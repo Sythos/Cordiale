@@ -74,6 +74,9 @@ fn main() -> Result<(), slint::PlatformError> {
     } else {
         "connect".into()
     });
+    if let Some(language) = settings.language {
+        let _ = slint::select_bundled_translation(language_code(language));
+    }
     ui.set_theme(theme_to_slint(settings.theme));
     ui.set_known_servers(known_servers_model());
 
@@ -90,6 +93,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut settings = persistence::load_settings().unwrap_or_default();
             settings.language = Some(language);
             let _ = persistence::save_settings(&settings);
+            let _ = slint::select_bundled_translation(language_code(language));
         }
         if let Some(ui) = weak_for_language.upgrade() {
             ui.set_screen("connect".into());
@@ -111,6 +115,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_connect_requested(move |server_url, identifier, password| {
         if let Some(ui) = weak_for_connect.upgrade() {
             ui.set_connecting(true);
+            ui.set_status_kind("".into());
             ui.set_status_message("".into());
         }
         let _ = tx_for_connect.send(WorkerCommand::Connect {
@@ -126,6 +131,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_disconnect.send(WorkerCommand::Disconnect);
         if let Some(ui) = weak_for_disconnect.upgrade() {
             ui.set_screen("connect".into());
+            ui.set_status_kind("".into());
             ui.set_status_message("".into());
             let empty_channels = Rc::new(slint::VecModel::from(Vec::<ChannelEntry>::new()));
             ui.set_channel_list(empty_channels.into());
@@ -301,13 +307,13 @@ async fn run_worker(
                     Some(SessionEvent::Disconnected) => {
                         persistence::log_line("session disconnected");
                         let _ = ui.upgrade_in_event_loop(|ui| {
-                            ui.set_status_message("Disconnected. Reconnecting…".into());
+                            ui.set_status_kind("disconnected".into());
                         });
                     }
                     Some(SessionEvent::Reconnecting) => {
                         persistence::log_line("session reconnecting");
                         let _ = ui.upgrade_in_event_loop(|ui| {
-                            ui.set_status_message("Reconnecting…".into());
+                            ui.set_status_kind("reconnecting".into());
                         });
                     }
                     None => {
@@ -387,18 +393,15 @@ async fn handle_connect(
                 .map(|(network, _, _)| network.clone())
                 .collect::<std::collections::HashSet<_>>()
                 .len();
+            let channel_count = entries.len();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
                 ui.set_is_admin(is_admin);
                 ui.set_known_servers(known_servers_model());
                 ui.set_screen("connected".into());
-                ui.set_status_message(
-                    format!(
-                        "Signed in. {network_count} network(s), {} channel(s).",
-                        entries.len()
-                    )
-                    .into(),
-                );
+                ui.set_status_kind("signed-in".into());
+                ui.set_status_network_count(network_count as i32);
+                ui.set_status_channel_count(channel_count as i32);
                 let model: Vec<ChannelEntry> = entries
                     .into_iter()
                     .map(|(network, channel, label)| ChannelEntry {
@@ -415,7 +418,7 @@ async fn handle_connect(
             let ui = ui.clone();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
-                ui.set_status_message(describe_bootstrap_error(&err).into());
+                apply_bootstrap_error(&ui, &err);
             });
         }
     }
@@ -468,7 +471,7 @@ async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, b
     {
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(|ui| {
-            ui.set_status_message("Couldn't send that message.".into());
+            ui.set_status_kind("send-failed".into());
         });
     }
 }
@@ -723,6 +726,20 @@ fn language_from_code(code: &str) -> Option<persistence::Language> {
     }
 }
 
+/// The bundled-translation directory name for a language — matches the
+/// `crates/cordiale-ui/lang/<code>/LC_MESSAGES/cordiale-ui.po` layout.
+/// English has no `.po` file: it's the untranslated source text, and
+/// `select_bundled_translation` is simply never called for it.
+fn language_code(language: persistence::Language) -> &'static str {
+    match language {
+        persistence::Language::En => "en",
+        persistence::Language::It => "it",
+        persistence::Language::Fr => "fr",
+        persistence::Language::De => "de",
+        persistence::Language::Es => "es",
+    }
+}
+
 fn theme_to_slint(theme: Theme) -> slint::SharedString {
     match theme {
         Theme::Light => "light".into(),
@@ -730,28 +747,33 @@ fn theme_to_slint(theme: Theme) -> slint::SharedString {
     }
 }
 
-fn describe_bootstrap_error(err: &BootstrapError) -> String {
+/// Sets `status-kind` (and `status-protocol-version` where needed) so
+/// `appwindow.slint`'s `status-text()` can render a translated message —
+/// this function never produces English text itself, only a machine-
+/// readable key, per MEMORY.md §0septies.
+fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
     match err {
-        BootstrapError::IncompatibleServer(compat) => format!(
-            "This server's protocol version ({}) is too old for Cordiale.",
-            compat.protocol_version
-        ),
+        BootstrapError::IncompatibleServer(compat) => {
+            ui.set_status_kind("protocol-too-old".into());
+            ui.set_status_protocol_version(compat.protocol_version as i32);
+        }
         BootstrapError::Config(_) => {
-            "Couldn't reach the server. Check the URL and try again.".to_string()
+            ui.set_status_kind("unreachable".into());
         }
         BootstrapError::Login(LoginError::InvalidCredentials) => {
-            "Wrong username or password/token.".to_string()
+            ui.set_status_kind("wrong-credentials".into());
         }
         BootstrapError::Login(LoginError::TwoFactorRequired) => {
-            "This account has two-factor authentication enabled. Sign in from a browser instead."
-                .to_string()
+            ui.set_status_kind("two-factor-required".into());
         }
         BootstrapError::Login(LoginError::TooManyAttempts) => {
-            "Too many attempts. Wait a bit before trying again.".to_string()
+            ui.set_status_kind("too-many-attempts".into());
         }
-        BootstrapError::Login(_) => "Login failed.".to_string(),
+        BootstrapError::Login(_) => {
+            ui.set_status_kind("login-failed".into());
+        }
         BootstrapError::Boot(_) | BootstrapError::Me(_) => {
-            "Signed in, but couldn't load account data.".to_string()
+            ui.set_status_kind("boot-me-failed".into());
         }
     }
 }

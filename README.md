@@ -45,11 +45,16 @@ need server endpoints Cordiale doesn't implement yet, rather than either
 hiding or faking functionality. The REST layer's request/response shapes
 have been checked against the real `irc.sindro.me` server (not just
 mocks) and match, including an undocumented guest/visitor login mode —
-see `docs/protocol-notes.md` §5. What's still missing: translated UI
-strings (only the language *picker* works today, the labels are still
-English) and an admin panel. The one gap nobody but a live server can
-close is field testing against a real Grappa instance through the actual
-GUI — that's next.
+see `docs/protocol-notes.md` §5. The UI is fully translated into Italian,
+French, German and Spanish (bundled at build time, switchable live, no
+runtime gettext dependency), and the compose box, server list and channel
+list carry explicit accessibility labels for screen readers. What's still
+missing: the admin panel (currently a placeholder — see
+`docs/feature-matrix.md` for Grappa's actual admin API surface, which
+turned out to be considerably larger than initially scoped) and
+performance profiling, deliberately deferred to after field testing. The
+one gap nobody but a live server can close is field testing against a
+real Grappa instance through the actual GUI — that's next.
 
 ## Download
 
@@ -74,7 +79,10 @@ Once packaged releases resume, see
 - `crates/cordiale-core` — domain model, protocol, persistence, credentials,
   REST/WebSocket clients, and other shareable logic;
 - `crates/cordiale-ui` — Slint executable and GUI entry point;
-- `resources/i18n/{en,it,fr,de,es}` — internationalization resources;
+- `crates/cordiale-ui/lang/{it,fr,de,es}/LC_MESSAGES/cordiale-ui.po` — UI
+  translations, bundled into the binary at build time by `slint-build`
+  (no runtime gettext dependency); English is the untranslated source
+  text, no `en/` file needed;
 - `resources/branding/` — project image and app icon source;
 - `packaging/windows` and `packaging/linux` — space for future deliverables
   (packaging notes in `docs/packaging-windows.md` and

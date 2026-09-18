@@ -1,0 +1,209 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: cordiale-ui\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgctxt "AppWindow"
+msgid "Choose your language"
+msgstr "Wähle deine Sprache"
+
+msgctxt "AppWindow"
+msgid "Server URL"
+msgstr "Server-URL"
+
+msgctxt "AppWindow"
+msgid "Username"
+msgstr "Benutzername"
+
+msgctxt "AppWindow"
+msgid "Password or client token"
+msgstr "Passwort oder Client-Token"
+
+msgctxt "AppWindow"
+msgid "Connecting…"
+msgstr "Verbinde…"
+
+msgctxt "AppWindow"
+msgid "Connect"
+msgstr "Verbinden"
+
+msgctxt "AppWindow"
+msgid "Change language"
+msgstr "Sprache ändern"
+
+msgctxt "AppWindow"
+msgid "Previously used servers"
+msgstr "Zuletzt verwendete Server"
+
+msgctxt "AppWindow"
+msgid "Switch to server {}"
+msgstr "Zu Server {} wechseln"
+
+msgctxt "AppWindow"
+msgid "Connected to {}"
+msgstr "Verbunden mit {}"
+
+msgctxt "AppWindow"
+msgid "Settings"
+msgstr "Einstellungen"
+
+msgctxt "AppWindow"
+msgid "Disconnect"
+msgstr "Trennen"
+
+msgctxt "AppWindow"
+msgid "Message"
+msgstr "Nachricht"
+
+msgctxt "AppWindow"
+msgid "Send"
+msgstr "Senden"
+
+msgctxt "AppWindow"
+msgid "General"
+msgstr "Allgemein"
+
+msgctxt "AppWindow"
+msgid "Display"
+msgstr "Erscheinungsbild"
+
+msgctxt "AppWindow"
+msgid "Security"
+msgstr "Sicherheit"
+
+msgctxt "AppWindow"
+msgid "Themes"
+msgstr "Designs"
+
+msgctxt "AppWindow"
+msgid "Notifications"
+msgstr "Benachrichtigungen"
+
+msgctxt "AppWindow"
+msgid "Watch Lists"
+msgstr "Beobachtungslisten"
+
+msgctxt "AppWindow"
+msgid "Ignore List"
+msgstr "Ignorierliste"
+
+msgctxt "AppWindow"
+msgid "Aliases"
+msgstr "Aliase"
+
+msgctxt "AppWindow"
+msgid "On-Connect Commands"
+msgstr "Befehle beim Verbinden"
+
+msgctxt "AppWindow"
+msgid "Source Address"
+msgstr "Quelladresse"
+
+msgctxt "AppWindow"
+msgid "Admin"
+msgstr "Verwaltung"
+
+msgctxt "AppWindow"
+msgid "Back"
+msgstr "Zurück"
+
+msgctxt "AppWindow"
+msgid "Language"
+msgstr "Sprache"
+
+msgctxt "AppWindow"
+msgid "Theme"
+msgstr "Design"
+
+msgctxt "AppWindow"
+msgid "Switch to dark"
+msgstr "Zu dunklem Design wechseln"
+
+msgctxt "AppWindow"
+msgid "Switch to light"
+msgstr "Zu hellem Design wechseln"
+
+msgctxt "AppWindow"
+msgid "Display preferences"
+msgstr "Anzeigeeinstellungen"
+
+msgctxt "AppWindow"
+msgid "Loading…"
+msgstr "Wird geladen…"
+
+msgctxt "AppWindow"
+msgid "Colored nicklist"
+msgstr "Farbige Nickliste"
+
+msgctxt "AppWindow"
+msgid "Bold mentions"
+msgstr "Fettgedruckte Erwähnungen"
+
+msgctxt "AppWindow"
+msgid "Strip formatting"
+msgstr "Formatierung entfernen"
+
+msgctxt "AppWindow"
+msgid "Show event badge"
+msgstr "Ereignis-Badge anzeigen"
+
+msgctxt "AppWindow"
+msgid "Show bottom bar"
+msgstr "Untere Leiste anzeigen"
+
+msgctxt "AppWindow"
+msgid "Not available yet — this section needs Grappa REST/WS endpoints Cordiale doesn't implement yet."
+msgstr "Noch nicht verfügbar: Dieser Bereich benötigt REST-/WS-Endpunkte von Grappa, die Cordiale noch nicht implementiert."
+
+msgctxt "AppWindow"
+msgid "Admin tools aren't built yet. Cordiale only knows you're an admin (via the account's subject data); it doesn't yet expose any of the admin-only surfaces."
+msgstr "Die Admin-Tools sind noch nicht fertig. Cordiale weiß nur, dass du Admin bist (anhand der Account-Daten), zeigt aber noch keine der Admin-Funktionen an."
+
+msgctxt "AppWindow"
+msgid "Signed in. {} network(s), {} channel(s)."
+msgstr "Angemeldet. {} Netzwerk(e), {} Kanal/Kanäle."
+
+msgctxt "AppWindow"
+msgid "Wrong username or password/token."
+msgstr "Benutzername oder Passwort/Token falsch."
+
+msgctxt "AppWindow"
+msgid "This account has two-factor authentication enabled. Sign in from a browser instead."
+msgstr "Für diesen Account ist die Zwei-Faktor-Authentifizierung aktiviert. Melde dich stattdessen über den Browser an."
+
+msgctxt "AppWindow"
+msgid "Too many attempts. Wait a bit before trying again."
+msgstr "Zu viele Versuche. Warte kurz, bevor du es erneut versuchst."
+
+msgctxt "AppWindow"
+msgid "Login failed."
+msgstr "Anmeldung fehlgeschlagen."
+
+msgctxt "AppWindow"
+msgid "Signed in, but couldn't load account data."
+msgstr "Anmeldung erfolgreich, aber die Kontodaten konnten nicht geladen werden."
+
+msgctxt "AppWindow"
+msgid "Couldn't reach the server. Check the URL and try again."
+msgstr "Der Server konnte nicht erreicht werden. Überprüfe die URL und versuch es erneut."
+
+msgctxt "AppWindow"
+msgid "This server's protocol version ({}) is too old for Cordiale."
+msgstr "Die Protokollversion dieses Servers ({}) ist zu alt für Cordiale."
+
+msgctxt "AppWindow"
+msgid "Couldn't send that message."
+msgstr "Nachricht konnte nicht gesendet werden."
+
+msgctxt "AppWindow"
+msgid "Disconnected. Reconnecting…"
+msgstr "Verbindung getrennt. Verbinde erneut…"
+
+msgctxt "AppWindow"
+msgid "Reconnecting…"
+msgstr "Verbinde erneut…"
