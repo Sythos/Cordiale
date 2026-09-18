@@ -22,13 +22,28 @@ jobs:
 
     steps:
       - name: Checkout client
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install stable Rust
         shell: bash
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
