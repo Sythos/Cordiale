@@ -7,8 +7,6 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
 use crate::persistence::config_dir;
 
 const CREDENTIALS_FILE_NAME: &str = "credentials.json";
