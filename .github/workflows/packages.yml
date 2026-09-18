@@ -160,7 +160,19 @@ jobs:
 
           $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
           if (-not $makensis) {
-            $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+            $candidates = @(
+              "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+              "${env:ProgramFiles}\NSIS\makensis.exe"
+            ) | Where-Object { Test-Path $_ }
+            $makensis = $candidates | Select-Object -First 1
+          }
+          if (-not $makensis) {
+            $found = Get-ChildItem -Path "${env:ProgramFiles}", "${env:ProgramFiles(x86)}" `
+              -Filter makensis.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $makensis = $found.FullName }
+          }
+          if (-not $makensis) {
+            throw "makensis.exe not found on this runner"
           }
           $outFile = "$PWD\dist\Cordiale_Windows_$env:WIN_ARCH.exe"
           & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=$env:VERSION" packaging\windows\installer.nsi
