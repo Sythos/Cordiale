@@ -12,6 +12,8 @@ pub const APP_NAME: &str = "Cordiale";
 /// Versione iniziale del client, distinta dalla versione del protocollo Grappa.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod domain;
+
 /// Segnaposto per il confine del protocollo, da implementare nella Fase 1.
 pub mod protocol {
     /// Contratto di compatibilità per messaggi/eventi ricevuti dal server.
