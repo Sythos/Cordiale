@@ -294,11 +294,65 @@ in modo esplicito:
   creato/autenticato, quali permessi ha, o se è raggiungibile da un client
   come Cordiale. I due campi sono esplicitamente "leggibili ma non
   azionabili" (pensati per la UI admin).
-- **Conclusione**: se un vero meccanismo guest/visitor esiste lato server,
-  non è nel contratto documentato — è, nella migliore delle ipotesi,
-  teorico/implicito da un solo campo di configurazione. **Va verificato sul
-  codice server reale prima di progettare qualunque funzionalità "guest" in
-  Cordiale** (coerente con la policy già in `MEMORY.md` §3.3).
+- **Conclusione (contratto documentato)**: se un vero meccanismo
+  guest/visitor esiste lato server, non è nel contratto documentato — è,
+  nella migliore delle ipotesi, teorico/implicito da un solo campo di
+  configurazione.
+
+### Aggiornamento: verifica empirica contro `irc.sindro.me` (2026-09-18)
+
+Su richiesta esplicita dell'utente, testato direttamente contro il server
+reale (non contro un mock) con `curl`. **Il meccanismo esiste davvero**,
+ma non è quello documentato nel contratto client — è stato osservato, non
+letto in una spec:
+
+- `POST /auth/login` con `{"identifier": "guest", "password": "guest"}` ha
+  risposto `200` con un token reale e
+  `"subject": {"id": "...", "registered": false, "kind": "visitor", "incognito": false}`.
+- Un secondo tentativo identico con `identifier: "guest"` ma una password
+  diversa ha risposto **non** con `401 invalid_credentials` (come da
+  contratto documentato per credenziali errate) ma con
+  `{"error": "anon_collision"}` — un codice errore **non presente nel
+  contratto documentato**. Ipotesi non verificata: l'identifier `"guest"`
+  è un varco riservato per sessioni anonime, e la collisione nasce perché
+  la prima sessione anonima era ancora attiva (le sessioni visitor hanno
+  un `expires_at`, osservato ~2 giorni nel futuro), non da un problema di
+  password.
+- Con il token ottenuto, `GET /boot` e `GET /me` hanno risposto
+  regolarmente (non `403`): il token visitor ha accesso a boot/me come un
+  token normale. `GET /boot` ha assegnato automaticamente un network
+  (`slug: "azzurra"`, `nick: "guest"`, `connection_state: "connected"`).
+  `GET /me` ha mostrato `"kind": "visitor"`, `"registered": false`,
+  `"home_data": {"available_networks": [...]}` con un elenco di altri
+  network selezionabili (`efnet`, `ircnet`, `libera`, `oftc`, `rizon`,
+  `undernet`).
+- **Bonus utile**: questa stessa chiamata ha confermato in pratica la
+  forma reale di `networks[]` in `/boot` — campi osservati: `id`
+  (numerico, non lo `slug` ipotizzato altrove come identificatore),
+  `location`, `connection` (`port`, `registered`, `server`, `tls`,
+  `connected_at`), `custom`, `kind`, `inserted_at`, `updated_at`, `age`,
+  `nick`, `slug`, `connection_state`, `ident`, `realname`,
+  `connection_state_changed_at`, `connection_state_reason`,
+  `services_flavor`, `avatar_url`, `gender`, `languages`. `channels` è
+  confermato chiavato per slug network. Tutto compatibile con i tipi
+  opachi già usati in `cordiale-core::rest::BootResponse`/`MeResponse`
+  (nessuna modifica di codice necessaria: i campi extra sconosciuti
+  vengono ignorati da `serde` come previsto).
+- **Cosa resta NON verificato**: se `"guest"` è un identifier
+  universale del protocollo Grappa o una particolarità di configurazione
+  di questa specifica istanza; cosa determina realmente il campo
+  `password` in questo flusso (valore libero? nickname richiesto?
+  ignorato?); se è possibile scegliere il network invece di quello
+  assegnato automaticamente; se esistono limiti di rate specifici per le
+  sessioni anonime oltre a quelli generali già documentati.
+- **Implicazione per Cordiale**: il meccanismo è confermato reale su
+  questa istanza, ma resta troppo poco compreso per costruire una UI
+  "Continue as guest" affidabile adesso — servirebbe altro testing mirato
+  (più tentativi controllati, verifica su un'altra istanza Grappa se
+  disponibile) prima di considerarlo pronto per il codice. Non
+  implementato in questa sessione, coerente con la policy di non inventare
+  capability senza prova solida — qui la prova solida c'è ma è ancora
+  incompleta.
 
 ### Ruolo admin
 - `/admin/*` (REST) e `AdminChannel` (WS) sono gated da un flag `is_admin`,

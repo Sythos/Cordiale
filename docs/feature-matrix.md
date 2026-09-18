@@ -63,10 +63,13 @@ verifica aggiuntiva sul codice server prima di pianificare.
 
 ## Voci ancora da chiarire prima di poter classificare
 
-- Guest/visitor: nessun meccanismo documentato nel contratto client; solo il
-  campo `per_visitor_cap_bytes` lo lascia intuire. **Non pianificabile** finché
-  non verificato sul codice server reale (vedi `protocol-notes.md` §5 e
-  `MEMORY.md` §3.3).
+- Guest/visitor: non documentato nel contratto client, ma **confermato
+  reale** con un test diretto contro `irc.sindro.me` il 2026-09-18
+  (`identifier: "guest"` → sessione `kind: "visitor"` funzionante). Il
+  meccanismo esiste ma è ancora troppo poco compreso (semantica del campo
+  `password` in questo flusso, portabilità tra istanze Grappa) per
+  costruire una UI affidabile — vedi `protocol-notes.md` §5 per il dettaglio
+  completo del test e `MEMORY.md` §3.3.
 - Assegnazione ruolo admin: nessuna procedura documentata.
 - Heartbeat/backoff WebSocket: da verificare sul codice server o sul default
   di `phoenix.js` prima di fissare la strategia di riconnessione.
