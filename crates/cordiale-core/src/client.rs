@@ -32,7 +32,8 @@ use reqwest::{Client, StatusCode};
 use serde_json::Value;
 
 use crate::rest::{
-    BootResponse, ConfigResponse, LoginRequest, LoginResponse, MeResponse, SendMessageRequest,
+    BootResponse, ConfigResponse, DisplayPrefs, LoginRequest, LoginResponse, MeResponse,
+    SendMessageRequest,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -161,6 +162,42 @@ impl GrappaClient {
             .await?
             .error_for_status()?;
         Ok(response.json::<Value>().await?)
+    }
+
+    /// `GET /me/settings/display-prefs` — absent-tolerant, per
+    /// `docs/protocol-notes.md` §1.
+    pub async fn fetch_display_prefs(
+        &self,
+        token: &str,
+    ) -> Result<DisplayPrefs, GrappaClientError> {
+        let url = format!("{}/me/settings/display-prefs", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<DisplayPrefs>().await?)
+    }
+
+    /// `PUT /me/settings/display-prefs` — only the fields set on `prefs` are
+    /// sent, so this can update a single preference without clobbering the
+    /// others.
+    pub async fn update_display_prefs(
+        &self,
+        token: &str,
+        prefs: &DisplayPrefs,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/me/settings/display-prefs", self.base_url);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(prefs)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 }
 
@@ -328,6 +365,54 @@ mod tests {
             .await
             .expect("send_message");
 
-        assert_eq!(response.get("kind").and_then(|k| k.as_str()), Some("privmsg"));
+        assert_eq!(
+            response.get("kind").and_then(|k| k.as_str()),
+            Some("privmsg")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_display_prefs_tolerates_a_partial_response() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/display-prefs"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"colored_nicklist": false})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let prefs = client
+            .fetch_display_prefs("abc123")
+            .await
+            .expect("fetch_display_prefs");
+
+        assert_eq!(prefs.colored_nicklist, Some(false));
+        assert_eq!(prefs.bold_mentions, None);
+    }
+
+    #[tokio::test]
+    async fn update_display_prefs_sends_only_the_set_fields() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/display-prefs"))
+            .and(header("authorization", "Bearer abc123"))
+            .and(body_json(serde_json::json!({"bold_mentions": true})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let prefs = crate::rest::DisplayPrefs {
+            bold_mentions: Some(true),
+            ..crate::rest::DisplayPrefs::default()
+        };
+        client
+            .update_display_prefs("abc123", &prefs)
+            .await
+            .expect("update_display_prefs");
     }
 }

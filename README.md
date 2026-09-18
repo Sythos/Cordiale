@@ -12,30 +12,32 @@ Some of us just want to sit on Grappa without hauling a full browser engine alon
 
 ## Status
 
-Phase 1 (minimal functional client) is in progress. `cordiale-core` has a
-domain model, local persistence under `~/.cordiale/`, a credential store
-(OS keychain with an explicitly insecure fallback), a REST client for the
-bootstrap sequence (`/api/config`, `/auth/login`, `/boot`, `/me`) with a
-documented status-code contract, and a hand-rolled Phoenix Channels
-transport over `tokio-tungstenite`.
+Phase 2 (parity and polish) is in progress. `cordiale-core` has a domain
+model, local persistence under `~/.cordiale/`, a credential store (OS
+keychain with an explicitly insecure fallback), a REST client for the
+bootstrap sequence (`/api/config`, `/auth/login`, `/boot`, `/me`,
+sending a message, reading/writing display preferences) with a documented
+status-code contract, a hand-rolled Phoenix Channels transport over
+`tokio-tungstenite`, and a realtime session layer on top of it (user-topic
+join, heartbeat, reconnect-with-rejoin).
 
-`cordiale-ui` has a splash screen, a first-launch language picker, a
-connect screen (server URL, username, password/client token) that runs
-the actual bootstrap sequence on a background thread, and a post-login
-screen listing the account's networks. The REST layer's request/response
-shapes have been checked against the real `irc.sindro.me` server (not just
+`cordiale-ui` runs everything from a single persistent background worker
+thread: a splash screen, a first-launch language picker, a connect screen,
+a two-pane connected screen (channel list sidebar, message history, a
+compose box wired to the real send-message endpoint, live updates pushed
+over the WebSocket session), and a Settings screen whose navigation
+mirrors Cicchetto's own Settings drawer (`docs/feature-matrix.md`) —
+General (language, Light/Dark) and Display (five real preferences, synced
+with the server) work today; the remaining sections say plainly that they
+need server endpoints Cordiale doesn't implement yet, rather than either
+hiding or faking functionality. The REST layer's request/response shapes
+have been checked against the real `irc.sindro.me` server (not just
 mocks) and match, including an undocumented guest/visitor login mode —
 see `docs/protocol-notes.md` §5. What's still missing: saved
-multi-server/profile management, Light/Dark theming, translated UI
-strings (only the language *picker* works today, the labels are still
-English), the fuller Settings screens (mapped from Cicchetto's structure
-in `docs/feature-matrix.md`, not yet built), and an actual channel/message
-view — the WebSocket/Phoenix Channels side hasn't been exercised against a
-real server yet, only the REST bootstrap has.
-
-Packaging is ahead of the app itself: releases already build and publish
-cleanly for every target below, even though there isn't much of a client
-in them yet.
+multi-server/profile management, translated UI strings (only the language
+*picker* works today, the labels are still English), and an admin panel.
+The one gap nobody but a live server can close is field testing against a
+real Grappa instance through the actual GUI — that's next.
 
 ## Download
 

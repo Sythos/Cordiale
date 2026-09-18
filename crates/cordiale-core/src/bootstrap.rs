@@ -28,6 +28,8 @@
 //! `protocol_version` again) is a separate step, not done here — this
 //! module only covers the REST leg.
 
+use serde_json::Value;
+
 use crate::client::{GrappaClient, GrappaClientError, LoginError};
 use crate::protocol::ServerCompatibility;
 use crate::rest::{BootResponse, LoginRequest, MeResponse};
@@ -37,6 +39,9 @@ pub struct BootstrapOutcome {
     pub compatibility: ServerCompatibility,
     /// Bearer token to use for `/boot`, `/me` and the WebSocket handshake.
     pub token: String,
+    /// Opaque `subject` from the login response (e.g. `is_admin`, `nick`) —
+    /// shape isn't documented, see `docs/protocol-notes.md` §5.
+    pub subject: Value,
     pub boot: BootResponse,
     pub me: MeResponse,
 }
@@ -90,6 +95,7 @@ pub async fn bootstrap(
     Ok(BootstrapOutcome {
         compatibility,
         token: login.token,
+        subject: login.subject,
         boot,
         me,
     })

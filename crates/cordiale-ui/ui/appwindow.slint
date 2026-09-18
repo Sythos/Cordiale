@@ -20,33 +20,62 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, Button, VerticalBox, ProgressIndicator } from "std-widgets.slint";
+import { LineEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox } from "std-widgets.slint";
+
+// One entry in the channel list sidebar.
+struct ChannelEntry {
+    network: string,
+    channel: string,
+    label: string,
+}
 
 export component AppWindow inherits Window {
     title: "Cordiale";
-    width: 480px;
-    height: 440px;
+    width: 900px;
+    height: 600px;
 
-    // One of "splash", "language", "connect", "connected" — see MEMORY.md
-    // §3.4 for why there's no `else`/`else if` in Slint: mutually
-    // exclusive `if` blocks are the documented pattern for multi-screen
-    // navigation.
+    // One of "splash", "language", "connect", "connected", "settings" —
+    // see MEMORY.md §3.4 for why there's no `else`/`else if` in Slint:
+    // mutually exclusive `if` blocks are the documented pattern for
+    // multi-screen navigation.
     in-out property <string> screen: "splash";
     // Set once by Rust before the window is shown: where the splash
     // screen hands off to once its animation finishes ("language" on
     // first launch, "connect" otherwise).
     in property <string> next-screen: "connect";
+    // Which Settings section is open; mirrors Cicchetto's own Settings
+    // drawer categories (see docs/feature-matrix.md) so the navigation
+    // feels familiar to anyone coming from that client.
+    in-out property <string> settings-section: "general";
+    in property <bool> is-admin: false;
 
     in-out property <string> server-url: "https://irc.sindro.me";
     in-out property <string> identifier: "";
     in-out property <string> password: "";
     in property <string> status-message: "";
     in property <bool> connecting: false;
-    in property <[string]> networks: [];
+
+    in property <[ChannelEntry]> channel-list: [];
+    in property <[string]> chat-messages: [];
+    in-out property <string> compose-text: "";
+    in property <string> current-channel-label: "";
+    in property <bool> has-selected-channel: false;
+
+    in-out property <string> theme: "light";
+    in property <bool> display-prefs-loaded: false;
+    in-out property <bool> pref-colored-nicklist: true;
+    in-out property <bool> pref-bold-mentions: true;
+    in-out property <bool> pref-strip-formatting: false;
+    in-out property <bool> pref-show-event-badge: true;
+    in-out property <bool> pref-show-bottom-bar: true;
 
     callback connect-requested(string, string, string);
     callback language-selected(string);
     callback disconnect-requested();
+    callback channel-selected(string, string);
+    callback send-chat-message(string);
+    callback theme-toggle-requested();
+    callback display-prefs-changed();
 
     if screen == "splash" : VerticalBox {
         padding: 32px;
@@ -162,29 +191,228 @@ export component AppWindow inherits Window {
         }
     }
 
-    if screen == "connected" : VerticalBox {
-        padding: 32px;
+    if screen == "connected" : HorizontalBox {
+        padding: 16px;
         spacing: 16px;
 
-        Text {
-            text: "Connected to " + server-url;
-            font-size: 20px;
-            horizontal-alignment: center;
+        VerticalBox {
+            width: 220px;
+            spacing: 8px;
+
+            Text {
+                text: "Connected to " + server-url;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: status-message;
+                wrap: word-wrap;
+            }
+
+            for entry in channel-list : Button {
+                text: entry.label;
+                clicked => { channel-selected(entry.network, entry.channel); }
+            }
+
+            Button {
+                text: "Settings";
+                clicked => { screen = "settings"; }
+            }
+
+            Button {
+                text: "Disconnect";
+                clicked => { disconnect-requested(); }
+            }
         }
 
-        Text {
-            text: status-message;
-            horizontal-alignment: center;
-            wrap: word-wrap;
+        VerticalBox {
+            spacing: 8px;
+
+            Text {
+                text: current-channel-label;
+                font-size: 18px;
+            }
+
+            for line in chat-messages : Text {
+                text: line;
+                wrap: word-wrap;
+            }
+
+            HorizontalBox {
+                LineEdit {
+                    placeholder-text: "Message";
+                    text <=> compose-text;
+                    accepted => { send-chat-message(compose-text); }
+                }
+                Button {
+                    text: "Send";
+                    enabled: has-selected-channel;
+                    clicked => { send-chat-message(compose-text); }
+                }
+            }
+        }
+    }
+
+    if screen == "settings" : HorizontalBox {
+        padding: 16px;
+        spacing: 16px;
+
+        VerticalBox {
+            width: 200px;
+            spacing: 4px;
+
+            Text {
+                text: "Settings";
+                font-size: 18px;
+            }
+
+            // Section list mirrors Cicchetto's Settings drawer order — see
+            // docs/feature-matrix.md. Only General/Display are backed by
+            // real Cordiale functionality today; the rest are placeholders
+            // naming what's missing rather than pretending to work.
+            Button {
+                text: "General";
+                clicked => { settings-section = "general"; }
+            }
+            Button {
+                text: "Display";
+                clicked => { settings-section = "display"; }
+            }
+            Button {
+                text: "Security";
+                clicked => { settings-section = "security"; }
+            }
+            Button {
+                text: "Themes";
+                clicked => { settings-section = "themes"; }
+            }
+            Button {
+                text: "Notifications";
+                clicked => { settings-section = "push"; }
+            }
+            Button {
+                text: "Watch Lists";
+                clicked => { settings-section = "watchlists"; }
+            }
+            Button {
+                text: "Ignore List";
+                clicked => { settings-section = "ignores"; }
+            }
+            Button {
+                text: "Aliases";
+                clicked => { settings-section = "aliases"; }
+            }
+            Button {
+                text: "On-Connect Commands";
+                clicked => { settings-section = "perform"; }
+            }
+            Button {
+                text: "Source Address";
+                clicked => { settings-section = "vhost"; }
+            }
+            if is-admin : Button {
+                text: "Admin";
+                clicked => { settings-section = "admin"; }
+            }
+
+            Button {
+                text: "Back";
+                clicked => { screen = "connected"; }
+            }
         }
 
-        for network in networks : Text {
-            text: "• " + network;
-        }
+        VerticalBox {
+            spacing: 12px;
 
-        Button {
-            text: "Disconnect";
-            clicked => { disconnect-requested(); }
+            if settings-section == "general" : VerticalBox {
+                spacing: 8px;
+
+                Text {
+                    text: "Language";
+                    font-size: 16px;
+                }
+                Button {
+                    text: "English";
+                    clicked => { language-selected("en"); }
+                }
+                Button {
+                    text: "Italiano";
+                    clicked => { language-selected("it"); }
+                }
+                Button {
+                    text: "Français";
+                    clicked => { language-selected("fr"); }
+                }
+                Button {
+                    text: "Deutsch";
+                    clicked => { language-selected("de"); }
+                }
+                Button {
+                    text: "Español";
+                    clicked => { language-selected("es"); }
+                }
+
+                Text {
+                    text: "Theme";
+                    font-size: 16px;
+                }
+                Button {
+                    text: theme == "light" ? "Switch to dark" : "Switch to light";
+                    clicked => { theme-toggle-requested(); }
+                }
+            }
+
+            if settings-section == "display" : VerticalBox {
+                spacing: 8px;
+
+                Text {
+                    text: display-prefs-loaded ? "Display preferences" : "Loading…";
+                    font-size: 16px;
+                }
+
+                CheckBox {
+                    text: "Colored nicklist";
+                    checked <=> pref-colored-nicklist;
+                    toggled => { display-prefs-changed(); }
+                }
+                CheckBox {
+                    text: "Bold mentions";
+                    checked <=> pref-bold-mentions;
+                    toggled => { display-prefs-changed(); }
+                }
+                CheckBox {
+                    text: "Strip formatting";
+                    checked <=> pref-strip-formatting;
+                    toggled => { display-prefs-changed(); }
+                }
+                CheckBox {
+                    text: "Show event badge";
+                    checked <=> pref-show-event-badge;
+                    toggled => { display-prefs-changed(); }
+                }
+                CheckBox {
+                    text: "Show bottom bar";
+                    checked <=> pref-show-bottom-bar;
+                    toggled => { display-prefs-changed(); }
+                }
+            }
+
+            if settings-section == "security" || settings-section == "themes"
+                || settings-section == "push" || settings-section == "watchlists"
+                || settings-section == "ignores" || settings-section == "aliases"
+                || settings-section == "perform" || settings-section == "vhost" : VerticalBox {
+                Text {
+                    text: "Not available yet — this section needs Grappa REST/WS endpoints Cordiale doesn't implement yet.";
+                    wrap: word-wrap;
+                }
+            }
+
+            if settings-section == "admin" : VerticalBox {
+                Text {
+                    text: "Admin tools aren't built yet. Cordiale only knows you're an admin (via the account's subject data); it doesn't yet expose any of the admin-only surfaces.";
+                    wrap: word-wrap;
+                }
+            }
         }
     }
 }
