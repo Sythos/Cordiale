@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 jobs:
   build-and-package:
@@ -121,6 +123,11 @@ jobs:
             -Path "target\$env:TARGET\release\cordiale-ui.exe" `
             -DestinationPath "dist\cordiale-$env:ARTIFACT-$env:VERSION.zip" `
             -Force
+
+      - name: Generate build provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v6
