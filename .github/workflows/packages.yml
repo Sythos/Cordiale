@@ -23,10 +23,12 @@ jobs:
             runner: ubuntu-latest
             artifact: linux-x64
             deb_arch: amd64
+            rpm_arch: x86_64
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             artifact: linux-arm64
             deb_arch: arm64
+            rpm_arch: aarch64
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             artifact: windows-x64
@@ -87,32 +89,58 @@ jobs:
         shell: bash
         run: cross build --release --package cordiale-ui --target "${{ matrix.target }}"
 
-      - name: Package Linux tarball and Debian package
+      - name: Install fpm and Linux packaging dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ruby ruby-dev build-essential rpm libarchive-tools zstd
+          sudo gem install --no-document fpm
+
+      - name: Package Linux artifacts
         if: runner.os == 'Linux'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          ARTIFACT: ${{ matrix.artifact }}
           DEB_ARCH: ${{ matrix.deb_arch }}
+          RPM_ARCH: ${{ matrix.rpm_arch }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p dist deb-root/usr/bin deb-root/DEBIAN
-          cp "target/${TARGET}/release/cordiale-ui" deb-root/usr/bin/cordiale
-          chmod 0755 deb-root/usr/bin/cordiale
-          cat > deb-root/DEBIAN/control <<EOF
-          Package: cordiale
-          Version: ${VERSION}
-          Section: net
-          Priority: optional
-          Architecture: ${DEB_ARCH}
-          Maintainer: Sythos <sythos@gmail.com>
-          Description: Native desktop client for Grappa
-           Cordiale connects to Grappa through its documented client protocol.
-          EOF
-          dpkg-deb --build deb-root "dist/cordiale-${ARTIFACT}-${VERSION}.deb"
-          tar -czf "dist/cordiale-${ARTIFACT}-${VERSION}.tar.gz" \
+          mkdir -p dist stage/usr/bin
+          cp "target/${TARGET}/release/cordiale-ui" stage/usr/bin/cordiale
+          chmod 0755 stage/usr/bin/cordiale
+
+          tar -czf "dist/cordiale-linux-${DEB_ARCH}-${VERSION}.tar.gz" \
             -C "target/${TARGET}/release" cordiale-ui
+
+          # RPM/pacman version fields reject "-"; deb accepts it fine.
+          RPM_VERSION="${VERSION//-/_}"
+
+          fpm -s dir -t deb -n cordiale -v "${VERSION}" -a "${DEB_ARCH}" \
+            --maintainer "Sythos <sythos@gmail.com>" \
+            --description "Native desktop client for Grappa" \
+            --url "https://github.com/Sythos/Cordiale" \
+            --license MIT \
+            -C stage -p "dist/Cordiale_Debian_13_${DEB_ARCH}.deb" .
+          # Same package content for Debian 13 and Ubuntu 26.04: identical
+          # format, dependencies and target glibc floor — see MEMORY.md.
+          cp "dist/Cordiale_Debian_13_${DEB_ARCH}.deb" "dist/Cordiale_Ubuntu_26.04_${DEB_ARCH}.deb"
+
+          fpm -s dir -t rpm -n cordiale -v "${RPM_VERSION}" -a "${RPM_ARCH}" \
+            --maintainer "Sythos <sythos@gmail.com>" \
+            --description "Native desktop client for Grappa" \
+            --url "https://github.com/Sythos/Cordiale" \
+            --license MIT \
+            -C stage -p "dist/Cordiale_AlmaLinux_10_${RPM_ARCH}.rpm" .
+
+          fpm -s dir -t pacman -n cordiale -v "${RPM_VERSION}" -a "${RPM_ARCH}" \
+            --pacman-compression zstd \
+            --maintainer "Sythos <sythos@gmail.com>" \
+            --description "Native desktop client for Grappa" \
+            --url "https://github.com/Sythos/Cordiale" \
+            --license MIT \
+            -C stage -p "dist/Cordiale_Arch_rolling_${RPM_ARCH}.pkg.tar.zst" .
 
       - name: Package Windows archive
         if: runner.os == 'Windows'
