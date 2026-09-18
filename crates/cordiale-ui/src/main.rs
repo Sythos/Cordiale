@@ -245,7 +245,7 @@ async fn run_worker(
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
-                        handle_send_message(&mut state, &ui, body).await;
+                        handle_send_message(&state, &ui, body).await;
                     }
                     Some(WorkerCommand::ToggleTheme) => {
                         handle_toggle_theme(&ui);
