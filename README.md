@@ -12,14 +12,23 @@ Some of us just want to sit on Grappa without hauling a full browser engine alon
 
 ## Status
 
-Phase 1 (minimal functional client) is in progress. `cordiale-core` already
-has a domain model, local persistence under `~/.cordiale/`, a credential
-store (OS keychain with an explicitly insecure fallback), a REST client for
-the bootstrap sequence (`/api/config`, `/auth/login`, `/boot`, `/me`) with a
+Phase 1 (minimal functional client) is in progress. `cordiale-core` has a
+domain model, local persistence under `~/.cordiale/`, a credential store
+(OS keychain with an explicitly insecure fallback), a REST client for the
+bootstrap sequence (`/api/config`, `/auth/login`, `/boot`, `/me`) with a
 documented status-code contract, and a hand-rolled Phoenix Channels
-transport over `tokio-tungstenite` — none of it exercised against a real or
-mocked Grappa server yet. The GUI in `cordiale-ui` is still a placeholder
-window.
+transport over `tokio-tungstenite`.
+
+`cordiale-ui` now has a real (if minimal) GUI: a first-launch language
+picker, a connect screen (server URL, username, password/client token)
+that runs the actual bootstrap sequence on a background thread, and a
+post-login screen listing the account's networks. What's still missing:
+saved multi-server/profile management, Light/Dark theming, translated UI
+strings (only the language *picker* works today, the labels are still
+English), and an actual channel/message view. **None of the networking
+code has been exercised against a real Grappa server yet** — only against
+mocked ones in tests — so that's the main open risk before calling this
+phase done.
 
 ## Workspace
 
