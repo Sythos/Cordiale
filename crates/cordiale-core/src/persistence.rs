@@ -28,8 +28,9 @@
 //! `CredentialStore` (Phase 1, item 3).
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +39,7 @@ use crate::domain::{Profile, Server};
 const CONFIG_DIR_NAME: &str = ".cordiale";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const SERVERS_FILE_NAME: &str = "servers.json";
+const LOG_FILE_NAME: &str = "cordiale.log";
 
 /// One of the languages Cordiale ships translations for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +187,33 @@ pub fn save_servers_file(servers_file: &ServersFile) -> Result<(), PersistenceEr
     save_json(SERVERS_FILE_NAME, servers_file)
 }
 
+/// Appends one line to `~/.cordiale/cordiale.log`, prefixed with a Unix
+/// timestamp — a plain-text trail a field tester can attach to a bug
+/// report. Best-effort like every other write in this module: a failure
+/// here is silently swallowed rather than surfaced, since diagnostics must
+/// never be the reason the app itself breaks.
+pub fn log_line(message: &str) {
+    if let Some(dir) = config_dir() {
+        log_line_to(&dir.join(LOG_FILE_NAME), message);
+    }
+}
+
+fn log_line_to(path: &std::path::Path, message: &str) {
+    if let Some(parent) = path.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let _ = writeln!(file, "[{timestamp}] {message}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +252,22 @@ mod tests {
         // Simulates an older settings.json written before a field existed.
         let decoded: Settings = serde_json::from_str("{}").expect("deserialize");
         assert_eq!(decoded, Settings::default());
+    }
+
+    #[test]
+    fn log_line_to_appends_a_timestamped_line() {
+        let path = std::env::temp_dir().join("cordiale-test-log-line-appends.log");
+        let _ = fs::remove_file(&path);
+
+        log_line_to(&path, "first line");
+        log_line_to(&path, "second line");
+
+        let contents = fs::read_to_string(&path).expect("read log file");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with("] first line"));
+        assert!(lines[1].ends_with("] second line"));
+
+        let _ = fs::remove_file(&path);
     }
 }

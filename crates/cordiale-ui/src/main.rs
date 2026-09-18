@@ -278,6 +278,7 @@ async fn run_worker(
                         handle_save_display_prefs(&state, prefs).await;
                     }
                     Some(WorkerCommand::Disconnect) => {
+                        persistence::log_line("disconnect requested");
                         if let Some(handle) = state.session.take() {
                             handle.shutdown();
                         }
@@ -289,16 +290,22 @@ async fn run_worker(
 
             event = next_event => {
                 match event {
-                    Some(SessionEvent::Connected { .. }) => {}
+                    Some(SessionEvent::Connected { protocol_version }) => {
+                        persistence::log_line(&format!(
+                            "session connected, protocol_version={protocol_version:?}"
+                        ));
+                    }
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame);
                     }
                     Some(SessionEvent::Disconnected) => {
+                        persistence::log_line("session disconnected");
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_status_message("Disconnected. Reconnecting…".into());
                         });
                     }
                     Some(SessionEvent::Reconnecting) => {
+                        persistence::log_line("session reconnecting");
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_status_message("Reconnecting…".into());
                         });
@@ -320,6 +327,11 @@ async fn handle_connect(
     identifier: String,
     password: String,
 ) {
+    // Never log `password`: it may be a real password or a per-client
+    // token, and either way it's a secret — see MEMORY.md §3.6.
+    persistence::log_line(&format!(
+        "connect attempt: server={server_url} identifier={identifier}"
+    ));
     remember_server_url(&server_url);
 
     let client = GrappaClient::new(server_url.clone());
@@ -331,6 +343,7 @@ async fn handle_connect(
 
     match result {
         Ok(outcome) => {
+            persistence::log_line(&format!("connect succeeded: server={server_url}"));
             remember_profile(&server_url, &identifier, &password);
 
             let entries = channel_entries_from_boot(&outcome);
@@ -398,6 +411,7 @@ async fn handle_connect(
             });
         }
         Err(err) => {
+            persistence::log_line(&format!("connect failed: server={server_url} {err:?}"));
             let ui = ui.clone();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
