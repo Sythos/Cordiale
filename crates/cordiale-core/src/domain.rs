@@ -1,44 +1,44 @@
-//! Modello di dominio: server, profili e metodo di autenticazione.
+//! Domain model: servers, profiles and authentication method.
 //!
-//! Un server è identificato dalla propria `base_url`; un profilo appartiene
-//! a un server ed è identificato da `(server_base_url, identifier)`. Le
-//! credenziali vere e proprie non vivono qui: sono responsabilità del
-//! `CredentialStore` (Fase 1, punto 3), interrogato con la stessa chiave.
+//! A server is identified by its `base_url`; a profile belongs to a server
+//! and is identified by `(server_base_url, identifier)`. Actual credentials
+//! don't live here: that's the `CredentialStore`'s job (Phase 1, item 3),
+//! queried with the same key.
 
 use serde::{Deserialize, Serialize};
 
-/// Un server Grappa a cui l'utente può connettersi.
+/// A Grappa server the user can connect to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Server {
-    /// URL di base del server, usata anche come chiave identificativa.
+    /// Base URL of the server, also used as its identifying key.
     pub base_url: String,
-    /// Etichetta mostrata all'utente in fase di selezione server.
+    /// Label shown to the user when selecting a server.
     pub label: String,
 }
 
-/// Come un profilo si autentica su `POST /auth/login`.
+/// How a profile authenticates against `POST /auth/login`.
 ///
-/// Entrambe le varianti viaggiano sul campo wire `password`, ma vanno tenute
-/// distinte localmente: un token per-client è scoped e un `403
-/// client_token_scope` non va mai trattato come una password sbagliata da
-/// far ritentare all'utente (vedi `docs/protocol-notes.md`, §1).
+/// Both variants travel on the wire `password` field, but are kept distinct
+/// locally: a per-client token is scoped, and a `403 client_token_scope`
+/// must never be treated as a wrong password to retry (see
+/// `docs/protocol-notes.md`, §1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthMethod {
     Password,
     ClientToken,
 }
 
-/// Un profilo con cui autenticarsi su un determinato server.
+/// A profile that can authenticate on a given server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
-    /// `base_url` del `Server` a cui appartiene.
+    /// `base_url` of the `Server` this profile belongs to.
     pub server_base_url: String,
-    /// Identificatore inviato come `identifier` in `POST /auth/login`.
+    /// Identifier sent as `identifier` in `POST /auth/login`.
     pub identifier: String,
     pub auth_method: AuthMethod,
-    /// Se `true`, il profilo va riproposto come selezionabile agli avvii
-    /// successivi; la credenziale resta comunque nel `CredentialStore`, mai
-    /// qui.
+    /// If `true`, the profile is offered again as selectable on later
+    /// launches; the credential itself still lives only in the
+    /// `CredentialStore`, never here.
     pub remembered: bool,
 }
 
