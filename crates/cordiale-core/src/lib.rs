@@ -42,4 +42,5 @@ pub mod persistence;
 pub mod phoenix;
 pub mod protocol;
 pub mod rest;
+pub mod session;
 pub mod websocket;
