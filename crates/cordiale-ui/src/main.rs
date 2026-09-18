@@ -26,6 +26,8 @@ use std::thread;
 
 use cordiale_core::bootstrap::{bootstrap, BootstrapError};
 use cordiale_core::client::{GrappaClient, LoginError};
+use cordiale_core::credentials::{resolve_credential_store, CredentialStore};
+use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::persistence;
 use cordiale_core::rest::LoginRequest;
 
@@ -36,7 +38,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
 
     let remembered_server_url = load_remembered_server_url();
-    ui.set_server_url(remembered_server_url.into());
+    ui.set_server_url(remembered_server_url.clone().into());
+    prefill_remembered_profile(&ui, &remembered_server_url);
 
     if persistence::load_settings()
         .unwrap_or_default()
@@ -85,6 +88,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_connecting(false);
                     match result {
                         Ok(outcome) => {
+                            remember_profile(&server_url, &request.identifier, &request.password);
                             let networks = network_names(&outcome);
                             ui.set_screen("connected".into());
                             ui.set_status_message(
@@ -130,6 +134,56 @@ fn remember_server_url(server_url: &str) {
     let mut file = persistence::load_servers_file().unwrap_or_default();
     file.selected_server_base_url = Some(server_url.to_string());
     let _ = persistence::save_servers_file(&file);
+}
+
+/// Called only after a successful login: remembers the profile (never the
+/// secret itself) in `servers.json`, and puts the secret in the
+/// `CredentialStore` — never in the JSON file, see MEMORY.md §3.6.
+///
+/// Doesn't yet distinguish a password from a per-client token (the form
+/// doesn't ask): always recorded as `AuthMethod::Password` for now.
+fn remember_profile(server_url: &str, identifier: &str, secret: &str) {
+    if let Ok(store) = resolve_credential_store() {
+        let _ = store.set_secret(server_url, identifier, secret);
+    }
+
+    let mut file = persistence::load_servers_file().unwrap_or_default();
+    let already_known = file
+        .profiles
+        .iter()
+        .any(|profile| profile.server_base_url == server_url && profile.identifier == identifier);
+    if !already_known {
+        file.profiles.push(Profile {
+            server_base_url: server_url.to_string(),
+            identifier: identifier.to_string(),
+            auth_method: AuthMethod::Password,
+            remembered: true,
+        });
+    }
+    file.selected_profile_identifier = Some(identifier.to_string());
+    let _ = persistence::save_servers_file(&file);
+}
+
+/// Pre-fills the identifier and, if the `CredentialStore` has it, the
+/// secret for the last remembered profile on `server_url` — a convenience
+/// auto-fill, not an auto-connect.
+fn prefill_remembered_profile(ui: &AppWindow, server_url: &str) {
+    let file = persistence::load_servers_file().unwrap_or_default();
+    let Some(profile) = file
+        .profiles
+        .iter()
+        .find(|profile| profile.server_base_url == server_url && profile.remembered)
+    else {
+        return;
+    };
+
+    ui.set_identifier(profile.identifier.clone().into());
+
+    if let Ok(store) = resolve_credential_store() {
+        if let Ok(Some(secret)) = store.get_secret(server_url, &profile.identifier) {
+            ui.set_password(secret.into());
+        }
+    }
 }
 
 /// Reads a display name out of each opaque `boot.networks` entry.
