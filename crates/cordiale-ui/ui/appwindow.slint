@@ -273,6 +273,8 @@ export component AppWindow inherits Window {
             color: #cc3333;
             horizontal-alignment: center;
             wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+            accessible-live-region: AccessibleLiveness.polite;
         }
 
         if known-servers.length > 0 : VerticalBox {
@@ -308,6 +310,8 @@ export component AppWindow inherits Window {
             Text {
                 text: status-text();
                 wrap: word-wrap;
+                accessible-role: AccessibleRole.text;
+                accessible-live-region: AccessibleLiveness.polite;
             }
 
             for entry in channel-list : Button {
