@@ -26,7 +26,7 @@ use std::thread;
 
 use cordiale_core::bootstrap::{bootstrap, BootstrapError};
 use cordiale_core::client::{GrappaClient, LoginError};
-use cordiale_core::credentials::{resolve_credential_store, CredentialStore};
+use cordiale_core::credentials::resolve_credential_store;
 use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::persistence;
 use cordiale_core::rest::LoginRequest;
