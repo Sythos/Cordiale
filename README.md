@@ -14,8 +14,13 @@ configurazione server, autenticazione, bootstrap, realtime e messaggistica.
 
 - `crates/cordiale-core` — modello, protocollo e logica condivisibile;
 - `crates/cordiale-ui` — eseguibile Slint e punto di ingresso della GUI;
-- `resources/i18n/en` — risorse iniziali per l’internazionalizzazione;
-- `packaging/windows` e `packaging/linux` — spazio per i deliverable futuri.
+- `resources/i18n/{en,it,fr,de,es}` — risorse per l'internazionalizzazione;
+- `packaging/windows` e `packaging/linux` — spazio per i deliverable futuri
+  (note di packaging in `docs/packaging-windows.md` e
+  `docs/packaging-linux.md`);
+- `docs/` — documentazione tecnica: contratto protocollo Grappa
+  (`protocol-notes.md`), matrice funzionalità (`feature-matrix.md`), note
+  di packaging.
 
 ## Riferimenti
 
