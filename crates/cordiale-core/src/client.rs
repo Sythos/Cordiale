@@ -7,7 +7,7 @@
 
 use reqwest::{Client, StatusCode};
 
-use crate::rest::{ConfigResponse, LoginRequest, LoginResponse};
+use crate::rest::{BootResponse, ConfigResponse, LoginRequest, LoginResponse, MeResponse};
 
 /// A Grappa server reached over REST, identified by its base URL.
 pub struct GrappaClient {
@@ -76,12 +76,39 @@ impl GrappaClient {
             other => Err(LoginError::UnexpectedStatus(other)),
         }
     }
+
+    /// `GET /boot` — authenticated cold-start aggregate. Call `GET /me` in
+    /// parallel, per `docs/protocol-notes.md` §7.
+    pub async fn fetch_boot(&self, token: &str) -> Result<BootResponse, GrappaClientError> {
+        let url = format!("{}/boot", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<BootResponse>().await?)
+    }
+
+    /// `GET /me` — authenticated bulk read-cursors/unread-counts/badge.
+    pub async fn fetch_me(&self, token: &str) -> Result<MeResponse, GrappaClientError> {
+        let url = format!("{}/me", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<MeResponse>().await?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -182,5 +209,43 @@ mod tests {
         let error = client.login(&request).await.expect_err("should fail");
 
         assert!(matches!(error, LoginError::TooManyAttempts));
+    }
+
+    #[tokio::test]
+    async fn fetch_boot_sends_the_bearer_token_and_parses_the_response() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/boot"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "networks": [{"slug": "libera"}],
+                "channels": {"libera": [{"name": "#rust"}]}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let boot = client.fetch_boot("abc123").await.expect("fetch_boot");
+
+        assert_eq!(boot.networks.len(), 1);
+        assert_eq!(boot.channels.get("libera").map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn fetch_me_sends_the_bearer_token_and_parses_the_response() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "badge_count": 3
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let me = client.fetch_me("abc123").await.expect("fetch_me");
+
+        assert_eq!(me.badge_count, serde_json::json!(3));
     }
 }

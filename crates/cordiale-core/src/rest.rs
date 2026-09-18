@@ -7,6 +7,8 @@
 //! guessed at, per the project's rule that Grappa's actual contract is the
 //! only authority for shape and capability.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -46,6 +48,37 @@ pub struct LoginResponse {
     pub token: String,
     #[serde(default)]
     pub subject: Value,
+}
+
+/// Response body of `GET /boot`, the cold-start aggregate endpoint.
+///
+/// `networks`, `channels` and `heads` don't have a fully published field
+/// schema (see `docs/protocol-notes.md` §4), so each entry is kept as
+/// opaque JSON: Cordiale reads what it needs from a specific entry once
+/// that shape is confirmed, rather than guessing a rigid struct now.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BootResponse {
+    pub networks: Vec<Value>,
+    /// Keyed by network slug; only present for a network the account owns.
+    #[serde(default)]
+    pub channels: HashMap<String, Vec<Value>>,
+    /// Keyed by network slug, then channel; only present for a channel that
+    /// actually has history.
+    #[serde(default)]
+    pub heads: HashMap<String, HashMap<String, Vec<Value>>>,
+}
+
+/// Response body of `GET /me`: read cursors, unread counts and badge count
+/// in bulk. None of the three have a published field schema, so they stay
+/// opaque JSON.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeResponse {
+    #[serde(default)]
+    pub read_cursors: Value,
+    #[serde(default)]
+    pub unread_counts: Value,
+    #[serde(default)]
+    pub badge_count: Value,
 }
 
 #[cfg(test)]
@@ -101,5 +134,34 @@ mod tests {
             response.subject.get("nick").and_then(|v| v.as_str()),
             Some("vjt")
         );
+    }
+
+    #[test]
+    fn boot_response_tolerates_missing_channels_and_heads() {
+        let json = r#"{"networks": [{"slug": "libera"}]}"#;
+        let boot: BootResponse = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(boot.networks.len(), 1);
+        assert!(boot.channels.is_empty());
+        assert!(boot.heads.is_empty());
+    }
+
+    #[test]
+    fn boot_response_parses_channels_and_heads() {
+        let json = r#"{
+            "networks": [{"slug": "libera"}],
+            "channels": {"libera": [{"name": "#rust"}]},
+            "heads": {"libera": {"#rust": [{"kind": "privmsg"}]}}
+        }"#;
+        let boot: BootResponse = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(boot.channels.get("libera").map(Vec::len), Some(1));
+        assert!(boot.heads.contains_key("libera"));
+    }
+
+    #[test]
+    fn me_response_tolerates_a_fully_empty_body() {
+        let me: MeResponse = serde_json::from_str("{}").expect("deserialize");
+        assert!(me.read_cursors.is_null());
+        assert!(me.unread_counts.is_null());
+        assert!(me.badge_count.is_null());
     }
 }
