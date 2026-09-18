@@ -50,7 +50,10 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 pub enum SessionCommand {
     /// Joins a topic (network or channel), optionally muting join/part/quit
     /// presence noise for it (see `docs/protocol-notes.md` §2).
-    JoinTopic { topic: String, presence: bool },
+    JoinTopic {
+        topic: String,
+        presence: bool,
+    },
     Shutdown,
 }
 
@@ -59,7 +62,9 @@ pub enum SessionCommand {
 pub enum SessionEvent {
     /// The user-topic join succeeded; echoes `protocol_version` again per
     /// the documented handshake.
-    Connected { protocol_version: Option<u32> },
+    Connected {
+        protocol_version: Option<u32>,
+    },
     /// Any frame Cordiale doesn't already interpret at this layer — the
     /// caller matches on `frame.event`/`frame.topic`, ignoring what it
     /// doesn't recognize (see `docs/protocol-notes.md` §3).
