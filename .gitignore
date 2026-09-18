@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+
+# IDE / editor metadata
+.idea/
+.vscode/
+*.swp
+
+# Local packaging output
+/dist/
+/artifacts/
+
+# OS metadata
+Thumbs.db
+.DS_Store

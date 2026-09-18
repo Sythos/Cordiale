@@ -1,0 +1,24 @@
+export component AppWindow inherits Window {
+    in property <string> app_title: "Cordiale";
+
+    min-width: 640px;
+    min-height: 420px;
+    width: 900px;
+    height: 600px;
+
+    VerticalLayout {
+        padding: 32px;
+        spacing: 16px;
+
+        Text {
+            text: app_title;
+            font-size: 28px;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: "Grappa desktop client scaffold";
+            horizontal-alignment: center;
+        }
+    }
+}
