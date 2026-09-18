@@ -14,6 +14,9 @@
 Thumbs.db
 .DS_Store
 
+# Local PowerShell helper scripts (never distributed with the client)
+*.ps1
+
 # AI assistant / agentic tooling metadata (never distributed with the client)
 .claude/
 CLAUDE.md
