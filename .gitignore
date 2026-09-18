@@ -13,3 +13,22 @@
 # OS metadata
 Thumbs.db
 .DS_Store
+
+# AI assistant / agentic tooling metadata (never distributed with the client)
+.claude/
+CLAUDE.md
+.cursor/
+.cursorrules
+.windsurf/
+.windsurfrules
+.codex/
+.aider*
+.copilot/
+.github/copilot-instructions.md
+.continue/
+.cline/
+.roo/
+.clinerules
+AGENTS.md
+GEMINI.md
+.gemini/
