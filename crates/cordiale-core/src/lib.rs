@@ -13,6 +13,7 @@ pub const APP_NAME: &str = "Cordiale";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod domain;
+pub mod persistence;
 
 /// Placeholder for the protocol boundary, to be implemented in Phase 1.
 pub mod protocol {
