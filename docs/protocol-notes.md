@@ -1,0 +1,374 @@
+# Note sul contratto client Grappa
+
+Documento tecnico di riferimento per l'implementazione di Cordiale, prodotto
+studiando la fonte primaria `CLIENT_PROTOCOL.md` di Grappa e, come
+riferimento solo funzionale, la struttura del client `cicchetto`.
+
+Fonti:
+- **Primaria (autorevole):** <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>.
+- **Riferimento funzionale (solo funzionalità, non architettura):** <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
+
+Convenzione: "la documentazione dice" = contenuto verificato del
+`CLIENT_PROTOCOL.md`; "sto inferendo" = deduzione non scritta esplicitamente
+nella fonte. Il codice server Grappa resta l'autorità finale in caso di
+dubbio o disaccordo con questo documento.
+
+---
+
+## 1. REST API
+
+Il documento è dichiaratamente una guida, non una spec OpenAPI completa
+("the source is authoritative... where they disagree, the code wins").
+Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
+
+### Bootstrap
+- **`GET /api/config`** — primo contatto, non autenticato, cacheable, va
+  chiamato prima di autenticarsi o aprire il socket. Campi documentati:
+  - `server` (string, sempre `"grappa"` per questa implementazione)
+  - `version` (stringa release software; solo diagnostico, mai da usare per
+    compatibilità)
+  - `protocol_version` (int, protocollo attuale del server)
+  - `min_protocol_version` (int, floor minimo accettato)
+  - `push_content_encoding` (string, es. `"aes128gcm"`; capability separata
+    dal `protocol_version` — vedi §3)
+
+- **`GET /boot`** — endpoint di boot aggregato, evita fan-out di richieste al
+  cold-start:
+  ```
+  { "networks": [...],                 // = GET /networks
+    "channels": { "<slug>": [...] },   // = GET /networks/:network_id/channels
+    "heads": { "<slug>": { "<chan>": [...] } } } // ultima pagina di history per canale
+  ```
+  `channels` ha una chiave per network posseduto; `heads` ha una chiave solo
+  per i canali che hanno storia (assente, non `[]`, se non c'è storia).
+
+- **`GET /me`** — risponde in bulk `read_cursors`, `unread_counts`,
+  `badge_count`. Abbinato a `/boot`, un boot a freddo è due richieste, flat
+  rispetto alla dimensione dell'account.
+
+### Autenticazione
+- **`POST /auth/login`** — body `{ "identifier": "...", "password": "..." }`.
+  - Successo: `200 { "token": "...", "subject": {...} }`.
+  - 2FA armato (TOTP o passkey): `202 two_factor_required` — non risolvibile
+    da un client non presidiato come Cordiale, serve un browser.
+  - Credenziali errate: `401 invalid_credentials`.
+  - Throttling: `429 too_many_attempts` dopo 10 fallimenti da un indirizzo in
+    15 minuti.
+
+- **Token per-client** — pensato esattamente per un client come Cordiale che
+  non può gestire TOTP/WebAuthn:
+  - Si invia nello stesso campo `password` di `POST /auth/login`.
+  - Il token è il bearer stesso: si può saltare `/auth/login` e presentarlo
+    direttamente come `Authorization: Bearer <token>` (REST) o via
+    subprotocollo WS (vedi §2).
+  - Non scade per inattività (una sessione browser sì, dopo 7 giorni). Solo
+    la revoca la termina.
+  - Armare/disarmare/cambiare un secondo fattore sull'account **non** revoca
+    i token già emessi.
+  - **È scoped**: legge e invia come l'account, ma NON può toccare
+    `/admin/*`, `/me/totp*`, `/me/passkeys*`, `DELETE /me`, né le route dei
+    token stessi — quelle rispondono `403 client_token_scope` (errore di
+    scope, non di credenziali: non va ritentato con retry).
+  - Gestione token (lato owner, da sessione browser, non da Cordiale):
+    `POST /me/client-tokens {label, password}` → `token` (una sola volta);
+    `GET /me/client-tokens` → lista; `DELETE /me/client-tokens/:handle`.
+  - Un token errato è indistinguibile da una password errata: stesso
+    `401 invalid_credentials`, stesso throttle.
+
+### Messaggi e canali
+- **`POST /networks/:network_id/channels/:channel_id/messages`** — invia un
+  PRIVMSG a `:channel_id` (e lo fa eco lì). Due campi opzionali mutuamente
+  esclusivi (entrambi presenti → `400 bad_request`):
+  - `ctcp_target` → eco come `kind: "privmsg"` con `meta.ctcp_target`.
+  - `notice_target` (nick o canale) → eco come `kind: "notice"` con
+    `meta.notice_target`.
+  - Il destinatario va letto da `meta`, mai da `channel` (che resta la
+    finestra sorgente).
+- Backlog/paginazione per canale: `?before=`, `?after=`, `/messages/count`.
+- **`GET /networks/:network_id/archive`** — `{target, kind, last_activity}`.
+  Il campo `row_count` è stato **rimosso** alla v8 (unico caso di rimozione
+  documentato — vedi §3).
+
+### Network e canali
+- **`GET /networks`** — include un oggetto `connection` con almeno
+  `registered` (bool, identità ai servizi — twin REST dell'evento
+  `session_identity_changed`, vedi §2).
+- **`GET /networks/:network_id/channels`** — elenco canali per network.
+- `:network_id` nel path è sempre uno **slug**, non un id numerico.
+
+### Liste canale (mode tipo A: ban, ecc.)
+- Nessun endpoint REST dedicato: query via verbo WebSocket `"banlist"`
+  (campo opzionale `"mode"`, default `"b"`), risposta come evento
+  `banlist_bundle`. Le lettere interrogabili sono esposte via
+  `isupport_changed` (`chanmodes_a`, `list_modes_queryable`).
+
+### DCC (trasferimento file peer-to-peer)
+- `POST .../dcc_offers/:offer_id/accept` → `202 {"ok": true}`.
+- `DELETE .../dcc_offers/:offer_id` → `200 {"ok": true}` (rifiuta; non
+  invia nulla al peer).
+- `GET .../dcc_offers` → `{"offers": [...]}`.
+- `GET /dcc_files/:slug[.ext]` — top-level, **nessuna autenticazione**; lo
+  slug (26 char base32) è di per sé il token d'accesso. Sempre
+  `application/octet-stream` + `Content-Disposition: attachment` +
+  `X-Content-Type-Options: nosniff`.
+- `GET/PUT .../dcc-auto-accept` — `{"enabled": true|false}`.
+
+### Impostazioni
+- `GET`/`PUT /me/settings/display-prefs` — 7 chiavi (v24): `time_format`,
+  `colored_nicklist`, `presence_filter`, `show_bottom_bar`,
+  `strip_formatting`, `show_event_badge`, `bold_mentions`. Absent-tolerant in
+  entrambe le direzioni.
+- `GET /api/server-settings`, `GET /admin/settings` — dalla v26 espone anche
+  `per_user_cap_bytes` e `per_visitor_cap_bytes`, leggibili ma non
+  azionabili (rifiuto quota = `507 insufficient_storage` generico).
+
+### Superfici solo-account (non accessibili da token per-client)
+`/admin/*`, `/me/totp*`, `/me/passkeys*`, `DELETE /me` — richiedono sessione
+browser piena; nessuno schema dettagliato nel documento.
+
+---
+
+## 2. Phoenix Channels / WebSocket
+
+### Handshake
+- Endpoint realtime: Phoenix Channels su `/socket/websocket`.
+- **Autenticazione**: il bearer viaggia nell'header `Sec-WebSocket-Protocol`
+  come `base64url.bearer.phx.<token>` — non nell'URL, per tenerlo fuori dagli
+  access log. Bearer mancante/invalido → `403`.
+- **Versione protocollo**: dichiarata via query param `client_proto`
+  sull'URL di upgrade (va messo nei `params` del `Socket`, non nel path).
+  - Sotto `min_protocol_version` → `426 Upgrade Required`, body
+    `{"error": "upgrade_required", "protocol_version": N, "min_protocol_version": M}`.
+  - Omesso → trattato come "current".
+  - Non leggibile come intero → anche questo trattato come current, il
+    connect ha successo ma la dichiarazione viene scartata silenziosamente.
+  - Nessun limite superiore: non esiste (né esisterà) un
+    `max_protocol_version`.
+  - Il controllo versione avviene **prima** dell'autenticazione.
+- **Payload iniziale**: il primo topic da joinare è il topic utente
+  `grappa:user:{user}`; la risposta di join porta `protocol_version`:
+  `join "grappa:user:vjt" → {:ok, {"protocol_version": 2}}` — un client che
+  ha saltato `GET /api/config` lo impara comunque al connect.
+
+### Topic
+| topic | shape |
+|---|---|
+| user | `grappa:user:{user}` |
+| network | `grappa:user:{user}/network:{slug}` |
+| channel | `grappa:user:{user}/network:{slug}/channel:{chan}` |
+
+- Il segmento canale è ASCII-folded lato server (solo A-Z): casing diverso
+  atterra sulla stessa finestra, ma `#foo[1]` e `#foo{1}` sono topic
+  **diversi**; il casing non-ASCII (`#CAFÉ` vs `#café`) **non** viene
+  foldato.
+- Una finestra query/DM usa come segmento il nick del peer, foldato allo
+  stesso modo.
+- I `kind` di evento non riconosciuti vanno ignorati (regola
+  additive-only, §3).
+
+### Eventi principali
+- **Stato finestra** — `window_pending`, `window_invited`, e i terminali
+  `joined`, `join_failed`, `kicked`: broadcast sul topic **utente**, non
+  canale (il topic canale li emette solo come snapshot al join). Lo stato
+  finestra va guidato dal topic utente fin dal connect.
+- **Risposte solo-alla-connessione-richiedente**: `who_reply`,
+  `names_reply`, `whois_bundle`, `whowas_bundle`, `server_reply`,
+  `banlist_bundle`, `links_bundle` — sul topic utente ma solo al socket
+  che ha inviato il comando. Eccezione: `lusers_bundle` fa fan-out a tutte
+  le connessioni (anche non richiesto, al connect) — va consumato una volta.
+- **Identità ai servizi**: `session_identity_changed` =
+  `{"kind": "session_identity_changed", "network_id": N, "identified": bool, "account": string|null}`.
+  `identified` è l'unico campo su cui basarsi (mai derivarlo da umode).
+  `account` è solo display, può essere `null` anche con `identified: true`.
+- **Muting presenza**: join sul topic canale con `{"presence": false}`
+  sopprime `join`/`part`/`quit` per quel canale; mai soppressi:
+  `nick_change`, `mode`, il proprio `join`/`part`/`quit`. Letto una sola
+  volta al join (per cambiare va rifatto il join). Richiede
+  `protocol_version >= 7`.
+- **DCC**: `dcc_offer` = `{"kind", "network", "channel", "offer_id", "from", "filename", "size"}`;
+  `dcc_offer_resolved` = `{"kind", "network", "channel", "offer_id", "resolution": "accepted"|"refused"|"expired"}`.
+  Nessun campo `state`. Snapshot a freddo re-inviato al reconnect sul topic
+  utente, o via `GET .../dcc_offers`.
+- **Reason personalizzati** (v23): `quit_part_reason_changed`
+  `{"quit_part_reason": string|null}`, `auto_away_reason_changed`
+  `{"auto_away_reason": string|null}` — chiave sempre presente, `null` è
+  significativo.
+- **Liste canale**: `isupport_changed` porta `chanmodes_a` e
+  `list_modes_queryable` — usare quest'ultimo per l'UI.
+- **Modifiche di modo strutturali** (v25): righe `:mode` portano
+  `meta.structural: true` quando il token cambia il canale (non un prefisso
+  membro); assente su storico pre-v25 = "non noto, tratta come prima".
+- **Rate limiting**: su un verbo WS oltre budget →
+  `{"error": "rate_limited", "retry_after_ms": N}` (socket resta aperto).
+  Flood sostenuto → `web_session_severed` `{"code": "rate_limit_flood"}` sul
+  topic utente → bearer revocato → socket chiuso. La sessione IRC (bouncer)
+  non viene toccata, solo quella web.
+
+### Heartbeat / riconnessione
+- **Non specificato esplicitamente** nel documento: nessun intervallo di
+  heartbeat Phoenix né policy di backoff dichiarata. Consiglio implicito:
+  `GET /boot` al cold-start e `?after=` per colmare i gap per canale al
+  resume, per evitare un burst equivalente a un boot a freddo. Da verificare
+  sul codice server (`GrappaWeb.UserSocket` / config `Grappa.Endpoint`) o sul
+  comportamento di default di `phoenix.js` prima di implementare la
+  riconnessione in Cordiale.
+
+---
+
+## 3. Versioning e compatibilità
+
+- **`protocol_version`**: cosa parla il server ORA. Dal 2026-08-21 si muove
+  per OGNI cambiamento di wire-shape, incluso quello additivo — inversione
+  esplicita di una regola precedente. Motivo: l'additività descrive cosa
+  EMETTE il server, non cosa RICHIEDE un client; un client che smette di
+  tollerare un campo mancante può rompersi contro un server vecchio.
+- **`min_protocol_version`**: il floor, si alza solo quando i client vecchi
+  non possono più essere serviti (asse diverso, non segue i bump additivi).
+- Esposti da `GET /api/config` e dalla risposta di join del topic utente.
+- Il WS handshake applica il floor: sotto `min_protocol_version` via
+  `client_proto` → `426 upgrade_required`.
+- **Regola wire additive-only**: nuovi frame/eventi/campi possono comparire
+  in qualsiasi momento; un verbo o campo sconosciuto non è mai fatale in
+  nessuna delle due direzioni; i campi esistenti non vengono mai
+  ripropositi con un significato diverso.
+- **Rimozione = evento raro, non "mai"**: un solo caso documentato —
+  `row_count` rimosso dall'entry di archivio alla v8.
+- **Linee guida per un client**:
+  - Un bump non è di per sé un avviso di rottura — solo
+    `min_protocol_version` può rifiutare la connessione.
+  - Confrontare con `>=`, mai `==`; mai usare la stringa `version` per il
+    gating (solo diagnostica/CTCP VERSION).
+  - Continuare a ignorare ciò che non si riconosce.
+  - Se Cordiale rende un campo server obbligatorio, si è auto-alzato un
+    floor interno: va registrato il `protocol_version` che ha introdotto
+    quel campo e va rifiutato/degradato sotto quella soglia — mai inventare
+    un valore per un campo che un server vecchio non ha mai mandato.
+- **`push_content_encoding`** è una capability, non una versione: è cambiata
+  senza muovere `protocol_version`. Un server senza questo campo va trattato
+  come "troppo vecchio per push cifrato", non come un bug del client.
+
+---
+
+## 4. Entità di dominio
+
+Il documento non fornisce schemi JSON completi entità-per-entità; quanto
+segue è ricostruito da frammenti sparsi (marcato dove è inferenza).
+
+- **network**: identificato da uno slug in ogni path `:network_id`. Ha un
+  oggetto `connection` con almeno `registered` (bool). Elencati da
+  `GET /networks` (e dentro `GET /boot`).
+- **channel**: identificato da `:channel_id` (slug, presumibilmente stesso
+  folding ASCII usato per i topic — *inferenza*). Ha: membri, topic, modes,
+  read cursor, `window_counts`. Elencati da `GET /networks/:network_id/channels`.
+- **query/DM**: stessa entità "channel" a livello di topic — il segmento è
+  il nick del peer, foldato come un nome canale.
+- **message/riga di scrollback**: ha un `kind` (`privmsg`, `notice`, `mode`,
+  `server_event` almeno), un oggetto `meta` (`ctcp_target`,
+  `notice_target`, `statusmsg`, `structural`), e `channel` = finestra
+  sorgente (non il vero destinatario con `ctcp_target`/`notice_target`).
+  Paginabile con `?before=`/`?after=`, contabile con `/messages/count`.
+- **archive entry**: `{target, kind, last_activity}`.
+- **presence/status**: `join`/`part`/`quit` per canale (sopprimibili);
+  `session_identity_changed` per l'identità ai servizi; reason personalizzati
+  per il subject stesso. Stato "away" dei **peer** non descritto
+  esplicitamente — *punto aperto*, vedi §7.
+- **dcc offer**: `{network, channel, offer_id, from, filename, size}` +
+  `resolution` quando risolta.
+- **display_prefs**: 7 chiavi (vedi §1).
+
+---
+
+## 5. Guest/visitor e ruolo admin
+
+### Guest/visitor
+La documentazione **non descrive alcun meccanismo di accesso guest/visitor**
+in modo esplicito:
+- L'unica occorrenza di "Guest" è `Guest87449`, un nickname di esempio
+  illustrativo nella spiegazione del folding ASCII dei topic — non un
+  flusso di autenticazione guest.
+- L'unica occorrenza di "visitor" è il campo `per_visitor_cap_bytes` (v26)
+  nella proiezione delle impostazioni server, accanto a
+  `per_user_cap_bytes`. Questo implica (inferenza) che lato server esista
+  una categoria di subject distinta da un "user" pieno, con una propria
+  quota di upload — ma il documento non descrive come un visitor viene
+  creato/autenticato, quali permessi ha, o se è raggiungibile da un client
+  come Cordiale. I due campi sono esplicitamente "leggibili ma non
+  azionabili" (pensati per la UI admin).
+- **Conclusione**: se un vero meccanismo guest/visitor esiste lato server,
+  non è nel contratto documentato — è, nella migliore delle ipotesi,
+  teorico/implicito da un solo campo di configurazione. **Va verificato sul
+  codice server reale prima di progettare qualunque funzionalità "guest" in
+  Cordiale** (coerente con la policy già in `MEMORY.md` §3.3).
+
+### Ruolo admin
+- `/admin/*` (REST) e `AdminChannel` (WS) sono gated da un flag `is_admin`,
+  esenti dal rate limiting condiviso.
+- Un token per-client non può mai accedere a `/admin/*`
+  (`403 client_token_scope`) — richiede sessione browser piena.
+- **Il documento non spiega come un subject diventi admin**: nessun
+  endpoint, campo o evento documentato per assegnare/revocare `is_admin`.
+  Citato solo come gate esistente, mai come procedura — coerente con
+  `MEMORY.md` §3.3 ("Il ruolo admin è assegnato dal server... Cordiale non
+  lo deduce da campi locali").
+
+---
+
+## 6. Domande aperte / punti non chiari
+
+1. **Heartbeat e riconnessione WebSocket** — nessun intervallo/policy di
+   backoff dichiarati esplicitamente. Da verificare sul codice server o sul
+   default di `phoenix.js` prima di implementare la riconnessione.
+2. **Meccanismo guest/visitor** — nessun endpoint/flusso documentato; unico
+   indizio `per_visitor_cap_bytes`. Da verificare sul codice server.
+3. **Assegnazione ruolo admin** — nessuna procedura documentata.
+4. **Endpoint di registrazione/signup** — assente dal documento, ma
+   cicchetto ha un wizard di registrazione lato UI: o è un gap di
+   documentazione, o cicchetto usa un provisioning lato operatore diverso.
+   Da chiarire prima di decidere se Cordiale deve offrire un percorso di
+   registrazione.
+5. **Endpoint di upload generico (POST)** — solo `GET /uploads/:slug`
+   citato per analogia col pattern DCC file; nessun endpoint di upload
+   (metodo, campo multipart, limiti) documentato.
+6. **Schema completo delle entità** — §4 di questo documento è una
+   ricostruzione da menzioni sparse, non una trascrizione di uno schema
+   pubblicato.
+7. **Stato "away" dei peer** — un componente del client di riferimento
+   suggerisce che esista, ma nessun evento/campo documentato per l'away
+   status di un peer (solo il proprio, via `auto_away_reason_changed`).
+8. **`presence_filter` in `display_prefs`** — non chiaro se collegato
+   meccanicamente al join-param `{"presence": false}` (§2) o se siano due
+   funzionalità distinte; il documento non li mette mai in relazione
+   esplicita.
+9. Alcune superfici (schema completo `/admin/*`, TOTP, passkey, recovery
+   codes, upload) non sono nel contratto client documentato: non rilevanti
+   per il perimetro Fase 1 di Cordiale (autenticazione username/password o
+   token per-client, non gestione 2FA/admin), ma da riconsiderare se il
+   perimetro si estende in Fase 2.
+
+---
+
+## 7. Implicazioni dirette per il design di Cordiale (Fase 1)
+
+- Il modello `Profilo` deve trattare password e token per-client come lo
+  stesso campo wire (`password` in `POST /auth/login`), ma va mantenuta una
+  distinzione interna esplicita (vedi `MEMORY.md` §3.6) per permettere una
+  UX diversa (es. "Password" vs "Client token") e per gestire
+  correttamente `403 client_token_scope` come errore di scope e non di
+  credenziali (niente retry, niente "riprova la password").
+  - **Nota importante**: `403 client_token_scope` implica che alcune
+    operazioni account-only (2FA, passkey, eliminazione account) **non
+    possono essere svolte da Cordiale con un token per-client** — vanno
+    escluse dal perimetro applicativo o esplicitamente segnalate come "vai
+    sul browser" quando rilevanti.
+- Il bootstrap REST va sequenziato come: `GET /api/config` (verifica
+  versione) → `POST /auth/login` (o bearer diretto se token già noto) →
+  `GET /boot` + `GET /me` in parallelo → join topic utente WS (che conferma
+  di nuovo `protocol_version`).
+- Il parser deve confrontare `protocol_version` con `>=`, mai `==`, e
+  ignorare sempre campi/eventi sconosciuti — coerente con la policy già
+  decisa in `MEMORY.md` §3.2.
+- Guest/visitor **non va implementato in Fase 1**: nessuna evidenza di un
+  flusso client-side nel contratto documentato.
+- Il modello dominio iniziale (network/channel/query/message) può basarsi
+  sui campi qui documentati; i campi non documentati vanno trattati come
+  opachi/opzionali, mai assunti.
