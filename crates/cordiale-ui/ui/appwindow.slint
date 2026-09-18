@@ -27,16 +27,53 @@ export component AppWindow inherits Window {
     width: 480px;
     height: 440px;
 
+    // One of "language", "connect", "connected" — see MEMORY.md §3.4 for
+    // why there's no `else`/`else if` in Slint: mutually exclusive `if`
+    // blocks are the documented pattern for multi-screen navigation.
+    in-out property <string> screen: "connect";
+
     in-out property <string> server-url: "https://irc.sindro.me";
     in-out property <string> identifier: "";
     in-out property <string> password: "";
     in property <string> status-message: "";
     in property <bool> connecting: false;
-    in property <bool> connected: false;
 
     callback connect-requested(string, string, string);
+    callback language-selected(string);
 
-    if !connected : VerticalBox {
+    if screen == "language" : VerticalBox {
+        padding: 32px;
+        spacing: 16px;
+
+        Text {
+            text: "Choose your language";
+            font-size: 22px;
+            horizontal-alignment: center;
+        }
+
+        Button {
+            text: "English";
+            clicked => { language-selected("en"); }
+        }
+        Button {
+            text: "Italiano";
+            clicked => { language-selected("it"); }
+        }
+        Button {
+            text: "Français";
+            clicked => { language-selected("fr"); }
+        }
+        Button {
+            text: "Deutsch";
+            clicked => { language-selected("de"); }
+        }
+        Button {
+            text: "Español";
+            clicked => { language-selected("es"); }
+        }
+    }
+
+    if screen == "connect" : VerticalBox {
         padding: 32px;
         spacing: 16px;
 
@@ -68,6 +105,11 @@ export component AppWindow inherits Window {
             clicked => { connect-requested(server-url, identifier, password); }
         }
 
+        Button {
+            text: "Change language";
+            clicked => { screen = "language"; }
+        }
+
         Text {
             text: status-message;
             color: #cc3333;
@@ -76,7 +118,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    if connected : VerticalBox {
+    if screen == "connected" : VerticalBox {
         padding: 32px;
         spacing: 16px;
 

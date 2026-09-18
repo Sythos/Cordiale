@@ -38,6 +38,26 @@ fn main() -> Result<(), slint::PlatformError> {
     let remembered_server_url = load_remembered_server_url();
     ui.set_server_url(remembered_server_url.into());
 
+    if persistence::load_settings()
+        .unwrap_or_default()
+        .language
+        .is_none()
+    {
+        ui.set_screen("language".into());
+    }
+
+    let weak_for_language = ui.as_weak();
+    ui.on_language_selected(move |code| {
+        if let Some(language) = language_from_code(&code) {
+            let mut settings = persistence::load_settings().unwrap_or_default();
+            settings.language = Some(language);
+            let _ = persistence::save_settings(&settings);
+        }
+        if let Some(ui) = weak_for_language.upgrade() {
+            ui.set_screen("connect".into());
+        }
+    });
+
     let weak = ui.as_weak();
     ui.on_connect_requested(move |server_url, identifier, password| {
         let server_url = server_url.to_string();
@@ -52,8 +72,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
         let weak_for_thread = weak.clone();
         thread::spawn(move || {
-            let runtime =
-                tokio::runtime::Runtime::new().expect("failed to start network runtime");
+            let runtime = tokio::runtime::Runtime::new().expect("failed to start network runtime");
             runtime.block_on(async move {
                 let client = GrappaClient::new(server_url.clone());
                 let request = LoginRequest {
@@ -66,7 +85,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_connecting(false);
                     match result {
                         Ok(outcome) => {
-                            ui.set_connected(true);
+                            ui.set_screen("connected".into());
                             ui.set_status_message(
                                 format!(
                                     "Signed in. {} network(s) on this account.",
@@ -103,6 +122,17 @@ fn remember_server_url(server_url: &str) {
     let mut file = persistence::load_servers_file().unwrap_or_default();
     file.selected_server_base_url = Some(server_url.to_string());
     let _ = persistence::save_servers_file(&file);
+}
+
+fn language_from_code(code: &str) -> Option<persistence::Language> {
+    match code {
+        "en" => Some(persistence::Language::En),
+        "it" => Some(persistence::Language::It),
+        "fr" => Some(persistence::Language::Fr),
+        "de" => Some(persistence::Language::De),
+        "es" => Some(persistence::Language::Es),
+        _ => None,
+    }
 }
 
 fn describe_bootstrap_error(err: &BootstrapError) -> String {
