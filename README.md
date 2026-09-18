@@ -19,16 +19,29 @@ bootstrap sequence (`/api/config`, `/auth/login`, `/boot`, `/me`) with a
 documented status-code contract, and a hand-rolled Phoenix Channels
 transport over `tokio-tungstenite`.
 
-`cordiale-ui` now has a real (if minimal) GUI: a first-launch language
-picker, a connect screen (server URL, username, password/client token)
-that runs the actual bootstrap sequence on a background thread, and a
-post-login screen listing the account's networks. What's still missing:
-saved multi-server/profile management, Light/Dark theming, translated UI
+`cordiale-ui` has a splash screen, a first-launch language picker, a
+connect screen (server URL, username, password/client token) that runs
+the actual bootstrap sequence on a background thread, and a post-login
+screen listing the account's networks. The REST layer's request/response
+shapes have been checked against the real `irc.sindro.me` server (not just
+mocks) and match, including an undocumented guest/visitor login mode —
+see `docs/protocol-notes.md` §5. What's still missing: saved
+multi-server/profile management, Light/Dark theming, translated UI
 strings (only the language *picker* works today, the labels are still
-English), and an actual channel/message view. **None of the networking
-code has been exercised against a real Grappa server yet** — only against
-mocked ones in tests — so that's the main open risk before calling this
-phase done.
+English), the fuller Settings screens (mapped from Cicchetto's structure
+in `docs/feature-matrix.md`, not yet built), and an actual channel/message
+view — the WebSocket/Phoenix Channels side hasn't been exercised against a
+real server yet, only the REST bootstrap has.
+
+Packaging is ahead of the app itself: releases already build and publish
+cleanly for every target below, even though there isn't much of a client
+in them yet.
+
+## Download
+
+Packaged releases (installers, distro packages, source archive) are on the
+[Releases page](https://github.com/Sythos/Cordiale/releases) — see
+[docs/installation.md](docs/installation.md) for per-platform instructions.
 
 ## Workspace
 
