@@ -614,7 +614,11 @@ fn remember_profile(server_url: &str, identifier: &str, secret: &str) {
 
     let mut file = persistence::load_servers_file().unwrap_or_default();
 
-    if !file.servers.iter().any(|server| server.base_url == server_url) {
+    if !file
+        .servers
+        .iter()
+        .any(|server| server.base_url == server_url)
+    {
         file.servers.push(cordiale_core::domain::Server {
             base_url: server_url.to_string(),
             label: server_url.to_string(),
