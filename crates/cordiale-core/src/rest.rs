@@ -103,6 +103,38 @@ pub struct MeResponse {
     pub badge_count: Value,
 }
 
+/// Request body of `POST /networks/:network_id/channels/:channel_id/messages`.
+///
+/// `body` isn't documented in `CLIENT_PROTOCOL.md` itself — confirmed by
+/// reading Cicchetto's real `sendMessage` call (`cicchetto/src/lib/api.ts`)
+/// against the same endpoint, since the reference client necessarily gets
+/// this right. `ctcp_target`/`notice_target` are documented and mutually
+/// exclusive with each other (never both set); `statusmsg_target` is a
+/// third relay kind seen in Cicchetto's code but not in the documented
+/// contract — included for parity, not guaranteed stable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SendMessageRequest {
+    pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ctcp_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub statusmsg_target: Option<String>,
+}
+
+impl SendMessageRequest {
+    /// A plain message, no CTCP/notice/statusmsg relay.
+    pub fn plain(body: impl Into<String>) -> Self {
+        SendMessageRequest {
+            body: body.into(),
+            ctcp_target: None,
+            notice_target: None,
+            statusmsg_target: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +217,25 @@ mod tests {
         assert!(me.read_cursors.is_null());
         assert!(me.unread_counts.is_null());
         assert!(me.badge_count.is_null());
+    }
+
+    #[test]
+    fn send_message_request_plain_omits_relay_targets() {
+        let request = SendMessageRequest::plain("hello there");
+        let json = serde_json::to_string(&request).expect("serialize");
+        assert_eq!(json, r#"{"body":"hello there"}"#);
+    }
+
+    #[test]
+    fn send_message_request_includes_ctcp_target_when_set() {
+        let request = SendMessageRequest {
+            body: "\u{1}ACTION waves\u{1}".to_string(),
+            ctcp_target: Some("vjt".to_string()),
+            notice_target: None,
+            statusmsg_target: None,
+        };
+        let json = serde_json::to_string(&request).expect("serialize");
+        assert!(json.contains("\"ctcp_target\":\"vjt\""));
+        assert!(!json.contains("notice_target"));
     }
 }

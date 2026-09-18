@@ -29,7 +29,11 @@
 
 use reqwest::{Client, StatusCode};
 
-use crate::rest::{BootResponse, ConfigResponse, LoginRequest, LoginResponse, MeResponse};
+use serde_json::Value;
+
+use crate::rest::{
+    BootResponse, ConfigResponse, LoginRequest, LoginResponse, MeResponse, SendMessageRequest,
+};
 
 /// A Grappa server reached over REST, identified by its base URL.
 pub struct GrappaClient {
@@ -40,6 +44,7 @@ pub struct GrappaClient {
 #[derive(Debug)]
 pub enum GrappaClientError {
     Http(reqwest::Error),
+    InvalidUrl(String),
 }
 
 impl From<reqwest::Error> for GrappaClientError {
@@ -125,12 +130,44 @@ impl GrappaClient {
             .error_for_status()?;
         Ok(response.json::<MeResponse>().await?)
     }
+
+    /// `POST /networks/:network_id/channels/:channel_id/messages` — sends a
+    /// message, echoed back as opaque JSON (row shape not fully documented,
+    /// see `docs/protocol-notes.md` §4).
+    ///
+    /// `network_id` and `channel_id` are percent-encoded as URL path
+    /// segments (via `Url::path_segments_mut`), not string-interpolated:
+    /// channel names routinely contain `#`, which is a URL fragment
+    /// delimiter if left raw.
+    pub async fn send_message(
+        &self,
+        token: &str,
+        network_id: &str,
+        channel_id: &str,
+        request: &SendMessageRequest,
+    ) -> Result<Value, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_id, "channels", channel_id, "messages"]);
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Value>().await?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -269,5 +306,28 @@ mod tests {
         let me = client.fetch_me("abc123").await.expect("fetch_me");
 
         assert_eq!(me.badge_count, serde_json::json!(3));
+    }
+
+    #[tokio::test]
+    async fn send_message_percent_encodes_a_channel_name_with_a_hash() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels/%23rust/messages"))
+            .and(header("authorization", "Bearer abc123"))
+            .and(body_json(serde_json::json!({"body": "hello there"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "kind": "privmsg"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let request = crate::rest::SendMessageRequest::plain("hello there");
+        let response = client
+            .send_message("abc123", "libera", "#rust", &request)
+            .await
+            .expect("send_message");
+
+        assert_eq!(response.get("kind").and_then(|k| k.as_str()), Some("privmsg"));
     }
 }
