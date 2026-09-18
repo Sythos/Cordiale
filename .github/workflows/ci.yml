@@ -67,3 +67,10 @@ jobs:
       - name: Audit dependencies (RustSec advisory DB)
         if: runner.os == 'Linux'
         run: cargo audit
+
+      - name: Upload Cargo.lock
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v6
+        with:
+          name: Cargo.lock
+          path: Cargo.lock
