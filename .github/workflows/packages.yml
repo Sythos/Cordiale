@@ -32,9 +32,11 @@ jobs:
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             artifact: windows-x64
+            win_arch: x64
           - target: aarch64-pc-windows-msvc
             runner: windows-latest
             artifact: windows-arm64
+            win_arch: arm64
 
     steps:
       - name: Checkout client
@@ -142,19 +144,29 @@ jobs:
             --license MIT \
             -C stage -p "dist/Cordiale_Arch_rolling_${RPM_ARCH}.pkg.tar.zst" .
 
-      - name: Package Windows archive
+      - name: Package Windows archive and installer
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           TARGET: ${{ matrix.target }}
           ARTIFACT: ${{ matrix.artifact }}
+          WIN_ARCH: ${{ matrix.win_arch }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Compress-Archive `
-            -Path "target\$env:TARGET\release\cordiale-ui.exe" `
-            -DestinationPath "dist\cordiale-$env:ARTIFACT-$env:VERSION.zip" `
-            -Force
+          $binPath = "target\$env:TARGET\release\cordiale-ui.exe"
+
+          Compress-Archive -Path $binPath -DestinationPath "dist\cordiale-$env:ARTIFACT-$env:VERSION.zip" -Force
+
+          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+          if (-not $makensis) {
+            $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          }
+          $outFile = "$PWD\dist\Cordiale_Windows_$env:WIN_ARCH.exe"
+          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=$env:VERSION" packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) {
+            throw "makensis failed with exit code $LASTEXITCODE"
+          }
 
       - name: Generate build provenance attestation
         uses: actions/attest@v4
