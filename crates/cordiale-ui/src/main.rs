@@ -74,6 +74,7 @@ fn main() -> Result<(), slint::PlatformError> {
         "connect".into()
     });
     ui.set_theme(theme_to_slint(settings.theme));
+    ui.set_known_servers(known_servers_model());
 
     let (worker_tx, worker_rx) = mpsc::unbounded_channel::<WorkerCommand>();
     let ui_weak = ui.as_weak();
@@ -91,6 +92,16 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         if let Some(ui) = weak_for_language.upgrade() {
             ui.set_screen("connect".into());
+        }
+    });
+
+    let weak_for_server = ui.as_weak();
+    ui.on_server_selected(move |server_url| {
+        if let Some(ui) = weak_for_server.upgrade() {
+            ui.set_server_url(server_url.clone());
+            ui.set_identifier("".into());
+            ui.set_password("".into());
+            prefill_remembered_profile(&ui, &server_url);
         }
     });
 
@@ -200,7 +211,10 @@ impl WorkerState {
 /// commands and realtime session events with `tokio::select!`; when there's
 /// no session yet, the event branch parks on `std::future::pending()` so it
 /// never fires.
-async fn run_worker(mut commands: mpsc::UnboundedReceiver<WorkerCommand>, ui: slint::Weak<AppWindow>) {
+async fn run_worker(
+    mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
+    ui: slint::Weak<AppWindow>,
+) {
     let mut state = WorkerState::new();
     let mut session_events: Option<mpsc::UnboundedReceiver<SessionEvent>> = None;
 
@@ -331,6 +345,7 @@ async fn handle_connect(
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
                 ui.set_is_admin(is_admin);
+                ui.set_known_servers(known_servers_model());
                 ui.set_screen("connected".into());
                 ui.set_status_message(
                     format!(
@@ -360,7 +375,12 @@ async fn handle_connect(
     }
 }
 
-async fn handle_select_channel(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, network: String, channel: String) {
+async fn handle_select_channel(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: String,
+) {
     let Some(identifier) = state.identifier.clone() else {
         return;
     };
@@ -436,7 +456,11 @@ async fn handle_save_display_prefs(state: &WorkerState, prefs: DisplayPrefs) {
 /// `docs/protocol-notes.md` (see its §7 open points), so this reads the
 /// plausible fields defensively and always falls back to a raw
 /// `event: payload` line rather than dropping the frame silently.
-fn handle_frame(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, frame: cordiale_core::phoenix::PhoenixMessage) {
+fn handle_frame(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    frame: cordiale_core::phoenix::PhoenixMessage,
+) {
     let Some((network, channel)) = channel_from_topic(&frame.topic) else {
         return;
     };
@@ -521,7 +545,10 @@ fn to_ws_url(base_url: &str) -> String {
     } else {
         format!("wss://{base_url}")
     };
-    format!("{}/socket/websocket?vsn=2.0.0", with_scheme.trim_end_matches('/'))
+    format!(
+        "{}/socket/websocket?vsn=2.0.0",
+        with_scheme.trim_end_matches('/')
+    )
 }
 
 /// Reads `(network, channel, label)` triples out of `boot.channels`. Field
@@ -565,7 +592,10 @@ fn remember_server_url(server_url: &str) {
 
 /// Called only after a successful login: remembers the profile (never the
 /// secret itself) in `servers.json`, and puts the secret in the
-/// `CredentialStore` — never in the JSON file, see MEMORY.md §3.6.
+/// `CredentialStore` — never in the JSON file, see MEMORY.md §3.6. Also
+/// remembers the server itself in `ServersFile.servers` — the quick-switch
+/// list on the connect screen reads from there (see MEMORY.md §0sexies:
+/// this field existed on disk already, nothing populated it until now).
 ///
 /// Doesn't yet distinguish a password from a per-client token (the form
 /// doesn't ask): always recorded as `AuthMethod::Password` for now.
@@ -575,6 +605,14 @@ fn remember_profile(server_url: &str, identifier: &str, secret: &str) {
     }
 
     let mut file = persistence::load_servers_file().unwrap_or_default();
+
+    if !file.servers.iter().any(|server| server.base_url == server_url) {
+        file.servers.push(cordiale_core::domain::Server {
+            base_url: server_url.to_string(),
+            label: server_url.to_string(),
+        });
+    }
+
     let already_known = file
         .profiles
         .iter()
@@ -589,6 +627,18 @@ fn remember_profile(server_url: &str, identifier: &str, secret: &str) {
     }
     file.selected_profile_identifier = Some(identifier.to_string());
     let _ = persistence::save_servers_file(&file);
+}
+
+/// The base URLs of every server previously connected to successfully, for
+/// the connect screen's quick-switch list.
+fn known_servers_model() -> slint::ModelRc<slint::SharedString> {
+    let file = persistence::load_servers_file().unwrap_or_default();
+    let urls: Vec<slint::SharedString> = file
+        .servers
+        .into_iter()
+        .map(|server| server.base_url.into())
+        .collect();
+    Rc::new(slint::VecModel::from(urls)).into()
 }
 
 /// Pre-fills the identifier and, if the `CredentialStore` has it, the

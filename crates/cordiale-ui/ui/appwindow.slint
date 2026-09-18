@@ -54,6 +54,10 @@ export component AppWindow inherits Window {
     in-out property <string> password: "";
     in property <string> status-message: "";
     in property <bool> connecting: false;
+    // Base URLs of servers previously connected to successfully — see
+    // `docs/feature-matrix.md`/MEMORY.md §0sexies: `ServersFile.servers`
+    // existed on disk already, nothing populated or showed it until now.
+    in property <[string]> known-servers: [];
 
     in property <[ChannelEntry]> channel-list: [];
     in property <[string]> chat-messages: [];
@@ -70,6 +74,7 @@ export component AppWindow inherits Window {
     in-out property <bool> pref-show-bottom-bar: true;
 
     callback connect-requested(string, string, string);
+    callback server-selected(string);
     callback language-selected(string);
     callback disconnect-requested();
     callback channel-selected(string, string);
@@ -188,6 +193,21 @@ export component AppWindow inherits Window {
             color: #cc3333;
             horizontal-alignment: center;
             wrap: word-wrap;
+        }
+
+        if known-servers.length > 0 : VerticalBox {
+            padding-top: 8px;
+            spacing: 4px;
+
+            Text {
+                text: "Previously used servers";
+                font-size: 14px;
+            }
+
+            for known in known-servers : Button {
+                text: known;
+                clicked => { server-selected(known); }
+            }
         }
     }
 
