@@ -1,30 +1,36 @@
 # Cordiale
 
-Cordiale è un client desktop nativo per Grappa, sviluppato in Rust con Slint.
-Non parla IRC direttamente: usa REST e Phoenix Channels/WebSocket secondo il
-contratto client di Grappa.
+Cordiale is a native desktop client for Grappa, written in Rust with Slint.
+It doesn't speak IRC directly: it uses REST and Phoenix Channels/WebSocket
+per Grappa's documented client protocol.
 
-## Stato
+## Status
 
-Il repository contiene lo scaffold iniziale del workspace e non implementa
-ancora il client di rete. La priorità della Fase 1 è il percorso completo di
-configurazione server, autenticazione, bootstrap, realtime e messaggistica.
+Phase 1 (minimal functional client) is in progress. `cordiale-core` already
+has a domain model, local persistence under `~/.cordiale/`, a credential
+store (OS keychain with an explicitly insecure fallback), a REST client for
+the bootstrap sequence (`/api/config`, `/auth/login`, `/boot`, `/me`) with a
+documented status-code contract, and a hand-rolled Phoenix Channels
+transport over `tokio-tungstenite` — none of it exercised against a real or
+mocked Grappa server yet. The GUI in `cordiale-ui` is still a placeholder
+window.
 
 ## Workspace
 
-- `crates/cordiale-core` — modello, protocollo e logica condivisibile;
-- `crates/cordiale-ui` — eseguibile Slint e punto di ingresso della GUI;
-- `resources/i18n/{en,it,fr,de,es}` — risorse per l'internazionalizzazione;
-- `packaging/windows` e `packaging/linux` — spazio per i deliverable futuri
-  (note di packaging in `docs/packaging-windows.md` e
+- `crates/cordiale-core` — domain model, protocol, persistence, credentials,
+  REST/WebSocket clients, and other shareable logic;
+- `crates/cordiale-ui` — Slint executable and GUI entry point;
+- `resources/i18n/{en,it,fr,de,es}` — internationalization resources;
+- `packaging/windows` and `packaging/linux` — space for future deliverables
+  (packaging notes in `docs/packaging-windows.md` and
   `docs/packaging-linux.md`);
-- `docs/` — documentazione tecnica: contratto protocollo Grappa
-  (`protocol-notes.md`), matrice funzionalità (`feature-matrix.md`), note
-  di packaging.
+- `docs/` — technical documentation: Grappa protocol contract
+  (`protocol-notes.md`), feature matrix (`feature-matrix.md`), packaging
+  notes.
 
-## Riferimenti
+## References
 
-- Protocollo client Grappa:
+- Grappa client protocol:
   <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>
-- Cicchetto, riferimento funzionale:
+- Cicchetto, functional reference:
   <https://github.com/vjt/grappa-irc/tree/main/cicchetto>
