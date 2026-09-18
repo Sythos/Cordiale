@@ -35,7 +35,10 @@ pub async fn bootstrap(
     client: &GrappaClient,
     login_request: &LoginRequest,
 ) -> Result<BootstrapOutcome, BootstrapError> {
-    let config = client.fetch_config().await.map_err(BootstrapError::Config)?;
+    let config = client
+        .fetch_config()
+        .await
+        .map_err(BootstrapError::Config)?;
     let compatibility = ServerCompatibility {
         protocol_version: config.protocol_version,
         min_protocol_version: config.min_protocol_version,
@@ -91,7 +94,11 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_runs_the_full_sequence_on_a_compatible_server() {
         let mock_server = MockServer::start().await;
-        mock_config(&mock_server, crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION).await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
         Mock::given(method("POST"))
             .and(path("/auth/login"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -144,7 +151,11 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_stops_at_login_on_invalid_credentials() {
         let mock_server = MockServer::start().await;
-        mock_config(&mock_server, crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION).await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
         Mock::given(method("POST"))
             .and(path("/auth/login"))
             .respond_with(ResponseTemplate::new(401))
