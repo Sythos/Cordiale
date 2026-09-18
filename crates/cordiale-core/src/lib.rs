@@ -16,5 +16,6 @@ pub mod client;
 pub mod credentials;
 pub mod domain;
 pub mod persistence;
+pub mod phoenix;
 pub mod protocol;
 pub mod rest;
