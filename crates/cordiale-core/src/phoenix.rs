@@ -7,7 +7,6 @@
 //! — the v1 object-shaped format is legacy, v2 (what `vsn=2.0.0` on the
 //! socket URL asks for) is always `[join_ref, ref, topic, event, payload]`.
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A single Phoenix Channels frame, in either direction.
@@ -64,7 +63,7 @@ impl RefCounter {
         RefCounter(0)
     }
 
-    pub fn next(&mut self) -> String {
+    pub fn next_ref(&mut self) -> String {
         self.0 += 1;
         self.0.to_string()
     }
@@ -131,8 +130,8 @@ mod tests {
     #[test]
     fn ref_counter_increments_from_one() {
         let mut counter = RefCounter::new();
-        assert_eq!(counter.next(), "1");
-        assert_eq!(counter.next(), "2");
-        assert_eq!(counter.next(), "3");
+        assert_eq!(counter.next_ref(), "1");
+        assert_eq!(counter.next_ref(), "2");
+        assert_eq!(counter.next_ref(), "3");
     }
 }
