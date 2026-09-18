@@ -147,11 +147,11 @@ mod tests {
 
     #[test]
     fn boot_response_parses_channels_and_heads() {
-        let json = r#"{
+        let json = r##"{
             "networks": [{"slug": "libera"}],
             "channels": {"libera": [{"name": "#rust"}]},
             "heads": {"libera": {"#rust": [{"kind": "privmsg"}]}}
-        }"#;
+        }"##;
         let boot: BootResponse = serde_json::from_str(json).expect("deserialize");
         assert_eq!(boot.channels.get("libera").map(Vec::len), Some(1));
         assert!(boot.heads.contains_key("libera"));
