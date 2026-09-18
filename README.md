@@ -10,8 +10,6 @@ Il repository contiene lo scaffold iniziale del workspace e non implementa
 ancora il client di rete. La priorità della Fase 1 è il percorso completo di
 configurazione server, autenticazione, bootstrap, realtime e messaggistica.
 
-La memoria persistente del progetto è in [MEMORY.md](MEMORY.md).
-
 ## Workspace
 
 - `crates/cordiale-core` — modello, protocollo e logica condivisibile;
