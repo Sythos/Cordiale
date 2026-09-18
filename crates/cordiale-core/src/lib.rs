@@ -16,3 +16,4 @@ pub mod credentials;
 pub mod domain;
 pub mod persistence;
 pub mod protocol;
+pub mod rest;
