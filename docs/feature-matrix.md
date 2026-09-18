@@ -61,6 +61,39 @@ verifica aggiuntiva sul codice server prima di pianificare.
 | Captcha | No / non documentato | — | Non menzionato |
 | Notifiche push web | Sì (capability) | — | `push_content_encoding`, capability separata da `protocol_version`; fuori perimetro Fase 1 (nessun runtime esterno/service worker previsto) |
 
+## Struttura Settings — mappatura da Cicchetto (2026-09-18)
+
+Steer utente: le schermate Settings di Cordiale devono restare
+concettualmente vicine a quelle di Cicchetto (stesse categorie, stesso
+raggruppamento), per rendere la transizione degli utenti esistenti meno
+spiazzante possibile — non stesso codice (Cicchetto è una PWA
+TypeScript/SolidJS, Cordiale un client nativo Rust/Slint), stessa
+organizzazione concettuale. Mappatura verificata leggendo
+`cicchetto/src/SettingsDrawer.tsx` e `cicchetto/src/AdminPane.tsx` su
+`vjt/grappa-irc`:
+
+**Sezioni utente normale** (ordine reale nel drawer di Cicchetto):
+`general` (identità per-network, ritenzione upload, auto-away, quit/part
+reason; contiene `profile` come sub-page) · `security` (cambio password,
+TOTP, passkey — solo per `kind: "user"`) · `display` (dimensione testo,
+formato timestamp, nicklist colorata) · `themes` (galleria + editor) ·
+`push`/notifiche · `watchlists` (presenza + keyword highlight) ·
+`ignores` · `aliases` (comandi personalizzati) · `perform` (comandi
+on-connect) · `vhost` (solo se il server lo espone). Fuori dall'indice:
+share session, delete account, credits, build info.
+
+**Sezioni admin** (`AdminPane.tsx`, 3 gruppi): *Live* (Sessions, Events,
+Session Log) · *Configuration* (Networks, Vhosts, Users, Settings —
+limiti upload/spool server-wide) · *Diagnostics* (Debug).
+
+**Decisione di scope per la release iniziale (v0.1.2)**: implementare
+subito l'intera struttura a 10+8 sezioni non è realistico — quasi tutte
+richiedono endpoint REST/WS non ancora scritti in `cordiale-core` (TOTP,
+push, watchlist, ignore, alias, perform, vhost, tutto l'admin). Per ora
+resta implementata solo la selezione lingua (equivalente minimo di una
+sola voce del futuro `general`); il resto è documentato qui come
+architettura-bersaglio per le fasi successive, non costruito ora.
+
 ## Voci ancora da chiarire prima di poter classificare
 
 - Guest/visitor: non documentato nel contratto client, ma **confermato
