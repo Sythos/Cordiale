@@ -86,13 +86,17 @@ share session, delete account, credits, build info.
 Session Log) · *Configuration* (Networks, Vhosts, Users, Settings —
 limiti upload/spool server-wide) · *Diagnostics* (Debug).
 
-**Decisione di scope per la release iniziale (v0.1.2)**: implementare
-subito l'intera struttura a 10+8 sezioni non è realistico — quasi tutte
-richiedono endpoint REST/WS non ancora scritti in `cordiale-core` (TOTP,
-push, watchlist, ignore, alias, perform, vhost, tutto l'admin). Per ora
-resta implementata solo la selezione lingua (equivalente minimo di una
-sola voce del futuro `general`); il resto è documentato qui come
-architettura-bersaglio per le fasi successive, non costruito ora.
+**Aggiornamento (2026-09-18, Fase 2)**: la shell di navigazione completa
+a 10+8 sezioni è ora costruita in `appwindow.slint`/`main.rs` (stesso
+ordine di Cicchetto, incluso il gate `is-admin` sulla voce Admin). Solo
+`general` (lingua + tema Light/Dark) e `display` (5 delle 7 chiavi di
+`display-prefs`, sincronizzate col server) sono davvero funzionali —
+le altre restano non implementate perché richiedono endpoint REST/WS
+che `cordiale-core` non ha ancora (TOTP, push, watchlist, ignore, alias,
+perform, vhost, tutto l'admin), ma la sezione esiste e lo dichiara
+esplicitamente all'utente invece di essere assente o di fingere di
+funzionare. Implementare gli endpoint mancanti resta lavoro per fasi
+successive.
 
 ## Voci ancora da chiarire prima di poter classificare
 
