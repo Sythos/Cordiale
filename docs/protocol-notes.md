@@ -276,6 +276,57 @@ segue è ricostruito da frammenti sparsi (marcato dove è inferenza).
   `resolution` quando risolta.
 - **display_prefs**: 7 chiavi (vedi §1).
 
+## 4bis. Modello di persistenza confermato dal manutentore (2026-09-18)
+
+Fonte: `vjt-claude` (manutentore di Grappa/Cicchetto), risposta diretta su
+IRC a una domanda esplicita di Sythos, non il contratto client documentato
+— riportato qui perché autorevole e perché risolve punti aperti del
+documento ufficiale, non perché sostituisce il contratto.
+
+- **Persistito lato server (SQLite di Grappa)**: `networks` +
+  `network_servers` (catalogo reti/host) e `network_credentials` — una riga
+  per utente-per-rete con nick/ident/SASL e la lista `autojoin_channels`.
+  Per i visitatori l'equivalente è `last_joined_channels`, uno snapshot
+  cappato a 200 voci.
+- **Non persistito**: i canali **attualmente** joinati. Vivono solo nella
+  sessione live (`Session.Server`, interrogato via
+  `Networks.session_channels/2`), non nel DB.
+- **L'albero canali di Cicchetto è l'unione delle due fonti**: ogni voce è
+  marcata `source: :autojoin | :joined` (funzione interna
+  `merge_channel_sources/2`) — dettaglio implementativo di Cicchetto
+  (Elixir), non un campo REST/WS documentato che Cordiale possa leggere
+  per nome con certezza. **Una rete "parcheggiata"** (lista autojoin piena,
+  zero canali joined) **è uno stato normale, non un errore** — Cordiale
+  non deve trattarlo come un caso da segnalare o gestire diversamente.
+- **`localStorage` di Cicchetto, contenuto confermato completo**:
+  `grappa-token` (il token di sessione, **mai la password**),
+  `grappa-subject`, `grappa-client-id`, più preferenze locali di comodo
+  (larghezze pannelli, font, formato ora, tema, nicklist colorata, bozze
+  di messaggio non spedite in `cicchetto.composeDrafts`). `IndexedDB` non
+  usato. Tutto il resto — reti, canali, autojoin, storico — è
+  server-side: svuotare il browser e riprendere identico da un altro
+  device funziona.
+
+**Conseguenze per Cordiale**: conferma diretta (non più solo inferenza
+dalla direttiva "BNC-like" dell'utente) che l'architettura scelta è
+corretta — `~/.cordiale/` deve restare limitato a preferenze locali di
+comodo (lingua, tema — già così) più credenziali via `CredentialStore`
+(scelta più sicura di un token in chiaro, non un problema: Cordiale è un
+client nativo con accesso al keychain di sistema, non una PWA in
+sandbox browser), mai reti/canali/storico, che restano sempre e solo
+lato server. Uniche azioni dirette intraprese: aggiunte le bozze di
+composizione per-canale (`WorkerState::drafts` in
+`crates/cordiale-ui/src/main.rs`, callback `compose-text-changed`),
+equivalente diretto di `cicchetto.composeDrafts` — prima mancavano del
+tutto e il campo compose-text perdeva/mischiava il contenuto passando da
+un canale all'altro. Non modificata l'estrazione di `boot.channels`:
+il campo `source: :autojoin | :joined` è un dettaglio interno di
+Cicchetto, non un nome di campo REST verificato — inventarlo violerebbe
+la disciplina "mai un campo non confermato", quindi Cordiale continua a
+trattare ogni voce di `boot.channels` come un canale selezionabile e la
+joina in modo lazy al click, comportamento già corretto sia per un
+canale già joined sia per uno solo in autojoin.
+
 ---
 
 ## 5. Guest/visitor e ruolo admin

@@ -55,6 +55,7 @@ enum WorkerCommand {
     SendMessage {
         body: String,
     },
+    ComposeTextChanged(String),
     ToggleTheme,
     SaveDisplayPrefs(DisplayPrefs),
     Disconnect,
@@ -155,6 +156,11 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    let tx_for_draft = worker_tx.clone();
+    ui.on_compose_text_changed(move |text| {
+        let _ = tx_for_draft.send(WorkerCommand::ComposeTextChanged(text.to_string()));
+    });
+
     let tx_for_theme = worker_tx.clone();
     ui.on_theme_toggle_requested(move || {
         let _ = tx_for_theme.send(WorkerCommand::ToggleTheme);
@@ -189,6 +195,11 @@ struct WorkerState {
     /// Keyed by `(network, channel)`; holds display lines already rendered
     /// for that channel so switching channels doesn't lose history.
     messages: HashMap<(String, String), Vec<String>>,
+    /// Keyed by `(network, channel)`; an unsent compose draft per channel,
+    /// mirroring Cicchetto's own per-channel drafts (confirmed by the
+    /// Grappa/Cicchetto maintainer, see MEMORY.md §0sexies) so switching
+    /// channels doesn't lose or leak what's half-typed.
+    drafts: HashMap<(String, String), String>,
     current_channel: Option<(String, String)>,
 }
 
@@ -201,6 +212,7 @@ impl WorkerState {
             session: None,
             joined_topics: std::collections::HashSet::new(),
             messages: HashMap::new(),
+            drafts: HashMap::new(),
             current_channel: None,
         }
     }
@@ -246,6 +258,18 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
                         handle_send_message(&state, &ui, body).await;
+                        if let Some(key) = state.current_channel.clone() {
+                            state.drafts.remove(&key);
+                        }
+                    }
+                    Some(WorkerCommand::ComposeTextChanged(text)) => {
+                        if let Some(key) = state.current_channel.clone() {
+                            if text.is_empty() {
+                                state.drafts.remove(&key);
+                            } else {
+                                state.drafts.insert(key, text);
+                            }
+                        }
                     }
                     Some(WorkerCommand::ToggleTheme) => {
                         handle_toggle_theme(&ui);
@@ -399,18 +423,17 @@ async fn handle_select_channel(
         }
     }
 
-    state.current_channel = Some((network.clone(), channel.clone()));
-    let lines = state
-        .messages
-        .get(&(network.clone(), channel.clone()))
-        .cloned()
-        .unwrap_or_default();
+    let key = (network.clone(), channel.clone());
+    state.current_channel = Some(key.clone());
+    let lines = state.messages.get(&key).cloned().unwrap_or_default();
+    let draft = state.drafts.get(&key).cloned().unwrap_or_default();
 
     let label = format!("{network} — {channel}");
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
         ui.set_has_selected_channel(true);
+        ui.set_compose_text(draft.into());
         let model: Vec<slint::SharedString> = lines.into_iter().map(Into::into).collect();
         ui.set_chat_messages(Rc::new(slint::VecModel::from(model)).into());
     });

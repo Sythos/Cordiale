@@ -79,6 +79,7 @@ export component AppWindow inherits Window {
     callback disconnect-requested();
     callback channel-selected(string, string);
     callback send-chat-message(string);
+    callback compose-text-changed(string);
     callback theme-toggle-requested();
     callback display-prefs-changed();
 
@@ -263,6 +264,7 @@ export component AppWindow inherits Window {
                     placeholder-text: "Message";
                     text <=> compose-text;
                     accepted => { send-chat-message(compose-text); }
+                    edited(new-text) => { compose-text-changed(new-text); }
                 }
                 Button {
                     text: "Send";
