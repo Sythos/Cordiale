@@ -15,13 +15,4 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod credentials;
 pub mod domain;
 pub mod persistence;
-
-/// Placeholder for the protocol boundary, to be implemented in Phase 1.
-pub mod protocol {
-    /// Compatibility contract for messages/events received from the server.
-    ///
-    /// The final parser must ignore unknown fields and events, and respect
-    /// `protocol_version` and `min_protocol_version`.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct CompatibilityPolicy;
-}
+pub mod protocol;
