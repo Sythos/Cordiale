@@ -42,7 +42,12 @@ impl From<serde_json::Error> for CredentialError {
 /// `identifier` as `username`. A missing entry is `Ok(None)` from
 /// `get_secret`, never an error; deleting a missing entry is also `Ok(())`.
 pub trait CredentialStore {
-    fn set_secret(&self, service: &str, username: &str, secret: &str) -> Result<(), CredentialError>;
+    fn set_secret(
+        &self,
+        service: &str,
+        username: &str,
+        secret: &str,
+    ) -> Result<(), CredentialError>;
     fn get_secret(&self, service: &str, username: &str) -> Result<Option<String>, CredentialError>;
     fn delete_secret(&self, service: &str, username: &str) -> Result<(), CredentialError>;
 }
@@ -77,7 +82,12 @@ impl KeyringCredentialStore {
 }
 
 impl CredentialStore for KeyringCredentialStore {
-    fn set_secret(&self, service: &str, username: &str, secret: &str) -> Result<(), CredentialError> {
+    fn set_secret(
+        &self,
+        service: &str,
+        username: &str,
+        secret: &str,
+    ) -> Result<(), CredentialError> {
         Self::entry(service, username)?
             .set_password(secret)
             .map_err(|err| CredentialError::Backend(err.to_string()))
@@ -167,7 +177,12 @@ impl ObfuscatedCredentialStore {
 }
 
 impl CredentialStore for ObfuscatedCredentialStore {
-    fn set_secret(&self, service: &str, username: &str, secret: &str) -> Result<(), CredentialError> {
+    fn set_secret(
+        &self,
+        service: &str,
+        username: &str,
+        secret: &str,
+    ) -> Result<(), CredentialError> {
         let mut map = self.load()?;
         map.insert(credential_key(service, username), obfuscate(secret));
         self.save(&map)
