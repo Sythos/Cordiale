@@ -176,10 +176,7 @@ mod tests {
             "subject_id": "abc-123",
             "network_id": 7
         });
-        assert_eq!(
-            admin_session_id(&entry),
-            Some("user:abc-123:7".to_string())
-        );
+        assert_eq!(admin_session_id(&entry), Some("user:abc-123:7".to_string()));
     }
 
     #[test]

@@ -613,7 +613,11 @@ fn handle_request_links(state: &WorkerState, network: String) {
         return;
     };
     let topic = format!("grappa:user:{identifier}");
-    session.send_command(topic, "links", serde_json::json!({ "network_id": network_id }));
+    session.send_command(
+        topic,
+        "links",
+        serde_json::json!({ "network_id": network_id }),
+    );
 }
 
 /// Appends an incoming realtime frame to the channel it belongs to (if any)

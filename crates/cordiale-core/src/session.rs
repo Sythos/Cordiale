@@ -292,5 +292,9 @@ async fn join(
         event: "phx_join".to_string(),
         payload,
     };
-    socket.send(&message).await.map(|()| join_ref).map_err(|_| ())
+    socket
+        .send(&message)
+        .await
+        .map(|()| join_ref)
+        .map_err(|_| ())
 }
