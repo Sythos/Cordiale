@@ -33,16 +33,28 @@ need server endpoints Cordiale doesn't implement yet, rather than either
 hiding or faking functionality. The REST layer's request/response shapes
 have been checked against the real `irc.sindro.me` server (not just
 mocks) and match, including an undocumented guest/visitor login mode —
-see `docs/protocol-notes.md` §5. What's still missing: saved
-multi-server/profile management, translated UI strings (only the language
-*picker* works today, the labels are still English), and an admin panel.
-The one gap nobody but a live server can close is field testing against a
-real Grappa instance through the actual GUI — that's next.
+see `docs/protocol-notes.md` §5. What's still missing: translated UI
+strings (only the language *picker* works today, the labels are still
+English) and an admin panel. The one gap nobody but a live server can
+close is field testing against a real Grappa instance through the actual
+GUI — that's next.
 
 ## Download
 
-Packaged releases (installers, distro packages, source archive) are on the
-[Releases page](https://github.com/Sythos/Cordiale/releases) — see
+No packaged release yet: an earlier `v0.1.2` was pulled after shipping
+before the client actually worked end to end (websocket, channel view,
+message send — none of it was there). The next tag goes out once the
+client is functional with the whole test suite green, not before. Until
+then, build from `main`:
+
+```bash
+git clone https://github.com/Sythos/Cordiale.git
+cd Cordiale
+cargo build --release --package cordiale-ui
+./target/release/cordiale-ui
+```
+
+Once packaged releases resume, see
 [docs/installation.md](docs/installation.md) for per-platform instructions.
 
 ## Workspace
