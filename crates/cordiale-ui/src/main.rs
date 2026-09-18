@@ -231,7 +231,15 @@ async fn run_worker(
                 match command {
                     None => return,
                     Some(WorkerCommand::Connect { server_url, identifier, password }) => {
-                        handle_connect(&mut state, &mut session_events, &ui, server_url, identifier, password).await;
+                        handle_connect(
+                            &mut state,
+                            &mut session_events,
+                            &ui,
+                            server_url,
+                            identifier,
+                            password,
+                        )
+                        .await;
                     }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         handle_select_channel(&mut state, &ui, network, channel).await;
