@@ -10,6 +10,7 @@ use crate::client::{GrappaClient, GrappaClientError, LoginError};
 use crate::protocol::ServerCompatibility;
 use crate::rest::{BootResponse, LoginRequest, MeResponse};
 
+#[derive(Debug)]
 pub struct BootstrapOutcome {
     pub compatibility: ServerCompatibility,
     /// Bearer token to use for `/boot`, `/me` and the WebSocket handshake.
