@@ -37,6 +37,7 @@ export component AppWindow inherits Window {
     in-out property <string> password: "";
     in property <string> status-message: "";
     in property <bool> connecting: false;
+    in property <[string]> networks: [];
 
     callback connect-requested(string, string, string);
     callback language-selected(string);
@@ -132,6 +133,10 @@ export component AppWindow inherits Window {
             text: status-message;
             horizontal-alignment: center;
             wrap: word-wrap;
+        }
+
+        for network in networks : Text {
+            text: "• " + network;
         }
     }
 }

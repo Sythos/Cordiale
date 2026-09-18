@@ -85,14 +85,22 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_connecting(false);
                     match result {
                         Ok(outcome) => {
+                            let networks = network_names(&outcome);
                             ui.set_screen("connected".into());
                             ui.set_status_message(
                                 format!(
                                     "Signed in. {} network(s) on this account.",
-                                    outcome.boot.networks.len()
+                                    networks.len()
                                 )
                                 .into(),
                             );
+                            let model = std::rc::Rc::new(slint::VecModel::from(
+                                networks
+                                    .into_iter()
+                                    .map(Into::into)
+                                    .collect::<Vec<slint::SharedString>>(),
+                            ));
+                            ui.set_networks(model.into());
                         }
                         Err(err) => {
                             ui.set_status_message(describe_bootstrap_error(&err).into());
@@ -122,6 +130,28 @@ fn remember_server_url(server_url: &str) {
     let mut file = persistence::load_servers_file().unwrap_or_default();
     file.selected_server_base_url = Some(server_url.to_string());
     let _ = persistence::save_servers_file(&file);
+}
+
+/// Reads a display name out of each opaque `boot.networks` entry.
+///
+/// The exact field names aren't confirmed by the client protocol (see
+/// `docs/protocol-notes.md` §4), so this tries the plausible candidates and
+/// falls back to a positional placeholder rather than guessing further.
+fn network_names(outcome: &cordiale_core::bootstrap::BootstrapOutcome) -> Vec<String> {
+    outcome
+        .boot
+        .networks
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .get("slug")
+                .or_else(|| value.get("name"))
+                .and_then(|field| field.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("network #{}", index + 1))
+        })
+        .collect()
 }
 
 fn language_from_code(code: &str) -> Option<persistence::Language> {
