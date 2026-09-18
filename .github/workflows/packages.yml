@@ -168,6 +168,20 @@ jobs:
             throw "makensis failed with exit code $LASTEXITCODE"
           }
 
+      - name: Generate checksums (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Generate checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem dist | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
+            Set-Content -Path dist\SHA256SUMS -Encoding ascii
+
       - name: Generate build provenance attestation
         uses: actions/attest@v4
         with:

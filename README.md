@@ -33,7 +33,7 @@ window.
   `docs/packaging-linux.md`);
 - `docs/` — technical documentation: Grappa protocol contract
   (`protocol-notes.md`), feature matrix (`feature-matrix.md`), packaging
-  notes.
+  notes, and how to [install a release](docs/installation.md).
 
 ## References
 
