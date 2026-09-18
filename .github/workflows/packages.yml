@@ -247,7 +247,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         working-directory: dist
-        run: sha256sum * > SHA256SUMS
+        run: sha256sum * > "SHA256SUMS-${{ matrix.artifact }}"
 
       - name: Generate checksums (Windows)
         if: runner.os == 'Windows'
@@ -255,13 +255,13 @@ jobs:
         run: |
           Get-ChildItem dist | Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
-            Set-Content -Path dist\SHA256SUMS -Encoding ascii
+            Set-Content -Path "dist\SHA256SUMS-${{ matrix.artifact }}" -Encoding ascii
 
       - name: Generate checksums (macOS)
         if: runner.os == 'macOS'
         shell: bash
         working-directory: dist
-        run: shasum -a 256 * > SHA256SUMS
+        run: shasum -a 256 * > "SHA256SUMS-${{ matrix.artifact }}"
 
       - name: Generate build provenance attestation
         uses: actions/attest@v4
@@ -306,7 +306,7 @@ jobs:
       - name: Generate checksums
         shell: bash
         working-directory: dist
-        run: sha256sum * > SHA256SUMS
+        run: sha256sum * > SHA256SUMS-src
 
       - name: Generate build provenance attestation
         uses: actions/attest@v4
