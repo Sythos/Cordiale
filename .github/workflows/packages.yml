@@ -37,6 +37,9 @@ jobs:
             runner: windows-latest
             artifact: windows-arm64
             win_arch: arm64
+          - target: universal-apple-darwin
+            runner: macos-latest
+            artifact: macos-universal
 
     steps:
       - name: Checkout client
@@ -58,7 +61,11 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup target add "${{ matrix.target }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          else
+            rustup target add "${{ matrix.target }}"
+          fi
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux' && matrix.target != 'aarch64-unknown-linux-gnu'
@@ -82,7 +89,7 @@ jobs:
           tool: cross
 
       - name: Build release binary (native)
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        if: runner.os != 'macOS' && matrix.target != 'aarch64-unknown-linux-gnu'
         shell: bash
         run: cargo build --release --package cordiale-ui --target "${{ matrix.target }}"
 
@@ -90,6 +97,19 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         shell: bash
         run: cross build --release --package cordiale-ui --target "${{ matrix.target }}"
+
+      - name: Build release binary (macOS universal)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --package cordiale-ui --target x86_64-apple-darwin
+          cargo build --release --package cordiale-ui --target aarch64-apple-darwin
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create \
+            target/x86_64-apple-darwin/release/cordiale-ui \
+            target/aarch64-apple-darwin/release/cordiale-ui \
+            -output target/universal-apple-darwin/release/cordiale-ui
 
       - name: Install fpm and Linux packaging dependencies
         if: runner.os == 'Linux'
@@ -144,6 +164,11 @@ jobs:
             --license MIT \
             -C stage -p "dist/Cordiale_Arch_rolling_${RPM_ARCH}.pkg.tar.zst" .
 
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install nsis --no-progress --yes
+
       - name: Package Windows archive and installer
         if: runner.os == 'Windows'
         shell: pwsh
@@ -158,16 +183,15 @@ jobs:
 
           Compress-Archive -Path $binPath -DestinationPath "dist\cordiale-$env:ARTIFACT-$env:VERSION.zip" -Force
 
-          $makensis = (Get-Command makensis -ErrorAction SilentlyContinue).Source
+          $candidates = @(
+            (Get-Command makensis -ErrorAction SilentlyContinue).Source,
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+            "${env:ProgramFiles}\NSIS\makensis.exe",
+            "${env:ChocolateyInstall}\lib\NSIS\tools\makensis.exe"
+          ) | Where-Object { $_ -and (Test-Path $_) }
+          $makensis = $candidates | Select-Object -First 1
           if (-not $makensis) {
-            $candidates = @(
-              "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
-              "${env:ProgramFiles}\NSIS\makensis.exe"
-            ) | Where-Object { Test-Path $_ }
-            $makensis = $candidates | Select-Object -First 1
-          }
-          if (-not $makensis) {
-            $found = Get-ChildItem -Path "${env:ProgramFiles}", "${env:ProgramFiles(x86)}" `
+            $found = Get-ChildItem -Path "${env:ProgramFiles}", "${env:ProgramFiles(x86)}", "${env:ChocolateyInstall}" `
               -Filter makensis.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($found) { $makensis = $found.FullName }
           }
@@ -203,4 +227,49 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: cordiale-${{ matrix.artifact }}-${{ steps.version.outputs.version }}
+          path: dist/*
+
+  source-archive:
+    name: source-archive
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v5
+
+      - name: Resolve artifact version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.1.0-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build source archive
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          git archive --format=tar.gz "--prefix=cordiale-${VERSION}/" \
+            -o "dist/Cordiale_src.tar.gz" HEAD
+
+      - name: Generate checksums
+        shell: bash
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Generate build provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v6
+        with:
+          name: cordiale-src-${{ steps.version.outputs.version }}
           path: dist/*
