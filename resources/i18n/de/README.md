@@ -1,4 +1,4 @@
-# English resources
+# German resources
 
 Una delle cinque lingue supportate da Cordiale fin dalla Fase 1: `en`, `it`,
 `fr`, `de`, `es` (vedi le directory sorelle). Il caricamento e il formato
