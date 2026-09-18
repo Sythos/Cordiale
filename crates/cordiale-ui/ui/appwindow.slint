@@ -29,6 +29,19 @@ struct ChannelEntry {
     label: string,
 }
 
+// One row in the admin Sessions list.
+struct AdminSessionRow {
+    label: string,
+    alive: bool,
+    session-id: string,
+}
+
+// One reconstructed `/links` tree row, already indented and formatted in
+// Rust (see `cordiale_core::links`) — Slint just displays it verbatim.
+struct LinksRow {
+    display: string,
+}
+
 export component AppWindow inherits Window {
     title: "Cordiale";
     width: 900px;
@@ -82,6 +95,20 @@ export component AppWindow inherits Window {
     in-out property <bool> pref-show-event-badge: true;
     in-out property <bool> pref-show-bottom-bar: true;
 
+    // Admin — Settings > Admin, only meaningful when `is-admin` (see
+    // `docs/protocol-notes.md` §4ter): a deliberately small slice of
+    // Grappa's actual `/admin/*` surface (overview + sessions list +
+    // disconnect), not the full operator console.
+    in property <string> admin-overview-text: "";
+    in property <[AdminSessionRow]> admin-sessions: [];
+    in property <bool> admin-loading: false;
+
+    // `/links` network-topology view — see `cordiale_core::links` for the
+    // tree reconstruction that feeds `links-rows`.
+    in property <[string]> known-networks: [];
+    in property <string> links-network-label: "";
+    in property <[LinksRow]> links-rows: [];
+
     callback connect-requested(string, string, string);
     callback server-selected(string);
     callback language-selected(string);
@@ -89,6 +116,9 @@ export component AppWindow inherits Window {
     callback channel-selected(string, string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
+    callback admin-refresh-requested();
+    callback admin-disconnect-session(string);
+    callback links-requested(string);
     callback theme-toggle-requested();
     callback display-prefs-changed();
 
@@ -283,6 +313,11 @@ export component AppWindow inherits Window {
             for entry in channel-list : Button {
                 text: entry.label;
                 clicked => { channel-selected(entry.network, entry.channel); }
+            }
+
+            for network in known-networks : Button {
+                text: @tr("Links for {}", network);
+                clicked => { links-requested(network); }
             }
 
             Button {
@@ -481,11 +516,55 @@ export component AppWindow inherits Window {
             }
 
             if settings-section == "admin" : VerticalBox {
+                spacing: 8px;
+
                 Text {
-                    text: @tr("Admin tools aren't built yet. Cordiale only knows you're an admin (via the account's subject data); it doesn't yet expose any of the admin-only surfaces.");
+                    text: @tr("Live overview and session management. The rest of Grappa's admin surface (networks, users, vhosts, credentials, live event stream) isn't built yet.");
                     wrap: word-wrap;
                 }
+
+                Button {
+                    text: @tr("Refresh");
+                    clicked => { admin-refresh-requested(); }
+                }
+
+                Text {
+                    text: admin-loading ? @tr("Loading…") : admin-overview-text;
+                    wrap: word-wrap;
+                }
+
+                for row in admin-sessions : HorizontalBox {
+                    Text {
+                        text: row.label;
+                        wrap: word-wrap;
+                    }
+                    Button {
+                        text: @tr("Disconnect");
+                        enabled: row.alive;
+                        clicked => { admin-disconnect-session(row.session-id); }
+                    }
+                }
             }
+        }
+    }
+
+    if screen == "links" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: links-network-label;
+            font-size: 18px;
+        }
+
+        for row in links-rows : Text {
+            text: row.display;
+            wrap: word-wrap;
+        }
+
+        Button {
+            text: @tr("Back");
+            clicked => { screen = "connected"; }
         }
     }
 }

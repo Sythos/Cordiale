@@ -327,6 +327,115 @@ trattare ogni voce di `boot.channels` come un canale selezionabile e la
 joina in modo lazy al click, comportamento già corretto sia per un
 canale già joined sia per uno solo in autojoin.
 
+## 4ter. `/admin/*` e comandi slash — contratto reale (2026-09-19)
+
+Fonte: lettura diretta del sorgente Elixir di `grappa-irc` (commit
+`382108e`) e del client di riferimento Cicchetto, via subagent di
+ricerca — non il contratto documentato, che su `/admin/*` dice solo che
+esiste dietro un flag `is_admin`, senza schema. Riportato qui perché è
+l'unica fonte esistente e Cordiale ora ne implementa un sottoinsieme
+reale.
+
+### Gating
+
+- REST: scope `/admin` (`router.ex`), pipeline `:admin_authn` — richiede
+  `is_admin: true` **e** sessione web piena (`RequireFullSession`): un
+  token per-client riceve `403` anche se l'account è admin.
+- WebSocket: canale `GrappaWeb.AdminChannel`, topic
+  `"grappa:admin:events"`, stesso doppio requisito (`is_admin` +
+  `session_kind == :web`).
+
+### Endpoint catalogati (elenco completo, non tutti implementati in Cordiale)
+
+`GET /admin/overview`, `GET/DELETE /admin/visitors[/:id]`,
+`POST /admin/visitors/:id/share-token`, `GET /admin/sessions`,
+`POST /admin/sessions/:id/disconnect`,
+`POST /admin/sessions/:id/reconnect`, `DELETE /admin/sessions/:id`,
+`GET/POST /admin/db_latency[/reset]` (mai usato da Cicchetto — solo
+`curl`/CLI operatore), `GET/POST/PATCH/DELETE /admin/networks[/:id]`,
+`POST/PUT/DELETE .../servers[/:id]`,
+`GET/POST/PUT/DELETE .../featured_channels[/:id]`,
+`POST /admin/reaper/run`, `POST /admin/circuit/:network_id/reset`,
+`GET/PATCH/POST/DELETE /admin/users[/:id]`,
+`PUT /admin/users/:id/password`,
+`GET/PATCH/POST/DELETE /admin/credentials[/:user_id/:network_id]`,
+`GET/PUT /admin/settings`, `GET/DELETE /admin/uploads[/:id]` (mai usato
+da Cicchetto), `GET /admin/session_log[/sessions]`,
+`GET /admin/ws_presence` (mai usato da Cicchetto),
+`GET/POST/PATCH/DELETE /admin/vhosts[/:id]`,
+`GET /admin/vhosts/subject_search`,
+`POST/DELETE /admin/vhosts/:id/grants[/:grant_id]`.
+
+**Implementato in Cordiale** (`cordiale_core::admin` + `client.rs`,
+Settings → Admin): `GET /admin/overview`, `GET /admin/sessions`,
+`POST /admin/sessions/:id/disconnect`. Anche presenti a livello di
+client ma non ancora collegati alla UI: `GET /admin/users`,
+`GET /admin/networks`. **Tutto il resto è deliberatamente fuori
+perimetro per ora** (networks/vhosts/credentials/settings write,
+visitors, reaper/circuit, session log, il canale WS
+`grappa:admin:events` per aggiornamenti live) — la superficie reale è
+troppo ampia per una singola sessione di lavoro; Settings → Admin lo
+dichiara esplicitamente all'utente invece di fingere completezza.
+
+Ogni entry (`AdminSession`/`AdminUser`/`AdminNetwork`) è tenuta come
+JSON opaco: i nomi dei campi sono confermati dal sorgente, non ogni
+tipo nidificato — stessa disciplina di `boot.channels`.
+
+### `/links` — comandi slash e ricostruzione ad albero
+
+Porta unica: `GrappaWeb.GrappaChannel.handle_in/3`
+(`lib/grappa_web/channels/grappa_channel.ex`). Catalogo completo dei
+comandi (nome, payload, evento di risposta) verificato leggendo ogni
+clausola — non riportato per intero qui, solo `/links` perché
+esplicitamente richiesto dall'utente per la parità con Cicchetto:
+
+- **Payload**: `{"network_id": int, "mask"?: string}`. **`network_id` è
+  un vero intero** (chiave primaria `Grappa.Networks.Network.id`), MAI
+  lo slug — verificato sia lato guardia Elixir (`is_integer/1`, nessun
+  fallback su slug) sia leggendo Cicchetto stesso, che risolve
+  esplicitamente slug→id (`networkIdBySlug`) prima di ogni comando WS.
+  Cordiale costruisce questa mappa da `boot.networks` (`slug`+`id`) al
+  login (`network_ids_from_boot`); se l'id manca per una rete, il
+  comando semplicemente non parte (mai un id inventato/sbagliato).
+- **Risposta**: evento `links_bundle` — `{kind: :links_bundle, network,
+  mask, entries: [{server, linked_to, hopcount, description}]}`.
+  `linked_to` è l'uplink (padre) di ogni server; la radice si
+  auto-collega (`server == linked_to`, `hopcount 0`). È uno spanning
+  tree per costruzione del protocollo IRC (niente loop), non una lista
+  piatta — e Cicchetto lo tratta esplicitamente come tale
+  (`linksLayout.ts`: layout radiale, non forza-diretto, "un albero è
+  più leggibile con un layout deterministico che con una simulazione
+  fisica").
+- **Ricostruzione**: `cordiale_core::links::build_links_tree` replica
+  la stessa semantica di `buildTree()` di Cicchetto — selezione radice
+  (auto-collegata > hopcount minimo > primo elemento), riparenting
+  degli orfani (uplink mancante dalla risposta) sulla radice, sicurezza
+  sui cicli (mai un nodo perso), `depth` ricostruita tenuta
+  esplicitamente distinta da `hopcount` riportato dal server (possono
+  differire su una risposta mascherata/parziale) — testato con 7 casi
+  unitari puri, nessun bisogno di un server reale.
+- **Resa visiva**: Cicchetto disegna un layout radiale SVG interattivo
+  (pan/zoom, colore per profondità). Cordiale rende invece una lista
+  testuale indentata per profondità (schermata `"links"`,
+  `appwindow.slint`) — stessa struttura/interpretazione dei dati, resa
+  visiva semplificata; non una scelta arbitraria ma un compromesso
+  esplicito per restare nel perimetro di questa sessione. `hopcount` è
+  mostrato accanto al nome server, mai confuso con la profondità.
+- **Instradamento non confermato**: non è specificato con certezza su
+  quale topic Grappa si aspetti il comando `links` in arrivo (topic
+  utente vs topic rete) — Cordiale lo invia sul topic utente
+  (`grappa:user:{user}`, sempre joinato), la scelta più plausibile dato
+  che le risposte "bundle" sono descritte come pushate sul topic
+  utente nella maggioranza dei casi. Da confermare col test sul campo.
+- **Nome evento non confermato**: idem, non è certo se il nome Phoenix
+  `event` della risposta sia letteralmente `"links_bundle"` oppure se
+  il vero discriminante sia il campo `kind` dentro il payload (il
+  moduledoc del canale dice solo che "ogni push condivide un
+  discriminante `kind:`"). Cordiale riconosce **entrambe** le
+  interpretazioni (`frame.event == "links_bundle" || payload.kind ==
+  "links_bundle"`), per non scommettere su una sola lettura non
+  verificabile senza un server reale.
+
 ---
 
 ## 5. Guest/visitor e ruolo admin

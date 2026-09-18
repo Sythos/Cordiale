@@ -54,7 +54,24 @@ pub enum SessionCommand {
         topic: String,
         presence: bool,
     },
+    /// Sends an arbitrary `GrappaChannel` command (e.g. `/links`, `whois`)
+    /// on a topic the session has already joined. `topic` is the caller's
+    /// responsibility to get right — this layer doesn't validate it.
+    Send {
+        topic: String,
+        event: String,
+        payload: serde_json::Value,
+    },
     Shutdown,
+}
+
+/// A topic the session currently has joined, and the `join_ref` the
+/// server assigned that join — re-established with a fresh ref on every
+/// reconnect.
+#[derive(Debug, Clone)]
+struct JoinedTopic {
+    join_ref: String,
+    presence: bool,
 }
 
 /// Something the running session wants the UI side to know about.
@@ -84,6 +101,22 @@ impl SessionHandle {
         let _ = self.commands.send(SessionCommand::JoinTopic {
             topic: topic.into(),
             presence,
+        });
+    }
+
+    /// Sends an arbitrary `GrappaChannel` command on `topic` (must already
+    /// be joined). Fire-and-forget: the reply, if any, arrives as a
+    /// `SessionEvent::Frame` the caller matches on its `event` field.
+    pub fn send_command(
+        &self,
+        topic: impl Into<String>,
+        event: impl Into<String>,
+        payload: serde_json::Value,
+    ) {
+        let _ = self.commands.send(SessionCommand::Send {
+            topic: topic.into(),
+            event: event.into(),
+            payload,
         });
     }
 
@@ -122,7 +155,11 @@ async fn run_session(
     events: mpsc::UnboundedSender<SessionEvent>,
 ) {
     let user_topic = format!("grappa:user:{user}");
-    let mut joined_topics: HashMap<String, bool> = HashMap::new();
+    // Every joined topic, including the user topic itself, keyed to the
+    // `join_ref` the server assigned it — required on any subsequent
+    // command frame for that topic, and re-established with a fresh ref
+    // on every reconnect (see `SessionCommand::Send`'s doc comment).
+    let mut joined_topics: HashMap<String, JoinedTopic> = HashMap::new();
 
     'reconnect: loop {
         let mut socket = match PhoenixSocket::connect(&ws_url, &token).await {
@@ -136,17 +173,32 @@ async fn run_session(
 
         let mut refs = RefCounter::new();
 
-        if join(&mut socket, &mut refs, &user_topic, true)
-            .await
-            .is_err()
-        {
+        let Ok(user_join_ref) = join(&mut socket, &mut refs, &user_topic, true).await else {
             let _ = events.send(SessionEvent::Reconnecting);
             sleep(RECONNECT_DELAY).await;
             continue 'reconnect;
-        }
+        };
+        joined_topics.insert(
+            user_topic.clone(),
+            JoinedTopic {
+                join_ref: user_join_ref,
+                presence: true,
+            },
+        );
 
-        for (topic, presence) in joined_topics.clone() {
-            let _ = join(&mut socket, &mut refs, &topic, presence).await;
+        for (topic, joined) in joined_topics.clone() {
+            if topic == user_topic {
+                continue;
+            }
+            if let Ok(join_ref) = join(&mut socket, &mut refs, &topic, joined.presence).await {
+                joined_topics.insert(
+                    topic,
+                    JoinedTopic {
+                        join_ref,
+                        presence: joined.presence,
+                    },
+                );
+            }
         }
 
         let mut heartbeat = interval(HEARTBEAT_INTERVAL);
@@ -173,8 +225,21 @@ async fn run_session(
                     match command {
                         None | Some(SessionCommand::Shutdown) => return,
                         Some(SessionCommand::JoinTopic { topic, presence }) => {
-                            if join(&mut socket, &mut refs, &topic, presence).await.is_ok() {
-                                joined_topics.insert(topic, presence);
+                            let joined = join(&mut socket, &mut refs, &topic, presence).await;
+                            if let Ok(join_ref) = joined {
+                                joined_topics.insert(topic, JoinedTopic { join_ref, presence });
+                            }
+                        }
+                        Some(SessionCommand::Send { topic, event, payload }) => {
+                            if let Some(joined) = joined_topics.get(&topic) {
+                                let message = PhoenixMessage {
+                                    join_ref: Some(joined.join_ref.clone()),
+                                    message_ref: Some(refs.next_ref()),
+                                    topic,
+                                    event,
+                                    payload,
+                                };
+                                let _ = socket.send(&message).await;
                             }
                         }
                     }
@@ -206,12 +271,14 @@ async fn run_session(
     }
 }
 
+/// Joins `topic`, returning the `join_ref` the server now associates with
+/// it — required on every subsequent command frame for that topic.
 async fn join(
     socket: &mut PhoenixSocket,
     refs: &mut RefCounter,
     topic: &str,
     presence: bool,
-) -> Result<(), ()> {
+) -> Result<String, ()> {
     let join_ref = refs.next_ref();
     let payload = if presence {
         serde_json::json!({})
@@ -220,10 +287,10 @@ async fn join(
     };
     let message = PhoenixMessage {
         join_ref: Some(join_ref.clone()),
-        message_ref: Some(join_ref),
+        message_ref: Some(join_ref.clone()),
         topic: topic.to_string(),
         event: "phx_join".to_string(),
         payload,
     };
-    socket.send(&message).await.map_err(|_| ())
+    socket.send(&message).await.map(|()| join_ref).map_err(|_| ())
 }

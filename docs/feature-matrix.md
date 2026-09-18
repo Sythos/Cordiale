@@ -98,6 +98,29 @@ esplicitamente all'utente invece di essere assente o di fingere di
 funzionare. Implementare gli endpoint mancanti resta lavoro per fasi
 successive.
 
+**Aggiornamento (2026-09-19)**: la superficie admin reale di Grappa
+(catalogata per intero in `docs/protocol-notes.md` §4ter, letta dal
+sorgente Elixir + da Cicchetto) è molto più ampia di quanto stimato
+inizialmente — oltre 30 endpoint `/admin/*` su 8 aree (overview,
+visitors, sessions, networks+servers+featured-channels, reaper/circuit,
+users, credentials, settings, uploads, session log, ws_presence,
+vhosts) più un canale WS dedicato (`grappa:admin:events`). Il gruppo
+*Live → Sessions* (la priorità esplicita dell'utente) è ora reale:
+`GET /admin/overview`, `GET /admin/sessions`,
+`POST /admin/sessions/:id/disconnect`, mostrati e azionabili in
+Settings → Admin. Tutto il resto — *Live → Events/Session Log*,
+l'intero gruppo *Configuration* (Networks, Vhosts, Users, Credentials,
+Settings), *Diagnostics → Debug* — resta non costruito, per ampiezza
+non per difficoltà: ciascuna di quelle aree è a sua volta 3-8 endpoint
+con azioni distruttive reali (elimina utente, elimina rete, cambia
+password), non qualcosa da implementare alla cieca senza un server di
+test. Anche `/links` (comando slash, non endpoint REST/admin, ma
+richiesto esplicitamente per parità con Cicchetto) è implementato:
+ricostruzione dell'albero di rete identica a `buildTree()` di
+Cicchetto (`cordiale_core::links`), resa come lista indentata invece
+del layout radiale SVG di Cicchetto — dettaglio completo in
+`docs/protocol-notes.md` §4ter.
+
 ## Voci ancora da chiarire prima di poter classificare
 
 - Guest/visitor: non documentato nel contratto client, ma **confermato

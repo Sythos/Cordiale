@@ -161,8 +161,16 @@ msgid "Not available yet — this section needs Grappa REST/WS endpoints Cordial
 msgstr "Noch nicht verfügbar: Dieser Bereich benötigt REST-/WS-Endpunkte von Grappa, die Cordiale noch nicht implementiert."
 
 msgctxt "AppWindow"
-msgid "Admin tools aren't built yet. Cordiale only knows you're an admin (via the account's subject data); it doesn't yet expose any of the admin-only surfaces."
-msgstr "Die Admin-Tools sind noch nicht fertig. Cordiale weiß nur, dass du Admin bist (anhand der Account-Daten), zeigt aber noch keine der Admin-Funktionen an."
+msgid "Links for {}"
+msgstr "Links für {}"
+
+msgctxt "AppWindow"
+msgid "Live overview and session management. The rest of Grappa's admin surface (networks, users, vhosts, credentials, live event stream) isn't built yet."
+msgstr "Live-Übersicht und Sitzungsverwaltung. Der Rest der Admin-Oberfläche von Grappa (Netzwerke, Benutzer, Vhosts, Zugangsdaten, Live-Ereignisstream) ist noch nicht implementiert."
+
+msgctxt "AppWindow"
+msgid "Refresh"
+msgstr "Aktualisieren"
 
 msgctxt "AppWindow"
 msgid "Signed in. {} network(s), {} channel(s)."

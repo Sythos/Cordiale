@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::thread;
 
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use cordiale_core::bootstrap::{bootstrap, BootstrapError, BootstrapOutcome};
@@ -58,6 +59,9 @@ enum WorkerCommand {
     ComposeTextChanged(String),
     ToggleTheme,
     SaveDisplayPrefs(DisplayPrefs),
+    AdminRefresh,
+    AdminDisconnectSession(String),
+    RequestLinks(String),
     Disconnect,
 }
 
@@ -187,6 +191,23 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    let tx_for_admin_refresh = worker_tx.clone();
+    ui.on_admin_refresh_requested(move || {
+        let _ = tx_for_admin_refresh.send(WorkerCommand::AdminRefresh);
+    });
+
+    let tx_for_admin_disconnect = worker_tx.clone();
+    ui.on_admin_disconnect_session(move |session_id| {
+        let _ = tx_for_admin_disconnect.send(WorkerCommand::AdminDisconnectSession(
+            session_id.to_string(),
+        ));
+    });
+
+    let tx_for_links = worker_tx.clone();
+    ui.on_links_requested(move |network| {
+        let _ = tx_for_links.send(WorkerCommand::RequestLinks(network.to_string()));
+    });
+
     ui.run()
 }
 
@@ -207,6 +228,12 @@ struct WorkerState {
     /// channels doesn't lose or leak what's half-typed.
     drafts: HashMap<(String, String), String>,
     current_channel: Option<(String, String)>,
+    /// Network slug -> Grappa's own integer `network_id`, read from
+    /// `boot.networks`. WS commands like `/links` need the integer id,
+    /// never the slug — see `docs/protocol-notes.md` §4ter for why this
+    /// isn't just string-vs-int bikeshedding: the server hard-rejects a
+    /// non-integer `network_id` (`is_integer/1` guard), no slug fallback.
+    network_ids: HashMap<String, i64>,
 }
 
 impl WorkerState {
@@ -220,6 +247,7 @@ impl WorkerState {
             messages: HashMap::new(),
             drafts: HashMap::new(),
             current_channel: None,
+            network_ids: HashMap::new(),
         }
     }
 }
@@ -282,6 +310,15 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SaveDisplayPrefs(prefs)) => {
                         handle_save_display_prefs(&state, prefs).await;
+                    }
+                    Some(WorkerCommand::AdminRefresh) => {
+                        handle_admin_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::AdminDisconnectSession(session_id)) => {
+                        handle_admin_disconnect_session(&state, &ui, session_id).await;
+                    }
+                    Some(WorkerCommand::RequestLinks(network)) => {
+                        handle_request_links(&state, network);
                     }
                     Some(WorkerCommand::Disconnect) => {
                         persistence::log_line("disconnect requested");
@@ -353,6 +390,7 @@ async fn handle_connect(
             remember_profile(&server_url, &identifier, &password);
 
             let entries = channel_entries_from_boot(&outcome);
+            state.network_ids = network_ids_from_boot(&outcome);
             let is_admin = outcome
                 .subject
                 .get("is_admin")
@@ -388,11 +426,14 @@ async fn handle_connect(
             });
 
             let ui = ui.clone();
-            let network_count = entries
+            let mut distinct_networks: Vec<String> = entries
                 .iter()
                 .map(|(network, _, _)| network.clone())
                 .collect::<std::collections::HashSet<_>>()
-                .len();
+                .into_iter()
+                .collect();
+            distinct_networks.sort();
+            let network_count = distinct_networks.len();
             let channel_count = entries.len();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
@@ -402,6 +443,9 @@ async fn handle_connect(
                 ui.set_status_kind("signed-in".into());
                 ui.set_status_network_count(network_count as i32);
                 ui.set_status_channel_count(channel_count as i32);
+                let networks: Vec<slint::SharedString> =
+                    distinct_networks.into_iter().map(Into::into).collect();
+                ui.set_known_networks(Rc::new(slint::VecModel::from(networks)).into());
                 let model: Vec<ChannelEntry> = entries
                     .into_iter()
                     .map(|(network, channel, label)| ChannelEntry {
@@ -497,6 +541,81 @@ async fn handle_save_display_prefs(state: &WorkerState, prefs: DisplayPrefs) {
     }
 }
 
+/// Fetches `/admin/overview` and `/admin/sessions` and pushes them to the
+/// UI. Only meaningful for an `is_admin` account with a full web session —
+/// a per-client token gets `403` here, surfaced as an empty refresh
+/// (see `docs/protocol-notes.md` §4ter).
+async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+
+    let ui_for_loading = ui.clone();
+    let _ = ui_for_loading.upgrade_in_event_loop(|ui| ui.set_admin_loading(true));
+
+    let overview = client.fetch_admin_overview(token).await.ok();
+    let sessions = client.fetch_admin_sessions(token).await.unwrap_or_default();
+
+    let overview_text = overview.map(|overview| {
+        format!(
+            "{} session(s) · {}/{} visitors live · {} · v{}",
+            overview.sessions,
+            overview.visitors.live,
+            overview.visitors.total,
+            overview.hostname,
+            overview.version
+        )
+    });
+
+    let rows: Vec<AdminSessionRow> = sessions
+        .iter()
+        .map(|entry| AdminSessionRow {
+            label: cordiale_core::admin::admin_session_label(entry).into(),
+            alive: cordiale_core::admin::admin_session_is_alive(entry),
+            session_id: cordiale_core::admin::admin_session_id(entry)
+                .unwrap_or_default()
+                .into(),
+        })
+        .collect();
+
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_admin_loading(false);
+        ui.set_admin_overview_text(overview_text.unwrap_or_default().into());
+        ui.set_admin_sessions(Rc::new(slint::VecModel::from(rows)).into());
+    });
+}
+
+async fn handle_admin_disconnect_session(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    session_id: String,
+) {
+    if let (Some(client), Some(token)) = (&state.client, &state.token) {
+        let _ = client.disconnect_admin_session(token, &session_id).await;
+    }
+    handle_admin_refresh(state, ui).await;
+}
+
+/// Sends a `/links` request on the user topic — see
+/// `docs/protocol-notes.md` §4ter for why the user topic rather than a
+/// network topic Cordiale doesn't currently join. The result arrives
+/// later as a `links_bundle` frame, handled in `handle_frame`.
+fn handle_request_links(state: &WorkerState, network: String) {
+    let (Some(session), Some(identifier)) = (&state.session, &state.identifier) else {
+        return;
+    };
+    // Grappa hard-rejects a non-integer `network_id` (`is_integer/1`
+    // guard server-side, no slug fallback) — see
+    // `docs/protocol-notes.md` §4ter. Silently do nothing rather than
+    // send a request guaranteed to be rejected if the id isn't known.
+    let Some(&network_id) = state.network_ids.get(&network) else {
+        return;
+    };
+    let topic = format!("grappa:user:{identifier}");
+    session.send_command(topic, "links", serde_json::json!({ "network_id": network_id }));
+}
+
 /// Appends an incoming realtime frame to the channel it belongs to (if any)
 /// and, if that channel is currently open, pushes the update to the UI.
 ///
@@ -509,6 +628,16 @@ fn handle_frame(
     ui: &slint::Weak<AppWindow>,
     frame: cordiale_core::phoenix::PhoenixMessage,
 ) {
+    // The `kind:` field is the real discriminator for these server-push
+    // "bundle" replies per `docs/protocol-notes.md` §4ter — the Phoenix
+    // `event` name itself isn't confirmed to equal the bundle name, so
+    // this checks both rather than betting on one interpretation.
+    let payload_kind = frame.payload.get("kind").and_then(Value::as_str);
+    if frame.event == "links_bundle" || payload_kind == Some("links_bundle") {
+        handle_links_bundle(ui, &frame.payload);
+        return;
+    }
+
     let Some((network, channel)) = channel_from_topic(&frame.topic) else {
         return;
     };
@@ -528,6 +657,82 @@ fn handle_frame(
             ui.set_chat_messages(Rc::new(slint::VecModel::from(model)).into());
         });
     }
+}
+
+/// Parses a `links_bundle` payload, reconstructs the tree (see
+/// `cordiale_core::links`), and pushes an indented rendering to the
+/// `"links"` screen. Never crashes on an unexpected shape: an
+/// unparseable `entries` array just shows nothing rather than erroring.
+fn handle_links_bundle(ui: &slint::Weak<AppWindow>, payload: &Value) {
+    let entries: Vec<cordiale_core::links::LinksEntry> = payload
+        .get("entries")
+        .and_then(|entries| serde_json::from_value(entries.clone()).ok())
+        .unwrap_or_default();
+    let network_label = payload
+        .get("network")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let tree = cordiale_core::links::build_links_tree(&entries);
+
+    let mut children_of: HashMap<Option<String>, Vec<&cordiale_core::links::LinksNode>> =
+        HashMap::new();
+    let mut by_server: HashMap<&str, &cordiale_core::links::LinksNode> = HashMap::new();
+    for node in &tree {
+        children_of
+            .entry(node.parent.clone())
+            .or_default()
+            .push(node);
+        by_server.insert(node.server.as_str(), node);
+    }
+    for children in children_of.values_mut() {
+        children.sort_by(|a, b| a.server.cmp(&b.server));
+    }
+
+    let mut ordered: Vec<&cordiale_core::links::LinksNode> = Vec::with_capacity(tree.len());
+    let mut stack: Vec<&str> = tree
+        .iter()
+        .filter(|node| node.is_root)
+        .map(|node| node.server.as_str())
+        .collect();
+    while let Some(server) = stack.pop() {
+        let Some(node) = by_server.get(server) else {
+            continue;
+        };
+        ordered.push(node);
+        if let Some(children) = children_of.get(&Some(server.to_string())) {
+            for child in children.iter().rev() {
+                stack.push(child.server.as_str());
+            }
+        }
+    }
+
+    let rows: Vec<LinksRow> = ordered
+        .into_iter()
+        .map(|node| {
+            let indent = "  ".repeat(node.depth as usize);
+            let hops = node
+                .hopcount
+                .map(|hops| format!(" (hops: {hops})"))
+                .unwrap_or_default();
+            let description = node
+                .description
+                .as_deref()
+                .map(|description| format!(" — {description}"))
+                .unwrap_or_default();
+            LinksRow {
+                display: format!("{indent}{}{hops}{description}", node.server).into(),
+            }
+        })
+        .collect();
+
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_links_network_label(network_label.into());
+        ui.set_links_rows(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_screen("links".into());
+    });
 }
 
 fn render_frame(frame: &cordiale_core::phoenix::PhoenixMessage) -> String {
@@ -618,6 +823,25 @@ fn channel_entries_from_boot(outcome: &BootstrapOutcome) -> Vec<(String, String,
         }
     }
     entries
+}
+
+/// Reads a `slug -> id` map out of `boot.networks`, for WS commands that
+/// need Grappa's integer `network_id` rather than the slug Cordiale uses
+/// everywhere else (confirmed required — see `docs/protocol-notes.md`
+/// §4ter). A network entry missing either field is skipped rather than
+/// guessed: callers treat a missing id as "can't send this command for
+/// that network" instead of sending a wrong one.
+fn network_ids_from_boot(outcome: &BootstrapOutcome) -> HashMap<String, i64> {
+    outcome
+        .boot
+        .networks
+        .iter()
+        .filter_map(|value| {
+            let slug = value.get("slug").and_then(Value::as_str)?;
+            let id = value.get("id").and_then(Value::as_i64)?;
+            Some((slug.to_string(), id))
+        })
+        .collect()
 }
 
 fn load_remembered_server_url() -> String {

@@ -31,6 +31,9 @@ use reqwest::{Client, StatusCode};
 
 use serde_json::Value;
 
+use crate::admin::{
+    AdminNetworksResponse, AdminOverview, AdminSessionsResponse, AdminUsersResponse,
+};
 use crate::rest::{
     BootResponse, ConfigResponse, DisplayPrefs, LoginRequest, LoginResponse, MeResponse,
     SendMessageRequest,
@@ -198,6 +201,85 @@ impl GrappaClient {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    /// `GET /admin/overview` — requires `is_admin` and a full web session
+    /// (a per-client token gets `403`, see `docs/protocol-notes.md` §4ter).
+    pub async fn fetch_admin_overview(
+        &self,
+        token: &str,
+    ) -> Result<AdminOverview, GrappaClientError> {
+        let url = format!("{}/admin/overview", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<AdminOverview>().await?)
+    }
+
+    /// `GET /admin/sessions`.
+    pub async fn fetch_admin_sessions(&self, token: &str) -> Result<Vec<Value>, GrappaClientError> {
+        let url = format!("{}/admin/sessions", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<AdminSessionsResponse>().await?.sessions)
+    }
+
+    /// `POST /admin/sessions/:id/disconnect` — `id` is the composite
+    /// `"<kind>:<subject_id>:<network_id>"` key, see
+    /// `crate::admin::admin_session_id`.
+    pub async fn disconnect_admin_session(
+        &self,
+        token: &str,
+        session_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "sessions", session_id, "disconnect"]);
+
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /admin/users`.
+    pub async fn fetch_admin_users(&self, token: &str) -> Result<Vec<Value>, GrappaClientError> {
+        let url = format!("{}/admin/users", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<AdminUsersResponse>().await?.users)
+    }
+
+    /// `GET /admin/networks`.
+    pub async fn fetch_admin_networks(&self, token: &str) -> Result<Vec<Value>, GrappaClientError> {
+        let url = format!("{}/admin/networks", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<AdminNetworksResponse>().await?.networks)
     }
 }
 
@@ -414,5 +496,69 @@ mod tests {
             .update_display_prefs("abc123", &prefs)
             .await
             .expect("update_display_prefs");
+    }
+
+    #[tokio::test]
+    async fn fetch_admin_overview_parses_the_response() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/overview"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sessions": 3,
+                "visitors": {"total": 2, "live": 1},
+                "hostname": "grappa-01",
+                "loadavg": 0.42,
+                "version": "1.4.2-abc1234"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let overview = client
+            .fetch_admin_overview("abc123")
+            .await
+            .expect("fetch_admin_overview");
+
+        assert_eq!(overview.sessions, 3);
+        assert_eq!(overview.visitors.total, 2);
+        assert_eq!(overview.hostname, "grappa-01");
+    }
+
+    #[tokio::test]
+    async fn fetch_admin_sessions_unwraps_the_sessions_array() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/sessions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sessions": [{"subject_kind": "user", "subject_id": "vjt"}]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let sessions = client
+            .fetch_admin_sessions("abc123")
+            .await
+            .expect("fetch_admin_sessions");
+
+        assert_eq!(sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn disconnect_admin_session_posts_to_the_composite_key_path() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/admin/sessions/user:vjt:1/disconnect"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .disconnect_admin_session("abc123", "user:vjt:1")
+            .await
+            .expect("disconnect_admin_session");
     }
 }
