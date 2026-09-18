@@ -96,7 +96,10 @@ mod tests {
 
         let event: EventEnvelope = serde_json::from_str(json).expect("deserialize");
         assert_eq!(event.kind, "session_identity_changed");
-        assert_eq!(event.fields.get("identified").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            event.fields.get("identified").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]
