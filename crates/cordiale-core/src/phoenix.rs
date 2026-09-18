@@ -40,8 +40,7 @@ impl PhoenixMessage {
     }
 
     pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
-        let (join_ref, message_ref, topic, event, payload): WireTuple =
-            serde_json::from_str(text)?;
+        let (join_ref, message_ref, topic, event, payload): WireTuple = serde_json::from_str(text)?;
         Ok(PhoenixMessage {
             join_ref,
             message_ref,
