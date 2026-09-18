@@ -204,6 +204,45 @@ jobs:
             throw "makensis failed with exit code $LASTEXITCODE"
           }
 
+      - name: Package macOS archive and disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf "dist/cordiale-macos-universal-${VERSION}.tar.gz" \
+            -C target/universal-apple-darwin/release cordiale-ui
+
+          APP_DIR="macos-app-stage/Cordiale.app"
+          mkdir -p "$APP_DIR/Contents/MacOS"
+          cp target/universal-apple-darwin/release/cordiale-ui "$APP_DIR/Contents/MacOS/cordiale-ui"
+          chmod +x "$APP_DIR/Contents/MacOS/cordiale-ui"
+          cat > "$APP_DIR/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>cordiale-ui</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.sythos.cordiale</string>
+              <key>CFBundleName</key>
+              <string>Cordiale</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${VERSION}</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>11.0</string>
+          </dict>
+          </plist>
+          PLIST
+
+          hdiutil create -volname "Cordiale" -srcfolder "macos-app-stage" \
+            -ov -format UDZO "dist/Cordiale_macOS_universal.dmg"
+
       - name: Generate checksums (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -217,6 +256,12 @@ jobs:
           Get-ChildItem dist | Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
             Set-Content -Path dist\SHA256SUMS -Encoding ascii
+
+      - name: Generate checksums (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: dist
+        run: shasum -a 256 * > SHA256SUMS
 
       - name: Generate build provenance attestation
         uses: actions/attest@v4
