@@ -29,17 +29,12 @@ pub enum Language {
 }
 
 /// A GUI theme, backed by Slint design tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
+    #[default]
     Light,
     Dark,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Theme::Light
-    }
 }
 
 /// Non-sensitive user preferences, persisted to `settings.json`.
