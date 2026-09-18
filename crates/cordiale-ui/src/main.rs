@@ -61,6 +61,16 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    let weak_for_disconnect = ui.as_weak();
+    ui.on_disconnect_requested(move || {
+        if let Some(ui) = weak_for_disconnect.upgrade() {
+            ui.set_screen("connect".into());
+            ui.set_status_message("".into());
+            let empty = slint::VecModel::from(Vec::<slint::SharedString>::new());
+            ui.set_networks(std::rc::Rc::new(empty).into());
+        }
+    });
+
     let weak = ui.as_weak();
     ui.on_connect_requested(move |server_url, identifier, password| {
         let server_url = server_url.to_string();

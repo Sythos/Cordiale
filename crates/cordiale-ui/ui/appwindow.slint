@@ -41,6 +41,7 @@ export component AppWindow inherits Window {
 
     callback connect-requested(string, string, string);
     callback language-selected(string);
+    callback disconnect-requested();
 
     if screen == "language" : VerticalBox {
         padding: 32px;
@@ -97,7 +98,10 @@ export component AppWindow inherits Window {
         LineEdit {
             placeholder-text: "Password or client token";
             text <=> password;
-            input-type: password;
+            // Qualified as `InputType.password`, not bare `password`: this
+            // component also has a property named `password` (the text
+            // itself), which would otherwise shadow the enum variant.
+            input-type: InputType.password;
         }
 
         Button {
@@ -137,6 +141,11 @@ export component AppWindow inherits Window {
 
         for network in networks : Text {
             text: "• " + network;
+        }
+
+        Button {
+            text: "Disconnect";
+            clicked => { disconnect-requested(); }
         }
     }
 }
