@@ -41,13 +41,15 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_server_url(remembered_server_url.clone().into());
     prefill_remembered_profile(&ui, &remembered_server_url);
 
-    if persistence::load_settings()
+    let needs_language_prompt = persistence::load_settings()
         .unwrap_or_default()
         .language
-        .is_none()
-    {
-        ui.set_screen("language".into());
-    }
+        .is_none();
+    ui.set_next_screen(if needs_language_prompt {
+        "language".into()
+    } else {
+        "connect".into()
+    });
 
     let weak_for_language = ui.as_weak();
     ui.on_language_selected(move |code| {

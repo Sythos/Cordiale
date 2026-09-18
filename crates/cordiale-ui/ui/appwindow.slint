@@ -20,17 +20,22 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, Button, VerticalBox } from "std-widgets.slint";
+import { LineEdit, Button, VerticalBox, ProgressIndicator } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
     title: "Cordiale";
     width: 480px;
     height: 440px;
 
-    // One of "language", "connect", "connected" — see MEMORY.md §3.4 for
-    // why there's no `else`/`else if` in Slint: mutually exclusive `if`
-    // blocks are the documented pattern for multi-screen navigation.
-    in-out property <string> screen: "connect";
+    // One of "splash", "language", "connect", "connected" — see MEMORY.md
+    // §3.4 for why there's no `else`/`else if` in Slint: mutually
+    // exclusive `if` blocks are the documented pattern for multi-screen
+    // navigation.
+    in-out property <string> screen: "splash";
+    // Set once by Rust before the window is shown: where the splash
+    // screen hands off to once its animation finishes ("language" on
+    // first launch, "connect" otherwise).
+    in property <string> next-screen: "connect";
 
     in-out property <string> server-url: "https://irc.sindro.me";
     in-out property <string> identifier: "";
@@ -42,6 +47,40 @@ export component AppWindow inherits Window {
     callback connect-requested(string, string, string);
     callback language-selected(string);
     callback disconnect-requested();
+
+    if screen == "splash" : VerticalBox {
+        padding: 32px;
+        spacing: 24px;
+        alignment: center;
+
+        property <float> splash-progress: 0;
+        animate splash-progress {
+            duration: 1800ms;
+            easing: ease-out;
+        }
+
+        init => {
+            splash-progress = 1.0;
+        }
+
+        Timer {
+            interval: 1900ms;
+            running: true;
+            triggered => {
+                screen = next-screen;
+            }
+        }
+
+        Image {
+            source: @image-url("../../../resources/branding/cordiale.png");
+            image-fit: contain;
+            height: 220px;
+        }
+
+        ProgressIndicator {
+            progress: splash-progress;
+        }
+    }
 
     if screen == "language" : VerticalBox {
         padding: 32px;
