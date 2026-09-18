@@ -22,7 +22,111 @@
 
 slint::include_modules!();
 
+use std::thread;
+
+use cordiale_core::bootstrap::{bootstrap, BootstrapError};
+use cordiale_core::client::{GrappaClient, LoginError};
+use cordiale_core::persistence;
+use cordiale_core::rest::LoginRequest;
+
+/// The default server offered on first launch, per MEMORY.md §3.3.
+const DEFAULT_SERVER_URL: &str = "https://irc.sindro.me";
+
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
+
+    let remembered_server_url = load_remembered_server_url();
+    ui.set_server_url(remembered_server_url.into());
+
+    let weak = ui.as_weak();
+    ui.on_connect_requested(move |server_url, identifier, password| {
+        let server_url = server_url.to_string();
+        let identifier = identifier.to_string();
+        let password = password.to_string();
+
+        if let Some(ui) = weak.upgrade() {
+            ui.set_connecting(true);
+            ui.set_status_message("".into());
+        }
+        remember_server_url(&server_url);
+
+        let weak_for_thread = weak.clone();
+        thread::spawn(move || {
+            let runtime =
+                tokio::runtime::Runtime::new().expect("failed to start network runtime");
+            runtime.block_on(async move {
+                let client = GrappaClient::new(server_url.clone());
+                let request = LoginRequest {
+                    identifier,
+                    password,
+                };
+                let result = bootstrap(&client, &request).await;
+
+                let _ = weak_for_thread.upgrade_in_event_loop(move |ui| {
+                    ui.set_connecting(false);
+                    match result {
+                        Ok(outcome) => {
+                            ui.set_connected(true);
+                            ui.set_status_message(
+                                format!(
+                                    "Signed in. {} network(s) on this account.",
+                                    outcome.boot.networks.len()
+                                )
+                                .into(),
+                            );
+                        }
+                        Err(err) => {
+                            ui.set_status_message(describe_bootstrap_error(&err).into());
+                        }
+                    }
+                });
+            });
+        });
+    });
+
     ui.run()
+}
+
+fn load_remembered_server_url() -> String {
+    persistence::load_servers_file()
+        .ok()
+        .and_then(|file| {
+            file.selected_server_base_url
+                .or_else(|| file.servers.first().map(|server| server.base_url.clone()))
+        })
+        .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
+}
+
+/// Remembers the last server URL the user tried, regardless of whether the
+/// connection attempt succeeds — so it's pre-filled again next launch.
+fn remember_server_url(server_url: &str) {
+    let mut file = persistence::load_servers_file().unwrap_or_default();
+    file.selected_server_base_url = Some(server_url.to_string());
+    let _ = persistence::save_servers_file(&file);
+}
+
+fn describe_bootstrap_error(err: &BootstrapError) -> String {
+    match err {
+        BootstrapError::IncompatibleServer(compat) => format!(
+            "This server's protocol version ({}) is too old for Cordiale.",
+            compat.protocol_version
+        ),
+        BootstrapError::Config(_) => {
+            "Couldn't reach the server. Check the URL and try again.".to_string()
+        }
+        BootstrapError::Login(LoginError::InvalidCredentials) => {
+            "Wrong username or password/token.".to_string()
+        }
+        BootstrapError::Login(LoginError::TwoFactorRequired) => {
+            "This account has two-factor authentication enabled. Sign in from a browser instead."
+                .to_string()
+        }
+        BootstrapError::Login(LoginError::TooManyAttempts) => {
+            "Too many attempts. Wait a bit before trying again.".to_string()
+        }
+        BootstrapError::Login(_) => "Login failed.".to_string(),
+        BootstrapError::Boot(_) | BootstrapError::Me(_) => {
+            "Signed in, but couldn't load account data.".to_string()
+        }
+    }
 }

@@ -20,25 +20,76 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+import { LineEdit, Button, VerticalBox } from "std-widgets.slint";
+
 export component AppWindow inherits Window {
-    in property <string> app_title: "Cordiale";
+    title: "Cordiale";
+    width: 480px;
+    height: 440px;
 
-    width: 900px;
-    height: 600px;
+    in-out property <string> server-url: "https://irc.sindro.me";
+    in-out property <string> identifier: "";
+    in-out property <string> password: "";
+    in property <string> status-message: "";
+    in property <bool> connecting: false;
+    in property <bool> connected: false;
 
-    VerticalLayout {
+    callback connect-requested(string, string, string);
+
+    if !connected : VerticalBox {
         padding: 32px;
         spacing: 16px;
 
         Text {
-            text: app_title;
+            text: "Cordiale";
             font-size: 28px;
             horizontal-alignment: center;
         }
 
+        LineEdit {
+            placeholder-text: "Server URL";
+            text <=> server-url;
+        }
+
+        LineEdit {
+            placeholder-text: "Username";
+            text <=> identifier;
+        }
+
+        LineEdit {
+            placeholder-text: "Password or client token";
+            text <=> password;
+            input-type: password;
+        }
+
+        Button {
+            text: connecting ? "Connecting…" : "Connect";
+            enabled: !connecting;
+            clicked => { connect-requested(server-url, identifier, password); }
+        }
+
         Text {
-            text: "Grappa desktop client scaffold";
+            text: status-message;
+            color: #cc3333;
             horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+
+    if connected : VerticalBox {
+        padding: 32px;
+        spacing: 16px;
+
+        Text {
+            text: "Connected to " + server-url;
+            font-size: 20px;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: status-message;
+            horizontal-alignment: center;
+            wrap: word-wrap;
         }
     }
 }
