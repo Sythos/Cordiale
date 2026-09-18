@@ -12,6 +12,7 @@ pub const APP_NAME: &str = "Cordiale";
 /// Initial client version, distinct from the Grappa protocol version.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod client;
 pub mod credentials;
 pub mod domain;
 pub mod persistence;
