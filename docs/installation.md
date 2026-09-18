@@ -53,3 +53,40 @@ tar -xzf cordiale-linux-<amd64|arm64>-<version>.tar.gz
 No installer, no package manager integration — just the binary. Requires
 fontconfig, Mesa/OpenGL, XCB and xkbcommon to already be on the system
 (present on effectively any desktop Linux install).
+
+## macOS (universal: x64 + Apple Silicon)
+
+Download `Cordiale_macOS_universal.dmg`, open it, drag `Cordiale.app` to
+`Applications`. Since the app is unsigned and not notarized, the first
+launch will be blocked by Gatekeeper. To allow it: try opening the app,
+then go to **System Settings → Privacy & Security**, scroll down, click
+**"Open Anyway"** next to the Cordiale warning, and confirm **Open** in the
+dialog that reappears. Right-click (or Control-click) the app and choose
+**Open** is the older equivalent, also still offered on most macOS
+versions.
+
+Prefer a plain binary? Grab `cordiale-macos-universal-<version>.tar.gz`
+instead and run `./cordiale-ui` from a terminal.
+
+## Building from source
+
+Every release also ships `Cordiale_src.tar.gz`: a plain snapshot of the
+tagged source tree (via `git archive`, so it's exactly what's on GitHub for
+that tag — no build artifacts, no `.git` history). To build it yourself:
+
+```bash
+tar -xzf Cordiale_src.tar.gz
+cd cordiale-<version>
+cargo build --release --package cordiale-ui
+./target/release/cordiale-ui
+```
+
+Requires a stable Rust toolchain ([rustup.rs](https://rustup.rs)) and, on
+Linux, the same system packages listed in `.github/workflows/ci.yml`
+(`libfontconfig1-dev`, `libgl1-mesa-dev`, `libxcb1-dev`,
+`libxcb-render0-dev`, `libxcb-shape0-dev`, `libxcb-xfixes0-dev`,
+`libxkbcommon-dev`, `libxkbcommon-x11-dev` — names as they appear in Debian
+Trixie/Ubuntu Resolute's `apt`; adjust for your distro's package manager).
+Windows and macOS need nothing beyond the Rust toolchain itself. This is
+also just `git clone` plus the same two commands if you'd rather build
+straight from `main` instead of a tagged release.
