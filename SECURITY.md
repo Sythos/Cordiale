@@ -34,3 +34,12 @@ where applicable, fixed.
   `settings.json`/`servers.json` in plain text.
 - Build, test and packaging run only in GitHub Actions; no release artifact
   is produced on a local development machine.
+
+## Automated scanning
+
+CI runs Clippy, `cargo audit` (RustSec advisory database) and CodeQL for
+Rust on every push to `main`. No dedicated static analysis or security
+scanner exists for Slint `.slint` files today; Slint markup is still
+compiled and type-checked as part of `cargo check`/`cargo build`. A generic
+secret scanner (e.g. `gitleaks`) is under consideration but not yet added —
+see `MEMORY.md`.
