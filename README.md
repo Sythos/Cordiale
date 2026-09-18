@@ -1,5 +1,7 @@
 # Cordiale
 
+![Cordiale](resources/branding/cordiale.png)
+
 Cordiale is a native desktop client for Grappa, written in Rust with Slint.
 It doesn't speak IRC directly: it uses REST and Phoenix Channels/WebSocket
 per Grappa's documented client protocol.
@@ -21,6 +23,7 @@ window.
   REST/WebSocket clients, and other shareable logic;
 - `crates/cordiale-ui` — Slint executable and GUI entry point;
 - `resources/i18n/{en,it,fr,de,es}` — internationalization resources;
+- `resources/branding/` — project image and app icon source;
 - `packaging/windows` and `packaging/linux` — space for future deliverables
   (packaging notes in `docs/packaging-windows.md` and
   `docs/packaging-linux.md`);
