@@ -725,9 +725,17 @@ export component LinksGraphWindow inherits Window {
         }
 
         Rectangle {
+            // Explicit size: absolutely-positioned children (the nodes
+            // and the Path below) don't contribute a preferred size to
+            // the enclosing VerticalBox, so without this the canvas
+            // could collapse to zero height.
+            width: 100%;
+            height: 560px;
             background: #1e1e1e;
 
             Path {
+                width: 100%;
+                height: 100%;
                 commands: edges-commands;
                 stroke: #888888;
                 stroke-width: 1.5px;
