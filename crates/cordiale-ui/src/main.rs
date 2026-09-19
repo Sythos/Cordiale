@@ -650,14 +650,14 @@ async fn run_worker(
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame);
                     }
-                    Some(SessionEvent::Disconnected) => {
-                        persistence::log_line("session disconnected");
+                    Some(SessionEvent::Disconnected { reason }) => {
+                        persistence::log_line(&format!("session disconnected: {reason}"));
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_status_kind("disconnected".into());
                         });
                     }
-                    Some(SessionEvent::Reconnecting) => {
-                        persistence::log_line("session reconnecting");
+                    Some(SessionEvent::Reconnecting { reason }) => {
+                        persistence::log_line(&format!("session reconnecting: {reason}"));
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_status_kind("reconnecting".into());
                         });
@@ -681,24 +681,41 @@ async fn handle_connect(
 ) {
     let server_url = normalize_server_url(&server_url);
 
-    // Never log `password`: it may be a real password or a per-client
-    // token, and either way it's a secret — see MEMORY.md §3.6.
+    // No password typed → guest/visitor login instead of sending an
+    // empty credential the server will just 400 on. `identifier: "guest",
+    // password: "guest"` is the one combination confirmed to work against
+    // a real server (see docs/protocol-notes.md §5) — the identifier the
+    // user typed, if any, is ignored for this attempt since the guest
+    // mechanism isn't known to accept an arbitrary one.
+    let is_guest_attempt = password.is_empty();
+    let (login_identifier, login_password) = if is_guest_attempt {
+        ("guest".to_string(), "guest".to_string())
+    } else {
+        (identifier.clone(), password.clone())
+    };
+
+    // Never log a real password: it may be a real password or a
+    // per-client token, and either way it's a secret — see MEMORY.md
+    // §3.6. "guest" isn't a secret, so the guest case can log it plainly.
     persistence::log_line(&format!(
-        "connect attempt: server={server_url} identifier={identifier}"
+        "connect attempt: server={server_url} identifier={login_identifier} \
+         guest={is_guest_attempt}"
     ));
     remember_server_url(&server_url);
 
     let client = GrappaClient::new(server_url.clone());
     let request = LoginRequest {
-        identifier: identifier.clone(),
-        password: password.clone(),
+        identifier: login_identifier.clone(),
+        password: login_password,
     };
     let result = bootstrap(&client, &request).await;
 
     match result {
         Ok(outcome) => {
             persistence::log_line(&format!("connect succeeded: server={server_url}"));
-            remember_profile(&server_url, &identifier, &password);
+            if !is_guest_attempt {
+                remember_profile(&server_url, &identifier, &password);
+            }
 
             let entries = channel_entries_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
@@ -1350,12 +1367,17 @@ fn channel_from_topic(topic: &str) -> Option<(String, String)> {
 }
 
 /// Strips surrounding whitespace and any trailing slash(es) from a
-/// server URL the user typed. A trailing slash is very easy to type
-/// (e.g. `"https://host/"`) and would otherwise make every REST call
-/// build a path like `.../host//api/config` — some routers reject the
-/// doubled slash instead of normalizing it, so this isn't cosmetic.
+/// server URL the user typed, and defaults a missing scheme to
+/// `https://` (typing just `"irc.example.com"` is easy to do and would
+/// otherwise make `reqwest`/`Url::parse` reject every request outright).
 fn normalize_server_url(url: &str) -> String {
-    url.trim().trim_end_matches('/').to_string()
+    let trimmed = url.trim().trim_end_matches('/');
+    let with_scheme = if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+    with_scheme.trim_end_matches('/').to_string()
 }
 
 /// Turns an `https://`/`http://` base URL into the matching `wss://`/`ws://`
@@ -1642,6 +1664,22 @@ mod tests {
         assert_eq!(
             normalize_server_url("https://irc.sindro.me"),
             "https://irc.sindro.me"
+        );
+    }
+
+    #[test]
+    fn normalize_server_url_adds_a_missing_https_scheme() {
+        assert_eq!(
+            normalize_server_url("irc.sythos.dev"),
+            "https://irc.sythos.dev"
+        );
+    }
+
+    #[test]
+    fn normalize_server_url_leaves_an_explicit_http_scheme_alone() {
+        assert_eq!(
+            normalize_server_url("http://irc.sythos.dev"),
+            "http://irc.sythos.dev"
         );
     }
 

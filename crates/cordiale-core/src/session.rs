@@ -40,7 +40,7 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
-use crate::websocket::PhoenixSocket;
+use crate::websocket::{PhoenixSocket, PhoenixSocketError};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -86,8 +86,16 @@ pub enum SessionEvent {
     /// caller matches on `frame.event`/`frame.topic`, ignoring what it
     /// doesn't recognize (see `docs/protocol-notes.md` §3).
     Frame(PhoenixMessage),
-    Disconnected,
-    Reconnecting,
+    /// `reason` is a `Debug`-formatted underlying error where one exists
+    /// (a closed/errored socket) — empty for a clean close. Never shown
+    /// to the user directly, only logged, so it doesn't need to be
+    /// translated or pretty.
+    Disconnected {
+        reason: String,
+    },
+    Reconnecting {
+        reason: String,
+    },
 }
 
 /// A handle to a running session: send commands, nothing else. Drop it (or
@@ -164,8 +172,10 @@ async fn run_session(
     'reconnect: loop {
         let mut socket = match PhoenixSocket::connect(&ws_url, &token).await {
             Ok(socket) => socket,
-            Err(_) => {
-                let _ = events.send(SessionEvent::Reconnecting);
+            Err(err) => {
+                let _ = events.send(SessionEvent::Reconnecting {
+                    reason: format!("connect failed: {err:?}"),
+                });
                 sleep(RECONNECT_DELAY).await;
                 continue 'reconnect;
             }
@@ -173,10 +183,15 @@ async fn run_session(
 
         let mut refs = RefCounter::new();
 
-        let Ok(user_join_ref) = join(&mut socket, &mut refs, &user_topic, true).await else {
-            let _ = events.send(SessionEvent::Reconnecting);
-            sleep(RECONNECT_DELAY).await;
-            continue 'reconnect;
+        let user_join_ref = match join(&mut socket, &mut refs, &user_topic, true).await {
+            Ok(join_ref) => join_ref,
+            Err(err) => {
+                let _ = events.send(SessionEvent::Reconnecting {
+                    reason: format!("user topic join failed: {err:?}"),
+                });
+                sleep(RECONNECT_DELAY).await;
+                continue 'reconnect;
+            }
         };
         joined_topics.insert(
             user_topic.clone(),
@@ -214,8 +229,10 @@ async fn run_session(
                         event: HEARTBEAT_EVENT.to_string(),
                         payload: serde_json::json!({}),
                     };
-                    if socket.send(&heartbeat_msg).await.is_err() {
-                        let _ = events.send(SessionEvent::Disconnected);
+                    if let Err(err) = socket.send(&heartbeat_msg).await {
+                        let _ = events.send(SessionEvent::Disconnected {
+                            reason: format!("heartbeat send failed: {err:?}"),
+                        });
                         sleep(RECONNECT_DELAY).await;
                         continue 'reconnect;
                     }
@@ -259,8 +276,17 @@ async fn run_session(
                             }
                             let _ = events.send(SessionEvent::Frame(message));
                         }
-                        Ok(None) | Err(_) => {
-                            let _ = events.send(SessionEvent::Disconnected);
+                        Ok(None) => {
+                            let _ = events.send(SessionEvent::Disconnected {
+                                reason: "socket closed".to_string(),
+                            });
+                            sleep(RECONNECT_DELAY).await;
+                            continue 'reconnect;
+                        }
+                        Err(err) => {
+                            let _ = events.send(SessionEvent::Disconnected {
+                                reason: format!("read failed: {err:?}"),
+                            });
                             sleep(RECONNECT_DELAY).await;
                             continue 'reconnect;
                         }
@@ -278,7 +304,7 @@ async fn join(
     refs: &mut RefCounter,
     topic: &str,
     presence: bool,
-) -> Result<String, ()> {
+) -> Result<String, PhoenixSocketError> {
     let join_ref = refs.next_ref();
     let payload = if presence {
         serde_json::json!({})
@@ -292,9 +318,5 @@ async fn join(
         event: "phx_join".to_string(),
         payload,
     };
-    socket
-        .send(&message)
-        .await
-        .map(|()| join_ref)
-        .map_err(|_| ())
+    socket.send(&message).await.map(|()| join_ref)
 }
