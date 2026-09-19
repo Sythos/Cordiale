@@ -31,13 +31,22 @@ fn main() {
         .expect("failed to compile the Slint UI");
 
     // Embed the app icon into the .exe on Windows. The .ico is generated
-    // from resources/branding/cordiale_icona.png by the CI workflows
-    // (packages.yml, dev-build.yml) with ImageMagick before `cargo build`
-    // runs, so it's expected to exist by the time build.rs gets here.
+    // from resources/branding/cordiale_icona.png by the release-building
+    // workflows (packages.yml, dev-build.yml) with ImageMagick before
+    // `cargo build` runs. ci.yml's plain `cargo check`/`build`/`test`
+    // never runs that step (it's not building a distributable binary),
+    // so the .ico is legitimately missing there — skip rather than fail
+    // the build over a file only the packaging workflows are expected to
+    // produce.
+    let icon_path = "../../resources/branding/cordiale.ico";
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        winresource::WindowsResource::new()
-            .set_icon("../../resources/branding/cordiale.ico")
-            .compile()
-            .expect("failed to embed the Windows icon resource");
+        if std::path::Path::new(icon_path).exists() {
+            winresource::WindowsResource::new()
+                .set_icon(icon_path)
+                .compile()
+                .expect("failed to embed the Windows icon resource");
+        } else {
+            println!("cargo:warning=cordiale.ico not found, building without an embedded icon");
+        }
     }
 }
