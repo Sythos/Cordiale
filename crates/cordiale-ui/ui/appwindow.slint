@@ -128,9 +128,14 @@ struct MemberRow {
 // binding loop on a self-referential resize (confirmed against a real
 // slint-ui/slint issue report before writing this, not guessed).
 component ResizeHandle {
+    // Not named `min-width`/`max-width`: those are builtin layout
+    // properties every element already has (its own size constraints) —
+    // redeclaring them is a compile error, and they mean something
+    // different anyway (this component's own 6px width is fixed, these
+    // bound the *target* panel's width instead).
     in-out property <length> target-width;
-    in property <length> min-width: 120px;
-    in property <length> max-width: 420px;
+    in property <length> target-min-width: 120px;
+    in property <length> target-max-width: 420px;
 
     width: 6px;
 
@@ -144,7 +149,10 @@ component ResizeHandle {
         mouse-cursor: ew-resize;
         moved => {
             if (self.pressed) {
-                target-width = max(min-width, min(max-width, target-width + (self.mouse-x - self.pressed-x)));
+                target-width = max(
+                    target-min-width,
+                    min(target-max-width, target-width + (self.mouse-x - self.pressed-x))
+                );
             }
         }
     }
@@ -548,8 +556,8 @@ export component AppWindow inherits Window {
 
         ResizeHandle {
             target-width <=> sidebar-width;
-            min-width: 120px;
-            max-width: 360px;
+            target-min-width: 120px;
+            target-max-width: 360px;
         }
 
         VerticalBox {
@@ -619,8 +627,8 @@ export component AppWindow inherits Window {
 
         if has-selected-channel && channel-members.length > 0 : ResizeHandle {
             target-width <=> members-width;
-            min-width: 100px;
-            max-width: 320px;
+            target-min-width: 100px;
+            target-max-width: 320px;
         }
 
         if has-selected-channel && channel-members.length > 0 : VerticalBox {
