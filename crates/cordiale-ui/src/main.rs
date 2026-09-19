@@ -389,9 +389,9 @@ struct WorkerState {
     identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
-    /// Keyed by `(network, channel)`; holds display lines already rendered
-    /// for that channel so switching channels doesn't lose history.
-    messages: HashMap<(String, String), Vec<String>>,
+    /// Keyed by `(network, channel)`; holds messages already rendered for
+    /// that channel so switching channels doesn't lose history.
+    messages: MessagesByChannel,
     /// Keyed by `(network, channel)`; an unsent compose draft per channel,
     /// mirroring Cicchetto's own per-channel drafts (confirmed by the
     /// Grappa/Cicchetto maintainer, see MEMORY.md §0sexies) so switching
@@ -423,6 +423,10 @@ struct WorkerState {
     /// reconnect/relaunch, unlike everything else in Settings.
     notify_nicks: Vec<String>,
     watch_patterns: Vec<String>,
+    /// Current app theme, kept here too (not just in Slint's `theme`
+    /// property) so message-rendering helpers running on this thread can
+    /// pick a legible color without an extra hop to the UI thread.
+    theme: Theme,
 }
 
 impl WorkerState {
@@ -443,6 +447,7 @@ impl WorkerState {
             settings_network: None,
             notify_nicks: Vec::new(),
             watch_patterns: Vec::new(),
+            theme: persistence::load_settings().unwrap_or_default().theme,
         }
     }
 }
@@ -525,7 +530,7 @@ async fn run_worker(
                         }
                     }
                     Some(WorkerCommand::ToggleTheme) => {
-                        handle_toggle_theme(&ui);
+                        handle_toggle_theme(&mut state, &ui);
                     }
                     Some(WorkerCommand::SaveDisplayPrefs(prefs)) => {
                         handle_save_display_prefs(&state, prefs).await;
@@ -857,6 +862,7 @@ async fn handle_select_channel(
     let lines = state.messages.get(&key).cloned().unwrap_or_default();
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
     let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
+    let dark_theme = state.theme == Theme::Dark;
 
     let label = format!("{network} — {channel}");
     let ui = ui.clone();
@@ -865,7 +871,7 @@ async fn handle_select_channel(
         ui.set_current_topic(irc_topic.into());
         ui.set_has_selected_channel(true);
         ui.set_compose_text(draft.into());
-        let model = chat_lines_model(&lines);
+        let model = chat_lines_model(&lines, dark_theme);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
     });
 }
@@ -890,7 +896,7 @@ async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, b
     }
 }
 
-fn handle_toggle_theme(ui: &slint::Weak<AppWindow>) {
+fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let mut settings = persistence::load_settings().unwrap_or_default();
     settings.theme = match settings.theme {
         Theme::Light => Theme::Dark,
@@ -899,9 +905,25 @@ fn handle_toggle_theme(ui: &slint::Weak<AppWindow>) {
     let _ = persistence::save_settings(&settings);
 
     let new_theme = settings.theme;
+    state.theme = new_theme;
+
+    // Re-render the currently open channel's history too: an mIRC-colored
+    // message that was legible a moment ago (see `ensure_legible`) can
+    // stop being legible the instant the background flips, and shouldn't
+    // have to wait for a channel reselect to catch up.
+    let current_lines = state
+        .current_channel
+        .as_ref()
+        .and_then(|key| state.messages.get(key))
+        .cloned();
+
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_theme(theme_to_slint(new_theme));
+        if let Some(lines) = current_lines {
+            let model = chat_lines_model(&lines, new_theme == Theme::Dark);
+            ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+        }
     });
 }
 
@@ -1264,9 +1286,10 @@ fn handle_frame(
 
     if state.current_channel.as_ref() == Some(&key) {
         let lines = state.messages[&key].clone();
+        let dark_theme = state.theme == Theme::Dark;
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
-            let model = chat_lines_model(&lines);
+            let model = chat_lines_model(&lines, dark_theme);
             ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         });
     }
@@ -1371,37 +1394,116 @@ fn handle_links_bundle(ui: &slint::Weak<AppWindow>, payload: &Value) {
     });
 }
 
-/// Shared `from`/`nick` + `body`/`message` extraction for both live frames
-/// (`render_frame`) and REST history rows (`render_history_entry`) — per
-/// `docs/protocol-notes.md` §4, scrollback rows and push events are the
-/// same "message" entity, so both shapes use the same field names.
-fn render_message_body(payload: &Value) -> Option<String> {
+/// One message/event ready for display: local timestamp already resolved
+/// (see `local_timestamp`), split into an ordinary chat line (`nick`
+/// `Some`, shown as `<nick> text` with a per-nick hash color) or a
+/// synthesized system line (`nick: None` — join/part/quit/notice/mode/
+/// server_event), always `italic`.
+#[derive(Clone)]
+struct RenderedMessage {
+    timestamp: String,
+    nick: Option<String>,
+    text: String,
+    italic: bool,
+}
+
+/// Shared `from`/`nick`/`sender` + `body`/`message` extraction for both
+/// live frames (`render_frame`) and REST history rows
+/// (`render_history_entry`) — per `docs/protocol-notes.md` §4, scrollback
+/// rows and push events are the same "message" entity, so both shapes use
+/// the same field names. `sender` is real, observed field on a live
+/// `kind: "join"` payload (`{"sender":"LAS3r","kind":"join","body":null,
+/// ...}`) that neither `from` nor `nick` cover — docs don't list it.
+fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMessage {
+    let timestamp = local_timestamp(payload);
     let nick = payload
         .get("from")
         .or_else(|| payload.get("nick"))
-        .and_then(|v| v.as_str());
+        .or_else(|| payload.get("sender"))
+        .and_then(Value::as_str);
     let body = payload
         .get("body")
         .or_else(|| payload.get("message"))
-        .and_then(|v| v.as_str());
+        .and_then(Value::as_str);
+    let kind = payload.get("kind").and_then(Value::as_str);
+    let reason = payload.get("reason").and_then(Value::as_str);
+
+    let event_text = match kind {
+        Some("join") => Some(format!("→ {} joined", nick.unwrap_or("someone"))),
+        Some("part") => Some(match reason {
+            Some(reason) => format!("← {} left ({reason})", nick.unwrap_or("someone")),
+            None => format!("← {} left", nick.unwrap_or("someone")),
+        }),
+        Some("quit") => Some(match reason {
+            Some(reason) => format!("⇐ {} quit ({reason})", nick.unwrap_or("someone")),
+            None => format!("⇐ {} quit", nick.unwrap_or("someone")),
+        }),
+        _ => None,
+    };
+    if let Some(text) = event_text {
+        return RenderedMessage {
+            timestamp,
+            nick: None,
+            text,
+            italic: true,
+        };
+    }
+
+    // A `notice` (the IRC convention services like NickServ/ChanServ use)
+    // keeps the normal `<nick> text` shape but renders italic, same as
+    // join/part/quit — distinguishing it from an ordinary privmsg without
+    // hiding its content the way a synthesized sentence would.
+    let italic = kind == Some("notice");
 
     match (nick, body) {
-        (Some(nick), Some(body)) => Some(format!("<{nick}> {body}")),
-        (None, Some(body)) => Some(body.to_string()),
-        _ => None,
+        (Some(nick), Some(body)) => RenderedMessage {
+            timestamp,
+            nick: Some(nick.to_string()),
+            text: body.to_string(),
+            italic,
+        },
+        (None, Some(body)) => RenderedMessage {
+            timestamp,
+            nick: None,
+            text: body.to_string(),
+            italic,
+        },
+        _ => RenderedMessage {
+            timestamp,
+            nick: None,
+            text: event_fallback
+                .map(|event| format!("{event}: {payload}"))
+                .unwrap_or_else(|| payload.to_string()),
+            italic: true,
+        },
     }
 }
 
-fn render_frame(frame: &cordiale_core::phoenix::PhoenixMessage) -> String {
-    render_message_body(&frame.payload)
-        .unwrap_or_else(|| format!("{}: {}", frame.event, frame.payload))
+fn render_frame(frame: &cordiale_core::phoenix::PhoenixMessage) -> RenderedMessage {
+    render_message(&frame.payload, Some(&frame.event))
 }
 
 /// Renders one `boot.heads` scrollback row the same way a live frame would
 /// be, minus the `event`/`topic` envelope a bootstrap history row doesn't
-/// have — falls back to the raw JSON rather than guessing a shape.
-fn render_history_entry(value: &Value) -> String {
-    render_message_body(value).unwrap_or_else(|| value.to_string())
+/// have.
+fn render_history_entry(value: &Value) -> RenderedMessage {
+    render_message(value, None)
+}
+
+/// Local `HH:MM:SS` for a message. Tries a handful of plausible
+/// server-provided timestamp field names (none confirmed by
+/// `docs/protocol-notes.md`) parsed as RFC 3339, falling back to "now" —
+/// correct for a live push, best-effort for scrollback history whose
+/// field name turns out to be something else.
+fn local_timestamp(payload: &Value) -> String {
+    for field in ["server_timestamp", "timestamp", "inserted_at", "created_at"] {
+        if let Some(raw) = payload.get(field).and_then(Value::as_str) {
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
+                return parsed.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
+            }
+        }
+    }
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
 fn apply_display_prefs(ui: &AppWindow, prefs: &DisplayPrefs) {
@@ -1522,11 +1624,13 @@ fn topics_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), Str
 /// (confirmed in an earlier research pass, see MEMORY.md) — a channel with
 /// none simply has no key here and starts empty, same as before this was
 /// wired in.
-fn messages_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), Vec<String>> {
+type MessagesByChannel = HashMap<(String, String), Vec<RenderedMessage>>;
+
+fn messages_from_boot(outcome: &BootstrapOutcome) -> MessagesByChannel {
     let mut messages = HashMap::new();
     for (network, channels) in &outcome.boot.heads {
         for (channel, rows) in channels {
-            let lines: Vec<String> = rows.iter().map(render_history_entry).collect();
+            let lines: Vec<RenderedMessage> = rows.iter().map(render_history_entry).collect();
             if !lines.is_empty() {
                 messages.insert((network.clone(), channel.clone()), lines);
             }
@@ -1608,36 +1712,141 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     });
 }
 
-/// Converts one already mIRC-parsed line into the Slint `ChatLine` model,
-/// mapping `cordiale_core::formatting::ColorSegment`'s abstract `(u8, u8,
-/// u8)` into a real `slint::Color` only here — the core crate stays free
-/// of any Slint dependency.
-fn chat_line_from_raw(raw: &str) -> ChatLine {
-    let segments: Vec<MessageSegment> = cordiale_core::formatting::parse_mirc_text(raw)
-        .into_iter()
-        .map(|segment| {
-            let (has_color, color) = match segment.color {
-                Some((r, g, b)) => (true, slint::Color::from_rgb_u8(r, g, b)),
-                None => (false, slint::Color::from_rgb_u8(0, 0, 0)),
-            };
-            MessageSegment {
-                text: segment.text.into(),
-                has_color,
-                color,
-                bold: segment.bold,
+/// Converts one already-rendered message into the Slint `ChatLine` model:
+/// a muted timestamp segment, an optional hash-colored `<nick>` segment,
+/// then the mIRC-parsed body — every segment forced `italic` when the
+/// message itself is (join/part/quit/notice/fallback), and every explicit
+/// mIRC color run past through `ensure_legible` for `dark_theme`. Maps
+/// `cordiale_core::formatting::ColorSegment`'s abstract `(u8, u8, u8)`
+/// into a real `slint::Color` only here — the core crate stays free of
+/// any Slint dependency.
+fn chat_line_from_message(message: &RenderedMessage, dark_theme: bool) -> ChatLine {
+    let mut segments = Vec::new();
+
+    segments.push(MessageSegment {
+        text: format!("[{}] ", message.timestamp).into(),
+        has_color: true,
+        color: muted_color(dark_theme),
+        bold: false,
+        italic: message.italic,
+    });
+
+    if let Some(nick) = &message.nick {
+        let (r, g, b) = nick_color(nick, dark_theme);
+        segments.push(MessageSegment {
+            text: format!("<{nick}> ").into(),
+            has_color: true,
+            color: slint::Color::from_rgb_u8(r, g, b),
+            bold: true,
+            italic: message.italic,
+        });
+    }
+
+    for segment in cordiale_core::formatting::parse_mirc_text(&message.text) {
+        let (has_color, color) = match segment.color {
+            Some(rgb) => {
+                let (r, g, b) = ensure_legible(rgb, dark_theme);
+                (true, slint::Color::from_rgb_u8(r, g, b))
             }
-        })
-        .collect();
+            None => (false, slint::Color::from_rgb_u8(0, 0, 0)),
+        };
+        segments.push(MessageSegment {
+            text: segment.text.into(),
+            has_color,
+            color,
+            bold: segment.bold,
+            italic: message.italic,
+        });
+    }
+
     ChatLine {
         segments: Rc::new(slint::VecModel::from(segments)).into(),
     }
 }
 
-fn chat_lines_model(raw_lines: &[String]) -> Vec<ChatLine> {
-    raw_lines
+fn chat_lines_model(messages: &[RenderedMessage], dark_theme: bool) -> Vec<ChatLine> {
+    messages
         .iter()
-        .map(|line| chat_line_from_raw(line))
+        .map(|message| chat_line_from_message(message, dark_theme))
         .collect()
+}
+
+/// Timestamp-prefix color: readable but visually secondary against either
+/// theme's default text color.
+fn muted_color(dark_theme: bool) -> slint::Color {
+    if dark_theme {
+        slint::Color::from_rgb_u8(150, 150, 150)
+    } else {
+        slint::Color::from_rgb_u8(110, 110, 110)
+    }
+}
+
+/// Deterministic, good-contrast color for a nick — the same nick always
+/// gets the same hue on a given theme, distinguishing speakers without
+/// needing any per-server nick metadata. Saturation/lightness are
+/// theme-tuned so every hue stays legible on that theme's background.
+fn nick_color(nick: &str, dark_theme: bool) -> (u8, u8, u8) {
+    let hue = (fnv1a_hash(nick.as_bytes()) % 360) as f32;
+    let (saturation, lightness) = if dark_theme { (0.65, 0.68) } else { (0.65, 0.35) };
+    hsl_to_rgb(hue, saturation, lightness)
+}
+
+/// Raises (dark theme) or lowers (light theme) `color`'s perceived
+/// brightness to a legibility floor/ceiling, blending toward white/black
+/// proportionally to how far past the threshold it is — a message using
+/// an explicit mIRC color that happens to be near-black shouldn't become
+/// unreadable just because the theme flipped underneath it.
+fn ensure_legible(color: (u8, u8, u8), dark_theme: bool) -> (u8, u8, u8) {
+    let (r, g, b) = color;
+    let luminance = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+    const DARK_FLOOR: f32 = 140.0;
+    const LIGHT_CEILING: f32 = 180.0;
+    if dark_theme && luminance < DARK_FLOOR {
+        blend_toward(color, (255, 255, 255), (DARK_FLOOR - luminance) / DARK_FLOOR)
+    } else if !dark_theme && luminance > LIGHT_CEILING {
+        blend_toward(color, (0, 0, 0), (luminance - LIGHT_CEILING) / (255.0 - LIGHT_CEILING))
+    } else {
+        color
+    }
+}
+
+fn blend_toward(from: (u8, u8, u8), to: (u8, u8, u8), amount: f32) -> (u8, u8, u8) {
+    let amount = amount.clamp(0.0, 1.0);
+    let mix = |c: u8, t: u8| (c as f32 + (t as f32 - c as f32) * amount).round() as u8;
+    (mix(from.0, to.0), mix(from.1, to.1), mix(from.2, to.2))
+}
+
+/// FNV-1a — simple, fully deterministic (no dependency on Rust's own
+/// `DefaultHasher`, which the standard library doesn't promise stability
+/// for across versions), good enough to scatter nicks across the hue
+/// wheel without visible clustering.
+fn fnv1a_hash(bytes: &[u8]) -> u32 {
+    let mut hash: u32 = 2_166_136_261;
+    for &byte in bytes {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash
+}
+
+/// Standard HSL -> RGB conversion; `h` in degrees, `s`/`l` in `0.0..=1.0`.
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r1, g1, b1) = match h as u32 {
+        0..=59 => (c, x, 0.0),
+        60..=119 => (x, c, 0.0),
+        120..=179 => (0.0, c, x),
+        180..=239 => (0.0, x, c),
+        240..=299 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        ((r1 + m) * 255.0).round() as u8,
+        ((g1 + m) * 255.0).round() as u8,
+        ((b1 + m) * 255.0).round() as u8,
+    )
 }
 
 /// Reads a `slug -> id` map out of `boot.networks`, for WS commands that
