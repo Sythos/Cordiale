@@ -133,6 +133,24 @@ impl SendMessageRequest {
             statusmsg_target: None,
         }
     }
+
+    /// A CTCP query (`VERSION`, `TIME`, `PING`, `CLIENTINFO`, `USERINFO`,
+    /// `SOURCE`, ...) to `target` — wire shape confirmed from Cicchetto's
+    /// own source (`lib/ctcpQuery.ts` + `lib/api.ts`): the CTCP framing
+    /// (`\x01VERB[ args]\x01`) goes in `body` like any other message,
+    /// with `ctcp_target` naming who it's actually for.
+    pub fn ctcp(target: impl Into<String>, verb: &str, args: Option<&str>) -> Self {
+        let body = match args {
+            Some(args) => format!("\u{1}{verb} {args}\u{1}"),
+            None => format!("\u{1}{verb}\u{1}"),
+        };
+        SendMessageRequest {
+            body,
+            ctcp_target: Some(target.into()),
+            notice_target: None,
+            statusmsg_target: None,
+        }
+    }
 }
 
 /// Body of `GET`/`PUT /me/settings/display-prefs`, per
@@ -258,6 +276,19 @@ mod tests {
         let json = serde_json::to_string(&request).expect("serialize");
         assert!(json.contains("\"ctcp_target\":\"vjt\""));
         assert!(!json.contains("notice_target"));
+    }
+
+    #[test]
+    fn send_message_request_ctcp_frames_the_body_with_args() {
+        let request = SendMessageRequest::ctcp("vjt", "PING", Some("123456"));
+        assert_eq!(request.body, "\u{1}PING 123456\u{1}");
+        assert_eq!(request.ctcp_target, Some("vjt".to_string()));
+    }
+
+    #[test]
+    fn send_message_request_ctcp_frames_the_body_without_args() {
+        let request = SendMessageRequest::ctcp("vjt", "VERSION", None);
+        assert_eq!(request.body, "\u{1}VERSION\u{1}");
     }
 
     #[test]

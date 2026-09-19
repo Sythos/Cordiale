@@ -91,6 +91,12 @@ enum WorkerCommand {
     WatchPatternRemove(String),
     Disconnect,
     GoHome,
+    MemberModeAction { verb: String, nick: String },
+    MemberKick(String),
+    MemberBan(String),
+    MemberWhois(String),
+    MemberCtcp { nick: String, verb: String },
+    MemberQuery(String),
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -180,6 +186,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
             ui.set_has_selected_channel(false);
+            ui.set_can_moderate_members(false);
         }
     });
 
@@ -196,7 +203,44 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_current_topic("".into());
             ui.set_current_channel_label("".into());
             ui.set_has_selected_channel(false);
+            ui.set_can_moderate_members(false);
         }
+    });
+
+    let tx_for_mode_action = worker_tx.clone();
+    ui.on_member_mode_action_requested(move |verb, nick| {
+        let _ = tx_for_mode_action.send(WorkerCommand::MemberModeAction {
+            verb: verb.to_string(),
+            nick: nick.to_string(),
+        });
+    });
+
+    let tx_for_kick = worker_tx.clone();
+    ui.on_member_kick_requested(move |nick| {
+        let _ = tx_for_kick.send(WorkerCommand::MemberKick(nick.to_string()));
+    });
+
+    let tx_for_ban = worker_tx.clone();
+    ui.on_member_ban_requested(move |nick| {
+        let _ = tx_for_ban.send(WorkerCommand::MemberBan(nick.to_string()));
+    });
+
+    let tx_for_whois = worker_tx.clone();
+    ui.on_member_whois_requested(move |nick| {
+        let _ = tx_for_whois.send(WorkerCommand::MemberWhois(nick.to_string()));
+    });
+
+    let tx_for_ctcp = worker_tx.clone();
+    ui.on_member_ctcp_requested(move |nick, verb| {
+        let _ = tx_for_ctcp.send(WorkerCommand::MemberCtcp {
+            nick: nick.to_string(),
+            verb: verb.to_string(),
+        });
+    });
+
+    let tx_for_query = worker_tx.clone();
+    ui.on_member_query_requested(move |nick| {
+        let _ = tx_for_query.send(WorkerCommand::MemberQuery(nick.to_string()));
     });
 
     let tx_for_channel = worker_tx.clone();
@@ -704,6 +748,24 @@ async fn run_worker(
                     Some(WorkerCommand::GoHome) => {
                         state.current_channel = None;
                     }
+                    Some(WorkerCommand::MemberModeAction { verb, nick }) => {
+                        send_member_mode_action(&state, &verb, &nick);
+                    }
+                    Some(WorkerCommand::MemberKick(nick)) => {
+                        send_member_kick(&state, &nick);
+                    }
+                    Some(WorkerCommand::MemberBan(nick)) => {
+                        send_member_ban(&state, &nick);
+                    }
+                    Some(WorkerCommand::MemberWhois(nick)) => {
+                        send_member_whois(&state, &nick);
+                    }
+                    Some(WorkerCommand::MemberCtcp { nick, verb }) => {
+                        handle_member_ctcp(&state, &ui, nick, verb).await;
+                    }
+                    Some(WorkerCommand::MemberQuery(nick)) => {
+                        send_member_query(&state, &nick);
+                    }
                 }
             }
 
@@ -891,6 +953,7 @@ async fn handle_select_channel(
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
     let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
     let members = state.members.get(&key).cloned().unwrap_or_default();
+    let can_moderate = is_own_nick_an_op(&members, &identifier);
     let dark_theme = state.theme == Theme::Dark;
 
     let label = format!("{network} — {channel}");
@@ -900,11 +963,22 @@ async fn handle_select_channel(
         ui.set_current_topic(irc_topic.into());
         ui.set_has_selected_channel(true);
         ui.set_compose_text(draft.into());
+        ui.set_can_moderate_members(can_moderate);
         let model = chat_lines_model(&lines, dark_theme);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         let member_rows = members_model(&members, dark_theme);
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
+}
+
+/// Whether `identifier` appears in `members` with the `@` (op) prefix —
+/// gates `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items. Only
+/// ever as accurate as `members` itself, which doesn't track role
+/// (mode) changes yet — see README's Known gaps.
+fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str) -> bool {
+    members
+        .iter()
+        .any(|(name, prefix)| name == identifier && prefix == "@")
 }
 
 async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
@@ -1275,6 +1349,139 @@ fn handle_request_links(state: &WorkerState, network: String) {
     );
 }
 
+/// Shared setup for every `MemberContextMenu` action below: the session,
+/// the user topic to send on (every one of these actions is a push on
+/// `grappa:user:{user}`, never the channel topic — confirmed against
+/// Cicchetto's own `lib/socket.ts`/`UserContextMenu.tsx`, not guessed),
+/// the currently-open channel's Grappa `network_id`, and its slug. `None`
+/// whenever any piece is missing (no session, no channel open, or the
+/// network's id hasn't been resolved yet) — every caller just does
+/// nothing in that case, same as `handle_request_links` already does.
+fn user_topic_channel_network(state: &WorkerState) -> Option<(&SessionHandle, String, i64, &str)> {
+    let session = state.session.as_ref()?;
+    let identifier = state.identifier.as_ref()?;
+    let (network, channel) = state.current_channel.as_ref()?;
+    let network_id = *state.network_ids.get(network)?;
+    Some((
+        session,
+        format!("grappa:user:{identifier}"),
+        network_id,
+        channel.as_str(),
+    ))
+}
+
+/// Op/Deop/Voice/Devoice — `verb` is one of those four, sent verbatim as
+/// the Phoenix event name. Wire shape confirmed from Cicchetto's
+/// `pushChannelOp`/`pushChannelDeop`/`pushChannelVoice`/
+/// `pushChannelDevoice`, which all funnel through the same
+/// `pushUserChannelVerb` helper: `nicks` is an array even for a single
+/// target.
+fn send_member_mode_action(state: &WorkerState, verb: &str, nick: &str) {
+    let Some((session, topic, network_id, channel)) = user_topic_channel_network(state) else {
+        return;
+    };
+    session.send_command(
+        topic,
+        verb,
+        serde_json::json!({ "network_id": network_id, "channel": channel, "nicks": [nick] }),
+    );
+}
+
+/// No reason prompt yet — Cicchetto's own UserContextMenu doesn't collect
+/// one either (`pushChannelKick(networkId, channel, nick, reason)` is
+/// called with an empty string from that same menu).
+fn send_member_kick(state: &WorkerState, nick: &str) {
+    let Some((session, topic, network_id, channel)) = user_topic_channel_network(state) else {
+        return;
+    };
+    session.send_command(
+        topic,
+        "kick",
+        serde_json::json!({
+            "network_id": network_id,
+            "channel": channel,
+            "nick": nick,
+            "reason": "",
+        }),
+    );
+}
+
+/// `{nick}!*@*` matches Cicchetto's own fallback mask (it prefers a
+/// WHOIS-derived host mask when available, a gap it documents itself —
+/// Cordiale doesn't have a WHOIS-derived mask to prefer either, so this
+/// only ever sends the fallback shape).
+fn send_member_ban(state: &WorkerState, nick: &str) {
+    let Some((session, topic, network_id, channel)) = user_topic_channel_network(state) else {
+        return;
+    };
+    let mask = format!("{nick}!*@*");
+    session.send_command(
+        topic,
+        "ban",
+        serde_json::json!({ "network_id": network_id, "channel": channel, "mask": mask }),
+    );
+}
+
+/// `source: "user"` matches Cicchetto's own default (the alternative,
+/// `"rail"`, isn't something Cordiale has a UI path to trigger from).
+fn send_member_whois(state: &WorkerState, nick: &str) {
+    let Some((session, topic, network_id, _channel)) = user_topic_channel_network(state) else {
+        return;
+    };
+    session.send_command(
+        topic,
+        "whois",
+        serde_json::json!({
+            "network_id": network_id,
+            "nick": nick,
+            "server": Value::Null,
+            "source": "user",
+        }),
+    );
+}
+
+/// Asks Grappa to open a DM window with `nick` — the server owns that
+/// state (broadcasts `query_windows_list` back per Cicchetto's source);
+/// Cordiale doesn't have a query-window UI to react to that yet, so this
+/// is currently fire-and-forget rather than switching to one.
+fn send_member_query(state: &WorkerState, nick: &str) {
+    let Some((session, topic, network_id, _channel)) = user_topic_channel_network(state) else {
+        return;
+    };
+    session.send_command(
+        topic,
+        "open_query_window",
+        serde_json::json!({ "network_id": network_id, "target_nick": nick }),
+    );
+}
+
+/// The one action here that isn't a WS push: Cicchetto sends CTCP
+/// queries as a normal REST message post with `ctcp_target` set, not a
+/// Phoenix event (confirmed from `lib/ctcpQuery.ts` + `lib/api.ts`).
+async fn handle_member_ctcp(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    nick: String,
+    verb: String,
+) {
+    let (Some(client), Some(token), Some((network, channel))) =
+        (&state.client, &state.token, &state.current_channel)
+    else {
+        return;
+    };
+    let request = SendMessageRequest::ctcp(nick, &verb, None);
+    if client
+        .send_message(token, network, channel, &request)
+        .await
+        .is_err()
+    {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_status_kind("send-failed".into());
+        });
+    }
+}
+
 /// Appends an incoming realtime frame to the channel it belongs to (if any)
 /// and, if that channel is currently open, pushes the update to the UI.
 ///
@@ -1338,9 +1545,14 @@ fn handle_frame(
     let members_changed = update_members_from_frame(state, &key, &frame.payload);
     if members_changed && state.current_channel.as_ref() == Some(&key) {
         let members = state.members.get(&key).cloned().unwrap_or_default();
+        let can_moderate = state
+            .identifier
+            .as_deref()
+            .is_some_and(|identifier| is_own_nick_an_op(&members, identifier));
         let dark_theme = state.theme == Theme::Dark;
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_can_moderate_members(can_moderate);
             let member_rows = members_model(&members, dark_theme);
             ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
         });
@@ -1954,36 +2166,27 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     });
 }
 
-/// Converts one already-rendered message into the Slint `ChatLine` model:
-/// a muted timestamp segment, an optional hash-colored `<nick>` segment,
-/// then the mIRC-parsed body — every segment forced `italic` when the
-/// message itself is (join/part/quit/notice/fallback), and every explicit
-/// mIRC color run past through `ensure_legible` for `dark_theme`. Maps
-/// `cordiale_core::formatting::ColorSegment`'s abstract `(u8, u8, u8)`
-/// into a real `slint::Color` only here — the core crate stays free of
-/// any Slint dependency.
+/// Converts one already-rendered message into the Slint `ChatLine` model.
+/// `timestamp` and `nick` are their own fields rather than folded into
+/// `segments` (as they briefly were) so the markup can style/wrap the
+/// timestamp as muted text and put just the nick inside a
+/// right-click-for-context-menu area, without either catching the mIRC
+/// body `Text` elements around them. Every body segment is forced
+/// `italic` when the message itself is (join/part/quit/notice/fallback),
+/// and every explicit mIRC color run passed through `ensure_legible` for
+/// `dark_theme`. Maps `cordiale_core::formatting::ColorSegment`'s
+/// abstract `(u8, u8, u8)` into a real `slint::Color` only here — the
+/// core crate stays free of any Slint dependency.
 fn chat_line_from_message(message: &RenderedMessage, dark_theme: bool) -> ChatLine {
+    let (nick, nick_color_value) = match &message.nick {
+        Some(nick) => {
+            let (r, g, b) = nick_color(nick, dark_theme);
+            (nick.clone(), slint::Color::from_rgb_u8(r, g, b))
+        }
+        None => (String::new(), slint::Color::from_rgb_u8(0, 0, 0)),
+    };
+
     let mut segments = Vec::new();
-
-    segments.push(MessageSegment {
-        text: format!("[{}] ", message.timestamp).into(),
-        has_color: true,
-        color: muted_color(dark_theme),
-        bold: false,
-        italic: message.italic,
-    });
-
-    if let Some(nick) = &message.nick {
-        let (r, g, b) = nick_color(nick, dark_theme);
-        segments.push(MessageSegment {
-            text: format!("<{nick}> ").into(),
-            has_color: true,
-            color: slint::Color::from_rgb_u8(r, g, b),
-            bold: true,
-            italic: message.italic,
-        });
-    }
-
     for segment in cordiale_core::formatting::parse_mirc_text(&message.text) {
         let (has_color, color) = match segment.color {
             Some(rgb) => {
@@ -2002,6 +2205,11 @@ fn chat_line_from_message(message: &RenderedMessage, dark_theme: bool) -> ChatLi
     }
 
     ChatLine {
+        timestamp: message.timestamp.clone().into(),
+        timestamp_color: muted_color(dark_theme),
+        nick: nick.into(),
+        nick_color: nick_color_value,
+        italic: message.italic,
         segments: Rc::new(slint::VecModel::from(segments)).into(),
     }
 }

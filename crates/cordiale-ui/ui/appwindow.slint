@@ -49,6 +49,16 @@ struct MessageSegment {
 
 // One line of chat, already split into mIRC color/weight segments.
 struct ChatLine {
+    // `timestamp`/`nick` are split out from `segments` on purpose: lets
+    // the markup style the timestamp as muted text and wrap just the
+    // nick in its own right-click context-menu area, separate from the
+    // mIRC body `Text` elements around them. Empty `nick` (a
+    // system/event line has none) means no nick to show.
+    timestamp: string,
+    timestamp-color: color,
+    nick: string,
+    nick-color: color,
+    italic: bool,
     segments: [MessageSegment],
 }
 
@@ -162,6 +172,82 @@ component ResizeHandle {
     }
 }
 
+// Right-click menu for a nick, usable both in the chat body and the
+// member list (the instantiator wraps whatever Text/content it wants
+// inside this). Item list, gating and wire shapes all confirmed against
+// Cicchetto's own source (UserContextMenu.tsx + lib/socket.ts +
+// lib/api.ts) before writing this, not guessed:
+// Op/Deop/Voice/Devoice/Kick/Ban only make sense (and are only ever
+// enabled) when the viewer is a channel op; WHOIS/CTCP/Query need no
+// permission. A local `component`, not `export`, the same as
+// `ResizeHandle` — its callbacks are plain pass-throughs the instantiator
+// wires to AppWindow's own top-level callbacks (Slint has no way for a
+// nested component to reach an ancestor's callbacks by name).
+component MemberContextMenu {
+    in property <string> target-nick;
+    in property <bool> can-moderate;
+    callback mode-action(string, string); // verb, nick
+    callback kick(string);
+    callback ban(string);
+    callback whois(string);
+    callback ctcp(string, string); // nick, verb
+    callback query(string);
+
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: @tr("Op");
+                enabled: can-moderate;
+                activated => { mode-action("op", target-nick); }
+            }
+            MenuItem {
+                title: @tr("Deop");
+                enabled: can-moderate;
+                activated => { mode-action("deop", target-nick); }
+            }
+            MenuItem {
+                title: @tr("Voice");
+                enabled: can-moderate;
+                activated => { mode-action("voice", target-nick); }
+            }
+            MenuItem {
+                title: @tr("Devoice");
+                enabled: can-moderate;
+                activated => { mode-action("devoice", target-nick); }
+            }
+            MenuItem {
+                title: @tr("Kick");
+                enabled: can-moderate;
+                activated => { kick(target-nick); }
+            }
+            MenuItem {
+                title: @tr("Ban");
+                enabled: can-moderate;
+                activated => { ban(target-nick); }
+            }
+            MenuItem {
+                title: @tr("WHOIS");
+                activated => { whois(target-nick); }
+            }
+            Menu {
+                title: @tr("CTCP");
+                MenuItem { title: "VERSION"; activated => { ctcp(target-nick, "VERSION"); } }
+                MenuItem { title: "TIME"; activated => { ctcp(target-nick, "TIME"); } }
+                MenuItem { title: "PING"; activated => { ctcp(target-nick, "PING"); } }
+                MenuItem { title: "CLIENTINFO"; activated => { ctcp(target-nick, "CLIENTINFO"); } }
+                MenuItem { title: "USERINFO"; activated => { ctcp(target-nick, "USERINFO"); } }
+                MenuItem { title: "SOURCE"; activated => { ctcp(target-nick, "SOURCE"); } }
+            }
+            MenuItem {
+                title: @tr("Query");
+                activated => { query(target-nick); }
+            }
+        }
+
+        @children
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Cordiale";
     // Not `width`/`height`: those pin the window to a fixed size the
@@ -234,9 +320,15 @@ export component AppWindow inherits Window {
     // channel label in the markup below).
     in property <string> current-topic: "";
     in property <bool> has-selected-channel: false;
-    // Snapshot from `boot`, not updated live on join/part yet — see
-    // README's Known gaps. Already sorted ops-first by Rust.
+    // Boot snapshot plus live join/part/quit/nick-change updates —
+    // doesn't track role (mode) changes yet, see README's Known gaps.
+    // Already sorted ops-first by Rust.
     in property <[MemberRow]> channel-members: [];
+    // Whether the viewer's own last-known role in the open channel is
+    // `@` — gates the Op/Deop/Voice/Devoice/Kick/Ban items in
+    // `MemberContextMenu`. Can go stale the same way `channel-members`'
+    // prefixes can (see above) since it's read from the same data.
+    in property <bool> can-moderate-members: false;
 
     // User-resizable via the drag handles between the three "connected"
     // screen columns (see `ResizeHandle`) — session-local, not persisted.
@@ -305,6 +397,15 @@ export component AppWindow inherits Window {
     // dropping the session — a quick way back to the network overview
     // from Settings/Links, or from a channel back to "nothing open".
     callback home-requested();
+    // Context-menu actions on a nick — see `MemberContextMenu`. All are
+    // scoped to whatever channel is currently open (`current-channel`
+    // isn't exposed to Slint; Rust reads its own copy).
+    callback member-mode-action-requested(string, string); // verb, nick
+    callback member-kick-requested(string);
+    callback member-ban-requested(string);
+    callback member-whois-requested(string);
+    callback member-ctcp-requested(string, string); // nick, verb
+    callback member-query-requested(string);
     callback channel-selected(string, string);
     callback network-toggle-requested(string);
     callback send-chat-message(string);
@@ -620,6 +721,30 @@ export component AppWindow inherits Window {
                     alignment: start;
                     spacing: 0px;
 
+                    Text {
+                        text: "[" + line.timestamp + "] ";
+                        color: line.timestamp-color;
+                        font-italic: line.italic;
+                    }
+
+                    if line.nick != "" : MemberContextMenu {
+                        target-nick: line.nick;
+                        can-moderate: can-moderate-members;
+                        mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
+                        kick(nick) => { member-kick-requested(nick); }
+                        ban(nick) => { member-ban-requested(nick); }
+                        whois(nick) => { member-whois-requested(nick); }
+                        ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
+                        query(nick) => { member-query-requested(nick); }
+
+                        Text {
+                            text: "<" + line.nick + "> ";
+                            font-weight: 700;
+                            font-italic: line.italic;
+                            color: line.nick-color;
+                        }
+                    }
+
                     for segment in line.segments : Text {
                         text: segment.text;
                         wrap: word-wrap;
@@ -682,10 +807,21 @@ export component AppWindow inherits Window {
             ListView {
                 vertical-stretch: 1;
 
-                for member in channel-members : Text {
-                    text: member.prefix == "" ? member.name : member.prefix + member.name;
-                    wrap: no-wrap;
-                    color: member.color;
+                for member in channel-members : MemberContextMenu {
+                    target-nick: member.name;
+                    can-moderate: can-moderate-members;
+                    mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
+                    kick(nick) => { member-kick-requested(nick); }
+                    ban(nick) => { member-ban-requested(nick); }
+                    whois(nick) => { member-whois-requested(nick); }
+                    ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
+                    query(nick) => { member-query-requested(nick); }
+
+                    Text {
+                        text: member.prefix == "" ? member.name : member.prefix + member.name;
+                        wrap: no-wrap;
+                        color: member.color;
+                    }
                 }
             }
         }

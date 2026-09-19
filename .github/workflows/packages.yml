@@ -44,9 +44,9 @@ jobs:
             runner: windows-latest
             artifact: windows-arm64
             win_arch: arm64
-          - target: universal-apple-darwin
+          - target: aarch64-apple-darwin
             runner: macos-latest
-            artifact: macos-universal
+            artifact: macos-arm64
 
     steps:
       - name: Checkout client
@@ -68,11 +68,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          if [ "${{ runner.os }}" = "macOS" ]; then
-            rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          else
-            rustup target add "${{ matrix.target }}"
-          fi
+          rustup target add "${{ matrix.target }}"
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux' && matrix.target != 'aarch64-unknown-linux-gnu'
@@ -101,7 +97,7 @@ jobs:
         run: magick resources\branding\cordiale_icona.png -define icon:auto-resize="256,48,32,16" resources\branding\cordiale.ico
 
       - name: Build release binary (native)
-        if: runner.os != 'macOS' && matrix.target != 'aarch64-unknown-linux-gnu'
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
         shell: bash
         run: cargo build --release --package cordiale-ui --target "${{ matrix.target }}"
 
@@ -109,19 +105,6 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         shell: bash
         run: cross build --release --package cordiale-ui --target "${{ matrix.target }}"
-
-      - name: Build release binary (macOS universal)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --release --package cordiale-ui --target x86_64-apple-darwin
-          cargo build --release --package cordiale-ui --target aarch64-apple-darwin
-          mkdir -p target/universal-apple-darwin/release
-          lipo -create \
-            target/x86_64-apple-darwin/release/cordiale-ui \
-            target/aarch64-apple-darwin/release/cordiale-ui \
-            -output target/universal-apple-darwin/release/cordiale-ui
 
       - name: Install fpm and Linux packaging dependencies
         if: runner.os == 'Linux'
@@ -240,12 +223,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          tar -czf "dist/cordiale-macos-universal-${VERSION}.tar.gz" \
-            -C target/universal-apple-darwin/release cordiale-ui
+          tar -czf "dist/cordiale-macos-arm64-${VERSION}.tar.gz" \
+            -C target/aarch64-apple-darwin/release cordiale-ui
 
           APP_DIR="macos-app-stage/Cordiale.app"
           mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-          cp target/universal-apple-darwin/release/cordiale-ui "$APP_DIR/Contents/MacOS/cordiale-ui"
+          cp target/aarch64-apple-darwin/release/cordiale-ui "$APP_DIR/Contents/MacOS/cordiale-ui"
           chmod +x "$APP_DIR/Contents/MacOS/cordiale-ui"
 
           ICONSET="Cordiale.iconset"
@@ -287,7 +270,7 @@ jobs:
           PLIST
 
           hdiutil create -volname "Cordiale" -srcfolder "macos-app-stage" \
-            -ov -format UDZO "dist/Cordiale_macOS_universal.dmg"
+            -ov -format UDZO "dist/Cordiale_macOS_arm64.dmg"
 
       - name: Generate checksums (Linux)
         if: runner.os == 'Linux'
