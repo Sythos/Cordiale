@@ -254,8 +254,7 @@ fn redact_secrets(message: &str) -> String {
             })
         });
 
-        let Some((_, value_start)) = literal_hit.chain(key_hit).min_by_key(|(pos, _)| *pos)
-        else {
+        let Some((_, value_start)) = literal_hit.chain(key_hit).min_by_key(|(pos, _)| *pos) else {
             result.push_str(&message[cursor..]);
             break;
         };
@@ -381,6 +380,9 @@ mod tests {
     #[test]
     fn redact_secrets_masks_every_occurrence() {
         let message = "token=aaa retry token=bbb";
-        assert_eq!(redact_secrets(message), "token=[redacted] retry token=[redacted]");
+        assert_eq!(
+            redact_secrets(message),
+            "token=[redacted] retry token=[redacted]"
+        );
     }
 }
