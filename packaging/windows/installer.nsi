@@ -16,9 +16,15 @@
   !define VERSION "0.0.0"
 !endif
 
+!include "FileFunc.nsh"
+
 !define APP_NAME "Cordiale"
 !define APP_EXE "cordiale-ui.exe"
 !define COMPANY "Sythos"
+; Where Windows Settings > Apps / Control Panel > Programs and Features
+; reads installed-app entries from — nothing here means Cordiale is
+; installed and uninstallable via uninstall.exe, but invisible to both.
+!define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 
 Name "${APP_NAME}"
 OutFile "${OUT_FILE}"
@@ -45,6 +51,21 @@ Section "Install"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\uninstall.exe"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
+
+  ; Registers Cordiale with Windows Settings > Apps / Control Panel >
+  ; Programs and Features — without this the app is installed and
+  ; uninstallable via uninstall.exe, but doesn't show up there at all.
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "${APP_NAME}"
+  WriteRegStr HKLM "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
+  WriteRegStr HKLM "${UNINST_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
+  WriteRegStr HKLM "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
+  WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "${COMPANY}"
+  WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
+  WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1
+  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  WriteRegDWORD HKLM "${UNINST_KEY}" "EstimatedSize" $0
 SectionEnd
 
 Section "Uninstall"
@@ -55,4 +76,6 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
+
+  DeleteRegKey HKLM "${UNINST_KEY}"
 SectionEnd
