@@ -22,64 +22,36 @@ Cordiale isn't the only way to sit on a Grappa server, and it's worth knowing wh
 
 Each of the above has its own maintainer(s) and its own issue tracker — if something's broken in Grappa, Cicchetto, Shottino, Resentin, or Bicchierino, that's the place to report it, not here.
 
-## Status
+## Known gaps
 
-Phase 2 (parity and polish) is in progress. `cordiale-core` has a domain
-model, local persistence under `~/.cordiale/`, a credential store (OS
-keychain with an explicitly insecure fallback), a REST client for the
-bootstrap sequence (`/api/config`, `/auth/login`, `/boot`, `/me`,
-sending a message, reading/writing display preferences) with a documented
-status-code contract, a hand-rolled Phoenix Channels transport over
-`tokio-tungstenite`, and a realtime session layer on top of it (user-topic
-join, heartbeat, reconnect-with-rejoin).
+Cordiale is functional end to end (REST bootstrap, realtime WebSocket
+session, channel/message view, self-service settings, admin panel for
+`is_admin` accounts), but hasn't yet been field-tested against a live
+server through the actual GUI — that's what this release is for. Before
+you file an issue, here's what's already known to be incomplete rather
+than broken:
 
-`cordiale-ui` runs everything from a single persistent background worker
-thread: a splash screen, a first-launch language picker, a connect screen,
-a two-pane connected screen (channel list sidebar, message history, a
-compose box wired to the real send-message endpoint, live updates pushed
-over the WebSocket session), and a Settings screen whose navigation
-mirrors Cicchetto's own Settings drawer (`docs/feature-matrix.md`) — all
-of it self-service (edit *your own* profile, never admin-only): General
-(language, Light/Dark, plus per-network identity — nick/ident/realname),
-Display (five real preferences), Source Address (vhost self-selection),
-Ignore List and On-Connect Commands (both per-network), Aliases
-(account-wide, confirmed server-persisted, not the client-local guess an
-earlier note made), and Watch Lists (presence over REST, keyword
-highlights over the WebSocket session). Grappa is a standalone,
-single-tenant server — there's no server-wide settings-write or
-user-provisioning surface for a client to expose, confirmed by the
-project owner, which is why none of that lives here. The REST layer's
-request/response shapes
-have been checked against the real `irc.sindro.me` server (not just
-mocks) and match, including an undocumented guest/visitor login mode —
-see `docs/protocol-notes.md` §5. The UI is fully translated into Italian,
-French, German and Spanish (bundled at build time, switchable live, no
-runtime gettext dependency), and the compose box, server list and channel
-list carry explicit accessibility labels for screen readers. Settings →
-Admin is real for `is_admin` accounts: overview, sessions (+ disconnect),
-users (+ toggle admin, delete), networks (+ circuit reset), visitors
-(+ delete), session log, and a reaper-sweep trigger — Grappa's actual
-admin surface turned out to be considerably larger than initially scoped
-(30+ endpoints across eight areas, see `docs/protocol-notes.md` §4ter),
-so vhosts, credentials, server-wide settings, and the live admin event
-stream are deliberately not built yet rather than attempted half-blind.
-`/links` reconstructs the same network-topology tree Cicchetto does
-(same root-selection and orphan-handling logic, tested independently of
-any server) and offers both an indented-list view and a "Show graph"
-button that opens a second window with a real radial layout, drawn with
-Slint's native `Path` element — same depth-driven radius and angular-
-slice logic as Cicchetto's own layout, no pan/zoom yet. What's still
-missing: performance profiling, deliberately deferred to after field
-testing. The one gap nobody but a live server can close is field testing
-against a real Grappa instance through the actual GUI — that's next.
+- **Admin panel** covers overview, sessions, users, networks, visitors,
+  session log and a reaper trigger — vhost grants, credentials,
+  server-wide settings, and the live admin event stream aren't built.
+- **Settings** has no way to read back your *current* per-network
+  identity (nick/ident/realname): the fields start blank, and saving
+  them blank leaves your existing values untouched.
+- **Watch Lists** (presence and keyword highlights) reset on every
+  reconnect or relaunch — Grappa has no read-back endpoint for either,
+  so Cordiale only tracks them for the current session.
+- **On-Connect Commands** is a single-line field, not a multi-line
+  editor — separate multiple commands yourself.
+- The **`/links` graph window** has no pan/zoom yet.
+- Performance hasn't been profiled — deliberately deferred until after
+  field testing surfaces real usage patterns.
 
 ## Download
 
-No packaged release yet: an earlier `v0.1.2` was pulled after shipping
-before the client actually worked end to end (websocket, channel view,
-message send — none of it was there). The next tag goes out once the
-client is functional with the whole test suite green, not before. Until
-then, build from `main`:
+Packaged releases (installers, distro packages, source archive) are on
+the [Releases page](https://github.com/Sythos/Cordiale/releases) — see
+[docs/installation.md](docs/installation.md) for per-platform
+instructions. Prefer building from source? `main` always builds:
 
 ```bash
 git clone https://github.com/Sythos/Cordiale.git
@@ -87,9 +59,6 @@ cd Cordiale
 cargo build --release --package cordiale-ui
 ./target/release/cordiale-ui
 ```
-
-Once packaged releases resume, see
-[docs/installation.md](docs/installation.md) for per-platform instructions.
 
 ## Workspace
 
