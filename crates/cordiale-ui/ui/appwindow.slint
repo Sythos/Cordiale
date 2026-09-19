@@ -122,9 +122,15 @@ export component AppWindow inherits Window {
     // Cordiale's own `theme` property below — which only drove a handful
     // of hand-rolled Text colors. That split is exactly what made an OS
     // in dark mode show native-dark widget chrome with light-theme text
-    // colors on top of it (unreadable). Binding the whole style palette
-    // to `theme` keeps everything in sync with Settings, not with the OS.
-    Palette.color-scheme: theme == "dark" ? ColorScheme.dark : ColorScheme.light;
+    // colors on top of it (unreadable). `Palette.color-scheme` isn't a
+    // plain bindable property (a `:` binding here is a parse error, since
+    // it's a write into an external global rather than this component's
+    // own property) — it has to be set imperatively, so Rust invokes this
+    // callback right after every `set-theme` call instead.
+    callback apply-color-scheme();
+    apply-color-scheme() => {
+        Palette.color-scheme = theme == "dark" ? ColorScheme.dark : ColorScheme.light;
+    }
 
     // One of "splash", "language", "connect", "connected", "settings" —
     // see MEMORY.md §3.4 for why there's no `else`/`else if` in Slint:

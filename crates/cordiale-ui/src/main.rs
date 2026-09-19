@@ -116,6 +116,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = slint::select_bundled_translation(language_code(language));
     }
     ui.set_theme(theme_to_slint(settings.theme));
+    ui.invoke_apply_color_scheme();
     ui.set_known_servers(known_servers_model());
 
     let (worker_tx, worker_rx) = mpsc::unbounded_channel::<WorkerCommand>();
@@ -920,6 +921,7 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_theme(theme_to_slint(new_theme));
+        ui.invoke_apply_color_scheme();
         if let Some(lines) = current_lines {
             let model = chat_lines_model(&lines, new_theme == Theme::Dark);
             ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
