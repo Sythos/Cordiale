@@ -91,11 +91,17 @@ enum WorkerCommand {
     WatchPatternRemove(String),
     Disconnect,
     GoHome,
-    MemberModeAction { verb: String, nick: String },
+    MemberModeAction {
+        verb: String,
+        nick: String,
+    },
     MemberKick(String),
     MemberBan(String),
     MemberWhois(String),
-    MemberCtcp { nick: String, verb: String },
+    MemberCtcp {
+        nick: String,
+        verb: String,
+    },
     MemberQuery(String),
 }
 
