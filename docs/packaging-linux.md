@@ -27,3 +27,20 @@ Ubuntu: `ubuntu:26.04`, `almalinux:9`/`almalinux:10`, `archlinux:latest`
 
 La compilazione e il packaging devono avvenire nel workflow GitHub Actions
 `packages.yml`, mai nella macchina di sviluppo.
+
+## Runner di build vs. compatibilità glibc
+
+Il binario Linux viene compilato UNA sola volta per architettura (nessuna
+build separata per distro dentro un container) e poi impacchettato tale
+e quale in `.deb` (Debian 13 E Ubuntu 26.04, stesso file copiato),
+`.rpm` e `.pkg.tar.zst` — quindi il floor di glibc del runner di build
+diventa il floor di compatibilità di TUTTI i pacchetti Linux distribuiti.
+Versioni glibc verificate (2026-09-19): Ubuntu 24.04 → 2.39, Debian 13
+Trixie → 2.41, Ubuntu 26.04 → 2.43. I job `linux-x64`/`linux-arm64` di
+`build-and-package` restano quindi pinnati a `ubuntu-24.04` (il floor più
+basso, compatibile all'indietro con Debian 13 e Ubuntu 26.04) anche dopo
+il pin generale di `ci.yml`/`codeql.yml` a `ubuntu-26.04` — costruire lì
+su `ubuntu-26.04` alzerebbe il requisito glibc minimo sopra quello di
+Debian 13 Trixie, rompendo quel pacchetto. I job `source-archive` e
+`create-release` non compilano nulla, quindi possono restare su
+`ubuntu-26.04` senza rischio.

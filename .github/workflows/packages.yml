@@ -20,12 +20,19 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-26.04
+            # Deliberately NOT ubuntu-26.04 (glibc 2.43): this build's
+            # binary ships as-is in the Debian 13 Trixie (glibc 2.41) and
+            # generic-tarball packages below. ubuntu-24.04's glibc 2.39 is
+            # older than every package this workflow ships to, so the
+            # binary runs everywhere; building on 26.04 would raise the
+            # minimum glibc requirement past what Trixie has and break
+            # that package. See MEMORY.md for the full reasoning.
+            runner: ubuntu-24.04
             artifact: linux-x64
             deb_arch: amd64
             rpm_arch: x86_64
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-26.04
+            runner: ubuntu-24.04
             artifact: linux-arm64
             deb_arch: arm64
             rpm_arch: aarch64
