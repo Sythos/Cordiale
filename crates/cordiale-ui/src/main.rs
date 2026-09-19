@@ -1610,7 +1610,10 @@ fn chat_line_from_raw(raw: &str) -> ChatLine {
 }
 
 fn chat_lines_model(raw_lines: &[String]) -> Vec<ChatLine> {
-    raw_lines.iter().map(|line| chat_line_from_raw(line)).collect()
+    raw_lines
+        .iter()
+        .map(|line| chat_line_from_raw(line))
+        .collect()
 }
 
 /// Reads a `slug -> id` map out of `boot.networks`, for WS commands that
