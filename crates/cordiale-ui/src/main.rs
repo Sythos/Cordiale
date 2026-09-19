@@ -679,6 +679,8 @@ async fn handle_connect(
     identifier: String,
     password: String,
 ) {
+    let server_url = normalize_server_url(&server_url);
+
     // Never log `password`: it may be a real password or a per-client
     // token, and either way it's a secret — see MEMORY.md §3.6.
     persistence::log_line(&format!(
@@ -1347,6 +1349,15 @@ fn channel_from_topic(topic: &str) -> Option<(String, String)> {
     Some((network.to_string(), after_channel.to_string()))
 }
 
+/// Strips surrounding whitespace and any trailing slash(es) from a
+/// server URL the user typed. A trailing slash is very easy to type
+/// (e.g. `"https://host/"`) and would otherwise make every REST call
+/// build a path like `.../host//api/config` — some routers reject the
+/// doubled slash instead of normalizing it, so this isn't cosmetic.
+fn normalize_server_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
 /// Turns an `https://`/`http://` base URL into the matching `wss://`/`ws://`
 /// Phoenix socket URL, per `docs/protocol-notes.md` §2.
 fn to_ws_url(base_url: &str) -> String {
@@ -1608,6 +1619,30 @@ mod tests {
     #[test]
     fn channel_from_topic_rejects_the_user_topic() {
         assert_eq!(channel_from_topic("grappa:user:vjt"), None);
+    }
+
+    #[test]
+    fn normalize_server_url_strips_a_trailing_slash() {
+        assert_eq!(
+            normalize_server_url("https://irc.sythos.dev/"),
+            "https://irc.sythos.dev"
+        );
+    }
+
+    #[test]
+    fn normalize_server_url_strips_whitespace_and_multiple_slashes() {
+        assert_eq!(
+            normalize_server_url("  https://irc.sythos.dev//  "),
+            "https://irc.sythos.dev"
+        );
+    }
+
+    #[test]
+    fn normalize_server_url_leaves_a_clean_url_untouched() {
+        assert_eq!(
+            normalize_server_url("https://irc.sindro.me"),
+            "https://irc.sindro.me"
+        );
     }
 
     #[test]
