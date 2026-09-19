@@ -20,13 +20,35 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox } from "std-widgets.slint";
+import { LineEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ListView } from "std-widgets.slint";
 
-// One entry in the channel list sidebar.
+// One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
     network: string,
     channel: string,
     label: string,
+}
+
+// One connected network in the sidebar, with its joined channels and
+// whether the channel list under it is currently shown (default: yes).
+struct NetworkGroup {
+    network: string,
+    expanded: bool,
+    channels: [ChannelEntry],
+}
+
+// One color/weight run within a rendered chat line — mIRC control codes
+// (see `cordiale_core::formatting`) already parsed out on the Rust side.
+struct MessageSegment {
+    text: string,
+    has-color: bool,
+    color: color,
+    bold: bool,
+}
+
+// One line of chat, already split into mIRC color/weight segments.
+struct ChatLine {
+    segments: [MessageSegment],
 }
 
 // One row in the admin Sessions list.
@@ -128,10 +150,16 @@ export component AppWindow inherits Window {
     // existed on disk already, nothing populated or showed it until now.
     in property <[string]> known-servers: [];
 
-    in property <[ChannelEntry]> channel-list: [];
-    in property <[string]> chat-messages: [];
+    // Sidebar model: one entry per connected network, each carrying its own
+    // joined-channels list and expand/collapse state (default expanded).
+    in property <[NetworkGroup]> network-groups: [];
+    in property <[ChatLine]> chat-lines: [];
     in-out property <string> compose-text: "";
     in property <string> current-channel-label: "";
+    // RPL_TOPIC-equivalent for the selected channel, shown above the chat
+    // list; empty when the server hasn't sent one (falls back to the
+    // channel label in the markup below).
+    in property <string> current-topic: "";
     in property <bool> has-selected-channel: false;
 
     in-out property <string> theme: "light";
@@ -193,8 +221,10 @@ export component AppWindow inherits Window {
     callback language-selected(string);
     callback disconnect-requested();
     callback channel-selected(string, string);
+    callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
+    callback attach-file-requested();
     callback admin-refresh-requested();
     callback admin-disconnect-session(string);
     callback admin-user-toggle-admin(string, bool);
@@ -247,6 +277,8 @@ export component AppWindow inherits Window {
             return @tr("Disconnected. Reconnecting…");
         } else if status-kind == "reconnecting" {
             return @tr("Reconnecting…");
+        } else if status-kind == "attach-unsupported" {
+            return @tr("Attachments aren't supported yet.");
         } else {
             return status-message;
         }
@@ -411,9 +443,29 @@ export component AppWindow inherits Window {
                 accessible-live-region: AccessibleLiveness.polite;
             }
 
-            for entry in channel-list : Button {
-                text: entry.label;
-                clicked => { channel-selected(entry.network, entry.channel); }
+            ListView {
+                vertical-stretch: 1;
+
+                for group in network-groups : VerticalLayout {
+                    alignment: start;
+                    spacing: 2px;
+
+                    Button {
+                        text: (group.expanded ? "▾ " : "▸ ") + group.network;
+                        clicked => { network-toggle-requested(group.network); }
+                    }
+
+                    if group.expanded : VerticalLayout {
+                        alignment: start;
+                        padding-left: 16px;
+                        spacing: 2px;
+
+                        for entry in group.channels : Button {
+                            text: entry.label;
+                            clicked => { channel-selected(entry.network, entry.channel); }
+                        }
+                    }
+                }
             }
 
             for network in known-networks : Button {
@@ -435,17 +487,49 @@ export component AppWindow inherits Window {
         VerticalBox {
             spacing: 8px;
 
+            // Topic bar: capped at roughly 3 lines so a long topic can't
+            // push the chat list off-screen. Falls back to the plain
+            // channel label when the server hasn't sent a topic.
             Text {
-                text: current-channel-label;
-                font-size: 18px;
-            }
-
-            for line in chat-messages : Text {
-                text: line;
+                text: current-topic == "" ? current-channel-label : current-topic;
+                font-size: 14px;
                 wrap: word-wrap;
+                max-height: 54px;
+                vertical-alignment: top;
             }
 
+            ListView {
+                vertical-stretch: 1;
+
+                for line in chat-lines : HorizontalLayout {
+                    alignment: start;
+                    spacing: 0px;
+
+                    for segment in line.segments : Text {
+                        text: segment.text;
+                        wrap: word-wrap;
+                        font-weight: segment.bold ? 700 : 400;
+                        color: segment.has-color
+                            ? segment.color
+                            : (theme == "dark" ? white : black);
+                    }
+                }
+            }
+
+            // Small compose bar, never more than one line tall: paperclip
+            // to attach a file (left, like Cicchetto), text field, send
+            // icon (right).
             HorizontalBox {
+                height: 40px;
+                spacing: 6px;
+
+                Button {
+                    text: "📎";
+                    accessible-label: @tr("Attach file");
+                    width: 36px;
+                    clicked => { attach-file-requested(); }
+                }
+
                 LineEdit {
                     placeholder-text: @tr("Message");
                     accessible-label: @tr("Message");
@@ -453,8 +537,11 @@ export component AppWindow inherits Window {
                     accepted => { send-chat-message(compose-text); }
                     edited(new-text) => { compose-text-changed(new-text); }
                 }
+
                 Button {
-                    text: @tr("Send");
+                    text: "➤";
+                    accessible-label: @tr("Send");
+                    width: 36px;
                     enabled: has-selected-channel;
                     clicked => { send-chat-message(compose-text); }
                 }

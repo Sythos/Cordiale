@@ -55,9 +55,11 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    ToggleNetwork(String),
     SendMessage {
         body: String,
     },
+    AttachFile,
     ComposeTextChanged(String),
     ToggleTheme,
     SaveDisplayPrefs(DisplayPrefs),
@@ -169,10 +171,11 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_screen("connect".into());
             ui.set_status_kind("".into());
             ui.set_status_message("".into());
-            let empty_channels = Rc::new(slint::VecModel::from(Vec::<ChannelEntry>::new()));
-            ui.set_channel_list(empty_channels.into());
-            let empty_messages = Rc::new(slint::VecModel::from(Vec::<slint::SharedString>::new()));
-            ui.set_chat_messages(empty_messages.into());
+            let empty_groups = Rc::new(slint::VecModel::from(Vec::<NetworkGroup>::new()));
+            ui.set_network_groups(empty_groups.into());
+            let empty_lines = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
+            ui.set_chat_lines(empty_lines.into());
+            ui.set_current_topic("".into());
             ui.set_has_selected_channel(false);
         }
     });
@@ -183,6 +186,16 @@ fn main() -> Result<(), slint::PlatformError> {
             network: network.to_string(),
             channel: channel.to_string(),
         });
+    });
+
+    let tx_for_network_toggle = worker_tx.clone();
+    ui.on_network_toggle_requested(move |network| {
+        let _ = tx_for_network_toggle.send(WorkerCommand::ToggleNetwork(network.to_string()));
+    });
+
+    let tx_for_attach = worker_tx.clone();
+    ui.on_attach_file_requested(move || {
+        let _ = tx_for_attach.send(WorkerCommand::AttachFile);
     });
 
     let tx_for_send = worker_tx.clone();
@@ -384,6 +397,15 @@ struct WorkerState {
     /// Grappa/Cicchetto maintainer, see MEMORY.md §0sexies) so switching
     /// channels doesn't lose or leak what's half-typed.
     drafts: HashMap<(String, String), String>,
+    /// Keyed by `(network, channel)`; the channel topic, if the server sent
+    /// one — see `topics_from_boot` and `handle_frame`.
+    topics: HashMap<(String, String), String>,
+    /// Network slug -> whether its channel list is expanded in the sidebar.
+    /// Missing entries default to expanded (see `network_groups_model`).
+    expanded_networks: HashMap<String, bool>,
+    /// `(network, channel, label)` from the last bootstrap, kept around so
+    /// `ToggleNetwork` can rebuild the sidebar model without re-fetching.
+    channel_entries: Vec<(String, String, String)>,
     current_channel: Option<(String, String)>,
     /// Network slug -> Grappa's own integer `network_id`, read from
     /// `boot.networks`. WS commands like `/links` need the integer id,
@@ -413,6 +435,9 @@ impl WorkerState {
             joined_topics: std::collections::HashSet::new(),
             messages: HashMap::new(),
             drafts: HashMap::new(),
+            topics: HashMap::new(),
+            expanded_networks: HashMap::new(),
+            channel_entries: Vec::new(),
             current_channel: None,
             network_ids: HashMap::new(),
             settings_network: None,
@@ -466,6 +491,23 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         handle_select_channel(&mut state, &ui, network, channel).await;
+                    }
+                    Some(WorkerCommand::ToggleNetwork(network)) => {
+                        let expanded = state.expanded_networks.entry(network).or_insert(true);
+                        *expanded = !*expanded;
+                        refresh_network_groups(&state, &ui);
+                    }
+                    Some(WorkerCommand::AttachFile) => {
+                        // No attachment upload path in the Grappa contract
+                        // yet (see `docs/protocol-notes.md` §4's "dcc
+                        // offer" entity — attachments look DCC-based, not
+                        // a plain REST upload) — surfaced as a status
+                        // message rather than silently doing nothing.
+                        persistence::log_line("attach file requested: not yet implemented");
+                        let ui = ui.clone();
+                        let _ = ui.upgrade_in_event_loop(|ui| {
+                            ui.set_status_kind("attach-unsupported".into());
+                        });
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
                         handle_send_message(&state, &ui, body).await;
@@ -718,6 +760,9 @@ async fn handle_connect(
             }
 
             let entries = channel_entries_from_boot(&outcome);
+            state.channel_entries = entries.clone();
+            state.topics = topics_from_boot(&outcome);
+            state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
             let is_admin = outcome
                 .subject
@@ -764,6 +809,7 @@ async fn handle_connect(
             state.settings_network = distinct_networks.first().cloned();
             let network_count = distinct_networks.len();
             let channel_count = entries.len();
+            let groups = network_groups_model(&entries, &state.expanded_networks);
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
                 ui.set_is_admin(is_admin);
@@ -775,15 +821,7 @@ async fn handle_connect(
                 let networks: Vec<slint::SharedString> =
                     distinct_networks.into_iter().map(Into::into).collect();
                 ui.set_known_networks(Rc::new(slint::VecModel::from(networks)).into());
-                let model: Vec<ChannelEntry> = entries
-                    .into_iter()
-                    .map(|(network, channel, label)| ChannelEntry {
-                        network: network.into(),
-                        channel: channel.into(),
-                        label: label.into(),
-                    })
-                    .collect();
-                ui.set_channel_list(Rc::new(slint::VecModel::from(model)).into());
+                ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
             });
         }
         Err(err) => {
@@ -817,15 +855,17 @@ async fn handle_select_channel(
     state.current_channel = Some(key.clone());
     let lines = state.messages.get(&key).cloned().unwrap_or_default();
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
+    let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
 
     let label = format!("{network} — {channel}");
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
+        ui.set_current_topic(irc_topic.into());
         ui.set_has_selected_channel(true);
         ui.set_compose_text(draft.into());
-        let model: Vec<slint::SharedString> = lines.into_iter().map(Into::into).collect();
-        ui.set_chat_messages(Rc::new(slint::VecModel::from(model)).into());
+        let model = chat_lines_model(&lines);
+        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
     });
 }
 
@@ -1200,16 +1240,33 @@ fn handle_frame(
         return;
     }
 
-    let line = render_frame(&frame);
     let key = (network.clone(), channel.clone());
+
+    // Any frame that happens to carry a `topic` field is treated as a
+    // topic update for its channel — no confirmed `topic_changed`-style
+    // event name in `docs/protocol-notes.md`, so this doesn't bet on one.
+    if let Some(new_topic) = frame.payload.get("topic").and_then(Value::as_str) {
+        if !new_topic.is_empty() {
+            state.topics.insert(key.clone(), new_topic.to_string());
+            if state.current_channel.as_ref() == Some(&key) {
+                let new_topic = new_topic.to_string();
+                let ui = ui.clone();
+                let _ = ui.upgrade_in_event_loop(move |ui| {
+                    ui.set_current_topic(new_topic.into());
+                });
+            }
+        }
+    }
+
+    let line = render_frame(&frame);
     state.messages.entry(key.clone()).or_default().push(line);
 
     if state.current_channel.as_ref() == Some(&key) {
         let lines = state.messages[&key].clone();
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
-            let model: Vec<slint::SharedString> = lines.into_iter().map(Into::into).collect();
-            ui.set_chat_messages(Rc::new(slint::VecModel::from(model)).into());
+            let model = chat_lines_model(&lines);
+            ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         });
     }
 }
@@ -1313,23 +1370,37 @@ fn handle_links_bundle(ui: &slint::Weak<AppWindow>, payload: &Value) {
     });
 }
 
-fn render_frame(frame: &cordiale_core::phoenix::PhoenixMessage) -> String {
-    let nick = frame
-        .payload
+/// Shared `from`/`nick` + `body`/`message` extraction for both live frames
+/// (`render_frame`) and REST history rows (`render_history_entry`) — per
+/// `docs/protocol-notes.md` §4, scrollback rows and push events are the
+/// same "message" entity, so both shapes use the same field names.
+fn render_message_body(payload: &Value) -> Option<String> {
+    let nick = payload
         .get("from")
-        .or_else(|| frame.payload.get("nick"))
+        .or_else(|| payload.get("nick"))
         .and_then(|v| v.as_str());
-    let body = frame
-        .payload
+    let body = payload
         .get("body")
-        .or_else(|| frame.payload.get("message"))
+        .or_else(|| payload.get("message"))
         .and_then(|v| v.as_str());
 
     match (nick, body) {
-        (Some(nick), Some(body)) => format!("<{nick}> {body}"),
-        (None, Some(body)) => body.to_string(),
-        _ => format!("{}: {}", frame.event, frame.payload),
+        (Some(nick), Some(body)) => Some(format!("<{nick}> {body}")),
+        (None, Some(body)) => Some(body.to_string()),
+        _ => None,
     }
+}
+
+fn render_frame(frame: &cordiale_core::phoenix::PhoenixMessage) -> String {
+    render_message_body(&frame.payload)
+        .unwrap_or_else(|| format!("{}: {}", frame.event, frame.payload))
+}
+
+/// Renders one `boot.heads` scrollback row the same way a live frame would
+/// be, minus the `event`/`topic` envelope a bootstrap history row doesn't
+/// have — falls back to the raw JSON rather than guessing a shape.
+fn render_history_entry(value: &Value) -> String {
+    render_message_body(value).unwrap_or_else(|| value.to_string())
 }
 
 fn apply_display_prefs(ui: &AppWindow, prefs: &DisplayPrefs) {
@@ -1399,7 +1470,10 @@ fn to_ws_url(base_url: &str) -> String {
 /// Reads `(network, channel, label)` triples out of `boot.channels`. Field
 /// names aren't fully confirmed (see `docs/protocol-notes.md` §4), so this
 /// tries the plausible candidates and falls back to a positional
-/// placeholder rather than guessing further.
+/// placeholder rather than guessing further. `label` is just the channel
+/// name — the sidebar groups by network already, so repeating it per row
+/// would be redundant (that's what the old flat "network — channel" list
+/// did).
 fn channel_entries_from_boot(outcome: &BootstrapOutcome) -> Vec<(String, String, String)> {
     let mut entries = Vec::new();
     for (network, channels) in &outcome.boot.channels {
@@ -1410,11 +1484,133 @@ fn channel_entries_from_boot(outcome: &BootstrapOutcome) -> Vec<(String, String,
                 .and_then(|field| field.as_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("channel #{}", index + 1));
-            let label = format!("{network} — {channel}");
+            let label = channel.clone();
             entries.push((network.clone(), channel, label));
         }
     }
     entries
+}
+
+/// Reads `(network, channel) -> topic` out of `boot.channels`, for entries
+/// that actually carry a non-empty `topic` field — inferred, not confirmed
+/// by `docs/protocol-notes.md` §4 ("Ha: membri, topic, modes, ..."; no
+/// JSON schema given). Channels without one are simply absent from the
+/// map; the UI falls back to the plain channel label in that case.
+fn topics_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), String> {
+    let mut topics = HashMap::new();
+    for (network, channels) in &outcome.boot.channels {
+        for value in channels {
+            let channel = value
+                .get("name")
+                .or_else(|| value.get("channel"))
+                .and_then(|field| field.as_str());
+            let topic = value.get("topic").and_then(|field| field.as_str());
+            if let (Some(channel), Some(topic)) = (channel, topic) {
+                if !topic.is_empty() {
+                    topics.insert((network.clone(), channel.to_string()), topic.to_string());
+                }
+            }
+        }
+    }
+    topics
+}
+
+/// Reads initial scrollback out of `boot.heads` (network -> channel ->
+/// message rows), rendered the same way a live frame would be.
+/// `boot.heads` "is only present for a channel that actually has history"
+/// (confirmed in an earlier research pass, see MEMORY.md) — a channel with
+/// none simply has no key here and starts empty, same as before this was
+/// wired in.
+fn messages_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), Vec<String>> {
+    let mut messages = HashMap::new();
+    for (network, channels) in &outcome.boot.heads {
+        for (channel, rows) in channels {
+            let lines: Vec<String> = rows.iter().map(render_history_entry).collect();
+            if !lines.is_empty() {
+                messages.insert((network.clone(), channel.clone()), lines);
+            }
+        }
+    }
+    messages
+}
+
+/// Groups flat `(network, channel, label)` entries by network, sorted by
+/// network then channel (`boot.channels` is a `HashMap`, so iteration
+/// order isn't stable without this), with each group's expand state from
+/// `expanded` — a network missing from that map defaults to expanded, so
+/// the sidebar starts fully open without having to pre-populate it.
+fn network_groups_model(
+    entries: &[(String, String, String)],
+    expanded: &HashMap<String, bool>,
+) -> Vec<NetworkGroup> {
+    let mut by_network: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for (network, channel, label) in entries {
+        by_network
+            .entry(network.clone())
+            .or_default()
+            .push((channel.clone(), label.clone()));
+    }
+    by_network
+        .into_iter()
+        .map(|(network, mut channels)| {
+            channels.sort();
+            let is_expanded = expanded.get(&network).copied().unwrap_or(true);
+            let channel_entries: Vec<ChannelEntry> = channels
+                .into_iter()
+                .map(|(channel, label)| ChannelEntry {
+                    network: network.clone().into(),
+                    channel: channel.into(),
+                    label: label.into(),
+                })
+                .collect();
+            NetworkGroup {
+                network: network.into(),
+                expanded: is_expanded,
+                channels: Rc::new(slint::VecModel::from(channel_entries)).into(),
+            }
+        })
+        .collect()
+}
+
+/// Pushes `state.channel_entries` + `state.expanded_networks` to the
+/// sidebar as a fresh `network-groups` model — called after anything that
+/// changes either (a network's expand toggle, a fresh connect).
+fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let groups = network_groups_model(&state.channel_entries, &state.expanded_networks);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
+    });
+}
+
+/// Converts one already mIRC-parsed line into the Slint `ChatLine` model,
+/// mapping `cordiale_core::formatting::ColorSegment`'s abstract `(u8, u8,
+/// u8)` into a real `slint::Color` only here — the core crate stays free
+/// of any Slint dependency.
+fn chat_line_from_raw(raw: &str) -> ChatLine {
+    let segments: Vec<MessageSegment> = cordiale_core::formatting::parse_mirc_text(raw)
+        .into_iter()
+        .map(|segment| {
+            let (has_color, color) = match segment.color {
+                Some((r, g, b)) => (true, slint::Color::from_rgb_u8(r, g, b)),
+                None => (false, slint::Color::from_rgb_u8(0, 0, 0)),
+            };
+            MessageSegment {
+                text: segment.text.into(),
+                has_color,
+                color,
+                bold: segment.bold,
+            }
+        })
+        .collect();
+    ChatLine {
+        segments: Rc::new(slint::VecModel::from(segments)).into(),
+    }
+}
+
+fn chat_lines_model(raw_lines: &[String]) -> Vec<ChatLine> {
+    raw_lines.iter().map(|line| chat_line_from_raw(line)).collect()
 }
 
 /// Reads a `slug -> id` map out of `boot.networks`, for WS commands that

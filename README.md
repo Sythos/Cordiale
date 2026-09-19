@@ -43,6 +43,18 @@ than broken:
 - **On-Connect Commands** is a single-line field, not a multi-line
   editor — separate multiple commands yourself.
 - The **`/links` graph window** has no pan/zoom yet.
+- **Attachments**: the paperclip icon in the compose bar is there, but
+  sending doesn't do anything yet — Grappa's contract doesn't document a
+  plain REST upload (attachments look DCC-based), so this needs its own
+  protocol research pass.
+- **mIRC color codes** render per-segment, but a line with multiple color
+  runs doesn't wrap as one paragraph — Slint's layout doesn't do inline
+  text flow across separately-colored spans, so a long multi-color line
+  can overflow sideways instead of wrapping.
+- **Channel topic** is read from `boot` at connect time and updated live
+  if a frame happens to carry a `topic` field — there's no confirmed
+  `topic_changed`-style event name in the protocol notes, so a server that
+  pushes topic changes under some other shape won't update it live.
 - Performance hasn't been profiled — deliberately deferred until after
   field testing surfaces real usage patterns.
 

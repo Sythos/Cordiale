@@ -39,6 +39,7 @@ pub mod bootstrap;
 pub mod client;
 pub mod credentials;
 pub mod domain;
+pub mod formatting;
 pub mod links;
 pub mod persistence;
 pub mod phoenix;
