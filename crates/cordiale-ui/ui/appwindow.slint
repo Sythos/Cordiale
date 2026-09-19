@@ -265,6 +265,12 @@ component MemberContextMenu {
 
 export component AppWindow inherits Window {
     title: "Cordiale";
+    // Winresource only embeds an icon into the .exe file's own Win32
+    // resources (Explorer file icon, Alt-Tab before the window exists).
+    // The live window's title-bar corner and running taskbar icon come
+    // from the window handle itself, which winit/Slint leaves unset
+    // unless this property is set — the two are independent.
+    icon: @image-url("../../../resources/branding/cordiale_icona.png");
     // Not `width`/`height`: those pin the window to a fixed size the
     // window manager won't let the user resize or maximize past.
     // `preferred-*` only picks the initial size, same window otherwise
@@ -474,9 +480,9 @@ export component AppWindow inherits Window {
         } else if status-kind == "send-failed" {
             return @tr("Couldn't send that message.");
         } else if status-kind == "disconnected" {
-            return @tr("Disconnected. Reconnecting…");
+            return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "reconnecting" {
-            return @tr("Reconnecting…");
+            return status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
         } else if status-kind == "attach-unsupported" {
             return @tr("Attachments aren't supported yet.");
         } else {
@@ -705,6 +711,37 @@ export component AppWindow inherits Window {
                     width: 32px;
                     height: 32px;
                     clicked => { screen = "settings"; }
+                }
+            }
+
+            // Cicchetto's own bottom-of-sidebar "actions" row (a plain
+            // click, not a right-click, unlike `MemberContextMenu`) —
+            // confirmed against its real source: a global nav/utility
+            // menu, not a per-member one. Only lists what Cordiale
+            // actually has; Cicchetto's version also has rooms/radio/
+            // themes/archive/mute/switch-account, none of which Cordiale
+            // supports yet.
+            HorizontalLayout {
+                alignment: start;
+
+                Button {
+                    text: "☰ " + @tr("Actions") + " ▾";
+                    clicked => { actions-menu-area.show({ x: 0px, y: 0px }); }
+                }
+
+                actions-menu-area := ContextMenuArea {
+                    Menu {
+                        MenuItem { title: @tr("Home"); activated => { home-requested(); } }
+                        MenuItem { title: @tr("Settings"); activated => { screen = "settings"; } }
+                        if is-admin : MenuItem {
+                            title: @tr("Admin");
+                            activated => {
+                                screen = "settings";
+                                settings-section = "admin";
+                            }
+                        }
+                        MenuItem { title: @tr("Disconnect"); activated => { disconnect-requested(); } }
+                    }
                 }
             }
         }

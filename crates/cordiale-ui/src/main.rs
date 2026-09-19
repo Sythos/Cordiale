@@ -787,6 +787,7 @@ async fn run_worker(
                         // back — nothing else ever clears it.
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_status_kind("signed-in".into());
+                            ui.set_status_message("".into());
                         });
                     }
                     Some(SessionEvent::Frame(frame)) => {
@@ -794,14 +795,16 @@ async fn run_worker(
                     }
                     Some(SessionEvent::Disconnected { reason }) => {
                         persistence::log_line(&format!("session disconnected: {reason}"));
-                        let _ = ui.upgrade_in_event_loop(|ui| {
+                        let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("disconnected".into());
+                            ui.set_status_message(reason.into());
                         });
                     }
                     Some(SessionEvent::Reconnecting { reason }) => {
                         persistence::log_line(&format!("session reconnecting: {reason}"));
-                        let _ = ui.upgrade_in_event_loop(|ui| {
+                        let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("reconnecting".into());
+                            ui.set_status_message(reason.into());
                         });
                     }
                     None => {
@@ -1510,6 +1513,25 @@ fn handle_frame(
         return;
     }
 
+    // Grappa doesn't use Phoenix Presence (`presence_state`/`presence_diff`)
+    // — confirmed by reading Cicchetto's actual source
+    // (`cicchetto/src/lib/subscribe.ts`). The full initial roster instead
+    // arrives as this one-shot event, fired after a channel join and on
+    // every real `366 RPL_ENDOFNAMES`; carries its own `network`/`channel`
+    // fields so it's handled here rather than through `channel_from_topic`,
+    // matching `links_bundle` above (may not even arrive on a channel
+    // topic). Without this, the member list only ever grows through
+    // incremental join/part/nick_change frames and starts empty for every
+    // channel that already had people in it before Cordiale connected.
+    if payload_kind == Some("members_seeded") {
+        if let Some(key) = apply_members_seeded(state, &frame.payload) {
+            if state.current_channel.as_ref() == Some(&key) {
+                push_members_update(state, ui, &key);
+            }
+        }
+        return;
+    }
+
     let Some((network, channel)) = channel_from_topic(&frame.topic) else {
         return;
     };
@@ -1550,19 +1572,40 @@ fn handle_frame(
 
     let members_changed = update_members_from_frame(state, &key, &frame.payload);
     if members_changed && state.current_channel.as_ref() == Some(&key) {
-        let members = state.members.get(&key).cloned().unwrap_or_default();
-        let can_moderate = state
-            .identifier
-            .as_deref()
-            .is_some_and(|identifier| is_own_nick_an_op(&members, identifier));
-        let dark_theme = state.theme == Theme::Dark;
-        let ui = ui.clone();
-        let _ = ui.upgrade_in_event_loop(move |ui| {
-            ui.set_can_moderate_members(can_moderate);
-            let member_rows = members_model(&members, dark_theme);
-            ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
-        });
+        push_members_update(state, ui, &key);
     }
+}
+
+/// Parses a `members_seeded` payload (`{kind, network, channel, members}`,
+/// each member `{nick, modes: [...]}`) and replaces the stored roster for
+/// that channel outright — it's a full snapshot, not a delta.
+fn apply_members_seeded(state: &mut WorkerState, payload: &Value) -> Option<(String, String)> {
+    let network = payload.get("network").and_then(Value::as_str)?.to_string();
+    let channel = payload.get("channel").and_then(Value::as_str)?.to_string();
+    let list = payload.get("members").and_then(Value::as_array)?;
+    let mut members: Vec<MemberEntry> = list.iter().filter_map(member_from_entry).collect();
+    sort_members_by_rank(&mut members);
+    let key = (network, channel);
+    state.members.insert(key.clone(), members);
+    Some(key)
+}
+
+/// Pushes `state.members[key]` (and the derived op-gating flag) to the UI
+/// — shared by every member-list mutation path (`members_seeded`,
+/// incremental join/part/nick_change, channel selection).
+fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(String, String)) {
+    let members = state.members.get(key).cloned().unwrap_or_default();
+    let can_moderate = state
+        .identifier
+        .as_deref()
+        .is_some_and(|identifier| is_own_nick_an_op(&members, identifier));
+    let dark_theme = state.theme == Theme::Dark;
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_can_moderate_members(can_moderate);
+        let member_rows = members_model(&members, dark_theme);
+        ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
+    });
 }
 
 /// Maintains `state.members` from live join/part/quit/nick_change frames
