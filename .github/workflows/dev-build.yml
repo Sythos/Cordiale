@@ -1,0 +1,86 @@
+name: Dev Build
+
+# Manually-triggered, Windows x64 only: a quick installer for field
+# testing between real releases, not a substitute for the tagged
+# `packages.yml` pipeline (which still builds every platform and
+# publishes a GitHub Release on a `v*` tag). Never runs on a push/tag —
+# `workflow_dispatch` only, so it can't be triggered by accident.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64-dev:
+    name: windows-x64-dev
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v5
+
+      - name: Compute DEV timestamp
+        id: timestamp
+        shell: pwsh
+        run: |
+          $ts = Get-Date -Format "yyyyMMddTHHmm"
+          "timestamp=$ts" >> $env:GITHUB_OUTPUT
+
+      - name: Install stable Rust and target
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --package cordiale-ui --target x86_64-pc-windows-msvc
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress --yes
+
+      - name: Package Windows DEV installer
+        shell: pwsh
+        env:
+          TIMESTAMP: ${{ steps.timestamp.outputs.timestamp }}
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $binPath = "target\x86_64-pc-windows-msvc\release\cordiale-ui.exe"
+
+          $candidates = @(
+            (Get-Command makensis -ErrorAction SilentlyContinue).Source,
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+            "${env:ProgramFiles}\NSIS\makensis.exe",
+            "${env:ChocolateyInstall}\lib\NSIS\tools\makensis.exe"
+          ) | Where-Object { $_ -and (Test-Path $_) }
+          $makensis = $candidates | Select-Object -First 1
+          if (-not $makensis) {
+            $found = Get-ChildItem -Path "${env:ProgramFiles}", "${env:ProgramFiles(x86)}", "${env:ChocolateyInstall}" `
+              -Filter makensis.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $makensis = $found.FullName }
+          }
+          if (-not $makensis) {
+            throw "makensis.exe not found on this runner"
+          }
+
+          $outFile = "$PWD\dist\Cordiale_Windows_x64_DEV_$env:TIMESTAMP.exe"
+          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=dev-$env:TIMESTAMP" packaging\windows\installer.nsi
+          if ($LASTEXITCODE -ne 0) {
+            throw "makensis failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Generate checksum
+        shell: pwsh
+        run: |
+          Get-ChildItem dist | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
+            Set-Content -Path "dist\SHA256SUMS-windows-x64-dev" -Encoding ascii
+
+      - name: Upload DEV installer
+        uses: actions/upload-artifact@v6
+        with:
+          name: cordiale-windows-x64-dev-${{ steps.timestamp.outputs.timestamp }}
+          path: dist/*
