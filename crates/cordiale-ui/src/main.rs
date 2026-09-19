@@ -401,7 +401,7 @@ struct WorkerState {
     /// one — see `topics_from_boot` and `handle_frame`.
     topics: HashMap<(String, String), String>,
     /// Network slug -> whether its channel list is expanded in the sidebar.
-    /// Missing entries default to expanded (see `network_groups_model`).
+    /// Missing entries default to expanded (see `network_groups_data`).
     expanded_networks: HashMap<String, bool>,
     /// `(network, channel, label)` from the last bootstrap, kept around so
     /// `ToggleNetwork` can rebuild the sidebar model without re-fetching.
@@ -809,7 +809,7 @@ async fn handle_connect(
             state.settings_network = distinct_networks.first().cloned();
             let network_count = distinct_networks.len();
             let channel_count = entries.len();
-            let groups = network_groups_model(&entries, &state.expanded_networks);
+            let groups_data = network_groups_data(&entries, &state.expanded_networks);
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
                 ui.set_is_admin(is_admin);
@@ -821,6 +821,7 @@ async fn handle_connect(
                 let networks: Vec<slint::SharedString> =
                     distinct_networks.into_iter().map(Into::into).collect();
                 ui.set_known_networks(Rc::new(slint::VecModel::from(networks)).into());
+                let groups = network_groups_model(groups_data);
                 ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
             });
         }
@@ -1539,10 +1540,17 @@ fn messages_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), V
 /// order isn't stable without this), with each group's expand state from
 /// `expanded` — a network missing from that map defaults to expanded, so
 /// the sidebar starts fully open without having to pre-populate it.
-fn network_groups_model(
+///
+/// Returns plain data, not yet a Slint model: this runs on the worker
+/// thread, and `NetworkGroup`/`ChannelEntry` need a `ModelRc` (backed by
+/// `Rc`, not `Send`) for the nested channel list — building that here
+/// would make the plain data un-`Send`, and it has to cross into an
+/// `upgrade_in_event_loop` closure to reach the UI thread. Pass this to
+/// `network_groups_model` only from inside that closure.
+fn network_groups_data(
     entries: &[(String, String, String)],
     expanded: &HashMap<String, bool>,
-) -> Vec<NetworkGroup> {
+) -> Vec<(String, bool, Vec<(String, String)>)> {
     let mut by_network: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
     for (network, channel, label) in entries {
@@ -1556,6 +1564,17 @@ fn network_groups_model(
         .map(|(network, mut channels)| {
             channels.sort();
             let is_expanded = expanded.get(&network).copied().unwrap_or(true);
+            (network, is_expanded, channels)
+        })
+        .collect()
+}
+
+/// Builds the actual sidebar `NetworkGroup` Slint model out of
+/// `network_groups_data`'s plain grouping — must run on the UI thread,
+/// see that function's doc comment for why.
+fn network_groups_model(data: Vec<(String, bool, Vec<(String, String)>)>) -> Vec<NetworkGroup> {
+    data.into_iter()
+        .map(|(network, expanded, channels)| {
             let channel_entries: Vec<ChannelEntry> = channels
                 .into_iter()
                 .map(|(channel, label)| ChannelEntry {
@@ -1566,7 +1585,7 @@ fn network_groups_model(
                 .collect();
             NetworkGroup {
                 network: network.into(),
-                expanded: is_expanded,
+                expanded,
                 channels: Rc::new(slint::VecModel::from(channel_entries)).into(),
             }
         })
@@ -1577,9 +1596,10 @@ fn network_groups_model(
 /// sidebar as a fresh `network-groups` model — called after anything that
 /// changes either (a network's expand toggle, a fresh connect).
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let groups = network_groups_model(&state.channel_entries, &state.expanded_networks);
+    let data = network_groups_data(&state.channel_entries, &state.expanded_networks);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        let groups = network_groups_model(data);
         ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
     });
 }
