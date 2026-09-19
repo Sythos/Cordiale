@@ -20,12 +20,12 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             artifact: linux-x64
             deb_arch: amd64
             rpm_arch: x86_64
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             artifact: linux-arm64
             deb_arch: arm64
             rpm_arch: aarch64
@@ -276,7 +276,7 @@ jobs:
 
   source-archive:
     name: source-archive
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout client
@@ -323,7 +323,7 @@ jobs:
     name: create-release
     needs: [build-and-package, source-archive]
     if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
