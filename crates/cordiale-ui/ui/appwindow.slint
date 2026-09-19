@@ -173,19 +173,28 @@ component ResizeHandle {
 }
 
 // Right-click menu for a nick, usable both in the chat body and the
-// member list (the instantiator wraps whatever Text/content it wants
-// inside this). Item list, gating and wire shapes all confirmed against
+// member list — the instantiator supplies the label text/styling as
+// plain properties rather than nested content (`@children` inside
+// `ContextMenuArea` crashed the Slint compiler itself — an internal
+// panic, "range end index 1 out of range for slice of length 0", not a
+// reported syntax error — so this sticks to a plain `Text` child
+// instead, the same uncomplicated shape `ContextMenuArea`'s own docs
+// example uses). Item list, gating and wire shapes all confirmed against
 // Cicchetto's own source (UserContextMenu.tsx + lib/socket.ts +
-// lib/api.ts) before writing this, not guessed:
-// Op/Deop/Voice/Devoice/Kick/Ban only make sense (and are only ever
-// enabled) when the viewer is a channel op; WHOIS/CTCP/Query need no
-// permission. A local `component`, not `export`, the same as
-// `ResizeHandle` — its callbacks are plain pass-throughs the instantiator
-// wires to AppWindow's own top-level callbacks (Slint has no way for a
-// nested component to reach an ancestor's callbacks by name).
+// lib/api.ts) before writing this, not guessed: Op/Deop/Voice/Devoice/
+// Kick/Ban only make sense (and are only ever enabled) when the viewer
+// is a channel op; WHOIS/CTCP/Query need no permission. A local
+// `component`, not `export`, the same as `ResizeHandle` — its callbacks
+// are plain pass-throughs the instantiator wires to AppWindow's own
+// top-level callbacks (Slint has no way for a nested component to reach
+// an ancestor's callbacks by name).
 component MemberContextMenu {
     in property <string> target-nick;
     in property <bool> can-moderate;
+    in property <string> display-text;
+    in property <color> text-color;
+    in property <bool> text-bold: false;
+    in property <bool> text-italic: false;
     callback mode-action(string, string); // verb, nick
     callback kick(string);
     callback ban(string);
@@ -244,7 +253,13 @@ component MemberContextMenu {
             }
         }
 
-        @children
+        Text {
+            text: display-text;
+            wrap: no-wrap;
+            font-weight: text-bold ? 700 : 400;
+            font-italic: text-italic;
+            color: text-color;
+        }
     }
 }
 
@@ -730,19 +745,16 @@ export component AppWindow inherits Window {
                     if line.nick != "" : MemberContextMenu {
                         target-nick: line.nick;
                         can-moderate: can-moderate-members;
+                        display-text: "<" + line.nick + "> ";
+                        text-color: line.nick-color;
+                        text-bold: true;
+                        text-italic: line.italic;
                         mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
                         kick(nick) => { member-kick-requested(nick); }
                         ban(nick) => { member-ban-requested(nick); }
                         whois(nick) => { member-whois-requested(nick); }
                         ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                         query(nick) => { member-query-requested(nick); }
-
-                        Text {
-                            text: "<" + line.nick + "> ";
-                            font-weight: 700;
-                            font-italic: line.italic;
-                            color: line.nick-color;
-                        }
                     }
 
                     for segment in line.segments : Text {
@@ -810,18 +822,14 @@ export component AppWindow inherits Window {
                 for member in channel-members : MemberContextMenu {
                     target-nick: member.name;
                     can-moderate: can-moderate-members;
+                    display-text: member.prefix == "" ? member.name : member.prefix + member.name;
+                    text-color: member.color;
                     mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
                     kick(nick) => { member-kick-requested(nick); }
                     ban(nick) => { member-ban-requested(nick); }
                     whois(nick) => { member-whois-requested(nick); }
                     ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                     query(nick) => { member-query-requested(nick); }
-
-                    Text {
-                        text: member.prefix == "" ? member.name : member.prefix + member.name;
-                        wrap: no-wrap;
-                        color: member.color;
-                    }
                 }
             }
         }
