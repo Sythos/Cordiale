@@ -35,6 +35,11 @@ use crate::admin::{
     AdminNetworksResponse, AdminOverview, AdminReaperRunResponse, AdminSessionLogResponse,
     AdminSessionsResponse, AdminUsersResponse, AdminVisitorsResponse,
 };
+use crate::profile::{
+    AddIgnoreRequest, AliasesView, IgnoreMutationResponse, IgnoresResponse,
+    NetworkIdentityRequest, NotifyAddRequest, PerformUpdateRequest, PerformView,
+    VhostSelectionRequest, VhostSettingsView,
+};
 use crate::rest::{
     BootResponse, ConfigResponse, DisplayPrefs, LoginRequest, LoginResponse, MeResponse,
     SendMessageRequest,
@@ -413,6 +418,258 @@ impl GrappaClient {
             .error_for_status()?;
         Ok(())
     }
+
+    /// `PATCH /networks/:slug/identity` — self-service, own profile only
+    /// (scoped by the bearer token server-side, never an explicit user
+    /// id). Only `nick`/`ident`/`realname`: SASL/autojoin stay admin-only,
+    /// see `cordiale_core::profile`.
+    pub async fn update_network_identity(
+        &self,
+        token: &str,
+        network_slug: &str,
+        request: &NetworkIdentityRequest,
+    ) -> Result<Value, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "identity"]);
+        let response = self
+            .http
+            .patch(url)
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Value>().await?)
+    }
+
+    /// `GET /me/settings/vhost`.
+    pub async fn fetch_vhost_settings(
+        &self,
+        token: &str,
+    ) -> Result<VhostSettingsView, GrappaClientError> {
+        let url = format!("{}/me/settings/vhost", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<VhostSettingsView>().await?)
+    }
+
+    /// `PUT /me/settings/vhost` — the user always self-selects from the
+    /// granted set; there's no separate admin "pin" to fight with.
+    pub async fn update_vhost_selection(
+        &self,
+        token: &str,
+        selection: Vec<String>,
+    ) -> Result<VhostSettingsView, GrappaClientError> {
+        let url = format!("{}/me/settings/vhost", self.base_url);
+        let response = self
+            .http
+            .put(url)
+            .bearer_auth(token)
+            .json(&VhostSelectionRequest { selection })
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<VhostSettingsView>().await?)
+    }
+
+    /// `GET /networks/:slug/ignores`.
+    pub async fn fetch_ignores(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<Vec<String>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "ignores"]);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<IgnoresResponse>().await?.masks)
+    }
+
+    /// `POST /networks/:slug/ignores`.
+    pub async fn add_ignore(
+        &self,
+        token: &str,
+        network_slug: &str,
+        mask: &str,
+    ) -> Result<IgnoreMutationResponse, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "ignores"]);
+        let request = AddIgnoreRequest {
+            mask: mask.to_string(),
+        };
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(&request)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<IgnoreMutationResponse>().await?)
+    }
+
+    /// `DELETE /networks/:slug/ignores/:mask`.
+    pub async fn remove_ignore(
+        &self,
+        token: &str,
+        network_slug: &str,
+        mask: &str,
+    ) -> Result<IgnoreMutationResponse, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "ignores", mask]);
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<IgnoreMutationResponse>().await?)
+    }
+
+    /// `GET /me/settings/aliases`.
+    pub async fn fetch_aliases(
+        &self,
+        token: &str,
+    ) -> Result<std::collections::HashMap<String, String>, GrappaClientError> {
+        let url = format!("{}/me/settings/aliases", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<AliasesView>().await?.aliases)
+    }
+
+    /// `PUT /me/settings/aliases` — full-map replace, not a diff.
+    pub async fn update_aliases(
+        &self,
+        token: &str,
+        aliases: std::collections::HashMap<String, String>,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/me/settings/aliases", self.base_url);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(&AliasesView { aliases })
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /networks/:slug/perform`.
+    pub async fn fetch_perform(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<PerformView, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "perform"]);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<PerformView>().await?)
+    }
+
+    /// `PUT /networks/:slug/perform`.
+    pub async fn update_perform(
+        &self,
+        token: &str,
+        network_slug: &str,
+        request: &PerformUpdateRequest,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "perform"]);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `POST /networks/:slug/notify` — adds nicks to the presence
+    /// watchlist. There's no self-service `GET`: the current list arrives
+    /// over the WS `notify_list` snapshot instead (Cicchetto has no REST
+    /// read path either, by design — see `docs/protocol-notes.md` §4quater).
+    pub async fn add_notify_nicks(
+        &self,
+        token: &str,
+        network_slug: &str,
+        nicks: Vec<String>,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "notify"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&NotifyAddRequest { nicks })
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /networks/:slug/notify/:nick`.
+    pub async fn remove_notify_nick(
+        &self,
+        token: &str,
+        network_slug: &str,
+        nick: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "notify", nick]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -746,5 +1003,146 @@ mod tests {
             .delete_admin_visitor("abc123", "abc")
             .await
             .expect("delete_admin_visitor");
+    }
+
+    #[tokio::test]
+    async fn update_network_identity_sends_only_set_fields() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/networks/libera/identity"))
+            .and(body_json(serde_json::json!({"nick": "vjt2"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let request = crate::profile::NetworkIdentityRequest {
+            nick: Some("vjt2".to_string()),
+            ..crate::profile::NetworkIdentityRequest::default()
+        };
+        client
+            .update_network_identity("abc123", "libera", &request)
+            .await
+            .expect("update_network_identity");
+    }
+
+    #[tokio::test]
+    async fn fetch_vhost_settings_parses_the_response() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/vhost"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "available": [
+                    {"address": "1.2.3.4", "in_pool": true, "granted": true, "name": "eu-1"}
+                ],
+                "selection": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let view = client
+            .fetch_vhost_settings("abc123")
+            .await
+            .expect("fetch_vhost_settings");
+        assert_eq!(view.available.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_vhost_selection_sends_the_selection_list() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/vhost"))
+            .and(body_json(serde_json::json!({"selection": ["1.2.3.4"]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "available": [],
+                "selection": ["1.2.3.4"]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .update_vhost_selection("abc123", vec!["1.2.3.4".to_string()])
+            .await
+            .expect("update_vhost_selection");
+    }
+
+    #[tokio::test]
+    async fn add_ignore_posts_the_mask() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/ignores"))
+            .and(body_json(serde_json::json!({"mask": "*!*@spammer.example"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "masks": ["*!*@spammer.example"],
+                "mask": "*!*@spammer.example",
+                "outcome": "added"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let response = client
+            .add_ignore("abc123", "libera", "*!*@spammer.example")
+            .await
+            .expect("add_ignore");
+        assert_eq!(response.outcome, "added");
+    }
+
+    #[tokio::test]
+    async fn fetch_aliases_unwraps_the_map() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/aliases"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "aliases": {"hi": "PRIVMSG $1 :hello!"}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let aliases = client
+            .fetch_aliases("abc123")
+            .await
+            .expect("fetch_aliases");
+        assert_eq!(aliases.get("hi"), Some(&"PRIVMSG $1 :hello!".to_string()));
+    }
+
+    #[tokio::test]
+    async fn fetch_perform_parses_the_response() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/perform"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "perform_list": "MODE $me +i",
+                "oper_pass_set": false
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let view = client
+            .fetch_perform("abc123", "libera")
+            .await
+            .expect("fetch_perform");
+        assert_eq!(view.perform_list, Some("MODE $me +i".to_string()));
+    }
+
+    #[tokio::test]
+    async fn add_notify_nicks_posts_to_the_network_scoped_path() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/notify"))
+            .and(body_json(serde_json::json!({"nicks": ["vjt"]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .add_notify_nicks("abc123", "libera", vec!["vjt".to_string()])
+            .await
+            .expect("add_notify_nicks");
     }
 }

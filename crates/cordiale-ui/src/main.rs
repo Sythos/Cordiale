@@ -68,6 +68,22 @@ enum WorkerCommand {
     AdminNetworkResetCircuit(String),
     AdminReaperRun,
     RequestLinks(String),
+    SettingsNetworkSelected(String),
+    IdentitySave {
+        nick: String,
+        ident: String,
+        realname: String,
+    },
+    IgnoreAdd(String),
+    IgnoreRemove(String),
+    PerformSave(String),
+    AliasAdd { command: String, expansion: String },
+    AliasRemove(String),
+    VhostToggle(String),
+    NotifyAdd(String),
+    NotifyRemove(String),
+    WatchPatternAdd(String),
+    WatchPatternRemove(String),
     Disconnect,
 }
 
@@ -268,6 +284,78 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_reaper.send(WorkerCommand::AdminReaperRun);
     });
 
+    let tx_for_network_selected = worker_tx.clone();
+    ui.on_settings_network_selected(move |network| {
+        let _ = tx_for_network_selected.send(WorkerCommand::SettingsNetworkSelected(
+            network.to_string(),
+        ));
+    });
+
+    let tx_for_identity = worker_tx.clone();
+    let weak_for_identity = ui.as_weak();
+    ui.on_identity_save_requested(move || {
+        if let Some(ui) = weak_for_identity.upgrade() {
+            let _ = tx_for_identity.send(WorkerCommand::IdentitySave {
+                nick: ui.get_identity_nick().to_string(),
+                ident: ui.get_identity_ident().to_string(),
+                realname: ui.get_identity_realname().to_string(),
+            });
+        }
+    });
+
+    let tx_for_ignore_add = worker_tx.clone();
+    ui.on_ignore_add_requested(move |mask| {
+        let _ = tx_for_ignore_add.send(WorkerCommand::IgnoreAdd(mask.to_string()));
+    });
+
+    let tx_for_ignore_remove = worker_tx.clone();
+    ui.on_ignore_remove_requested(move |mask| {
+        let _ = tx_for_ignore_remove.send(WorkerCommand::IgnoreRemove(mask.to_string()));
+    });
+
+    let tx_for_perform_save = worker_tx.clone();
+    ui.on_perform_save_requested(move |text| {
+        let _ = tx_for_perform_save.send(WorkerCommand::PerformSave(text.to_string()));
+    });
+
+    let tx_for_alias_add = worker_tx.clone();
+    ui.on_alias_add_requested(move |command, expansion| {
+        let _ = tx_for_alias_add.send(WorkerCommand::AliasAdd {
+            command: command.to_string(),
+            expansion: expansion.to_string(),
+        });
+    });
+
+    let tx_for_alias_remove = worker_tx.clone();
+    ui.on_alias_remove_requested(move |command| {
+        let _ = tx_for_alias_remove.send(WorkerCommand::AliasRemove(command.to_string()));
+    });
+
+    let tx_for_vhost_toggle = worker_tx.clone();
+    ui.on_vhost_toggle_requested(move |address| {
+        let _ = tx_for_vhost_toggle.send(WorkerCommand::VhostToggle(address.to_string()));
+    });
+
+    let tx_for_notify_add = worker_tx.clone();
+    ui.on_notify_add_requested(move |nick| {
+        let _ = tx_for_notify_add.send(WorkerCommand::NotifyAdd(nick.to_string()));
+    });
+
+    let tx_for_notify_remove = worker_tx.clone();
+    ui.on_notify_remove_requested(move |nick| {
+        let _ = tx_for_notify_remove.send(WorkerCommand::NotifyRemove(nick.to_string()));
+    });
+
+    let tx_for_watch_add = worker_tx.clone();
+    ui.on_watch_pattern_add_requested(move |pattern| {
+        let _ = tx_for_watch_add.send(WorkerCommand::WatchPatternAdd(pattern.to_string()));
+    });
+
+    let tx_for_watch_remove = worker_tx.clone();
+    ui.on_watch_pattern_remove_requested(move |pattern| {
+        let _ = tx_for_watch_remove.send(WorkerCommand::WatchPatternRemove(pattern.to_string()));
+    });
+
     ui.run()
 }
 
@@ -294,6 +382,16 @@ struct WorkerState {
     /// isn't just string-vs-int bikeshedding: the server hard-rejects a
     /// non-integer `network_id` (`is_integer/1` guard), no slug fallback.
     network_ids: HashMap<String, i64>,
+    /// The network the self-service Identity/Ignores/Perform/Notify
+    /// sections currently act on.
+    settings_network: Option<String>,
+    /// Session-local only: Grappa has no self-service `GET` for either of
+    /// these (the presence watchlist arrives via a WS snapshot, the
+    /// keyword watchlist has no documented `list` reply shape — see
+    /// `docs/protocol-notes.md` §4quater), so these don't survive a
+    /// reconnect/relaunch, unlike everything else in Settings.
+    notify_nicks: Vec<String>,
+    watch_patterns: Vec<String>,
 }
 
 impl WorkerState {
@@ -308,6 +406,9 @@ impl WorkerState {
             drafts: HashMap::new(),
             current_channel: None,
             network_ids: HashMap::new(),
+            settings_network: None,
+            notify_nicks: Vec::new(),
+            watch_patterns: Vec::new(),
         }
     }
 }
@@ -346,6 +447,13 @@ async fn run_worker(
                             password,
                         )
                         .await;
+                        if let Some(network) = state.settings_network.clone() {
+                            let ui_for_network = ui.clone();
+                            let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
+                                ui.set_settings_network(network.into());
+                            });
+                            handle_settings_network_refresh(&state, &ui).await;
+                        }
                     }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         handle_select_channel(&mut state, &ui, network, channel).await;
@@ -411,6 +519,106 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::RequestLinks(network)) => {
                         handle_request_links(&state, network);
+                    }
+                    Some(WorkerCommand::SettingsNetworkSelected(network)) => {
+                        state.settings_network = Some(network);
+                        handle_settings_network_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::IdentitySave {
+                        nick,
+                        ident,
+                        realname,
+                    }) => {
+                        handle_identity_save(&state, nick, ident, realname).await;
+                    }
+                    Some(WorkerCommand::IgnoreAdd(mask)) => {
+                        if let (Some(client), Some(token), Some(network)) =
+                            (&state.client, &state.token, &state.settings_network)
+                        {
+                            let _ = client.add_ignore(token, network, &mask).await;
+                        }
+                        handle_settings_network_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::IgnoreRemove(mask)) => {
+                        if let (Some(client), Some(token), Some(network)) =
+                            (&state.client, &state.token, &state.settings_network)
+                        {
+                            let _ = client.remove_ignore(token, network, &mask).await;
+                        }
+                        handle_settings_network_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::PerformSave(text)) => {
+                        if let (Some(client), Some(token), Some(network)) =
+                            (&state.client, &state.token, &state.settings_network)
+                        {
+                            let request = cordiale_core::profile::PerformUpdateRequest {
+                                perform_list: Some(text),
+                                oper_pass: None,
+                            };
+                            let _ = client.update_perform(token, network, &request).await;
+                        }
+                    }
+                    Some(WorkerCommand::AliasAdd { command, expansion }) => {
+                        handle_alias_upsert(&state, &ui, Some((command, expansion))).await;
+                    }
+                    Some(WorkerCommand::AliasRemove(command)) => {
+                        handle_alias_remove(&state, &ui, command).await;
+                    }
+                    Some(WorkerCommand::VhostToggle(address)) => {
+                        handle_vhost_toggle(&state, &ui, address).await;
+                    }
+                    Some(WorkerCommand::NotifyAdd(nick)) => {
+                        if let (Some(client), Some(token), Some(network)) =
+                            (&state.client, &state.token, &state.settings_network)
+                        {
+                            if client
+                                .add_notify_nicks(token, network, vec![nick.clone()])
+                                .await
+                                .is_ok()
+                                && !state.notify_nicks.contains(&nick)
+                            {
+                                state.notify_nicks.push(nick);
+                            }
+                        }
+                        push_notify_nicks(&state, &ui);
+                    }
+                    Some(WorkerCommand::NotifyRemove(nick)) => {
+                        if let (Some(client), Some(token), Some(network)) =
+                            (&state.client, &state.token, &state.settings_network)
+                        {
+                            if client.remove_notify_nick(token, network, &nick).await.is_ok() {
+                                state.notify_nicks.retain(|existing| existing != &nick);
+                            }
+                        }
+                        push_notify_nicks(&state, &ui);
+                    }
+                    Some(WorkerCommand::WatchPatternAdd(pattern)) => {
+                        if let (Some(session), Some(identifier)) =
+                            (&state.session, &state.identifier)
+                        {
+                            session.send_command(
+                                format!("grappa:user:{identifier}"),
+                                "watchlist",
+                                serde_json::json!({"action": "add", "pattern": pattern}),
+                            );
+                        }
+                        if !state.watch_patterns.contains(&pattern) {
+                            state.watch_patterns.push(pattern);
+                        }
+                        push_watch_patterns(&state, &ui);
+                    }
+                    Some(WorkerCommand::WatchPatternRemove(pattern)) => {
+                        if let (Some(session), Some(identifier)) =
+                            (&state.session, &state.identifier)
+                        {
+                            session.send_command(
+                                format!("grappa:user:{identifier}"),
+                                "watchlist",
+                                serde_json::json!({"action": "del", "pattern": pattern}),
+                            );
+                        }
+                        state.watch_patterns.retain(|existing| existing != &pattern);
+                        push_watch_patterns(&state, &ui);
                     }
                     Some(WorkerCommand::Disconnect) => {
                         persistence::log_line("disconnect requested");
@@ -525,6 +733,7 @@ async fn handle_connect(
                 .into_iter()
                 .collect();
             distinct_networks.sort();
+            state.settings_network = distinct_networks.first().cloned();
             let network_count = distinct_networks.len();
             let channel_count = entries.len();
             let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -740,6 +949,163 @@ async fn handle_admin_disconnect_session(
         let _ = client.disconnect_admin_session(token, &session_id).await;
     }
     handle_admin_refresh(state, ui).await;
+}
+
+/// Refreshes every self-service settings section: Ignores/Perform for
+/// `state.settings_network` (empty if none picked yet), plus the
+/// account-scoped Aliases/Vhost — see `docs/protocol-notes.md` §4quater.
+async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+
+    let ignores = match &state.settings_network {
+        Some(network) => client.fetch_ignores(token, network).await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let perform_text = match &state.settings_network {
+        Some(network) => client
+            .fetch_perform(token, network)
+            .await
+            .ok()
+            .and_then(|view| view.perform_list)
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    let aliases = client.fetch_aliases(token).await.unwrap_or_default();
+    let vhost = client.fetch_vhost_settings(token).await.ok();
+
+    let alias_rows: Vec<AliasRow> = aliases
+        .into_iter()
+        .map(|(command, expansion)| AliasRow {
+            command: command.into(),
+            expansion: expansion.into(),
+        })
+        .collect();
+
+    let vhost_rows: Vec<VhostOptionRow> = match vhost {
+        Some(view) => {
+            let selection = view.selection;
+            view.available
+                .into_iter()
+                .map(|option| {
+                    let selected = selection.contains(&option.address);
+                    let label = option.name.clone().unwrap_or_else(|| option.address.clone());
+                    VhostOptionRow {
+                        address: option.address.into(),
+                        label: label.into(),
+                        selected,
+                    }
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let ignores_model: Vec<slint::SharedString> = ignores.into_iter().map(Into::into).collect();
+        ui.set_settings_ignores(Rc::new(slint::VecModel::from(ignores_model)).into());
+        ui.set_perform_text(perform_text.into());
+        ui.set_settings_aliases(Rc::new(slint::VecModel::from(alias_rows)).into());
+        ui.set_settings_vhost_options(Rc::new(slint::VecModel::from(vhost_rows)).into());
+    });
+}
+
+fn non_empty(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+async fn handle_identity_save(state: &WorkerState, nick: String, ident: String, realname: String) {
+    let (Some(client), Some(token), Some(network)) =
+        (&state.client, &state.token, &state.settings_network)
+    else {
+        return;
+    };
+    let request = cordiale_core::profile::NetworkIdentityRequest {
+        nick: non_empty(nick),
+        ident: non_empty(ident),
+        realname: non_empty(realname),
+    };
+    let _ = client.update_network_identity(token, network, &request).await;
+}
+
+/// Adds/edits one alias — Grappa's `PUT /me/settings/aliases` replaces
+/// the whole map, so this fetches the current one, applies the change,
+/// and writes the whole thing back (no diff/patch endpoint exists).
+async fn handle_alias_upsert(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    new_entry: Option<(String, String)>,
+) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let mut aliases = client.fetch_aliases(token).await.unwrap_or_default();
+    if let Some((command, expansion)) = new_entry {
+        if !command.is_empty() {
+            aliases.insert(command, expansion);
+        }
+    }
+    let _ = client.update_aliases(token, aliases).await;
+    handle_settings_network_refresh(state, ui).await;
+}
+
+async fn handle_alias_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>, command: String) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let mut aliases = client.fetch_aliases(token).await.unwrap_or_default();
+    aliases.remove(&command);
+    let _ = client.update_aliases(token, aliases).await;
+    handle_settings_network_refresh(state, ui).await;
+}
+
+/// Toggles one address in the vhost selection — `PUT /me/settings/vhost`
+/// also replaces the whole selection, so this reads the current one,
+/// flips the one address, and writes it back.
+async fn handle_vhost_toggle(state: &WorkerState, ui: &slint::Weak<AppWindow>, address: String) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let Ok(current) = client.fetch_vhost_settings(token).await else {
+        return;
+    };
+    let mut selection = current.selection;
+    if let Some(index) = selection.iter().position(|existing| existing == &address) {
+        selection.remove(index);
+    } else {
+        selection.push(address);
+    }
+    let _ = client.update_vhost_selection(token, selection).await;
+    handle_settings_network_refresh(state, ui).await;
+}
+
+/// Pushes the session-local presence-watchlist nicks to the UI — see
+/// `WorkerState::notify_nicks`'s doc comment for why this is
+/// session-local rather than server-refetched.
+fn push_notify_nicks(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let nicks: Vec<slint::SharedString> =
+        state.notify_nicks.iter().cloned().map(Into::into).collect();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_settings_notify_nicks(Rc::new(slint::VecModel::from(nicks)).into());
+    });
+}
+
+/// Pushes the session-local keyword-watchlist patterns to the UI — same
+/// session-local caveat as `push_notify_nicks`.
+fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let patterns: Vec<slint::SharedString> =
+        state.watch_patterns.iter().cloned().map(Into::into).collect();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_settings_watch_patterns(Rc::new(slint::VecModel::from(patterns)).into());
+    });
 }
 
 /// Sends a `/links` request on the user topic — see

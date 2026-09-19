@@ -263,3 +263,55 @@ msgstr "Diagramm anzeigen"
 msgctxt "LinksGraphWindow"
 msgid "Cordiale — Network Links"
 msgstr "Cordiale — Netzwerkverbindungen"
+
+msgctxt "AppWindow"
+msgid "Network identity"
+msgstr "Netzwerkidentität"
+
+msgctxt "AppWindow"
+msgid "Nickname"
+msgstr "Nickname"
+
+msgctxt "AppWindow"
+msgid "Ident"
+msgstr "Ident"
+
+msgctxt "AppWindow"
+msgid "Real name"
+msgstr "Echter Name"
+
+msgctxt "AppWindow"
+msgid "Save"
+msgstr "Speichern"
+
+msgctxt "AppWindow"
+msgid "Presence (per network)"
+msgstr "Präsenz (pro Netzwerk)"
+
+msgctxt "AppWindow"
+msgid "Keyword highlights"
+msgstr "Schlüsselwort-Hervorhebungen"
+
+msgctxt "AppWindow"
+msgid "Pattern"
+msgstr "Muster"
+
+msgctxt "AppWindow"
+msgid "Add"
+msgstr "Hinzufügen"
+
+msgctxt "AppWindow"
+msgid "Mask (nick!user@host)"
+msgstr "Maske (Nick!Benutzer@Host)"
+
+msgctxt "AppWindow"
+msgid "Command"
+msgstr "Befehl"
+
+msgctxt "AppWindow"
+msgid "Expansion"
+msgstr "Erweiterung"
+
+msgctxt "AppWindow"
+msgid "On-connect commands (one per line, semicolon-separated)"
+msgstr "Befehle beim Verbinden (einer pro Zeile, durch Semikolon getrennt)"

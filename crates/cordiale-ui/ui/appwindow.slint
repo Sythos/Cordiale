@@ -55,6 +55,20 @@ struct AdminVisitorRow {
     visitor-id: string,
 }
 
+// One custom command alias — Settings > Aliases (account-scoped).
+struct AliasRow {
+    command: string,
+    expansion: string,
+}
+
+// One selectable outgoing address — Settings > Source Address
+// (account-scoped; `selected` reflects the last fetched/saved state).
+struct VhostOptionRow {
+    address: string,
+    label: string,
+    selected: bool,
+}
+
 // One positioned node in the radial `/links` diagram — see
 // `cordiale_core::links::radial_layout`, which computes `x`/`y` (already
 // offset to the canvas center) in Rust; the graph window only draws them.
@@ -150,6 +164,25 @@ export component AppWindow inherits Window {
     in property <string> links-graph-edges-commands: "";
     in property <[LinksGraphNode]> links-graph-nodes: [];
 
+    // Self-service network profile (never admin-only) — see
+    // `docs/protocol-notes.md` §4quater. `settings-network` picks which
+    // known network the Identity/Ignores/Perform/Notify sections act on.
+    in-out property <string> settings-network: "";
+    in-out property <string> identity-nick: "";
+    in-out property <string> identity-ident: "";
+    in-out property <string> identity-realname: "";
+    in property <[string]> settings-ignores: [];
+    in-out property <string> new-ignore-mask: "";
+    in-out property <string> perform-text: "";
+    in property <[AliasRow]> settings-aliases: [];
+    in-out property <string> new-alias-command: "";
+    in-out property <string> new-alias-expansion: "";
+    in property <[VhostOptionRow]> settings-vhost-options: [];
+    in property <[string]> settings-notify-nicks: [];
+    in-out property <string> new-notify-nick: "";
+    in property <[string]> settings-watch-patterns: [];
+    in-out property <string> new-watch-pattern: "";
+
     callback connect-requested(string, string, string);
     callback server-selected(string);
     callback language-selected(string);
@@ -168,6 +201,18 @@ export component AppWindow inherits Window {
     callback links-graph-requested();
     callback theme-toggle-requested();
     callback display-prefs-changed();
+    callback settings-network-selected(string);
+    callback identity-save-requested();
+    callback ignore-add-requested(string);
+    callback ignore-remove-requested(string);
+    callback perform-save-requested(string);
+    callback alias-add-requested(string, string);
+    callback alias-remove-requested(string);
+    callback vhost-toggle-requested(string);
+    callback notify-add-requested(string);
+    callback notify-remove-requested(string);
+    callback watch-pattern-add-requested(string);
+    callback watch-pattern-remove-requested(string);
 
     // Maps a machine-readable `status-kind` (set from Rust, never
     // English text directly) to a translated template — the only way to
@@ -519,6 +564,52 @@ export component AppWindow inherits Window {
                     text: theme == "light" ? @tr("Switch to dark") : @tr("Switch to light");
                     clicked => { theme-toggle-requested(); }
                 }
+
+                if known-networks.length > 0 : VerticalBox {
+                    padding-top: 8px;
+                    spacing: 4px;
+
+                    Text {
+                        text: @tr("Network identity");
+                        font-size: 16px;
+                    }
+
+                    HorizontalBox {
+                        for network in known-networks : Button {
+                            text: network;
+                            clicked => {
+                                settings-network = network;
+                                settings-network-selected(network);
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: settings-network;
+                        font-size: 12px;
+                    }
+
+                    LineEdit {
+                        placeholder-text: @tr("Nickname");
+                        accessible-label: @tr("Nickname");
+                        text <=> identity-nick;
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Ident");
+                        accessible-label: @tr("Ident");
+                        text <=> identity-ident;
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Real name");
+                        accessible-label: @tr("Real name");
+                        text <=> identity-realname;
+                    }
+                    Button {
+                        text: @tr("Save");
+                        enabled: settings-network != "";
+                        clicked => { identity-save-requested(); }
+                    }
+                }
             }
 
             if settings-section == "display" : VerticalBox {
@@ -557,12 +648,191 @@ export component AppWindow inherits Window {
             }
 
             if settings-section == "security" || settings-section == "themes"
-                || settings-section == "push" || settings-section == "watchlists"
-                || settings-section == "ignores" || settings-section == "aliases"
-                || settings-section == "perform" || settings-section == "vhost" : VerticalBox {
+                || settings-section == "push" : VerticalBox {
                 Text {
                     text: @tr("Not available yet — this section needs Grappa REST/WS endpoints Cordiale doesn't implement yet.");
                     wrap: word-wrap;
+                }
+            }
+
+            if settings-section == "watchlists" : VerticalBox {
+                spacing: 8px;
+
+                Text {
+                    text: @tr("Presence (per network)");
+                    font-size: 16px;
+                }
+                HorizontalBox {
+                    for network in known-networks : Button {
+                        text: network;
+                        clicked => {
+                            settings-network = network;
+                            settings-network-selected(network);
+                        }
+                    }
+                }
+                for nick in settings-notify-nicks : HorizontalBox {
+                    Text {
+                        text: nick;
+                        wrap: word-wrap;
+                    }
+                    Button {
+                        text: @tr("Delete");
+                        clicked => { notify-remove-requested(nick); }
+                    }
+                }
+                HorizontalBox {
+                    LineEdit {
+                        placeholder-text: @tr("Nickname");
+                        text <=> new-notify-nick;
+                    }
+                    Button {
+                        text: @tr("Add");
+                        enabled: settings-network != "";
+                        clicked => {
+                            notify-add-requested(new-notify-nick);
+                            new-notify-nick = "";
+                        }
+                    }
+                }
+
+                Text {
+                    text: @tr("Keyword highlights");
+                    font-size: 16px;
+                }
+                for pattern in settings-watch-patterns : HorizontalBox {
+                    Text {
+                        text: pattern;
+                        wrap: word-wrap;
+                    }
+                    Button {
+                        text: @tr("Delete");
+                        clicked => { watch-pattern-remove-requested(pattern); }
+                    }
+                }
+                HorizontalBox {
+                    LineEdit {
+                        placeholder-text: @tr("Pattern");
+                        text <=> new-watch-pattern;
+                    }
+                    Button {
+                        text: @tr("Add");
+                        clicked => {
+                            watch-pattern-add-requested(new-watch-pattern);
+                            new-watch-pattern = "";
+                        }
+                    }
+                }
+            }
+
+            if settings-section == "ignores" : VerticalBox {
+                spacing: 8px;
+
+                HorizontalBox {
+                    for network in known-networks : Button {
+                        text: network;
+                        clicked => {
+                            settings-network = network;
+                            settings-network-selected(network);
+                        }
+                    }
+                }
+                for mask in settings-ignores : HorizontalBox {
+                    Text {
+                        text: mask;
+                        wrap: word-wrap;
+                    }
+                    Button {
+                        text: @tr("Delete");
+                        clicked => { ignore-remove-requested(mask); }
+                    }
+                }
+                HorizontalBox {
+                    LineEdit {
+                        placeholder-text: @tr("Mask (nick!user@host)");
+                        text <=> new-ignore-mask;
+                    }
+                    Button {
+                        text: @tr("Add");
+                        enabled: settings-network != "";
+                        clicked => {
+                            ignore-add-requested(new-ignore-mask);
+                            new-ignore-mask = "";
+                        }
+                    }
+                }
+            }
+
+            if settings-section == "aliases" : VerticalBox {
+                spacing: 8px;
+
+                for row in settings-aliases : HorizontalBox {
+                    Text {
+                        text: row.command;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: row.expansion;
+                        wrap: word-wrap;
+                    }
+                    Button {
+                        text: @tr("Delete");
+                        clicked => { alias-remove-requested(row.command); }
+                    }
+                }
+                HorizontalBox {
+                    LineEdit {
+                        placeholder-text: @tr("Command");
+                        text <=> new-alias-command;
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Expansion");
+                        text <=> new-alias-expansion;
+                    }
+                    Button {
+                        text: @tr("Add");
+                        clicked => {
+                            alias-add-requested(new-alias-command, new-alias-expansion);
+                            new-alias-command = "";
+                            new-alias-expansion = "";
+                        }
+                    }
+                }
+            }
+
+            if settings-section == "perform" : VerticalBox {
+                spacing: 8px;
+
+                HorizontalBox {
+                    for network in known-networks : Button {
+                        text: network;
+                        clicked => {
+                            settings-network = network;
+                            settings-network-selected(network);
+                        }
+                    }
+                }
+                Text {
+                    text: @tr("On-connect commands (one per line, semicolon-separated)");
+                    wrap: word-wrap;
+                }
+                LineEdit {
+                    text <=> perform-text;
+                }
+                Button {
+                    text: @tr("Save");
+                    enabled: settings-network != "";
+                    clicked => { perform-save-requested(perform-text); }
+                }
+            }
+
+            if settings-section == "vhost" : VerticalBox {
+                spacing: 8px;
+
+                for option in settings-vhost-options : CheckBox {
+                    text: option.label;
+                    checked: option.selected;
+                    toggled => { vhost-toggle-requested(option.address); }
                 }
             }
 

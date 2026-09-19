@@ -449,6 +449,95 @@ esplicitamente richiesto dall'utente per la parità con Cicchetto:
   "links_bundle"`), per non scommettere su una sola lettura non
   verificabile senza un server reale.
 
+## 4quater. Profilo self-service (non-admin) — contratto reale (2026-09-19)
+
+Correzione esplicita dell'utente: Grappa è un deployment standalone,
+senza scrittura di settings server-wide né provisioning utenti lato
+client (`/admin/settings` write e `/admin/users` create/password
+restano fuori scope per questo motivo, non per pigrizia). Quello che
+**serve davvero**, come in Cicchetto originale, è che ogni utente possa
+modificare il **proprio** profilo di rete. Fonte: lettura diretta di
+`cicchetto/src/SettingsDrawer.tsx` (non `AdminPane.tsx`) + le route
+Elixir non-admin corrispondenti, via subagent dedicato.
+
+Due scope di autorizzazione distinti, **mai** un id utente esplicito in
+path/body — sempre risolto dal bearer token lato server:
+- `/networks/:network_id/*` — `ResolveNetwork` verifica che il subject
+  del token abbia una credenziale su quella rete; mismatch → `404`
+  uniforme (nessuna fuga di informazione).
+- `/me/settings/*` — scope diretto dal token via `Subject.from_assigns`.
+
+**Identità per-rete** — `PATCH /networks/:slug/identity`, body
+`{nick?, ident?, realname?}` (stringa vuota = reset al default,
+campo omesso = invariato). **Solo questi tre campi**: `sasl_user` e
+`auth_command_template` restano admin-only (whitelist verificata
+server-side, non assunta). `autojoin_channels` **non ha un endpoint di
+modifica diretta** — si ottiene implicitamente joinando/lasciando un
+canale (`POST`/`DELETE /networks/:network_id/channels[/:channel_id]`),
+quindi Cordiale non lo espone come campo editabile in Settings.
+Implementato in Cordiale: `cordiale_core::profile::
+NetworkIdentityRequest` + `GrappaClient::update_network_identity`,
+UI in Settings → General (selettore rete + 3 campi + Save). **Nessun
+`GET` self-service esiste** per leggere l'identità corrente — i campi
+partono vuoti (salvare senza modificare = nessun cambiamento, mai un
+valore inventato).
+
+**Vhost self-service** — `GET`/`PUT /me/settings/vhost`. GET →
+`{available: [{address, in_pool, granted, name}], selection: [string]}`;
+PUT body `{selection: [string]}`, replace totale non diff. "L'utente si
+autoseleziona sempre" (commento nel sorgente Cicchetto) — nessun pin
+admin residuo da conciliare. Implementato: `VhostSettingsView`/
+`VhostSelectionRequest`, UI in Settings → Source Address (checkbox per
+opzione disponibile, toggle = fetch attuale → flip → PUT).
+
+**Ignores** (per-rete) — `GET/POST /networks/:slug/ignores`,
+`DELETE /networks/:slug/ignores/:mask`. Risposta mutazione include
+`outcome: "added"|"already_ignored"|"removed"|"not_ignored"`.
+Implementato per intero con lista + form aggiungi in Settings.
+
+**Aliases** (account-scoped, non per-rete) — `GET/PUT
+/me/settings/aliases`, body `{aliases: {comando: espansione}}`,
+replace totale della mappa (nessun PATCH/diff). **Confermato
+server-persistito** — corregge una nota precedente di questo
+documento che diceva "presumibilmente client-local", mai verificata
+prima d'ora. Implementato con fetch-modifica-PUT per ogni
+aggiunta/rimozione (nessun endpoint diff, quindi si rilegge sempre lo
+stato attuale prima di scrivere).
+
+**Perform** (per-rete) — `GET/PUT /networks/:slug/perform`, body
+`{perform_list?, oper_pass?}` (`oper_pass` write-only, vuoto = invariato;
+una chiave legacy `nickserv_pass` nel body riceve `410 Gone` lato
+server). **Semplificazione consapevole**: Cordiale tratta `perform_list`
+come una singola stringa via un `LineEdit` (Slint non ha, verificato,
+un widget multi-riga usato altrove in questo progetto), non un editor
+multi-riga — l'utente deve separare i comandi con `;` o secondo il
+formato che Grappa effettivamente accetta, non confermato riga per riga.
+`oper_pass` non esposto in UI per ora (dato sensibile, scope minimo).
+
+**Watchlist di presenza** (per-rete, REST) — `POST /networks/:slug/notify
+{nicks: [string]}`, `DELETE /networks/:slug/notify/:nick`. **Nessun
+`GET` self-service**: Cicchetto stesso non ne ha uno, lo stato arriva
+via lo snapshot WS `notify_list` (mai implementato in Cordiale finora —
+vedi §7). Cordiale traccia la lista solo lato client per la sessione
+corrente (non sopravvive a riconnessione/riavvio) — limite dichiarato,
+non nascosto.
+
+**Watchlist per parola chiave** — **non REST**: push WS
+`ch.push("watchlist", {action: "add"|"del"|"list", pattern})` sul
+topic utente (mai un endpoint `/highlight*` nel router). Cordiale usa
+`SessionHandle::send_command` (già esistente per `/links`) per inviare
+`add`/`del`; la risposta a `"list"` non ha una forma confermata da
+fonte primaria, quindi non viene interpretata — stessa limitazione
+session-local della watchlist di presenza.
+
+**Non implementato per scelta esplicita** (non ambiguità, elencato per
+completezza): password/`server_pass` di rete (`PUT /networks/:slug/
+password`, `GET/PUT /networks/:slug/server_pass` — dati sensibili,
+fuori scope per questa sessione), avatar/profilo esteso (age/gender/
+location — bassa priorità), l'intero blocco `/me/settings/*` minore
+(upload-retention, auto-away-debounce, quit/part-reason, ecc. — non
+richiesti esplicitamente), `dcc-auto-accept`.
+
 ---
 
 ## 5. Guest/visitor e ruolo admin

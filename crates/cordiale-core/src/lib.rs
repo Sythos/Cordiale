@@ -42,6 +42,7 @@ pub mod domain;
 pub mod links;
 pub mod persistence;
 pub mod phoenix;
+pub mod profile;
 pub mod protocol;
 pub mod rest;
 pub mod session;

@@ -263,3 +263,55 @@ msgstr "Mostrar gráfico"
 msgctxt "LinksGraphWindow"
 msgid "Cordiale — Network Links"
 msgstr "Cordiale — Enlaces de red"
+
+msgctxt "AppWindow"
+msgid "Network identity"
+msgstr "Identidad de red"
+
+msgctxt "AppWindow"
+msgid "Nickname"
+msgstr "Apodo"
+
+msgctxt "AppWindow"
+msgid "Ident"
+msgstr "Ident"
+
+msgctxt "AppWindow"
+msgid "Real name"
+msgstr "Nombre real"
+
+msgctxt "AppWindow"
+msgid "Save"
+msgstr "Guardar"
+
+msgctxt "AppWindow"
+msgid "Presence (per network)"
+msgstr "Presencia (por red)"
+
+msgctxt "AppWindow"
+msgid "Keyword highlights"
+msgstr "Resaltados por palabra clave"
+
+msgctxt "AppWindow"
+msgid "Pattern"
+msgstr "Patrón"
+
+msgctxt "AppWindow"
+msgid "Add"
+msgstr "Añadir"
+
+msgctxt "AppWindow"
+msgid "Mask (nick!user@host)"
+msgstr "Máscara (nick!usuario@host)"
+
+msgctxt "AppWindow"
+msgid "Command"
+msgstr "Comando"
+
+msgctxt "AppWindow"
+msgid "Expansion"
+msgstr "Expansión"
+
+msgctxt "AppWindow"
+msgid "On-connect commands (one per line, semicolon-separated)"
+msgstr "Comandos al conectar (uno por línea, separados por punto y coma)"

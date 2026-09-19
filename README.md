@@ -38,11 +38,18 @@ thread: a splash screen, a first-launch language picker, a connect screen,
 a two-pane connected screen (channel list sidebar, message history, a
 compose box wired to the real send-message endpoint, live updates pushed
 over the WebSocket session), and a Settings screen whose navigation
-mirrors Cicchetto's own Settings drawer (`docs/feature-matrix.md`) —
-General (language, Light/Dark) and Display (five real preferences, synced
-with the server) work today; the remaining sections say plainly that they
-need server endpoints Cordiale doesn't implement yet, rather than either
-hiding or faking functionality. The REST layer's request/response shapes
+mirrors Cicchetto's own Settings drawer (`docs/feature-matrix.md`) — all
+of it self-service (edit *your own* profile, never admin-only): General
+(language, Light/Dark, plus per-network identity — nick/ident/realname),
+Display (five real preferences), Source Address (vhost self-selection),
+Ignore List and On-Connect Commands (both per-network), Aliases
+(account-wide, confirmed server-persisted, not the client-local guess an
+earlier note made), and Watch Lists (presence over REST, keyword
+highlights over the WebSocket session). Grappa is a standalone,
+single-tenant server — there's no server-wide settings-write or
+user-provisioning surface for a client to expose, confirmed by the
+project owner, which is why none of that lives here. The REST layer's
+request/response shapes
 have been checked against the real `irc.sindro.me` server (not just
 mocks) and match, including an undocumented guest/visitor login mode —
 see `docs/protocol-notes.md` §5. The UI is fully translated into Italian,
