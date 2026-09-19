@@ -77,7 +77,10 @@ enum WorkerCommand {
     IgnoreAdd(String),
     IgnoreRemove(String),
     PerformSave(String),
-    AliasAdd { command: String, expansion: String },
+    AliasAdd {
+        command: String,
+        expansion: String,
+    },
     AliasRemove(String),
     VhostToggle(String),
     NotifyAdd(String),
@@ -286,9 +289,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let tx_for_network_selected = worker_tx.clone();
     ui.on_settings_network_selected(move |network| {
-        let _ = tx_for_network_selected.send(WorkerCommand::SettingsNetworkSelected(
-            network.to_string(),
-        ));
+        let _ = tx_for_network_selected
+            .send(WorkerCommand::SettingsNetworkSelected(network.to_string()));
     });
 
     let tx_for_identity = worker_tx.clone();
@@ -960,7 +962,10 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
     };
 
     let ignores = match &state.settings_network {
-        Some(network) => client.fetch_ignores(token, network).await.unwrap_or_default(),
+        Some(network) => client
+            .fetch_ignores(token, network)
+            .await
+            .unwrap_or_default(),
         None => Vec::new(),
     };
     let perform_text = match &state.settings_network {
@@ -990,7 +995,10 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
                 .into_iter()
                 .map(|option| {
                     let selected = selection.contains(&option.address);
-                    let label = option.name.clone().unwrap_or_else(|| option.address.clone());
+                    let label = option
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| option.address.clone());
                     VhostOptionRow {
                         address: option.address.into(),
                         label: label.into(),
@@ -1031,7 +1039,9 @@ async fn handle_identity_save(state: &WorkerState, nick: String, ident: String, 
         ident: non_empty(ident),
         realname: non_empty(realname),
     };
-    let _ = client.update_network_identity(token, network, &request).await;
+    let _ = client
+        .update_network_identity(token, network, &request)
+        .await;
 }
 
 /// Adds/edits one alias — Grappa's `PUT /me/settings/aliases` replaces
@@ -1100,8 +1110,12 @@ fn push_notify_nicks(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 /// Pushes the session-local keyword-watchlist patterns to the UI — same
 /// session-local caveat as `push_notify_nicks`.
 fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let patterns: Vec<slint::SharedString> =
-        state.watch_patterns.iter().cloned().map(Into::into).collect();
+    let patterns: Vec<slint::SharedString> = state
+        .watch_patterns
+        .iter()
+        .cloned()
+        .map(Into::into)
+        .collect();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_settings_watch_patterns(Rc::new(slint::VecModel::from(patterns)).into());

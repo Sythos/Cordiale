@@ -36,9 +36,8 @@ use crate::admin::{
     AdminSessionsResponse, AdminUsersResponse, AdminVisitorsResponse,
 };
 use crate::profile::{
-    AddIgnoreRequest, AliasesView, IgnoreMutationResponse, IgnoresResponse,
-    NetworkIdentityRequest, NotifyAddRequest, PerformUpdateRequest, PerformView,
-    VhostSelectionRequest, VhostSettingsView,
+    AddIgnoreRequest, AliasesView, IgnoreMutationResponse, IgnoresResponse, NetworkIdentityRequest,
+    NotifyAddRequest, PerformUpdateRequest, PerformView, VhostSelectionRequest, VhostSettingsView,
 };
 use crate::rest::{
     BootResponse, ConfigResponse, DisplayPrefs, LoginRequest, LoginResponse, MeResponse,
@@ -1073,7 +1072,9 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/networks/libera/ignores"))
-            .and(body_json(serde_json::json!({"mask": "*!*@spammer.example"})))
+            .and(body_json(
+                serde_json::json!({"mask": "*!*@spammer.example"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "masks": ["*!*@spammer.example"],
                 "mask": "*!*@spammer.example",
@@ -1102,10 +1103,7 @@ mod tests {
             .await;
 
         let client = GrappaClient::new(mock_server.uri());
-        let aliases = client
-            .fetch_aliases("abc123")
-            .await
-            .expect("fetch_aliases");
+        let aliases = client.fetch_aliases("abc123").await.expect("fetch_aliases");
         assert_eq!(aliases.get("hi"), Some(&"PRIVMSG $1 :hello!".to_string()));
     }
 
