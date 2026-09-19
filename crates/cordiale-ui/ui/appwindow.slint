@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ListView, Palette, ColorScheme } from "std-widgets.slint";
+import { LineEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ListView, Palette } from "std-widgets.slint";
 
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
@@ -112,6 +112,44 @@ struct LinksRow {
     display: string,
 }
 
+// One member of the currently-selected channel. `prefix` is the
+// highest-ranked mode marker Rust resolved for that member (`@`/`%`/`+`
+// or empty for a plain member) — already sorted/deduped there, Slint just
+// displays it ahead of the name.
+struct MemberRow {
+    name: string,
+    prefix: string,
+}
+
+// A thin draggable strip between two side-by-side panels: drag
+// horizontally to resize whichever property `target-width` is bound to.
+// `moved`'s incremental `target-width + (mouse-x - pressed-x)` (rather
+// than recomputing from scratch) is the documented pattern for avoiding a
+// binding loop on a self-referential resize (confirmed against a real
+// slint-ui/slint issue report before writing this, not guessed).
+component ResizeHandle {
+    in-out property <length> target-width;
+    in property <length> min-width: 120px;
+    in property <length> max-width: 420px;
+
+    width: 6px;
+
+    Rectangle {
+        width: 2px;
+        x: (parent.width - self.width) / 2;
+        background: #808080;
+    }
+
+    TouchArea {
+        mouse-cursor: ew-resize;
+        moved => {
+            if (self.pressed) {
+                target-width = max(min-width, min(max-width, target-width + (self.mouse-x - self.pressed-x)));
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Cordiale";
     width: 900px;
@@ -177,6 +215,14 @@ export component AppWindow inherits Window {
     // channel label in the markup below).
     in property <string> current-topic: "";
     in property <bool> has-selected-channel: false;
+    // Snapshot from `boot`, not updated live on join/part yet — see
+    // README's Known gaps. Already sorted ops-first by Rust.
+    in property <[MemberRow]> channel-members: [];
+
+    // User-resizable via the drag handles between the three "connected"
+    // screen columns (see `ResizeHandle`) — session-local, not persisted.
+    property <length> sidebar-width: 180px;
+    property <length> members-width: 160px;
 
     in-out property <string> theme: "light";
     in property <bool> display-prefs-loaded: false;
@@ -248,7 +294,6 @@ export component AppWindow inherits Window {
     callback admin-visitor-delete(string);
     callback admin-network-reset-circuit(string);
     callback admin-reaper-run();
-    callback links-requested(string);
     callback links-graph-requested();
     callback theme-toggle-requested();
     callback display-prefs-changed();
@@ -441,10 +486,10 @@ export component AppWindow inherits Window {
 
     if screen == "connected" : HorizontalBox {
         padding: 16px;
-        spacing: 16px;
+        spacing: 8px;
 
         VerticalBox {
-            width: 220px;
+            width: sidebar-width;
             spacing: 8px;
 
             Text {
@@ -484,11 +529,6 @@ export component AppWindow inherits Window {
                 }
             }
 
-            for network in known-networks : Button {
-                text: @tr("Links for {}", network);
-                clicked => { links-requested(network); }
-            }
-
             HorizontalLayout {
                 alignment: start;
 
@@ -504,6 +544,12 @@ export component AppWindow inherits Window {
                     clicked => { screen = "settings"; }
                 }
             }
+        }
+
+        ResizeHandle {
+            target-width <=> sidebar-width;
+            min-width: 120px;
+            max-width: 360px;
         }
 
         VerticalBox {
@@ -567,6 +613,31 @@ export component AppWindow inherits Window {
                     width: 36px;
                     enabled: has-selected-channel;
                     clicked => { send-chat-message(compose-text); }
+                }
+            }
+        }
+
+        if has-selected-channel && channel-members.length > 0 : ResizeHandle {
+            target-width <=> members-width;
+            min-width: 100px;
+            max-width: 320px;
+        }
+
+        if has-selected-channel && channel-members.length > 0 : VerticalBox {
+            width: members-width;
+            spacing: 4px;
+
+            Text {
+                text: @tr("Members ({})", channel-members.length);
+                font-size: 14px;
+            }
+
+            ListView {
+                vertical-stretch: 1;
+
+                for member in channel-members : Text {
+                    text: member.prefix == "" ? member.name : member.prefix + member.name;
+                    wrap: no-wrap;
                 }
             }
         }

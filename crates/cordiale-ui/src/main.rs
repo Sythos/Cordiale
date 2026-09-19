@@ -70,7 +70,6 @@ enum WorkerCommand {
     AdminVisitorDelete(String),
     AdminNetworkResetCircuit(String),
     AdminReaperRun,
-    RequestLinks(String),
     SettingsNetworkSelected(String),
     IdentitySave {
         nick: String,
@@ -176,6 +175,8 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_network_groups(empty_groups.into());
             let empty_lines = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
             ui.set_chat_lines(empty_lines.into());
+            let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
+            ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
             ui.set_has_selected_channel(false);
         }
@@ -247,11 +248,6 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_admin_disconnect.send(WorkerCommand::AdminDisconnectSession(
             session_id.to_string(),
         ));
-    });
-
-    let tx_for_links = worker_tx.clone();
-    ui.on_links_requested(move |network| {
-        let _ = tx_for_links.send(WorkerCommand::RequestLinks(network.to_string()));
     });
 
     // Lazily created, reused across requests rather than spawning a new
@@ -401,6 +397,11 @@ struct WorkerState {
     /// Keyed by `(network, channel)`; the channel topic, if the server sent
     /// one — see `topics_from_boot` and `handle_frame`.
     topics: HashMap<(String, String), String>,
+    /// Keyed by `(network, channel)`; the member list from `boot`, if any
+    /// was found — see `members_from_boot`. Snapshot only: unlike
+    /// messages/topic, this doesn't update live on join/part yet (a known
+    /// gap, see README).
+    members: MembersByChannel,
     /// Network slug -> whether its channel list is expanded in the sidebar.
     /// Missing entries default to expanded (see `network_groups_data`).
     expanded_networks: HashMap<String, bool>,
@@ -441,6 +442,7 @@ impl WorkerState {
             messages: HashMap::new(),
             drafts: HashMap::new(),
             topics: HashMap::new(),
+            members: HashMap::new(),
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
             current_channel: None,
@@ -573,9 +575,6 @@ async fn run_worker(
                             let _ = client.run_admin_reaper(token).await;
                         }
                         handle_admin_refresh(&state, &ui).await;
-                    }
-                    Some(WorkerCommand::RequestLinks(network)) => {
-                        handle_request_links(&state, network);
                     }
                     Some(WorkerCommand::SettingsNetworkSelected(network)) => {
                         state.settings_network = Some(network);
@@ -768,6 +767,7 @@ async fn handle_connect(
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
             state.topics = topics_from_boot(&outcome);
+            state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
             let is_admin = outcome
@@ -863,6 +863,7 @@ async fn handle_select_channel(
     let lines = state.messages.get(&key).cloned().unwrap_or_default();
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
     let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
+    let members = state.members.get(&key).cloned().unwrap_or_default();
     let dark_theme = state.theme == Theme::Dark;
 
     let label = format!("{network} — {channel}");
@@ -874,6 +875,8 @@ async fn handle_select_channel(
         ui.set_compose_text(draft.into());
         let model = chat_lines_model(&lines, dark_theme);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+        let member_rows = members_model(&members);
+        ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
 }
 
@@ -883,6 +886,15 @@ async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, b
     else {
         return;
     };
+
+    // `/links` isn't a chat message: it asks for the active server's
+    // topology graph, same request the old per-network sidebar button
+    // used to send — moved here since a button per connected network
+    // doesn't scale (the user may have a dozen networks joined at once).
+    if body.trim() == "/links" {
+        handle_request_links(state, network.clone());
+        return;
+    }
 
     let request = SendMessageRequest::plain(body);
     if client
@@ -1623,6 +1635,106 @@ fn topics_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), Str
     topics
 }
 
+/// `(name, prefix)` — `prefix` is the single highest-ranked IRC role
+/// marker (`@` op, `%` halfop, `+` voice, empty for a plain member).
+type MemberEntry = (String, String);
+type MembersByChannel = HashMap<(String, String), Vec<MemberEntry>>;
+
+/// Reads `(network, channel) -> members` out of `boot.channels`. The
+/// exact field/shape isn't confirmed by `docs/protocol-notes.md` (only
+/// "channel... ha: membri" is mentioned, no schema) — tries the plausible
+/// field names and both a flat `["@nick", "+other", "plain"]` shape and an
+/// object-per-member shape (`{"nick"/"name", "prefix"}` or `{"modes":
+/// [...]}`) defensively. An unrecognized shape just yields no members for
+/// that channel rather than guessing further; see README's Known gaps.
+fn members_from_boot(outcome: &BootstrapOutcome) -> MembersByChannel {
+    const FIELD_NAMES: &[&str] = &["members", "nicks", "names", "userlist", "who"];
+
+    let mut members_by_channel = HashMap::new();
+    for (network, channels) in &outcome.boot.channels {
+        for value in channels {
+            let channel = value
+                .get("name")
+                .or_else(|| value.get("channel"))
+                .and_then(Value::as_str);
+            let Some(channel) = channel else { continue };
+
+            let Some(list) = FIELD_NAMES
+                .iter()
+                .find_map(|field| value.get(field))
+                .and_then(Value::as_array)
+            else {
+                continue;
+            };
+
+            let mut members: Vec<MemberEntry> =
+                list.iter().filter_map(member_from_entry).collect();
+            if members.is_empty() {
+                continue;
+            }
+            sort_members_by_rank(&mut members);
+            members_by_channel.insert((network.clone(), channel.to_string()), members);
+        }
+    }
+    members_by_channel
+}
+
+/// Parses one member list entry: either a plain string with an optional
+/// leading role-prefix character (`"@nick"`, `"+nick"`, `"nick"`), or an
+/// object carrying a `nick`/`name` field plus either an explicit `prefix`
+/// string or a `modes` array of mode letters (`o`/`h`/`v`) to derive one
+/// from.
+fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
+    if let Some(raw) = entry.as_str() {
+        let prefix_char = raw.chars().next().filter(|c| "@%+&~".contains(*c));
+        return Some(match prefix_char {
+            Some(c) => (raw[c.len_utf8()..].to_string(), c.to_string()),
+            None => (raw.to_string(), String::new()),
+        });
+    }
+
+    let obj = entry.as_object()?;
+    let name = obj
+        .get("nick")
+        .or_else(|| obj.get("name"))
+        .and_then(Value::as_str)?
+        .to_string();
+    let prefix = obj
+        .get("prefix")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            obj.get("modes").and_then(Value::as_array).and_then(|modes| {
+                modes.iter().find_map(|mode| match mode.as_str() {
+                    Some("o") => Some("@".to_string()),
+                    Some("h") => Some("%".to_string()),
+                    Some("v") => Some("+".to_string()),
+                    _ => None,
+                })
+            })
+        })
+        .unwrap_or_default();
+    Some((name, prefix))
+}
+
+/// Ops first, then halfops, then voice, then everyone else — each group
+/// alphabetical (case-insensitive) within itself.
+fn sort_members_by_rank(members: &mut [MemberEntry]) {
+    const RANK_ORDER: &str = "@%+";
+    let rank = |prefix: &str| {
+        prefix
+            .chars()
+            .next()
+            .and_then(|c| RANK_ORDER.find(c))
+            .unwrap_or(RANK_ORDER.len())
+    };
+    members.sort_by(|(name_a, prefix_a), (name_b, prefix_b)| {
+        rank(prefix_a)
+            .cmp(&rank(prefix_b))
+            .then_with(|| name_a.to_lowercase().cmp(&name_b.to_lowercase()))
+    });
+}
+
 /// Reads initial scrollback out of `boot.heads` (network -> channel ->
 /// message rows), rendered the same way a live frame would be.
 /// `boot.heads` "is only present for a channel that actually has history"
@@ -1773,6 +1885,16 @@ fn chat_lines_model(messages: &[RenderedMessage], dark_theme: bool) -> Vec<ChatL
     messages
         .iter()
         .map(|message| chat_line_from_message(message, dark_theme))
+        .collect()
+}
+
+fn members_model(members: &[MemberEntry]) -> Vec<MemberRow> {
+    members
+        .iter()
+        .map(|(name, prefix)| MemberRow {
+            name: name.clone().into(),
+            prefix: prefix.clone().into(),
+        })
         .collect()
 }
 

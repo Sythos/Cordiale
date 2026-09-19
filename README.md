@@ -55,6 +55,12 @@ than broken:
   if a frame happens to carry a `topic` field — there's no confirmed
   `topic_changed`-style event name in the protocol notes, so a server that
   pushes topic changes under some other shape won't update it live.
+- **Channel members list** (the right-hand column with `@`/`%`/`+` role
+  prefixes) is a snapshot read from `boot` at connect time — the exact
+  field/shape isn't documented, so it's parsed defensively and may come
+  back empty against a server whose shape doesn't match what was guessed.
+  It also doesn't update live on join/part/mode changes yet — reselect
+  the channel (or reconnect) to refresh it.
 - Performance hasn't been profiled — deliberately deferred until after
   field testing surfaces real usage patterns.
 
