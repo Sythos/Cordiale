@@ -11,9 +11,9 @@ Colonna "Nel protocollo Grappa?": `Sì` = documentato esplicitamente in
 = menzionato solo indirettamente o per analogia; `No / non documentato` =
 assente dal contratto, presumibilmente client-side o fuori perimetro.
 
-Colonna "Fase Cordiale": fase prevista di valutazione/implementazione
-secondo la roadmap in `MEMORY.md` §9; `—` = non ancora decisa, richiede
-verifica aggiuntiva sul codice server prima di pianificare.
+Colonna "Fase Cordiale": fase prevista di valutazione/implementazione;
+`—` = non ancora decisa, richiede verifica aggiuntiva sul codice server
+prima di pianificare.
 
 | Funzionalità (cicchetto) | Nel protocollo Grappa? | Fase Cordiale | Note |
 |---|---|---|---|
@@ -21,7 +21,7 @@ verifica aggiuntiva sul codice server prima di pianificare.
 | Token per-client come alternativa a TOTP/passkey | Sì | Fase 1 | Stesso campo `password`; scoped, `403 client_token_scope` fuori scope |
 | Bootstrap `/api/config` + `/boot` + `/me` | Sì | Fase 1 | Sequenza di avvio |
 | Phoenix Channels realtime (user/network/channel topic) | Sì | Fase 1 | Vedi protocol-notes §2 |
-| network/channel/query, messaggi, stato realtime | Sì | Fase 1 | Perimetro Fase 1 dichiarato in `MEMORY.md` |
+| network/channel/query, messaggi, stato realtime | Sì | Fase 1 | Perimetro Fase 1 |
 | TOTP (2FA) | Parziale | — | Richiede sessione browser piena, fuori scope token per-client |
 | Passkey/WebAuthn (2FA) | Parziale | — | Come sopra |
 | Recovery codes | Incerto | — | Nessun endpoint documentato |
@@ -136,7 +136,7 @@ completo in `docs/protocol-notes.md` §4ter.
   meccanismo esiste ma è ancora troppo poco compreso (semantica del campo
   `password` in questo flusso, portabilità tra istanze Grappa) per
   costruire una UI affidabile — vedi `protocol-notes.md` §5 per il dettaglio
-  completo del test e `MEMORY.md` §3.3.
+  completo del test.
 - Assegnazione ruolo admin: nessuna procedura documentata.
 - Heartbeat/backoff WebSocket: da verificare sul codice server o sul default
   di `phoenix.js` prima di fissare la strategia di riconnessione.

@@ -8,7 +8,7 @@ fallback documented in code and never presented as real protection — see
 
 ## Supported versions
 
-Cordiale is pre-release (Phase 1 of the roadmap in `MEMORY.md`). Until a
+Cordiale is pre-release (Phase 1 of the roadmap). Until a
 first tagged release exists, only the `main` branch is supported; there are
 no maintained older versions.
 
@@ -41,5 +41,4 @@ CI runs Clippy, `cargo audit` (RustSec advisory database) and CodeQL for
 Rust on every push to `main`. No dedicated static analysis or security
 scanner exists for Slint `.slint` files today; Slint markup is still
 compiled and type-checked as part of `cargo check`/`cargo build`. A generic
-secret scanner (e.g. `gitleaks`) is under consideration but not yet added —
-see `MEMORY.md`.
+secret scanner (e.g. `gitleaks`) is under consideration but not yet added.

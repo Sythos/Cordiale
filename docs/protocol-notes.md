@@ -623,9 +623,8 @@ letto in una spec:
   (`403 client_token_scope`) — richiede sessione browser piena.
 - **Il documento non spiega come un subject diventi admin**: nessun
   endpoint, campo o evento documentato per assegnare/revocare `is_admin`.
-  Citato solo come gate esistente, mai come procedura — coerente con
-  `MEMORY.md` §3.3 ("Il ruolo admin è assegnato dal server... Cordiale non
-  lo deduce da campi locali").
+  Citato solo come gate esistente, mai come procedura ("Il ruolo admin è
+  assegnato dal server... Cordiale non lo deduce da campi locali").
 
 ---
 
@@ -667,7 +666,7 @@ letto in una spec:
 
 - Il modello `Profilo` deve trattare password e token per-client come lo
   stesso campo wire (`password` in `POST /auth/login`), ma va mantenuta una
-  distinzione interna esplicita (vedi `MEMORY.md` §3.6) per permettere una
+  distinzione interna esplicita per permettere una
   UX diversa (es. "Password" vs "Client token") e per gestire
   correttamente `403 client_token_scope` come errore di scope e non di
   credenziali (niente retry, niente "riprova la password").
@@ -681,8 +680,7 @@ letto in una spec:
   `GET /boot` + `GET /me` in parallelo → join topic utente WS (che conferma
   di nuovo `protocol_version`).
 - Il parser deve confrontare `protocol_version` con `>=`, mai `==`, e
-  ignorare sempre campi/eventi sconosciuti — coerente con la policy già
-  decisa in `MEMORY.md` §3.2.
+  ignorare sempre campi/eventi sconosciuti.
 - Guest/visitor **non va implementato in Fase 1**: nessuna evidenza di un
   flusso client-side nel contratto documentato.
 - Il modello dominio iniziale (network/channel/query/message) può basarsi

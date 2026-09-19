@@ -19,7 +19,7 @@ nella convenzione nativa dell'ecosistema pacchetti (`amd64`/`arm64` per
 usa mai `amd64`/`arm64`). Per Arch, che non ha una versione OS, il segmento
 `<VersioneDistro>` usa `rolling` come placeholder (nessuna convenzione
 ufficiale trovata per citare una "versione distro" nel nome di un pacchetto
-di terze parti su Arch — vedi `MEMORY.md` §4).
+di terze parti su Arch).
 
 Immagini Docker ufficiali confermate per la build multi-distro su runner
 Ubuntu: `ubuntu:26.04`, `almalinux:9`/`almalinux:10`, `archlinux:latest`
