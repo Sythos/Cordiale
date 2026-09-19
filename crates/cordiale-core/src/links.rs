@@ -225,7 +225,10 @@ pub fn radial_layout(tree: &[LinksNode], ring_gap: f64) -> RadialLayout {
         let Some(kids) = children.get(&Some(server.to_string())) else {
             return;
         };
-        let total: u32 = kids.iter().map(|kid| leaf_count(&kid.server, children)).sum();
+        let total: u32 = kids
+            .iter()
+            .map(|kid| leaf_count(&kid.server, children))
+            .sum();
         let span = end - start;
         let mut cursor = start;
         for kid in kids {
