@@ -119,6 +119,10 @@ struct LinksRow {
 struct MemberRow {
     name: string,
     prefix: string,
+    // Same hash-derived per-nick color chat lines use (`nick_color` in
+    // Rust) — nicknames stay colored everywhere, not just in the chat
+    // body.
+    color: color,
 }
 
 // A thin draggable strip between two side-by-side panels: drag
@@ -160,8 +164,15 @@ component ResizeHandle {
 
 export component AppWindow inherits Window {
     title: "Cordiale";
-    width: 900px;
-    height: 600px;
+    // Not `width`/`height`: those pin the window to a fixed size the
+    // window manager won't let the user resize or maximize past.
+    // `preferred-*` only picks the initial size, same window otherwise
+    // fully resizable — confirmed against Slint's own Window docs and a
+    // maintainer's explanation (slint-ui/slint discussion #2514) before
+    // writing this, since it's the opposite of what the property names
+    // alone would suggest.
+    preferred-width: 900px;
+    preferred-height: 600px;
 
     // Without this, std-widgets (Button/LineEdit/CheckBox/ListView/...)
     // silently follow the OS's own dark/light setting, independent of
@@ -290,6 +301,10 @@ export component AppWindow inherits Window {
     callback server-selected(string);
     callback language-selected(string);
     callback disconnect-requested();
+    // Deselects the current channel and returns to "connected" without
+    // dropping the session — a quick way back to the network overview
+    // from Settings/Links, or from a channel back to "nothing open".
+    callback home-requested();
     callback channel-selected(string, string);
     callback network-toggle-requested(string);
     callback send-chat-message(string);
@@ -500,6 +515,30 @@ export component AppWindow inherits Window {
             width: sidebar-width;
             spacing: 8px;
 
+            HorizontalLayout {
+                alignment: start;
+                spacing: 4px;
+
+                Button {
+                    text: "🏠";
+                    accessible-label: @tr("Home");
+                    width: 32px;
+                    height: 32px;
+                    clicked => { home-requested(); }
+                }
+
+                if is-admin : Button {
+                    text: "🛡";
+                    accessible-label: @tr("Admin");
+                    width: 32px;
+                    height: 32px;
+                    clicked => {
+                        screen = "settings";
+                        settings-section = "admin";
+                    }
+                }
+            }
+
             Text {
                 text: @tr("Connected to {}", server-url);
                 wrap: word-wrap;
@@ -520,7 +559,7 @@ export component AppWindow inherits Window {
                     spacing: 2px;
 
                     Button {
-                        text: (group.expanded ? "▾ " : "▸ ") + group.network;
+                        text: (group.expanded ? "▾ 🔌 " : "▸ 🔌 ") + group.network;
                         clicked => { network-toggle-requested(group.network); }
                     }
 
@@ -646,6 +685,7 @@ export component AppWindow inherits Window {
                 for member in channel-members : Text {
                     text: member.prefix == "" ? member.name : member.prefix + member.name;
                     wrap: no-wrap;
+                    color: member.color;
                 }
             }
         }
@@ -854,11 +894,33 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if settings-section == "security" || settings-section == "themes"
-                || settings-section == "push" : VerticalBox {
+            if settings-section == "security" || settings-section == "push" : VerticalBox {
                 Text {
                     text: @tr("Not available yet — this section needs Grappa REST/WS endpoints Cordiale doesn't implement yet.");
                     wrap: word-wrap;
+                }
+            }
+
+            // Purely client-side — no Grappa REST/WS endpoint involved,
+            // unlike Security/Notifications above. A server-driven theme
+            // (if/when Grappa exposes one) is a separate, later addition;
+            // this is just the local light/dark switch, same toggle as
+            // the one on General, surfaced here too since that's where
+            // it's discoverable.
+            if settings-section == "themes" : VerticalBox {
+                spacing: 8px;
+
+                Text {
+                    text: @tr("Theme");
+                    font-size: 16px;
+                }
+                Text {
+                    text: @tr("Local only for now — a theme driven by Grappa itself will be a separate option once the server supports one.");
+                    wrap: word-wrap;
+                }
+                Button {
+                    text: theme == "light" ? @tr("Switch to dark") : @tr("Switch to light");
+                    clicked => { theme-toggle-requested(); }
                 }
             }
 

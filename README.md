@@ -56,11 +56,17 @@ than broken:
   `topic_changed`-style event name in the protocol notes, so a server that
   pushes topic changes under some other shape won't update it live.
 - **Channel members list** (the right-hand column with `@`/`%`/`+` role
-  prefixes) is a snapshot read from `boot` at connect time — the exact
-  field/shape isn't documented, so it's parsed defensively and may come
-  back empty against a server whose shape doesn't match what was guessed.
-  It also doesn't update live on join/part/mode changes yet — reselect
-  the channel (or reconnect) to refresh it.
+  prefixes): the `boot`-time snapshot is best-effort (the field/shape
+  isn't documented, so it's parsed defensively and may come back empty),
+  but the list also builds up live from join/part/quit/nick-change
+  traffic, so it fills in correctly over time even when the snapshot
+  doesn't. What it does **not** track yet is role changes: a `MODE +o`/
+  `+v`/etc. on someone already in the list doesn't update their `@`/`+`
+  prefix (mode-change frame shape isn't confirmed yet), so a prefix shown
+  can go stale after a promotion/demotion until the channel is reselected
+  or Cordiale reconnects. This also means the context-menu's op-only
+  actions (Op/Deop/Voice/Devoice/Kick/Ban) are gated on your *last-known*
+  role, not necessarily your current one.
 - Performance hasn't been profiled — deliberately deferred until after
   field testing surfaces real usage patterns.
 

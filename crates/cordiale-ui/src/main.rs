@@ -90,6 +90,7 @@ enum WorkerCommand {
     WatchPatternAdd(String),
     WatchPatternRemove(String),
     Disconnect,
+    GoHome,
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -178,6 +179,22 @@ fn main() -> Result<(), slint::PlatformError> {
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
+            ui.set_has_selected_channel(false);
+        }
+    });
+
+    let tx_for_home = worker_tx.clone();
+    let weak_for_home = ui.as_weak();
+    ui.on_home_requested(move || {
+        let _ = tx_for_home.send(WorkerCommand::GoHome);
+        if let Some(ui) = weak_for_home.upgrade() {
+            ui.set_screen("connected".into());
+            let empty_lines = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
+            ui.set_chat_lines(empty_lines.into());
+            let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
+            ui.set_channel_members(empty_members.into());
+            ui.set_current_topic("".into());
+            ui.set_current_channel_label("".into());
             ui.set_has_selected_channel(false);
         }
     });
@@ -684,6 +701,9 @@ async fn run_worker(
                         session_events = None;
                         state = WorkerState::new();
                     }
+                    Some(WorkerCommand::GoHome) => {
+                        state.current_channel = None;
+                    }
                 }
             }
 
@@ -693,6 +713,13 @@ async fn run_worker(
                         persistence::log_line(&format!(
                             "session connected, protocol_version={protocol_version:?}"
                         ));
+                        // Without this, a status set to "disconnected" or
+                        // "reconnecting" by an earlier drop just sits
+                        // there forever once the session actually comes
+                        // back — nothing else ever clears it.
+                        let _ = ui.upgrade_in_event_loop(|ui| {
+                            ui.set_status_kind("signed-in".into());
+                        });
                     }
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame);
@@ -875,7 +902,7 @@ async fn handle_select_channel(
         ui.set_compose_text(draft.into());
         let model = chat_lines_model(&lines, dark_theme);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
-        let member_rows = members_model(&members);
+        let member_rows = members_model(&members, dark_theme);
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
 }
@@ -1307,6 +1334,79 @@ fn handle_frame(
             ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         });
     }
+
+    let members_changed = update_members_from_frame(state, &key, &frame.payload);
+    if members_changed && state.current_channel.as_ref() == Some(&key) {
+        let members = state.members.get(&key).cloned().unwrap_or_default();
+        let dark_theme = state.theme == Theme::Dark;
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            let member_rows = members_model(&members, dark_theme);
+            ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
+        });
+    }
+}
+
+/// Maintains `state.members` from live join/part/quit/nick_change frames
+/// — the boot-time snapshot (`members_from_boot`) may come back empty if
+/// its field-name guesses don't match this server, so this is the only
+/// reliable way members ever show up in practice. Returns whether the
+/// member list for `key` actually changed (callers use this to decide
+/// whether to push an update to the UI).
+fn update_members_from_frame(
+    state: &mut WorkerState,
+    key: &(String, String),
+    payload: &Value,
+) -> bool {
+    let kind = payload.get("kind").and_then(Value::as_str);
+    let nick = payload
+        .get("from")
+        .or_else(|| payload.get("nick"))
+        .or_else(|| payload.get("sender"))
+        .and_then(Value::as_str);
+
+    match kind {
+        Some("join") => {
+            let Some(nick) = nick else { return false };
+            let members = state.members.entry(key.clone()).or_default();
+            if members.iter().any(|(name, _)| name == nick) {
+                return false;
+            }
+            members.push((nick.to_string(), String::new()));
+            sort_members_by_rank(members);
+            true
+        }
+        Some("part") | Some("quit") => {
+            let Some(nick) = nick else { return false };
+            let Some(members) = state.members.get_mut(key) else {
+                return false;
+            };
+            let before = members.len();
+            members.retain(|(name, _)| name != nick);
+            before != members.len()
+        }
+        Some("nick_change") => {
+            let (Some(old_nick), Some(new_nick)) = (
+                nick,
+                payload
+                    .get("meta")
+                    .and_then(|meta| meta.get("new_nick"))
+                    .and_then(Value::as_str),
+            ) else {
+                return false;
+            };
+            let Some(members) = state.members.get_mut(key) else {
+                return false;
+            };
+            let Some(entry) = members.iter_mut().find(|(name, _)| name == old_nick) else {
+                return false;
+            };
+            entry.0 = new_nick.to_string();
+            sort_members_by_rank(members);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Parses a `links_bundle` payload, reconstructs the tree (see
@@ -1452,6 +1552,20 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             Some(reason) => format!("⇐ {} quit ({reason})", nick.unwrap_or("someone")),
             None => format!("⇐ {} quit", nick.unwrap_or("someone")),
         }),
+        // Real, observed shape (`docs/protocol-notes.md` doesn't mention
+        // this kind at all): old nick in `sender` (already captured
+        // above), new one in `meta.new_nick`.
+        Some("nick_change") => {
+            let new_nick = payload
+                .get("meta")
+                .and_then(|meta| meta.get("new_nick"))
+                .and_then(Value::as_str)
+                .unwrap_or("someone else");
+            Some(format!(
+                "* {} is now known as {new_nick}",
+                nick.unwrap_or("someone")
+            ))
+        }
         _ => None,
     };
     if let Some(text) = event_text {
@@ -1504,12 +1618,22 @@ fn render_history_entry(value: &Value) -> RenderedMessage {
     render_message(value, None)
 }
 
-/// Local `HH:MM:SS` for a message. Tries a handful of plausible
-/// server-provided timestamp field names (none confirmed by
-/// `docs/protocol-notes.md`) parsed as RFC 3339, falling back to "now" —
-/// correct for a live push, best-effort for scrollback history whose
-/// field name turns out to be something else.
+/// Local `HH:MM:SS` for a message. `server_time` (epoch milliseconds) is
+/// the real, observed field — confirmed from a live `kind: "nick_change"`
+/// payload during field testing (`docs/protocol-notes.md` never named
+/// it). The RFC-3339-string field names below are kept as a fallback in
+/// case some other event shape uses a different convention; "now" is the
+/// last resort — correct for a live push, best-effort for scrollback
+/// history whose field turns out to be neither.
 fn local_timestamp(payload: &Value) -> String {
+    if let Some(millis) = payload.get("server_time").and_then(Value::as_i64) {
+        if let Some(parsed) = chrono::DateTime::from_timestamp_millis(millis) {
+            return parsed
+                .with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string();
+        }
+    }
     for field in ["server_timestamp", "timestamp", "inserted_at", "created_at"] {
         if let Some(raw) = payload.get(field).and_then(Value::as_str) {
             if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
@@ -1889,12 +2013,16 @@ fn chat_lines_model(messages: &[RenderedMessage], dark_theme: bool) -> Vec<ChatL
         .collect()
 }
 
-fn members_model(members: &[MemberEntry]) -> Vec<MemberRow> {
+fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
     members
         .iter()
-        .map(|(name, prefix)| MemberRow {
-            name: name.clone().into(),
-            prefix: prefix.clone().into(),
+        .map(|(name, prefix)| {
+            let (r, g, b) = nick_color(name, dark_theme);
+            MemberRow {
+                name: name.clone().into(),
+                prefix: prefix.clone().into(),
+                color: slint::Color::from_rgb_u8(r, g, b),
+            }
         })
         .collect()
 }
