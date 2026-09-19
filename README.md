@@ -58,15 +58,16 @@ than broken:
 - **Channel members list** (the right-hand column with `@`/`%`/`+` role
   prefixes): the `boot`-time snapshot is best-effort (the field/shape
   isn't documented, so it's parsed defensively and may come back empty),
-  but the list also builds up live from join/part/quit/nick-change
-  traffic, so it fills in correctly over time even when the snapshot
-  doesn't. What it does **not** track yet is role changes: a `MODE +o`/
-  `+v`/etc. on someone already in the list doesn't update their `@`/`+`
-  prefix (mode-change frame shape isn't confirmed yet), so a prefix shown
-  can go stale after a promotion/demotion until the channel is reselected
-  or Cordiale reconnects. This also means the context-menu's op-only
-  actions (Op/Deop/Voice/Devoice/Kick/Ban) are gated on your *last-known*
-  role, not necessarily your current one.
+  the full initial roster instead arrives as a `members_seeded` push (the
+  same one Cicchetto's own source relies on), and the list also builds up
+  live from join/part/quit/nick-change/mode traffic — role changes
+  (`MODE +o`/`+v`/etc.) do update someone's `@`/`%`/`+` prefix, including
+  your own (which also re-gates the context menu's op-only actions), as
+  long as the mode string only mixes prefix letters (`o`/`h`/`v`) with
+  ones Cordiale doesn't need to track; Cordiale has no ISUPPORT
+  `CHANMODES` table, so a string mixing a prefix letter with another
+  argument-taking one (e.g. a ban alongside an op in the same `MODE`) can
+  misalign and produce a stale prefix until the channel is reselected.
 - Performance hasn't been profiled — deliberately deferred until after
   field testing surfaces real usage patterns.
 

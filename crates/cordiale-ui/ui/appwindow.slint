@@ -713,37 +713,6 @@ export component AppWindow inherits Window {
                     clicked => { screen = "settings"; }
                 }
             }
-
-            // Cicchetto's own bottom-of-sidebar "actions" row (a plain
-            // click, not a right-click, unlike `MemberContextMenu`) —
-            // confirmed against its real source: a global nav/utility
-            // menu, not a per-member one. Only lists what Cordiale
-            // actually has; Cicchetto's version also has rooms/radio/
-            // themes/archive/mute/switch-account, none of which Cordiale
-            // supports yet.
-            HorizontalLayout {
-                alignment: start;
-
-                Button {
-                    text: "☰ " + @tr("Actions") + " ▾";
-                    clicked => { actions-menu-area.show({ x: 0px, y: 0px }); }
-                }
-
-                actions-menu-area := ContextMenuArea {
-                    Menu {
-                        MenuItem { title: @tr("Home"); activated => { home-requested(); } }
-                        MenuItem { title: @tr("Settings"); activated => { screen = "settings"; } }
-                        if is-admin : MenuItem {
-                            title: @tr("Admin");
-                            activated => {
-                                screen = "settings";
-                                settings-section = "admin";
-                            }
-                        }
-                        MenuItem { title: @tr("Disconnect"); activated => { disconnect-requested(); } }
-                    }
-                }
-            }
         }
 
         ResizeHandle {
@@ -838,13 +807,17 @@ export component AppWindow inherits Window {
             }
         }
 
-        if has-selected-channel && channel-members.length > 0 : ResizeHandle {
+        // Visible whenever a channel is open, not just once members show
+        // up: the roster can legitimately take a moment to arrive (or, if
+        // it never does, hiding the whole column also hid the "actions"
+        // row below it, which doesn't depend on the roster at all).
+        if has-selected-channel : ResizeHandle {
             target-width <=> members-width;
             target-min-width: 100px;
             target-max-width: 320px;
         }
 
-        if has-selected-channel && channel-members.length > 0 : VerticalBox {
+        if has-selected-channel : VerticalBox {
             width: members-width;
             spacing: 4px;
 
@@ -867,6 +840,37 @@ export component AppWindow inherits Window {
                     whois(nick) => { member-whois-requested(nick); }
                     ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                     query(nick) => { member-query-requested(nick); }
+                }
+            }
+
+            // Cicchetto's own bottom-of-members-column "actions" row (a
+            // plain click, not a right-click, unlike `MemberContextMenu`)
+            // — confirmed against its real source and the user's own
+            // screenshot: a global nav/utility menu, not a per-member one.
+            // Only lists what Cordiale actually has; Cicchetto's version
+            // also has rooms/radio/themes/archive/mute/switch-account,
+            // none of which Cordiale supports yet.
+            HorizontalLayout {
+                alignment: start;
+
+                Button {
+                    text: "☰ " + @tr("Actions") + " ▾";
+                    clicked => { actions-menu-area.show({ x: 0px, y: 0px }); }
+                }
+
+                actions-menu-area := ContextMenuArea {
+                    Menu {
+                        MenuItem { title: @tr("Home"); activated => { home-requested(); } }
+                        MenuItem { title: @tr("Settings"); activated => { screen = "settings"; } }
+                        if is-admin : MenuItem {
+                            title: @tr("Admin");
+                            activated => {
+                                screen = "settings";
+                                settings-section = "admin";
+                            }
+                        }
+                        MenuItem { title: @tr("Disconnect"); activated => { disconnect-requested(); } }
+                    }
                 }
             }
         }

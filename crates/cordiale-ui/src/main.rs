@@ -1524,9 +1524,27 @@ fn handle_frame(
     // incremental join/part/nick_change frames and starts empty for every
     // channel that already had people in it before Cordiale connected.
     if payload_kind == Some("members_seeded") {
-        if let Some(key) = apply_members_seeded(state, &frame.payload) {
-            if state.current_channel.as_ref() == Some(&key) {
-                push_members_update(state, ui, &key);
+        match apply_members_seeded(state, &frame.payload) {
+            Some(key) => {
+                let count = state.members.get(&key).map(Vec::len).unwrap_or(0);
+                persistence::log_line(&format!(
+                    "members_seeded applied: {}/{} -> {count} member(s)",
+                    key.0, key.1
+                ));
+                if state.current_channel.as_ref() == Some(&key) {
+                    push_members_update(state, ui, &key);
+                }
+            }
+            // Confirms the event arrives but this server's actual field
+            // names differ from Cicchetto's (`network`/`channel`/`members`
+            // with each member `{nick, modes}`) — logged instead of
+            // guessed again; the payload is safe to log verbatim, it never
+            // carries credentials.
+            None => {
+                persistence::log_line(&format!(
+                    "members_seeded frame didn't match the expected shape: {}",
+                    frame.payload
+                ));
             }
         }
         return;
@@ -1665,6 +1683,60 @@ fn update_members_from_frame(
             entry.0 = new_nick.to_string();
             sort_members_by_rank(members);
             true
+        }
+        // Real, observed shape (a screenshot caught this leaking as raw
+        // JSON before this was handled): `meta.modes` like `"+o"`/`"-o"`,
+        // `meta.args` the targets in order for whichever letters take one.
+        // Cordiale only tracks the three prefix-bearing modes it renders
+        // (`@`/`%`/`+`) — any other letter in the string (ban masks, keys,
+        // limits, ...) is skipped without consuming an `args` entry, since
+        // Cordiale has no ISUPPORT CHANMODES table to know which of those
+        // take one; a combined string mixing a skipped letter with a
+        // prefix letter (e.g. `"+ob"`) would misalign, but no such case
+        // has been observed yet — see README's Known gaps.
+        Some("mode") => {
+            let modes = payload
+                .get("meta")
+                .and_then(|meta| meta.get("modes"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let targets = mode_args(payload);
+            let Some(members) = state.members.get_mut(key) else {
+                return false;
+            };
+            let mut sign = '+';
+            let mut targets = targets.into_iter();
+            let mut changed = false;
+            for ch in modes.chars() {
+                match ch {
+                    '+' | '-' => sign = ch,
+                    'o' | 'h' | 'v' => {
+                        let Some(target) = targets.next() else {
+                            continue;
+                        };
+                        let Some(entry) = members.iter_mut().find(|(name, _)| *name == target)
+                        else {
+                            continue;
+                        };
+                        let symbol = match ch {
+                            'o' => "@",
+                            'h' => "%",
+                            _ => "+",
+                        };
+                        entry.1 = if sign == '+' {
+                            symbol.to_string()
+                        } else {
+                            String::new()
+                        };
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+            if changed {
+                sort_members_by_rank(members);
+            }
+            changed
         }
         _ => false,
     }
@@ -1827,6 +1899,27 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
                 nick.unwrap_or("someone")
             ))
         }
+        // Real, observed shape: `meta.modes` is the mode-change string
+        // (e.g. `"+o"`, `"+ov"`, `"-o"`) and `meta.args` the targets that
+        // take one, in order — same alignment `update_members_from_frame`
+        // uses to actually apply the change.
+        Some("mode") => {
+            let modes = payload
+                .get("meta")
+                .and_then(|meta| meta.get("modes"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let targets = mode_args(payload);
+            let suffix = if targets.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", targets.join(" "))
+            };
+            Some(format!(
+                "* {} sets {modes}{suffix}",
+                nick.unwrap_or("someone")
+            ))
+        }
         _ => None,
     };
     if let Some(text) = event_text {
@@ -1866,6 +1959,23 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             italic: true,
         },
     }
+}
+
+/// `meta.args` on a `kind: "mode"` payload — the targets a mode change's
+/// letters that take one line up with, in order (same list `render_message`
+/// and `update_members_from_frame` both read).
+fn mode_args(payload: &Value) -> Vec<String> {
+    payload
+        .get("meta")
+        .and_then(|meta| meta.get("args"))
+        .and_then(Value::as_array)
+        .map(|args| {
+            args.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn render_frame(frame: &cordiale_core::phoenix::PhoenixMessage) -> RenderedMessage {
