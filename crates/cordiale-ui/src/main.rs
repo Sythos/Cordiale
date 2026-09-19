@@ -1535,6 +1535,10 @@ fn messages_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), V
     messages
 }
 
+/// One sidebar network group as plain data: network slug, expand state,
+/// and its `(channel, label)` pairs.
+type NetworkGroupData = (String, bool, Vec<(String, String)>);
+
 /// Groups flat `(network, channel, label)` entries by network, sorted by
 /// network then channel (`boot.channels` is a `HashMap`, so iteration
 /// order isn't stable without this), with each group's expand state from
@@ -1550,7 +1554,7 @@ fn messages_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), V
 fn network_groups_data(
     entries: &[(String, String, String)],
     expanded: &HashMap<String, bool>,
-) -> Vec<(String, bool, Vec<(String, String)>)> {
+) -> Vec<NetworkGroupData> {
     let mut by_network: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
     for (network, channel, label) in entries {
@@ -1572,7 +1576,7 @@ fn network_groups_data(
 /// Builds the actual sidebar `NetworkGroup` Slint model out of
 /// `network_groups_data`'s plain grouping — must run on the UI thread,
 /// see that function's doc comment for why.
-fn network_groups_model(data: Vec<(String, bool, Vec<(String, String)>)>) -> Vec<NetworkGroup> {
+fn network_groups_model(data: Vec<NetworkGroupData>) -> Vec<NetworkGroup> {
     data.into_iter()
         .map(|(network, expanded, channels)| {
             let channel_entries: Vec<ChannelEntry> = channels
