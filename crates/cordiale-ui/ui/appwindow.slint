@@ -483,14 +483,20 @@ export component AppWindow inherits Window {
                 clicked => { links-requested(network); }
             }
 
-            Button {
-                text: @tr("Settings");
-                clicked => { screen = "settings"; }
-            }
+            HorizontalLayout {
+                alignment: start;
 
-            Button {
-                text: @tr("Disconnect");
-                clicked => { disconnect-requested(); }
+                // Small icon on purpose: Settings is a low-frequency
+                // action once a session is up, and Disconnect moved into
+                // Settings > General (the network section) instead of
+                // sitting here as its own permanent button.
+                Button {
+                    text: "⚙";
+                    accessible-label: @tr("Settings");
+                    width: 32px;
+                    height: 32px;
+                    clicked => { screen = "settings"; }
+                }
             }
         }
 
@@ -670,6 +676,15 @@ export component AppWindow inherits Window {
                 Button {
                     text: theme == "light" ? @tr("Switch to dark") : @tr("Switch to light");
                     clicked => { theme-toggle-requested(); }
+                }
+
+                Text {
+                    text: @tr("Connection");
+                    font-size: 16px;
+                }
+                Button {
+                    text: @tr("Disconnect");
+                    clicked => { disconnect-requested(); }
                 }
 
                 if known-networks.length > 0 : VerticalBox {
