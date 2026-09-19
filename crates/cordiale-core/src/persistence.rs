@@ -211,7 +211,66 @@ fn log_line_to(path: &std::path::Path, message: &str) {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
+    let message = redact_secrets(message);
     let _ = writeln!(file, "[{timestamp}] {message}");
+}
+
+/// Keys whose value is redacted wherever they appear as `key<punctuation>value`
+/// (covers `password=`, `password: "..."`, `"password":"..."` — query-string,
+/// Rust `Debug`-derive and JSON shapes alike).
+const SECRET_KEY_MARKERS: &[&str] = &["password", "token", "secret"];
+/// Fixed strings redacted verbatim, for shapes no key/value split covers —
+/// the Phoenix WS bearer subprotocol (`base64url.bearer.phx.<token>`) and a
+/// plain HTTP `Authorization: Bearer <token>` header.
+const SECRET_LITERAL_MARKERS: &[&str] = &["bearer.phx.", "bearer "];
+
+/// Masks every password/token/secret value found in `message` before it's
+/// written to disk. A backstop, not the only line of defense: every call
+/// site already avoids interpolating a secret directly (see
+/// `docs/protocol-notes.md` and the comments at each `log_line` call), but
+/// this makes it structurally true instead of relying on every caller,
+/// forever, getting that right — a `Debug`-derived struct or a future
+/// dependency's error type echoing a credential back would otherwise slip
+/// straight into a file field testers are asked to share for bug reports.
+fn redact_secrets(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    let mut result = String::with_capacity(message.len());
+    let mut cursor = 0;
+
+    while cursor < message.len() {
+        let literal_hit = SECRET_LITERAL_MARKERS.iter().filter_map(|marker| {
+            lower[cursor..]
+                .find(*marker)
+                .map(|pos| (cursor + pos, cursor + pos + marker.len()))
+        });
+        let key_hit = SECRET_KEY_MARKERS.iter().filter_map(|marker| {
+            lower[cursor..].find(*marker).map(|pos| {
+                let key_end = cursor + pos + marker.len();
+                let value_start = message[key_end..]
+                    .find(|c: char| !matches!(c, ':' | '=' | '"' | '\'' | ' '))
+                    .map(|offset| key_end + offset)
+                    .unwrap_or(message.len());
+                (cursor + pos, value_start)
+            })
+        });
+
+        let Some((_, value_start)) = literal_hit.chain(key_hit).min_by_key(|(pos, _)| *pos)
+        else {
+            result.push_str(&message[cursor..]);
+            break;
+        };
+
+        result.push_str(&message[cursor..value_start]);
+        result.push_str("[redacted]");
+
+        let value_end = message[value_start..]
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | '}' | '&'))
+            .map(|offset| value_start + offset)
+            .unwrap_or(message.len());
+        cursor = value_end;
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -269,5 +328,59 @@ mod tests {
         assert!(lines[1].ends_with("] second line"));
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn redact_secrets_masks_the_ws_bearer_subprotocol() {
+        let message = "connect failed: base64url.bearer.phx.abcDEF123-_.xyz stuff";
+        assert_eq!(
+            redact_secrets(message),
+            "connect failed: base64url.bearer.phx.[redacted] stuff"
+        );
+    }
+
+    #[test]
+    fn redact_secrets_masks_an_authorization_header() {
+        assert_eq!(
+            redact_secrets("sent Authorization: Bearer abc123.def456"),
+            "sent Authorization: Bearer [redacted]"
+        );
+    }
+
+    #[test]
+    fn redact_secrets_masks_a_debug_derived_password_field() {
+        let message = r#"LoginRequest { identifier: "vjt", password: "hunter2" }"#;
+        assert_eq!(
+            redact_secrets(message),
+            r#"LoginRequest { identifier: "vjt", password: "[redacted]" }"#
+        );
+    }
+
+    #[test]
+    fn redact_secrets_masks_a_compact_json_token_field() {
+        assert_eq!(
+            redact_secrets(r#"{"token":"abc123","subject":{}}"#),
+            r#"{"token":"[redacted]","subject":{}}"#
+        );
+    }
+
+    #[test]
+    fn redact_secrets_masks_a_query_string_secret() {
+        assert_eq!(
+            redact_secrets("GET /x?password=hunter2&next=1"),
+            "GET /x?password=[redacted]&next=1"
+        );
+    }
+
+    #[test]
+    fn redact_secrets_leaves_an_unrelated_message_untouched() {
+        let message = "connect succeeded: server=https://irc.sindro.me";
+        assert_eq!(redact_secrets(message), message);
+    }
+
+    #[test]
+    fn redact_secrets_masks_every_occurrence() {
+        let message = "token=aaa retry token=bbb";
+        assert_eq!(redact_secrets(message), "token=[redacted] retry token=[redacted]");
     }
 }
