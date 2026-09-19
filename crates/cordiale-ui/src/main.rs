@@ -1499,7 +1499,10 @@ fn local_timestamp(payload: &Value) -> String {
     for field in ["server_timestamp", "timestamp", "inserted_at", "created_at"] {
         if let Some(raw) = payload.get(field).and_then(Value::as_str) {
             if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
-                return parsed.with_timezone(&chrono::Local).format("%H:%M:%S").to_string();
+                return parsed
+                    .with_timezone(&chrono::Local)
+                    .format("%H:%M:%S")
+                    .to_string();
             }
         }
     }
@@ -1787,7 +1790,11 @@ fn muted_color(dark_theme: bool) -> slint::Color {
 /// theme-tuned so every hue stays legible on that theme's background.
 fn nick_color(nick: &str, dark_theme: bool) -> (u8, u8, u8) {
     let hue = (fnv1a_hash(nick.as_bytes()) % 360) as f32;
-    let (saturation, lightness) = if dark_theme { (0.65, 0.68) } else { (0.65, 0.35) };
+    let (saturation, lightness) = if dark_theme {
+        (0.65, 0.68)
+    } else {
+        (0.65, 0.35)
+    };
     hsl_to_rgb(hue, saturation, lightness)
 }
 
@@ -1802,9 +1809,17 @@ fn ensure_legible(color: (u8, u8, u8), dark_theme: bool) -> (u8, u8, u8) {
     const DARK_FLOOR: f32 = 140.0;
     const LIGHT_CEILING: f32 = 180.0;
     if dark_theme && luminance < DARK_FLOOR {
-        blend_toward(color, (255, 255, 255), (DARK_FLOOR - luminance) / DARK_FLOOR)
+        blend_toward(
+            color,
+            (255, 255, 255),
+            (DARK_FLOOR - luminance) / DARK_FLOOR,
+        )
     } else if !dark_theme && luminance > LIGHT_CEILING {
-        blend_toward(color, (0, 0, 0), (luminance - LIGHT_CEILING) / (255.0 - LIGHT_CEILING))
+        blend_toward(
+            color,
+            (0, 0, 0),
+            (luminance - LIGHT_CEILING) / (255.0 - LIGHT_CEILING),
+        )
     } else {
         color
     }
