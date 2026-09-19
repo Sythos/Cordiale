@@ -29,4 +29,15 @@ fn main() {
     let config = slint_build::CompilerConfiguration::new().with_bundled_translations("lang");
     slint_build::compile_with_config("ui/appwindow.slint", config)
         .expect("failed to compile the Slint UI");
+
+    // Embed the app icon into the .exe on Windows. The .ico is generated
+    // from resources/branding/cordiale_icona.png by the CI workflows
+    // (packages.yml, dev-build.yml) with ImageMagick before `cargo build`
+    // runs, so it's expected to exist by the time build.rs gets here.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        winresource::WindowsResource::new()
+            .set_icon("../../resources/branding/cordiale.ico")
+            .compile()
+            .expect("failed to embed the Windows icon resource");
+    }
 }

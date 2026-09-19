@@ -95,6 +95,11 @@ jobs:
         with:
           tool: cross
 
+      - name: Generate Windows .ico from source PNG
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: magick resources\branding\cordiale_icona.png -define icon:auto-resize="256,48,32,16" resources\branding\cordiale.ico
+
       - name: Build release binary (native)
         if: runner.os != 'macOS' && matrix.target != 'aarch64-unknown-linux-gnu'
         shell: bash
@@ -123,7 +128,7 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install --yes ruby ruby-dev build-essential rpm libarchive-tools zstd
+          sudo apt-get install --yes ruby ruby-dev build-essential rpm libarchive-tools zstd imagemagick
           sudo gem install --no-document fpm
 
       - name: Package Linux artifacts
@@ -139,6 +144,21 @@ jobs:
           mkdir -p dist stage/usr/bin
           cp "target/${TARGET}/release/cordiale-ui" stage/usr/bin/cordiale
           chmod 0755 stage/usr/bin/cordiale
+
+          mkdir -p stage/usr/share/icons/hicolor/256x256/apps stage/usr/share/applications
+          convert resources/branding/cordiale_icona.png -resize 256x256 \
+            stage/usr/share/icons/hicolor/256x256/apps/cordiale.png
+
+          cat > stage/usr/share/applications/cordiale.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Cordiale
+          Comment=Native desktop client for Grappa
+          Exec=cordiale
+          Icon=cordiale
+          Terminal=false
+          Categories=Network;InstantMessaging;Chat;
+          DESKTOP
 
           tar -czf "dist/cordiale-linux-${DEB_ARCH}-${VERSION}.tar.gz" \
             -C "target/${TARGET}/release" cordiale-ui
@@ -206,7 +226,8 @@ jobs:
             throw "makensis.exe not found on this runner"
           }
           $outFile = "$PWD\dist\Cordiale_Windows_$env:WIN_ARCH.exe"
-          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=$env:VERSION" packaging\windows\installer.nsi
+          $iconPath = "$PWD\resources\branding\cordiale.ico"
+          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=$env:VERSION" "/DICON_PATH=$iconPath" packaging\windows\installer.nsi
           if ($LASTEXITCODE -ne 0) {
             throw "makensis failed with exit code $LASTEXITCODE"
           }
@@ -223,9 +244,25 @@ jobs:
             -C target/universal-apple-darwin/release cordiale-ui
 
           APP_DIR="macos-app-stage/Cordiale.app"
-          mkdir -p "$APP_DIR/Contents/MacOS"
+          mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
           cp target/universal-apple-darwin/release/cordiale-ui "$APP_DIR/Contents/MacOS/cordiale-ui"
           chmod +x "$APP_DIR/Contents/MacOS/cordiale-ui"
+
+          ICONSET="Cordiale.iconset"
+          mkdir -p "$ICONSET"
+          sips -z 16 16 resources/branding/cordiale_icona.png --out "$ICONSET/icon_16x16.png"
+          sips -z 32 32 resources/branding/cordiale_icona.png --out "$ICONSET/icon_16x16@2x.png"
+          sips -z 32 32 resources/branding/cordiale_icona.png --out "$ICONSET/icon_32x32.png"
+          sips -z 64 64 resources/branding/cordiale_icona.png --out "$ICONSET/icon_32x32@2x.png"
+          sips -z 128 128 resources/branding/cordiale_icona.png --out "$ICONSET/icon_128x128.png"
+          sips -z 256 256 resources/branding/cordiale_icona.png --out "$ICONSET/icon_128x128@2x.png"
+          sips -z 256 256 resources/branding/cordiale_icona.png --out "$ICONSET/icon_256x256.png"
+          sips -z 512 512 resources/branding/cordiale_icona.png --out "$ICONSET/icon_256x256@2x.png"
+          sips -z 512 512 resources/branding/cordiale_icona.png --out "$ICONSET/icon_512x512.png"
+          sips -z 1024 1024 resources/branding/cordiale_icona.png --out "$ICONSET/icon_512x512@2x.png"
+          iconutil -c icns "$ICONSET" -o Cordiale.icns
+          cp Cordiale.icns "$APP_DIR/Contents/Resources/Cordiale.icns"
+
           cat > "$APP_DIR/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -233,6 +270,8 @@ jobs:
           <dict>
               <key>CFBundleExecutable</key>
               <string>cordiale-ui</string>
+              <key>CFBundleIconFile</key>
+              <string>Cordiale</string>
               <key>CFBundleIdentifier</key>
               <string>com.sythos.cordiale</string>
               <key>CFBundleName</key>

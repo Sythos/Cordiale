@@ -34,6 +34,10 @@ jobs:
           rustup default stable
           rustup target add x86_64-pc-windows-msvc
 
+      - name: Generate Windows .ico from source PNG
+        shell: pwsh
+        run: magick resources\branding\cordiale_icona.png -define icon:auto-resize="256,48,32,16" resources\branding\cordiale.ico
+
       - name: Build release binary
         shell: bash
         run: cargo build --release --package cordiale-ui --target x86_64-pc-windows-msvc
@@ -67,7 +71,8 @@ jobs:
           }
 
           $outFile = "$PWD\dist\Cordiale_Windows_x64_DEV_$env:TIMESTAMP.exe"
-          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=dev-$env:TIMESTAMP" packaging\windows\installer.nsi
+          $iconPath = "$PWD\resources\branding\cordiale.ico"
+          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=dev-$env:TIMESTAMP" "/DICON_PATH=$iconPath" packaging\windows\installer.nsi
           if ($LASTEXITCODE -ne 0) {
             throw "makensis failed with exit code $LASTEXITCODE"
           }

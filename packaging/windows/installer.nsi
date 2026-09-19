@@ -5,12 +5,16 @@
 ;   /DBIN_PATH=<path to the built cordiale-ui.exe>
 ;   /DOUT_FILE=<path to write the installer to>
 ;   /DVERSION=<version string shown to the user>
+;   /DICON_PATH=<path to the cordiale.ico file>
 
 !ifndef BIN_PATH
   !error "BIN_PATH must be defined on the command line (/DBIN_PATH=...)"
 !endif
 !ifndef OUT_FILE
   !error "OUT_FILE must be defined on the command line (/DOUT_FILE=...)"
+!endif
+!ifndef ICON_PATH
+  !error "ICON_PATH must be defined on the command line (/DICON_PATH=...)"
 !endif
 !ifndef VERSION
   !define VERSION "0.0.0"
@@ -28,6 +32,7 @@
 
 Name "${APP_NAME}"
 OutFile "${OUT_FILE}"
+Icon "${ICON_PATH}"
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 RequestExecutionLevel admin
 VIProductVersion "0.0.0.0"
