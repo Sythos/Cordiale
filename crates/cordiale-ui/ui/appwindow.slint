@@ -36,6 +36,39 @@ struct AdminSessionRow {
     session-id: string,
 }
 
+// One row in the admin Users list.
+struct AdminUserRow {
+    label: string,
+    is-admin: bool,
+    user-id: string,
+}
+
+// One row in the admin Networks list.
+struct AdminNetworkRow {
+    label: string,
+    network-id: string,
+}
+
+// One row in the admin Visitors list.
+struct AdminVisitorRow {
+    label: string,
+    visitor-id: string,
+}
+
+// One positioned node in the radial `/links` diagram — see
+// `cordiale_core::links::radial_layout`, which computes `x`/`y` (already
+// offset to the canvas center) in Rust; the graph window only draws them.
+struct LinksGraphNode {
+    server: string,
+    // Plain pixel counts, not `length`: keeps the Rust-side type exactly
+    // `i32`, the same int<->i32 mapping already proven by CI elsewhere in
+    // this file (`status-network-count` etc.), rather than betting on an
+    // unverified `length` binding. `* 1px` below is the documented
+    // int-to-length conversion idiom.
+    x: int,
+    y: int,
+}
+
 // One reconstructed `/links` tree row, already indented and formatted in
 // Rust (see `cordiale_core::links`) — Slint just displays it verbatim.
 struct LinksRow {
@@ -97,17 +130,25 @@ export component AppWindow inherits Window {
 
     // Admin — Settings > Admin, only meaningful when `is-admin` (see
     // `docs/protocol-notes.md` §4ter): a deliberately small slice of
-    // Grappa's actual `/admin/*` surface (overview + sessions list +
-    // disconnect), not the full operator console.
+    // Grappa's actual `/admin/*` surface, not the full operator console.
+    in-out property <string> admin-section: "sessions";
     in property <string> admin-overview-text: "";
     in property <[AdminSessionRow]> admin-sessions: [];
+    in property <[AdminUserRow]> admin-users: [];
+    in property <[AdminNetworkRow]> admin-networks: [];
+    in property <[AdminVisitorRow]> admin-visitors: [];
+    in property <[string]> admin-session-log: [];
     in property <bool> admin-loading: false;
 
     // `/links` network-topology view — see `cordiale_core::links` for the
-    // tree reconstruction that feeds `links-rows`.
+    // tree reconstruction that feeds `links-rows`, and the radial layout
+    // that feeds `links-graph-*` (read by `on_links_graph_requested` in
+    // main.rs to populate a `LinksGraphWindow` on demand).
     in property <[string]> known-networks: [];
     in property <string> links-network-label: "";
     in property <[LinksRow]> links-rows: [];
+    in property <string> links-graph-edges-commands: "";
+    in property <[LinksGraphNode]> links-graph-nodes: [];
 
     callback connect-requested(string, string, string);
     callback server-selected(string);
@@ -118,7 +159,13 @@ export component AppWindow inherits Window {
     callback compose-text-changed(string);
     callback admin-refresh-requested();
     callback admin-disconnect-session(string);
+    callback admin-user-toggle-admin(string, bool);
+    callback admin-user-delete(string);
+    callback admin-visitor-delete(string);
+    callback admin-network-reset-circuit(string);
+    callback admin-reaper-run();
     callback links-requested(string);
+    callback links-graph-requested();
     callback theme-toggle-requested();
     callback display-prefs-changed();
 
@@ -523,13 +570,42 @@ export component AppWindow inherits Window {
                 spacing: 8px;
 
                 Text {
-                    text: @tr("Live overview and session management. The rest of Grappa's admin surface (networks, users, vhosts, credentials, live event stream) isn't built yet.");
+                    text: @tr("Vhosts, credentials, server-wide settings write, and the live admin event stream aren't built yet.");
                     wrap: word-wrap;
                 }
 
-                Button {
-                    text: @tr("Refresh");
-                    clicked => { admin-refresh-requested(); }
+                HorizontalBox {
+                    Button {
+                        text: @tr("Sessions");
+                        clicked => { admin-section = "sessions"; }
+                    }
+                    Button {
+                        text: @tr("Users");
+                        clicked => { admin-section = "users"; }
+                    }
+                    Button {
+                        text: @tr("Networks");
+                        clicked => { admin-section = "networks"; }
+                    }
+                    Button {
+                        text: @tr("Visitors");
+                        clicked => { admin-section = "visitors"; }
+                    }
+                    Button {
+                        text: @tr("Session Log");
+                        clicked => { admin-section = "session-log"; }
+                    }
+                }
+
+                HorizontalBox {
+                    Button {
+                        text: @tr("Refresh");
+                        clicked => { admin-refresh-requested(); }
+                    }
+                    Button {
+                        text: @tr("Run reaper sweep");
+                        clicked => { admin-reaper-run(); }
+                    }
                 }
 
                 Text {
@@ -537,15 +613,67 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                 }
 
-                for row in admin-sessions : HorizontalBox {
-                    Text {
-                        text: row.label;
-                        wrap: word-wrap;
+                if admin-section == "sessions" : VerticalBox {
+                    for row in admin-sessions : HorizontalBox {
+                        Text {
+                            text: row.label;
+                            wrap: word-wrap;
+                        }
+                        Button {
+                            text: @tr("Disconnect");
+                            enabled: row.alive;
+                            clicked => { admin-disconnect-session(row.session-id); }
+                        }
                     }
-                    Button {
-                        text: @tr("Disconnect");
-                        enabled: row.alive;
-                        clicked => { admin-disconnect-session(row.session-id); }
+                }
+
+                if admin-section == "users" : VerticalBox {
+                    for row in admin-users : HorizontalBox {
+                        Text {
+                            text: row.label;
+                            wrap: word-wrap;
+                        }
+                        Button {
+                            text: row.is-admin ? @tr("Revoke admin") : @tr("Make admin");
+                            clicked => { admin-user-toggle-admin(row.user-id, !row.is-admin); }
+                        }
+                        Button {
+                            text: @tr("Delete");
+                            clicked => { admin-user-delete(row.user-id); }
+                        }
+                    }
+                }
+
+                if admin-section == "networks" : VerticalBox {
+                    for row in admin-networks : HorizontalBox {
+                        Text {
+                            text: row.label;
+                            wrap: word-wrap;
+                        }
+                        Button {
+                            text: @tr("Reset circuit");
+                            clicked => { admin-network-reset-circuit(row.network-id); }
+                        }
+                    }
+                }
+
+                if admin-section == "visitors" : VerticalBox {
+                    for row in admin-visitors : HorizontalBox {
+                        Text {
+                            text: row.label;
+                            wrap: word-wrap;
+                        }
+                        Button {
+                            text: @tr("Delete");
+                            clicked => { admin-visitor-delete(row.visitor-id); }
+                        }
+                    }
+                }
+
+                if admin-section == "session-log" : VerticalBox {
+                    for line in admin-session-log : Text {
+                        text: line;
+                        wrap: word-wrap;
                     }
                 }
             }
@@ -567,8 +695,60 @@ export component AppWindow inherits Window {
         }
 
         Button {
+            text: @tr("Show graph");
+            clicked => { links-graph-requested(); }
+        }
+
+        Button {
             text: @tr("Back");
             clicked => { screen = "connected"; }
+        }
+    }
+}
+
+export component LinksGraphWindow inherits Window {
+    title: @tr("Cordiale — Network Links");
+    width: 800px;
+    height: 640px;
+
+    in property <string> network-label: "";
+    in property <string> edges-commands: "";
+    in property <[LinksGraphNode]> nodes: [];
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+
+        Text {
+            text: network-label;
+            font-size: 18px;
+        }
+
+        Rectangle {
+            background: #1e1e1e;
+
+            Path {
+                commands: edges-commands;
+                stroke: #888888;
+                stroke-width: 1.5px;
+            }
+
+            for node in nodes : Rectangle {
+                x: node.x * 1px - 5px;
+                y: node.y * 1px - 5px;
+                width: 10px;
+                height: 10px;
+                border-radius: 5px;
+                background: #4a9eff;
+            }
+
+            for node in nodes : Text {
+                x: node.x * 1px + 8px;
+                y: node.y * 1px - 7px;
+                text: node.server;
+                color: white;
+                font-size: 12px;
+            }
         }
     }
 }

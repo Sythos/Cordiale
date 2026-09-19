@@ -32,7 +32,8 @@ use reqwest::{Client, StatusCode};
 use serde_json::Value;
 
 use crate::admin::{
-    AdminNetworksResponse, AdminOverview, AdminSessionsResponse, AdminUsersResponse,
+    AdminNetworksResponse, AdminOverview, AdminReaperRunResponse, AdminSessionLogResponse,
+    AdminSessionsResponse, AdminUsersResponse, AdminVisitorsResponse,
 };
 use crate::rest::{
     BootResponse, ConfigResponse, DisplayPrefs, LoginRequest, LoginResponse, MeResponse,
@@ -280,6 +281,137 @@ impl GrappaClient {
             .await?
             .error_for_status()?;
         Ok(response.json::<AdminNetworksResponse>().await?.networks)
+    }
+
+    /// `GET /admin/visitors`.
+    pub async fn fetch_admin_visitors(&self, token: &str) -> Result<Vec<Value>, GrappaClientError> {
+        let url = format!("{}/admin/visitors", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<AdminVisitorsResponse>().await?.visitors)
+    }
+
+    /// `DELETE /admin/visitors/:id`.
+    pub async fn delete_admin_visitor(
+        &self,
+        token: &str,
+        visitor_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "visitors", visitor_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /admin/session_log?limit=N`.
+    pub async fn fetch_admin_session_log(
+        &self,
+        token: &str,
+        limit: u32,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let url = format!("{}/admin/session_log?limit={limit}", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response
+            .json::<AdminSessionLogResponse>()
+            .await?
+            .session_log)
+    }
+
+    /// `POST /admin/reaper/run`.
+    pub async fn run_admin_reaper(
+        &self,
+        token: &str,
+    ) -> Result<AdminReaperRunResponse, GrappaClientError> {
+        let url = format!("{}/admin/reaper/run", self.base_url);
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<AdminReaperRunResponse>().await?)
+    }
+
+    /// `POST /admin/circuit/:network_id/reset`.
+    pub async fn reset_admin_circuit(
+        &self,
+        token: &str,
+        network_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "circuit", network_id, "reset"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `PATCH /admin/users/:id` — whitelist is just `is_admin` server-side.
+    pub async fn set_admin_user_is_admin(
+        &self,
+        token: &str,
+        user_id: &str,
+        is_admin: bool,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "users", user_id]);
+        self.http
+            .patch(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "is_admin": is_admin }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /admin/users/:id`.
+    pub async fn delete_admin_user(
+        &self,
+        token: &str,
+        user_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "users", user_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 }
 
@@ -560,5 +692,59 @@ mod tests {
             .disconnect_admin_session("abc123", "user:vjt:1")
             .await
             .expect("disconnect_admin_session");
+    }
+
+    #[tokio::test]
+    async fn run_admin_reaper_parses_the_response() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/admin/reaper/run"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "swept_count": 3,
+                "swept_at": "2026-09-19T10:00:00Z"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let result = client
+            .run_admin_reaper("abc123")
+            .await
+            .expect("run_admin_reaper");
+
+        assert_eq!(result.swept_count, 3);
+    }
+
+    #[tokio::test]
+    async fn set_admin_user_is_admin_sends_the_whitelisted_field() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/admin/users/42"))
+            .and(body_json(serde_json::json!({"is_admin": true})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .set_admin_user_is_admin("abc123", "42", true)
+            .await
+            .expect("set_admin_user_is_admin");
+    }
+
+    #[tokio::test]
+    async fn delete_admin_visitor_deletes_by_id() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/visitors/abc"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .delete_admin_visitor("abc123", "abc")
+            .await
+            .expect("delete_admin_visitor");
     }
 }

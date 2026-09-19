@@ -49,19 +49,22 @@ see `docs/protocol-notes.md` §5. The UI is fully translated into Italian,
 French, German and Spanish (bundled at build time, switchable live, no
 runtime gettext dependency), and the compose box, server list and channel
 list carry explicit accessibility labels for screen readers. Settings →
-Admin is real for `is_admin` accounts: a live overview and the session
-list, with disconnect — Grappa's actual admin surface turned out to be
-considerably larger than initially scoped (30+ endpoints across eight
-areas, see `docs/protocol-notes.md` §4ter), so the rest of it (network/
-user/vhost management, the live admin event stream) is deliberately not
-built yet rather than attempted half-blind. `/links` reconstructs the
-same network-topology tree Cicchetto does (same root-selection and
-orphan-handling logic, tested independently of any server), rendered as
-an indented list rather than Cicchetto's radial SVG layout. What's still
+Admin is real for `is_admin` accounts: overview, sessions (+ disconnect),
+users (+ toggle admin, delete), networks (+ circuit reset), visitors
+(+ delete), session log, and a reaper-sweep trigger — Grappa's actual
+admin surface turned out to be considerably larger than initially scoped
+(30+ endpoints across eight areas, see `docs/protocol-notes.md` §4ter),
+so vhosts, credentials, server-wide settings, and the live admin event
+stream are deliberately not built yet rather than attempted half-blind.
+`/links` reconstructs the same network-topology tree Cicchetto does
+(same root-selection and orphan-handling logic, tested independently of
+any server) and offers both an indented-list view and a "Show graph"
+button that opens a second window with a real radial layout, drawn with
+Slint's native `Path` element — same depth-driven radius and angular-
+slice logic as Cicchetto's own layout, no pan/zoom yet. What's still
 missing: performance profiling, deliberately deferred to after field
 testing. The one gap nobody but a live server can close is field testing
-against a
-real Grappa instance through the actual GUI — that's next.
+against a real Grappa instance through the actual GUI — that's next.
 
 ## Download
 

@@ -29,11 +29,15 @@
 //! corresponding `*.AdminWire` modules) and Cicchetto's admin UI
 //! (`cicchetto/src/AdminPane.tsx`, `cicchetto/src/lib/api.ex`) directly,
 //! since no other authority exists. See `docs/protocol-notes.md` §4ter
-//! for the full endpoint inventory, including the considerably larger set
-//! of endpoints this module deliberately does not cover yet (visitors,
-//! vhosts, credentials, server-wide settings, the admin WebSocket event
-//! stream, and every mutating network/user endpoint beyond session
-//! disconnect).
+//! for the full endpoint inventory. Covered: overview, sessions (list +
+//! disconnect), users (list + toggle `is_admin` + delete), networks
+//! (list + circuit reset), visitors (list + delete), session log (read),
+//! reaper (run). Still deliberately out of scope: vhosts (+ grants),
+//! credentials, server-wide settings write, network create/patch/delete,
+//! user create/password-change, and the admin WebSocket event stream
+//! (`grappa:admin:events`) — each is a form-heavy or genuinely
+//! destructive surface that needs a real server to validate against,
+//! not something to build blind.
 //!
 //! Every entry (`AdminSession`, `AdminUser`, `AdminNetwork`) is kept as
 //! opaque JSON rather than a fully-typed struct: the source confirms
@@ -80,6 +84,28 @@ pub struct AdminUsersResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AdminNetworksResponse {
     pub networks: Vec<Value>,
+}
+
+/// Response body of `GET /admin/visitors`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminVisitorsResponse {
+    pub visitors: Vec<Value>,
+}
+
+/// Response body of `GET /admin/session_log` and
+/// `GET /admin/session_log/sessions`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminSessionLogResponse {
+    #[serde(default)]
+    pub session_log: Vec<Value>,
+}
+
+/// Response body of `POST /admin/reaper/run`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminReaperRunResponse {
+    pub swept_count: i64,
+    #[serde(default)]
+    pub swept_at: Option<String>,
 }
 
 /// Reads a human-readable label out of one opaque `AdminSession` entry:
@@ -144,6 +170,25 @@ pub fn admin_user_is_admin(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Reads the `:id` path segment for `PATCH`/`DELETE /admin/users/:id` out
+/// of one opaque `AdminUser` entry.
+pub fn admin_user_id(entry: &Value) -> Option<String> {
+    let id = entry.get("id")?;
+    id.as_str()
+        .map(str::to_string)
+        .or_else(|| id.as_i64().map(|n| n.to_string()))
+}
+
+/// Reads the `:id`/`:network_id` path segment for
+/// `POST /admin/circuit/:network_id/reset` out of one opaque
+/// `AdminNetwork` entry.
+pub fn admin_network_id(entry: &Value) -> Option<String> {
+    let id = entry.get("id")?;
+    id.as_str()
+        .map(str::to_string)
+        .or_else(|| id.as_i64().map(|n| n.to_string()))
+}
+
 /// Reads a display name out of one opaque `AdminNetwork` entry.
 pub fn admin_network_label(entry: &Value) -> String {
     entry
@@ -151,6 +196,67 @@ pub fn admin_network_label(entry: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("(unknown)")
         .to_string()
+}
+
+/// Reads a short circuit-breaker/live-count status suffix out of one
+/// opaque `AdminNetwork` entry — `""` if the fields aren't present.
+pub fn admin_network_status(entry: &Value) -> String {
+    let circuit = entry
+        .get("circuit_state")
+        .and_then(|circuit| circuit.get("state"))
+        .and_then(Value::as_str);
+    let users = entry
+        .get("live_counts")
+        .and_then(|counts| counts.get("users"))
+        .and_then(Value::as_i64);
+    let visitors = entry
+        .get("live_counts")
+        .and_then(|counts| counts.get("visitors"))
+        .and_then(Value::as_i64);
+
+    match (circuit, users, visitors) {
+        (Some(circuit), Some(users), Some(visitors)) => {
+            format!(" ({circuit}, {users} user(s), {visitors} visitor(s))")
+        }
+        (Some(circuit), _, _) => format!(" ({circuit})"),
+        _ => String::new(),
+    }
+}
+
+/// Reads a human-readable label out of one opaque `AdminVisitor` entry.
+pub fn admin_visitor_label(entry: &Value) -> String {
+    let id = entry.get("id").and_then(Value::as_str).unwrap_or("?");
+    let ip = entry.get("ip").and_then(Value::as_str).unwrap_or("");
+    if ip.is_empty() {
+        id.to_string()
+    } else {
+        format!("{id} ({ip})")
+    }
+}
+
+/// Reads the `:id` path segment for `DELETE /admin/visitors/:id`.
+pub fn admin_visitor_id(entry: &Value) -> Option<String> {
+    entry.get("id").and_then(Value::as_str).map(str::to_string)
+}
+
+/// Reads a one-line summary out of one opaque `SessionLog.Wire` entry.
+pub fn admin_session_log_line(entry: &Value) -> String {
+    let at = entry.get("at").and_then(Value::as_str).unwrap_or("");
+    let event = entry.get("event").and_then(Value::as_str).unwrap_or("?");
+    let nick = entry
+        .get("nick")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("subject_kind").and_then(Value::as_str))
+        .unwrap_or("?");
+    let network = entry
+        .get("network_slug")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if network.is_empty() {
+        format!("{at} · {event} · {nick}")
+    } else {
+        format!("{at} · {event} · {nick}@{network}")
+    }
 }
 
 #[cfg(test)]
@@ -195,5 +301,54 @@ mod tests {
     fn admin_session_is_alive_reads_the_nested_flag() {
         let entry = serde_json::json!({"live_state": {"alive": true}});
         assert!(admin_session_is_alive(&entry));
+    }
+
+    #[test]
+    fn admin_user_id_reads_an_integer_id_as_a_string() {
+        let entry = serde_json::json!({"id": 42});
+        assert_eq!(admin_user_id(&entry), Some("42".to_string()));
+    }
+
+    #[test]
+    fn admin_network_status_formats_circuit_and_live_counts() {
+        let entry = serde_json::json!({
+            "circuit_state": {"state": "closed"},
+            "live_counts": {"users": 3, "visitors": 1}
+        });
+        assert_eq!(
+            admin_network_status(&entry),
+            " (closed, 3 user(s), 1 visitor(s))"
+        );
+    }
+
+    #[test]
+    fn admin_network_id_reads_an_integer_id_as_a_string() {
+        let entry = serde_json::json!({"id": 7});
+        assert_eq!(admin_network_id(&entry), Some("7".to_string()));
+    }
+
+    #[test]
+    fn admin_network_status_is_empty_without_circuit_data() {
+        assert_eq!(admin_network_status(&serde_json::json!({})), "");
+    }
+
+    #[test]
+    fn admin_visitor_label_includes_ip_when_present() {
+        let entry = serde_json::json!({"id": "abc", "ip": "203.0.113.1"});
+        assert_eq!(admin_visitor_label(&entry), "abc (203.0.113.1)");
+    }
+
+    #[test]
+    fn admin_session_log_line_formats_event_and_network() {
+        let entry = serde_json::json!({
+            "at": "2026-09-19T10:00:00Z",
+            "event": "join",
+            "nick": "vjt",
+            "network_slug": "libera"
+        });
+        assert_eq!(
+            admin_session_log_line(&entry),
+            "2026-09-19T10:00:00Z · join · vjt@libera"
+        );
     }
 }

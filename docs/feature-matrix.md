@@ -104,22 +104,26 @@ sorgente Elixir + da Cicchetto) è molto più ampia di quanto stimato
 inizialmente — oltre 30 endpoint `/admin/*` su 8 aree (overview,
 visitors, sessions, networks+servers+featured-channels, reaper/circuit,
 users, credentials, settings, uploads, session log, ws_presence,
-vhosts) più un canale WS dedicato (`grappa:admin:events`). Il gruppo
-*Live → Sessions* (la priorità esplicita dell'utente) è ora reale:
-`GET /admin/overview`, `GET /admin/sessions`,
-`POST /admin/sessions/:id/disconnect`, mostrati e azionabili in
-Settings → Admin. Tutto il resto — *Live → Events/Session Log*,
-l'intero gruppo *Configuration* (Networks, Vhosts, Users, Credentials,
-Settings), *Diagnostics → Debug* — resta non costruito, per ampiezza
-non per difficoltà: ciascuna di quelle aree è a sua volta 3-8 endpoint
-con azioni distruttive reali (elimina utente, elimina rete, cambia
-password), non qualcosa da implementare alla cieca senza un server di
-test. Anche `/links` (comando slash, non endpoint REST/admin, ma
-richiesto esplicitamente per parità con Cicchetto) è implementato:
-ricostruzione dell'albero di rete identica a `buildTree()` di
-Cicchetto (`cordiale_core::links`), resa come lista indentata invece
-del layout radiale SVG di Cicchetto — dettaglio completo in
-`docs/protocol-notes.md` §4ter.
+vhosts) più un canale WS dedicato (`grappa:admin:events`). **Esteso
+(2026-09-19)** oltre al gruppo *Live → Sessions* iniziale: ora reali
+anche Users (lista + toggle admin + delete), Networks (lista + reset
+circuit), Visitors (lista + delete), Session Log (lettura), Reaper
+(run) — tutti azionabili in Settings → Admin con sotto-navigazione a
+bottoni. Resta fuori: Vhosts, Credentials, scrittura di Settings
+server-wide, creazione/modifica-password utente,
+creazione/modifica/eliminazione rete, il canale WS
+`grappa:admin:events` per aggiornamenti live — ciascuna di quelle aree
+è a sua volta un sottoinsieme con azioni distruttive reali (elimina
+rete, cambia password) o form multi-campo, non qualcosa da
+implementare alla cieca senza un server di test. Anche `/links`
+(comando slash, non endpoint REST/admin, ma richiesto esplicitamente
+per parità con Cicchetto) è implementato: ricostruzione dell'albero di
+rete identica a `buildTree()` di Cicchetto (`cordiale_core::links`),
+con **doppia resa** — lista indentata sempre disponibile, più un
+bottone "Show graph" che apre una seconda finestra con un vero layout
+radiale (stesso principio angolo/raggio di Cicchetto, disegnato con
+l'elemento nativo Slint `Path`, niente pan/zoom per ora) — dettaglio
+completo in `docs/protocol-notes.md` §4ter.
 
 ## Voci ancora da chiarire prima di poter classificare
 

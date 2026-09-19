@@ -165,8 +165,48 @@ msgid "Links for {}"
 msgstr "Links für {}"
 
 msgctxt "AppWindow"
-msgid "Live overview and session management. The rest of Grappa's admin surface (networks, users, vhosts, credentials, live event stream) isn't built yet."
-msgstr "Live-Übersicht und Sitzungsverwaltung. Der Rest der Admin-Oberfläche von Grappa (Netzwerke, Benutzer, Vhosts, Zugangsdaten, Live-Ereignisstream) ist noch nicht implementiert."
+msgid "Vhosts, credentials, server-wide settings write, and the live admin event stream aren't built yet."
+msgstr "Vhosts, Zugangsdaten, das Schreiben serverweiter Einstellungen und der Live-Admin-Ereignisstream sind noch nicht implementiert."
+
+msgctxt "AppWindow"
+msgid "Sessions"
+msgstr "Sitzungen"
+
+msgctxt "AppWindow"
+msgid "Users"
+msgstr "Benutzer"
+
+msgctxt "AppWindow"
+msgid "Networks"
+msgstr "Netzwerke"
+
+msgctxt "AppWindow"
+msgid "Visitors"
+msgstr "Besucher"
+
+msgctxt "AppWindow"
+msgid "Session Log"
+msgstr "Sitzungsprotokoll"
+
+msgctxt "AppWindow"
+msgid "Run reaper sweep"
+msgstr "Reaper-Durchlauf starten"
+
+msgctxt "AppWindow"
+msgid "Make admin"
+msgstr "Zum Admin machen"
+
+msgctxt "AppWindow"
+msgid "Revoke admin"
+msgstr "Admin entziehen"
+
+msgctxt "AppWindow"
+msgid "Delete"
+msgstr "Löschen"
+
+msgctxt "AppWindow"
+msgid "Reset circuit"
+msgstr "Schaltkreis zurücksetzen"
 
 msgctxt "AppWindow"
 msgid "Refresh"
@@ -215,3 +255,11 @@ msgstr "Verbindung getrennt. Verbinde erneut…"
 msgctxt "AppWindow"
 msgid "Reconnecting…"
 msgstr "Verbinde erneut…"
+
+msgctxt "AppWindow"
+msgid "Show graph"
+msgstr "Diagramm anzeigen"
+
+msgctxt "LinksGraphWindow"
+msgid "Cordiale — Network Links"
+msgstr "Cordiale — Netzwerkverbindungen"

@@ -22,6 +22,7 @@
 
 slint::include_modules!();
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::thread;
@@ -61,6 +62,11 @@ enum WorkerCommand {
     SaveDisplayPrefs(DisplayPrefs),
     AdminRefresh,
     AdminDisconnectSession(String),
+    AdminUserToggleAdmin(String, bool),
+    AdminUserDelete(String),
+    AdminVisitorDelete(String),
+    AdminNetworkResetCircuit(String),
+    AdminReaperRun,
     RequestLinks(String),
     Disconnect,
 }
@@ -208,6 +214,60 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_links.send(WorkerCommand::RequestLinks(network.to_string()));
     });
 
+    // Lazily created, reused across requests rather than spawning a new
+    // OS window every click. Only ever touched from this callback, which
+    // Slint guarantees runs on the UI thread — safe to be a plain `Rc`.
+    let graph_window: Rc<RefCell<Option<LinksGraphWindow>>> = Rc::new(RefCell::new(None));
+    let weak_for_graph = ui.as_weak();
+    ui.on_links_graph_requested(move || {
+        let Some(ui) = weak_for_graph.upgrade() else {
+            return;
+        };
+        let mut slot = graph_window.borrow_mut();
+        if slot.is_none() {
+            let Ok(window) = LinksGraphWindow::new() else {
+                return;
+            };
+            *slot = Some(window);
+        }
+        let window = slot.as_ref().expect("just ensured present above");
+        window.set_network_label(ui.get_links_network_label());
+        window.set_edges_commands(ui.get_links_graph_edges_commands());
+        window.set_nodes(ui.get_links_graph_nodes());
+        let _ = window.show();
+    });
+
+    let tx_for_user_toggle = worker_tx.clone();
+    ui.on_admin_user_toggle_admin(move |user_id, is_admin| {
+        let _ = tx_for_user_toggle.send(WorkerCommand::AdminUserToggleAdmin(
+            user_id.to_string(),
+            is_admin,
+        ));
+    });
+
+    let tx_for_user_delete = worker_tx.clone();
+    ui.on_admin_user_delete(move |user_id| {
+        let _ = tx_for_user_delete.send(WorkerCommand::AdminUserDelete(user_id.to_string()));
+    });
+
+    let tx_for_visitor_delete = worker_tx.clone();
+    ui.on_admin_visitor_delete(move |visitor_id| {
+        let _ =
+            tx_for_visitor_delete.send(WorkerCommand::AdminVisitorDelete(visitor_id.to_string()));
+    });
+
+    let tx_for_circuit_reset = worker_tx.clone();
+    ui.on_admin_network_reset_circuit(move |network_id| {
+        let _ = tx_for_circuit_reset.send(WorkerCommand::AdminNetworkResetCircuit(
+            network_id.to_string(),
+        ));
+    });
+
+    let tx_for_reaper = worker_tx.clone();
+    ui.on_admin_reaper_run(move || {
+        let _ = tx_for_reaper.send(WorkerCommand::AdminReaperRun);
+    });
+
     ui.run()
 }
 
@@ -316,6 +376,38 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::AdminDisconnectSession(session_id)) => {
                         handle_admin_disconnect_session(&state, &ui, session_id).await;
+                    }
+                    Some(WorkerCommand::AdminUserToggleAdmin(user_id, is_admin)) => {
+                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                            let _ = client
+                                .set_admin_user_is_admin(token, &user_id, is_admin)
+                                .await;
+                        }
+                        handle_admin_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::AdminUserDelete(user_id)) => {
+                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                            let _ = client.delete_admin_user(token, &user_id).await;
+                        }
+                        handle_admin_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::AdminVisitorDelete(visitor_id)) => {
+                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                            let _ = client.delete_admin_visitor(token, &visitor_id).await;
+                        }
+                        handle_admin_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::AdminNetworkResetCircuit(network_id)) => {
+                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                            let _ = client.reset_admin_circuit(token, &network_id).await;
+                        }
+                        handle_admin_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::AdminReaperRun) => {
+                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                            let _ = client.run_admin_reaper(token).await;
+                        }
+                        handle_admin_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::RequestLinks(network)) => {
                         handle_request_links(&state, network);
@@ -555,6 +647,13 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
 
     let overview = client.fetch_admin_overview(token).await.ok();
     let sessions = client.fetch_admin_sessions(token).await.unwrap_or_default();
+    let users = client.fetch_admin_users(token).await.unwrap_or_default();
+    let networks = client.fetch_admin_networks(token).await.unwrap_or_default();
+    let visitors = client.fetch_admin_visitors(token).await.unwrap_or_default();
+    let session_log = client
+        .fetch_admin_session_log(token, 50)
+        .await
+        .unwrap_or_default();
 
     let overview_text = overview.map(|overview| {
         format!(
@@ -567,7 +666,7 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         )
     });
 
-    let rows: Vec<AdminSessionRow> = sessions
+    let session_rows: Vec<AdminSessionRow> = sessions
         .iter()
         .map(|entry| AdminSessionRow {
             label: cordiale_core::admin::admin_session_label(entry).into(),
@@ -578,11 +677,57 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         })
         .collect();
 
+    let user_rows: Vec<AdminUserRow> = users
+        .iter()
+        .map(|entry| AdminUserRow {
+            label: cordiale_core::admin::admin_user_label(entry).into(),
+            is_admin: cordiale_core::admin::admin_user_is_admin(entry),
+            user_id: cordiale_core::admin::admin_user_id(entry)
+                .unwrap_or_default()
+                .into(),
+        })
+        .collect();
+
+    let network_rows: Vec<AdminNetworkRow> = networks
+        .iter()
+        .map(|entry| {
+            let label = format!(
+                "{}{}",
+                cordiale_core::admin::admin_network_label(entry),
+                cordiale_core::admin::admin_network_status(entry)
+            );
+            let network_id = cordiale_core::admin::admin_network_id(entry).unwrap_or_default();
+            AdminNetworkRow {
+                label: label.into(),
+                network_id: network_id.into(),
+            }
+        })
+        .collect();
+
+    let visitor_rows: Vec<AdminVisitorRow> = visitors
+        .iter()
+        .map(|entry| AdminVisitorRow {
+            label: cordiale_core::admin::admin_visitor_label(entry).into(),
+            visitor_id: cordiale_core::admin::admin_visitor_id(entry)
+                .unwrap_or_default()
+                .into(),
+        })
+        .collect();
+
+    let session_log_lines: Vec<slint::SharedString> = session_log
+        .iter()
+        .map(|entry| cordiale_core::admin::admin_session_log_line(entry).into())
+        .collect();
+
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_admin_loading(false);
         ui.set_admin_overview_text(overview_text.unwrap_or_default().into());
-        ui.set_admin_sessions(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_admin_sessions(Rc::new(slint::VecModel::from(session_rows)).into());
+        ui.set_admin_users(Rc::new(slint::VecModel::from(user_rows)).into());
+        ui.set_admin_networks(Rc::new(slint::VecModel::from(network_rows)).into());
+        ui.set_admin_visitors(Rc::new(slint::VecModel::from(visitor_rows)).into());
+        ui.set_admin_session_log(Rc::new(slint::VecModel::from(session_log_lines)).into());
     });
 }
 
@@ -731,10 +876,33 @@ fn handle_links_bundle(ui: &slint::Weak<AppWindow>, payload: &Value) {
         })
         .collect();
 
+    // Radial layout for the optional graph window ("Show graph" on the
+    // list screen) — computed here too so it's ready the moment the user
+    // asks for it, rather than recomputed on click.
+    const CANVAS_CENTER: f64 = 380.0;
+    const RING_GAP: f64 = 64.0;
+    let layout = cordiale_core::links::radial_layout(&tree, RING_GAP);
+    let edges_commands = cordiale_core::links::links_graph_edges_svg_path(
+        &layout.edges,
+        CANVAS_CENTER,
+        CANVAS_CENTER,
+    );
+    let graph_nodes: Vec<LinksGraphNode> = layout
+        .nodes
+        .into_iter()
+        .map(|node| LinksGraphNode {
+            server: node.server.into(),
+            x: (node.x + CANVAS_CENTER).round() as i32,
+            y: (node.y + CANVAS_CENTER).round() as i32,
+        })
+        .collect();
+
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_links_network_label(network_label.into());
         ui.set_links_rows(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_links_graph_edges_commands(edges_commands.into());
+        ui.set_links_graph_nodes(Rc::new(slint::VecModel::from(graph_nodes)).into());
         ui.set_screen("links".into());
     });
 }
