@@ -26,6 +26,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -92,6 +93,12 @@ enum WorkerCommand {
 
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
+
+    // Settings > Credits: Cordiale's own info only, never a list of
+    // Grappa/Cicchetto's contributors — explicit project-owner
+    // requirement, see MEMORY.md §0septies.
+    ui.set_credits_copyright_text(format!("© {} Sythos", current_year()).into());
+    ui.set_app_version(cordiale_core::APP_VERSION.into());
 
     let remembered_server_url = load_remembered_server_url();
     ui.set_server_url(remembered_server_url.clone().into());
@@ -1523,6 +1530,20 @@ fn theme_to_slint(theme: Theme) -> slint::SharedString {
     }
 }
 
+/// The current calendar year, for Settings > Credits' copyright line.
+/// Approximated from the Unix clock using the average Gregorian year
+/// length — no `chrono` dependency needed for a value only ever shown to
+/// a human, and the average-year approximation can be off by at most a
+/// fraction of a day around a year boundary, never a whole year.
+fn current_year() -> i32 {
+    const SECONDS_PER_YEAR: f64 = 365.2425 * 86_400.0;
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    1970 + (seconds as f64 / SECONDS_PER_YEAR) as i32
+}
+
 /// Sets `status-kind` (and `status-protocol-version` where needed) so
 /// `appwindow.slint`'s `status-text()` can render a translated message —
 /// this function never produces English text itself, only a machine-
@@ -1557,6 +1578,15 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_year_is_in_a_sane_range() {
+        // Not pinned to an exact year (the test suite outlives any single
+        // year): just guards against a unit mixup collapsing everything
+        // to 1970 or overflowing wildly.
+        let year = current_year();
+        assert!((2020..2100).contains(&year));
+    }
 
     #[test]
     fn channel_topic_has_the_documented_shape() {

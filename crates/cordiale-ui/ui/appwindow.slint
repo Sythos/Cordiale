@@ -164,6 +164,11 @@ export component AppWindow inherits Window {
     in property <string> links-graph-edges-commands: "";
     in property <[LinksGraphNode]> links-graph-nodes: [];
 
+    // Settings > Credits: Cordiale's own info only — deliberately not a
+    // list of Grappa/Cicchetto contributors, see MEMORY.md §0septies.
+    in property <string> credits-copyright-text: "";
+    in property <string> app-version: "";
+
     // Self-service network profile (never admin-only) — see
     // `docs/protocol-notes.md` §4quater. `settings-network` picks which
     // known network the Identity/Ignores/Perform/Notify sections act on.
@@ -518,6 +523,10 @@ export component AppWindow inherits Window {
                 text: @tr("Admin");
                 clicked => { settings-section = "admin"; }
             }
+            Button {
+                text: @tr("Credits");
+                clicked => { settings-section = "credits"; }
+            }
 
             Button {
                 text: @tr("Back");
@@ -833,6 +842,38 @@ export component AppWindow inherits Window {
                     text: option.label;
                     checked: option.selected;
                     toggled => { vhost-toggle-requested(option.address); }
+                }
+            }
+
+            if settings-section == "credits" : VerticalBox {
+                spacing: 8px;
+                alignment: start;
+
+                Image {
+                    source: @image-url("../../../resources/branding/cordiale_icona.png");
+                    image-fit: contain;
+                    height: 96px;
+                }
+
+                Text {
+                    text: "Cordiale";
+                    font-size: 20px;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Sythos";
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: credits-copyright-text;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: app-version;
+                    horizontal-alignment: center;
                 }
             }
 

@@ -315,3 +315,7 @@ msgstr "Erweiterung"
 msgctxt "AppWindow"
 msgid "On-connect commands (one per line, semicolon-separated)"
 msgstr "Befehle beim Verbinden (einer pro Zeile, durch Semikolon getrennt)"
+
+msgctxt "AppWindow"
+msgid "Credits"
+msgstr "Impressum"

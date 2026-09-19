@@ -315,3 +315,7 @@ msgstr "Espansione"
 msgctxt "AppWindow"
 msgid "On-connect commands (one per line, semicolon-separated)"
 msgstr "Comandi alla connessione (uno per riga, separati da punto e virgola)"
+
+msgctxt "AppWindow"
+msgid "Credits"
+msgstr "Crediti"
