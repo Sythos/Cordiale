@@ -1667,8 +1667,7 @@ fn members_from_boot(outcome: &BootstrapOutcome) -> MembersByChannel {
                 continue;
             };
 
-            let mut members: Vec<MemberEntry> =
-                list.iter().filter_map(member_from_entry).collect();
+            let mut members: Vec<MemberEntry> = list.iter().filter_map(member_from_entry).collect();
             if members.is_empty() {
                 continue;
             }
@@ -1704,14 +1703,16 @@ fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| {
-            obj.get("modes").and_then(Value::as_array).and_then(|modes| {
-                modes.iter().find_map(|mode| match mode.as_str() {
-                    Some("o") => Some("@".to_string()),
-                    Some("h") => Some("%".to_string()),
-                    Some("v") => Some("+".to_string()),
-                    _ => None,
+            obj.get("modes")
+                .and_then(Value::as_array)
+                .and_then(|modes| {
+                    modes.iter().find_map(|mode| match mode.as_str() {
+                        Some("o") => Some("@".to_string()),
+                        Some("h") => Some("%".to_string()),
+                        Some("v") => Some("+".to_string()),
+                        _ => None,
+                    })
                 })
-            })
         })
         .unwrap_or_default();
     Some((name, prefix))
