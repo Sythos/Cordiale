@@ -258,9 +258,9 @@ screenshot dell'utente) e sul report a monte dell'utente stesso,
   topic canale non lo vedrà mai arrivare lì.
 - **Politica esplicita del documento reale** (§4, non riportata altrove in
   questo file): *"treat unknown `kind` values as ignorable"* — un kind non
-  riconosciuto va ignorato silenziosamente, non mostrato all'utente. Regola
-  applicata in Cordiale da questa data: i kind sopra elencati (tranne
-  `topic_changed`, che porta stato reale) vengono scartati senza produrre
+  riconosciuto va ignorato silenziosamente, non mostrato all'utente. In
+  Cordiale `topic_changed` e `channel_modes_changed` aggiornano stato locale;
+  gli altri kind di questa lista, se ricevuti, vengono scartati senza produrre
   una riga di chat.
 
 ### 2ter. Censimento completo dei kind reali (2026-09-20)
