@@ -658,7 +658,7 @@ async fn run_worker(
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
-                        handle_dismiss_kicked_channel(&mut state, &ui, &network, &channel).await;
+                        handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
                         let expanded = state.expanded_networks.entry(network).or_insert(true);
