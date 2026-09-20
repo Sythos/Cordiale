@@ -3896,10 +3896,7 @@ mod tests {
                 &channel_topic("sythos", "libera", "#empty"),
                 &empty
             ),
-            Some((
-                ("libera".to_string(), "#empty".to_string()),
-                String::new(),
-            ))
+            Some((("libera".to_string(), "#empty".to_string()), String::new(),))
         );
         assert!(state
             .channel_modes
@@ -3918,9 +3915,11 @@ mod tests {
             ),
             None
         );
-        assert!(state.channel_modes[&("libera".to_string(), "#empty".to_string())]
-            .modes
-            .is_empty());
+        assert!(
+            state.channel_modes[&("libera".to_string(), "#empty".to_string())]
+                .modes
+                .is_empty()
+        );
     }
 
     #[test]
