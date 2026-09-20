@@ -40,6 +40,7 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::rest::{DisplayPrefs, LoginRequest, SendMessageRequest};
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
+use cordiale_core::wire_event::ClientEventKind;
 
 /// The default server offered on first launch.
 const DEFAULT_SERVER_URL: &str = "https://irc.sindro.me";
@@ -1695,7 +1696,13 @@ fn handle_frame(
     // "bundle" replies per `docs/protocol-notes.md` §4ter — the Phoenix
     // `event` name itself isn't confirmed to equal the bundle name, so
     // this checks both rather than betting on one interpretation.
-    let payload_kind = frame.payload.get("kind").and_then(Value::as_str);
+    let Some(event_kind) = ClientEventKind::from_payload(&frame.payload) else {
+        // Grappa explicitly requires unknown event kinds to be ignored for
+        // forward compatibility. Never turn an unrecognized event payload
+        // into a raw JSON chat line.
+        return;
+    };
+    let payload_kind = Some(event_kind.as_wire_name());
     if frame.event == "links_bundle" || payload_kind == Some("links_bundle") {
         handle_links_bundle(ui, &frame.payload);
         return;
