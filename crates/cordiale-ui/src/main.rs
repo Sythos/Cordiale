@@ -1702,8 +1702,8 @@ fn handle_frame(
         // into a raw JSON chat line.
         return;
     };
-    let payload_kind = Some(event_kind.as_wire_name());
-    if frame.event == "links_bundle" || payload_kind == Some("links_bundle") {
+    let payload_kind = event_kind.as_wire_name();
+    if frame.event == "links_bundle" || payload_kind == "links_bundle" {
         handle_links_bundle(ui, &frame.payload);
         return;
     }
@@ -1718,7 +1718,7 @@ fn handle_frame(
     // topic). Without this, the member list only ever grows through
     // incremental join/part/nick_change frames and starts empty for every
     // channel that already had people in it before Cordiale connected.
-    if payload_kind == Some("members_seeded") {
+    if payload_kind == "members_seeded" {
         match apply_members_seeded(state, &frame.payload) {
             Some(key) => {
                 let count = state.members.get(&key).map(Vec::len).unwrap_or(0);
@@ -1755,7 +1755,7 @@ fn handle_frame(
     // WebSocket connection itself never even succeeding until now meant
     // this had no chance to be noticed until a real user screenshot
     // showed the literal envelope shape.
-    let effective_payload: &Value = if payload_kind == Some("message") {
+    let effective_payload: &Value = if payload_kind == "message" {
         match frame.payload.get("message") {
             Some(inner) => inner,
             None => return,
@@ -1764,7 +1764,7 @@ fn handle_frame(
         &frame.payload
     };
 
-    if payload_kind == Some("topic_changed") {
+    if payload_kind == "topic_changed" {
         handle_topic_changed(state, ui, &frame.payload);
         return;
     }
@@ -1774,7 +1774,7 @@ fn handle_frame(
     // source for the initial roster, confirmed by reading
     // `session/wire.ex` directly (not the same code path as
     // `members_seeded`, but the payload contract matches byte for byte).
-    if payload_kind == Some("names_reply") {
+    if payload_kind == "names_reply" {
         if let Some(key) = apply_members_seeded(state, &frame.payload) {
             if state.current_channel.as_ref() == Some(&key) {
                 push_members_update(state, ui, &key);
@@ -1783,7 +1783,7 @@ fn handle_frame(
         return;
     }
 
-    if IGNORED_KINDS.contains(&payload_kind.unwrap_or("")) {
+    if IGNORED_KINDS.contains(&payload_kind) {
         return;
     }
 
