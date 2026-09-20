@@ -90,3 +90,17 @@ Trixie/Ubuntu Resolute's `apt`; adjust for your distro's package manager).
 Windows and macOS need nothing beyond the Rust toolchain itself. This is
 also just `git clone` plus the same two commands if you'd rather build
 straight from `main` instead of a tagged release.
+
+## Grappa upstream references
+
+Cordiale is a native client for Grappa. Its server integration follows the
+upstream client contract; the Grappa server implementation remains the final
+authority if documentation and behavior differ. These links intentionally
+target the original `main` branch, not a release branch:
+
+- **Original Grappa repository and server source:**
+  <https://github.com/vjt/grappa-irc/tree/main>.
+- **Authoritative REST and Phoenix Channels client protocol:**
+  <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>.
+- **Cicchetto reference client** (functional comparison only):
+  <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.

@@ -44,3 +44,15 @@ su `ubuntu-26.04` alzerebbe il requisito glibc minimo sopra quello di
 Debian 13 Trixie, rompendo quel pacchetto. I job `source-archive` e
 `create-release` non compilano nulla, quindi possono restare su
 `ubuntu-26.04` senza rischio.
+
+## Fonti upstream Grappa (`vjt/grappa-irc`, branch `main`)
+
+Questa guida riguarda il packaging di Cordiale; il contratto tra il client e
+il server Grappa va verificato sulle fonti upstream originali:
+
+- **Repository e codice server:**
+  <https://github.com/vjt/grappa-irc/tree/main>.
+- **Contratto client REST/Phoenix Channels:**
+  <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>.
+- **Cicchetto**, solo riferimento funzionale:
+  <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.

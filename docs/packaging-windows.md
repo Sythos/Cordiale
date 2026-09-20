@@ -15,3 +15,15 @@ i casi.
 
 Output: `Cordiale_Windows_x64.exe` e `Cordiale_Windows_arm64.exe`, oltre
 agli archivi `.zip` generici già esistenti.
+
+## Fonti upstream Grappa (`vjt/grappa-irc`, branch `main`)
+
+Questa guida descrive il packaging del client nativo Cordiale; per il
+contratto server/client e il comportamento Grappa valgono le fonti upstream:
+
+- **Repository e codice server originali:**
+  <https://github.com/vjt/grappa-irc/tree/main>.
+- **Contratto client REST/Phoenix Channels:**
+  <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>.
+- **Cicchetto**, solo riferimento funzionale e non architetturale:
+  <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.

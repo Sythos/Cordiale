@@ -5,8 +5,12 @@ studiando la fonte primaria `CLIENT_PROTOCOL.md` di Grappa e, come
 riferimento solo funzionale, la struttura del client `cicchetto`.
 
 Fonti:
-- **Primaria (autorevole):** <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>.
-- **Riferimento funzionale (solo funzionalità, non architettura):** <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
+- **Repository e sorgente server originali, branch `main`:**
+  <https://github.com/vjt/grappa-irc/tree/main>.
+- **Primaria (autorevole):**
+  <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>.
+- **Riferimento funzionale (solo funzionalità, non architettura):**
+  <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
 
 Convenzione: "la documentazione dice" = contenuto verificato del
 `CLIENT_PROTOCOL.md`; "sto inferendo" = deduzione non scritta esplicitamente
@@ -206,12 +210,12 @@ browser piena; nessuno schema dettagliato nel documento.
 
 ### Heartbeat / riconnessione
 - **Non specificato esplicitamente** nel documento: nessun intervallo di
-  heartbeat Phoenix né policy di backoff dichiarata. Consiglio implicito:
-  `GET /boot` al cold-start e `?after=` per colmare i gap per canale al
-  resume, per evitare un burst equivalente a un boot a freddo. Da verificare
-  sul codice server (`GrappaWeb.UserSocket` / config `Grappa.Endpoint`) o sul
-  comportamento di default di `phoenix.js` prima di implementare la
-  riconnessione in Cordiale.
+  heartbeat Phoenix né policy di backoff dichiarata. Cordiale attualmente
+  invia il heartbeat ogni 30 secondi e attende 5 secondi prima di un nuovo
+  tentativo (`crates/cordiale-core/src/session.rs`); sono parametri del client,
+  non prescrizioni del server, e vanno validati su condizioni di rete e
+  istanze differenti. Il recupero dello scrollback resta distinto dalla
+  riconnessione del socket e segue la paginazione documentata in §4.
 
 ### 2bis. Forma reale confermata da traffico live (2026-09-20)
 
@@ -589,10 +593,11 @@ formato che Grappa effettivamente accetta, non confermato riga per riga.
 **Watchlist di presenza** (per-rete, REST) — `POST /networks/:slug/notify
 {nicks: [string]}`, `DELETE /networks/:slug/notify/:nick`. **Nessun
 `GET` self-service**: Cicchetto stesso non ne ha uno, lo stato arriva
-via lo snapshot WS `notify_list` (mai implementato in Cordiale finora —
-vedi §7). Cordiale traccia la lista solo lato client per la sessione
-corrente (non sopravvive a riconnessione/riavvio) — limite dichiarato,
-non nascosto.
+via lo snapshot WS `notify_list`, che Cordiale al momento classifica tra i
+kind ignorati e non applica alla UI. Cordiale traccia le modifiche inviate
+solo lato client per la sessione corrente (non sopravvivono a disconnessione
+esplicita o riavvio); durante una riconnessione automatica lo stato locale
+può restare presente ma non viene riallineato allo snapshot del server.
 
 **Watchlist per parola chiave** — **non REST**: push WS
 `ch.push("watchlist", {action: "add"|"del"|"list", pattern})` sul
@@ -600,7 +605,8 @@ topic utente (mai un endpoint `/highlight*` nel router). Cordiale usa
 `SessionHandle::send_command` (già esistente per `/links`) per inviare
 `add`/`del`; la risposta a `"list"` non ha una forma confermata da
 fonte primaria, quindi non viene interpretata — stessa limitazione
-session-local della watchlist di presenza.
+session-local: la UI mostra solo le modifiche tracciate in questa sessione,
+non una lista recuperata dal server.
 
 **Non implementato per scelta esplicita** (non ambiguità, elencato per
 completezza): password/`server_pass` di rete (`PUT /networks/:slug/
@@ -680,13 +686,12 @@ letto in una spec:
   assegnato automaticamente; se esistono limiti di rate specifici per le
   sessioni anonime oltre a quelli generali già documentati.
 - **Implicazione per Cordiale**: il meccanismo è confermato reale su
-  questa istanza, ma resta troppo poco compreso per costruire una UI
-  "Continue as guest" affidabile adesso — servirebbe altro testing mirato
-  (più tentativi controllati, verifica su un'altra istanza Grappa se
-  disponibile) prima di considerarlo pronto per il codice. Non
-  implementato in questa sessione, coerente con la policy di non inventare
-  capability senza prova solida — qui la prova solida c'è ma è ancora
-  incompleta.
+  questa istanza. La decisione di prodotto approvata è che una connessione
+  con password vuota tenti il flusso guest, inviando `guest`/`guest`; il
+  codice salva solo il token bearer restituito dal server, non la password
+  immessa. Il server resta l'autorità: il protocollo non garantisce che il
+  flusso funzioni su altre istanze. La semantica del campo `password`, la
+  scelta del network e i limiti specifici visitor restano non verificati.
 
 ### Ruolo admin
 - `/admin/*` (REST) e `AdminChannel` (WS) sono gated da un flag `is_admin`,
@@ -702,11 +707,15 @@ letto in una spec:
 
 ## 6. Domande aperte / punti non chiari
 
-1. **Heartbeat e riconnessione WebSocket** — nessun intervallo/policy di
-   backoff dichiarati esplicitamente. Da verificare sul codice server o sul
-   default di `phoenix.js` prima di implementare la riconnessione.
-2. **Meccanismo guest/visitor** — nessun endpoint/flusso documentato; unico
-   indizio `per_visitor_cap_bytes`. Da verificare sul codice server.
+1. **Parametri di heartbeat e riconnessione WebSocket** — il contratto
+   Grappa non prescrive intervalli o backoff. Cordiale implementa un
+   heartbeat Phoenix ogni 30 secondi e un ritardo fisso di riconnessione di
+   5 secondi (`crates/cordiale-core/src/session.rs`); sono scelte del client, non
+   garanzie del server, da validare su altre condizioni di rete/istanze.
+2. **Portabilità del login guest/visitor** — il contratto non definisce un
+   flusso universale; `guest`/`guest` è stato verificato solo su
+   `irc.sindro.me`. La password vuota attiva quel tentativo in Cordiale,
+   ma server diversi possono rifiutarlo. Da verificare su altre istanze.
 3. **Assegnazione ruolo admin** — nessuna procedura documentata.
 4. **Endpoint di registrazione/signup** — assente dal documento, ma
    cicchetto ha un wizard di registrazione lato UI: o è un gap di
@@ -752,9 +761,15 @@ letto in una spec:
   `GET /boot` + `GET /me` in parallelo → join topic utente WS (che conferma
   di nuovo `protocol_version`).
 - Il parser deve confrontare `protocol_version` con `>=`, mai `==`, e
-  ignorare sempre campi/eventi sconosciuti.
-- Guest/visitor **non va implementato in Fase 1**: nessuna evidenza di un
-  flusso client-side nel contratto documentato.
+  ignorare i campi sconosciuti. Per i kind evento, Cordiale classifica
+  esplicitamente l'inventario upstream attuale: cinque sono gestiti e 51
+  sono ignorati; un kind top-level futuro non ancora censito può però
+  ancora finire nel fallback che mostra `event: payload`, mentre il
+  contratto prescrive di ignorarlo. È un gap di forward-compatibilità noto.
+- Una password vuota nel form Connect avvia il tentativo guest osservato
+  (`identifier: "guest"`, `password: "guest"`). È una scelta approvata e
+  implementata, non una capability garantita dal contratto: il server
+  decide se accettarlo e Cordiale non deve presentarlo come universale.
 - Il modello dominio iniziale (network/channel/query/message) può basarsi
   sui campi qui documentati; i campi non documentati vanno trattati come
   opachi/opzionali, mai assunti.

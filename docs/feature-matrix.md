@@ -86,17 +86,12 @@ share session, delete account, credits, build info.
 Session Log) · *Configuration* (Networks, Vhosts, Users, Settings —
 limiti upload/spool server-wide) · *Diagnostics* (Debug).
 
-**Aggiornamento (2026-09-18, Fase 2)**: la shell di navigazione completa
-a 10+8 sezioni è ora costruita in `appwindow.slint`/`main.rs` (stesso
-ordine di Cicchetto, incluso il gate `is-admin` sulla voce Admin). Solo
-`general` (lingua + tema Light/Dark) e `display` (5 delle 7 chiavi di
-`display-prefs`, sincronizzate col server) sono davvero funzionali —
-le altre restano non implementate perché richiedono endpoint REST/WS
-che `cordiale-core` non ha ancora (TOTP, push, watchlist, ignore, alias,
-perform, vhost, tutto l'admin), ma la sezione esiste e lo dichiara
-esplicitamente all'utente invece di essere assente o di fingere di
-funzionare. Implementare gli endpoint mancanti resta lavoro per fasi
-successive.
+**Nota storica (2026-09-18, Fase 2)**: quando fu introdotta la shell di
+navigazione completa a 10+8 sezioni in `appwindow.slint`/`main.rs`, solo
+`general` e `display` erano funzionali; le altre sezioni erano segnaposto.
+Le implementazioni successive sono riportate nella matrice qui sopra e
+negli aggiornamenti cronologici sotto: questa nota descrive lo stato di
+quel giorno, non quello corrente.
 
 **Aggiornamento (2026-09-19)**: la superficie admin reale di Grappa
 (catalogata per intero in `docs/protocol-notes.md` §4ter, letta dal
@@ -130,13 +125,22 @@ completo in `docs/protocol-notes.md` §4ter.
 
 ## Voci ancora da chiarire prima di poter classificare
 
-- Guest/visitor: non documentato nel contratto client, ma **confermato
-  reale** con un test diretto contro `irc.sindro.me` il 2026-09-18
-  (`identifier: "guest"` → sessione `kind: "visitor"` funzionante). Il
-  meccanismo esiste ma è ancora troppo poco compreso (semantica del campo
-  `password` in questo flusso, portabilità tra istanze Grappa) per
-  costruire una UI affidabile — vedi `protocol-notes.md` §5 per il dettaglio
-  completo del test.
+- Guest/visitor: il contratto client non definisce un flusso universale.
+  Cordiale applica la decisione approvata di usare la password vuota per
+  tentare il login guest osservato (`guest`/`guest`), verificato su
+  `irc.sindro.me`; altre istanze possono rifiutarlo. Semantica e portabilità
+  restano da confermare, come dettagliato in `protocol-notes.md` §5.
 - Assegnazione ruolo admin: nessuna procedura documentata.
-- Heartbeat/backoff WebSocket: da verificare sul codice server o sul default
-  di `phoenix.js` prima di fissare la strategia di riconnessione.
+- Heartbeat/backoff WebSocket: il contratto non fissa intervalli; Cordiale
+  usa un heartbeat da 30 s e un ritardo fisso di riconnessione da 5 s.
+  Restano parametri scelti dal client da verificare su altre istanze e
+  condizioni di rete (`protocol-notes.md` §2 e §6).
+
+## Fonti upstream Grappa (`vjt/grappa-irc`, branch `main`)
+
+- **Repository e codice server originali:**
+  <https://github.com/vjt/grappa-irc/tree/main>.
+- **Contratto client autorevole:**
+  <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>.
+- **Cicchetto**, usato solo come riferimento funzionale e non architetturale:
+  <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
