@@ -5,6 +5,9 @@
 ;   /DBIN_PATH=<path to the built cordiale-ui.exe>
 ;   /DOUT_FILE=<path to write the installer to>
 ;   /DVERSION=<version string shown to the user>
+;   /DBUILD_ID=<GitHub Actions run ID>
+;   /DBUILD_ATTEMPT=<GitHub Actions rerun attempt>
+;   /DPRODUCT_VERSION=<four-component numeric VERSIONINFO value>
 ;   /DICON_PATH=<path to the cordiale.ico file>
 
 !ifndef BIN_PATH
@@ -18,6 +21,12 @@
 !endif
 !ifndef VERSION
   !define VERSION "0.0.0"
+!endif
+!ifndef BUILD_ID
+  !define BUILD_ID "unknown"
+!endif
+!ifndef BUILD_ATTEMPT
+  !define BUILD_ATTEMPT "1"
 !endif
 !ifndef PRODUCT_VERSION
   !define PRODUCT_VERSION "0.0.0.0"
@@ -44,6 +53,8 @@ VIAddVersionKey "ProductName" "${APP_NAME}"
 VIAddVersionKey "CompanyName" "${COMPANY}"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
+VIAddVersionKey "PrivateBuild" "${BUILD_ID}"
+VIAddVersionKey "SpecialBuild" "GitHub Actions attempt ${BUILD_ATTEMPT}"
 
 Page directory
 Page instfiles
@@ -70,6 +81,8 @@ Section "Install"
   WriteRegStr HKLM "${UNINST_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\${APP_EXE}"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKLM "${UNINST_KEY}" "BuildID" "${BUILD_ID}"
+  WriteRegStr HKLM "${UNINST_KEY}" "BuildAttempt" "${BUILD_ATTEMPT}"
   WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "${COMPANY}"
   WriteRegDWORD HKLM "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKLM "${UNINST_KEY}" "NoRepair" 1

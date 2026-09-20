@@ -19,13 +19,44 @@ jobs:
     steps:
       - name: Checkout client
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - name: Compute DEV timestamp
-        id: timestamp
+      - name: Resolve latest tag and DEV build version
+        id: metadata
         shell: pwsh
         run: |
-          $ts = Get-Date -Format "yyyyMMddTHHmm"
-          "timestamp=$ts" >> $env:GITHUB_OUTPUT
+          $latestTag = git tag --list 'v[0-9]*' --sort=-version:refname |
+            Where-Object { $_ -match '^v[0-9]+\.[0-9]+\.[0-9]+$' } |
+            Select-Object -First 1
+          if ($latestTag -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
+            throw "Expected a stable vMAJOR.MINOR.PATCH tag, got: $latestTag"
+          }
+          $baseVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+          $versionParts = $baseVersion.Split('.')
+          if (@($versionParts | Where-Object { [long]$_ -gt 65535 }).Count -gt 0) {
+            throw "Windows VERSIONINFO tag components must not exceed 65535: $baseVersion"
+          }
+
+          $buildId = [long]$env:GITHUB_RUN_ID
+          $buildAttempt = [long]$env:GITHUB_RUN_ATTEMPT
+          if ($buildId -le 0 -or $buildAttempt -lt 1) {
+            throw "Invalid GitHub Actions run ID/attempt: $buildId/$buildAttempt"
+          }
+          # The remainder is equivalent to repeatedly subtracting 65535,
+          # while avoiding a long loop for the repository-wide GitHub run ID.
+          $windowsBuildComponent = $buildId % 65535
+          $packageVersion = "$baseVersion.$buildId-dev"
+          $productVersion = "$baseVersion.$windowsBuildComponent"
+
+          @(
+            "base_version=$baseVersion"
+            "package_version=$packageVersion"
+            "build_id=$buildId"
+            "build_attempt=$buildAttempt"
+            "windows_build_component=$windowsBuildComponent"
+            "product_version=$productVersion"
+          ) | Add-Content -Path $env:GITHUB_OUTPUT
 
       - name: Install stable Rust and target
         shell: bash
@@ -49,7 +80,10 @@ jobs:
       - name: Package Windows DEV installer
         shell: pwsh
         env:
-          TIMESTAMP: ${{ steps.timestamp.outputs.timestamp }}
+          PACKAGE_VERSION: ${{ steps.metadata.outputs.package_version }}
+          BUILD_ID: ${{ steps.metadata.outputs.build_id }}
+          BUILD_ATTEMPT: ${{ steps.metadata.outputs.build_attempt }}
+          PRODUCT_VERSION: ${{ steps.metadata.outputs.product_version }}
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           $binPath = "target\x86_64-pc-windows-msvc\release\cordiale-ui.exe"
@@ -70,9 +104,9 @@ jobs:
             throw "makensis.exe not found on this runner"
           }
 
-          $outFile = "$PWD\dist\Cordiale_Windows_x64_DEV_$env:TIMESTAMP.exe"
+          $outFile = "$PWD\dist\Cordiale_Windows_x64_DEV_$($env:PACKAGE_VERSION).exe"
           $iconPath = "$PWD\resources\branding\cordiale.ico"
-          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=dev-$env:TIMESTAMP" "/DICON_PATH=$iconPath" packaging\windows\installer.nsi
+          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=$env:PACKAGE_VERSION" "/DBUILD_ID=$env:BUILD_ID" "/DBUILD_ATTEMPT=$env:BUILD_ATTEMPT" "/DPRODUCT_VERSION=$env:PRODUCT_VERSION" "/DICON_PATH=$iconPath" packaging\windows\installer.nsi
           if ($LASTEXITCODE -ne 0) {
             throw "makensis failed with exit code $LASTEXITCODE"
           }
@@ -87,5 +121,5 @@ jobs:
       - name: Upload DEV installer
         uses: actions/upload-artifact@v6
         with:
-          name: cordiale-windows-x64-dev-${{ steps.timestamp.outputs.timestamp }}
+          name: cordiale-windows-x64-dev-${{ steps.metadata.outputs.package_version }}-attempt-${{ steps.metadata.outputs.build_attempt }}
           path: dist/*

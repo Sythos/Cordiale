@@ -10,11 +10,91 @@ permissions:
   contents: read
   id-token: write
   attestations: write
+  artifact-metadata: write
 
 jobs:
+  build-metadata:
+    name: build-metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      package_version: ${{ steps.metadata.outputs.package_version }}
+      build_id: ${{ steps.metadata.outputs.build_id }}
+      build_attempt: ${{ steps.metadata.outputs.build_attempt }}
+      windows_build_component: ${{ steps.metadata.outputs.windows_build_component }}
+      mac_bundle_version: ${{ steps.metadata.outputs.mac_bundle_version }}
+
+    steps:
+      - name: Checkout repository tags
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release and build versions
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            source_tag="${GITHUB_REF_NAME}"
+          else
+            source_tag="$(git tag --list 'v[0-9]*' --sort=-version:refname | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')"
+          fi
+          if [[ ! "${source_tag}" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Expected a stable vMAJOR.MINOR.PATCH tag, got: ${source_tag}" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+
+          if [[ ! "${GITHUB_RUN_ID}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Invalid GitHub Actions run ID: ${GITHUB_RUN_ID}" >&2
+            exit 1
+          fi
+          if (( GITHUB_RUN_ATTEMPT < 1 )); then
+            echo "Invalid workflow run attempt: ${GITHUB_RUN_ATTEMPT}" >&2
+            exit 1
+          fi
+
+          # GITHUB_RUN_ID is unique across workflows in this repository. A
+          # rerun keeps the same build ID; its attempt remains separate.
+          build_id="${GITHUB_RUN_ID}"
+          build_attempt="${GITHUB_RUN_ATTEMPT}"
+          package_version="${version}.${build_id}"
+
+          # Windows VERSIONINFO components are 16-bit. Modulo is equivalent
+          # to the approved repeated subtraction, while avoiding a huge loop.
+          windows_build_component=$((build_id % 65535))
+
+          # CFBundleVersion allows only three numeric components (4/2/2
+          # digits). Keep a compact, valid build version there and record the
+          # exact GitHub run ID in CordialeBuildID and CordialeBuildVersion.
+          mac_code=$((build_id % 99990000 + 10000))
+          mac_major=$((mac_code / 10000))
+          mac_minor=$(((mac_code / 100) % 100))
+          mac_patch=$((mac_code % 100))
+          mac_bundle_version="${mac_major}.${mac_minor}.${mac_patch}"
+
+          {
+            echo "version=${version}"
+            echo "package_version=${package_version}"
+            echo "build_id=${build_id}"
+            echo "build_attempt=${build_attempt}"
+            echo "windows_build_component=${windows_build_component}"
+            echo "mac_bundle_version=${mac_bundle_version}"
+          } >> "${GITHUB_OUTPUT}"
+
   build-and-package:
     name: ${{ matrix.artifact }}
     runs-on: ${{ matrix.runner }}
+    needs: build-metadata
+    env:
+      VERSION: ${{ needs.build-metadata.outputs.version }}
+      PACKAGE_VERSION: ${{ needs.build-metadata.outputs.package_version }}
+      BUILD_ID: ${{ needs.build-metadata.outputs.build_id }}
+      BUILD_ATTEMPT: ${{ needs.build-metadata.outputs.build_attempt }}
+      WINDOWS_BUILD_COMPONENT: ${{ needs.build-metadata.outputs.windows_build_component }}
+      MAC_BUNDLE_VERSION: ${{ needs.build-metadata.outputs.mac_bundle_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -51,17 +131,6 @@ jobs:
     steps:
       - name: Checkout client
         uses: actions/checkout@v5
-
-      - name: Resolve artifact version
-        id: version
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            version="0.1.0-dev.${GITHUB_RUN_NUMBER}"
-          fi
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
       - name: Install stable Rust and target
         shell: bash
@@ -121,7 +190,6 @@ jobs:
           TARGET: ${{ matrix.target }}
           DEB_ARCH: ${{ matrix.deb_arch }}
           RPM_ARCH: ${{ matrix.rpm_arch }}
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist stage/usr/bin
@@ -143,13 +211,13 @@ jobs:
           Categories=Network;InstantMessaging;Chat;
           DESKTOP
 
-          tar -czf "dist/cordiale-linux-${DEB_ARCH}-${VERSION}.tar.gz" \
+          tar -czf "dist/cordiale-linux-${DEB_ARCH}-${PACKAGE_VERSION}.tar.gz" \
             -C "target/${TARGET}/release" cordiale-ui
 
           # RPM/pacman version fields reject "-"; deb accepts it fine.
-          RPM_VERSION="${VERSION//-/_}"
+          RPM_VERSION="${PACKAGE_VERSION//-/_}"
 
-          fpm -s dir -t deb -n cordiale -v "${VERSION}" -a "${DEB_ARCH}" \
+          fpm -s dir -t deb -n cordiale -v "${PACKAGE_VERSION}" -a "${DEB_ARCH}" \
             --maintainer "Sythos <sythos@gmail.com>" \
             --description "Native desktop client for Grappa" \
             --url "https://github.com/Sythos/Cordiale" \
@@ -186,12 +254,11 @@ jobs:
           TARGET: ${{ matrix.target }}
           ARTIFACT: ${{ matrix.artifact }}
           WIN_ARCH: ${{ matrix.win_arch }}
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           $binPath = "target\$env:TARGET\release\cordiale-ui.exe"
 
-          Compress-Archive -Path $binPath -DestinationPath "dist\cordiale-$env:ARTIFACT-$env:VERSION.zip" -Force
+          Compress-Archive -Path $binPath -DestinationPath "dist\cordiale-$($env:ARTIFACT)-$($env:PACKAGE_VERSION).zip" -Force
 
           $candidates = @(
             (Get-Command makensis -ErrorAction SilentlyContinue).Source,
@@ -208,21 +275,24 @@ jobs:
           if (-not $makensis) {
             throw "makensis.exe not found on this runner"
           }
-          $outFile = "$PWD\dist\Cordiale_Windows_$env:WIN_ARCH.exe"
+          $outFile = "$PWD\dist\Cordiale_Windows_$($env:WIN_ARCH).exe"
           $iconPath = "$PWD\resources\branding\cordiale.ico"
-          # NSIS VERSIONINFO requires four numeric components. Keep the
-          # readable SemVer (including any -dev suffix) in string keys,
-          # while deriving the numeric resource version from its core.
-          $numericVersion = $env:VERSION.Split('-')[0]
-          if ($numericVersion -notmatch '^\d+\.\d+\.\d+$') {
-            throw "VERSION must start with a three-part numeric version: $env:VERSION"
+          # NSIS VERSIONINFO accepts four 16-bit numeric components. The
+          # fourth component is the reduced GitHub run ID; string keys retain
+          # the full run ID and the attempt number separately.
+          if ($env:VERSION -notmatch '^\d+\.\d+\.\d+$') {
+            throw "VERSION must be a three-part numeric tag version: $env:VERSION"
           }
-          $versionParts = $numericVersion.Split('.')
-          if (@($versionParts | Where-Object { [int]$_ -gt 65535 }).Count -gt 0) {
-            throw "NSIS VERSIONINFO components must not exceed 65535: $numericVersion"
+          $versionParts = $env:VERSION.Split('.')
+          if (@($versionParts | Where-Object { [long]$_ -gt 65535 }).Count -gt 0) {
+            throw "NSIS VERSIONINFO tag components must not exceed 65535: $env:VERSION"
           }
-          $productVersion = "$numericVersion.0"
-          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=$env:VERSION" "/DPRODUCT_VERSION=$productVersion" "/DICON_PATH=$iconPath" packaging\windows\installer.nsi
+          $windowsBuildComponent = [int]$env:WINDOWS_BUILD_COMPONENT
+          if ($windowsBuildComponent -lt 0 -or $windowsBuildComponent -ge 65535) {
+            throw "Reduced Windows build component must be below 65535: $windowsBuildComponent"
+          }
+          $productVersion = "$($env:VERSION).$windowsBuildComponent"
+          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=$env:PACKAGE_VERSION" "/DBUILD_ID=$env:BUILD_ID" "/DBUILD_ATTEMPT=$env:BUILD_ATTEMPT" "/DPRODUCT_VERSION=$productVersion" "/DICON_PATH=$iconPath" packaging\windows\installer.nsi
           if ($LASTEXITCODE -ne 0) {
             throw "makensis failed with exit code $LASTEXITCODE"
           }
@@ -230,12 +300,10 @@ jobs:
       - name: Package macOS archive and disk image
         if: runner.os == 'macOS'
         shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          tar -czf "dist/cordiale-macos-arm64-${VERSION}.tar.gz" \
+          tar -czf "dist/cordiale-macos-arm64-${PACKAGE_VERSION}.tar.gz" \
             -C target/aarch64-apple-darwin/release cordiale-ui
 
           APP_DIR="macos-app-stage/Cordiale.app"
@@ -273,8 +341,16 @@ jobs:
               <string>Cordiale</string>
               <key>CFBundlePackageType</key>
               <string>APPL</string>
+              <key>CFBundleVersion</key>
+              <string>${MAC_BUNDLE_VERSION}</string>
               <key>CFBundleShortVersionString</key>
               <string>${VERSION}</string>
+              <key>CordialeBuildID</key>
+              <string>${BUILD_ID}</string>
+              <key>CordialeBuildAttempt</key>
+              <string>${BUILD_ATTEMPT}</string>
+              <key>CordialeBuildVersion</key>
+              <string>${PACKAGE_VERSION}</string>
               <key>LSMinimumSystemVersion</key>
               <string>11.0</string>
           </dict>
@@ -312,36 +388,29 @@ jobs:
       - name: Upload package artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: cordiale-${{ matrix.artifact }}-${{ steps.version.outputs.version }}
+          name: cordiale-${{ matrix.artifact }}-${{ needs.build-metadata.outputs.package_version }}-attempt-${{ needs.build-metadata.outputs.build_attempt }}
           path: dist/*
 
   source-archive:
     name: source-archive
     runs-on: ubuntu-26.04
+    needs: build-metadata
+    env:
+      VERSION: ${{ needs.build-metadata.outputs.version }}
+      PACKAGE_VERSION: ${{ needs.build-metadata.outputs.package_version }}
+      BUILD_ID: ${{ needs.build-metadata.outputs.build_id }}
+      BUILD_ATTEMPT: ${{ needs.build-metadata.outputs.build_attempt }}
 
     steps:
       - name: Checkout client
         uses: actions/checkout@v5
 
-      - name: Resolve artifact version
-        id: version
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            version="0.1.0-dev.${GITHUB_RUN_NUMBER}"
-          fi
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-
       - name: Build source archive
         shell: bash
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          git archive --format=tar.gz "--prefix=cordiale-${VERSION}/" \
+          git archive --format=tar.gz "--prefix=cordiale-${PACKAGE_VERSION}/" \
             -o "dist/Cordiale_src.tar.gz" HEAD
 
       - name: Generate checksums
@@ -357,12 +426,12 @@ jobs:
       - name: Upload source archive
         uses: actions/upload-artifact@v6
         with:
-          name: cordiale-src-${{ steps.version.outputs.version }}
+          name: cordiale-src-${{ needs.build-metadata.outputs.package_version }}-attempt-${{ needs.build-metadata.outputs.build_attempt }}
           path: dist/*
 
   create-release:
     name: create-release
-    needs: [build-and-package, source-archive]
+    needs: [build-metadata, build-and-package, source-archive]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-26.04
     permissions:
@@ -380,4 +449,10 @@ jobs:
           files: release-assets/*/*
           generate_release_notes: true
           body: |
+            Cordiale package version: `${{ needs.build-metadata.outputs.package_version }}` (tag version `${{ needs.build-metadata.outputs.version }}`, GitHub Actions run ID `${{ needs.build-metadata.outputs.build_id }}`, attempt `${{ needs.build-metadata.outputs.build_attempt }}`).
+
+            Where four numeric components are supported, the fourth is the GitHub Actions run ID. Windows VERSIONINFO stores its reduction below 65535 in the numeric component and preserves the full ID in string metadata. macOS keeps the tag in `CFBundleShortVersionString`, uses a valid compact `CFBundleVersion`, and records the full run ID in `CordialeBuildID` and `CordialeBuildVersion`.
+
+            Tester note: the 51 known event kinds without a Cordiale handler are intentionally ignored for this preview build; they are not rendered as chat messages. See the README for the current list.
+
             Heads up: every package here is unsigned, on every platform — no code-signing cert anywhere, even though the filenames don't say so. Windows SmartScreen and some Linux package managers might complain about it; that's expected for an unsigned, community-built app, not a sign of tampering. Each artifact still ships a SHA256SUMS file and a build provenance attestation if you want to verify it yourself — see [docs/installation.md](https://github.com/Sythos/Cordiale/blob/main/docs/installation.md).

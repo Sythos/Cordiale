@@ -16,6 +16,20 @@ i casi.
 Output: `Cordiale_Windows_x64.exe` e `Cordiale_Windows_arm64.exe`, oltre
 agli archivi `.zip` generici già esistenti.
 
+La versione testuale è `<tag>.<GITHUB_RUN_ID>`; il workflow DEV aggiunge
+anche il suffisso `-dev`. Il quarto campo numerico delle risorse Windows è il
+run ID ridotto sotto `65535` sottraendo ripetutamente `65535` (il workflow
+usa il resto equivalente per evitare iterazioni inutilmente lunghe). I campi
+`FileVersion`, `ProductVersion`, `DisplayVersion` e `BuildID` conservano il
+run ID completo; `BuildAttempt` identifica un eventuale rilancio della stessa
+esecuzione. Il tag resta la versione di release del progetto.
+
+Il bundle macOS mantiene il tag in `CFBundleShortVersionString`; Apple limita
+`CFBundleVersion` a tre componenti numeriche con ampiezza `4/2/2`, quindi il
+workflow vi scrive una codifica compatta valida e conserva il run ID completo
+nei campi `CordialeBuildID` e `CordialeBuildVersion`. I pacchetti Linux usano
+direttamente il run ID come quarto componente della versione.
+
 ## Fonti upstream Grappa (`vjt/grappa-irc`, branch `main`)
 
 Questa guida descrive il packaging del client nativo Cordiale; per il
