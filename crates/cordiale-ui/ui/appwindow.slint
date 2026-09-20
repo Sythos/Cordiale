@@ -27,6 +27,7 @@ struct ChannelEntry {
     network: string,
     channel: string,
     label: string,
+    failed: bool,
 }
 
 // One connected network in the sidebar, with its joined channels and
@@ -723,6 +724,13 @@ export component AppWindow inherits Window {
 
                         for entry in group.channels : Button {
                             text: entry.label;
+                            accessible-label: entry.failed
+                                ? entry.label + " — join failed"
+                                : entry.label;
+                            // Cicchetto keeps a failed channel as a muted,
+                            // selectable pseudo-window; its reason and
+                            // numeric are not part of the row.
+                            opacity: entry.failed ? 0.55 : 1.0;
                             clicked => { channel-selected(entry.network, entry.channel); }
                         }
                     }

@@ -28,7 +28,7 @@ use std::rc::Rc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Number, Value};
 use tokio::sync::mpsc;
 
 use cordiale_core::bootstrap::{
@@ -490,6 +490,13 @@ fn main() -> Result<(), slint::PlatformError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChannelWindowState {
     Joined,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WindowFailure {
+    reason: Option<String>,
+    numeric: Option<Number>,
 }
 
 struct WorkerState {
@@ -498,9 +505,15 @@ struct WorkerState {
     identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
-    /// Cicchetto's `windowStateByChannel` projection. Cordiale currently
-    /// applies only the `joined` state; other lifecycle kinds remain ignored.
+    /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
+    /// transitions.
     window_states: HashMap<(String, String), ChannelWindowState>,
+    /// Nullable failure metadata is retained like Cicchetto but not shown in
+    /// the channel row.
+    window_failures: HashMap<(String, String), WindowFailure>,
+    /// Invitation markers are cleared by terminal window transitions. The
+    /// invitation event itself remains unsupported until its own parity step.
+    invited_by: HashMap<(String, String), String>,
     /// Keyed by `(network, channel)`; holds messages already rendered for
     /// that channel so switching channels doesn't lose history.
     messages: MessagesByChannel,
@@ -555,6 +568,8 @@ impl WorkerState {
             session: None,
             joined_topics: std::collections::HashSet::new(),
             window_states: HashMap::new(),
+            window_failures: HashMap::new(),
+            invited_by: HashMap::new(),
             messages: HashMap::new(),
             drafts: HashMap::new(),
             topics: HashMap::new(),
@@ -953,6 +968,8 @@ async fn handle_connect(
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
             state.window_states = joined_window_states_from_boot_channels(&outcome.boot.channels);
+            state.window_failures.clear();
+            state.invited_by.clear();
             state.topics = topics_from_boot(&outcome);
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
@@ -1010,6 +1027,7 @@ async fn handle_connect(
             let network_count = distinct_networks.len();
             let channel_count = entries.len();
             let groups_data = network_groups_data(&entries, &state.expanded_networks);
+            let window_states = state.window_states.clone();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
                 ui.set_is_admin(is_admin);
@@ -1025,7 +1043,7 @@ async fn handle_connect(
                 let networks: Vec<slint::SharedString> =
                     distinct_networks.into_iter().map(Into::into).collect();
                 ui.set_known_networks(Rc::new(slint::VecModel::from(networks)).into());
-                let groups = network_groups_model(groups_data);
+                let groups = network_groups_model(groups_data, window_states);
                 ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
             });
 
@@ -1632,8 +1650,8 @@ async fn handle_member_ctcp(
 /// the window disappearing from window-state, not a push, so listening
 /// for it here would be dead code matching nothing.
 const IGNORED_KINDS: &[&str] = &[
-    // Already known from vjt/grappa-irc#2260 (joined, topic_changed, and
-    // members_seeded/names_reply are handled above instead, not ignored).
+    // Known from vjt/grappa-irc#2260 or the wire union (joined, join_failed,
+    // topic_changed, and members_seeded/names_reply are handled above).
     "channel_modes_changed",
     "read_cursor_set",
     "window_counts",
@@ -1655,7 +1673,6 @@ const IGNORED_KINDS: &[&str] = &[
     "window_invite_declined",
     "dcc_offer",
     "dcc_offer_resolved",
-    "join_failed",
     "kicked",
     "mentions_bundle",
     "whois_bundle",
@@ -1812,7 +1829,13 @@ fn handle_frame(
         else {
             return;
         };
-        let state_changed = set_joined_window_state(&mut state.window_states, &network, &channel);
+        let state_changed = set_joined_window_state(
+            &mut state.window_states,
+            &mut state.window_failures,
+            &mut state.invited_by,
+            &network,
+            &channel,
+        );
         let selected_window_joined =
             state
                 .current_channel
@@ -1822,10 +1845,56 @@ fn handle_frame(
                         == window_state_key(&network, &channel)
                 });
         let sidebar_changed =
-            upsert_joined_channel(&mut state.channel_entries, network.clone(), channel.clone());
+            upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
         if selected_window_joined {
             let ui = ui.clone();
             let _ = ui.upgrade_in_event_loop(|ui| ui.set_current_window_is_joined(true));
+        }
+        if state_changed || sidebar_changed {
+            refresh_network_groups(state, ui);
+        }
+        return;
+    }
+
+    // A rejected join is also a window-state transition: Cicchetto applies
+    // it on the user topic and as a channel-topic reconnect snapshot. Keep a
+    // faded pseudo-row, but never show a roster for a failed window. The
+    // nullable reason/numeric stay in the session store only.
+    if payload_kind == "join_failed" {
+        let Some(identifier) = state.identifier.as_deref() else {
+            return;
+        };
+        let Some((network, channel, failure)) =
+            parse_join_failed_event(&frame.payload, &frame.topic, identifier)
+        else {
+            return;
+        };
+
+        let state_changed = set_failed_window_state(
+            &mut state.window_states,
+            &mut state.window_failures,
+            &mut state.invited_by,
+            &network,
+            &channel,
+            failure,
+        );
+        let sidebar_changed =
+            upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
+        let selected_window_failed =
+            state
+                .current_channel
+                .as_ref()
+                .is_some_and(|(current_network, current_channel)| {
+                    window_state_key(current_network, current_channel)
+                        == window_state_key(&network, &channel)
+                });
+
+        if selected_window_failed {
+            let ui = ui.clone();
+            let _ = ui.upgrade_in_event_loop(|ui| {
+                ui.set_current_window_is_joined(false);
+                ui.set_can_moderate_members(false);
+            });
         }
         if state_changed || sidebar_changed {
             refresh_network_groups(state, ui);
@@ -1919,6 +1988,46 @@ fn parse_joined_event(payload: &Value, topic: &str, identifier: &str) -> Option<
     Some((network.to_string(), channel.to_string()))
 }
 
+/// Parses Cicchetto's required `join_failed` payload from either the live
+/// user topic or the matching per-channel reconnect snapshot. Nullable fields
+/// must be present, but unknown additive fields are deliberately ignored.
+fn parse_join_failed_event(
+    payload: &Value,
+    topic: &str,
+    identifier: &str,
+) -> Option<(String, String, WindowFailure)> {
+    let object = payload.as_object()?;
+    if object.get("kind").and_then(Value::as_str) != Some("join_failed")
+        || object.get("state").and_then(Value::as_str) != Some("failed")
+    {
+        return None;
+    }
+
+    let network = object.get("network")?.as_str()?;
+    let channel = object.get("channel")?.as_str()?;
+    let reason = match object.get("reason")? {
+        Value::Null => None,
+        Value::String(value) => Some(value.clone()),
+        _ => return None,
+    };
+    let numeric = match object.get("numeric")? {
+        Value::Null => None,
+        Value::Number(value) => Some(value.clone()),
+        _ => return None,
+    };
+
+    let user_topic = format!("grappa:user:{identifier}");
+    if topic != user_topic && !channel_topic_matches(identifier, topic, network, channel) {
+        return None;
+    }
+
+    Some((
+        network.to_string(),
+        channel.to_string(),
+        WindowFailure { reason, numeric },
+    ))
+}
+
 /// Matches the server's channel topic with the same identifier key used by
 /// Cicchetto: exact user and network, ASCII-folded channel only.
 fn channel_topic_matches(identifier: &str, topic: &str, network: &str, channel: &str) -> bool {
@@ -1944,10 +2053,18 @@ fn window_state_key(network: &str, channel: &str) -> (String, String) {
     (network.to_string(), ascii_fold_channel(channel))
 }
 
-/// Adds a newly joined channel to the session's sidebar source of truth.
-/// The return value lets callers avoid rebuilding Slint models when the
-/// user-topic event and per-channel reconnect snapshot both arrive.
-fn upsert_joined_channel(
+fn window_is_failed(
+    window_states: &HashMap<(String, String), ChannelWindowState>,
+    network: &str,
+    channel: &str,
+) -> bool {
+    window_states.get(&window_state_key(network, channel)) == Some(&ChannelWindowState::Failed)
+}
+
+/// Adds a channel window to the session's sidebar source of truth after a
+/// server-reported join or join failure. The return value lets callers avoid
+/// rebuilding Slint models for duplicate live/snapshot delivery.
+fn upsert_channel_entry(
     entries: &mut Vec<(String, String, String)>,
     network: String,
     channel: String,
@@ -1962,18 +2079,42 @@ fn upsert_joined_channel(
     true
 }
 
-/// Mirrors Cicchetto's `setJoined`: assignment overwrites any prior
-/// window-state value for this `(network, channel)` key. Repeated delivery on
-/// the live user topic and channel reconnect snapshot is idempotent.
+/// Mirrors Cicchetto's `setJoined`: assignment overwrites the prior
+/// window-state value and clears stale invite/failure metadata. Repeated
+/// delivery on the live user topic and channel reconnect snapshot is
+/// idempotent.
 fn set_joined_window_state(
     window_states: &mut HashMap<(String, String), ChannelWindowState>,
+    window_failures: &mut HashMap<(String, String), WindowFailure>,
+    invited_by: &mut HashMap<(String, String), String>,
     network: &str,
     channel: &str,
 ) -> bool {
-    window_states.insert(
-        window_state_key(network, channel),
-        ChannelWindowState::Joined,
-    ) != Some(ChannelWindowState::Joined)
+    let key = window_state_key(network, channel);
+    let state_changed = window_states.insert(key.clone(), ChannelWindowState::Joined)
+        != Some(ChannelWindowState::Joined);
+    let failure_cleared = window_failures.remove(&key).is_some();
+    let invite_cleared = invited_by.remove(&key).is_some();
+    state_changed || failure_cleared || invite_cleared
+}
+
+/// Mirrors Cicchetto's `setFailed`: failure replaces the current window
+/// status, retains its nullable wire metadata, and clears any invite marker.
+/// Replayed snapshots are idempotent.
+fn set_failed_window_state(
+    window_states: &mut HashMap<(String, String), ChannelWindowState>,
+    window_failures: &mut HashMap<(String, String), WindowFailure>,
+    invited_by: &mut HashMap<(String, String), String>,
+    network: &str,
+    channel: &str,
+    failure: WindowFailure,
+) -> bool {
+    let key = window_state_key(network, channel);
+    let state_changed = window_states.insert(key.clone(), ChannelWindowState::Failed)
+        != Some(ChannelWindowState::Failed);
+    let failure_changed = window_failures.insert(key.clone(), failure.clone()) != Some(failure);
+    let invite_cleared = invited_by.remove(&key).is_some();
+    state_changed || failure_changed || invite_cleared
 }
 
 /// Parses a `members_seeded` payload (`{kind, network, channel, members}`,
@@ -2711,15 +2852,22 @@ fn network_groups_data(
 /// Builds the actual sidebar `NetworkGroup` Slint model out of
 /// `network_groups_data`'s plain grouping — must run on the UI thread,
 /// see that function's doc comment for why.
-fn network_groups_model(data: Vec<NetworkGroupData>) -> Vec<NetworkGroup> {
+fn network_groups_model(
+    data: Vec<NetworkGroupData>,
+    window_states: HashMap<(String, String), ChannelWindowState>,
+) -> Vec<NetworkGroup> {
     data.into_iter()
         .map(|(network, expanded, channels)| {
             let channel_entries: Vec<ChannelEntry> = channels
                 .into_iter()
-                .map(|(channel, label)| ChannelEntry {
-                    network: network.clone().into(),
-                    channel: channel.into(),
-                    label: label.into(),
+                .map(|(channel, label)| {
+                    let failed = window_is_failed(&window_states, &network, &channel);
+                    ChannelEntry {
+                        network: network.clone().into(),
+                        channel: channel.into(),
+                        label: label.into(),
+                        failed,
+                    }
                 })
                 .collect();
             NetworkGroup {
@@ -2736,9 +2884,10 @@ fn network_groups_model(data: Vec<NetworkGroupData>) -> Vec<NetworkGroup> {
 /// changes either (a network's expand toggle, a fresh connect).
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let data = network_groups_data(&state.channel_entries, &state.expanded_networks);
+    let window_states = state.window_states.clone();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let groups = network_groups_model(data);
+        let groups = network_groups_model(data, window_states);
         ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
     });
 }
@@ -3378,24 +3527,140 @@ mod tests {
     }
 
     #[test]
-    fn upsert_joined_channel_is_idempotent_for_live_and_snapshot_delivery() {
+    fn parse_join_failed_accepts_live_and_matching_channel_snapshot_topics() {
+        let payload = serde_json::json!({
+            "kind": "join_failed",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "failed",
+            "reason": "invite only",
+            "numeric": 473,
+            "future_field": true
+        });
+        let expected = Some((
+            "libera".to_string(),
+            "#cordiale".to_string(),
+            WindowFailure {
+                reason: Some("invite only".to_string()),
+                numeric: Some(Number::from(473)),
+            },
+        ));
+
+        assert_eq!(
+            parse_join_failed_event(&payload, "grappa:user:sythos", "sythos"),
+            expected
+        );
+        assert_eq!(
+            parse_join_failed_event(
+                &payload,
+                &channel_topic("sythos", "libera", "#CoRdIaLe"),
+                "sythos"
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn parse_join_failed_preserves_required_nullable_fields_and_rejects_bad_payloads() {
+        let nullable = serde_json::json!({
+            "kind": "join_failed",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "failed",
+            "reason": null,
+            "numeric": null
+        });
+        assert_eq!(
+            parse_join_failed_event(&nullable, "grappa:user:sythos", "sythos"),
+            Some((
+                "libera".to_string(),
+                "#cordiale".to_string(),
+                WindowFailure {
+                    reason: None,
+                    numeric: None,
+                },
+            ))
+        );
+
+        let wrong_state = serde_json::json!({
+            "kind": "join_failed",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "joined",
+            "reason": null,
+            "numeric": null
+        });
+        assert_eq!(
+            parse_join_failed_event(&wrong_state, "grappa:user:sythos", "sythos"),
+            None
+        );
+
+        let missing_reason = serde_json::json!({
+            "kind": "join_failed",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "failed",
+            "numeric": null
+        });
+        assert_eq!(
+            parse_join_failed_event(&missing_reason, "grappa:user:sythos", "sythos"),
+            None
+        );
+
+        let malformed_numeric = serde_json::json!({
+            "kind": "join_failed",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "failed",
+            "reason": null,
+            "numeric": "473"
+        });
+        assert_eq!(
+            parse_join_failed_event(&malformed_numeric, "grappa:user:sythos", "sythos"),
+            None
+        );
+
+        assert_eq!(
+            parse_join_failed_event(&nullable, "grappa:user:other", "sythos"),
+            None
+        );
+        assert_eq!(
+            parse_join_failed_event(
+                &nullable,
+                &channel_topic("sythos", "libera", "#other"),
+                "sythos"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_join_failed_event(
+                &nullable,
+                "grappa:user:sythos/network:libera/query:friend",
+                "sythos"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn upsert_channel_entry_is_idempotent_for_live_and_snapshot_delivery() {
         let mut entries = vec![(
             "libera".to_string(),
             "#cordiale".to_string(),
             "#cordiale".to_string(),
         )];
 
-        assert!(!upsert_joined_channel(
+        assert!(!upsert_channel_entry(
             &mut entries,
             "libera".to_string(),
             "#CoRdIaLe".to_string()
         ));
-        assert!(upsert_joined_channel(
+        assert!(upsert_channel_entry(
             &mut entries,
             "libera".to_string(),
             "#rust".to_string()
         ));
-        assert!(!upsert_joined_channel(
+        assert!(!upsert_channel_entry(
             &mut entries,
             "libera".to_string(),
             "#rust".to_string()
@@ -3421,13 +3686,69 @@ mod tests {
     fn set_joined_window_state_records_transition_and_deduplicates_delivery() {
         let key = window_state_key("libera", "#cordiale");
         let mut states = HashMap::new();
+        let mut failures = HashMap::from([(
+            key.clone(),
+            WindowFailure {
+                reason: Some("old failure".to_string()),
+                numeric: Some(Number::from(473)),
+            },
+        )]);
+        let mut invited_by = HashMap::from([(key.clone(), "ChanServ".to_string())]);
 
-        assert!(set_joined_window_state(&mut states, &key.0, "#CoRdIaLe"));
+        assert!(set_joined_window_state(
+            &mut states,
+            &mut failures,
+            &mut invited_by,
+            &key.0,
+            "#CoRdIaLe"
+        ));
         assert_eq!(states.get(&key), Some(&ChannelWindowState::Joined));
+        assert!(!failures.contains_key(&key));
+        assert!(!invited_by.contains_key(&key));
 
-        assert!(!set_joined_window_state(&mut states, &key.0, &key.1));
+        assert!(!set_joined_window_state(
+            &mut states,
+            &mut failures,
+            &mut invited_by,
+            &key.0,
+            &key.1
+        ));
         assert_eq!(states.len(), 1);
         assert_eq!(states.get(&key), Some(&ChannelWindowState::Joined));
+    }
+
+    #[test]
+    fn set_failed_window_state_keeps_metadata_clears_invite_and_is_idempotent() {
+        let key = window_state_key("libera", "#cordiale");
+        let failure = WindowFailure {
+            reason: Some("invite only".to_string()),
+            numeric: Some(Number::from(473)),
+        };
+        let mut states = HashMap::from([(key.clone(), ChannelWindowState::Joined)]);
+        let mut failures = HashMap::new();
+        let mut invited_by = HashMap::from([(key.clone(), "ChanServ".to_string())]);
+
+        assert!(set_failed_window_state(
+            &mut states,
+            &mut failures,
+            &mut invited_by,
+            "libera",
+            "#CoRdIaLe",
+            failure.clone()
+        ));
+        assert_eq!(states.get(&key), Some(&ChannelWindowState::Failed));
+        assert!(window_is_failed(&states, "libera", "#CoRdIaLe"));
+        assert_eq!(failures.get(&key), Some(&failure));
+        assert!(!invited_by.contains_key(&key));
+
+        assert!(!set_failed_window_state(
+            &mut states,
+            &mut failures,
+            &mut invited_by,
+            "libera",
+            "#cordiale",
+            failure
+        ));
     }
 
     #[test]
@@ -3488,6 +3809,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"names_reply"));
         assert!(!IGNORED_KINDS.contains(&"topic_changed"));
         assert!(!IGNORED_KINDS.contains(&"joined"));
+        assert!(!IGNORED_KINDS.contains(&"join_failed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
