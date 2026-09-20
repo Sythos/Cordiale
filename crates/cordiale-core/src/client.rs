@@ -44,6 +44,7 @@ use crate::rest::{
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
+#[derive(Clone)]
 pub struct GrappaClient {
     http: Client,
     base_url: String,
@@ -183,6 +184,36 @@ impl GrappaClient {
             .await?
             .error_for_status()?;
         Ok(response.json::<Value>().await?)
+    }
+
+    /// `DELETE /networks/:network_slug/channels/:channel` — parts from an
+    /// IRC channel and removes the joined/pseudo window on the server. A
+    /// non-empty optional reason is sent as a query parameter, never a DELETE
+    /// body; channel names are encoded as URL path segments because they
+    /// commonly start with `#`.
+    pub async fn part_channel(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel: &str,
+        reason: Option<&str>,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "channels", channel]);
+        if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
+            url.query_pairs_mut().append_pair("reason", reason);
+        }
+
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     /// `GET /me/settings/display-prefs` — absent-tolerant, per
@@ -687,7 +718,7 @@ impl GrappaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::matchers::{body_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -852,6 +883,41 @@ mod tests {
             response.get("kind").and_then(|k| k.as_str()),
             Some("privmsg")
         );
+    }
+
+    #[tokio::test]
+    async fn part_channel_uses_encoded_path_and_omits_empty_reason() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/channels/%23rust"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .part_channel("abc123", "libera", "#rust", None)
+            .await
+            .expect("part_channel");
+    }
+
+    #[tokio::test]
+    async fn part_channel_percent_encodes_optional_reason() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/channels/%23rust"))
+            .and(query_param("reason", "away for now & later"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .part_channel("abc123", "libera", "#rust", Some("away for now & later"))
+            .await
+            .expect("part_channel with reason");
     }
 
     #[tokio::test]
