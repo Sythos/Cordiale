@@ -324,7 +324,10 @@ mod tests {
         assert_eq!(ALL_CLIENT_EVENT_KINDS.len(), 56);
         assert_eq!(names.len(), 56);
         for kind in ALL_CLIENT_EVENT_KINDS {
-            assert_eq!(ClientEventKind::from_wire_name(kind.as_wire_name()), Some(kind));
+            assert_eq!(
+                ClientEventKind::from_wire_name(kind.as_wire_name()),
+                Some(kind)
+            );
         }
     }
 
