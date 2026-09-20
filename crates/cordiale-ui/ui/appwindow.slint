@@ -28,6 +28,7 @@ struct ChannelEntry {
     channel: string,
     label: string,
     failed: bool,
+    kicked: bool,
 }
 
 // One connected network in the sidebar, with its joined channels and
@@ -437,6 +438,7 @@ export component AppWindow inherits Window {
     callback member-ctcp-requested(string, string); // nick, verb
     callback member-query-requested(string);
     callback channel-selected(string, string);
+    callback kicked-channel-dismiss-requested(string, string);
     callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
@@ -722,16 +724,30 @@ export component AppWindow inherits Window {
                         padding-left: 16px;
                         spacing: 2px;
 
-                        for entry in group.channels : Button {
-                            text: entry.label;
-                            accessible-label: entry.failed
-                                ? entry.label + " — join failed"
-                                : entry.label;
-                            // Cicchetto keeps a failed channel as a muted,
-                            // selectable pseudo-window; its reason and
-                            // numeric are not part of the row.
-                            opacity: entry.failed ? 0.55 : 1.0;
-                            clicked => { channel-selected(entry.network, entry.channel); }
+                        for entry in group.channels : HorizontalBox {
+                            spacing: 2px;
+
+                            Button {
+                                horizontal-stretch: 1;
+                                text: entry.label;
+                                accessible-label: entry.kicked
+                                    ? entry.label + " — kicked"
+                                    : (entry.failed ? entry.label + " — join failed" : entry.label);
+                                // Cicchetto keeps failed and kicked channels as
+                                // muted, selectable pseudo-windows; details
+                                // remain in session state, not in the row.
+                                opacity: (entry.failed || entry.kicked) ? 0.55 : 1.0;
+                                clicked => { channel-selected(entry.network, entry.channel); }
+                            }
+
+                            if entry.kicked : Button {
+                                text: "×";
+                                accessible-label: @tr("Dismiss kicked channel {}", entry.label);
+                                width: 28px;
+                                clicked => {
+                                    kicked-channel-dismiss-requested(entry.network, entry.channel);
+                                }
+                            }
                         }
                     }
                 }

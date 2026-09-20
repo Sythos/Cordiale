@@ -58,6 +58,10 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    DismissKickedChannel {
+        network: String,
+        channel: String,
+    },
     ToggleNetwork(String),
     SendMessage {
         body: String,
@@ -297,6 +301,14 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     });
 
+    let tx_for_dismiss_kicked_channel = worker_tx.clone();
+    ui.on_kicked_channel_dismiss_requested(move |network, channel| {
+        let _ = tx_for_dismiss_kicked_channel.send(WorkerCommand::DismissKickedChannel {
+            network: network.to_string(),
+            channel: channel.to_string(),
+        });
+    });
+
     let tx_for_network_toggle = worker_tx.clone();
     ui.on_network_toggle_requested(move |network| {
         let _ = tx_for_network_toggle.send(WorkerCommand::ToggleNetwork(network.to_string()));
@@ -491,12 +503,19 @@ fn main() -> Result<(), slint::PlatformError> {
 enum ChannelWindowState {
     Joined,
     Failed,
+    Kicked,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WindowFailure {
     reason: Option<String>,
     numeric: Option<Number>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WindowKick {
+    by: Option<String>,
+    reason: Option<String>,
 }
 
 struct WorkerState {
@@ -511,6 +530,9 @@ struct WorkerState {
     /// Nullable failure metadata is retained like Cicchetto but not shown in
     /// the channel row.
     window_failures: HashMap<(String, String), WindowFailure>,
+    /// Nullable kick metadata is retained like Cicchetto but not shown in
+    /// the channel row.
+    window_kicks: HashMap<(String, String), WindowKick>,
     /// Invitation markers are cleared by terminal window transitions. The
     /// invitation event itself remains unsupported until its own parity step.
     invited_by: HashMap<(String, String), String>,
@@ -536,6 +558,8 @@ struct WorkerState {
     /// `(network, channel, label)` from the last bootstrap, kept around so
     /// `ToggleNetwork` can rebuild the sidebar model without re-fetching.
     channel_entries: Vec<(String, String, String)>,
+    /// Channel-selection MRU, used when a dismissed pseudo-window was open.
+    recent_channels: Vec<(String, String)>,
     current_channel: Option<(String, String)>,
     /// Network slug -> Grappa's own integer `network_id`, read from
     /// `boot.networks`. WS commands like `/links` need the integer id,
@@ -569,6 +593,7 @@ impl WorkerState {
             joined_topics: std::collections::HashSet::new(),
             window_states: HashMap::new(),
             window_failures: HashMap::new(),
+            window_kicks: HashMap::new(),
             invited_by: HashMap::new(),
             messages: HashMap::new(),
             drafts: HashMap::new(),
@@ -576,6 +601,7 @@ impl WorkerState {
             members: HashMap::new(),
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
+            recent_channels: Vec::new(),
             current_channel: None,
             network_ids: HashMap::new(),
             settings_network: None,
@@ -630,6 +656,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         handle_select_channel(&mut state, &ui, network, channel).await;
+                    }
+                    Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
+                        handle_dismiss_kicked_channel(&mut state, &ui, &network, &channel).await;
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
                         let expanded = state.expanded_networks.entry(network).or_insert(true);
@@ -969,7 +998,9 @@ async fn handle_connect(
             state.channel_entries = entries.clone();
             state.window_states = joined_window_states_from_boot_channels(&outcome.boot.channels);
             state.window_failures.clear();
+            state.window_kicks.clear();
             state.invited_by.clear();
+            state.recent_channels.clear();
             state.topics = topics_from_boot(&outcome);
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
@@ -1089,6 +1120,10 @@ async fn handle_select_channel(
     }
 
     let key = (network.clone(), channel.clone());
+    state.recent_channels.retain(|(known_network, known_channel)| {
+        window_state_key(known_network, known_channel) != window_state_key(&network, &channel)
+    });
+    state.recent_channels.insert(0, key.clone());
     state.current_channel = Some(key.clone());
 
     let mut settings = persistence::load_settings().unwrap_or_default();
@@ -1120,6 +1155,131 @@ async fn handle_select_channel(
         let member_rows = members_model(&members, dark_theme);
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
+}
+
+/// Dismisses a kicked pseudo-window with the same optimistic semantics as
+/// Cicchetto: authenticated REST PART in the background, then local window
+/// removal immediately. If the dismissed window was selected, return to the
+/// most-recent remaining channel or the server/home view.
+async fn handle_dismiss_kicked_channel(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: String,
+) {
+    if !window_is_kicked(&state.window_states, &network, &channel) {
+        return;
+    }
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+
+    let part_network = network.clone();
+    let part_channel = channel.clone();
+    tokio::spawn(async move {
+        if let Err(err) = client
+            .part_channel(&token, &part_network, &part_channel, None)
+            .await
+        {
+            persistence::log_line(&format!("kicked channel part failed: {err:?}"));
+        }
+    });
+
+    let Some(selected) = dismiss_kicked_window_locally(state, &network, &channel) else {
+        return;
+    };
+    refresh_network_groups(state, ui);
+
+    if !selected {
+        return;
+    }
+
+    let next_channel = state
+        .recent_channels
+        .iter()
+        .find(|(recent_network, recent_channel)| {
+            state
+                .channel_entries
+                .iter()
+                .any(|(entry_network, entry_channel, _)| {
+                    window_state_key(recent_network, recent_channel)
+                        == window_state_key(entry_network, entry_channel)
+                })
+        })
+        .cloned();
+    if let Some((next_network, next_channel)) = next_channel {
+        handle_select_channel(state, ui, next_network, next_channel).await;
+        return;
+    }
+
+    state.current_channel = None;
+    let mut settings = persistence::load_settings().unwrap_or_default();
+    settings.last_channel = None;
+    let _ = persistence::save_settings(&settings);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let empty_lines = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
+        let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
+        ui.set_has_selected_channel(false);
+        ui.set_current_channel_label("".into());
+        ui.set_current_topic("".into());
+        ui.set_current_window_is_joined(false);
+        ui.set_can_moderate_members(false);
+        ui.set_compose_text("".into());
+        ui.set_chat_lines(empty_lines.into());
+        ui.set_channel_members(empty_members.into());
+    });
+}
+
+/// Cicchetto's `forceParted` projection for a kicked channel: remove only its
+/// lifecycle state/metadata immediately after REST PART. The sidebar channel
+/// list is maintained separately by Cordiale.
+fn force_parted_kicked_window(state: &mut WorkerState, network: &str, channel: &str) -> bool {
+    if !window_is_kicked(&state.window_states, network, channel) {
+        return false;
+    }
+
+    let key = window_state_key(network, channel);
+    state.window_states.remove(&key);
+    state.window_failures.remove(&key);
+    state.window_kicks.remove(&key);
+    state.invited_by.remove(&key);
+    true
+}
+
+/// Applies the kicked-row portion of Cicchetto's close action locally and
+/// reports whether that pseudo-window was selected, without changing the
+/// current selection or its MRU ordering.
+fn dismiss_kicked_window_locally(
+    state: &mut WorkerState,
+    network: &str,
+    channel: &str,
+) -> Option<bool> {
+    let key = window_state_key(network, channel);
+    let selected = state.current_channel.as_ref().is_some_and(
+        |(current_network, current_channel)| {
+            window_state_key(current_network, current_channel) == key
+        },
+    );
+    if !force_parted_kicked_window(state, network, channel) {
+        return None;
+    }
+    remove_sidebar_channel_entry(&mut state.channel_entries, network, channel);
+    Some(selected)
+}
+
+/// Removes a dismissed channel from Cordiale's current sidebar projection.
+fn remove_sidebar_channel_entry(
+    entries: &mut Vec<(String, String, String)>,
+    network: &str,
+    channel: &str,
+) -> bool {
+    let key = window_state_key(network, channel);
+    let previous_len = entries.len();
+    entries.retain(|(entry_network, entry_channel, _)| {
+        window_state_key(entry_network, entry_channel) != key
+    });
+    entries.len() != previous_len
 }
 
 /// Whether `identifier` appears in `members` with the `@` (op) prefix —
@@ -1651,7 +1811,7 @@ async fn handle_member_ctcp(
 /// for it here would be dead code matching nothing.
 const IGNORED_KINDS: &[&str] = &[
     // Known from vjt/grappa-irc#2260 or the wire union (joined, join_failed,
-    // topic_changed, and members_seeded/names_reply are handled above).
+    // kicked, topic_changed, and members_seeded/names_reply are handled above).
     "channel_modes_changed",
     "read_cursor_set",
     "window_counts",
@@ -1673,7 +1833,6 @@ const IGNORED_KINDS: &[&str] = &[
     "window_invite_declined",
     "dcc_offer",
     "dcc_offer_resolved",
-    "kicked",
     "mentions_bundle",
     "whois_bundle",
     "whois_avatar_ready",
@@ -1832,6 +1991,7 @@ fn handle_frame(
         let state_changed = set_joined_window_state(
             &mut state.window_states,
             &mut state.window_failures,
+            &mut state.window_kicks,
             &mut state.invited_by,
             &network,
             &channel,
@@ -1873,6 +2033,7 @@ fn handle_frame(
         let state_changed = set_failed_window_state(
             &mut state.window_states,
             &mut state.window_failures,
+            &mut state.window_kicks,
             &mut state.invited_by,
             &network,
             &channel,
@@ -1894,6 +2055,57 @@ fn handle_frame(
             let _ = ui.upgrade_in_event_loop(|ui| {
                 ui.set_current_window_is_joined(false);
                 ui.set_can_moderate_members(false);
+            });
+        }
+        if state_changed || sidebar_changed {
+            refresh_network_groups(state, ui);
+        }
+        return;
+    }
+
+    // A kick becomes a retained, muted pseudo-window just like Cicchetto's
+    // UI state. The server sends it live on the user topic and as a cold
+    // snapshot on the matching channel topic; query/DM topics are rejected
+    // by the parser. Keep the by/reason metadata in session state only.
+    if payload_kind == "kicked" {
+        let Some(identifier) = state.identifier.as_deref() else {
+            return;
+        };
+        let Some((network, channel, kick)) =
+            parse_kicked_event(&frame.payload, &frame.topic, identifier)
+        else {
+            return;
+        };
+
+        let state_changed = set_kicked_window_state(
+            &mut state.window_states,
+            &mut state.window_failures,
+            &mut state.window_kicks,
+            &mut state.invited_by,
+            &network,
+            &channel,
+            kick,
+        );
+        let sidebar_changed =
+            upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
+        let key = window_state_key(&network, &channel);
+        state.members.retain(|(known_network, known_channel), _| {
+            window_state_key(known_network, known_channel) != key
+        });
+        let selected_window_kicked = state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, current_channel)| {
+                window_state_key(current_network, current_channel) == key
+        });
+
+        if selected_window_kicked {
+            let ui = ui.clone();
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_current_window_is_joined(false);
+                ui.set_can_moderate_members(false);
+                let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
+                ui.set_channel_members(empty_members.into());
             });
         }
         if state_changed || sidebar_changed {
@@ -2028,6 +2240,46 @@ fn parse_join_failed_event(
     ))
 }
 
+/// Parses Cicchetto's required `kicked` payload from either the live user
+/// topic or the matching per-channel cold snapshot. Nullable fields must be
+/// present, but unknown additive fields are deliberately ignored.
+fn parse_kicked_event(
+    payload: &Value,
+    topic: &str,
+    identifier: &str,
+) -> Option<(String, String, WindowKick)> {
+    let object = payload.as_object()?;
+    if object.get("kind").and_then(Value::as_str) != Some("kicked")
+        || object.get("state").and_then(Value::as_str) != Some("kicked")
+    {
+        return None;
+    }
+
+    let network = object.get("network")?.as_str()?;
+    let channel = object.get("channel")?.as_str()?;
+    let by = match object.get("by")? {
+        Value::Null => None,
+        Value::String(value) => Some(value.clone()),
+        _ => return None,
+    };
+    let reason = match object.get("reason")? {
+        Value::Null => None,
+        Value::String(value) => Some(value.clone()),
+        _ => return None,
+    };
+
+    let user_topic = format!("grappa:user:{identifier}");
+    if topic != user_topic && !channel_topic_matches(identifier, topic, network, channel) {
+        return None;
+    }
+
+    Some((
+        network.to_string(),
+        channel.to_string(),
+        WindowKick { by, reason },
+    ))
+}
+
 /// Matches the server's channel topic with the same identifier key used by
 /// Cicchetto: exact user and network, ASCII-folded channel only.
 fn channel_topic_matches(identifier: &str, topic: &str, network: &str, channel: &str) -> bool {
@@ -2061,9 +2313,17 @@ fn window_is_failed(
     window_states.get(&window_state_key(network, channel)) == Some(&ChannelWindowState::Failed)
 }
 
+fn window_is_kicked(
+    window_states: &HashMap<(String, String), ChannelWindowState>,
+    network: &str,
+    channel: &str,
+) -> bool {
+    window_states.get(&window_state_key(network, channel)) == Some(&ChannelWindowState::Kicked)
+}
+
 /// Adds a channel window to the session's sidebar source of truth after a
-/// server-reported join or join failure. The return value lets callers avoid
-/// rebuilding Slint models for duplicate live/snapshot delivery.
+/// server-reported join, join failure, or kick. The return value lets callers
+/// avoid rebuilding Slint models for duplicate live/snapshot delivery.
 fn upsert_channel_entry(
     entries: &mut Vec<(String, String, String)>,
     network: String,
@@ -2080,12 +2340,13 @@ fn upsert_channel_entry(
 }
 
 /// Mirrors Cicchetto's `setJoined`: assignment overwrites the prior
-/// window-state value and clears stale invite/failure metadata. Repeated
+/// window-state value and clears stale invite/failure/kick metadata. Repeated
 /// delivery on the live user topic and channel reconnect snapshot is
 /// idempotent.
 fn set_joined_window_state(
     window_states: &mut HashMap<(String, String), ChannelWindowState>,
     window_failures: &mut HashMap<(String, String), WindowFailure>,
+    window_kicks: &mut HashMap<(String, String), WindowKick>,
     invited_by: &mut HashMap<(String, String), String>,
     network: &str,
     channel: &str,
@@ -2094,8 +2355,9 @@ fn set_joined_window_state(
     let state_changed = window_states.insert(key.clone(), ChannelWindowState::Joined)
         != Some(ChannelWindowState::Joined);
     let failure_cleared = window_failures.remove(&key).is_some();
+    let kick_cleared = window_kicks.remove(&key).is_some();
     let invite_cleared = invited_by.remove(&key).is_some();
-    state_changed || failure_cleared || invite_cleared
+    state_changed || failure_cleared || kick_cleared || invite_cleared
 }
 
 /// Mirrors Cicchetto's `setFailed`: failure replaces the current window
@@ -2104,6 +2366,7 @@ fn set_joined_window_state(
 fn set_failed_window_state(
     window_states: &mut HashMap<(String, String), ChannelWindowState>,
     window_failures: &mut HashMap<(String, String), WindowFailure>,
+    window_kicks: &mut HashMap<(String, String), WindowKick>,
     invited_by: &mut HashMap<(String, String), String>,
     network: &str,
     channel: &str,
@@ -2113,8 +2376,30 @@ fn set_failed_window_state(
     let state_changed = window_states.insert(key.clone(), ChannelWindowState::Failed)
         != Some(ChannelWindowState::Failed);
     let failure_changed = window_failures.insert(key.clone(), failure.clone()) != Some(failure);
+    let kick_cleared = window_kicks.remove(&key).is_some();
     let invite_cleared = invited_by.remove(&key).is_some();
-    state_changed || failure_changed || invite_cleared
+    state_changed || failure_changed || kick_cleared || invite_cleared
+}
+
+/// Mirrors Cicchetto's `setKicked`: replaces the current window status,
+/// retains nullable actor/reason metadata, and clears stale failure/invite
+/// data. Replayed user-topic and channel-topic deliveries are idempotent.
+fn set_kicked_window_state(
+    window_states: &mut HashMap<(String, String), ChannelWindowState>,
+    window_failures: &mut HashMap<(String, String), WindowFailure>,
+    window_kicks: &mut HashMap<(String, String), WindowKick>,
+    invited_by: &mut HashMap<(String, String), String>,
+    network: &str,
+    channel: &str,
+    kick: WindowKick,
+) -> bool {
+    let key = window_state_key(network, channel);
+    let state_changed = window_states.insert(key.clone(), ChannelWindowState::Kicked)
+        != Some(ChannelWindowState::Kicked);
+    let failure_cleared = window_failures.remove(&key).is_some();
+    let kick_changed = window_kicks.insert(key.clone(), kick.clone()) != Some(kick);
+    let invite_cleared = invited_by.remove(&key).is_some();
+    state_changed || failure_cleared || kick_changed || invite_cleared
 }
 
 /// Parses a `members_seeded` payload (`{kind, network, channel, members}`,
@@ -2862,11 +3147,13 @@ fn network_groups_model(
                 .into_iter()
                 .map(|(channel, label)| {
                     let failed = window_is_failed(&window_states, &network, &channel);
+                    let kicked = window_is_kicked(&window_states, &network, &channel);
                     ChannelEntry {
                         network: network.clone().into(),
                         channel: channel.into(),
                         label: label.into(),
                         failed,
+                        kicked,
                     }
                 })
                 .collect();
@@ -3643,6 +3930,147 @@ mod tests {
     }
 
     #[test]
+    fn parse_kicked_accepts_live_and_matching_channel_snapshot_topics() {
+        let payload = serde_json::json!({
+            "kind": "kicked",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "kicked",
+            "by": "ChanServ",
+            "reason": "policy",
+            "future_field": true
+        });
+        let expected = Some((
+            "libera".to_string(),
+            "#cordiale".to_string(),
+            WindowKick {
+                by: Some("ChanServ".to_string()),
+                reason: Some("policy".to_string()),
+            },
+        ));
+
+        assert_eq!(
+            parse_kicked_event(&payload, "grappa:user:sythos", "sythos"),
+            expected
+        );
+        assert_eq!(
+            parse_kicked_event(
+                &payload,
+                &channel_topic("sythos", "libera", "#CoRdIaLe"),
+                "sythos"
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn parse_kicked_preserves_required_nullable_fields_and_rejects_bad_payloads() {
+        let nullable = serde_json::json!({
+            "kind": "kicked",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "kicked",
+            "by": null,
+            "reason": null
+        });
+        assert_eq!(
+            parse_kicked_event(&nullable, "grappa:user:sythos", "sythos"),
+            Some((
+                "libera".to_string(),
+                "#cordiale".to_string(),
+                WindowKick {
+                    by: None,
+                    reason: None,
+                },
+            ))
+        );
+
+        let wrong_state = serde_json::json!({
+            "kind": "kicked",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "joined",
+            "by": null,
+            "reason": null
+        });
+        assert_eq!(
+            parse_kicked_event(&wrong_state, "grappa:user:sythos", "sythos"),
+            None
+        );
+
+        let missing_by = serde_json::json!({
+            "kind": "kicked",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "kicked",
+            "reason": null
+        });
+        assert_eq!(
+            parse_kicked_event(&missing_by, "grappa:user:sythos", "sythos"),
+            None
+        );
+
+        let missing_reason = serde_json::json!({
+            "kind": "kicked",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "kicked",
+            "by": null
+        });
+        assert_eq!(
+            parse_kicked_event(&missing_reason, "grappa:user:sythos", "sythos"),
+            None
+        );
+
+        let malformed_by = serde_json::json!({
+            "kind": "kicked",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "kicked",
+            "by": 7,
+            "reason": null
+        });
+        assert_eq!(
+            parse_kicked_event(&malformed_by, "grappa:user:sythos", "sythos"),
+            None
+        );
+
+        let malformed_reason = serde_json::json!({
+            "kind": "kicked",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "kicked",
+            "by": null,
+            "reason": false
+        });
+        assert_eq!(
+            parse_kicked_event(&malformed_reason, "grappa:user:sythos", "sythos"),
+            None
+        );
+
+        assert_eq!(
+            parse_kicked_event(&nullable, "grappa:user:other", "sythos"),
+            None
+        );
+        assert_eq!(
+            parse_kicked_event(
+                &nullable,
+                &channel_topic("sythos", "libera", "#other"),
+                "sythos"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_kicked_event(
+                &nullable,
+                "grappa:user:sythos/network:libera/query:friend",
+                "sythos"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn upsert_channel_entry_is_idempotent_for_live_and_snapshot_delivery() {
         let mut entries = vec![(
             "libera".to_string(),
@@ -3693,22 +4121,32 @@ mod tests {
                 numeric: Some(Number::from(473)),
             },
         )]);
+        let mut kicks = HashMap::from([(
+            key.clone(),
+            WindowKick {
+                by: Some("old actor".to_string()),
+                reason: None,
+            },
+        )]);
         let mut invited_by = HashMap::from([(key.clone(), "ChanServ".to_string())]);
 
         assert!(set_joined_window_state(
             &mut states,
             &mut failures,
+            &mut kicks,
             &mut invited_by,
             &key.0,
             "#CoRdIaLe"
         ));
         assert_eq!(states.get(&key), Some(&ChannelWindowState::Joined));
         assert!(!failures.contains_key(&key));
+        assert!(!kicks.contains_key(&key));
         assert!(!invited_by.contains_key(&key));
 
         assert!(!set_joined_window_state(
             &mut states,
             &mut failures,
+            &mut kicks,
             &mut invited_by,
             &key.0,
             &key.1
@@ -3726,11 +4164,19 @@ mod tests {
         };
         let mut states = HashMap::from([(key.clone(), ChannelWindowState::Joined)]);
         let mut failures = HashMap::new();
+        let mut kicks = HashMap::from([(
+            key.clone(),
+            WindowKick {
+                by: None,
+                reason: Some("stale".to_string()),
+            },
+        )]);
         let mut invited_by = HashMap::from([(key.clone(), "ChanServ".to_string())]);
 
         assert!(set_failed_window_state(
             &mut states,
             &mut failures,
+            &mut kicks,
             &mut invited_by,
             "libera",
             "#CoRdIaLe",
@@ -3739,15 +4185,238 @@ mod tests {
         assert_eq!(states.get(&key), Some(&ChannelWindowState::Failed));
         assert!(window_is_failed(&states, "libera", "#CoRdIaLe"));
         assert_eq!(failures.get(&key), Some(&failure));
+        assert!(!kicks.contains_key(&key));
         assert!(!invited_by.contains_key(&key));
 
         assert!(!set_failed_window_state(
             &mut states,
             &mut failures,
+            &mut kicks,
             &mut invited_by,
             "libera",
             "#cordiale",
             failure
+        ));
+    }
+
+    #[test]
+    fn set_kicked_window_state_keeps_metadata_clears_prior_state_and_is_idempotent() {
+        let key = window_state_key("libera", "#cordiale");
+        let kick = WindowKick {
+            by: Some("ChanServ".to_string()),
+            reason: Some("policy".to_string()),
+        };
+        let mut states = HashMap::from([(key.clone(), ChannelWindowState::Failed)]);
+        let mut failures = HashMap::from([(
+            key.clone(),
+            WindowFailure {
+                reason: Some("old failure".to_string()),
+                numeric: Some(Number::from(473)),
+            },
+        )]);
+        let mut kicks = HashMap::new();
+        let mut invited_by = HashMap::from([(key.clone(), "ChanServ".to_string())]);
+
+        assert!(set_kicked_window_state(
+            &mut states,
+            &mut failures,
+            &mut kicks,
+            &mut invited_by,
+            "libera",
+            "#CoRdIaLe",
+            kick.clone(),
+        ));
+        assert_eq!(states.get(&key), Some(&ChannelWindowState::Kicked));
+        assert!(window_is_kicked(&states, "libera", "#CoRdIaLe"));
+        assert!(!failures.contains_key(&key));
+        assert_eq!(kicks.get(&key), Some(&kick));
+        assert!(!invited_by.contains_key(&key));
+
+        assert!(!set_kicked_window_state(
+            &mut states,
+            &mut failures,
+            &mut kicks,
+            &mut invited_by,
+            "libera",
+            "#cordiale",
+            kick,
+        ));
+    }
+
+    #[test]
+    fn force_parted_kicked_window_clears_only_lifecycle_metadata() {
+        let key = window_state_key("libera", "#cordiale");
+        let mut state = WorkerState::new();
+        state
+            .window_states
+            .insert(key.clone(), ChannelWindowState::Kicked);
+        state.window_failures.insert(
+            key.clone(),
+            WindowFailure {
+                reason: Some("old failure".to_string()),
+                numeric: Some(Number::from(473)),
+            },
+        );
+        state.window_kicks.insert(
+            key.clone(),
+            WindowKick {
+                by: Some("ChanServ".to_string()),
+                reason: Some("policy".to_string()),
+            },
+        );
+        state
+            .invited_by
+            .insert(key.clone(), "ChanServ".to_string());
+        state.channel_entries.push((
+            "libera".to_string(),
+            "#cordiale".to_string(),
+            "#cordiale".to_string(),
+        ));
+        state
+            .members
+            .insert(key.clone(), vec![("sythos".to_string(), "@".to_string())]);
+        state.messages.insert(key.clone(), Vec::new());
+        state.drafts.insert(key.clone(), "draft".to_string());
+        state.topics.insert(key.clone(), "topic".to_string());
+        state
+            .recent_channels
+            .push(("libera".to_string(), "#cordiale".to_string()));
+
+        assert!(force_parted_kicked_window(&mut state, "libera", "#CoRdIaLe"));
+        assert!(!state.window_states.contains_key(&key));
+        assert!(!state.window_failures.contains_key(&key));
+        assert!(!state.window_kicks.contains_key(&key));
+        assert!(!state.invited_by.contains_key(&key));
+        assert_eq!(state.channel_entries.len(), 1);
+        assert!(state.members.contains_key(&key));
+        assert!(state.messages.contains_key(&key));
+        assert_eq!(state.drafts.get(&key).map(String::as_str), Some("draft"));
+        assert_eq!(state.topics.get(&key).map(String::as_str), Some("topic"));
+        assert_eq!(state.recent_channels.len(), 1);
+    }
+
+    #[test]
+    fn force_parted_kicked_window_is_a_noop_for_other_window_states() {
+        let key = window_state_key("libera", "#cordiale");
+        let mut state = WorkerState::new();
+        state
+            .window_states
+            .insert(key.clone(), ChannelWindowState::Failed);
+        state.window_failures.insert(
+            key.clone(),
+            WindowFailure {
+                reason: Some("invite only".to_string()),
+                numeric: Some(Number::from(473)),
+            },
+        );
+        state.window_kicks.insert(
+            key.clone(),
+            WindowKick {
+                by: Some("ChanServ".to_string()),
+                reason: Some("stale".to_string()),
+            },
+        );
+        state
+            .invited_by
+            .insert(key.clone(), "ChanServ".to_string());
+        let expected_states = state.window_states.clone();
+        let expected_failures = state.window_failures.clone();
+        let expected_kicks = state.window_kicks.clone();
+        let expected_invites = state.invited_by.clone();
+
+        assert!(!force_parted_kicked_window(&mut state, "libera", "#cordiale"));
+        assert_eq!(state.window_states, expected_states);
+        assert_eq!(state.window_failures, expected_failures);
+        assert_eq!(state.window_kicks, expected_kicks);
+        assert_eq!(state.invited_by, expected_invites);
+    }
+
+    #[test]
+    fn dismiss_kicked_window_locally_removes_row_and_preserves_selection_state() {
+        let key = window_state_key("libera", "#cordiale");
+        let mut state = WorkerState::new();
+        state
+            .window_states
+            .insert(key.clone(), ChannelWindowState::Kicked);
+        state.window_kicks.insert(
+            key.clone(),
+            WindowKick {
+                by: Some("ChanServ".to_string()),
+                reason: Some("policy".to_string()),
+            },
+        );
+        state
+            .invited_by
+            .insert(key.clone(), "ChanServ".to_string());
+        state.channel_entries.push((
+            "libera".to_string(),
+            "#cordiale".to_string(),
+            "#cordiale".to_string(),
+        ));
+        state.current_channel = Some(key.clone());
+        state.recent_channels.push(key.clone());
+        state
+            .members
+            .insert(key.clone(), vec![("sythos".to_string(), "@".to_string())]);
+
+        assert_eq!(
+            dismiss_kicked_window_locally(&mut state, "libera", "#CoRdIaLe"),
+            Some(true)
+        );
+        assert!(state.channel_entries.is_empty());
+        assert!(!state.window_states.contains_key(&key));
+        assert!(!state.window_failures.contains_key(&key));
+        assert!(!state.window_kicks.contains_key(&key));
+        assert!(!state.invited_by.contains_key(&key));
+        assert_eq!(state.current_channel, Some(key.clone()));
+        assert_eq!(state.recent_channels, vec![key.clone()]);
+        assert!(state.members.contains_key(&key));
+    }
+
+    #[test]
+    fn remove_sidebar_channel_entry_matches_only_network_and_ascii_folded_channel() {
+        let mut entries = vec![
+            (
+                "libera".to_string(),
+                "#cordiale".to_string(),
+                "#cordiale".to_string(),
+            ),
+            (
+                "other".to_string(),
+                "#cordiale".to_string(),
+                "#cordiale".to_string(),
+            ),
+            (
+                "libera".to_string(),
+                "#rust".to_string(),
+                "#rust".to_string(),
+            ),
+        ];
+
+        assert!(remove_sidebar_channel_entry(
+            &mut entries,
+            "libera",
+            "#CoRdIaLe"
+        ));
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    "other".to_string(),
+                    "#cordiale".to_string(),
+                    "#cordiale".to_string()
+                ),
+                (
+                    "libera".to_string(),
+                    "#rust".to_string(),
+                    "#rust".to_string()
+                )
+            ]
+        );
+        assert!(!remove_sidebar_channel_entry(
+            &mut entries,
+            "libera",
+            "#cordiale"
         ));
     }
 
@@ -3810,6 +4479,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"topic_changed"));
         assert!(!IGNORED_KINDS.contains(&"joined"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
+        assert!(!IGNORED_KINDS.contains(&"kicked"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
