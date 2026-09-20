@@ -1120,9 +1120,11 @@ async fn handle_select_channel(
     }
 
     let key = (network.clone(), channel.clone());
-    state.recent_channels.retain(|(known_network, known_channel)| {
-        window_state_key(known_network, known_channel) != window_state_key(&network, &channel)
-    });
+    state
+        .recent_channels
+        .retain(|(known_network, known_channel)| {
+            window_state_key(known_network, known_channel) != window_state_key(&network, &channel)
+        });
     state.recent_channels.insert(0, key.clone());
     state.current_channel = Some(key.clone());
 
@@ -1256,11 +1258,13 @@ fn dismiss_kicked_window_locally(
     channel: &str,
 ) -> Option<bool> {
     let key = window_state_key(network, channel);
-    let selected = state.current_channel.as_ref().is_some_and(
-        |(current_network, current_channel)| {
-            window_state_key(current_network, current_channel) == key
-        },
-    );
+    let selected =
+        state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, current_channel)| {
+                window_state_key(current_network, current_channel) == key
+            });
     if !force_parted_kicked_window(state, network, channel) {
         return None;
     }
@@ -2092,12 +2096,13 @@ fn handle_frame(
         state.members.retain(|(known_network, known_channel), _| {
             window_state_key(known_network, known_channel) != key
         });
-        let selected_window_kicked = state
-            .current_channel
-            .as_ref()
-            .is_some_and(|(current_network, current_channel)| {
-                window_state_key(current_network, current_channel) == key
-        });
+        let selected_window_kicked =
+            state
+                .current_channel
+                .as_ref()
+                .is_some_and(|(current_network, current_channel)| {
+                    window_state_key(current_network, current_channel) == key
+                });
 
         if selected_window_kicked {
             let ui = ui.clone();
@@ -4264,9 +4269,7 @@ mod tests {
                 reason: Some("policy".to_string()),
             },
         );
-        state
-            .invited_by
-            .insert(key.clone(), "ChanServ".to_string());
+        state.invited_by.insert(key.clone(), "ChanServ".to_string());
         state.channel_entries.push((
             "libera".to_string(),
             "#cordiale".to_string(),
@@ -4282,7 +4285,11 @@ mod tests {
             .recent_channels
             .push(("libera".to_string(), "#cordiale".to_string()));
 
-        assert!(force_parted_kicked_window(&mut state, "libera", "#CoRdIaLe"));
+        assert!(force_parted_kicked_window(
+            &mut state,
+            "libera",
+            "#CoRdIaLe"
+        ));
         assert!(!state.window_states.contains_key(&key));
         assert!(!state.window_failures.contains_key(&key));
         assert!(!state.window_kicks.contains_key(&key));
@@ -4316,15 +4323,17 @@ mod tests {
                 reason: Some("stale".to_string()),
             },
         );
-        state
-            .invited_by
-            .insert(key.clone(), "ChanServ".to_string());
+        state.invited_by.insert(key.clone(), "ChanServ".to_string());
         let expected_states = state.window_states.clone();
         let expected_failures = state.window_failures.clone();
         let expected_kicks = state.window_kicks.clone();
         let expected_invites = state.invited_by.clone();
 
-        assert!(!force_parted_kicked_window(&mut state, "libera", "#cordiale"));
+        assert!(!force_parted_kicked_window(
+            &mut state,
+            "libera",
+            "#cordiale"
+        ));
         assert_eq!(state.window_states, expected_states);
         assert_eq!(state.window_failures, expected_failures);
         assert_eq!(state.window_kicks, expected_kicks);
@@ -4345,9 +4354,7 @@ mod tests {
                 reason: Some("policy".to_string()),
             },
         );
-        state
-            .invited_by
-            .insert(key.clone(), "ChanServ".to_string());
+        state.invited_by.insert(key.clone(), "ChanServ".to_string());
         state.channel_entries.push((
             "libera".to_string(),
             "#cordiale".to_string(),

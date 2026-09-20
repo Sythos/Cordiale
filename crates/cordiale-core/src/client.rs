@@ -915,12 +915,7 @@ mod tests {
 
         let client = GrappaClient::new(mock_server.uri());
         client
-            .part_channel(
-                "abc123",
-                "libera",
-                "#rust",
-                Some("away for now & later"),
-            )
+            .part_channel("abc123", "libera", "#rust", Some("away for now & later"))
             .await
             .expect("part_channel with reason");
     }
