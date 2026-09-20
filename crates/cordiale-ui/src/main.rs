@@ -1515,10 +1515,13 @@ async fn handle_member_ctcp(
 /// Appends an incoming realtime frame to the channel it belongs to (if any)
 /// and, if that channel is currently open, pushes the update to the UI.
 ///
-/// The exact shape of a channel-message push isn't confirmed by
-/// `docs/protocol-notes.md` (see its §7 open points), so this reads the
-/// plausible fields defensively and always falls back to a raw
-/// `event: payload` line rather than dropping the frame silently.
+/// Kinds Grappa's own `docs/CLIENT_PROTOCOL.md` documents as real but
+/// Cordiale has no use for yet (window-state/administrative pushes) are
+/// dropped without rendering anything, per that doc's own policy on
+/// unrecognized kinds (§4). A kind genuinely unknown to both the doc and
+/// this function still falls back to a raw `event: payload` line — the
+/// mechanism that caught the ones now handled by name below, via real user
+/// screenshots.
 fn handle_frame(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -1571,6 +1574,54 @@ fn handle_frame(
         return;
     }
 
+    // Confirmed real (not a guess): a chat row doesn't arrive as a flat
+    // `kind: "privmsg"`/`"notice"` object the way a `boot.heads` history
+    // row does — it's nested one level deeper, under a `kind: "message"`
+    // envelope (`{"kind": "message", "message": {"kind": "privmsg", ...}}`).
+    // Every frame this session before now was read straight off
+    // `frame.payload`, so every live chat message fell through to the raw
+    // dump fallback (`sender`/`body` both absent at the top level) — the
+    // WebSocket connection itself never even succeeding until now (see
+    // MEMORY.md) meant this had no chance to be noticed until a real user
+    // screenshot showed the literal envelope shape.
+    let effective_payload: &Value = if payload_kind == Some("message") {
+        match frame.payload.get("message") {
+            Some(inner) => inner,
+            None => return,
+        }
+    } else {
+        &frame.payload
+    };
+
+    // Confirmed real via the user's own upstream report
+    // (github.com/vjt/grappa-irc/issues/2260, filed after these were
+    // caught leaking as raw JSON) plus `docs/CLIENT_PROTOCOL.md` §4:
+    // window-state/administrative kinds Cordiale has nothing to do with
+    // yet. The protocol doc's own policy is to treat any kind a client
+    // doesn't recognize as ignorable (§4, "treat unknown `kind` values as
+    // ignorable"), so these are dropped silently rather than rendered —
+    // `topic_changed` is the one exception, handled below instead of
+    // ignored, since it carries real state to apply.
+    if payload_kind == Some("topic_changed") {
+        handle_topic_changed(state, ui, &frame.payload);
+        return;
+    }
+    if matches!(
+        payload_kind,
+        Some(
+            "joined"
+                | "parted"
+                | "channel_modes_changed"
+                | "read_cursor_set"
+                | "window_counts"
+                | "away_confirmed"
+                | "bundle_hash"
+                | "query_windows_list"
+        )
+    ) {
+        return;
+    }
+
     let Some((network, channel)) = channel_from_topic(&frame.topic) else {
         return;
     };
@@ -1580,23 +1631,7 @@ fn handle_frame(
 
     let key = (network.clone(), channel.clone());
 
-    // Any frame that happens to carry a `topic` field is treated as a
-    // topic update for its channel — no confirmed `topic_changed`-style
-    // event name in `docs/protocol-notes.md`, so this doesn't bet on one.
-    if let Some(new_topic) = frame.payload.get("topic").and_then(Value::as_str) {
-        if !new_topic.is_empty() {
-            state.topics.insert(key.clone(), new_topic.to_string());
-            if state.current_channel.as_ref() == Some(&key) {
-                let new_topic = new_topic.to_string();
-                let ui = ui.clone();
-                let _ = ui.upgrade_in_event_loop(move |ui| {
-                    ui.set_current_topic(new_topic.into());
-                });
-            }
-        }
-    }
-
-    let line = render_frame(&frame);
+    let line = render_message(effective_payload, Some(&frame.event));
     state.messages.entry(key.clone()).or_default().push(line);
 
     if state.current_channel.as_ref() == Some(&key) {
@@ -1609,10 +1644,43 @@ fn handle_frame(
         });
     }
 
-    let members_changed = update_members_from_frame(state, &key, &frame.payload);
+    let members_changed = update_members_from_frame(state, &key, effective_payload);
     if members_changed && state.current_channel.as_ref() == Some(&key) {
         push_members_update(state, ui, &key);
     }
+}
+
+/// Applies a `topic_changed` push — real shape confirmed via a live user
+/// frame and `github.com/vjt/grappa-irc/issues/2260`:
+/// `{"channel", "kind": "topic_changed", "network", "topic": {"set_at",
+/// "set_by", "text"}}`. `topic` is an object here, not the plain string
+/// the old ad-hoc extraction assumed (dead code against real traffic —
+/// removed, this replaces it), so only `.topic.text` is used; `set_by`/
+/// `set_at` aren't surfaced yet.
+fn handle_topic_changed(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, payload: &Value) {
+    let Some((key, text)) = parse_topic_changed(payload) else {
+        return;
+    };
+
+    state.topics.insert(key.clone(), text.clone());
+    if state.current_channel.as_ref() == Some(&key) {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_current_topic(text.into());
+        });
+    }
+}
+
+/// Pulls `(network, channel)` and the new topic text out of a
+/// `topic_changed` payload — `{"channel", "network", "topic": {"text", ...}}`.
+fn parse_topic_changed(payload: &Value) -> Option<((String, String), String)> {
+    let network = payload.get("network").and_then(Value::as_str)?;
+    let channel = payload.get("channel").and_then(Value::as_str)?;
+    let text = payload
+        .get("topic")
+        .and_then(|topic| topic.get("text"))
+        .and_then(Value::as_str)?;
+    Some(((network.to_string(), channel.to_string()), text.to_string()))
 }
 
 /// Parses a `members_seeded` payload (`{kind, network, channel, members}`,
@@ -1876,8 +1944,9 @@ struct RenderedMessage {
 }
 
 /// Shared `from`/`nick`/`sender` + `body`/`message` extraction for both
-/// live frames (`render_frame`) and REST history rows
-/// (`render_history_entry`) — per `docs/protocol-notes.md` §4, scrollback
+/// live frames (called from `handle_frame`, after unwrapping the
+/// `kind: "message"` envelope a chat row arrives under) and REST history
+/// rows (`render_history_entry`) — per `docs/protocol-notes.md` §4, scrollback
 /// rows and push events are the same "message" entity, so both shapes use
 /// the same field names. `sender` is real, observed field on a live
 /// `kind: "join"` payload (`{"sender":"LAS3r","kind":"join","body":null,
@@ -1997,10 +2066,6 @@ fn mode_args(payload: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn render_frame(frame: &cordiale_core::phoenix::PhoenixMessage) -> RenderedMessage {
-    render_message(&frame.payload, Some(&frame.event))
 }
 
 /// Renders one `boot.heads` scrollback row the same way a live frame would
@@ -2745,6 +2810,60 @@ mod tests {
             normalize_server_url("  https://irc.sythos.dev//  "),
             "https://irc.sythos.dev"
         );
+    }
+
+    #[test]
+    fn parse_topic_changed_reads_the_nested_text_field() {
+        // Real shape, confirmed via a live frame and
+        // github.com/vjt/grappa-irc/issues/2260 — `topic` is an object,
+        // not the plain string an earlier version of this code assumed.
+        let payload = serde_json::json!({
+            "channel": "#grappa",
+            "kind": "topic_changed",
+            "network": "azzurra",
+            "topic": {
+                "set_at": "2026-09-14T21:42:44Z",
+                "set_by": "vjt",
+                "text": "Welcome to #grappa"
+            }
+        });
+        assert_eq!(
+            parse_topic_changed(&payload),
+            Some((
+                ("azzurra".to_string(), "#grappa".to_string()),
+                "Welcome to #grappa".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_topic_changed_rejects_a_plain_string_topic() {
+        let payload = serde_json::json!({
+            "channel": "#grappa",
+            "network": "azzurra",
+            "topic": "not an object"
+        });
+        assert_eq!(parse_topic_changed(&payload), None);
+    }
+
+    #[test]
+    fn render_message_reads_the_message_envelopes_inner_row() {
+        // `handle_frame` unwraps `payload.message` before calling this —
+        // this test locks in what that inner row looks like, confirmed
+        // via a real live frame: {"kind": "message", "message": {"kind":
+        // "privmsg", "sender", "body", ...}}.
+        let inner = serde_json::json!({
+            "kind": "privmsg",
+            "sender": "vjt",
+            "body": "hello from the real channel",
+            "channel": "#grappa",
+            "network": "azzurra",
+            "id": 40172,
+        });
+        let rendered = render_message(&inner, None);
+        assert_eq!(rendered.nick.as_deref(), Some("vjt"));
+        assert_eq!(rendered.text, "hello from the real channel");
+        assert!(!rendered.italic);
     }
 
     #[test]

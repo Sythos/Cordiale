@@ -213,6 +213,51 @@ browser piena; nessuno schema dettagliato nel documento.
   comportamento di default di `phoenix.js` prima di implementare la
   riconnessione in Cordiale.
 
+### 2bis. Forma reale confermata da traffico live (2026-09-20)
+
+Fino a questa data il WebSocket di Cordiale non si era mai connesso con
+successo (bug di encoding del bearer, vedi MEMORY.md §18), quindi nessuna
+delle note seguenti era osservabile prima d'ora — solo `boot.heads`
+(storico REST) era mai stato visto. Confermato su traffico live reale (uno
+screenshot dell'utente) e sul report a monte dell'utente stesso,
+[vjt/grappa-irc#2260](https://github.com/vjt/grappa-irc/issues/2260):
+
+- **Le righe chat live arrivano incapsulate**, non piatte come una riga di
+  `boot.heads`: `{"kind": "message", "message": {"kind": "privmsg", "body",
+  "channel", "id", "meta", "network", "sender", "server_time"}}`. Il client
+  deve leggere `payload.message`, non `payload` direttamente, per ottenere
+  la riga "vera" (stessa forma dello storico REST una volta spacchettata).
+  Non confermato se `:notice` segue lo stesso incapsulamento — plausibile
+  per simmetria (§5b del `CLIENT_PROTOCOL.md` reale tratta `:notice` e
+  `:privmsg` come la stessa famiglia di riga), non ancora osservato
+  direttamente.
+- **`topic_changed`** — kind reale, non documentato in `CLIENT_PROTOCOL.md`
+  al momento del report (vedi issue linkata): `{"channel", "kind":
+  "topic_changed", "network", "topic": {"set_at", "set_by", "text"}}`. Il
+  campo `topic` è un **oggetto**, non la stringa che questo documento aveva
+  ipotizzato altrove prima di questa conferma.
+- **Altri sei kind confermati reali ma non documentati** dall'issue
+  dell'utente (estratti via grep sul sorgente server, quindi limite
+  inferiore, non censimento completo): `channel_modes_changed` (snapshot
+  dei modi dell'intero canale, es. `{"modes": {"modes": ["r","n","t"],
+  "params": {}}}` — diverso da una riga `:mode` per-membro), `parted`
+  (probabile stato di finestra "il mio canale si è chiuso", simmetrico a
+  `joined` — non ancora osservato un payload di esempio), `read_cursor_set`,
+  `away_confirmed`, `bundle_hash`, `query_windows_list`.
+- **`joined`** (con `"state": "joined"`) è l'evento di stato-finestra della
+  propria connessione — non un peer che entra nel canale (quello resta
+  `kind: "join"`, già documentato sopra). Confermato dalla §4 del
+  `CLIENT_PROTOCOL.md` reale: `joined`/`join_failed`/`kicked` viaggiano sul
+  topic **utente**, e il topic per-canale li ripete una sola volta come
+  snapshot al momento del join — un client che aspetta un `joined` live sul
+  topic canale non lo vedrà mai arrivare lì.
+- **Politica esplicita del documento reale** (§4, non riportata altrove in
+  questo file): *"treat unknown `kind` values as ignorable"* — un kind non
+  riconosciuto va ignorato silenziosamente, non mostrato all'utente. Regola
+  applicata in Cordiale da questa data: i kind sopra elencati (tranne
+  `topic_changed`, che porta stato reale) vengono scartati senza produrre
+  una riga di chat.
+
 ---
 
 ## 3. Versioning e compatibilità
