@@ -174,7 +174,7 @@ async fn run_session(
             Ok(socket) => socket,
             Err(err) => {
                 let _ = events.send(SessionEvent::Reconnecting {
-                    reason: format!("connect failed: {err:?}"),
+                    reason: format!("connect failed: {err}"),
                 });
                 sleep(RECONNECT_DELAY).await;
                 continue 'reconnect;
@@ -187,7 +187,7 @@ async fn run_session(
             Ok(join_ref) => join_ref,
             Err(err) => {
                 let _ = events.send(SessionEvent::Reconnecting {
-                    reason: format!("user topic join failed: {err:?}"),
+                    reason: format!("user topic join failed: {err}"),
                 });
                 sleep(RECONNECT_DELAY).await;
                 continue 'reconnect;
@@ -231,7 +231,7 @@ async fn run_session(
                     };
                     if let Err(err) = socket.send(&heartbeat_msg).await {
                         let _ = events.send(SessionEvent::Disconnected {
-                            reason: format!("heartbeat send failed: {err:?}"),
+                            reason: format!("heartbeat send failed: {err}"),
                         });
                         sleep(RECONNECT_DELAY).await;
                         continue 'reconnect;
@@ -285,7 +285,7 @@ async fn run_session(
                         }
                         Err(err) => {
                             let _ = events.send(SessionEvent::Disconnected {
-                                reason: format!("read failed: {err:?}"),
+                                reason: format!("read failed: {err}"),
                             });
                             sleep(RECONNECT_DELAY).await;
                             continue 'reconnect;

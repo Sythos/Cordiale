@@ -73,6 +73,11 @@ pub struct Settings {
     pub language: Option<Language>,
     #[serde(default)]
     pub theme: Theme,
+    /// `(network, channel)` last selected before quitting or disconnecting
+    /// — re-selected automatically on the next successful connect, so the
+    /// app doesn't drop back to the bare network overview every time.
+    #[serde(default)]
+    pub last_channel: Option<(String, String)>,
 }
 
 fn current_settings_schema_version() -> u32 {
@@ -85,6 +90,7 @@ impl Default for Settings {
             schema_version: current_settings_schema_version(),
             language: None,
             theme: Theme::default(),
+            last_channel: None,
         }
     }
 }

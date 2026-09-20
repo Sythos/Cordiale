@@ -48,6 +48,22 @@ pub enum PhoenixSocketError {
     Codec(serde_json::Error),
 }
 
+// `session.rs` puts this in a `SessionEvent::Reconnecting`/`Disconnected`
+// reason the UI shows directly — needs a short, human message, not the
+// `{:?}` dump `PhoenixSocketError` doesn't derive. `tungstenite::Error`
+// already has a clean one (e.g. its `Http` variant is just `"HTTP error:
+// 500 Internal Server Error"`, confirmed against its real source), so this
+// just delegates to it.
+impl std::fmt::Display for PhoenixSocketError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PhoenixSocketError::InvalidRequest(message) => write!(f, "invalid request: {message}"),
+            PhoenixSocketError::Connect(err) => write!(f, "{err}"),
+            PhoenixSocketError::Codec(err) => write!(f, "malformed message: {err}"),
+        }
+    }
+}
+
 /// Builds the `Sec-WebSocket-Protocol` value Grappa expects for
 /// authentication, per `docs/protocol-notes.md` §2: the bearer travels in
 /// this header, never in the URL, so it stays out of access logs.

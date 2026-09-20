@@ -659,14 +659,29 @@ export component AppWindow inherits Window {
                         settings-section = "admin";
                     }
                 }
+
+                // Low-frequency action once a session is up; Disconnect
+                // moved into Settings > General (the network section)
+                // instead of sitting here as its own permanent button.
+                Button {
+                    text: "⚙";
+                    accessible-label: @tr("Settings");
+                    width: 32px;
+                    height: 32px;
+                    clicked => { screen = "settings"; }
+                }
             }
 
-            Text {
+            // Once actually signed in, this row of icons is the whole
+            // story — the connecting/error/reconnecting text below only
+            // shows while there's something to report, so a healthy
+            // session doesn't sit under a permanent status paragraph.
+            if status-kind != "signed-in" : Text {
                 text: @tr("Connected to {}", server-url);
                 wrap: word-wrap;
             }
 
-            Text {
+            if status-kind != "signed-in" : Text {
                 text: status-text();
                 wrap: word-wrap;
                 accessible-role: AccessibleRole.text;
@@ -695,22 +710,6 @@ export component AppWindow inherits Window {
                             clicked => { channel-selected(entry.network, entry.channel); }
                         }
                     }
-                }
-            }
-
-            HorizontalLayout {
-                alignment: start;
-
-                // Small icon on purpose: Settings is a low-frequency
-                // action once a session is up, and Disconnect moved into
-                // Settings > General (the network section) instead of
-                // sitting here as its own permanent button.
-                Button {
-                    text: "⚙";
-                    accessible-label: @tr("Settings");
-                    width: 32px;
-                    height: 32px;
-                    clicked => { screen = "settings"; }
                 }
             }
         }
@@ -807,17 +806,17 @@ export component AppWindow inherits Window {
             }
         }
 
-        // Visible whenever a channel is open, not just once members show
-        // up: the roster can legitimately take a moment to arrive (or, if
-        // it never does, hiding the whole column also hid the "actions"
-        // row below it, which doesn't depend on the roster at all).
-        if has-selected-channel : ResizeHandle {
+        // Always present on the "connected" screen, not just once a
+        // channel is open: the "actions" row at its bottom (global nav,
+        // not per-member) doesn't depend on a channel selection at all,
+        // and hiding the whole column also hid it.
+        ResizeHandle {
             target-width <=> members-width;
             target-min-width: 100px;
             target-max-width: 320px;
         }
 
-        if has-selected-channel : VerticalBox {
+        VerticalBox {
             width: members-width;
             spacing: 4px;
 

@@ -928,6 +928,20 @@ async fn handle_connect(
                 let groups = network_groups_model(groups_data);
                 ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
             });
+
+            // Drops the user back on the bare network overview after
+            // every reconnect otherwise, even mid-conversation — only
+            // restores a channel still actually joined this session
+            // (`entries`), never a stale one from a since-parted channel.
+            let restore_channel = persistence::load_settings()
+                .unwrap_or_default()
+                .last_channel
+                .filter(|(network, channel)| {
+                    entries.iter().any(|(n, c, _)| n == network && c == channel)
+                });
+            if let Some((network, channel)) = restore_channel {
+                handle_select_channel(state, &ui, network, channel).await;
+            }
         }
         Err(err) => {
             persistence::log_line(&format!("connect failed: server={server_url} {err:?}"));
@@ -958,6 +972,11 @@ async fn handle_select_channel(
 
     let key = (network.clone(), channel.clone());
     state.current_channel = Some(key.clone());
+
+    let mut settings = persistence::load_settings().unwrap_or_default();
+    settings.last_channel = Some(key.clone());
+    let _ = persistence::save_settings(&settings);
+
     let lines = state.messages.get(&key).cloned().unwrap_or_default();
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
     let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
