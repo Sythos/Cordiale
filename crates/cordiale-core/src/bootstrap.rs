@@ -39,8 +39,11 @@ pub struct BootstrapOutcome {
     pub compatibility: ServerCompatibility,
     /// Bearer token to use for `/boot`, `/me` and the WebSocket handshake.
     pub token: String,
-    /// Opaque `subject` from the login response (e.g. `is_admin`, `nick`) —
-    /// shape isn't documented, see `docs/protocol-notes.md` §5.
+    /// Opaque `subject` from the login response — shape isn't documented,
+    /// see `docs/protocol-notes.md` §5. Does **not** carry `is_admin`
+    /// despite an earlier assumption here that it did (confirmed by
+    /// reading Cicchetto's real `Subject`/`MeResponse` types) — that field
+    /// lives on `me` instead.
     pub subject: Value,
     pub boot: BootResponse,
     pub me: MeResponse,

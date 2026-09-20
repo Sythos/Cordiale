@@ -868,11 +868,13 @@ async fn handle_connect(
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
-            let is_admin = outcome
-                .subject
-                .get("is_admin")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            // Not `outcome.subject.get("is_admin")`: the login/boot
+            // response's `subject` never carries this field at all (so
+            // that lookup silently always returned `false`, even for a
+            // real admin) — confirmed by reading Cicchetto's actual
+            // `Subject`/`MeResponse` types, `is_admin` is a top-level
+            // field on the separate `GET /me` response instead.
+            let is_admin = outcome.me.is_admin;
             let token = outcome.token.clone();
 
             let ws_url = to_ws_url(&server_url);

@@ -32,6 +32,8 @@
 //! parts that don't need an actual socket (the handshake header) are unit
 //! tested here.
 
+use base64::engine::general_purpose::STANDARD_NO_PAD;
+use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -67,8 +69,19 @@ impl std::fmt::Display for PhoenixSocketError {
 /// Builds the `Sec-WebSocket-Protocol` value Grappa expects for
 /// authentication, per `docs/protocol-notes.md` §2: the bearer travels in
 /// this header, never in the URL, so it stays out of access logs.
+///
+/// Despite the `base64url.bearer.phx.` name, the payload after the prefix
+/// is plain standard-alphabet base64 with padding stripped (`btoa(token)`
+/// then `.replace(/=/g, "")`, per phoenix.js's own `transportConnect()` —
+/// confirmed by reading it directly, since this project has no mature
+/// Phoenix client to crib from). The server decodes it back to the raw
+/// token server-side. Sending the raw, unencoded token after the prefix
+/// (the previous version of this function) made the server's decode fail
+/// on every real token — every single WebSocket connect attempt got a 500
+/// during the handshake itself, confirmed against a real user's
+/// `cordiale.log` covering dozens of attempts across many hours.
 fn bearer_subprotocol(token: &str) -> String {
-    format!("base64url.bearer.phx.{token}")
+    format!("base64url.bearer.phx.{}", STANDARD_NO_PAD.encode(token))
 }
 
 pub struct PhoenixSocket {
@@ -84,10 +97,17 @@ impl PhoenixSocket {
             .into_client_request()
             .map_err(|err| PhoenixSocketError::InvalidRequest(err.to_string()))?;
 
-        let subprotocol = bearer_subprotocol(bearer_token);
+        // phoenix.js always offers `"phoenix"` alongside the bearer value
+        // (`protocols = ["phoenix", "base64url.bearer.phx.<token>"]`,
+        // joined by the WebSocket handshake into one comma-separated
+        // header) — matched here even though the missing bearer encoding
+        // above was the actual cause of the 500s; unclear whether Grappa's
+        // server also expects `"phoenix"` to be present, so this doesn't
+        // drop it without evidence either way.
+        let subprotocols = format!("phoenix, {}", bearer_subprotocol(bearer_token));
         request.headers_mut().insert(
             HeaderName::from_static("sec-websocket-protocol"),
-            HeaderValue::from_str(&subprotocol)
+            HeaderValue::from_str(&subprotocols)
                 .map_err(|err| PhoenixSocketError::InvalidRequest(err.to_string()))?,
         );
 
@@ -132,7 +152,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bearer_subprotocol_has_the_documented_shape() {
-        assert_eq!(bearer_subprotocol("abc123"), "base64url.bearer.phx.abc123");
+    fn bearer_subprotocol_base64_encodes_the_token_without_padding() {
+        // Matches phoenix.js's own `btoa(token).replace(/=/g, "")` exactly
+        // (confirmed by reading `transportConnect()` in the real `phoenix`
+        // npm package) — the prefix alone, without this encoding step, is
+        // what made every real WebSocket connect attempt get a 500 back.
+        assert_eq!(
+            bearer_subprotocol("abc123"),
+            format!("base64url.bearer.phx.{}", STANDARD_NO_PAD.encode("abc123"))
+        );
+    }
+
+    #[test]
+    fn bearer_subprotocol_round_trips_back_to_the_original_token() {
+        let subprotocol = bearer_subprotocol("s3cr3t-t0ken/with+special=chars");
+        let encoded = subprotocol
+            .strip_prefix("base64url.bearer.phx.")
+            .expect("prefix");
+        let decoded = STANDARD_NO_PAD.decode(encoded).expect("valid base64");
+        assert_eq!(decoded, b"s3cr3t-t0ken/with+special=chars");
     }
 }

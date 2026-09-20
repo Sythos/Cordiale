@@ -91,8 +91,12 @@ pub struct BootResponse {
 }
 
 /// Response body of `GET /me`: read cursors, unread counts and badge count
-/// in bulk. None of the three have a published field schema, so they stay
-/// opaque JSON.
+/// in bulk, plus admin status. The first three have no published field
+/// schema, so they stay opaque JSON. `is_admin` does have a confirmed
+/// source: Cicchetto's real `MeResponse` type and its own comment pointing
+/// at the server implementation (`lib/grappa_web/controllers/me_json.ex`,
+/// `MeJSON.show/1`) — a top-level boolean here, never under `subject` on
+/// the login/boot response, which doesn't carry it at all.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MeResponse {
     #[serde(default)]
@@ -101,6 +105,8 @@ pub struct MeResponse {
     pub unread_counts: Value,
     #[serde(default)]
     pub badge_count: Value,
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 /// Request body of `POST /networks/:network_id/channels/:channel_id/messages`.
