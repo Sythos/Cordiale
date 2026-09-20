@@ -49,10 +49,9 @@ known limitations are:
 - **On-Connect Commands** is a single-line field, not a multi-line
   editor — separate multiple commands yourself.
 - The **`/links` graph window** has no pan/zoom yet.
-- **Guest/visitor access**: connecting with a blank password tries the
-  empirically observed `guest`/`guest` login. This works on
-  `irc.sindro.me`, but the client protocol does not define a universal
-  guest flow, so other Grappa instances may reject it.
+- **Guest/visitor access**: leave the password blank to enter the guest flow.
+  Whether guest access is available is up to the selected Grappa server;
+  Cordiale doesn't send a made-up shared guest password.
 - **Attachments** are not implemented: the paperclip displays an explicit
   unsupported status. The client protocol does not define a plain upload
   endpoint; DCC/file transfer needs separate implementation work.
@@ -68,19 +67,35 @@ known limitations are:
   argument-taking mode (for example, a ban and an op together) can
   misalign arguments and leave a stale prefix; broader validation across
   server configurations is still needed.
-- **Realtime event coverage**: the current upstream inventory has 56
-  top-level event kinds. Cordiale handles `links_bundle`,
-  `members_seeded`, `names_reply`, `topic_changed`, and `message`; its
-  other 51 current kinds are explicitly ignored. This is a feature-parity
-  gap, not a lack of upstream precedent: Cicchetto has dispatch cases for
-  all 51 across its [user-topic handler](https://github.com/vjt/grappa-irc/blob/main/cicchetto/src/lib/userTopic.ts)
-  and [channel handler](https://github.com/vjt/grappa-irc/blob/main/cicchetto/src/lib/subscribe.ts).
-  Cordiale still needs a native-feature-by-native-feature review before
-  porting them. A genuinely unknown future kind can also fall through to a
-  raw `event: payload` chat line, although Grappa's protocol says unknown
-  kinds should be ignored. Within message envelopes, `topic`, `kick`, and
-  `server_event` use generic system-message rendering rather than dedicated
-  text.
+- **Realtime event coverage (0.1.4 tester build)**: the current Grappa
+  protocol lists 56 top-level event kinds. Cordiale handles `links_bundle`,
+  `members_seeded`, `names_reply`, `topic_changed`, and `message`; the other
+  51 are recognized but deliberately ignored for this tester release. They
+  won't be turned into fake `event: payload` chat messages. Cicchetto is the
+  behavior reference, and native parity work is still in progress:
+  - **Window, channel, and scrollback state**: `channel_created`,
+    `channel_modes_changed`, `joined`, `join_failed`, `kicked`,
+    `read_cursor_set`, `window_counts`, `window_pending`, `window_invited`,
+    `window_invite_declined`, `query_windows_list`, `archive_changed`,
+    `archive_purged`.
+  - **Network, connection, identity, and settings**: `channels_changed`,
+    `network_attached`, `network_detached`, `connection_progress`,
+    `connection_state_changed`, `own_nick_changed`, `isupport_changed`,
+    `umode_changed`, `supported_umodes_changed`, `session_identity_changed`,
+    `away_confirmed`, `peer_away`, `auto_away_debounce_changed`,
+    `auto_away_reason_changed`, `quit_part_reason_changed`,
+    `server_settings_changed`, `web_session_severed`.
+  - **Presence, queries, and server replies**: `presence_changed`,
+    `presence_error`, `presence_snapshot`, `notify_list`, `who_reply`,
+    `whois_bundle`, `whois_avatar_ready`, `whowas_bundle`, `lusers_bundle`,
+    `banlist_bundle`, `server_reply`, `invite_ack`, `mentions_bundle`.
+  - **Transfers and other asynchronous work**: `dcc_offer`,
+    `dcc_offer_resolved`, `directory_progress`, `directory_complete`,
+    `directory_failed`, `recover_progress`, `recover_result`, `bundle_hash`.
+  - Unknown future event kinds are also silently dropped, as Grappa's
+    protocol requires. Within message envelopes, `topic`, `kick`, and
+    `server_event` still use generic system-message rendering rather than
+    dedicated text.
 - Performance hasn't been profiled — deliberately deferred until after
   broader field testing surfaces real usage patterns.
 
