@@ -959,13 +959,9 @@ async fn handle_connect(
             };
 
             let ws_url = to_ws_url(&server_url);
-            let (handle, events) =
-                spawn_session(ws_url, token.clone(), session_identifier.clone());
+            let (handle, events) = spawn_session(ws_url, token.clone(), session_identifier.clone());
             for entry in &entries {
-                handle.join_topic(
-                    channel_topic(&session_identifier, &entry.0, &entry.1),
-                    true,
-                );
+                handle.join_topic(channel_topic(&session_identifier, &entry.0, &entry.1), true);
             }
             *session_events = Some(events);
 
@@ -975,9 +971,7 @@ async fn handle_connect(
             state.session = Some(handle);
             state.joined_topics = entries
                 .iter()
-                .map(|(network, channel, _)| {
-                    channel_topic(&session_identifier, network, channel)
-                })
+                .map(|(network, channel, _)| channel_topic(&session_identifier, network, channel))
                 .collect();
 
             let prefs_client = GrappaClient::new(server_url.clone());
@@ -2894,9 +2888,7 @@ fn remembered_profile_credential(
         return RememberedProfileCredential::NeedsReauthentication;
     };
     match store.get_secret(server_url, identifier) {
-        Ok(Some(bearer)) if !bearer.is_empty() => {
-            RememberedProfileCredential::Bearer(bearer)
-        }
+        Ok(Some(bearer)) if !bearer.is_empty() => RememberedProfileCredential::Bearer(bearer),
         _ => RememberedProfileCredential::NeedsReauthentication,
     }
 }
