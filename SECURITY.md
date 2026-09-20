@@ -14,6 +14,13 @@ no maintained older versions.
 
 ## Reporting a vulnerability
 
+This repository's private reporting channel accepts submissions only for
+security vulnerabilities in Cordiale itself. For security issues in the Grappa
+server, please report them directly through
+[Grappa's Security page](https://github.com/vjt/grappa-irc/security). Cordiale
+has no automatic link or forwarding mechanism for Grappa reports, so reports
+submitted here will not be routed to the Grappa maintainers.
+
 If you find a security issue in Cordiale, please open a private report
 through GitHub's [Security Advisories](https://github.com/Sythos/Cordiale/security/advisories)
 for this repository rather than a public issue. Include:
