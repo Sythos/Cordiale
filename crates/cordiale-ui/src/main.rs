@@ -229,6 +229,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
+            ui.set_current_window_is_joined(false);
             ui.set_has_selected_channel(false);
             ui.set_can_moderate_members(false);
         }
@@ -246,6 +247,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
             ui.set_current_channel_label("".into());
+            ui.set_current_window_is_joined(false);
             ui.set_has_selected_channel(false);
             ui.set_can_moderate_members(false);
         }
@@ -485,12 +487,20 @@ fn main() -> Result<(), slint::PlatformError> {
 
 /// State the worker keeps across the whole connected session. Lives only on
 /// the background thread; the UI thread never touches it directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelWindowState {
+    Joined,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
     identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
+    /// Cicchetto's `windowStateByChannel` projection. Cordiale currently
+    /// applies only the `joined` state; other lifecycle kinds remain ignored.
+    window_states: HashMap<(String, String), ChannelWindowState>,
     /// Keyed by `(network, channel)`; holds messages already rendered for
     /// that channel so switching channels doesn't lose history.
     messages: MessagesByChannel,
@@ -544,6 +554,7 @@ impl WorkerState {
             identifier: None,
             session: None,
             joined_topics: std::collections::HashSet::new(),
+            window_states: HashMap::new(),
             messages: HashMap::new(),
             drafts: HashMap::new(),
             topics: HashMap::new(),
@@ -941,6 +952,8 @@ async fn handle_connect(
 
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
+            state.window_states =
+                joined_window_states_from_boot_channels(&outcome.boot.channels);
             state.topics = topics_from_boot(&outcome);
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
@@ -1069,6 +1082,8 @@ async fn handle_select_channel(
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
     let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
     let members = state.members.get(&key).cloned().unwrap_or_default();
+    let window_is_joined = state.window_states.get(&window_state_key(&network, &channel))
+        == Some(&ChannelWindowState::Joined);
     let can_moderate = is_own_nick_an_op(&members, &identifier);
     let dark_theme = state.theme == Theme::Dark;
 
@@ -1077,6 +1092,7 @@ async fn handle_select_channel(
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
         ui.set_current_topic(irc_topic.into());
+        ui.set_current_window_is_joined(window_is_joined);
         ui.set_has_selected_channel(true);
         ui.set_compose_text(draft.into());
         ui.set_can_moderate_members(can_moderate);
@@ -1615,9 +1631,8 @@ async fn handle_member_ctcp(
 /// the window disappearing from window-state, not a push, so listening
 /// for it here would be dead code matching nothing.
 const IGNORED_KINDS: &[&str] = &[
-    // Already known from vjt/grappa-irc#2260 (topic_changed and
+    // Already known from vjt/grappa-irc#2260 (joined, topic_changed, and
     // members_seeded/names_reply are handled above instead, not ignored).
-    "joined",
     "channel_modes_changed",
     "read_cursor_set",
     "window_counts",
@@ -1783,6 +1798,46 @@ fn handle_frame(
         return;
     }
 
+    // A successful join is broadcast on the user topic and replayed as a
+    // cold snapshot on a subscribed channel topic. Both paths carry the
+    // same typed payload; accepting only the matching topic keeps a stale or
+    // unrelated frame from adding another channel, while the upsert below
+    // makes dual delivery idempotent (Cicchetto's setJoined semantics).
+    if payload_kind == "joined" {
+        let Some(identifier) = state.identifier.as_deref() else {
+            return;
+        };
+        let Some((network, channel)) =
+            parse_joined_event(&frame.payload, &frame.topic, identifier)
+        else {
+            return;
+        };
+        let state_changed = set_joined_window_state(
+            &mut state.window_states,
+            &network,
+            &channel,
+        );
+        let selected_window_joined = state.current_channel.as_ref().is_some_and(
+            |(current_network, current_channel)| {
+                window_state_key(current_network, current_channel)
+                    == window_state_key(&network, &channel)
+            },
+        );
+        let sidebar_changed = upsert_joined_channel(
+            &mut state.channel_entries,
+            network.clone(),
+            channel.clone(),
+        );
+        if selected_window_joined {
+            let ui = ui.clone();
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_current_window_is_joined(true));
+        }
+        if state_changed || sidebar_changed {
+            refresh_network_groups(state, ui);
+        }
+        return;
+    }
+
     if IGNORED_KINDS.contains(&payload_kind) {
         return;
     }
@@ -1846,6 +1901,91 @@ fn parse_topic_changed(payload: &Value) -> Option<((String, String), String)> {
         .and_then(|topic| topic.get("text"))
         .and_then(Value::as_str)?;
     Some(((network.to_string(), channel.to_string()), text.to_string()))
+}
+
+/// Parses Cicchetto's typed `joined` payload from either supported delivery
+/// path: the current user's live topic or the matching channel's reconnect
+/// snapshot. Cicchetto's shared wire narrower requires `network`, `channel`,
+/// and the exact `state: "joined"` discriminant.
+fn parse_joined_event(
+    payload: &Value,
+    topic: &str,
+    identifier: &str,
+) -> Option<(String, String)> {
+    if payload.get("kind").and_then(Value::as_str) != Some("joined")
+        || payload.get("state").and_then(Value::as_str) != Some("joined")
+    {
+        return None;
+    }
+
+    let network = payload.get("network").and_then(Value::as_str)?;
+    let channel = payload.get("channel").and_then(Value::as_str)?;
+    let user_topic = format!("grappa:user:{identifier}");
+    if topic != user_topic && !channel_topic_matches(identifier, topic, network, channel) {
+        return None;
+    }
+
+    Some((network.to_string(), channel.to_string()))
+}
+
+/// Matches the server's channel topic with the same identifier key used by
+/// Cicchetto: exact user and network, ASCII-folded channel only.
+fn channel_topic_matches(identifier: &str, topic: &str, network: &str, channel: &str) -> bool {
+    let prefix = channel_topic(identifier, network, "");
+    topic
+        .strip_prefix(&prefix)
+        .is_some_and(|topic_channel| ascii_fold_channel(topic_channel) == ascii_fold_channel(channel))
+}
+
+/// Cicchetto's `channelKey` uses `asciiFold` (`A-Z` only) for the channel
+/// segment. Keep display names untouched and leave all non-ASCII characters
+/// unchanged, matching its current key equivalence exactly.
+fn ascii_fold_channel(channel: &str) -> String {
+    channel
+        .chars()
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+/// The Rust tuple is Cordiale's equivalent of Cicchetto's composite
+/// `channelKey`: preserve the network slug and ASCII-fold only the channel.
+fn window_state_key(network: &str, channel: &str) -> (String, String) {
+    (network.to_string(), ascii_fold_channel(channel))
+}
+
+/// Adds a newly joined channel to the session's sidebar source of truth.
+/// The return value lets callers avoid rebuilding Slint models when the
+/// user-topic event and per-channel reconnect snapshot both arrive.
+fn upsert_joined_channel(
+    entries: &mut Vec<(String, String, String)>,
+    network: String,
+    channel: String,
+) -> bool {
+    if entries
+        .iter()
+        .any(|(known_network, known_channel, _)| {
+            window_state_key(known_network, known_channel) == window_state_key(&network, &channel)
+        })
+    {
+        return false;
+    }
+
+    entries.push((network, channel.clone(), channel));
+    true
+}
+
+/// Mirrors Cicchetto's `setJoined`: assignment overwrites any prior
+/// window-state value for this `(network, channel)` key. Repeated delivery on
+/// the live user topic and channel reconnect snapshot is idempotent.
+fn set_joined_window_state(
+    window_states: &mut HashMap<(String, String), ChannelWindowState>,
+    network: &str,
+    channel: &str,
+) -> bool {
+    window_states.insert(
+        window_state_key(network, channel),
+        ChannelWindowState::Joined,
+    ) != Some(ChannelWindowState::Joined)
 }
 
 /// Parses a `members_seeded` payload (`{kind, network, channel, members}`,
@@ -2366,6 +2506,35 @@ fn channel_entries_from_boot(outcome: &BootstrapOutcome) -> Vec<(String, String,
         }
     }
     entries
+}
+
+/// Seeds the runtime joined map only from Grappa's explicit `/boot` flag.
+/// The channel tree also contains persisted autojoin intentions that can be
+/// disconnected, so mere presence in `boot.channels` is not enough.
+fn joined_window_states_from_boot_channels(
+    channels: &HashMap<String, Vec<Value>>,
+) -> HashMap<(String, String), ChannelWindowState> {
+    let mut window_states = HashMap::new();
+    for (network, entries) in channels {
+        for entry in entries {
+            if entry.get("joined").and_then(Value::as_bool) != Some(true) {
+                continue;
+            }
+            let Some(channel) = entry
+                .get("name")
+                .or_else(|| entry.get("channel"))
+                .and_then(Value::as_str)
+                .filter(|channel| !channel.is_empty())
+            else {
+                continue;
+            };
+            window_states.insert(
+                window_state_key(network, channel),
+                ChannelWindowState::Joined,
+            );
+        }
+    }
+    window_states
 }
 
 /// Reads `(network, channel) -> topic` out of `boot.channels`, for entries
@@ -3123,6 +3292,161 @@ mod tests {
     }
 
     #[test]
+    fn parse_joined_event_accepts_live_and_channel_snapshot_topics() {
+        let payload = serde_json::json!({
+            "kind": "joined",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "joined",
+            "future_field": true
+        });
+        let expected = Some(("libera".to_string(), "#cordiale".to_string()));
+
+        assert_eq!(
+            parse_joined_event(&payload, "grappa:user:sythos", "sythos"),
+            expected
+        );
+        assert_eq!(
+            parse_joined_event(
+                &payload,
+                &channel_topic("sythos", "libera", "#CoRdIaLe"),
+                "sythos"
+            ),
+            expected
+        );
+        assert_eq!(ascii_fold_channel("#CAFÉ[1]"), "#cafÉ[1]");
+    }
+
+    #[test]
+    fn boot_seeds_only_channels_with_an_explicit_true_joined_flag() {
+        let channels = HashMap::from([(
+            "libera".to_string(),
+            vec![
+                serde_json::json!({"name": "#ACTIVE-AUTOJOIN", "joined": true, "source": "autojoin"}),
+                serde_json::json!({"name": "#active-dynamic", "joined": true, "source": "joined"}),
+                serde_json::json!({"name": "#configured-only", "joined": false, "source": "autojoin"}),
+                serde_json::json!({"name": "#missing-joined", "source": "joined"}),
+                serde_json::json!({"name": "#malformed-joined", "joined": "true"}),
+                serde_json::json!({"joined": true, "source": "joined"}),
+            ],
+        )]);
+
+        let states = joined_window_states_from_boot_channels(&channels);
+        let expected = HashMap::from([
+            (
+                ("libera".to_string(), "#active-autojoin".to_string()),
+                ChannelWindowState::Joined,
+            ),
+            (
+                ("libera".to_string(), "#active-dynamic".to_string()),
+                ChannelWindowState::Joined,
+            ),
+        ]);
+
+        assert_eq!(states, expected);
+    }
+
+    #[test]
+    fn parse_joined_event_rejects_malformed_state_and_unrelated_topics() {
+        let valid = serde_json::json!({
+            "kind": "joined",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "joined"
+        });
+        assert_eq!(
+            parse_joined_event(&valid, "grappa:user:someone-else", "sythos"),
+            None
+        );
+        assert_eq!(
+            parse_joined_event(
+                &valid,
+                &channel_topic("sythos", "libera", "#other"),
+                "sythos"
+            ),
+            None
+        );
+
+        let wrong_state = serde_json::json!({
+            "kind": "joined",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "pending"
+        });
+        assert_eq!(
+            parse_joined_event(&wrong_state, "grappa:user:sythos", "sythos"),
+            None
+        );
+
+        let missing_channel = serde_json::json!({
+            "kind": "joined",
+            "network": "libera",
+            "state": "joined"
+        });
+        assert_eq!(
+            parse_joined_event(&missing_channel, "grappa:user:sythos", "sythos"),
+            None
+        );
+    }
+
+    #[test]
+    fn upsert_joined_channel_is_idempotent_for_live_and_snapshot_delivery() {
+        let mut entries = vec![(
+            "libera".to_string(),
+            "#cordiale".to_string(),
+            "#cordiale".to_string(),
+        )];
+
+        assert!(!upsert_joined_channel(
+            &mut entries,
+            "libera".to_string(),
+            "#CoRdIaLe".to_string()
+        ));
+        assert!(upsert_joined_channel(
+            &mut entries,
+            "libera".to_string(),
+            "#rust".to_string()
+        ));
+        assert!(!upsert_joined_channel(
+            &mut entries,
+            "libera".to_string(),
+            "#rust".to_string()
+        ));
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    "libera".to_string(),
+                    "#cordiale".to_string(),
+                    "#cordiale".to_string()
+                ),
+                ("libera".to_string(), "#rust".to_string(), "#rust".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn set_joined_window_state_records_transition_and_deduplicates_delivery() {
+        let key = window_state_key("libera", "#cordiale");
+        let mut states = HashMap::new();
+
+        assert!(set_joined_window_state(
+            &mut states,
+            &key.0,
+            "#CoRdIaLe"
+        ));
+        assert_eq!(states.get(&key), Some(&ChannelWindowState::Joined));
+
+        assert!(!set_joined_window_state(
+            &mut states,
+            &key.0,
+            &key.1
+        ));
+        assert_eq!(states.len(), 1);
+        assert_eq!(states.get(&key), Some(&ChannelWindowState::Joined));
+    }
+
+    #[test]
     fn render_message_reads_the_message_envelopes_inner_row() {
         // `handle_frame` unwraps `payload.message` before calling this —
         // this test locks in what that inner row looks like, confirmed
@@ -3161,7 +3485,6 @@ mod tests {
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
         for kind in [
-            "joined",
             "channel_modes_changed",
             "read_cursor_set",
             "window_counts",
@@ -3180,6 +3503,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"members_seeded"));
         assert!(!IGNORED_KINDS.contains(&"names_reply"));
         assert!(!IGNORED_KINDS.contains(&"topic_changed"));
+        assert!(!IGNORED_KINDS.contains(&"joined"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.

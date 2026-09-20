@@ -345,6 +345,9 @@ export component AppWindow inherits Window {
     // channel label in the markup below).
     in property <string> current-topic: "";
     in property <bool> has-selected-channel: false;
+    // Only show the roster after Grappa confirms this window is joined.
+    // Autojoin entries in `/boot` can be known but not currently connected.
+    in property <bool> current-window-is-joined: false;
     // Boot snapshot plus live join/part/quit/nick-change updates —
     // doesn't track role (mode) changes yet, see README's Known gaps.
     // Already sorted ops-first by Rust.
@@ -833,12 +836,12 @@ export component AppWindow inherits Window {
             width: members-width;
             spacing: 4px;
 
-            Text {
+            if current-window-is-joined : Text {
                 text: @tr("Members ({})", channel-members.length);
                 font-size: 14px;
             }
 
-            ListView {
+            if current-window-is-joined : ListView {
                 vertical-stretch: 1;
 
                 for member in channel-members : MemberContextMenu {
@@ -853,6 +856,13 @@ export component AppWindow inherits Window {
                     ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                     query(nick) => { member-query-requested(nick); }
                 }
+            }
+
+            // Keep the global Actions row anchored at the bottom even when
+            // the selected window isn't joined and the roster is hidden.
+            if !current-window-is-joined : Rectangle {
+                vertical-stretch: 1;
+                background: transparent;
             }
 
             // Cicchetto's own bottom-of-members-column "actions" row (a

@@ -69,12 +69,13 @@ known limitations are:
   server configurations is still needed.
 - **Realtime event coverage (0.1.4 tester build)**: the current Grappa
   protocol lists 56 top-level event kinds. Cordiale handles `links_bundle`,
-  `members_seeded`, `names_reply`, `topic_changed`, and `message`; the other
-  51 are recognized but deliberately ignored for this tester release. They
+  `members_seeded`, `names_reply`, `topic_changed`, `joined`, and
+  `message`; the other 50 are recognized but deliberately ignored for this
+  tester release. They
   won't be turned into fake `event: payload` chat messages. Cicchetto is the
   behavior reference, and native parity work is still in progress:
   - **Window, channel, and scrollback state**: `channel_created`,
-    `channel_modes_changed`, `joined`, `join_failed`, `kicked`,
+    `channel_modes_changed`, `join_failed`, `kicked`,
     `read_cursor_set`, `window_counts`, `window_pending`, `window_invited`,
     `window_invite_declined`, `query_windows_list`, `archive_changed`,
     `archive_purged`.
