@@ -233,6 +233,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
+            ui.set_current_channel_modes("".into());
             ui.set_current_window_is_joined(false);
             ui.set_has_selected_channel(false);
             ui.set_can_moderate_members(false);
@@ -250,6 +251,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
+            ui.set_current_channel_modes("".into());
             ui.set_current_channel_label("".into());
             ui.set_current_window_is_joined(false);
             ui.set_has_selected_channel(false);
@@ -518,6 +520,15 @@ struct WindowKick {
     reason: Option<String>,
 }
 
+/// Last complete `channel_modes_changed` snapshot for a network/channel.
+/// `params` is retained even though the initial UI only renders the compact
+/// mode letters; Cicchetto treats this event as a full replacement snapshot.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ChannelModes {
+    modes: Vec<String>,
+    params: HashMap<String, Option<String>>,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -547,6 +558,9 @@ struct WorkerState {
     /// Keyed by `(network, channel)`; the channel topic, if the server sent
     /// one — see `topics_from_boot` and `handle_frame`.
     topics: HashMap<(String, String), String>,
+    /// Keyed by `(network, channel)`; the last complete channel-mode
+    /// snapshot received on the Phoenix channel topic.
+    channel_modes: HashMap<(String, String), ChannelModes>,
     /// Keyed by `(network, channel)`; the member list from `boot`, if any
     /// was found — see `members_from_boot`. Snapshot only: unlike
     /// messages/topic, this doesn't update live on join/part yet (a known
@@ -598,6 +612,7 @@ impl WorkerState {
             messages: HashMap::new(),
             drafts: HashMap::new(),
             topics: HashMap::new(),
+            channel_modes: HashMap::new(),
             members: HashMap::new(),
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
@@ -1002,6 +1017,9 @@ async fn handle_connect(
             state.invited_by.clear();
             state.recent_channels.clear();
             state.topics = topics_from_boot(&outcome);
+            // Mode snapshots are replayed on each subscribed channel topic,
+            // not included in `/boot`; never carry them across identities.
+            state.channel_modes.clear();
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
@@ -1135,6 +1153,11 @@ async fn handle_select_channel(
     let lines = state.messages.get(&key).cloned().unwrap_or_default();
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
     let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
+    let channel_modes = state
+        .channel_modes
+        .get(&key)
+        .map(|snapshot| format_channel_modes(&snapshot.modes))
+        .unwrap_or_default();
     let members = state.members.get(&key).cloned().unwrap_or_default();
     let window_is_joined = state
         .window_states
@@ -1148,6 +1171,7 @@ async fn handle_select_channel(
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
         ui.set_current_topic(irc_topic.into());
+        ui.set_current_channel_modes(channel_modes.into());
         ui.set_current_window_is_joined(window_is_joined);
         ui.set_has_selected_channel(true);
         ui.set_compose_text(draft.into());
@@ -1225,6 +1249,7 @@ async fn handle_dismiss_kicked_channel(
         ui.set_has_selected_channel(false);
         ui.set_current_channel_label("".into());
         ui.set_current_topic("".into());
+        ui.set_current_channel_modes("".into());
         ui.set_current_window_is_joined(false);
         ui.set_can_moderate_members(false);
         ui.set_compose_text("".into());
@@ -1233,9 +1258,9 @@ async fn handle_dismiss_kicked_channel(
     });
 }
 
-/// Cicchetto's `forceParted` projection for a kicked channel: remove only its
-/// lifecycle state/metadata immediately after REST PART. The sidebar channel
-/// list is maintained separately by Cordiale.
+/// Cicchetto's `forceParted` projection for a kicked channel: remove its
+/// lifecycle metadata and cached modes immediately after REST PART. The
+/// sidebar channel list is maintained separately by Cordiale.
 fn force_parted_kicked_window(state: &mut WorkerState, network: &str, channel: &str) -> bool {
     if !window_is_kicked(&state.window_states, network, channel) {
         return false;
@@ -1246,6 +1271,11 @@ fn force_parted_kicked_window(state: &mut WorkerState, network: &str, channel: &
     state.window_failures.remove(&key);
     state.window_kicks.remove(&key);
     state.invited_by.remove(&key);
+    state
+        .channel_modes
+        .retain(|(known_network, known_channel), _| {
+            window_state_key(known_network, known_channel) != key
+        });
     true
 }
 
@@ -1815,8 +1845,8 @@ async fn handle_member_ctcp(
 /// for it here would be dead code matching nothing.
 const IGNORED_KINDS: &[&str] = &[
     // Known from vjt/grappa-irc#2260 or the wire union (joined, join_failed,
-    // kicked, topic_changed, and members_seeded/names_reply are handled above).
-    "channel_modes_changed",
+    // kicked, topic_changed, channel_modes_changed, and members_seeded/names_reply
+    // are handled above.
     "read_cursor_set",
     "window_counts",
     "away_confirmed",
@@ -1962,6 +1992,11 @@ fn handle_frame(
 
     if payload_kind == "topic_changed" {
         handle_topic_changed(state, ui, &frame.payload);
+        return;
+    }
+
+    if payload_kind == "channel_modes_changed" {
+        handle_channel_modes_changed(state, ui, &frame.topic, &frame.payload);
         return;
     }
 
@@ -2182,6 +2217,83 @@ fn parse_topic_changed(payload: &Value) -> Option<((String, String), String)> {
         .and_then(|topic| topic.get("text"))
         .and_then(Value::as_str)?;
     Some(((network.to_string(), channel.to_string()), text.to_string()))
+}
+
+/// Applies a complete `channel_modes_changed` snapshot. This event replaces,
+/// rather than incrementally mutates, the cached modes for its channel.
+fn handle_channel_modes_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    topic: &str,
+    payload: &Value,
+) {
+    let Some((key, label)) = apply_channel_modes_changed(state, topic, payload) else {
+        return;
+    };
+    if state.current_channel.as_ref() == Some(&key) {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_current_channel_modes(label.into());
+        });
+    }
+}
+
+/// Stores one full mode snapshot and returns its `(network, channel)` key and
+/// compact display label when the payload satisfies the wire contract.
+fn apply_channel_modes_changed(
+    state: &mut WorkerState,
+    topic: &str,
+    payload: &Value,
+) -> Option<((String, String), String)> {
+    let (key, snapshot) = parse_channel_modes_changed(payload)?;
+    // Cicchetto consumes this kind only on its per-channel Phoenix topic;
+    // require the payload identity to agree with that topic as well.
+    if channel_from_topic(topic).as_ref() != Some(&key) {
+        return None;
+    }
+    let label = format_channel_modes(&snapshot.modes);
+    state.channel_modes.insert(key.clone(), snapshot);
+    Some((key, label))
+}
+
+/// Parses `{ network, channel, modes: { modes: string[], params:
+/// Record<string, string | null> } }`. Unknown fields are ignored, while
+/// malformed values are rejected instead of corrupting the cached snapshot.
+fn parse_channel_modes_changed(payload: &Value) -> Option<((String, String), ChannelModes)> {
+    let network = payload.get("network")?.as_str()?.to_owned();
+    let channel = payload.get("channel")?.as_str()?.to_owned();
+    let mode_state = payload.get("modes")?.as_object()?;
+    let modes = mode_state
+        .get("modes")?
+        .as_array()?
+        .iter()
+        .map(|mode| mode.as_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()?;
+    let params = mode_state
+        .get("params")?
+        .as_object()?
+        .iter()
+        .map(|(name, value)| {
+            let value = if value.is_null() {
+                None
+            } else {
+                Some(value.as_str()?.to_owned())
+            };
+            Some((name.clone(), value))
+        })
+        .collect::<Option<HashMap<_, _>>>()?;
+
+    Some(((network, channel), ChannelModes { modes, params }))
+}
+
+/// Cicchetto's compact `+nt` form; empty-but-known modes remain distinguishable
+/// from an unknown snapshot in `WorkerState::channel_modes`.
+fn format_channel_modes(modes: &[String]) -> String {
+    if modes.is_empty() {
+        String::new()
+    } else {
+        format!("+{}", modes.join(""))
+    }
 }
 
 /// Parses Cicchetto's typed `joined` payload from either supported delivery
@@ -3721,6 +3833,121 @@ mod tests {
     }
 
     #[test]
+    fn channel_modes_changed_replaces_the_complete_channel_snapshot() {
+        let mut state = WorkerState::new();
+        let first = serde_json::json!({
+            "kind": "channel_modes_changed",
+            "network": "libera",
+            "channel": "#cordiale",
+            "modes": {"modes": ["n", "t", "k"], "params": {"k": "secret", "l": null}},
+            "future_field": true
+        });
+        assert_eq!(
+            apply_channel_modes_changed(
+                &mut state,
+                &channel_topic("sythos", "libera", "#cordiale"),
+                &first
+            ),
+            Some((
+                ("libera".to_string(), "#cordiale".to_string()),
+                "+ntk".to_string(),
+            ))
+        );
+        let key = ("libera".to_string(), "#cordiale".to_string());
+        assert_eq!(
+            state.channel_modes[&key].params.get("k"),
+            Some(&Some("secret".to_string()))
+        );
+        assert_eq!(state.channel_modes[&key].params.get("l"), Some(&None));
+
+        let replacement = serde_json::json!({
+            "kind": "channel_modes_changed",
+            "network": "libera",
+            "channel": "#cordiale",
+            "modes": {"modes": ["i"], "params": {}}
+        });
+        assert_eq!(
+            apply_channel_modes_changed(
+                &mut state,
+                &channel_topic("sythos", "libera", "#cordiale"),
+                &replacement
+            ),
+            Some((
+                ("libera".to_string(), "#cordiale".to_string()),
+                "+i".to_string(),
+            ))
+        );
+        assert_eq!(state.channel_modes.len(), 1);
+        assert_eq!(state.channel_modes[&key].modes, vec!["i".to_string()]);
+        assert!(state.channel_modes[&key].params.is_empty());
+    }
+
+    #[test]
+    fn channel_modes_changed_preserves_known_empty_and_rejects_bad_params() {
+        let mut state = WorkerState::new();
+        let empty = serde_json::json!({
+            "network": "libera",
+            "channel": "#empty",
+            "modes": {"modes": [], "params": {}}
+        });
+        assert_eq!(
+            apply_channel_modes_changed(
+                &mut state,
+                &channel_topic("sythos", "libera", "#empty"),
+                &empty
+            ),
+            Some((
+                ("libera".to_string(), "#empty".to_string()),
+                String::new(),
+            ))
+        );
+        assert!(state
+            .channel_modes
+            .contains_key(&("libera".to_string(), "#empty".to_string())));
+
+        let malformed = serde_json::json!({
+            "network": "libera",
+            "channel": "#empty",
+            "modes": {"modes": ["n"], "params": {"limit": 42}}
+        });
+        assert_eq!(
+            apply_channel_modes_changed(
+                &mut state,
+                &channel_topic("sythos", "libera", "#empty"),
+                &malformed
+            ),
+            None
+        );
+        assert!(state.channel_modes[&("libera".to_string(), "#empty".to_string())]
+            .modes
+            .is_empty());
+    }
+
+    #[test]
+    fn channel_modes_changed_requires_the_matching_channel_topic() {
+        let payload = serde_json::json!({
+            "network": "libera",
+            "channel": "#cordiale",
+            "modes": {"modes": ["n"], "params": {}}
+        });
+        let mut state = WorkerState::new();
+
+        assert_eq!(
+            apply_channel_modes_changed(&mut state, "grappa:user:sythos", &payload),
+            None
+        );
+        assert_eq!(
+            apply_channel_modes_changed(
+                &mut state,
+                &channel_topic("sythos", "libera", "#different"),
+                &payload
+            ),
+            None
+        );
+        assert!(state.channel_modes.is_empty());
+    }
+
+    #[test]
     fn parse_joined_event_accepts_live_and_channel_snapshot_topics() {
         let payload = serde_json::json!({
             "kind": "joined",
@@ -4281,6 +4508,13 @@ mod tests {
         state.messages.insert(key.clone(), Vec::new());
         state.drafts.insert(key.clone(), "draft".to_string());
         state.topics.insert(key.clone(), "topic".to_string());
+        state.channel_modes.insert(
+            key.clone(),
+            ChannelModes {
+                modes: vec!["n".to_string()],
+                params: HashMap::new(),
+            },
+        );
         state
             .recent_channels
             .push(("libera".to_string(), "#cordiale".to_string()));
@@ -4294,6 +4528,7 @@ mod tests {
         assert!(!state.window_failures.contains_key(&key));
         assert!(!state.window_kicks.contains_key(&key));
         assert!(!state.invited_by.contains_key(&key));
+        assert!(!state.channel_modes.contains_key(&key));
         assert_eq!(state.channel_entries.len(), 1);
         assert!(state.members.contains_key(&key));
         assert!(state.messages.contains_key(&key));
@@ -4466,7 +4701,6 @@ mod tests {
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
         for kind in [
-            "channel_modes_changed",
             "read_cursor_set",
             "window_counts",
             "away_confirmed",
@@ -4484,6 +4718,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"members_seeded"));
         assert!(!IGNORED_KINDS.contains(&"names_reply"));
         assert!(!IGNORED_KINDS.contains(&"topic_changed"));
+        assert!(!IGNORED_KINDS.contains(&"channel_modes_changed"));
         assert!(!IGNORED_KINDS.contains(&"joined"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));

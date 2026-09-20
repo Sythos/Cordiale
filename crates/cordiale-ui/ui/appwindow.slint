@@ -346,6 +346,9 @@ export component AppWindow inherits Window {
     // list; empty when the server hasn't sent one (falls back to the
     // channel label in the markup below).
     in property <string> current-topic: "";
+    // Compact `+nt` snapshot for the selected channel; empty when unknown or
+    // when the server confirms there are no channel modes.
+    in property <string> current-channel-modes: "";
     in property <bool> has-selected-channel: false;
     // Only show the roster after Grappa confirms this window is joined.
     // Autojoin entries in `/boot` can be known but not currently connected.
@@ -772,6 +775,10 @@ export component AppWindow inherits Window {
                 wrap: word-wrap;
                 max-height: 54px;
                 vertical-alignment: top;
+            }
+            if current-channel-modes != "" : Text {
+                text: current-channel-modes;
+                font-size: 12px;
             }
 
             ListView {
