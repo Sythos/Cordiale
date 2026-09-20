@@ -952,8 +952,7 @@ async fn handle_connect(
 
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
-            state.window_states =
-                joined_window_states_from_boot_channels(&outcome.boot.channels);
+            state.window_states = joined_window_states_from_boot_channels(&outcome.boot.channels);
             state.topics = topics_from_boot(&outcome);
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
@@ -1082,7 +1081,9 @@ async fn handle_select_channel(
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
     let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
     let members = state.members.get(&key).cloned().unwrap_or_default();
-    let window_is_joined = state.window_states.get(&window_state_key(&network, &channel))
+    let window_is_joined = state
+        .window_states
+        .get(&window_state_key(&network, &channel))
         == Some(&ChannelWindowState::Joined);
     let can_moderate = is_own_nick_an_op(&members, &identifier);
     let dark_theme = state.theme == Theme::Dark;
@@ -1807,27 +1808,21 @@ fn handle_frame(
         let Some(identifier) = state.identifier.as_deref() else {
             return;
         };
-        let Some((network, channel)) =
-            parse_joined_event(&frame.payload, &frame.topic, identifier)
+        let Some((network, channel)) = parse_joined_event(&frame.payload, &frame.topic, identifier)
         else {
             return;
         };
-        let state_changed = set_joined_window_state(
-            &mut state.window_states,
-            &network,
-            &channel,
-        );
-        let selected_window_joined = state.current_channel.as_ref().is_some_and(
-            |(current_network, current_channel)| {
-                window_state_key(current_network, current_channel)
-                    == window_state_key(&network, &channel)
-            },
-        );
-        let sidebar_changed = upsert_joined_channel(
-            &mut state.channel_entries,
-            network.clone(),
-            channel.clone(),
-        );
+        let state_changed = set_joined_window_state(&mut state.window_states, &network, &channel);
+        let selected_window_joined =
+            state
+                .current_channel
+                .as_ref()
+                .is_some_and(|(current_network, current_channel)| {
+                    window_state_key(current_network, current_channel)
+                        == window_state_key(&network, &channel)
+                });
+        let sidebar_changed =
+            upsert_joined_channel(&mut state.channel_entries, network.clone(), channel.clone());
         if selected_window_joined {
             let ui = ui.clone();
             let _ = ui.upgrade_in_event_loop(|ui| ui.set_current_window_is_joined(true));
@@ -1907,11 +1902,7 @@ fn parse_topic_changed(payload: &Value) -> Option<((String, String), String)> {
 /// path: the current user's live topic or the matching channel's reconnect
 /// snapshot. Cicchetto's shared wire narrower requires `network`, `channel`,
 /// and the exact `state: "joined"` discriminant.
-fn parse_joined_event(
-    payload: &Value,
-    topic: &str,
-    identifier: &str,
-) -> Option<(String, String)> {
+fn parse_joined_event(payload: &Value, topic: &str, identifier: &str) -> Option<(String, String)> {
     if payload.get("kind").and_then(Value::as_str) != Some("joined")
         || payload.get("state").and_then(Value::as_str) != Some("joined")
     {
@@ -1932,9 +1923,9 @@ fn parse_joined_event(
 /// Cicchetto: exact user and network, ASCII-folded channel only.
 fn channel_topic_matches(identifier: &str, topic: &str, network: &str, channel: &str) -> bool {
     let prefix = channel_topic(identifier, network, "");
-    topic
-        .strip_prefix(&prefix)
-        .is_some_and(|topic_channel| ascii_fold_channel(topic_channel) == ascii_fold_channel(channel))
+    topic.strip_prefix(&prefix).is_some_and(|topic_channel| {
+        ascii_fold_channel(topic_channel) == ascii_fold_channel(channel)
+    })
 }
 
 /// Cicchetto's `channelKey` uses `asciiFold` (`A-Z` only) for the channel
@@ -1961,12 +1952,9 @@ fn upsert_joined_channel(
     network: String,
     channel: String,
 ) -> bool {
-    if entries
-        .iter()
-        .any(|(known_network, known_channel, _)| {
-            window_state_key(known_network, known_channel) == window_state_key(&network, &channel)
-        })
-    {
+    if entries.iter().any(|(known_network, known_channel, _)| {
+        window_state_key(known_network, known_channel) == window_state_key(&network, &channel)
+    }) {
         return false;
     }
 
@@ -3420,7 +3408,11 @@ mod tests {
                     "#cordiale".to_string(),
                     "#cordiale".to_string()
                 ),
-                ("libera".to_string(), "#rust".to_string(), "#rust".to_string())
+                (
+                    "libera".to_string(),
+                    "#rust".to_string(),
+                    "#rust".to_string()
+                )
             ]
         );
     }
@@ -3430,18 +3422,10 @@ mod tests {
         let key = window_state_key("libera", "#cordiale");
         let mut states = HashMap::new();
 
-        assert!(set_joined_window_state(
-            &mut states,
-            &key.0,
-            "#CoRdIaLe"
-        ));
+        assert!(set_joined_window_state(&mut states, &key.0, "#CoRdIaLe"));
         assert_eq!(states.get(&key), Some(&ChannelWindowState::Joined));
 
-        assert!(!set_joined_window_state(
-            &mut states,
-            &key.0,
-            &key.1
-        ));
+        assert!(!set_joined_window_state(&mut states, &key.0, &key.1));
         assert_eq!(states.len(), 1);
         assert_eq!(states.get(&key), Some(&ChannelWindowState::Joined));
     }
