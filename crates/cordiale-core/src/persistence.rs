@@ -295,6 +295,7 @@ mod tests {
             schema_version: 1,
             language: Some(Language::It),
             theme: Theme::Dark,
+            last_channel: Some(("libera".to_string(), "#rust".to_string())),
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");
