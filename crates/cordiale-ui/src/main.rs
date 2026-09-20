@@ -31,7 +31,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use cordiale_core::bootstrap::{bootstrap, BootstrapError, BootstrapOutcome};
+use cordiale_core::bootstrap::{
+    bootstrap, bootstrap_with_bearer, BootstrapError, BootstrapOutcome,
+};
 use cordiale_core::client::{GrappaClient, LoginError};
 use cordiale_core::credentials::resolve_credential_store;
 use cordiale_core::domain::{AuthMethod, Profile};
@@ -49,7 +51,7 @@ enum WorkerCommand {
     Connect {
         server_url: String,
         identifier: String,
-        password: String,
+        credential: ConnectCredential,
     },
     SelectChannel {
         network: String,
@@ -105,6 +107,20 @@ enum WorkerCommand {
     MemberQuery(String),
 }
 
+/// The authentication action the user explicitly chose on the connect
+/// screen. An empty form value is always the guest path; saved bearers are
+/// used only through the separate saved-profile action.
+enum ConnectCredential {
+    FormValue(String),
+    SavedProfile,
+}
+
+impl ConnectCredential {
+    fn is_guest_attempt(&self) -> bool {
+        matches!(self, Self::FormValue(value) if value.is_empty())
+    }
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
 
@@ -157,6 +173,8 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_server_url(server_url.clone());
             ui.set_identifier("".into());
             ui.set_password("".into());
+            ui.set_saved_profile_identifier("".into());
+            ui.set_saved_profile_server_url("".into());
             prefill_remembered_profile(&ui, &server_url);
         }
     });
@@ -164,7 +182,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_connect = worker_tx.clone();
     let weak_for_connect = ui.as_weak();
     ui.on_connect_requested(move |server_url, identifier, password| {
+        let server_url = normalize_server_url(&server_url);
         if let Some(ui) = weak_for_connect.upgrade() {
+            ui.set_server_url(server_url.clone().into());
             ui.set_connecting(true);
             ui.set_status_kind("".into());
             ui.set_status_message("".into());
@@ -172,7 +192,24 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_connect.send(WorkerCommand::Connect {
             server_url: server_url.to_string(),
             identifier: identifier.to_string(),
-            password: password.to_string(),
+            credential: ConnectCredential::FormValue(password.to_string()),
+        });
+    });
+
+    let tx_for_saved_profile = worker_tx.clone();
+    let weak_for_saved_profile = ui.as_weak();
+    ui.on_saved_profile_connect_requested(move |server_url, identifier| {
+        let server_url = normalize_server_url(&server_url);
+        if let Some(ui) = weak_for_saved_profile.upgrade() {
+            ui.set_server_url(server_url.clone().into());
+            ui.set_connecting(true);
+            ui.set_status_kind("".into());
+            ui.set_status_message("".into());
+        }
+        let _ = tx_for_saved_profile.send(WorkerCommand::Connect {
+            server_url: server_url.to_string(),
+            identifier: identifier.to_string(),
+            credential: ConnectCredential::SavedProfile,
         });
     });
 
@@ -546,14 +583,14 @@ async fn run_worker(
             command = commands.recv() => {
                 match command {
                     None => return,
-                    Some(WorkerCommand::Connect { server_url, identifier, password }) => {
+                    Some(WorkerCommand::Connect { server_url, identifier, credential }) => {
                         handle_connect(
                             &mut state,
                             &mut session_events,
                             &ui,
                             server_url,
                             identifier,
-                            password,
+                            credential,
                         )
                         .await;
                         if let Some(network) = state.settings_network.clone() {
@@ -822,45 +859,84 @@ async fn handle_connect(
     ui: &slint::Weak<AppWindow>,
     server_url: String,
     identifier: String,
-    password: String,
+    credential: ConnectCredential,
 ) {
     let server_url = normalize_server_url(&server_url);
-
-    // No password typed → guest/visitor login instead of sending an
-    // empty credential the server will just 400 on. `identifier: "guest",
-    // password: "guest"` is the one combination confirmed to work against
-    // a real server (see docs/protocol-notes.md §5) — the identifier the
-    // user typed, if any, is ignored for this attempt since the guest
-    // mechanism isn't known to accept an arbitrary one.
-    let is_guest_attempt = password.is_empty();
-    let (login_identifier, login_password) = if is_guest_attempt {
-        ("guest".to_string(), "guest".to_string())
-    } else {
-        (identifier.clone(), password.clone())
-    };
-
-    // Never log a real password: it may be a real password or a
-    // per-client token, and either way it's a secret. "guest" isn't a
-    // secret, so the guest case can log it plainly.
-    persistence::log_line(&format!(
-        "connect attempt: server={server_url} identifier={login_identifier} \
-         guest={is_guest_attempt}"
-    ));
     remember_server_url(&server_url);
 
     let client = GrappaClient::new(server_url.clone());
-    let request = LoginRequest {
-        identifier: login_identifier.clone(),
-        password: login_password,
+    let is_guest_attempt = credential.is_guest_attempt();
+    let result = match credential {
+        ConnectCredential::FormValue(password) => {
+            // Older releases stored the entered password/client token in
+            // the credential store. Drop that legacy value; only a bearer
+            // returned by a successful login may be persisted now.
+            discard_legacy_profile_secret(&server_url, &identifier);
+
+            let (login_identifier, login_password) = if is_guest_attempt {
+                // A blank Connect action is unconditionally guest, even if
+                // the username field is prefilled with a remembered profile.
+                ("guest".to_string(), "guest".to_string())
+            } else {
+                (identifier.clone(), password)
+            };
+            persistence::log_line(&format!(
+                "connect attempt: server={server_url} identifier={login_identifier} \
+                 guest={is_guest_attempt} auth=password_or_guest"
+            ));
+            let request = LoginRequest {
+                identifier: login_identifier,
+                password: login_password,
+            };
+            bootstrap(&client, &request).await
+        }
+        ConnectCredential::SavedProfile => {
+            let bearer = match remembered_profile_credential(&server_url, &identifier) {
+                RememberedProfileCredential::Bearer(bearer) => bearer,
+                RememberedProfileCredential::None
+                | RememberedProfileCredential::NeedsReauthentication => {
+                    persistence::log_line(&format!(
+                        "saved profile unavailable: server={server_url} identifier={identifier}"
+                    ));
+                    show_reauthentication_required(ui);
+                    return;
+                }
+            };
+
+            persistence::log_line(&format!(
+                "connect attempt: server={server_url} identifier={identifier} \
+                 guest=false auth=saved_bearer"
+            ));
+            let result = bootstrap_with_bearer(&client, &bearer).await;
+            if matches!(&result, Err(BootstrapError::BearerRejected)) {
+                forget_remembered_bearer(&server_url, &identifier);
+                persistence::log_line(&format!(
+                    "saved bearer rejected: server={server_url} identifier={identifier}"
+                ));
+                show_reauthentication_required(ui);
+                return;
+            }
+            result
+        }
     };
-    let result = bootstrap(&client, &request).await;
 
     match result {
         Ok(outcome) => {
             persistence::log_line(&format!("connect succeeded: server={server_url}"));
             if !is_guest_attempt {
-                remember_profile(&server_url, &identifier, &password);
+                remember_profile(&server_url, &identifier, &outcome.token);
             }
+            let saved_profile = if is_guest_attempt {
+                // Guest sign-in does not alter any remembered profile.
+                None
+            } else if matches!(
+                remembered_profile_credential(&server_url, &identifier),
+                RememberedProfileCredential::Bearer(_)
+            ) {
+                Some((identifier.clone(), server_url.clone()))
+            } else {
+                Some((String::new(), String::new()))
+            };
 
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
@@ -868,29 +944,40 @@ async fn handle_connect(
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
-            // Not `outcome.subject.get("is_admin")`: the login/boot
-            // response's `subject` never carries this field at all (so
-            // that lookup silently always returned `false`, even for a
-            // real admin) — confirmed by reading Cicchetto's actual
-            // `Subject`/`MeResponse` types, `is_admin` is a top-level
-            // field on the separate `GET /me` response instead.
+            // The Grappa login `subject` is opaque (and absent when reusing
+            // a bearer); admin status comes only from the separate `/me`
+            // response, where it is a top-level field.
             let is_admin = outcome.me.is_admin;
             let token = outcome.token.clone();
+            // Guest login always sends the fixed server-confirmed identifier
+            // "guest"; never derive its user-topic name from arbitrary text
+            // left in the username field.
+            let session_identifier = if is_guest_attempt {
+                "guest".to_string()
+            } else {
+                identifier.clone()
+            };
 
             let ws_url = to_ws_url(&server_url);
-            let (handle, events) = spawn_session(ws_url, token.clone(), identifier.clone());
+            let (handle, events) =
+                spawn_session(ws_url, token.clone(), session_identifier.clone());
             for entry in &entries {
-                handle.join_topic(channel_topic(&identifier, &entry.0, &entry.1), true);
+                handle.join_topic(
+                    channel_topic(&session_identifier, &entry.0, &entry.1),
+                    true,
+                );
             }
             *session_events = Some(events);
 
             state.client = Some(client);
             state.token = Some(token.clone());
-            state.identifier = Some(identifier.clone());
+            state.identifier = Some(session_identifier.clone());
             state.session = Some(handle);
             state.joined_topics = entries
                 .iter()
-                .map(|(network, channel, _)| channel_topic(&identifier, network, channel))
+                .map(|(network, channel, _)| {
+                    channel_topic(&session_identifier, network, channel)
+                })
                 .collect();
 
             let prefs_client = GrappaClient::new(server_url.clone());
@@ -919,6 +1006,10 @@ async fn handle_connect(
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
                 ui.set_is_admin(is_admin);
+                if let Some((saved_identifier, saved_server_url)) = saved_profile {
+                    ui.set_saved_profile_identifier(saved_identifier.into());
+                    ui.set_saved_profile_server_url(saved_server_url.into());
+                }
                 ui.set_known_servers(known_servers_model());
                 ui.set_screen("connected".into());
                 ui.set_status_kind("signed-in".into());
@@ -2690,18 +2781,12 @@ fn remember_server_url(server_url: &str) {
     let _ = persistence::save_servers_file(&file);
 }
 
-/// Called only after a successful login: remembers the profile (never the
-/// secret itself) in `servers.json`, and puts the secret in the
-/// `CredentialStore` — never in the JSON file. Also remembers the server
-/// itself in `ServersFile.servers` — the quick-switch list on the connect
-/// screen reads from there (this field existed on disk already, nothing
-/// populated it until now).
-///
-/// Doesn't yet distinguish a password from a per-client token (the form
-/// doesn't ask): always recorded as `AuthMethod::Password` for now.
-fn remember_profile(server_url: &str, identifier: &str, secret: &str) {
+/// Called only after a successful non-guest bootstrap. The entered password
+/// or per-client token is never persisted: only Grappa's returned bearer is
+/// written to the CredentialStore, while `servers.json` records its kind.
+fn remember_profile(server_url: &str, identifier: &str, bearer: &str) {
     if let Ok(store) = resolve_credential_store() {
-        let _ = store.set_secret(server_url, identifier, secret);
+        let _ = store.set_secret(server_url, identifier, bearer);
     }
 
     let mut file = persistence::load_servers_file().unwrap_or_default();
@@ -2717,15 +2802,18 @@ fn remember_profile(server_url: &str, identifier: &str, secret: &str) {
         });
     }
 
-    let already_known = file
+    let profile = file
         .profiles
-        .iter()
-        .any(|profile| profile.server_base_url == server_url && profile.identifier == identifier);
-    if !already_known {
+        .iter_mut()
+        .find(|profile| profile.server_base_url == server_url && profile.identifier == identifier);
+    if let Some(profile) = profile {
+        profile.auth_method = AuthMethod::BearerToken;
+        profile.remembered = true;
+    } else {
         file.profiles.push(Profile {
             server_base_url: server_url.to_string(),
             identifier: identifier.to_string(),
-            auth_method: AuthMethod::Password,
+            auth_method: AuthMethod::BearerToken,
             remembered: true,
         });
     }
@@ -2745,10 +2833,13 @@ fn known_servers_model() -> slint::ModelRc<slint::SharedString> {
     Rc::new(slint::VecModel::from(urls)).into()
 }
 
-/// Pre-fills the identifier and, if the `CredentialStore` has it, the
-/// secret for the last remembered profile on `server_url` — a convenience
-/// auto-fill, not an auto-connect.
+/// Pre-fills only the identifier for the last remembered profile on
+/// `server_url`. Credentials are never copied into the password field; a
+/// returned bearer is loaded privately only when the user explicitly chooses
+/// the saved-profile sign-in action.
 fn prefill_remembered_profile(ui: &AppWindow, server_url: &str) {
+    ui.set_saved_profile_identifier("".into());
+    ui.set_saved_profile_server_url("".into());
     let file = persistence::load_servers_file().unwrap_or_default();
     let Some(profile) = file
         .profiles
@@ -2759,12 +2850,105 @@ fn prefill_remembered_profile(ui: &AppWindow, server_url: &str) {
     };
 
     ui.set_identifier(profile.identifier.clone().into());
+    if matches!(
+        remembered_profile_credential(server_url, &profile.identifier),
+        RememberedProfileCredential::Bearer(_)
+    ) {
+        ui.set_saved_profile_identifier(profile.identifier.clone().into());
+        ui.set_saved_profile_server_url(server_url.into());
+    }
+}
 
-    if let Ok(store) = resolve_credential_store() {
-        if let Ok(Some(secret)) = store.get_secret(server_url, &profile.identifier) {
-            ui.set_password(secret.into());
+enum RememberedProfileCredential {
+    None,
+    NeedsReauthentication,
+    Bearer(String),
+}
+
+/// Returns a saved Grappa bearer only when `servers.json` marks the value as
+/// a bearer written by the current persistence flow. Older releases stored
+/// the entered password/client token under the same key; those values are
+/// never reused as bearer credentials and are removed on a form Connect.
+fn remembered_profile_credential(
+    server_url: &str,
+    identifier: &str,
+) -> RememberedProfileCredential {
+    if identifier.is_empty() {
+        return RememberedProfileCredential::None;
+    }
+
+    let file = persistence::load_servers_file().unwrap_or_default();
+    let Some(profile) = file.profiles.iter().find(|profile| {
+        profile.server_base_url == server_url
+            && profile.identifier == identifier
+            && profile.remembered
+    }) else {
+        return RememberedProfileCredential::None;
+    };
+
+    if profile.auth_method != AuthMethod::BearerToken {
+        return RememberedProfileCredential::NeedsReauthentication;
+    }
+
+    let Ok(store) = resolve_credential_store() else {
+        return RememberedProfileCredential::NeedsReauthentication;
+    };
+    match store.get_secret(server_url, identifier) {
+        Ok(Some(bearer)) if !bearer.is_empty() => {
+            RememberedProfileCredential::Bearer(bearer)
+        }
+        _ => RememberedProfileCredential::NeedsReauthentication,
+    }
+}
+
+/// Removes a value written by the old implementation, which persisted the
+/// form's password/client-token input under the same key now used for the
+/// returned bearer. The profile metadata lets us distinguish it safely.
+fn discard_legacy_profile_secret(server_url: &str, identifier: &str) {
+    if identifier.is_empty() {
+        return;
+    }
+
+    let file = persistence::load_servers_file().unwrap_or_default();
+    let is_legacy_profile = file.profiles.iter().any(|profile| {
+        profile.server_base_url == server_url
+            && profile.identifier == identifier
+            && profile.auth_method != AuthMethod::BearerToken
+    });
+    if is_legacy_profile {
+        if let Ok(store) = resolve_credential_store() {
+            let _ = store.delete_secret(server_url, identifier);
         }
     }
+}
+
+/// Best-effort removal of a bearer that Grappa has rejected. The profile's
+/// marker remains so a later explicit saved-profile attempt requests fresh
+/// credentials instead of interpreting it as a password or guest choice.
+fn forget_remembered_bearer(server_url: &str, identifier: &str) {
+    let file = persistence::load_servers_file().unwrap_or_default();
+    let is_bearer_profile = file.profiles.iter().any(|profile| {
+        profile.server_base_url == server_url
+            && profile.identifier == identifier
+            && profile.remembered
+            && profile.auth_method == AuthMethod::BearerToken
+    });
+    if is_bearer_profile {
+        if let Ok(store) = resolve_credential_store() {
+            let _ = store.delete_secret(server_url, identifier);
+        }
+    }
+}
+
+fn show_reauthentication_required(ui: &slint::Weak<AppWindow>) {
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_connecting(false);
+        ui.set_saved_profile_identifier("".into());
+        ui.set_saved_profile_server_url("".into());
+        ui.set_status_kind("reauthentication-required".into());
+        ui.set_status_message("".into());
+    });
 }
 
 fn language_from_code(code: &str) -> Option<persistence::Language> {
@@ -2838,6 +3022,9 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
         BootstrapError::Login(_) => {
             ui.set_status_kind("login-failed".into());
         }
+        BootstrapError::BearerRejected => {
+            ui.set_status_kind("reauthentication-required".into());
+        }
         BootstrapError::Boot(_) | BootstrapError::Me(_) => {
             ui.set_status_kind("boot-me-failed".into());
         }
@@ -2847,6 +3034,13 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_connect_form_is_guest_but_saved_profile_is_explicit() {
+        assert!(ConnectCredential::FormValue(String::new()).is_guest_attempt());
+        assert!(!ConnectCredential::FormValue("new-password".into()).is_guest_attempt());
+        assert!(!ConnectCredential::SavedProfile.is_guest_attempt());
+    }
 
     #[test]
     fn current_year_is_in_a_sane_range() {

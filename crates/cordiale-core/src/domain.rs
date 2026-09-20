@@ -38,16 +38,25 @@ pub struct Server {
     pub label: String,
 }
 
-/// How a profile authenticates against `POST /auth/login`.
+/// How a remembered profile's credential is represented locally.
 ///
-/// Both variants travel on the wire `password` field, but are kept distinct
-/// locally: a per-client token is scoped, and a `403 client_token_scope`
-/// must never be treated as a wrong password to retry (see
-/// `docs/protocol-notes.md`, §1).
+/// `Password` and `ClientToken` are retained to read older `servers.json`
+/// profiles safely; their old stored values are login inputs and are never
+/// reused as bearer tokens. New successful logins record the bearer returned
+/// by Grappa as `BearerToken`, which is presented directly to authenticated
+/// endpoints instead of being sent in `/auth/login`'s `password` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuthMethod {
+    /// The legacy profile stored an entered credential. Cordiale no longer
+    /// reuses secrets recorded with this variant; the user must enter the
+    /// credential again so that only Grappa's response bearer is persisted.
     Password,
+    /// Legacy input mode, where a per-client token was entered into the
+    /// login form. Old stored values are not treated as returned bearers.
     ClientToken,
+    /// A bearer token returned by Grappa after a successful login. It can
+    /// be presented directly to authenticated REST/WS endpoints.
+    BearerToken,
 }
 
 /// A profile that can authenticate on a given server.
@@ -82,17 +91,23 @@ mod tests {
     }
 
     #[test]
-    fn profile_round_trips_through_json() {
-        let profile = Profile {
-            server_base_url: "https://irc.sindro.me".to_string(),
-            identifier: "vjt".to_string(),
-            auth_method: AuthMethod::ClientToken,
-            remembered: true,
-        };
+    fn profile_auth_methods_round_trip_including_legacy_markers() {
+        for auth_method in [
+            AuthMethod::Password,
+            AuthMethod::ClientToken,
+            AuthMethod::BearerToken,
+        ] {
+            let profile = Profile {
+                server_base_url: "https://irc.sindro.me".to_string(),
+                identifier: "vjt".to_string(),
+                auth_method,
+                remembered: true,
+            };
 
-        let json = serde_json::to_string(&profile).expect("serialize");
-        let decoded: Profile = serde_json::from_str(&json).expect("deserialize");
+            let json = serde_json::to_string(&profile).expect("serialize");
+            let decoded: Profile = serde_json::from_str(&json).expect("deserialize");
 
-        assert_eq!(profile, decoded);
+            assert_eq!(profile, decoded);
+        }
     }
 }

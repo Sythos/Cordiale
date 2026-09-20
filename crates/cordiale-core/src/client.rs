@@ -55,6 +55,20 @@ pub enum GrappaClientError {
     InvalidUrl(String),
 }
 
+impl GrappaClientError {
+    /// HTTP status when the server returned a non-success response.
+    ///
+    /// Callers use this only when the protocol assigns meaning to a
+    /// specific status (for example, 401 means a presented bearer was
+    /// rejected). Transport and URL errors have no status.
+    pub fn status(&self) -> Option<StatusCode> {
+        match self {
+            GrappaClientError::Http(err) => err.status(),
+            GrappaClientError::InvalidUrl(_) => None,
+        }
+    }
+}
+
 impl From<reqwest::Error> for GrappaClientError {
     fn from(err: reqwest::Error) -> Self {
         GrappaClientError::Http(err)

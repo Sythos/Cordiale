@@ -53,8 +53,10 @@ pub struct ConfigResponse {
 /// Request body of `POST /auth/login`.
 ///
 /// `password` carries either an actual password or a per-client token —
-/// both travel on the same wire field (see `docs/protocol-notes.md` §1 and
-/// `crate::domain::AuthMethod`).
+/// both travel on the same wire field (see `docs/protocol-notes.md` §1).
+/// The bearer returned by Grappa after a successful login is a separate
+/// credential and must be sent directly as `Authorization: Bearer`, never
+/// placed in this request field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LoginRequest {
     pub identifier: String,

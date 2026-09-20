@@ -313,6 +313,11 @@ export component AppWindow inherits Window {
     in-out property <string> server-url: "https://irc.sindro.me";
     in-out property <string> identifier: "";
     in-out property <string> password: "";
+    // Set only when this server/identifier has a non-empty returned bearer
+    // in CredentialStore. The button compares both against the editable
+    // server and identifier, hiding it as soon as either value changes.
+    in property <string> saved-profile-identifier: "";
+    in property <string> saved-profile-server-url: "";
     // `status-kind` selects a translated template below; `status-message`
     // is shown verbatim only when `status-kind` is empty (a
     // raw/passthrough message Rust didn't map to a template).
@@ -410,6 +415,7 @@ export component AppWindow inherits Window {
     in-out property <string> new-watch-pattern: "";
 
     callback connect-requested(string, string, string);
+    callback saved-profile-connect-requested(string, string);
     callback server-selected(string);
     callback language-selected(string);
     callback disconnect-requested();
@@ -464,6 +470,8 @@ export component AppWindow inherits Window {
             return @tr("Signed in. {} network(s), {} channel(s).", status-network-count, status-channel-count);
         } else if status-kind == "wrong-credentials" {
             return @tr("Wrong username or password/token.");
+        } else if status-kind == "reauthentication-required" {
+            return @tr("Saved sign-in is unavailable. Enter your password or client token to sign in again.");
         } else if status-kind == "two-factor-required" {
             return @tr("This account has two-factor authentication enabled. Sign in from a browser instead.");
         } else if status-kind == "too-many-attempts" {
@@ -595,6 +603,12 @@ export component AppWindow inherits Window {
             text: connecting ? @tr("Connecting…") : @tr("Connect");
             enabled: !connecting;
             clicked => { connect-requested(server-url, identifier, password); }
+        }
+
+        if saved-profile-identifier != "" && saved-profile-identifier == identifier && saved-profile-server-url == server-url : Button {
+            text: @tr("Sign in with saved profile");
+            enabled: !connecting;
+            clicked => { saved-profile-connect-requested(server-url, identifier); }
         }
 
         Button {

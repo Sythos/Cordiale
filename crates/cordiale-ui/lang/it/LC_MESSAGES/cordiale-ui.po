@@ -25,12 +25,20 @@ msgid "Password or client token"
 msgstr "Password o token client"
 
 msgctxt "AppWindow"
+msgid "Saved sign-in is unavailable. Enter your password or client token to sign in again."
+msgstr "L'accesso salvato non è disponibile. Inserisci di nuovo la password o il token client."
+
+msgctxt "AppWindow"
 msgid "Connecting…"
 msgstr "Connessione in corso…"
 
 msgctxt "AppWindow"
 msgid "Connect"
 msgstr "Connetti"
+
+msgctxt "AppWindow"
+msgid "Sign in with saved profile"
+msgstr "Accedi con il profilo salvato"
 
 msgctxt "AppWindow"
 msgid "Change language"

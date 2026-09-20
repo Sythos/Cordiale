@@ -44,7 +44,9 @@ pub struct BootstrapOutcome {
     /// despite an earlier assumption here that it did (confirmed by
     /// reading Cicchetto's real `Subject`/`MeResponse` types) — that field
     /// lives on `me` instead.
-    pub subject: Value,
+    /// `None` when bootstrapping directly with a previously saved bearer,
+    /// because that path deliberately skips `/auth/login`.
+    pub subject: Option<Value>,
     pub boot: BootResponse,
     pub me: MeResponse,
 }
@@ -56,16 +58,17 @@ pub enum BootstrapError {
     IncompatibleServer(ServerCompatibility),
     Config(GrappaClientError),
     Login(LoginError),
+    /// A saved bearer was rejected by an authenticated bootstrap endpoint.
+    /// Callers must ask the user to authenticate again; never retry it as a
+    /// password or silently switch identities.
+    BearerRejected,
     Boot(GrappaClientError),
     Me(GrappaClientError),
 }
 
-/// Runs the full REST bootstrap sequence against `client`, or fails at the
-/// first step that doesn't check out.
-pub async fn bootstrap(
+async fn check_server_compatibility(
     client: &GrappaClient,
-    login_request: &LoginRequest,
-) -> Result<BootstrapOutcome, BootstrapError> {
+) -> Result<ServerCompatibility, BootstrapError> {
     let config = client
         .fetch_config()
         .await
@@ -77,6 +80,16 @@ pub async fn bootstrap(
     if !compatibility.supported_by_cordiale() {
         return Err(BootstrapError::IncompatibleServer(compatibility));
     }
+    Ok(compatibility)
+}
+
+/// Runs the full REST bootstrap sequence against `client`, or fails at the
+/// first step that doesn't check out.
+pub async fn bootstrap(
+    client: &GrappaClient,
+    login_request: &LoginRequest,
+) -> Result<BootstrapOutcome, BootstrapError> {
+    let compatibility = check_server_compatibility(client).await?;
 
     let login = client
         .login(login_request)
@@ -98,7 +111,41 @@ pub async fn bootstrap(
     Ok(BootstrapOutcome {
         compatibility,
         token: login.token,
-        subject: login.subject,
+        subject: Some(login.subject),
+        boot,
+        me,
+    })
+}
+
+/// Runs the authenticated cold-start sequence using a bearer already
+/// returned by Grappa. The documented protocol permits presenting that
+/// bearer directly to REST, so this path intentionally skips `/auth/login`
+/// (and in particular never sends the bearer in the `password` field).
+pub async fn bootstrap_with_bearer(
+    client: &GrappaClient,
+    bearer: &str,
+) -> Result<BootstrapOutcome, BootstrapError> {
+    let compatibility = check_server_compatibility(client).await?;
+
+    let boot = client.fetch_boot(bearer).await.map_err(|err| {
+        if err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
+            BootstrapError::BearerRejected
+        } else {
+            BootstrapError::Boot(err)
+        }
+    })?;
+    let me = client.fetch_me(bearer).await.map_err(|err| {
+        if err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
+            BootstrapError::BearerRejected
+        } else {
+            BootstrapError::Me(err)
+        }
+    })?;
+
+    Ok(BootstrapOutcome {
+        compatibility,
+        token: bearer.to_string(),
+        subject: None,
         boot,
         me,
     })
@@ -107,7 +154,7 @@ pub async fn bootstrap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn mock_config(mock_server: &MockServer, protocol_version: u32) {
@@ -162,7 +209,66 @@ mod tests {
         let outcome = bootstrap(&client, &request).await.expect("bootstrap");
 
         assert_eq!(outcome.token, "abc123");
+        assert_eq!(outcome.subject, Some(serde_json::json!({"nick": "vjt"})));
         assert!(outcome.boot.networks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_bearer_skips_login_and_uses_authorization_header() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/boot"))
+            .and(header("authorization", "Bearer saved-bearer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "networks": []
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("authorization", "Bearer saved-bearer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "badge_count": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let outcome = bootstrap_with_bearer(&client, "saved-bearer")
+            .await
+            .expect("bootstrap with saved bearer");
+
+        assert_eq!(outcome.token, "saved-bearer");
+        assert_eq!(outcome.subject, None);
+        assert!(outcome.boot.networks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_bearer_reports_unauthorized_without_password_retry() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/boot"))
+            .and(header("authorization", "Bearer revoked-bearer"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let error = bootstrap_with_bearer(&client, "revoked-bearer")
+            .await
+            .expect_err("revoked bearer must be rejected");
+
+        assert!(matches!(error, BootstrapError::BearerRejected));
     }
 
     #[tokio::test]
