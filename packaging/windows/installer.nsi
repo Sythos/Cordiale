@@ -33,6 +33,7 @@
 Name "${APP_NAME}"
 OutFile "${OUT_FILE}"
 Icon "${ICON_PATH}"
+UninstallIcon "${ICON_PATH}"
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 RequestExecutionLevel admin
 VIProductVersion "0.0.0.0"
