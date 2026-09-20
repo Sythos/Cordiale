@@ -1512,6 +1512,85 @@ async fn handle_member_ctcp(
     }
 }
 
+/// Real kinds Grappa pushes to a regular (non-admin) user that Cordiale
+/// has no UI for yet — window-state transitions, ISUPPORT/umode/identity
+/// bookkeeping, DCC offers, WHOIS/WHOWAS/LUSERS/banlist/directory bundles,
+/// network-attach lifecycle, MONITOR/WATCH presence, the notify list,
+/// per-server settings, and more. Exhaustive as of this date: audited
+/// directly from the real server source (`session/wire.ex`'s
+/// `@type wire_event_kind` union — the authoritative closed set — plus
+/// every other non-admin `*/wire.ex` module in vjt/grappa-irc), not
+/// grepped or guessed; see MEMORY.md §20 for the full audit. Per
+/// `docs/CLIENT_PROTOCOL.md` §4's own policy ("treat unknown `kind`
+/// values as ignorable"), these are dropped silently rather than shown as
+/// a raw dump. Deliberately excludes `"parted"`: two comments in the real
+/// server source (`session/server.ex`, `session/window_state.ex`) state
+/// there is intentionally no such broadcast — a self-part is signaled by
+/// the window disappearing from window-state, not a push, so listening
+/// for it here would be dead code matching nothing.
+const IGNORED_KINDS: &[&str] = &[
+    // Already known from vjt/grappa-irc#2260 (topic_changed and
+    // members_seeded/names_reply are handled above instead, not ignored).
+    "joined",
+    "channel_modes_changed",
+    "read_cursor_set",
+    "window_counts",
+    "away_confirmed",
+    "bundle_hash",
+    "query_windows_list",
+    // session/wire.ex's wire_event_kind union.
+    "channels_changed",
+    "own_nick_changed",
+    "isupport_changed",
+    "umode_changed",
+    "session_identity_changed",
+    "supported_umodes_changed",
+    "channel_created",
+    "who_reply",
+    "server_reply",
+    "window_pending",
+    "window_invited",
+    "window_invite_declined",
+    "dcc_offer",
+    "dcc_offer_resolved",
+    "join_failed",
+    "kicked",
+    "mentions_bundle",
+    "whois_bundle",
+    "whois_avatar_ready",
+    "peer_away",
+    "invite_ack",
+    "lusers_bundle",
+    "whowas_bundle",
+    "banlist_bundle",
+    "directory_progress",
+    "directory_complete",
+    "directory_failed",
+    "connection_progress",
+    "recover_progress",
+    "recover_result",
+    "presence_changed",
+    "presence_error",
+    "presence_snapshot",
+    // scrollback/wire.ex.
+    "archive_changed",
+    "archive_purged",
+    // networks/wire.ex.
+    "network_detached",
+    "network_attached",
+    "connection_state_changed",
+    // user_settings/wire.ex.
+    "auto_away_debounce_changed",
+    "quit_part_reason_changed",
+    "auto_away_reason_changed",
+    // rate_limit/wire.ex.
+    "web_session_severed",
+    // notify/wire.ex.
+    "notify_list",
+    // server_settings/wire.ex.
+    "server_settings_changed",
+];
+
 /// Appends an incoming realtime frame to the channel it belongs to (if any)
 /// and, if that channel is currently open, pushes the update to the UI.
 ///
@@ -1593,32 +1672,26 @@ fn handle_frame(
         &frame.payload
     };
 
-    // Confirmed real via the user's own upstream report
-    // (github.com/vjt/grappa-irc/issues/2260, filed after these were
-    // caught leaking as raw JSON) plus `docs/CLIENT_PROTOCOL.md` §4:
-    // window-state/administrative kinds Cordiale has nothing to do with
-    // yet. The protocol doc's own policy is to treat any kind a client
-    // doesn't recognize as ignorable (§4, "treat unknown `kind` values as
-    // ignorable"), so these are dropped silently rather than rendered —
-    // `topic_changed` is the one exception, handled below instead of
-    // ignored, since it carries real state to apply.
     if payload_kind == Some("topic_changed") {
         handle_topic_changed(state, ui, &frame.payload);
         return;
     }
-    if matches!(
-        payload_kind,
-        Some(
-            "joined"
-                | "parted"
-                | "channel_modes_changed"
-                | "read_cursor_set"
-                | "window_counts"
-                | "away_confirmed"
-                | "bundle_hash"
-                | "query_windows_list"
-        )
-    ) {
+
+    // `names_reply` carries the exact same shape as `members_seeded`
+    // (`{network, channel, members: [{nick, modes}]}`) — another real
+    // source for the initial roster, confirmed by reading
+    // `session/wire.ex` directly (not the same code path as
+    // `members_seeded`, but the payload contract matches byte for byte).
+    if payload_kind == Some("names_reply") {
+        if let Some(key) = apply_members_seeded(state, &frame.payload) {
+            if state.current_channel.as_ref() == Some(&key) {
+                push_members_update(state, ui, &key);
+            }
+        }
+        return;
+    }
+
+    if IGNORED_KINDS.contains(&payload_kind.unwrap_or("")) {
         return;
     }
 
@@ -2010,6 +2083,17 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
                 nick.unwrap_or("someone")
             ))
         }
+        // CTCP ACTION (`/me`) — the inner kind riding under a `message`
+        // envelope, confirmed real by auditing `scrollback/message.ex`
+        // directly (MEMORY.md §20). The body is the plain action text,
+        // not the raw `\x01ACTION ... \x01` wire form (that framing is
+        // stripped server-side, matching how `notice` is already a clean
+        // kind rather than needing CTCP unwrapping itself).
+        Some("action") => Some(format!(
+            "* {} {}",
+            nick.unwrap_or("someone"),
+            body.unwrap_or("")
+        )),
         _ => None,
     };
     if let Some(text) = event_text {
@@ -2864,6 +2948,50 @@ mod tests {
         assert_eq!(rendered.nick.as_deref(), Some("vjt"));
         assert_eq!(rendered.text, "hello from the real channel");
         assert!(!rendered.italic);
+    }
+
+    #[test]
+    fn render_message_formats_a_ctcp_action_as_a_sentence() {
+        let inner = serde_json::json!({
+            "kind": "action",
+            "sender": "vjt",
+            "body": "waves hello",
+        });
+        let rendered = render_message(&inner, None);
+        assert_eq!(rendered.nick, None);
+        assert_eq!(rendered.text, "* vjt waves hello");
+        assert!(rendered.italic);
+    }
+
+    #[test]
+    fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
+        // The kinds caught leaking as raw JSON in chat before being fixed
+        // this session — a regression here means one of them is no longer
+        // ignored and would start dumping raw JSON again.
+        for kind in [
+            "joined",
+            "channel_modes_changed",
+            "read_cursor_set",
+            "window_counts",
+            "away_confirmed",
+            "bundle_hash",
+            "query_windows_list",
+        ] {
+            assert!(
+                IGNORED_KINDS.contains(&kind),
+                "{kind} should be in IGNORED_KINDS"
+            );
+        }
+        // members_seeded/names_reply/topic_changed are handled, not
+        // ignored, so they must NOT be in this list — that would silently
+        // drop real state instead of applying it.
+        assert!(!IGNORED_KINDS.contains(&"members_seeded"));
+        assert!(!IGNORED_KINDS.contains(&"names_reply"));
+        assert!(!IGNORED_KINDS.contains(&"topic_changed"));
+        // "parted" is confirmed to never actually be sent by the server
+        // (MEMORY.md §20) — listing it here would be harmless but wrong
+        // documentation, so it must stay absent.
+        assert!(!IGNORED_KINDS.contains(&"parted"));
     }
 
     #[test]

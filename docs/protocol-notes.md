@@ -258,6 +258,31 @@ screenshot dell'utente) e sul report a monte dell'utente stesso,
   `topic_changed`, che porta stato reale) vengono scartati senza produrre
   una riga di chat.
 
+### 2ter. Censimento completo dei kind reali (2026-09-20)
+
+Audit diretto sui moduli sorgente Elixir del server (non regex/grep su
+poche righe): `session/wire.ex`'s `@type wire_event_kind` è l'insieme
+chiuso ufficiale (40 kind), più ogni altro `*/wire.ex` non-admin del repo.
+Elenco completo, forma dei payload e dettagli in `MEMORY.md` §21 di
+Cordiale (troppo lungo per essere duplicato qui) — riassunto:
+
+- **`"parted"` non esiste**: due commenti nel sorgente server
+  (`session/server.ex`, `session/window_state.ex`) confermano che
+  l'assenza di broadcast È il segnale di un proprio PART, non un kind
+  dedicato. Qualsiasi client che ascolti `kind: "parted"` sta ascoltando
+  qualcosa che il server non manda mai.
+- **`names_reply`** ha la stessa identica forma di `members_seeded`
+  (`{network, channel, members: [{nick, modes}]}`) — seconda via reale per
+  il roster iniziale.
+- **Kind interni sotto l'involucro `message`** (oltre a `privmsg`/
+  `notice`): `action` (CTCP `/me`), `topic` (riga scrollback di cambio
+  topic), `kick` (riga scrollback di kick, diversa da `kicked`
+  top-level), `server_event` (riga feed server, diversa da `notice`).
+- 45 kind aggiuntivi confermati reali ma senza UI in Cordiale ad oggi
+  (ISUPPORT/umode/identità, stato finestra, WHOIS/WHOWAS/LUSERS/banlist,
+  DCC, ricerca directory, lifecycle network, presence MONITOR/WATCH,
+  notify list, impostazioni server) — elenco e forme in MEMORY.md §21.
+
 ---
 
 ## 3. Versioning e compatibilità
