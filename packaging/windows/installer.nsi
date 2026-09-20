@@ -19,6 +19,9 @@
 !ifndef VERSION
   !define VERSION "0.0.0"
 !endif
+!ifndef PRODUCT_VERSION
+  !define PRODUCT_VERSION "0.0.0.0"
+!endif
 
 !include "FileFunc.nsh"
 
@@ -36,7 +39,7 @@ Icon "${ICON_PATH}"
 UninstallIcon "${ICON_PATH}"
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 RequestExecutionLevel admin
-VIProductVersion "0.0.0.0"
+VIProductVersion "${PRODUCT_VERSION}"
 VIAddVersionKey "ProductName" "${APP_NAME}"
 VIAddVersionKey "CompanyName" "${COMPANY}"
 VIAddVersionKey "FileVersion" "${VERSION}"

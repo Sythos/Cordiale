@@ -210,7 +210,19 @@ jobs:
           }
           $outFile = "$PWD\dist\Cordiale_Windows_$env:WIN_ARCH.exe"
           $iconPath = "$PWD\resources\branding\cordiale.ico"
-          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=$env:VERSION" "/DICON_PATH=$iconPath" packaging\windows\installer.nsi
+          # NSIS VERSIONINFO requires four numeric components. Keep the
+          # readable SemVer (including any -dev suffix) in string keys,
+          # while deriving the numeric resource version from its core.
+          $numericVersion = $env:VERSION.Split('-')[0]
+          if ($numericVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw "VERSION must start with a three-part numeric version: $env:VERSION"
+          }
+          $versionParts = $numericVersion.Split('.')
+          if (@($versionParts | Where-Object { [int]$_ -gt 65535 }).Count -gt 0) {
+            throw "NSIS VERSIONINFO components must not exceed 65535: $numericVersion"
+          }
+          $productVersion = "$numericVersion.0"
+          & $makensis "/DBIN_PATH=$PWD\$binPath" "/DOUT_FILE=$outFile" "/DVERSION=$env:VERSION" "/DPRODUCT_VERSION=$productVersion" "/DICON_PATH=$iconPath" packaging\windows\installer.nsi
           if ($LASTEXITCODE -ne 0) {
             throw "makensis failed with exit code $LASTEXITCODE"
           }
