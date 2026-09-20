@@ -1880,13 +1880,14 @@ fn handle_frame(
         );
         let sidebar_changed =
             upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
-        let selected_window_failed = state
-            .current_channel
-            .as_ref()
-            .is_some_and(|(current_network, current_channel)| {
-                window_state_key(current_network, current_channel)
-                    == window_state_key(&network, &channel)
-            });
+        let selected_window_failed =
+            state
+                .current_channel
+                .as_ref()
+                .is_some_and(|(current_network, current_channel)| {
+                    window_state_key(current_network, current_channel)
+                        == window_state_key(&network, &channel)
+                });
 
         if selected_window_failed {
             let ui = ui.clone();
