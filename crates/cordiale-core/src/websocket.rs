@@ -23,14 +23,15 @@
 //! Phoenix Channels transport, built by hand over `tokio-tungstenite`.
 //!
 //! No mature Rust client for Phoenix Channels exists (checked before
-//! writing this — see the networking architecture note in `MEMORY.md`), so
-//! this wraps a plain WebSocket connection and speaks the wire format from
-//! `crate::phoenix` over it. Plain `async fn`s only: no runtime is started
-//! here, `cordiale-ui` owns that (see `MEMORY.md`).
+//! writing this), so this wraps a plain WebSocket connection and speaks
+//! the wire format from `crate::phoenix` over it. Plain `async fn`s only:
+//! no runtime is started here, `cordiale-ui` owns that.
 //!
-//! Not yet exercised against a real or mocked Phoenix server — only the
-//! parts that don't need an actual socket (the handshake header) are unit
-//! tested here.
+//! Exercised against a real Grappa server as of 2026-09-20 (the bearer
+//! subprotocol needed base64-encoding the token, not sending it raw —
+//! see `bearer_subprotocol`'s own doc comment); still no mocked-server
+//! test harness, so the unit tests here only cover what doesn't need an
+//! actual socket (the handshake header).
 
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;

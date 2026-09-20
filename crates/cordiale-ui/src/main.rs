@@ -39,7 +39,7 @@ use cordiale_core::persistence::{self, Theme};
 use cordiale_core::rest::{DisplayPrefs, LoginRequest, SendMessageRequest};
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 
-/// The default server offered on first launch, per MEMORY.md §3.3.
+/// The default server offered on first launch.
 const DEFAULT_SERVER_URL: &str = "https://irc.sindro.me";
 
 /// Everything the UI thread can ask the background worker to do. Sent over
@@ -110,7 +110,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Settings > Credits: Cordiale's own info only, never a list of
     // Grappa/Cicchetto's contributors — explicit project-owner
-    // requirement, see MEMORY.md §0septies.
+    // requirement.
     ui.set_credits_copyright_text(format!("© {} Sythos", current_year()).into());
     ui.set_app_version(cordiale_core::APP_VERSION.into());
 
@@ -458,8 +458,8 @@ struct WorkerState {
     messages: MessagesByChannel,
     /// Keyed by `(network, channel)`; an unsent compose draft per channel,
     /// mirroring Cicchetto's own per-channel drafts (confirmed by the
-    /// Grappa/Cicchetto maintainer, see MEMORY.md §0sexies) so switching
-    /// channels doesn't lose or leak what's half-typed.
+    /// Grappa/Cicchetto maintainer) so switching channels doesn't lose or
+    /// leak what's half-typed.
     drafts: HashMap<(String, String), String>,
     /// Keyed by `(network, channel)`; the channel topic, if the server sent
     /// one — see `topics_from_boot` and `handle_frame`.
@@ -840,8 +840,8 @@ async fn handle_connect(
     };
 
     // Never log a real password: it may be a real password or a
-    // per-client token, and either way it's a secret — see MEMORY.md
-    // §3.6. "guest" isn't a secret, so the guest case can log it plainly.
+    // per-client token, and either way it's a secret. "guest" isn't a
+    // secret, so the guest case can log it plainly.
     persistence::log_line(&format!(
         "connect attempt: server={server_url} identifier={login_identifier} \
          guest={is_guest_attempt}"
@@ -1520,10 +1520,10 @@ async fn handle_member_ctcp(
 /// directly from the real server source (`session/wire.ex`'s
 /// `@type wire_event_kind` union — the authoritative closed set — plus
 /// every other non-admin `*/wire.ex` module in vjt/grappa-irc), not
-/// grepped or guessed; see MEMORY.md §20 for the full audit. Per
-/// `docs/CLIENT_PROTOCOL.md` §4's own policy ("treat unknown `kind`
-/// values as ignorable"), these are dropped silently rather than shown as
-/// a raw dump. Deliberately excludes `"parted"`: two comments in the real
+/// grepped or guessed. Per `docs/CLIENT_PROTOCOL.md` §4's own policy
+/// ("treat unknown `kind` values as ignorable"), these are dropped
+/// silently rather than shown as a raw dump. Deliberately excludes
+/// `"parted"`: two comments in the real
 /// server source (`session/server.ex`, `session/window_state.ex`) state
 /// there is intentionally no such broadcast — a self-part is signaled by
 /// the window disappearing from window-state, not a push, so listening
@@ -1660,9 +1660,9 @@ fn handle_frame(
     // Every frame this session before now was read straight off
     // `frame.payload`, so every live chat message fell through to the raw
     // dump fallback (`sender`/`body` both absent at the top level) — the
-    // WebSocket connection itself never even succeeding until now (see
-    // MEMORY.md) meant this had no chance to be noticed until a real user
-    // screenshot showed the literal envelope shape.
+    // WebSocket connection itself never even succeeding until now meant
+    // this had no chance to be noticed until a real user screenshot
+    // showed the literal envelope shape.
     let effective_payload: &Value = if payload_kind == Some("message") {
         match frame.payload.get("message") {
             Some(inner) => inner,
@@ -2085,7 +2085,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
         }
         // CTCP ACTION (`/me`) — the inner kind riding under a `message`
         // envelope, confirmed real by auditing `scrollback/message.ex`
-        // directly (MEMORY.md §20). The body is the plain action text,
+        // directly. The body is the plain action text,
         // not the raw `\x01ACTION ... \x01` wire form (that framing is
         // stripped server-side, matching how `notice` is already a clean
         // kind rather than needing CTCP unwrapping itself).
@@ -2404,9 +2404,8 @@ fn sort_members_by_rank(members: &mut [MemberEntry]) {
 /// Reads initial scrollback out of `boot.heads` (network -> channel ->
 /// message rows), rendered the same way a live frame would be.
 /// `boot.heads` "is only present for a channel that actually has history"
-/// (confirmed in an earlier research pass, see MEMORY.md) — a channel with
-/// none simply has no key here and starts empty, same as before this was
-/// wired in.
+/// (confirmed in an earlier research pass) — a channel with none simply
+/// has no key here and starts empty, same as before this was wired in.
 type MessagesByChannel = HashMap<(String, String), Vec<RenderedMessage>>;
 
 fn messages_from_boot(outcome: &BootstrapOutcome) -> MessagesByChannel {
@@ -2693,10 +2692,10 @@ fn remember_server_url(server_url: &str) {
 
 /// Called only after a successful login: remembers the profile (never the
 /// secret itself) in `servers.json`, and puts the secret in the
-/// `CredentialStore` — never in the JSON file, see MEMORY.md §3.6. Also
-/// remembers the server itself in `ServersFile.servers` — the quick-switch
-/// list on the connect screen reads from there (see MEMORY.md §0sexies:
-/// this field existed on disk already, nothing populated it until now).
+/// `CredentialStore` — never in the JSON file. Also remembers the server
+/// itself in `ServersFile.servers` — the quick-switch list on the connect
+/// screen reads from there (this field existed on disk already, nothing
+/// populated it until now).
 ///
 /// Doesn't yet distinguish a password from a per-client token (the form
 /// doesn't ask): always recorded as `AuthMethod::Password` for now.
@@ -2816,8 +2815,8 @@ fn current_year() -> i32 {
 
 /// Sets `status-kind` (and `status-protocol-version` where needed) so
 /// `appwindow.slint`'s `status-text()` can render a translated message —
-/// this function never produces English text itself, only a machine-
-/// readable key, per MEMORY.md §0septies.
+/// this function never produces English text itself, only a
+/// machine-readable key.
 fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
     match err {
         BootstrapError::IncompatibleServer(compat) => {
@@ -2989,8 +2988,8 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"names_reply"));
         assert!(!IGNORED_KINDS.contains(&"topic_changed"));
         // "parted" is confirmed to never actually be sent by the server
-        // (MEMORY.md §20) — listing it here would be harmless but wrong
-        // documentation, so it must stay absent.
+        // — listing it here would be harmless but wrong documentation,
+        // so it must stay absent.
         assert!(!IGNORED_KINDS.contains(&"parted"));
     }
 

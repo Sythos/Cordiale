@@ -23,9 +23,8 @@
 fn main() {
     // Bundled translations (not runtime gettext): slint-build compiles the
     // `.po` files itself at build time, no external `msgfmt`/gettext
-    // toolchain needed on any platform — see MEMORY.md §0septies for the
-    // primary-source verification of this before writing it. Domain is
-    // the crate name, per Slint's own convention.
+    // toolchain needed on any platform. Domain is the crate name, per
+    // Slint's own convention.
     let config = slint_build::CompilerConfiguration::new().with_bundled_translations("lang");
     slint_build::compile_with_config("ui/appwindow.slint", config)
         .expect("failed to compile the Slint UI");

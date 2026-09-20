@@ -3,6 +3,6 @@
 # Slint's own team publishes a cross-rs image with fontconfig (and the
 # rest of the GUI dependency stack) preinstalled for both host and target,
 # avoiding the flaky multiarch apt setup on GitHub-hosted runners — see
-# https://github.com/slint-ui/slint/discussions/1165 and MEMORY.md.
+# https://github.com/slint-ui/slint/discussions/1165.
 [target.aarch64-unknown-linux-gnu]
 image = "ghcr.io/slint-ui/slint/aarch64-unknown-linux-gnu"

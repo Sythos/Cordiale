@@ -216,7 +216,8 @@ browser piena; nessuno schema dettagliato nel documento.
 ### 2bis. Forma reale confermata da traffico live (2026-09-20)
 
 Fino a questa data il WebSocket di Cordiale non si era mai connesso con
-successo (bug di encoding del bearer, vedi MEMORY.md §18), quindi nessuna
+successo (bug di encoding del bearer nel valore del subprotocollo
+`Sec-WebSocket-Protocol`, corretto in questa stessa data), quindi nessuna
 delle note seguenti era osservabile prima d'ora — solo `boot.heads`
 (storico REST) era mai stato visto. Confermato su traffico live reale (uno
 screenshot dell'utente) e sul report a monte dell'utente stesso,
@@ -263,8 +264,8 @@ screenshot dell'utente) e sul report a monte dell'utente stesso,
 Audit diretto sui moduli sorgente Elixir del server (non regex/grep su
 poche righe): `session/wire.ex`'s `@type wire_event_kind` è l'insieme
 chiuso ufficiale (40 kind), più ogni altro `*/wire.ex` non-admin del repo.
-Elenco completo, forma dei payload e dettagli in `MEMORY.md` §21 di
-Cordiale (troppo lungo per essere duplicato qui) — riassunto:
+Elenco completo e forma dei payload: costante `IGNORED_KINDS` in
+`crates/cordiale-ui/src/main.rs` — riassunto qui:
 
 - **`"parted"` non esiste**: due commenti nel sorgente server
   (`session/server.ex`, `session/window_state.ex`) confermano che
@@ -281,7 +282,8 @@ Cordiale (troppo lungo per essere duplicato qui) — riassunto:
 - 45 kind aggiuntivi confermati reali ma senza UI in Cordiale ad oggi
   (ISUPPORT/umode/identità, stato finestra, WHOIS/WHOWAS/LUSERS/banlist,
   DCC, ricerca directory, lifecycle network, presence MONITOR/WATCH,
-  notify list, impostazioni server) — elenco e forme in MEMORY.md §21.
+  notify list, impostazioni server) — elenco completo e forma dei payload
+  nella costante `IGNORED_KINDS` citata sopra.
 
 ---
 

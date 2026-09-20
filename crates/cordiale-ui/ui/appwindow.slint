@@ -297,9 +297,8 @@ export component AppWindow inherits Window {
     }
 
     // One of "splash", "language", "connect", "connected", "settings" —
-    // see MEMORY.md §3.4 for why there's no `else`/`else if` in Slint:
-    // mutually exclusive `if` blocks are the documented pattern for
-    // multi-screen navigation.
+    // Slint has no `else`/`else if`: mutually exclusive `if` blocks are
+    // the documented pattern for multi-screen navigation.
     in-out property <string> screen: "splash";
     // Set once by Rust before the window is shown: where the splash
     // screen hands off to once its animation finishes ("language" on
@@ -315,8 +314,8 @@ export component AppWindow inherits Window {
     in-out property <string> identifier: "";
     in-out property <string> password: "";
     // `status-kind` selects a translated template below; `status-message`
-    // is shown verbatim only when `status-kind` is empty (a raw/passthrough
-    // message Rust didn't map to a template — see MEMORY.md §0septies).
+    // is shown verbatim only when `status-kind` is empty (a
+    // raw/passthrough message Rust didn't map to a template).
     // `status-network-count`/`status-channel-count`/`status-protocol-version`
     // fill the `{}` placeholders of the templates that need a number.
     in property <string> status-kind: "";
@@ -326,8 +325,8 @@ export component AppWindow inherits Window {
     in property <int> status-protocol-version: 0;
     in property <bool> connecting: false;
     // Base URLs of servers previously connected to successfully — see
-    // `docs/feature-matrix.md`/MEMORY.md §0sexies: `ServersFile.servers`
-    // existed on disk already, nothing populated or showed it until now.
+    // `docs/feature-matrix.md`: `ServersFile.servers` existed on disk
+    // already, nothing populated or showed it until now.
     in property <[string]> known-servers: [];
 
     // Sidebar model: one entry per connected network, each carrying its own
@@ -387,7 +386,7 @@ export component AppWindow inherits Window {
     in property <[LinksGraphNode]> links-graph-nodes: [];
 
     // Settings > Credits: Cordiale's own info only — deliberately not a
-    // list of Grappa/Cicchetto contributors, see MEMORY.md §0septies.
+    // list of Grappa/Cicchetto contributors.
     in property <string> credits-copyright-text: "";
     in property <string> app-version: "";
 

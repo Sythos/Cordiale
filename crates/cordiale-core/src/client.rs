@@ -24,8 +24,7 @@
 //!
 //! Plain `async fn`s only: no runtime, no threading model, no Slint
 //! dependency here. `cordiale-ui` owns the tokio runtime and the thread
-//! this eventually runs on — see the networking architecture note in
-//! `MEMORY.md`.
+//! this eventually runs on.
 
 use reqwest::{Client, StatusCode};
 

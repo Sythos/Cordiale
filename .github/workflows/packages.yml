@@ -26,7 +26,7 @@ jobs:
             # older than every package this workflow ships to, so the
             # binary runs everywhere; building on 26.04 would raise the
             # minimum glibc requirement past what Trixie has and break
-            # that package. See MEMORY.md for the full reasoning.
+            # that package.
             runner: ubuntu-24.04
             artifact: linux-x64
             deb_arch: amd64
@@ -156,7 +156,7 @@ jobs:
             --license MIT \
             -C stage -p "dist/Cordiale_Debian_13_${DEB_ARCH}.deb" .
           # Same package content for Debian 13 and Ubuntu 26.04: identical
-          # format, dependencies and target glibc floor — see MEMORY.md.
+          # format, dependencies and target glibc floor.
           cp "dist/Cordiale_Debian_13_${DEB_ARCH}.deb" "dist/Cordiale_Ubuntu_26.04_${DEB_ARCH}.deb"
 
           fpm -s dir -t rpm -n cordiale -v "${RPM_VERSION}" -a "${RPM_ARCH}" \
