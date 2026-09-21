@@ -71,9 +71,9 @@ known limitations are:
   protocol lists 56 top-level event kinds. Cordiale handles `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
-  `away_confirmed`, `joined`, `join_failed`, `kicked`, and `message`; the
-  remaining 43 kinds are deliberately ignored for this tester release. They
-  won't appear as fake `event: payload` chat messages. Query
+  `away_confirmed`, `window_counts`, `joined`, `join_failed`, `kicked`, and
+  `message`; the remaining 42 kinds are deliberately ignored for this tester
+  release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
   sidebar rows, subscribe via Cicchetto's channel-shaped/ASCII-folded topic,
   and load/deduplicate history around join acknowledgements. The own-nick
@@ -90,9 +90,13 @@ known limitations are:
   applies live channel-topic cursor pushes last-write-wins (including a
   backward cursor from an authoritative event), clamping the badge to 0..99.
   Cordiale currently retains that badge in session state but does not yet map
-  it to an OS taskbar/dock icon badge. This is not complete DM parity:
-  `window_counts` remains a gap, and overflow or an invalid/missing
-  authoritative query snapshot can still lose realtime DMs.
+  it to an OS taskbar/dock icon badge. `window_counts` seeds per-window
+  mention badges from `/me` and successful joins, then updates them from
+  server pushes; message and event totals remain locally derived, matching
+  Cicchetto. Peer queries update on their own topics, while the own-nick
+  listener targets the self-message window. This is not complete
+  DM parity: overflow or an invalid/missing authoritative query snapshot can
+  still lose realtime DMs.
   Cicchetto is the behavior reference, and native parity work is still in
   progress. A failed
   join keeps a muted pseudo-row, hides its roster, and retains `reason` and
@@ -103,7 +107,7 @@ known limitations are:
   carrier and known network, then update only that network's state; the
   still-ignored `mentions_bundle` remains a separate event gap:
   - **Window, channel, and scrollback state**: `channel_created`,
-    `window_counts`, `window_pending`, `window_invited`,
+    `window_pending`, `window_invited`,
     `window_invite_declined`, `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**: `channels_changed`,
