@@ -70,15 +70,24 @@ known limitations are:
 - **Realtime event coverage (0.1.4 tester build)**: the current Grappa
   protocol lists 56 top-level event kinds. Cordiale handles `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
-  `query_windows_list`, `joined`, `join_failed`, `kicked`, and `message`; the
-  other 46 kinds are deliberately ignored for this tester release. They won't
-  appear as fake `event: payload` chat messages. Query snapshots replace the
-  full query-window map, map network IDs to native sidebar rows, subscribe via
-  Cicchetto's channel-shaped/ASCII-folded topic, and load/deduplicate history
-  around join acknowledgements. This is not complete DM parity: read cursors,
-  window counts, and the separate own-nick listener/rename behavior remain
-  distinct gaps. Cicchetto is the behavior reference, and native parity work
-  is still in progress. A failed
+  `query_windows_list`, `own_nick_changed`, `joined`, `join_failed`, `kicked`,
+  and `message`; the other 45 kinds are deliberately ignored for this tester
+  release. They won't appear as fake `event: payload` chat messages. Query
+  snapshots replace the full query-window map, map network IDs to native
+  sidebar rows, subscribe via Cicchetto's channel-shaped/ASCII-folded topic,
+  and load/deduplicate history around join acknowledgements. The own-nick
+  event updates only its mapped network; Cordiale leaves the old listener
+  before joining the new topic unless that canonical topic is still owned by
+  an open query, keeps case-only changes on the same canonical topic, and
+  accepts inbound listener messages only after a successful join ACK. A small
+  FIFO holds messages whose sender is not in the current query snapshot; a
+  valid `query_windows_list` drains it only for queries the server actually
+  lists, dropping unmatched entries rather than inventing rows. The queue is
+  capped at 32 messages and evicts the oldest on overflow. This is not complete
+  DM parity: read cursors and window counts remain gaps, and overflow or an
+  invalid/missing authoritative snapshot can still lose realtime DMs.
+  Cicchetto is the behavior reference, and native parity work is still in
+  progress. A failed
   join keeps a muted pseudo-row, hides its roster, and retains `reason` and
   `numeric` only in session state. A kick also keeps a muted, accessible,
   selectable pseudo-row without a roster; its `by` and `reason` metadata stay
@@ -90,7 +99,7 @@ known limitations are:
     `archive_purged`.
   - **Network, connection, identity, and settings**: `channels_changed`,
     `network_attached`, `network_detached`, `connection_progress`,
-    `connection_state_changed`, `own_nick_changed`, `isupport_changed`,
+    `connection_state_changed`, `isupport_changed`,
     `umode_changed`, `supported_umodes_changed`, `session_identity_changed`,
     `away_confirmed`, `peer_away`, `auto_away_debounce_changed`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
