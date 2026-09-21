@@ -610,6 +610,12 @@ struct WorkerState {
     /// Keyed by `(network, channel)`; the last complete channel-mode
     /// snapshot received on the Phoenix channel topic.
     channel_modes: HashMap<(String, String), ChannelModes>,
+    /// Last server-confirmed read message ID per canonical channel-shaped
+    /// window key. The network is preserved and only the channel segment is
+    /// ASCII-folded, matching Cicchetto's channel key.
+    read_cursors: HashMap<(String, String), i64>,
+    /// Account-wide unread badge from `/me` or the latest read-cursor push.
+    badge_count: u64,
     /// Keyed by `(network, channel)`; the member list from `boot`, if any
     /// was found — see `members_from_boot`. Snapshot only: unlike
     /// messages/topic, this doesn't update live on join/part yet (a known
@@ -694,6 +700,8 @@ impl WorkerState {
             drafts: HashMap::new(),
             topics: HashMap::new(),
             channel_modes: HashMap::new(),
+            read_cursors: HashMap::new(),
+            badge_count: 0,
             members: HashMap::new(),
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
@@ -1128,6 +1136,11 @@ async fn handle_connect(
             // Mode snapshots are replayed on each subscribed channel topic,
             // not included in `/boot`; never carry them across identities.
             state.channel_modes.clear();
+            // `/me` is the cold seed for the server-authoritative read cursor
+            // and account-wide badge; replace prior identity state before
+            // opening the new Phoenix session.
+            state.read_cursors = read_cursors_from_me(&outcome.me.read_cursors);
+            state.badge_count = normalize_badge_count(Some(&outcome.me.badge_count));
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
@@ -2105,7 +2118,6 @@ const IGNORED_KINDS: &[&str] = &[
     // Known from vjt/grappa-irc#2260 or the wire union (joined, join_failed,
     // kicked, topic_changed, channel_modes_changed, and members_seeded/names_reply
     // are handled above.
-    "read_cursor_set",
     "window_counts",
     "away_confirmed",
     "bundle_hash",
@@ -2300,6 +2312,16 @@ async fn handle_frame(
     let payload_kind = event_kind.as_wire_name();
     if payload_kind == "own_nick_changed" {
         handle_own_nick_changed(state, &frame.topic, &frame.payload);
+        return;
+    }
+    // `read_cursor_set` omits both network and target from its payload; the
+    // Phoenix channel topic is its window identity. Cicchetto applies these
+    // authoritative pushes last-write-wins, including a lower cursor from a
+    // later-arriving frame, and treats the account-wide badge separately.
+    if payload_kind == "read_cursor_set" {
+        if let Some(identifier) = state.identifier.clone() {
+            apply_read_cursor_set(state, &identifier, &frame.topic, &frame.payload);
+        }
         return;
     }
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
@@ -2845,6 +2867,97 @@ fn channel_topic_matches(identifier: &str, topic: &str, network: &str, channel: 
     topic.strip_prefix(&prefix).is_some_and(|topic_channel| {
         ascii_fold_channel(topic_channel) == ascii_fold_channel(channel)
     })
+}
+
+/// Parses `/me.read_cursors`, keyed by network slug and target, into the same
+/// `(network, ASCII-folded target)` key used for channel/query windows.
+/// Absent, null, or malformed cursor entries are not fabricated.
+fn read_cursors_from_me(value: &Value) -> HashMap<(String, String), i64> {
+    let mut cursors = HashMap::new();
+    let Some(networks) = value.as_object() else {
+        return cursors;
+    };
+
+    for (network, windows) in networks {
+        if network.is_empty() {
+            continue;
+        }
+        let Some(windows) = windows.as_object() else {
+            continue;
+        };
+        for (target, cursor) in windows {
+            if target.is_empty() {
+                continue;
+            }
+            if let Some(message_id) = cursor.as_i64() {
+                cursors.insert(window_state_key(network, target), message_id);
+            }
+        }
+    }
+
+    cursors
+}
+
+/// Mirrors Cicchetto's account-wide badge normalization: invalid/non-positive
+/// values become zero, positive fractions are floored, and the visible badge
+/// is capped at 99.
+fn normalize_badge_count(value: Option<&Value>) -> u64 {
+    let Some(count) = value.and_then(Value::as_f64) else {
+        return 0;
+    };
+    if !count.is_finite() || count <= 0.0 {
+        return 0;
+    }
+    count.floor().min(99.0) as u64
+}
+
+/// Parses one channel-topic cursor push. The kind is checked again here so
+/// the helper is safe to exercise independently in tests; an unrelated user
+/// topic, foreign identity, empty window, or malformed cursor is rejected.
+fn parse_read_cursor_set_event(
+    identifier: &str,
+    topic: &str,
+    payload: &Value,
+) -> Option<((String, String), i64, u64)> {
+    if payload.get("kind").and_then(Value::as_str) != Some("read_cursor_set") {
+        return None;
+    }
+    let (network, channel) = channel_from_topic(topic)?;
+    if network.is_empty()
+        || channel.is_empty()
+        || !channel_topic_matches(identifier, topic, &network, &channel)
+    {
+        return None;
+    }
+    let last_read_message_id = payload.get("last_read_message_id")?.as_i64()?;
+    let badge_count = normalize_badge_count(payload.get("badge_count"));
+    Some((
+        window_state_key(&network, &channel),
+        last_read_message_id,
+        badge_count,
+    ))
+}
+
+/// Applies a server-authoritative cursor/badge update. A malformed required
+/// cursor leaves both values unchanged; an omitted or malformed badge is
+/// normalized to zero, as Cicchetto's badge setter does.
+fn apply_read_cursor_set(
+    state: &mut WorkerState,
+    identifier: &str,
+    topic: &str,
+    payload: &Value,
+) -> bool {
+    let Some((key, last_read_message_id, badge_count)) =
+        parse_read_cursor_set_event(identifier, topic, payload)
+    else {
+        return false;
+    };
+
+    let cursor_changed = state.read_cursors.get(&key).copied() != Some(last_read_message_id);
+    let badge_changed = state.badge_count != badge_count;
+    state.read_cursors.insert(key, last_read_message_id);
+    state.badge_count = badge_count;
+    cursor_changed || badge_changed
 }
 
 /// Cicchetto's `channelKey` uses `asciiFold` (`A-Z` only) for the channel
@@ -6645,16 +6758,11 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 45);
+        assert_eq!(IGNORED_KINDS.len(), 44);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
-        for kind in [
-            "read_cursor_set",
-            "window_counts",
-            "away_confirmed",
-            "bundle_hash",
-        ] {
+        for kind in ["window_counts", "away_confirmed", "bundle_hash"] {
             assert!(
                 IGNORED_KINDS.contains(&kind),
                 "{kind} should be in IGNORED_KINDS"
@@ -6667,6 +6775,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"names_reply"));
         assert!(!IGNORED_KINDS.contains(&"topic_changed"));
         assert!(!IGNORED_KINDS.contains(&"channel_modes_changed"));
+        assert!(!IGNORED_KINDS.contains(&"read_cursor_set"));
         assert!(!IGNORED_KINDS.contains(&"query_windows_list"));
         assert!(!IGNORED_KINDS.contains(&"own_nick_changed"));
         assert!(!IGNORED_KINDS.contains(&"joined"));
@@ -6676,6 +6785,165 @@ mod tests {
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
         assert!(!IGNORED_KINDS.contains(&"parted"));
+    }
+
+    #[test]
+    fn read_cursor_set_is_scoped_to_its_channel_shaped_topic_and_clamps_badge() {
+        let channel = channel_topic("sythos", "libera", "#Cordiale");
+        let payload = serde_json::json!({
+            "kind": "read_cursor_set",
+            "last_read_message_id": 202,
+            "badge_count": 120,
+            "future_field": "ignored"
+        });
+
+        assert_eq!(
+            parse_read_cursor_set_event("sythos", &channel, &payload),
+            Some((window_state_key("libera", "#cordiale"), 202, 99))
+        );
+
+        // Cicchetto uses the same channel-shaped topic for a DM or own-nick
+        // listener, so those windows use the same per-network keying rule.
+        let query = query_topic("sythos", "libera", "FrIeNd");
+        let query_payload = serde_json::json!({
+            "kind": "read_cursor_set",
+            "last_read_message_id": 303,
+            "badge_count": 7
+        });
+        assert_eq!(
+            parse_read_cursor_set_event("sythos", &query, &query_payload),
+            Some((window_state_key("libera", "friend"), 303, 7))
+        );
+    }
+
+    #[test]
+    fn read_cursor_set_is_last_write_wins_even_when_cursor_moves_backward() {
+        let topic = channel_topic("sythos", "libera", "#rust");
+        let mut state = WorkerState::new();
+        state.identifier = Some("sythos".to_string());
+
+        let newer = serde_json::json!({
+            "kind": "read_cursor_set",
+            "last_read_message_id": 202,
+            "badge_count": 4
+        });
+        let older = serde_json::json!({
+            "kind": "read_cursor_set",
+            "last_read_message_id": 101,
+            "badge_count": 5
+        });
+
+        assert!(apply_read_cursor_set(&mut state, "sythos", &topic, &newer));
+        assert!(!apply_read_cursor_set(&mut state, "sythos", &topic, &newer));
+        assert!(apply_read_cursor_set(&mut state, "sythos", &topic, &older));
+        assert_eq!(
+            state.read_cursors.get(&window_state_key("libera", "#rust")),
+            Some(&101)
+        );
+        assert_eq!(state.badge_count, 5);
+    }
+
+    #[test]
+    fn read_cursors_are_seeded_from_me_without_fabricating_invalid_entries() {
+        let payload = serde_json::json!({
+            "libera": {
+                "#Rust": 101,
+                "Alice": 202,
+                "#null": null,
+                "#text": "203",
+                "#fraction": 1.5
+            },
+            "invalid-network": 3,
+            "empty-network": {}
+        });
+        let cursors = read_cursors_from_me(&payload);
+
+        assert_eq!(cursors.len(), 2);
+        assert_eq!(
+            cursors.get(&window_state_key("libera", "#rust")),
+            Some(&101)
+        );
+        assert_eq!(
+            cursors.get(&window_state_key("libera", "alice")),
+            Some(&202)
+        );
+        assert!(read_cursors_from_me(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn malformed_or_foreign_read_cursor_events_leave_state_unchanged() {
+        let topic = channel_topic("sythos", "libera", "#rust");
+        let mut state = WorkerState::new();
+        state.identifier = Some("sythos".to_string());
+        state
+            .read_cursors
+            .insert(window_state_key("libera", "#rust"), 101);
+        state.badge_count = 6;
+        let before_cursors = state.read_cursors.clone();
+        let before_badge = state.badge_count;
+
+        for (identifier, event) in [
+            (
+                "someone-else",
+                serde_json::json!({
+                    "kind": "read_cursor_set",
+                    "last_read_message_id": 202,
+                    "badge_count": 1
+                }),
+            ),
+            (
+                "sythos",
+                serde_json::json!({
+                    "kind": "read_cursor_set",
+                    "last_read_message_id": "202",
+                    "badge_count": 1
+                }),
+            ),
+            (
+                "sythos",
+                serde_json::json!({
+                    "kind": "window_counts",
+                    "last_read_message_id": 202,
+                    "badge_count": 1
+                }),
+            ),
+        ] {
+            assert!(!apply_read_cursor_set(
+                &mut state, identifier, &topic, &event
+            ));
+        }
+        assert!(!apply_read_cursor_set(
+            &mut state,
+            "sythos",
+            "grappa:user:sythos",
+            &serde_json::json!({
+                "kind": "read_cursor_set",
+                "last_read_message_id": 202,
+                "badge_count": 1
+            })
+        ));
+
+        assert_eq!(state.read_cursors, before_cursors);
+        assert_eq!(state.badge_count, before_badge);
+    }
+
+    #[test]
+    fn read_cursor_badge_normalizes_values_like_cicchetto() {
+        let cases = [
+            (serde_json::json!(0), 0),
+            (serde_json::json!(99), 99),
+            (serde_json::json!(100), 99),
+            (serde_json::json!(u64::MAX), 99),
+            (serde_json::json!(-1), 0),
+            (serde_json::json!(4.9), 4),
+            (serde_json::json!(null), 0),
+            (serde_json::json!("bad"), 0),
+        ];
+
+        for (value, expected) in cases {
+            assert_eq!(normalize_badge_count(Some(&value)), expected);
+        }
+        assert_eq!(normalize_badge_count(None), 0);
     }
 
     #[test]

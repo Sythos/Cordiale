@@ -70,9 +70,10 @@ known limitations are:
 - **Realtime event coverage (0.1.4 tester build)**: the current Grappa
   protocol lists 56 top-level event kinds. Cordiale handles `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
-  `query_windows_list`, `own_nick_changed`, `joined`, `join_failed`, `kicked`,
-  and `message`; the other 45 kinds are deliberately ignored for this tester
-  release. They won't appear as fake `event: payload` chat messages. Query
+  `query_windows_list`, `own_nick_changed`, `read_cursor_set`, `joined`,
+  `join_failed`, `kicked`, and `message`; the other 44 kinds are deliberately
+  ignored for this tester release. They won't appear as fake `event: payload`
+  chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
   sidebar rows, subscribe via Cicchetto's channel-shaped/ASCII-folded topic,
   and load/deduplicate history around join acknowledgements. The own-nick
@@ -84,9 +85,14 @@ known limitations are:
   FIFO holds messages whose sender is not in the current query snapshot; a
   valid `query_windows_list` drains it only for queries the server actually
   lists, dropping unmatched entries rather than inventing rows. The queue is
-  capped at 32 messages and evicts the oldest on overflow. This is not complete
-  DM parity: read cursors and window counts remain gaps, and overflow or an
-  invalid/missing authoritative snapshot can still lose realtime DMs.
+  capped at 32 messages and evicts the oldest on overflow. `read_cursor_set`
+  seeds per-window cursors and the account-wide unread badge from `/me`, then
+  applies live channel-topic cursor pushes last-write-wins (including a
+  backward cursor from an authoritative event), clamping the badge to 0..99.
+  Cordiale currently retains that badge in session state but does not yet map
+  it to an OS taskbar/dock icon badge. This is not complete DM parity:
+  `window_counts` remains a gap, and overflow or an invalid/missing
+  authoritative query snapshot can still lose realtime DMs.
   Cicchetto is the behavior reference, and native parity work is still in
   progress. A failed
   join keeps a muted pseudo-row, hides its roster, and retains `reason` and
@@ -95,7 +101,7 @@ known limitations are:
   in session state, and its close control sends a server-side PART before
   removing the row locally:
   - **Window, channel, and scrollback state**: `channel_created`,
-    `read_cursor_set`, `window_counts`, `window_pending`, `window_invited`,
+    `window_counts`, `window_pending`, `window_invited`,
     `window_invite_declined`, `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**: `channels_changed`,
