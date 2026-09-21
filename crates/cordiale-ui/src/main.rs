@@ -6762,11 +6762,7 @@ mod tests {
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
-        for kind in [
-            "window_counts",
-            "away_confirmed",
-            "bundle_hash",
-        ] {
+        for kind in ["window_counts", "away_confirmed", "bundle_hash"] {
             assert!(
                 IGNORED_KINDS.contains(&kind),
                 "{kind} should be in IGNORED_KINDS"
@@ -6879,7 +6875,9 @@ mod tests {
         let topic = channel_topic("sythos", "libera", "#rust");
         let mut state = WorkerState::new();
         state.identifier = Some("sythos".to_string());
-        state.read_cursors.insert(window_state_key("libera", "#rust"), 101);
+        state
+            .read_cursors
+            .insert(window_state_key("libera", "#rust"), 101);
         state.badge_count = 6;
         let before_cursors = state.read_cursors.clone();
         let before_badge = state.badge_count;
@@ -6910,7 +6908,9 @@ mod tests {
                 }),
             ),
         ] {
-            assert!(!apply_read_cursor_set(&mut state, identifier, &topic, &event));
+            assert!(!apply_read_cursor_set(
+                &mut state, identifier, &topic, &event
+            ));
         }
         assert!(!apply_read_cursor_set(
             &mut state,
