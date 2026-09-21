@@ -3663,6 +3663,7 @@ fn messages_from_boot(outcome: &BootstrapOutcome) -> MessagesByChannel {
 /// One sidebar network group as plain data: network slug, expand state,
 /// and its `(channel, label)` pairs.
 type NetworkGroupData = (String, bool, Vec<(String, String)>, Vec<(String, String)>);
+type NetworkEntries = (Vec<(String, String)>, Vec<(String, String)>);
 
 /// Groups flat `(network, channel, label)` entries by network, sorted by
 /// network then channel (`boot.channels` is a `HashMap`, so iteration
@@ -3681,10 +3682,8 @@ fn network_groups_data(
     query_windows: &[QueryWindow],
     expanded: &HashMap<String, bool>,
 ) -> Vec<NetworkGroupData> {
-    let mut by_network: std::collections::BTreeMap<
-        String,
-        (Vec<(String, String)>, Vec<(String, String)>),
-    > = std::collections::BTreeMap::new();
+    let mut by_network: std::collections::BTreeMap<String, NetworkEntries> =
+        std::collections::BTreeMap::new();
     for (network, channel, label) in entries {
         by_network
             .entry(network.clone())
