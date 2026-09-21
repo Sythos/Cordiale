@@ -26,9 +26,9 @@
 //! sends a periodic heartbeat (standard Phoenix client convention — every
 //! 30s on the dedicated `"phoenix"` topic; not Grappa-specific, and not
 //! spelled out in `docs/protocol-notes.md`, which flags heartbeat/backoff
-//! as undocumented — see its §6.1/§7), lets callers join additional topics
-//! (network/channel), and reconnects with a fixed delay on disconnect,
-//! rejoining whatever was joined before.
+//! as undocumented — see its §6.1/§7), lets callers join and leave
+//! additional topics (network/channel), and reconnects with a fixed delay
+//! on disconnect, rejoining whatever was joined before.
 //!
 //! Runs as a plain `tokio::spawn`ed task, talking to its caller over two
 //! channels, so `cordiale-ui` never has to hold the socket itself.
@@ -53,6 +53,12 @@ pub enum SessionCommand {
     JoinTopic {
         topic: String,
         presence: bool,
+    },
+    /// Leaves a topic previously joined by this session. The current
+    /// `join_ref` is attached to the `phx_leave` frame, and the topic is
+    /// removed from the reconnect set.
+    LeaveTopic {
+        topic: String,
     },
     /// Sends an arbitrary `GrappaChannel` command (e.g. `/links`, `whois`)
     /// on a topic the session has already joined. `topic` is the caller's
@@ -109,6 +115,12 @@ impl SessionHandle {
         let _ = self.commands.send(SessionCommand::JoinTopic {
             topic: topic.into(),
             presence,
+        });
+    }
+
+    pub fn leave_topic(&self, topic: impl Into<String>) {
+        let _ = self.commands.send(SessionCommand::LeaveTopic {
+            topic: topic.into(),
         });
     }
 
@@ -247,6 +259,12 @@ async fn run_session(
                                 joined_topics.insert(topic, JoinedTopic { join_ref, presence });
                             }
                         }
+                        Some(SessionCommand::LeaveTopic { topic }) => {
+                            if let Some(joined) = joined_topics.remove(&topic) {
+                                let message = leave_message(&topic, &joined, &mut refs);
+                                let _ = socket.send(&message).await;
+                            }
+                        }
                         Some(SessionCommand::Send { topic, event, payload }) => {
                             if let Some(joined) = joined_topics.get(&topic) {
                                 let message = PhoenixMessage {
@@ -319,4 +337,43 @@ async fn join(
         payload,
     };
     socket.send(&message).await.map(|()| join_ref)
+}
+
+fn leave_message(topic: &str, joined: &JoinedTopic, refs: &mut RefCounter) -> PhoenixMessage {
+    PhoenixMessage {
+        join_ref: Some(joined.join_ref.clone()),
+        message_ref: Some(refs.next_ref()),
+        topic: topic.to_string(),
+        event: "phx_leave".to_string(),
+        payload: serde_json::json!({}),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leave_frame_uses_join_ref_and_a_fresh_message_ref() {
+        let joined = JoinedTopic {
+            join_ref: "join-7".to_string(),
+            presence: false,
+        };
+        let mut refs = RefCounter::new();
+
+        let message = leave_message(
+            "grappa:user:vjt/network:libera/channel:oldnick",
+            &joined,
+            &mut refs,
+        );
+
+        assert_eq!(message.join_ref.as_deref(), Some("join-7"));
+        assert_eq!(message.message_ref.as_deref(), Some("1"));
+        assert_eq!(
+            message.topic,
+            "grappa:user:vjt/network:libera/channel:oldnick"
+        );
+        assert_eq!(message.event, "phx_leave");
+        assert_eq!(message.payload, serde_json::json!({}));
+    }
 }

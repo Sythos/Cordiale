@@ -23,7 +23,7 @@
 slint::include_modules!();
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -555,6 +555,29 @@ struct QueryWindow {
     opened_at: String,
 }
 
+#[derive(Clone, Debug)]
+struct PendingOwnNickDm {
+    network: String,
+    sender: String,
+    payload: Value,
+    event_fallback: String,
+}
+
+const MAX_PENDING_OWN_NICK_DMS: usize = 32;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OwnNickListenerAction {
+    Leave(String),
+    Join(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnNickListenerJoinReply {
+    Untracked,
+    Accepted,
+    Rejected,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -601,12 +624,20 @@ struct WorkerState {
     /// Full replacement from `query_windows_list`; query rows live beside
     /// channel rows while retaining their own window identity.
     query_windows: Vec<QueryWindow>,
+    /// Own-nick DMs can precede the authoritative query snapshot that Grappa
+    /// emits after opening a sender's query. Hold only a small FIFO until that
+    /// snapshot either confirms the query or proves it should be discarded.
+    pending_own_nick_dms: VecDeque<PendingOwnNickDm>,
     /// Query topics whose Phoenix join was acknowledged successfully. Keys
     /// use the same network + ASCII-folded target identity as the snapshot.
     query_joined: std::collections::HashSet<(String, String)>,
     /// Query topics whose join and initial/refresh history load both
     /// completed; only these are ready for sending, like Cicchetto.
     query_ready: std::collections::HashSet<(String, String)>,
+    /// Queries that received a buffered first DM before their initial history
+    /// fetch; the join-ACK path must load the full tail, not just `after` the
+    /// buffered message ID.
+    query_full_history_required: std::collections::HashSet<(String, String)>,
     /// Query keys removed/renamed by a later full snapshot. Since Grappa
     /// shares the channel-shaped Phoenix topic for channels and queries,
     /// remember these identities so their late frames are ignored without
@@ -625,6 +656,12 @@ struct WorkerState {
     /// isn't just string-vs-int bikeshedding: the server hard-rejects a
     /// non-integer `network_id` (`is_integer/1` guard), no slug fallback.
     network_ids: HashMap<String, i64>,
+    /// Current IRC nick for each network, seeded from `/boot.networks` and
+    /// replaced by `own_nick_changed` on the matching network only.
+    own_nicks: HashMap<String, String>,
+    /// Own-nick listener topics become usable only after a successful
+    /// Phoenix join reply. Keys are canonical topic strings.
+    own_listener_ready: std::collections::HashSet<String>,
     /// The network the self-service Identity/Ignores/Perform/Notify
     /// sections currently act on.
     settings_network: Option<String>,
@@ -661,14 +698,18 @@ impl WorkerState {
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
             query_windows: Vec::new(),
+            pending_own_nick_dms: VecDeque::new(),
             query_joined: std::collections::HashSet::new(),
             query_ready: std::collections::HashSet::new(),
+            query_full_history_required: std::collections::HashSet::new(),
             stale_query_topics: std::collections::HashSet::new(),
             recent_channels: Vec::new(),
             current_query: false,
             current_query_ready: false,
             current_channel: None,
             network_ids: HashMap::new(),
+            own_nicks: HashMap::new(),
+            own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
             notify_nicks: Vec::new(),
             watch_patterns: Vec::new(),
@@ -959,6 +1000,7 @@ async fn run_worker(
                     Some(SessionEvent::Disconnected { reason }) => {
                         persistence::log_line(&format!("session disconnected: {reason}"));
                         reset_query_session_readiness(&mut state);
+                        state.own_listener_ready.clear();
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("disconnected".into());
                             ui.set_status_message(reason.into());
@@ -968,6 +1010,7 @@ async fn run_worker(
                     Some(SessionEvent::Reconnecting { reason }) => {
                         persistence::log_line(&format!("session reconnecting: {reason}"));
                         reset_query_session_readiness(&mut state);
+                        state.own_listener_ready.clear();
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("reconnecting".into());
                             ui.set_status_message(reason.into());
@@ -1071,8 +1114,10 @@ async fn handle_connect(
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
             state.query_windows.clear();
+            state.pending_own_nick_dms.clear();
             state.query_joined.clear();
             state.query_ready.clear();
+            state.query_full_history_required.clear();
             state.stale_query_topics.clear();
             state.window_states = joined_window_states_from_boot_channels(&outcome.boot.channels);
             state.window_failures.clear();
@@ -1086,6 +1131,8 @@ async fn handle_connect(
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
+            state.own_nicks = network_nicks_from_boot(&outcome);
+            state.own_listener_ready.clear();
             state.current_query = false;
             state.current_query_ready = false;
             state.current_channel = None;
@@ -1108,6 +1155,12 @@ async fn handle_connect(
             for entry in &entries {
                 handle.join_topic(channel_topic(&session_identifier, &entry.0, &entry.1), true);
             }
+            for (network, nick) in &state.own_nicks {
+                handle.join_topic(
+                    own_nick_listener_topic(&session_identifier, network, nick),
+                    false,
+                );
+            }
             *session_events = Some(events);
 
             state.client = Some(client);
@@ -1118,6 +1171,13 @@ async fn handle_connect(
                 .iter()
                 .map(|(network, channel, _)| channel_topic(&session_identifier, network, channel))
                 .collect();
+            for (network, nick) in &state.own_nicks {
+                state.joined_topics.insert(own_nick_listener_topic(
+                    &session_identifier,
+                    network,
+                    nick,
+                ));
+            }
 
             let prefs_client = GrappaClient::new(server_url.clone());
             let prefs_token = token.clone();
@@ -1292,6 +1352,7 @@ async fn handle_select_query(
     // default page is newest-first, so merge_query_history restores chronological
     // display order and deduplicates any messages received live in the meantime.
     if fetch_query_history(state, &query, None, None).await {
+        state.query_full_history_required.remove(&identity);
         mark_query_ready_after_history(state, &identity);
         show_query_window(state, ui, &query, &key);
     }
@@ -2050,7 +2111,6 @@ const IGNORED_KINDS: &[&str] = &[
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
     "channels_changed",
-    "own_nick_changed",
     "isupport_changed",
     "umode_changed",
     "session_identity_changed",
@@ -2174,8 +2234,7 @@ async fn handle_query_join_reply(
         return;
     };
     let key = (query.network.clone(), query.target_nick.clone());
-    let high_water = query_high_water_id(state, &key);
-    let limit = high_water.map(|_| 200);
+    let (high_water, limit) = query_history_fetch_window(state, &identity, &key);
 
     // Phoenix's join reply is only the window/cursor seed; it carries no
     // message rows. Fetch the after-page from Grappa, using a known local
@@ -2184,6 +2243,7 @@ async fn handle_query_join_reply(
     if !fetch_query_history(state, &query, high_water, limit).await {
         return;
     }
+    state.query_full_history_required.remove(&identity);
     mark_query_ready_after_history(state, &identity);
 
     let selected = state.current_query
@@ -2215,6 +2275,14 @@ async fn handle_frame(
 ) {
     if frame.event == "phx_reply" {
         let status = frame.payload.get("status").and_then(Value::as_str);
+        if handle_own_nick_listener_join_reply(state, &frame.topic, status)
+            == OwnNickListenerJoinReply::Rejected
+        {
+            persistence::log_line(&format!(
+                "own-nick listener join was not acknowledged: {}",
+                frame.topic
+            ));
+        }
         handle_query_join_reply(state, ui, &frame.topic, status).await;
         return;
     }
@@ -2230,6 +2298,10 @@ async fn handle_frame(
         return;
     };
     let payload_kind = event_kind.as_wire_name();
+    if payload_kind == "own_nick_changed" {
+        handle_own_nick_changed(state, &frame.topic, &frame.payload);
+        return;
+    }
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
         handle_links_bundle(ui, &frame.payload);
         return;
@@ -2295,6 +2367,32 @@ async fn handle_frame(
     } else {
         &frame.payload
     };
+
+    if let Some(network) = own_nick_listener_network_for_topic(state, &frame.topic) {
+        if payload_kind == "message"
+            && state.own_listener_ready.contains(&frame.topic)
+            && own_nick_listener_accepts_inbound_dm(effective_payload)
+        {
+            if let Some(key) = own_nick_dm_query_key(state, &network, effective_payload) {
+                require_query_full_history_if_unready(state, &key);
+                if append_query_live_message(state, &key, effective_payload, Some(&frame.event))
+                    && state.current_query
+                    && state.current_channel.as_ref() == Some(&key)
+                {
+                    let lines = state.messages[&key].clone();
+                    let dark_theme = state.theme == Theme::Dark;
+                    let ui = ui.clone();
+                    let _ = ui.upgrade_in_event_loop(move |ui| {
+                        let model = chat_lines_model(&lines, dark_theme);
+                        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+                    });
+                }
+            } else {
+                buffer_pending_own_nick_dm(state, &network, effective_payload, &frame.event);
+            }
+        }
+        return;
+    }
 
     if payload_kind == "topic_changed" {
         handle_topic_changed(state, ui, &frame.payload);
@@ -3301,6 +3399,27 @@ fn query_high_water_id(state: &WorkerState, key: &(String, String)) -> Option<i6
         .max()
 }
 
+fn query_history_fetch_window(
+    state: &WorkerState,
+    identity: &(String, String),
+    key: &(String, String),
+) -> (Option<i64>, Option<usize>) {
+    if state.query_full_history_required.contains(identity) {
+        // The highest local ID may be the just-buffered inbound DM, not a
+        // history checkpoint. Fetch the default tail and merge it by ID.
+        return (None, None);
+    }
+    let high_water = query_high_water_id(state, key);
+    (high_water, high_water.map(|_| 200))
+}
+
+fn require_query_full_history_if_unready(state: &mut WorkerState, key: &(String, String)) {
+    let identity = query_window_key(&key.0, &key.1);
+    if !state.query_ready.contains(&identity) {
+        state.query_full_history_required.insert(identity);
+    }
+}
+
 /// Merges a query history page into the local conversation by the server's
 /// stable message ID, then restores Cicchetto's chronological
 /// `(server_time, id)` ordering. This makes the default newest-first tail and
@@ -3409,6 +3528,10 @@ fn query_topic(user: &str, network: &str, nick: &str) -> String {
     channel_topic(user, network, &ascii_fold_channel(nick))
 }
 
+fn own_nick_listener_topic(user: &str, network: &str, nick: &str) -> String {
+    query_topic(user, network, nick)
+}
+
 /// Parses a channel-shaped query topic only when it belongs to the active
 /// user. It intentionally accepts the same `channel:` topic contract as
 /// Grappa; callers must additionally confirm the target is in the current
@@ -3421,6 +3544,85 @@ fn query_from_topic(user: &str, topic: &str) -> Option<(String, String)> {
         return None;
     }
     Some((network.to_string(), nick.to_string()))
+}
+
+fn own_nick_listener_network_for_topic(state: &WorkerState, topic: &str) -> Option<String> {
+    let user = state.identifier.as_deref()?;
+    state.own_nicks.iter().find_map(|(network, nick)| {
+        (own_nick_listener_topic(user, network, nick) == topic).then(|| network.clone())
+    })
+}
+
+fn own_nick_listener_accepts_inbound_dm(payload: &Value) -> bool {
+    matches!(
+        payload.get("kind").and_then(Value::as_str),
+        Some("privmsg" | "action")
+    )
+}
+
+fn own_nick_dm_query_key(
+    state: &WorkerState,
+    network: &str,
+    payload: &Value,
+) -> Option<(String, String)> {
+    let sender = own_nick_dm_sender(payload)?;
+    let query = find_query_window(&state.query_windows, network, sender)?;
+    Some((query.network.clone(), query.target_nick.clone()))
+}
+
+fn own_nick_dm_sender(payload: &Value) -> Option<&str> {
+    let sender = ["from", "nick", "sender"]
+        .iter()
+        .find_map(|field| payload.get(*field).and_then(Value::as_str))?;
+    if sender.trim().is_empty()
+        || payload
+            .get("body")
+            .or_else(|| payload.get("message"))
+            .and_then(Value::as_str)
+            .is_none()
+    {
+        return None;
+    }
+    Some(sender)
+}
+
+fn buffer_pending_own_nick_dm(
+    state: &mut WorkerState,
+    network: &str,
+    payload: &Value,
+    event_fallback: &str,
+) {
+    let Some(sender) = own_nick_dm_sender(payload) else {
+        return;
+    };
+    if find_query_window(&state.query_windows, network, sender).is_some() {
+        return;
+    }
+    if state.pending_own_nick_dms.len() >= MAX_PENDING_OWN_NICK_DMS {
+        state.pending_own_nick_dms.pop_front();
+    }
+    state.pending_own_nick_dms.push_back(PendingOwnNickDm {
+        network: network.to_string(),
+        sender: sender.to_string(),
+        payload: payload.clone(),
+        event_fallback: event_fallback.to_string(),
+    });
+}
+
+fn drain_pending_own_nick_dms(state: &mut WorkerState) {
+    let pending = std::mem::take(&mut state.pending_own_nick_dms);
+    for dm in pending {
+        let Some(query) = find_query_window(&state.query_windows, &dm.network, &dm.sender).cloned()
+        else {
+            // A valid full snapshot is authoritative: if it didn't open the
+            // sender's query, don't invent a client-side window or retain the
+            // message until some unrelated later snapshot.
+            continue;
+        };
+        let key = (query.network.clone(), query.target_nick.clone());
+        require_query_full_history_if_unready(state, &key);
+        append_query_live_message(state, &key, &dm.payload, Some(&dm.event_fallback));
+    }
 }
 
 /// Parses `(network, channel)` back out of a channel-level topic string;
@@ -3944,6 +4146,24 @@ fn network_ids_from_boot(outcome: &BootstrapOutcome) -> HashMap<String, i64> {
         .collect()
 }
 
+fn network_nicks_from_boot(outcome: &BootstrapOutcome) -> HashMap<String, String> {
+    network_nicks_from_entries(&outcome.boot.networks)
+}
+
+fn network_nicks_from_entries(networks: &[Value]) -> HashMap<String, String> {
+    networks
+        .iter()
+        .filter_map(|value| {
+            let slug = value.get("slug").and_then(Value::as_str)?;
+            let nick = value.get("nick").and_then(Value::as_str)?;
+            if nick.trim().is_empty() {
+                return None;
+            }
+            Some((slug.to_string(), nick.to_string()))
+        })
+        .collect()
+}
+
 /// Reverses `/boot`'s slug-to-id map. Duplicate IDs are rejected rather than
 /// allowing an event row to be attached to an arbitrary network.
 fn network_slugs_by_id(network_ids: &HashMap<String, i64>) -> Option<HashMap<i64, String>> {
@@ -3959,6 +4179,113 @@ fn network_slugs_by_id(network_ids: &HashMap<String, i64>) -> Option<HashMap<i64
         }
     }
     Some(slugs)
+}
+
+fn parse_own_nick_changed(
+    payload: &Value,
+    network_slugs: &HashMap<i64, String>,
+) -> Option<(String, String)> {
+    if payload.get("kind")?.as_str()? != "own_nick_changed" {
+        return None;
+    }
+    let network_id = payload.get("network_id")?.as_i64()?;
+    if network_id <= 0 {
+        return None;
+    }
+    let network = network_slugs.get(&network_id)?;
+    let nick = payload.get("nick")?.as_str()?;
+    if nick.trim().is_empty() {
+        return None;
+    }
+    Some((network.clone(), nick.to_string()))
+}
+
+fn apply_own_nick_change(
+    state: &mut WorkerState,
+    user: &str,
+    network: &str,
+    nick: &str,
+) -> Vec<OwnNickListenerAction> {
+    let previous = state
+        .own_nicks
+        .insert(network.to_string(), nick.to_string());
+    let new_topic = own_nick_listener_topic(user, network, nick);
+    if previous
+        .as_deref()
+        .is_some_and(|old_nick| ascii_fold_channel(old_nick) == ascii_fold_channel(nick))
+    {
+        return Vec::new();
+    }
+
+    let mut actions = Vec::with_capacity(2);
+    if let Some(old_nick) = previous {
+        let old_topic = own_nick_listener_topic(user, network, &old_nick);
+        state.own_listener_ready.remove(&old_topic);
+        if find_query_window(&state.query_windows, network, &old_nick).is_none() {
+            state.joined_topics.remove(&old_topic);
+            actions.push(OwnNickListenerAction::Leave(old_topic));
+        }
+    }
+
+    if state.joined_topics.insert(new_topic.clone()) {
+        state.own_listener_ready.remove(&new_topic);
+        actions.push(OwnNickListenerAction::Join(new_topic));
+    } else if state
+        .query_joined
+        .contains(&query_window_key(network, nick))
+    {
+        // The canonical topic may already have been joined as a listed query.
+        // Its successful query ACK is also sufficient for this listener.
+        state.own_listener_ready.insert(new_topic);
+    }
+
+    actions
+}
+
+fn handle_own_nick_listener_join_reply(
+    state: &mut WorkerState,
+    topic: &str,
+    status: Option<&str>,
+) -> OwnNickListenerJoinReply {
+    if !state.joined_topics.contains(topic)
+        || own_nick_listener_network_for_topic(state, topic).is_none()
+    {
+        return OwnNickListenerJoinReply::Untracked;
+    }
+    if status == Some("ok") {
+        state.own_listener_ready.insert(topic.to_string());
+        OwnNickListenerJoinReply::Accepted
+    } else {
+        state.own_listener_ready.remove(topic);
+        OwnNickListenerJoinReply::Rejected
+    }
+}
+
+fn handle_own_nick_changed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
+    let Some(user) = state.identifier.clone() else {
+        return;
+    };
+    if carrier_topic != format!("grappa:user:{user}") {
+        return;
+    }
+    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+        persistence::log_line("own_nick_changed rejected: ambiguous network ID map");
+        return;
+    };
+    let Some((network, nick)) = parse_own_nick_changed(payload, &network_slugs) else {
+        persistence::log_line("own_nick_changed rejected: invalid or unknown network");
+        return;
+    };
+
+    let actions = apply_own_nick_change(state, &user, &network, &nick);
+    if let Some(session) = state.session.as_ref() {
+        for action in actions {
+            match action {
+                OwnNickListenerAction::Leave(topic) => session.leave_topic(topic),
+                OwnNickListenerAction::Join(topic) => session.join_topic(topic, false),
+            }
+        }
+    }
 }
 
 /// Parses the authoritative `query_windows_list` full snapshot. If any row
@@ -4186,6 +4513,9 @@ fn reconcile_query_topic_tracking(state: &mut WorkerState, previous: &[QueryWind
         .iter()
         .map(|query| query_window_key(&query.network, &query.target_nick))
         .collect();
+    state
+        .query_full_history_required
+        .retain(|identity| active_queries.contains(identity));
     for query in previous {
         let identity = query_window_key(&query.network, &query.target_nick);
         if !active_queries.contains(&identity) {
@@ -4235,6 +4565,7 @@ fn handle_query_windows_list(
     let previous_queries = state.query_windows.clone();
     let selected_closed = apply_query_windows_snapshot(state, snapshot);
     reconcile_query_topic_tracking(state, &previous_queries);
+    drain_pending_own_nick_dms(state);
     if let Some(session) = state.session.as_ref() {
         for query in &state.query_windows {
             let topic = query_topic(&identifier, &query.network, &query.target_nick);
@@ -4598,6 +4929,380 @@ mod tests {
             query_from_topic("vjt", "grappa:user:vjt/network:libera/channel:friend/extra"),
             None
         );
+    }
+
+    #[test]
+    fn boot_seeds_current_nicks_per_network_and_skips_missing_or_blank_values() {
+        let nicks = network_nicks_from_entries(&[
+            serde_json::json!({"slug": "libera", "nick": "OldNick"}),
+            serde_json::json!({"slug": "azzurra", "nick": "  "}),
+            serde_json::json!({"slug": "oftc"}),
+            serde_json::json!({"nick": "orphan"}),
+        ]);
+
+        let expected: HashMap<String, String> = [("libera".to_string(), "OldNick".to_string())]
+            .into_iter()
+            .collect();
+        assert_eq!(nicks, expected);
+    }
+
+    #[test]
+    fn own_nick_changed_maps_only_known_positive_network_ids() {
+        let network_slugs: HashMap<i64, String> =
+            [(7, "libera".to_string()), (9, "azzurra".to_string())]
+                .into_iter()
+                .collect();
+        let valid = serde_json::json!({
+            "kind": "own_nick_changed",
+            "network_id": 7,
+            "nick": "NewNick",
+            "future_field": true
+        });
+        assert_eq!(
+            parse_own_nick_changed(&valid, &network_slugs),
+            Some(("libera".to_string(), "NewNick".to_string()))
+        );
+
+        for invalid in [
+            serde_json::json!({"kind": "own_nick_changed", "network_id": 77, "nick": "NewNick"}),
+            serde_json::json!({"kind": "own_nick_changed", "network_id": 0, "nick": "NewNick"}),
+            serde_json::json!({"kind": "own_nick_changed", "network_id": 7, "nick": "  "}),
+            serde_json::json!({"kind": "other_kind", "network_id": 7, "nick": "NewNick"}),
+        ] {
+            assert_eq!(parse_own_nick_changed(&invalid, &network_slugs), None);
+        }
+    }
+
+    #[test]
+    fn own_nick_rename_leaves_old_topic_before_joining_new_topic() {
+        let mut state = WorkerState::new();
+        state
+            .own_nicks
+            .insert("libera".to_string(), "OldNick".to_string());
+        state
+            .own_nicks
+            .insert("azzurra".to_string(), "AwayNick".to_string());
+        let old_topic = own_nick_listener_topic("vjt", "libera", "OldNick");
+        let new_topic = own_nick_listener_topic("vjt", "libera", "NewNick");
+        let other_topic = own_nick_listener_topic("vjt", "azzurra", "AwayNick");
+        state
+            .joined_topics
+            .extend([old_topic.clone(), other_topic.clone()]);
+        state.own_listener_ready.insert(old_topic.clone());
+        state.own_listener_ready.insert(other_topic.clone());
+
+        let actions = apply_own_nick_change(&mut state, "vjt", "libera", "NewNick");
+
+        assert_eq!(
+            actions,
+            vec![
+                OwnNickListenerAction::Leave(old_topic.clone()),
+                OwnNickListenerAction::Join(new_topic.clone()),
+            ]
+        );
+        assert!(!state.joined_topics.contains(&old_topic));
+        assert!(state.joined_topics.contains(&new_topic));
+        assert!(!state.own_listener_ready.contains(&old_topic));
+        assert!(!state.own_listener_ready.contains(&new_topic));
+        assert!(state.joined_topics.contains(&other_topic));
+        assert!(state.own_listener_ready.contains(&other_topic));
+        assert_eq!(
+            state.own_nicks.get("libera").map(String::as_str),
+            Some("NewNick")
+        );
+        assert_eq!(
+            state.own_nicks.get("azzurra").map(String::as_str),
+            Some("AwayNick")
+        );
+    }
+
+    #[test]
+    fn own_nick_rename_keeps_old_topic_when_an_open_query_owns_it() {
+        let mut state = WorkerState::new();
+        state
+            .own_nicks
+            .insert("libera".to_string(), "OldNick".to_string());
+        state.identifier = Some("vjt".to_string());
+        state.query_windows.push(QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "OldNick".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        });
+        let old_topic = own_nick_listener_topic("vjt", "libera", "OldNick");
+        let new_topic = own_nick_listener_topic("vjt", "libera", "NewNick");
+        let old_query = query_window_key("libera", "OldNick");
+        state.joined_topics.insert(old_topic.clone());
+        state.own_listener_ready.insert(old_topic.clone());
+        state.query_joined.insert(old_query.clone());
+        state.query_ready.insert(old_query.clone());
+
+        let actions = apply_own_nick_change(&mut state, "vjt", "libera", "NewNick");
+
+        assert_eq!(
+            actions,
+            vec![OwnNickListenerAction::Join(new_topic.clone())]
+        );
+        assert!(state.joined_topics.contains(&old_topic));
+        assert!(!state.own_listener_ready.contains(&old_topic));
+        assert!(state.joined_topics.contains(&new_topic));
+        assert!(!state.own_listener_ready.contains(&new_topic));
+        assert!(state.query_joined.contains(&old_query));
+        assert!(state.query_ready.contains(&old_query));
+        assert_eq!(
+            own_nick_listener_network_for_topic(&state, &old_topic),
+            None
+        );
+        assert!(matches!(
+            resolve_query_topic(
+                &state.query_windows,
+                &state.stale_query_topics,
+                "libera",
+                "OldNick"
+            ),
+            QueryTopicResolution::Active(_)
+        ));
+    }
+
+    #[test]
+    fn own_nick_case_only_change_updates_spelling_without_rejoining() {
+        let mut state = WorkerState::new();
+        state
+            .own_nicks
+            .insert("libera".to_string(), "Foo".to_string());
+        let topic = own_nick_listener_topic("vjt", "libera", "Foo");
+        state.joined_topics.insert(topic.clone());
+        state.own_listener_ready.insert(topic.clone());
+
+        let actions = apply_own_nick_change(&mut state, "vjt", "libera", "fOO");
+
+        assert!(actions.is_empty());
+        assert_eq!(
+            state.own_nicks.get("libera").map(String::as_str),
+            Some("fOO")
+        );
+        assert!(state.joined_topics.contains(&topic));
+        assert!(state.own_listener_ready.contains(&topic));
+    }
+
+    #[test]
+    fn own_nick_listener_readiness_requires_ack_and_fails_closed_without_it() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state
+            .own_nicks
+            .insert("libera".to_string(), "OldNick".to_string());
+        let old_topic = own_nick_listener_topic("vjt", "libera", "OldNick");
+        let new_topic = own_nick_listener_topic("vjt", "libera", "NewNick");
+        state.joined_topics.insert(old_topic.clone());
+        state.own_listener_ready.insert(old_topic.clone());
+
+        assert_eq!(
+            apply_own_nick_change(&mut state, "vjt", "libera", "NewNick"),
+            vec![
+                OwnNickListenerAction::Leave(old_topic.clone()),
+                OwnNickListenerAction::Join(new_topic.clone()),
+            ]
+        );
+        // A join with no reply (including a timeout) never reaches the
+        // positive-ACK transition and must remain unusable for DM routing.
+        assert!(!state.own_listener_ready.contains(&new_topic));
+        assert_eq!(
+            handle_own_nick_listener_join_reply(&mut state, &new_topic, Some("error")),
+            OwnNickListenerJoinReply::Rejected
+        );
+        assert!(!state.own_listener_ready.contains(&new_topic));
+        assert_eq!(
+            handle_own_nick_listener_join_reply(&mut state, &new_topic, None),
+            OwnNickListenerJoinReply::Rejected
+        );
+        assert!(!state.own_listener_ready.contains(&new_topic));
+        assert_eq!(
+            handle_own_nick_listener_join_reply(&mut state, &new_topic, Some("ok")),
+            OwnNickListenerJoinReply::Accepted
+        );
+        assert!(state.own_listener_ready.contains(&new_topic));
+        assert_eq!(
+            handle_own_nick_listener_join_reply(&mut state, &old_topic, Some("ok")),
+            OwnNickListenerJoinReply::Untracked
+        );
+        assert!(!state.own_listener_ready.contains(&old_topic));
+    }
+
+    #[test]
+    fn own_nick_listener_accepts_privmsg_and_action() {
+        assert!(own_nick_listener_accepts_inbound_dm(&serde_json::json!({
+            "kind": "privmsg"
+        })));
+        assert!(own_nick_listener_accepts_inbound_dm(&serde_json::json!({
+            "kind": "action"
+        })));
+    }
+
+    #[test]
+    fn own_nick_listener_rejects_non_dm_kinds() {
+        assert!(!own_nick_listener_accepts_inbound_dm(&serde_json::json!({
+            "kind": "notice"
+        })));
+    }
+
+    #[test]
+    fn own_nick_dm_is_appended_only_to_an_authoritative_existing_query() {
+        let mut state = WorkerState::new();
+        state.query_windows = vec![QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "Peer".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        }];
+        let inbound = serde_json::json!({
+            "kind": "privmsg",
+            "sender": "peer",
+            "body": "inbound DM",
+            "id": 41
+        });
+
+        let key = own_nick_dm_query_key(&state, "libera", &inbound).unwrap();
+        assert_eq!(key, ("libera".to_string(), "Peer".to_string()));
+        let identity = query_window_key(&key.0, &key.1);
+        require_query_full_history_if_unready(&mut state, &key);
+        assert!(append_query_live_message(
+            &mut state,
+            &key,
+            &inbound,
+            Some("message")
+        ));
+        assert_eq!(
+            state.messages.get(&key).unwrap()[0].text.as_str(),
+            "inbound DM"
+        );
+        assert_eq!(
+            query_history_fetch_window(&state, &identity, &key),
+            (None, None)
+        );
+
+        let unknown_sender = serde_json::json!({
+            "kind": "privmsg",
+            "sender": "not-listed",
+            "body": "do not invent a query",
+            "id": 42
+        });
+        assert_eq!(
+            own_nick_dm_query_key(&state, "libera", &unknown_sender),
+            None
+        );
+        assert_eq!(own_nick_dm_query_key(&state, "azzurra", &inbound), None);
+        assert_eq!(state.query_windows.len(), 1);
+        assert_eq!(state.messages.len(), 1);
+    }
+
+    #[test]
+    fn own_nick_dm_fifo_waits_for_snapshot_then_merges_with_history_by_id() {
+        let mut state = WorkerState::new();
+        let first = serde_json::json!({
+            "kind": "privmsg",
+            "sender": "peer",
+            "body": "first buffered",
+            "id": 41,
+            "server_time": 2_000
+        });
+        let second = serde_json::json!({
+            "kind": "privmsg",
+            "sender": "peer",
+            "body": "second buffered",
+            "id": 42,
+            "server_time": 3_000
+        });
+
+        assert_eq!(own_nick_dm_query_key(&state, "libera", &first), None);
+        buffer_pending_own_nick_dm(&mut state, "libera", &first, "message");
+        buffer_pending_own_nick_dm(&mut state, "libera", &second, "message");
+        assert_eq!(state.pending_own_nick_dms.len(), 2);
+        assert!(state.messages.is_empty());
+
+        let query = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "Peer".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        };
+        assert!(!apply_query_windows_snapshot(&mut state, vec![query]));
+        drain_pending_own_nick_dms(&mut state);
+
+        let key = ("libera".to_string(), "Peer".to_string());
+        let identity = query_window_key(&key.0, &key.1);
+        assert!(state.pending_own_nick_dms.is_empty());
+        assert!(state.query_full_history_required.contains(&identity));
+        assert_eq!(
+            query_history_fetch_window(&state, &identity, &key),
+            (None, None)
+        );
+        assert_eq!(
+            state.messages[&key]
+                .iter()
+                .filter_map(|message| message.message_id)
+                .collect::<Vec<_>>(),
+            vec![41, 42]
+        );
+
+        merge_query_history(
+            &mut state,
+            &key,
+            &[
+                serde_json::json!({
+                    "kind": "privmsg",
+                    "sender": "peer",
+                    "body": "older history",
+                    "id": 40,
+                    "server_time": 1_000
+                }),
+                serde_json::json!({
+                    "kind": "privmsg",
+                    "sender": "peer",
+                    "body": "duplicate history row",
+                    "id": 41,
+                    "server_time": 2_000
+                }),
+            ],
+        );
+
+        let messages = &state.messages[&key];
+        assert_eq!(
+            messages
+                .iter()
+                .filter_map(|message| message.message_id)
+                .collect::<Vec<_>>(),
+            vec![40, 41, 42]
+        );
+        assert_eq!(messages[1].text, "first buffered");
+        state.query_full_history_required.remove(&identity);
+        assert_eq!(
+            query_history_fetch_window(&state, &identity, &key),
+            (Some(42), Some(200))
+        );
+    }
+
+    #[test]
+    fn own_nick_dm_buffer_is_bounded_and_unconfirmed_queries_are_discarded() {
+        let mut state = WorkerState::new();
+        for id in 0..(MAX_PENDING_OWN_NICK_DMS + 2) {
+            let payload = serde_json::json!({
+                "kind": "privmsg",
+                "sender": "unlisted",
+                "body": format!("message {id}"),
+                "id": id as i64,
+                "server_time": id as i64
+            });
+            buffer_pending_own_nick_dm(&mut state, "libera", &payload, "message");
+        }
+        assert_eq!(state.pending_own_nick_dms.len(), MAX_PENDING_OWN_NICK_DMS);
+        assert_eq!(
+            state.pending_own_nick_dms.front().unwrap().payload["id"].as_i64(),
+            Some(2)
+        );
+
+        assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
+        drain_pending_own_nick_dms(&mut state);
+        assert!(state.pending_own_nick_dms.is_empty());
+        assert!(state.query_windows.is_empty());
+        assert!(state.messages.is_empty());
     }
 
     #[test]
@@ -5940,7 +6645,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 46);
+        assert_eq!(IGNORED_KINDS.len(), 45);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -5963,6 +6668,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"topic_changed"));
         assert!(!IGNORED_KINDS.contains(&"channel_modes_changed"));
         assert!(!IGNORED_KINDS.contains(&"query_windows_list"));
+        assert!(!IGNORED_KINDS.contains(&"own_nick_changed"));
         assert!(!IGNORED_KINDS.contains(&"joined"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));
