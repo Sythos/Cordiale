@@ -2369,7 +2369,10 @@ async fn handle_frame(
     };
 
     if let Some(network) = own_nick_listener_network_for_topic(state, &frame.topic) {
-        if payload_kind == "message" && state.own_listener_ready.contains(&frame.topic) {
+        if payload_kind == "message"
+            && state.own_listener_ready.contains(&frame.topic)
+            && own_nick_listener_accepts_inbound_dm(effective_payload)
+        {
             if let Some(key) = own_nick_dm_query_key(state, &network, effective_payload) {
                 require_query_full_history_if_unready(state, &key);
                 if append_query_live_message(state, &key, effective_payload, Some(&frame.event))
@@ -3548,6 +3551,13 @@ fn own_nick_listener_network_for_topic(state: &WorkerState, topic: &str) -> Opti
     state.own_nicks.iter().find_map(|(network, nick)| {
         (own_nick_listener_topic(user, network, nick) == topic).then(|| network.clone())
     })
+}
+
+fn own_nick_listener_accepts_inbound_dm(payload: &Value) -> bool {
+    matches!(
+        payload.get("kind").and_then(Value::as_str),
+        Some("privmsg" | "action")
+    )
 }
 
 fn own_nick_dm_query_key(
@@ -5077,6 +5087,7 @@ mod tests {
     #[test]
     fn own_nick_listener_readiness_requires_ack_and_fails_closed_without_it() {
         let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
         state
             .own_nicks
             .insert("libera".to_string(), "OldNick".to_string());
@@ -5115,6 +5126,23 @@ mod tests {
             OwnNickListenerJoinReply::Untracked
         );
         assert!(!state.own_listener_ready.contains(&old_topic));
+    }
+
+    #[test]
+    fn own_nick_listener_accepts_privmsg_and_action() {
+        assert!(own_nick_listener_accepts_inbound_dm(&serde_json::json!({
+            "kind": "privmsg"
+        })));
+        assert!(own_nick_listener_accepts_inbound_dm(&serde_json::json!({
+            "kind": "action"
+        })));
+    }
+
+    #[test]
+    fn own_nick_listener_rejects_non_dm_kinds() {
+        assert!(!own_nick_listener_accepts_inbound_dm(&serde_json::json!({
+            "kind": "notice"
+        })));
     }
 
     #[test]

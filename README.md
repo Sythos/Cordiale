@@ -79,7 +79,8 @@ known limitations are:
   event updates only its mapped network; Cordiale leaves the old listener
   before joining the new topic unless that canonical topic is still owned by
   an open query, keeps case-only changes on the same canonical topic, and
-  accepts inbound listener messages only after a successful join ACK. A small
+  accepts inbound listener messages only after a successful join ACK and only
+  when their nested kind is `privmsg` or `action`. A small
   FIFO holds messages whose sender is not in the current query snapshot; a
   valid `query_windows_list` drains it only for queries the server actually
   lists, dropping unmatched entries rather than inventing rows. The queue is
