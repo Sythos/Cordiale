@@ -1141,11 +1141,8 @@ async fn handle_connect(
             state.settings_network = distinct_networks.first().cloned();
             let network_count = distinct_networks.len();
             let channel_count = entries.len();
-            let groups_data = network_groups_data(
-                &entries,
-                &state.query_windows,
-                &state.expanded_networks,
-            );
+            let groups_data =
+                network_groups_data(&entries, &state.query_windows, &state.expanded_networks);
             let window_states = state.window_states.clone();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
@@ -1339,13 +1336,7 @@ async fn fetch_query_history(
         return false;
     };
     let rows = match client
-        .fetch_messages(
-            &token,
-            &query.network,
-            &query.target_nick,
-            after_id,
-            limit,
-        )
+        .fetch_messages(&token, &query.network, &query.target_nick, after_id, limit)
         .await
     {
         Ok(rows) => rows,
@@ -1375,9 +1366,10 @@ fn mark_query_ready_after_history(state: &mut WorkerState, identity: &(String, S
     }
     state.query_ready.insert(identity.clone());
     if state.current_query
-        && state.current_channel.as_ref().is_some_and(|(network, nick)| {
-            &query_window_key(network, nick) == identity
-        })
+        && state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(network, nick)| &query_window_key(network, nick) == identity)
     {
         state.current_query_ready = true;
     }
@@ -2126,9 +2118,10 @@ fn reset_query_join_failure(
     state.query_ready.remove(identity);
     state.joined_topics.remove(topic);
     let selected = state.current_query
-        && state.current_channel.as_ref().is_some_and(|(network, nick)| {
-            &query_window_key(network, nick) == identity
-        });
+        && state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(network, nick)| &query_window_key(network, nick) == identity);
     if selected {
         state.current_query_ready = false;
     }
@@ -2167,7 +2160,9 @@ async fn handle_query_join_reply(
             let ui = ui.clone();
             let _ = ui.upgrade_in_event_loop(|ui| ui.set_current_query_ready(false));
         }
-        persistence::log_line(&format!("query topic join was not acknowledged: {network}/{nick}"));
+        persistence::log_line(&format!(
+            "query topic join was not acknowledged: {network}/{nick}"
+        ));
         return;
     }
 
@@ -2192,9 +2187,12 @@ async fn handle_query_join_reply(
     mark_query_ready_after_history(state, &identity);
 
     let selected = state.current_query
-        && state.current_channel.as_ref().is_some_and(|(current_network, current_nick)| {
-            query_window_key(current_network, current_nick) == identity
-        });
+        && state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, current_nick)| {
+                query_window_key(current_network, current_nick) == identity
+            });
     if selected {
         show_query_window(state, ui, &query, &key);
     }
@@ -3285,7 +3283,10 @@ fn render_history_entry(value: &Value) -> RenderedMessage {
     render_message(value, None)
 }
 
-fn compare_rendered_message_order(left: &RenderedMessage, right: &RenderedMessage) -> std::cmp::Ordering {
+fn compare_rendered_message_order(
+    left: &RenderedMessage,
+    right: &RenderedMessage,
+) -> std::cmp::Ordering {
     left.server_time
         .cmp(&right.server_time)
         .then_with(|| left.message_id.cmp(&right.message_id))
@@ -3304,11 +3305,7 @@ fn query_high_water_id(state: &WorkerState, key: &(String, String)) -> Option<i6
 /// stable message ID, then restores Cicchetto's chronological
 /// `(server_time, id)` ordering. This makes the default newest-first tail and
 /// the post-join `after` page converge without duplicate echoes.
-fn merge_query_history(
-    state: &mut WorkerState,
-    key: &(String, String),
-    rows: &[Value],
-) {
+fn merge_query_history(state: &mut WorkerState, key: &(String, String), rows: &[Value]) {
     let messages = state.messages.entry(key.clone()).or_default();
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
 }
@@ -3340,10 +3337,11 @@ fn append_query_live_message(
 ) -> bool {
     let message = render_message(payload, event_fallback);
     let messages = state.messages.entry(key.clone()).or_default();
-    if message
-        .message_id
-        .is_some_and(|id| messages.iter().any(|existing| existing.message_id == Some(id)))
-    {
+    if message.message_id.is_some_and(|id| {
+        messages
+            .iter()
+            .any(|existing| existing.message_id == Some(id))
+    }) {
         return false;
     }
     messages.push(message);
@@ -3664,12 +3662,7 @@ fn messages_from_boot(outcome: &BootstrapOutcome) -> MessagesByChannel {
 
 /// One sidebar network group as plain data: network slug, expand state,
 /// and its `(channel, label)` pairs.
-type NetworkGroupData = (
-    String,
-    bool,
-    Vec<(String, String)>,
-    Vec<(String, String)>,
-);
+type NetworkGroupData = (String, bool, Vec<(String, String)>, Vec<(String, String)>);
 
 /// Groups flat `(network, channel, label)` entries by network, sorted by
 /// network then channel (`boot.channels` is a `HashMap`, so iteration
@@ -4162,7 +4155,7 @@ fn apply_query_windows_snapshot(state: &mut WorkerState, snapshot: Vec<QueryWind
                                 == query_window_key(&network, &nick)
                         })
                         .map(|(_, new)| new.clone())
-            });
+                });
             if let Some(query) = selected {
                 if let Some(old) = find_query_window(&previous, &network, &nick) {
                     move_query_window_cache(state, old, &query);
@@ -4200,7 +4193,9 @@ fn reconcile_query_topic_tracking(state: &mut WorkerState, previous: &[QueryWind
             state.stale_query_topics.insert(identity);
             // The topic remains joined, but reopening must load its latest
             // tail before the composer is enabled again.
-            state.query_ready.remove(&query_window_key(&query.network, &query.target_nick));
+            state
+                .query_ready
+                .remove(&query_window_key(&query.network, &query.target_nick));
         }
     }
     for query in &state.query_windows {
@@ -4209,9 +4204,12 @@ fn reconcile_query_topic_tracking(state: &mut WorkerState, previous: &[QueryWind
             .remove(&query_window_key(&query.network, &query.target_nick));
     }
     state.current_query_ready = state.current_query
-        && state.current_channel.as_ref().is_some_and(|(network, nick)| {
-            state.query_ready.contains(&query_window_key(network, nick))
-        });
+        && state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(network, nick)| {
+                state.query_ready.contains(&query_window_key(network, nick))
+            });
 }
 
 fn handle_query_windows_list(
@@ -4611,7 +4609,9 @@ mod tests {
             opened_at: "2026-09-21T10:00:00Z".to_string(),
         };
         let stale: std::collections::HashSet<(String, String)> =
-            [query_window_key("libera", "oldpeer")].into_iter().collect();
+            [query_window_key("libera", "oldpeer")]
+                .into_iter()
+                .collect();
         let windows = vec![active.clone()];
 
         assert!(matches!(
@@ -4630,12 +4630,10 @@ mod tests {
 
     #[test]
     fn query_windows_snapshot_maps_ids_and_preserves_server_order() {
-        let network_slugs: HashMap<i64, String> = [
-            (1, "libera".to_string()),
-            (2, "azzurra".to_string()),
-        ]
-        .into_iter()
-        .collect();
+        let network_slugs: HashMap<i64, String> =
+            [(1, "libera".to_string()), (2, "azzurra".to_string())]
+                .into_iter()
+                .collect();
         let payload = serde_json::json!({
             "kind": "query_windows_list",
             "windows": {
@@ -4667,7 +4665,10 @@ mod tests {
     fn query_windows_snapshot_accepts_empty_and_rejects_invalid_rows_atomically() {
         let network_slugs: HashMap<i64, String> = [(1, "libera".to_string())].into_iter().collect();
         let empty = serde_json::json!({"kind": "query_windows_list", "windows": {}});
-        assert_eq!(parse_query_windows_list(&empty, &network_slugs), Some(Vec::new()));
+        assert_eq!(
+            parse_query_windows_list(&empty, &network_slugs),
+            Some(Vec::new())
+        );
 
         let bad_timestamp = serde_json::json!({
             "kind": "query_windows_list",
@@ -4677,7 +4678,10 @@ mod tests {
                 "opened_at": "not-rfc3339"
             }]}
         });
-        assert_eq!(parse_query_windows_list(&bad_timestamp, &network_slugs), None);
+        assert_eq!(
+            parse_query_windows_list(&bad_timestamp, &network_slugs),
+            None
+        );
 
         let mismatched_id = serde_json::json!({
             "kind": "query_windows_list",
@@ -4687,13 +4691,19 @@ mod tests {
                 "opened_at": "2026-09-21T10:00:00Z"
             }]}
         });
-        assert_eq!(parse_query_windows_list(&mismatched_id, &network_slugs), None);
+        assert_eq!(
+            parse_query_windows_list(&mismatched_id, &network_slugs),
+            None
+        );
 
         let unknown_network = serde_json::json!({
             "kind": "query_windows_list",
             "windows": {"9": []}
         });
-        assert_eq!(parse_query_windows_list(&unknown_network, &network_slugs), None);
+        assert_eq!(
+            parse_query_windows_list(&unknown_network, &network_slugs),
+            None
+        );
 
         let duplicate_folded_nick = serde_json::json!({
             "kind": "query_windows_list",
@@ -4702,7 +4712,10 @@ mod tests {
                 {"network_id": 1, "target_nick": "peer", "opened_at": "2026-09-21T11:00:00Z"}
             ]}
         });
-        assert_eq!(parse_query_windows_list(&duplicate_folded_nick, &network_slugs), None);
+        assert_eq!(
+            parse_query_windows_list(&duplicate_folded_nick, &network_slugs),
+            None
+        );
     }
 
     #[test]
@@ -4731,10 +4744,15 @@ mod tests {
         state.current_query_ready = true;
         state.current_channel = Some(old_key.clone());
         state.messages.insert(old_key.clone(), Vec::new());
-        state.drafts.insert(old_key.clone(), "unsent draft".to_string());
+        state
+            .drafts
+            .insert(old_key.clone(), "unsent draft".to_string());
 
         let previous = state.query_windows.clone();
-        assert!(!apply_query_windows_snapshot(&mut state, vec![renamed.clone()]));
+        assert!(!apply_query_windows_snapshot(
+            &mut state,
+            vec![renamed.clone()]
+        ));
         reconcile_query_topic_tracking(&mut state, &previous);
         assert_eq!(state.query_windows, vec![renamed]);
         assert_eq!(state.current_channel, Some(new_key.clone()));
@@ -4749,7 +4767,10 @@ mod tests {
             .stale_query_topics
             .contains(&query_window_key(&old.network, &old.target_nick)));
         assert!(state.messages.contains_key(&new_key));
-        assert_eq!(state.drafts.get(&new_key).map(String::as_str), Some("unsent draft"));
+        assert_eq!(
+            state.drafts.get(&new_key).map(String::as_str),
+            Some("unsent draft")
+        );
 
         let previous = state.query_windows.clone();
         assert!(apply_query_windows_snapshot(&mut state, Vec::new()));
@@ -4791,17 +4812,25 @@ mod tests {
                 server_time: Some(1),
             }],
         );
-        state.drafts.insert(old_key.clone(), "unsent draft".to_string());
+        state
+            .drafts
+            .insert(old_key.clone(), "unsent draft".to_string());
 
         let previous = state.query_windows.clone();
-        assert!(!apply_query_windows_snapshot(&mut state, vec![recased.clone()]));
+        assert!(!apply_query_windows_snapshot(
+            &mut state,
+            vec![recased.clone()]
+        ));
         reconcile_query_topic_tracking(&mut state, &previous);
 
         assert_eq!(state.query_windows, vec![recased]);
         assert!(!state.messages.contains_key(&old_key));
         assert_eq!(state.messages[&recased_key][0].text, "retained history");
         assert!(!state.drafts.contains_key(&old_key));
-        assert_eq!(state.drafts.get(&recased_key).map(String::as_str), Some("unsent draft"));
+        assert_eq!(
+            state.drafts.get(&recased_key).map(String::as_str),
+            Some("unsent draft")
+        );
         assert!(state.query_joined.contains(&identity));
         assert!(state.query_ready.contains(&identity));
         assert!(state.joined_topics.contains(&topic));
@@ -4831,11 +4860,7 @@ mod tests {
             opened_at: "2026-09-21T12:00:00+02:00".to_string(),
         };
 
-        assert!(query_window_renames(
-            &[old_one, old_two],
-            &[new_one, new_two]
-        )
-        .is_empty());
+        assert!(query_window_renames(&[old_one, old_two], &[new_one, new_two]).is_empty());
     }
 
     #[test]
@@ -4862,7 +4887,10 @@ mod tests {
         assert!(!state.query_ready.contains(&identity));
 
         let previous = state.query_windows.clone();
-        assert!(!apply_query_windows_snapshot(&mut state, vec![query.clone()]));
+        assert!(!apply_query_windows_snapshot(
+            &mut state,
+            vec![query.clone()]
+        ));
         reconcile_query_topic_tracking(&mut state, &previous);
         assert!(!state.stale_query_topics.contains(&identity));
         assert!(state.joined_topics.contains(&topic));
