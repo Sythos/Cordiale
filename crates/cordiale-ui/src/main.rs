@@ -58,6 +58,10 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    SelectQuery {
+        network: String,
+        nick: String,
+    },
     DismissKickedChannel {
         network: String,
         channel: String,
@@ -236,6 +240,8 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_current_channel_modes("".into());
             ui.set_current_window_is_joined(false);
             ui.set_has_selected_channel(false);
+            ui.set_current_query(false);
+            ui.set_current_query_ready(false);
             ui.set_can_moderate_members(false);
         }
     });
@@ -255,6 +261,8 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_current_channel_label("".into());
             ui.set_current_window_is_joined(false);
             ui.set_has_selected_channel(false);
+            ui.set_current_query(false);
+            ui.set_current_query_ready(false);
             ui.set_can_moderate_members(false);
         }
     });
@@ -300,6 +308,14 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_channel.send(WorkerCommand::SelectChannel {
             network: network.to_string(),
             channel: channel.to_string(),
+        });
+    });
+
+    let tx_for_query_window = worker_tx.clone();
+    ui.on_query_selected(move |network, nick| {
+        let _ = tx_for_query_window.send(WorkerCommand::SelectQuery {
+            network: network.to_string(),
+            nick: nick.to_string(),
         });
     });
 
@@ -529,6 +545,16 @@ struct ChannelModes {
     params: HashMap<String, Option<String>>,
 }
 
+/// One open Grappa query window. `opened_at` is retained from the server's
+/// full snapshot so a unique stable opening can be matched across a nick
+/// rename without guessing from list position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueryWindow {
+    network: String,
+    target_nick: String,
+    opened_at: String,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -572,8 +598,26 @@ struct WorkerState {
     /// `(network, channel, label)` from the last bootstrap, kept around so
     /// `ToggleNetwork` can rebuild the sidebar model without re-fetching.
     channel_entries: Vec<(String, String, String)>,
+    /// Full replacement from `query_windows_list`; query rows live beside
+    /// channel rows while retaining their own window identity.
+    query_windows: Vec<QueryWindow>,
+    /// Query topics whose Phoenix join was acknowledged successfully. Keys
+    /// use the same network + ASCII-folded target identity as the snapshot.
+    query_joined: std::collections::HashSet<(String, String)>,
+    /// Query topics whose join and initial/refresh history load both
+    /// completed; only these are ready for sending, like Cicchetto.
+    query_ready: std::collections::HashSet<(String, String)>,
+    /// Query keys removed/renamed by a later full snapshot. Since Grappa
+    /// shares the channel-shaped Phoenix topic for channels and queries,
+    /// remember these identities so their late frames are ignored without
+    /// swallowing ordinary channel traffic.
+    stale_query_topics: std::collections::HashSet<(String, String)>,
     /// Channel-selection MRU, used when a dismissed pseudo-window was open.
     recent_channels: Vec<(String, String)>,
+    /// `current_channel` is the active window's `(network, target)` key;
+    /// this flag disambiguates query topics from channel topics.
+    current_query: bool,
+    current_query_ready: bool,
     current_channel: Option<(String, String)>,
     /// Network slug -> Grappa's own integer `network_id`, read from
     /// `boot.networks`. WS commands like `/links` need the integer id,
@@ -616,7 +660,13 @@ impl WorkerState {
             members: HashMap::new(),
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
+            query_windows: Vec::new(),
+            query_joined: std::collections::HashSet::new(),
+            query_ready: std::collections::HashSet::new(),
+            stale_query_topics: std::collections::HashSet::new(),
             recent_channels: Vec::new(),
+            current_query: false,
+            current_query_ready: false,
             current_channel: None,
             network_ids: HashMap::new(),
             settings_network: None,
@@ -671,6 +721,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         handle_select_channel(&mut state, &ui, network, channel).await;
+                    }
+                    Some(WorkerCommand::SelectQuery { network, nick }) => {
+                        handle_select_query(&mut state, &ui, network, nick).await;
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
                         handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;
@@ -861,6 +914,8 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::GoHome) => {
                         state.current_channel = None;
+                        state.current_query = false;
+                        state.current_query_ready = false;
                     }
                     Some(WorkerCommand::MemberModeAction { verb, nick }) => {
                         send_member_mode_action(&state, &verb, &nick);
@@ -899,20 +954,24 @@ async fn run_worker(
                         });
                     }
                     Some(SessionEvent::Frame(frame)) => {
-                        handle_frame(&mut state, &ui, frame);
+                        handle_frame(&mut state, &ui, frame).await;
                     }
                     Some(SessionEvent::Disconnected { reason }) => {
                         persistence::log_line(&format!("session disconnected: {reason}"));
+                        reset_query_session_readiness(&mut state);
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("disconnected".into());
                             ui.set_status_message(reason.into());
+                            ui.set_current_query_ready(false);
                         });
                     }
                     Some(SessionEvent::Reconnecting { reason }) => {
                         persistence::log_line(&format!("session reconnecting: {reason}"));
+                        reset_query_session_readiness(&mut state);
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("reconnecting".into());
                             ui.set_status_message(reason.into());
+                            ui.set_current_query_ready(false);
                         });
                     }
                     None => {
@@ -1011,6 +1070,10 @@ async fn handle_connect(
 
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
+            state.query_windows.clear();
+            state.query_joined.clear();
+            state.query_ready.clear();
+            state.stale_query_topics.clear();
             state.window_states = joined_window_states_from_boot_channels(&outcome.boot.channels);
             state.window_failures.clear();
             state.window_kicks.clear();
@@ -1023,6 +1086,9 @@ async fn handle_connect(
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
+            state.current_query = false;
+            state.current_query_ready = false;
+            state.current_channel = None;
             // The Grappa login `subject` is opaque (and absent when reusing
             // a bearer); admin status comes only from the separate `/me`
             // response, where it is a top-level field.
@@ -1075,7 +1141,8 @@ async fn handle_connect(
             state.settings_network = distinct_networks.first().cloned();
             let network_count = distinct_networks.len();
             let channel_count = entries.len();
-            let groups_data = network_groups_data(&entries, &state.expanded_networks);
+            let groups_data =
+                network_groups_data(&entries, &state.query_windows, &state.expanded_networks);
             let window_states = state.window_states.clone();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
@@ -1089,6 +1156,8 @@ async fn handle_connect(
                 ui.set_status_kind("signed-in".into());
                 ui.set_status_network_count(network_count as i32);
                 ui.set_status_channel_count(channel_count as i32);
+                ui.set_current_query(false);
+                ui.set_current_query_ready(false);
                 let networks: Vec<slint::SharedString> =
                     distinct_networks.into_iter().map(Into::into).collect();
                 ui.set_known_networks(Rc::new(slint::VecModel::from(networks)).into());
@@ -1144,6 +1213,8 @@ async fn handle_select_channel(
             window_state_key(known_network, known_channel) != window_state_key(&network, &channel)
         });
     state.recent_channels.insert(0, key.clone());
+    state.current_query = false;
+    state.current_query_ready = false;
     state.current_channel = Some(key.clone());
 
     let mut settings = persistence::load_settings().unwrap_or_default();
@@ -1174,6 +1245,8 @@ async fn handle_select_channel(
         ui.set_current_channel_modes(channel_modes.into());
         ui.set_current_window_is_joined(window_is_joined);
         ui.set_has_selected_channel(true);
+        ui.set_current_query(false);
+        ui.set_current_query_ready(false);
         ui.set_compose_text(draft.into());
         ui.set_can_moderate_members(can_moderate);
         let model = chat_lines_model(&lines, dark_theme);
@@ -1181,6 +1254,125 @@ async fn handle_select_channel(
         let member_rows = members_model(&members, dark_theme);
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
+}
+
+/// Selects a query row already present in the server-owned snapshot. Joining
+/// the query topic only subscribes to its realtime stream; it never sends an
+/// IRC JOIN. The server's snapshot is the authority for whether the window is
+/// currently open.
+async fn handle_select_query(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    nick: String,
+) {
+    let Some(query) = find_query_window(&state.query_windows, &network, &nick).cloned() else {
+        return;
+    };
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+
+    let topic = query_topic(&identifier, &query.network, &query.target_nick);
+    if let Some(handle) = &state.session {
+        if state.joined_topics.insert(topic.clone()) {
+            handle.join_topic(topic, false);
+        }
+    }
+
+    let key = (query.network.clone(), query.target_nick.clone());
+    let identity = query_window_key(&query.network, &query.target_nick);
+    state.current_query = true;
+    state.current_query_ready = state.query_ready.contains(&identity);
+    state.current_channel = Some(key.clone());
+    show_query_window(state, ui, &query, &key);
+
+    // Cicchetto loads the latest page when a query is selected, independently
+    // of the history refresh that follows the Phoenix join ACK. The endpoint's
+    // default page is newest-first, so merge_query_history restores chronological
+    // display order and deduplicates any messages received live in the meantime.
+    if fetch_query_history(state, &query, None, None).await {
+        mark_query_ready_after_history(state, &identity);
+        show_query_window(state, ui, &query, &key);
+    }
+}
+
+fn show_query_window(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    query: &QueryWindow,
+    key: &(String, String),
+) {
+    let lines = state.messages.get(key).cloned().unwrap_or_default();
+    let draft = state.drafts.get(key).cloned().unwrap_or_default();
+    let dark_theme = state.theme == Theme::Dark;
+    let query_ready = state.current_query_ready;
+    let label = format!("{} — {}", query.network, query.target_nick);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_current_channel_label(label.into());
+        ui.set_current_topic("".into());
+        ui.set_current_channel_modes("".into());
+        ui.set_current_window_is_joined(false);
+        ui.set_has_selected_channel(true);
+        ui.set_current_query(true);
+        ui.set_current_query_ready(query_ready);
+        ui.set_compose_text(draft.into());
+        ui.set_can_moderate_members(false);
+        let model = chat_lines_model(&lines, dark_theme);
+        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+        let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
+        ui.set_channel_members(empty_members.into());
+    });
+}
+
+async fn fetch_query_history(
+    state: &mut WorkerState,
+    query: &QueryWindow,
+    after_id: Option<i64>,
+    limit: Option<usize>,
+) -> bool {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return false;
+    };
+    let rows = match client
+        .fetch_messages(&token, &query.network, &query.target_nick, after_id, limit)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            persistence::log_line(&format!(
+                "query history fetch failed for {}/{}: {error:?}",
+                query.network, query.target_nick
+            ));
+            return false;
+        }
+    };
+
+    // A newer full snapshot can close/rename this query while the request is
+    // in flight. The worker serializes awaits today, but retain the guard so a
+    // later async refactor cannot resurrect a stale conversation.
+    if find_query_window(&state.query_windows, &query.network, &query.target_nick).is_none() {
+        return false;
+    }
+    let key = (query.network.clone(), query.target_nick.clone());
+    merge_query_history(state, &key, &rows);
+    true
+}
+
+fn mark_query_ready_after_history(state: &mut WorkerState, identity: &(String, String)) {
+    if !state.query_joined.contains(identity) {
+        return;
+    }
+    state.query_ready.insert(identity.clone());
+    if state.current_query
+        && state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(network, nick)| &query_window_key(network, nick) == identity)
+    {
+        state.current_query_ready = true;
+    }
 }
 
 /// Dismisses a kicked pseudo-window with the same optimistic semantics as
@@ -1327,6 +1519,9 @@ fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str) -> bool {
 }
 
 async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
+    if state.current_query && !state.current_query_ready {
+        return;
+    }
     let (Some(client), Some(token), Some((network, channel))) =
         (&state.client, &state.token, &state.current_channel)
     else {
@@ -1703,6 +1898,9 @@ fn handle_request_links(state: &WorkerState, network: String) {
 /// network's id hasn't been resolved yet) — every caller just does
 /// nothing in that case, same as `handle_request_links` already does.
 fn user_topic_channel_network(state: &WorkerState) -> Option<(&SessionHandle, String, i64, &str)> {
+    if state.current_query {
+        return None;
+    }
     let session = state.session.as_ref()?;
     let identifier = state.identifier.as_ref()?;
     let (network, channel) = state.current_channel.as_ref()?;
@@ -1785,10 +1983,9 @@ fn send_member_whois(state: &WorkerState, nick: &str) {
     );
 }
 
-/// Asks Grappa to open a DM window with `nick` — the server owns that
-/// state (broadcasts `query_windows_list` back per Cicchetto's source);
-/// Cordiale doesn't have a query-window UI to react to that yet, so this
-/// is currently fire-and-forget rather than switching to one.
+/// Asks Grappa to open a DM window with `nick`; the resulting
+/// `query_windows_list` snapshot drives Cordiale's query rows and topic
+/// subscriptions.
 fn send_member_query(state: &WorkerState, nick: &str) {
     let Some((session, topic, network_id, _channel)) = user_topic_channel_network(state) else {
         return;
@@ -1851,7 +2048,6 @@ const IGNORED_KINDS: &[&str] = &[
     "window_counts",
     "away_confirmed",
     "bundle_hash",
-    "query_windows_list",
     // session/wire.ex's wire_event_kind union.
     "channels_changed",
     "own_nick_changed",
@@ -1903,6 +2099,105 @@ const IGNORED_KINDS: &[&str] = &[
     "server_settings_changed",
 ];
 
+fn reset_query_session_readiness(state: &mut WorkerState) {
+    state.query_joined.clear();
+    state.query_ready.clear();
+    state.current_query_ready = false;
+}
+
+fn record_query_join_success(state: &mut WorkerState, identity: &(String, String)) {
+    state.query_joined.insert(identity.clone());
+}
+
+fn reset_query_join_failure(
+    state: &mut WorkerState,
+    identity: &(String, String),
+    topic: &str,
+) -> bool {
+    state.query_joined.remove(identity);
+    state.query_ready.remove(identity);
+    state.joined_topics.remove(topic);
+    let selected = state.current_query
+        && state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(network, nick)| &query_window_key(network, nick) == identity);
+    if selected {
+        state.current_query_ready = false;
+    }
+    selected
+}
+
+async fn handle_query_join_reply(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    topic: &str,
+    status: Option<&str>,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, nick)) = query_from_topic(identifier, topic) else {
+        return;
+    };
+    let (identity, query) = match resolve_query_topic(
+        &state.query_windows,
+        &state.stale_query_topics,
+        &network,
+        &nick,
+    ) {
+        QueryTopicResolution::Active(query) => (
+            query_window_key(&query.network, &query.target_nick),
+            Some(query.clone()),
+        ),
+        QueryTopicResolution::Stale => (query_window_key(&network, &nick), None),
+        QueryTopicResolution::Untracked => return,
+    };
+
+    if status != Some("ok") {
+        let selected = reset_query_join_failure(state, &identity, topic);
+        if selected {
+            let ui = ui.clone();
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_current_query_ready(false));
+        }
+        persistence::log_line(&format!(
+            "query topic join was not acknowledged: {network}/{nick}"
+        ));
+        return;
+    }
+
+    record_query_join_success(state, &identity);
+    let Some(query) = query else {
+        // Cicchetto leaves old query topics joined for the session lifetime.
+        // Remember the ACK so a later close→reopen can reuse that topic; the
+        // selected query will load its latest tail before becoming ready.
+        return;
+    };
+    let key = (query.network.clone(), query.target_nick.clone());
+    let high_water = query_high_water_id(state, &key);
+    let limit = high_water.map(|_| 200);
+
+    // Phoenix's join reply is only the window/cursor seed; it carries no
+    // message rows. Fetch the after-page from Grappa, using a known local
+    // message ID as a high-water mark when available, and fall back to the
+    // normal tail page rather than treating read_cursor as a message ID.
+    if !fetch_query_history(state, &query, high_water, limit).await {
+        return;
+    }
+    mark_query_ready_after_history(state, &identity);
+
+    let selected = state.current_query
+        && state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, current_nick)| {
+                query_window_key(current_network, current_nick) == identity
+            });
+    if selected {
+        show_query_window(state, ui, &query, &key);
+    }
+}
+
 /// Appends an incoming realtime frame to the channel it belongs to (if any)
 /// and, if that channel is currently open, pushes the update to the UI.
 ///
@@ -1913,11 +2208,17 @@ const IGNORED_KINDS: &[&str] = &[
 /// this function still falls back to a raw `event: payload` line — the
 /// mechanism that caught the ones now handled by name below, via real user
 /// screenshots.
-fn handle_frame(
+async fn handle_frame(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     frame: cordiale_core::phoenix::PhoenixMessage,
 ) {
+    if frame.event == "phx_reply" {
+        let status = frame.payload.get("status").and_then(Value::as_str);
+        handle_query_join_reply(state, ui, &frame.topic, status).await;
+        return;
+    }
+
     // The `kind:` field is the real discriminator for these server-push
     // "bundle" replies per `docs/protocol-notes.md` §4ter — the Phoenix
     // `event` name itself isn't confirmed to equal the bundle name, so
@@ -1931,6 +2232,11 @@ fn handle_frame(
     let payload_kind = event_kind.as_wire_name();
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
         handle_links_bundle(ui, &frame.payload);
+        return;
+    }
+
+    if payload_kind == "query_windows_list" {
+        handle_query_windows_list(state, ui, &frame.topic, &frame.payload);
         return;
     }
 
@@ -2158,12 +2464,49 @@ fn handle_frame(
         return;
     }
 
+    if let Some((network, topic_nick)) = state
+        .identifier
+        .as_deref()
+        .and_then(|identifier| query_from_topic(identifier, &frame.topic))
+    {
+        match resolve_query_topic(
+            &state.query_windows,
+            &state.stale_query_topics,
+            &network,
+            &topic_nick,
+        ) {
+            QueryTopicResolution::Active(query) => {
+                let key = (query.network.clone(), query.target_nick.clone());
+                append_query_live_message(state, &key, effective_payload, Some(&frame.event));
+
+                if state.current_query && state.current_channel.as_ref() == Some(&key) {
+                    let lines = state.messages[&key].clone();
+                    let dark_theme = state.theme == Theme::Dark;
+                    let ui = ui.clone();
+                    let _ = ui.upgrade_in_event_loop(move |ui| {
+                        let model = chat_lines_model(&lines, dark_theme);
+                        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+                    });
+                }
+                return;
+            }
+            QueryTopicResolution::Stale => {
+                // The topic can remain joined after its query row disappears;
+                // the full snapshot is authoritative, so don't render late
+                // data from the obsolete conversation.
+                return;
+            }
+            QueryTopicResolution::Untracked => {
+                // The query parser starts from the common `/channel:` form.
+                // A channel that isn't in the query snapshot must continue
+                // into the normal channel message path below.
+            }
+        }
+    }
+
     let Some((network, channel)) = channel_from_topic(&frame.topic) else {
         return;
     };
-    if frame.event == "phx_reply" {
-        return;
-    }
 
     let key = (network.clone(), channel.clone());
 
@@ -2777,6 +3120,8 @@ struct RenderedMessage {
     nick: Option<String>,
     text: String,
     italic: bool,
+    message_id: Option<i64>,
+    server_time: Option<i64>,
 }
 
 /// Shared `from`/`nick`/`sender` + `body`/`message` extraction for both
@@ -2865,6 +3210,8 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             nick: None,
             text,
             italic: true,
+            message_id: message_id(payload),
+            server_time: server_time(payload),
         };
     }
 
@@ -2880,12 +3227,16 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             nick: Some(nick.to_string()),
             text: body.to_string(),
             italic,
+            message_id: message_id(payload),
+            server_time: server_time(payload),
         },
         (None, Some(body)) => RenderedMessage {
             timestamp,
             nick: None,
             text: body.to_string(),
             italic,
+            message_id: message_id(payload),
+            server_time: server_time(payload),
         },
         _ => RenderedMessage {
             timestamp,
@@ -2894,8 +3245,18 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
                 .map(|event| format!("{event}: {payload}"))
                 .unwrap_or_else(|| payload.to_string()),
             italic: true,
+            message_id: message_id(payload),
+            server_time: server_time(payload),
         },
     }
+}
+
+fn message_id(payload: &Value) -> Option<i64> {
+    payload.get("id").and_then(Value::as_i64)
+}
+
+fn server_time(payload: &Value) -> Option<i64> {
+    payload.get("server_time").and_then(Value::as_i64)
 }
 
 /// `meta.args` on a `kind: "mode"` payload — the targets a mode change's
@@ -2920,6 +3281,72 @@ fn mode_args(payload: &Value) -> Vec<String> {
 /// have.
 fn render_history_entry(value: &Value) -> RenderedMessage {
     render_message(value, None)
+}
+
+fn compare_rendered_message_order(
+    left: &RenderedMessage,
+    right: &RenderedMessage,
+) -> std::cmp::Ordering {
+    left.server_time
+        .cmp(&right.server_time)
+        .then_with(|| left.message_id.cmp(&right.message_id))
+}
+
+fn query_high_water_id(state: &WorkerState, key: &(String, String)) -> Option<i64> {
+    state
+        .messages
+        .get(key)?
+        .iter()
+        .filter_map(|message| message.message_id)
+        .max()
+}
+
+/// Merges a query history page into the local conversation by the server's
+/// stable message ID, then restores Cicchetto's chronological
+/// `(server_time, id)` ordering. This makes the default newest-first tail and
+/// the post-join `after` page converge without duplicate echoes.
+fn merge_query_history(state: &mut WorkerState, key: &(String, String), rows: &[Value]) {
+    let messages = state.messages.entry(key.clone()).or_default();
+    merge_rendered_messages(messages, rows.iter().map(render_history_entry));
+}
+
+fn merge_rendered_messages(
+    messages: &mut Vec<RenderedMessage>,
+    incoming: impl IntoIterator<Item = RenderedMessage>,
+) {
+    let mut known_ids: std::collections::HashSet<i64> = messages
+        .iter()
+        .filter_map(|message| message.message_id)
+        .collect();
+    for message in incoming {
+        if let Some(id) = message.message_id {
+            if !known_ids.insert(id) {
+                continue;
+            }
+        }
+        messages.push(message);
+    }
+    messages.sort_by(compare_rendered_message_order);
+}
+
+fn append_query_live_message(
+    state: &mut WorkerState,
+    key: &(String, String),
+    payload: &Value,
+    event_fallback: Option<&str>,
+) -> bool {
+    let message = render_message(payload, event_fallback);
+    let messages = state.messages.entry(key.clone()).or_default();
+    if message.message_id.is_some_and(|id| {
+        messages
+            .iter()
+            .any(|existing| existing.message_id == Some(id))
+    }) {
+        return false;
+    }
+    messages.push(message);
+    messages.sort_by(compare_rendered_message_order);
+    true
 }
 
 /// Local `HH:MM:SS` for a message. `server_time` (epoch milliseconds) is
@@ -2974,6 +3401,26 @@ fn apply_display_prefs(ui: &AppWindow, prefs: &DisplayPrefs) {
 /// `docs/protocol-notes.md` §2.
 fn channel_topic(user: &str, network: &str, channel: &str) -> String {
     format!("grappa:user:{user}/network:{network}/channel:{channel}")
+}
+
+/// Cicchetto uses the existing channel-shaped Phoenix topic for a private
+/// query, with the target nick ASCII-folded into the channel segment.
+fn query_topic(user: &str, network: &str, nick: &str) -> String {
+    channel_topic(user, network, &ascii_fold_channel(nick))
+}
+
+/// Parses a channel-shaped query topic only when it belongs to the active
+/// user. It intentionally accepts the same `channel:` topic contract as
+/// Grappa; callers must additionally confirm the target is in the current
+/// `query_windows_list` snapshot before treating it as a DM.
+fn query_from_topic(user: &str, topic: &str) -> Option<(String, String)> {
+    let prefix = format!("grappa:user:{user}/network:");
+    let rest = topic.strip_prefix(&prefix)?;
+    let (network, nick) = rest.split_once("/channel:")?;
+    if network.is_empty() || nick.is_empty() || network.contains('/') || nick.contains('/') {
+        return None;
+    }
+    Some((network.to_string(), nick.to_string()))
 }
 
 /// Parses `(network, channel)` back out of a channel-level topic string;
@@ -3215,7 +3662,8 @@ fn messages_from_boot(outcome: &BootstrapOutcome) -> MessagesByChannel {
 
 /// One sidebar network group as plain data: network slug, expand state,
 /// and its `(channel, label)` pairs.
-type NetworkGroupData = (String, bool, Vec<(String, String)>);
+type NetworkGroupData = (String, bool, Vec<(String, String)>, Vec<(String, String)>);
+type NetworkEntries = (Vec<(String, String)>, Vec<(String, String)>);
 
 /// Groups flat `(network, channel, label)` entries by network, sorted by
 /// network then channel (`boot.channels` is a `HashMap`, so iteration
@@ -3231,22 +3679,31 @@ type NetworkGroupData = (String, bool, Vec<(String, String)>);
 /// `network_groups_model` only from inside that closure.
 fn network_groups_data(
     entries: &[(String, String, String)],
+    query_windows: &[QueryWindow],
     expanded: &HashMap<String, bool>,
 ) -> Vec<NetworkGroupData> {
-    let mut by_network: std::collections::BTreeMap<String, Vec<(String, String)>> =
+    let mut by_network: std::collections::BTreeMap<String, NetworkEntries> =
         std::collections::BTreeMap::new();
     for (network, channel, label) in entries {
         by_network
             .entry(network.clone())
             .or_default()
+            .0
             .push((channel.clone(), label.clone()));
+    }
+    for query in query_windows {
+        by_network
+            .entry(query.network.clone())
+            .or_default()
+            .1
+            .push((query.target_nick.clone(), query.target_nick.clone()));
     }
     by_network
         .into_iter()
-        .map(|(network, mut channels)| {
+        .map(|(network, (mut channels, queries))| {
             channels.sort();
             let is_expanded = expanded.get(&network).copied().unwrap_or(true);
-            (network, is_expanded, channels)
+            (network, is_expanded, channels, queries)
         })
         .collect()
 }
@@ -3259,7 +3716,7 @@ fn network_groups_model(
     window_states: HashMap<(String, String), ChannelWindowState>,
 ) -> Vec<NetworkGroup> {
     data.into_iter()
-        .map(|(network, expanded, channels)| {
+        .map(|(network, expanded, channels, queries)| {
             let channel_entries: Vec<ChannelEntry> = channels
                 .into_iter()
                 .map(|(channel, label)| {
@@ -3274,10 +3731,19 @@ fn network_groups_model(
                     }
                 })
                 .collect();
+            let query_entries: Vec<QueryEntry> = queries
+                .into_iter()
+                .map(|(nick, label)| QueryEntry {
+                    network: network.clone().into(),
+                    nick: nick.into(),
+                    label: label.into(),
+                })
+                .collect();
             NetworkGroup {
                 network: network.into(),
                 expanded,
                 channels: Rc::new(slint::VecModel::from(channel_entries)).into(),
+                queries: Rc::new(slint::VecModel::from(query_entries)).into(),
             }
         })
         .collect()
@@ -3287,7 +3753,11 @@ fn network_groups_model(
 /// sidebar as a fresh `network-groups` model — called after anything that
 /// changes either (a network's expand toggle, a fresh connect).
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let data = network_groups_data(&state.channel_entries, &state.expanded_networks);
+    let data = network_groups_data(
+        &state.channel_entries,
+        &state.query_windows,
+        &state.expanded_networks,
+    );
     let window_states = state.window_states.clone();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -3472,6 +3942,340 @@ fn network_ids_from_boot(outcome: &BootstrapOutcome) -> HashMap<String, i64> {
             Some((slug.to_string(), id))
         })
         .collect()
+}
+
+/// Reverses `/boot`'s slug-to-id map. Duplicate IDs are rejected rather than
+/// allowing an event row to be attached to an arbitrary network.
+fn network_slugs_by_id(network_ids: &HashMap<String, i64>) -> Option<HashMap<i64, String>> {
+    let mut slugs = HashMap::new();
+    for (slug, id) in network_ids {
+        if *id <= 0 {
+            return None;
+        }
+        if let Some(previous) = slugs.insert(*id, slug.clone()) {
+            if previous != *slug {
+                return None;
+            }
+        }
+    }
+    Some(slugs)
+}
+
+/// Parses the authoritative `query_windows_list` full snapshot. If any row
+/// is malformed, has an unknown/mismatched network ID, duplicates another
+/// query identity, or carries a non-RFC3339 `opened_at`, reject the whole
+/// snapshot so a partial payload cannot erase known windows.
+fn parse_query_windows_list(
+    payload: &Value,
+    network_slugs: &HashMap<i64, String>,
+) -> Option<Vec<QueryWindow>> {
+    if payload.get("kind")?.as_str()? != "query_windows_list" {
+        return None;
+    }
+    let windows = payload.get("windows")?.as_object()?;
+    let mut parsed = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for (raw_network_id, entries) in windows {
+        let network_id = raw_network_id.parse::<i64>().ok()?;
+        if network_id <= 0 {
+            return None;
+        }
+        let network = network_slugs.get(&network_id)?;
+        for entry in entries.as_array()? {
+            if entry.get("network_id").and_then(Value::as_i64) != Some(network_id) {
+                return None;
+            }
+            let target_nick = entry.get("target_nick")?.as_str()?;
+            if target_nick.trim().is_empty() {
+                return None;
+            }
+            let opened_at = entry.get("opened_at")?.as_str()?;
+            chrono::DateTime::parse_from_rfc3339(opened_at).ok()?;
+
+            let query = QueryWindow {
+                network: network.clone(),
+                target_nick: target_nick.to_string(),
+                opened_at: opened_at.to_string(),
+            };
+            if !seen.insert(query_window_key(&query.network, &query.target_nick)) {
+                return None;
+            }
+            parsed.push(query);
+        }
+    }
+
+    // The server's per-network list is already oldest-first; preserve it for
+    // the sidebar instead of replacing the user's established ordering.
+    Some(parsed)
+}
+
+fn query_window_key(network: &str, nick: &str) -> (String, String) {
+    (network.to_string(), ascii_fold_channel(nick))
+}
+
+fn find_query_window<'a>(
+    windows: &'a [QueryWindow],
+    network: &str,
+    nick: &str,
+) -> Option<&'a QueryWindow> {
+    let key = query_window_key(network, nick);
+    windows
+        .iter()
+        .find(|window| query_window_key(&window.network, &window.target_nick) == key)
+}
+
+enum QueryTopicResolution<'a> {
+    Active(&'a QueryWindow),
+    Stale,
+    Untracked,
+}
+
+fn resolve_query_topic<'a>(
+    windows: &'a [QueryWindow],
+    stale_topics: &std::collections::HashSet<(String, String)>,
+    network: &str,
+    target: &str,
+) -> QueryTopicResolution<'a> {
+    if let Some(query) = find_query_window(windows, network, target) {
+        QueryTopicResolution::Active(query)
+    } else if stale_topics.contains(&query_window_key(network, target)) {
+        QueryTopicResolution::Stale
+    } else {
+        QueryTopicResolution::Untracked
+    }
+}
+
+fn same_rfc3339_instant(left: &str, right: &str) -> bool {
+    let (Ok(left), Ok(right)) = (
+        chrono::DateTime::parse_from_rfc3339(left),
+        chrono::DateTime::parse_from_rfc3339(right),
+    ) else {
+        return false;
+    };
+    left.timestamp() == right.timestamp()
+        && left.timestamp_subsec_nanos() == right.timestamp_subsec_nanos()
+}
+
+/// Infers only unambiguous renames: exactly one disappeared and one appeared
+/// on the same network with the same validated opening instant. No list
+/// ordering or nickname similarity is treated as identity.
+fn query_window_renames(
+    previous: &[QueryWindow],
+    next: &[QueryWindow],
+) -> Vec<(QueryWindow, QueryWindow)> {
+    let removed: Vec<&QueryWindow> = previous
+        .iter()
+        .filter(|old| find_query_window(next, &old.network, &old.target_nick).is_none())
+        .collect();
+    let added: Vec<&QueryWindow> = next
+        .iter()
+        .filter(|new| find_query_window(previous, &new.network, &new.target_nick).is_none())
+        .collect();
+
+    let mut renames = Vec::new();
+    for old in removed.iter().copied() {
+        let candidates: Vec<&QueryWindow> = added
+            .iter()
+            .copied()
+            .filter(|new| {
+                old.network == new.network && same_rfc3339_instant(&old.opened_at, &new.opened_at)
+            })
+            .collect();
+        if candidates.len() != 1 {
+            continue;
+        }
+        let new = candidates[0];
+        let reverse_matches = removed
+            .iter()
+            .copied()
+            .filter(|other| {
+                other.network == new.network
+                    && same_rfc3339_instant(&other.opened_at, &new.opened_at)
+            })
+            .count();
+        if reverse_matches == 1 {
+            renames.push((old.clone(), new.clone()));
+        }
+    }
+    renames
+}
+
+fn move_query_window_cache(state: &mut WorkerState, old: &QueryWindow, new: &QueryWindow) {
+    let from = (old.network.clone(), old.target_nick.clone());
+    let to = (new.network.clone(), new.target_nick.clone());
+    if from == to {
+        return;
+    }
+    if let Some(lines) = state.messages.remove(&from) {
+        merge_rendered_messages(state.messages.entry(to.clone()).or_default(), lines);
+    }
+    if !state.drafts.contains_key(&to) {
+        if let Some(draft) = state.drafts.remove(&from) {
+            state.drafts.insert(to, draft);
+        }
+    }
+    // A rename changes the canonical Phoenix topic. Keep old join/readiness
+    // tracking because Cicchetto keeps obsolete topics joined for the session;
+    // the new identity starts unready until its own join/history cycle.
+}
+
+/// Replaces local query state from a complete server snapshot. Returns true
+/// only when the currently selected query was closed rather than retained or
+/// unambiguously renamed.
+fn apply_query_windows_snapshot(state: &mut WorkerState, snapshot: Vec<QueryWindow>) -> bool {
+    let previous = state.query_windows.clone();
+    // A case-only nick change retains the same query identity and topic, but
+    // the rendered-message and draft maps use the displayed nick verbatim.
+    // Move those exact-key caches before normal rename detection, which
+    // deliberately treats this as the same identity.
+    for new in &snapshot {
+        if let Some(old) = find_query_window(&previous, &new.network, &new.target_nick) {
+            if old.network != new.network || old.target_nick != new.target_nick {
+                move_query_window_cache(state, old, new);
+            }
+        }
+    }
+    let renames = query_window_renames(&previous, &snapshot);
+    for (old, new) in &renames {
+        move_query_window_cache(state, old, new);
+    }
+
+    let mut selected_closed = false;
+    if state.current_query {
+        if let Some((network, nick)) = state.current_channel.clone() {
+            let selected = find_query_window(&snapshot, &network, &nick)
+                .cloned()
+                .or_else(|| {
+                    renames
+                        .iter()
+                        .find(|(old, _)| {
+                            query_window_key(&old.network, &old.target_nick)
+                                == query_window_key(&network, &nick)
+                        })
+                        .map(|(_, new)| new.clone())
+                });
+            if let Some(query) = selected {
+                if let Some(old) = find_query_window(&previous, &network, &nick) {
+                    move_query_window_cache(state, old, &query);
+                }
+                state.current_channel = Some((query.network, query.target_nick));
+            } else {
+                state.current_channel = None;
+                state.current_query = false;
+                selected_closed = true;
+            }
+        } else {
+            state.current_query = false;
+            selected_closed = true;
+        }
+    }
+
+    state.query_windows = snapshot;
+    selected_closed
+}
+
+/// Keeps the worker's query/topic lifecycle aligned with the latest complete
+/// snapshot while retaining acknowledgements for topics Grappa/Cicchetto keep
+/// joined after a query closes. Those acknowledgements allow a same-session
+/// reopen to reuse the existing topic and load a fresh tail without a second
+/// join.
+fn reconcile_query_topic_tracking(state: &mut WorkerState, previous: &[QueryWindow]) {
+    let active_queries: std::collections::HashSet<(String, String)> = state
+        .query_windows
+        .iter()
+        .map(|query| query_window_key(&query.network, &query.target_nick))
+        .collect();
+    for query in previous {
+        let identity = query_window_key(&query.network, &query.target_nick);
+        if !active_queries.contains(&identity) {
+            state.stale_query_topics.insert(identity);
+            // The topic remains joined, but reopening must load its latest
+            // tail before the composer is enabled again.
+            state
+                .query_ready
+                .remove(&query_window_key(&query.network, &query.target_nick));
+        }
+    }
+    for query in &state.query_windows {
+        state
+            .stale_query_topics
+            .remove(&query_window_key(&query.network, &query.target_nick));
+    }
+    state.current_query_ready = state.current_query
+        && state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(network, nick)| {
+                state.query_ready.contains(&query_window_key(network, nick))
+            });
+}
+
+fn handle_query_windows_list(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return;
+    }
+    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+        persistence::log_line("query_windows_list rejected: ambiguous network ID map");
+        return;
+    };
+    let Some(snapshot) = parse_query_windows_list(payload, &network_slugs) else {
+        persistence::log_line("query_windows_list rejected: invalid full snapshot");
+        return;
+    };
+
+    let previous_queries = state.query_windows.clone();
+    let selected_closed = apply_query_windows_snapshot(state, snapshot);
+    reconcile_query_topic_tracking(state, &previous_queries);
+    if let Some(session) = state.session.as_ref() {
+        for query in &state.query_windows {
+            let topic = query_topic(&identifier, &query.network, &query.target_nick);
+            if state.joined_topics.insert(topic.clone()) {
+                // Query topics carry scrollback/messages, not the channel
+                // presence stream used to populate the roster.
+                session.join_topic(topic, false);
+            }
+        }
+    }
+
+    refresh_network_groups(state, ui);
+    if state.current_query {
+        if let Some((network, nick)) = state.current_channel.as_ref() {
+            if let Some(query) = find_query_window(&state.query_windows, network, nick).cloned() {
+                let key = (query.network.clone(), query.target_nick.clone());
+                show_query_window(state, ui, &query, &key);
+            }
+        }
+    } else if selected_closed {
+        clear_closed_query_view(ui);
+    }
+}
+
+fn clear_closed_query_view(ui: &slint::Weak<AppWindow>) {
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let empty_lines = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
+        let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
+        ui.set_current_channel_label("".into());
+        ui.set_current_topic("".into());
+        ui.set_current_channel_modes("".into());
+        ui.set_current_window_is_joined(false);
+        ui.set_has_selected_channel(false);
+        ui.set_current_query(false);
+        ui.set_current_query_ready(false);
+        ui.set_can_moderate_members(false);
+        ui.set_compose_text("".into());
+        ui.set_chat_lines(empty_lines.into());
+        ui.set_channel_members(empty_members.into());
+    });
 }
 
 fn load_remembered_server_url() -> String {
@@ -3766,6 +4570,446 @@ mod tests {
             channel_topic("vjt", "libera", "#rust"),
             "grappa:user:vjt/network:libera/channel:#rust"
         );
+    }
+
+    #[test]
+    fn query_topic_uses_the_channel_segment_and_ascii_folded_nick() {
+        assert_eq!(
+            query_topic("vjt", "libera", "FrIeNd"),
+            "grappa:user:vjt/network:libera/channel:friend"
+        );
+        assert_eq!(
+            query_from_topic("vjt", "grappa:user:vjt/network:libera/channel:friend"),
+            Some(("libera".to_string(), "friend".to_string()))
+        );
+        assert_eq!(
+            query_from_topic("other", "grappa:user:vjt/network:libera/channel:friend"),
+            None
+        );
+        assert_eq!(
+            query_from_topic("vjt", "grappa:user:vjt/network:libera/channel:#rust"),
+            Some(("libera".to_string(), "#rust".to_string()))
+        );
+        assert_eq!(
+            query_from_topic("vjt", "grappa:user:vjt/network:libera/channel:"),
+            None
+        );
+        assert_eq!(
+            query_from_topic("vjt", "grappa:user:vjt/network:libera/channel:friend/extra"),
+            None
+        );
+    }
+
+    #[test]
+    fn channel_shaped_topics_distinguish_active_stale_and_normal_windows() {
+        let active = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "peer".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        };
+        let stale: std::collections::HashSet<(String, String)> =
+            [query_window_key("libera", "oldpeer")]
+                .into_iter()
+                .collect();
+        let windows = vec![active.clone()];
+
+        assert!(matches!(
+            resolve_query_topic(&windows, &stale, "libera", "PEER"),
+            QueryTopicResolution::Active(query) if query == &active
+        ));
+        assert!(matches!(
+            resolve_query_topic(&windows, &stale, "libera", "oldpeer"),
+            QueryTopicResolution::Stale
+        ));
+        assert!(matches!(
+            resolve_query_topic(&windows, &stale, "libera", "#rust"),
+            QueryTopicResolution::Untracked
+        ));
+    }
+
+    #[test]
+    fn query_windows_snapshot_maps_ids_and_preserves_server_order() {
+        let network_slugs: HashMap<i64, String> =
+            [(1, "libera".to_string()), (2, "azzurra".to_string())]
+                .into_iter()
+                .collect();
+        let payload = serde_json::json!({
+            "kind": "query_windows_list",
+            "windows": {
+                "1": [
+                    {"network_id": 1, "target_nick": "older", "opened_at": "2026-09-21T10:00:00Z"},
+                    {"network_id": 1, "target_nick": "newer", "opened_at": "2026-09-21T11:00:00Z"}
+                ],
+                "2": [
+                    {"network_id": 2, "target_nick": "peer", "opened_at": "2026-09-21T12:00:00+02:00"}
+                ]
+            },
+            "future_field": true
+        });
+
+        let queries = parse_query_windows_list(&payload, &network_slugs).unwrap();
+        assert_eq!(queries.len(), 3);
+        assert_eq!(queries[0].network, "libera");
+        assert_eq!(queries[0].target_nick, "older");
+        assert_eq!(queries[1].target_nick, "newer");
+        assert_eq!(queries[2].network, "azzurra");
+
+        let grouped = network_groups_data(&[], &queries, &HashMap::new());
+        let libera = grouped.iter().find(|group| group.0 == "libera").unwrap();
+        assert_eq!(libera.3[0].0, "older");
+        assert_eq!(libera.3[1].0, "newer");
+    }
+
+    #[test]
+    fn query_windows_snapshot_accepts_empty_and_rejects_invalid_rows_atomically() {
+        let network_slugs: HashMap<i64, String> = [(1, "libera".to_string())].into_iter().collect();
+        let empty = serde_json::json!({"kind": "query_windows_list", "windows": {}});
+        assert_eq!(
+            parse_query_windows_list(&empty, &network_slugs),
+            Some(Vec::new())
+        );
+
+        let bad_timestamp = serde_json::json!({
+            "kind": "query_windows_list",
+            "windows": {"1": [{
+                "network_id": 1,
+                "target_nick": "peer",
+                "opened_at": "not-rfc3339"
+            }]}
+        });
+        assert_eq!(
+            parse_query_windows_list(&bad_timestamp, &network_slugs),
+            None
+        );
+
+        let mismatched_id = serde_json::json!({
+            "kind": "query_windows_list",
+            "windows": {"1": [{
+                "network_id": 2,
+                "target_nick": "peer",
+                "opened_at": "2026-09-21T10:00:00Z"
+            }]}
+        });
+        assert_eq!(
+            parse_query_windows_list(&mismatched_id, &network_slugs),
+            None
+        );
+
+        let unknown_network = serde_json::json!({
+            "kind": "query_windows_list",
+            "windows": {"9": []}
+        });
+        assert_eq!(
+            parse_query_windows_list(&unknown_network, &network_slugs),
+            None
+        );
+
+        let duplicate_folded_nick = serde_json::json!({
+            "kind": "query_windows_list",
+            "windows": {"1": [
+                {"network_id": 1, "target_nick": "Peer", "opened_at": "2026-09-21T10:00:00Z"},
+                {"network_id": 1, "target_nick": "peer", "opened_at": "2026-09-21T11:00:00Z"}
+            ]}
+        });
+        assert_eq!(
+            parse_query_windows_list(&duplicate_folded_nick, &network_slugs),
+            None
+        );
+    }
+
+    #[test]
+    fn query_windows_snapshot_replaces_state_and_migrates_unambiguous_rename() {
+        let old = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "oldnick".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        };
+        let renamed = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "newnick".to_string(),
+            opened_at: "2026-09-21T12:00:00+02:00".to_string(),
+        };
+        let old_key = (old.network.clone(), old.target_nick.clone());
+        let new_key = (renamed.network.clone(), renamed.target_nick.clone());
+        let mut state = WorkerState::new();
+        state.query_windows = vec![old.clone()];
+        state
+            .query_joined
+            .insert(query_window_key(&old.network, &old.target_nick));
+        state
+            .query_ready
+            .insert(query_window_key(&old.network, &old.target_nick));
+        state.current_query = true;
+        state.current_query_ready = true;
+        state.current_channel = Some(old_key.clone());
+        state.messages.insert(old_key.clone(), Vec::new());
+        state
+            .drafts
+            .insert(old_key.clone(), "unsent draft".to_string());
+
+        let previous = state.query_windows.clone();
+        assert!(!apply_query_windows_snapshot(
+            &mut state,
+            vec![renamed.clone()]
+        ));
+        reconcile_query_topic_tracking(&mut state, &previous);
+        assert_eq!(state.query_windows, vec![renamed]);
+        assert_eq!(state.current_channel, Some(new_key.clone()));
+        assert!(!state.current_query_ready);
+        assert!(state
+            .query_joined
+            .contains(&query_window_key(&old.network, &old.target_nick)));
+        assert!(!state
+            .query_ready
+            .contains(&query_window_key(&old.network, &old.target_nick)));
+        assert!(state
+            .stale_query_topics
+            .contains(&query_window_key(&old.network, &old.target_nick)));
+        assert!(state.messages.contains_key(&new_key));
+        assert_eq!(
+            state.drafts.get(&new_key).map(String::as_str),
+            Some("unsent draft")
+        );
+
+        let previous = state.query_windows.clone();
+        assert!(apply_query_windows_snapshot(&mut state, Vec::new()));
+        reconcile_query_topic_tracking(&mut state, &previous);
+        assert!(state.query_windows.is_empty());
+        assert!(!state.current_query);
+        assert_eq!(state.current_channel, None);
+    }
+
+    #[test]
+    fn query_windows_snapshot_migrates_cache_on_case_only_nick_change() {
+        let old = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "foo".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        };
+        let recased = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "Foo".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        };
+        let old_key = (old.network.clone(), old.target_nick.clone());
+        let recased_key = (recased.network.clone(), recased.target_nick.clone());
+        let identity = query_window_key(&old.network, &old.target_nick);
+        let topic = query_topic("vjt", &old.network, &old.target_nick);
+        let mut state = WorkerState::new();
+        state.query_windows = vec![old.clone()];
+        state.query_joined.insert(identity.clone());
+        state.query_ready.insert(identity.clone());
+        state.joined_topics.insert(topic.clone());
+        state.messages.insert(
+            old_key.clone(),
+            vec![RenderedMessage {
+                timestamp: "10:00".to_string(),
+                nick: Some("foo".to_string()),
+                text: "retained history".to_string(),
+                italic: false,
+                message_id: Some(1),
+                server_time: Some(1),
+            }],
+        );
+        state
+            .drafts
+            .insert(old_key.clone(), "unsent draft".to_string());
+
+        let previous = state.query_windows.clone();
+        assert!(!apply_query_windows_snapshot(
+            &mut state,
+            vec![recased.clone()]
+        ));
+        reconcile_query_topic_tracking(&mut state, &previous);
+
+        assert_eq!(state.query_windows, vec![recased]);
+        assert!(!state.messages.contains_key(&old_key));
+        assert_eq!(state.messages[&recased_key][0].text, "retained history");
+        assert!(!state.drafts.contains_key(&old_key));
+        assert_eq!(
+            state.drafts.get(&recased_key).map(String::as_str),
+            Some("unsent draft")
+        );
+        assert!(state.query_joined.contains(&identity));
+        assert!(state.query_ready.contains(&identity));
+        assert!(state.joined_topics.contains(&topic));
+        assert!(!state.stale_query_topics.contains(&identity));
+    }
+
+    #[test]
+    fn query_window_rename_matching_refuses_ambiguous_open_times() {
+        let old_one = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "old-one".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        };
+        let old_two = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "old-two".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        };
+        let new_one = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "new-one".to_string(),
+            opened_at: "2026-09-21T12:00:00+02:00".to_string(),
+        };
+        let new_two = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "new-two".to_string(),
+            opened_at: "2026-09-21T12:00:00+02:00".to_string(),
+        };
+
+        assert!(query_window_renames(&[old_one, old_two], &[new_one, new_two]).is_empty());
+    }
+
+    #[test]
+    fn closing_and_reopening_query_reuses_join_but_reloads_tail_before_ready() {
+        let query = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "peer".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        };
+        let identity = query_window_key(&query.network, &query.target_nick);
+        let topic = query_topic("vjt", &query.network, &query.target_nick);
+        let mut state = WorkerState::new();
+        state.query_windows = vec![query.clone()];
+        state.joined_topics.insert(topic.clone());
+        record_query_join_success(&mut state, &identity);
+        state.query_ready.insert(identity.clone());
+
+        let previous = state.query_windows.clone();
+        assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
+        reconcile_query_topic_tracking(&mut state, &previous);
+        assert!(state.stale_query_topics.contains(&identity));
+        assert!(state.joined_topics.contains(&topic));
+        assert!(state.query_joined.contains(&identity));
+        assert!(!state.query_ready.contains(&identity));
+
+        let previous = state.query_windows.clone();
+        assert!(!apply_query_windows_snapshot(
+            &mut state,
+            vec![query.clone()]
+        ));
+        reconcile_query_topic_tracking(&mut state, &previous);
+        assert!(!state.stale_query_topics.contains(&identity));
+        assert!(state.joined_topics.contains(&topic));
+        assert!(state.query_joined.contains(&identity));
+        assert!(!state.query_ready.contains(&identity));
+        state.current_query = true;
+        state.current_channel = Some(("libera".to_string(), "peer".to_string()));
+        mark_query_ready_after_history(&mut state, &identity);
+        assert!(state.query_ready.contains(&identity));
+        assert!(state.current_query_ready);
+    }
+
+    #[test]
+    fn reopening_query_after_reconnect_waits_for_ack_and_history_again() {
+        let query = QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "peer".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        };
+        let identity = query_window_key(&query.network, &query.target_nick);
+        let topic = query_topic("vjt", &query.network, &query.target_nick);
+        let mut state = WorkerState::new();
+        state.query_windows = vec![query.clone()];
+        state.joined_topics.insert(topic);
+        record_query_join_success(&mut state, &identity);
+        state.query_ready.insert(identity.clone());
+
+        let previous = state.query_windows.clone();
+        assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
+        reconcile_query_topic_tracking(&mut state, &previous);
+        reset_query_session_readiness(&mut state);
+        assert!(state.query_joined.is_empty());
+        assert!(state.query_ready.is_empty());
+
+        // The session rejoins the retained stale topic after reconnect; its
+        // successful ACK is remembered even though the snapshot still omits it.
+        record_query_join_success(&mut state, &identity);
+        let previous = state.query_windows.clone();
+        assert!(!apply_query_windows_snapshot(&mut state, vec![query]));
+        reconcile_query_topic_tracking(&mut state, &previous);
+        assert!(state.query_joined.contains(&identity));
+        assert!(!state.query_ready.contains(&identity));
+
+        state.current_query = true;
+        state.current_channel = Some(("libera".to_string(), "peer".to_string()));
+        mark_query_ready_after_history(&mut state, &identity);
+        assert!(state.query_ready.contains(&identity));
+        assert!(state.current_query_ready);
+    }
+
+    #[test]
+    fn failed_query_join_clears_readiness_and_allows_a_retry() {
+        let identity = query_window_key("libera", "peer");
+        let topic = query_topic("vjt", "libera", "peer");
+        let mut state = WorkerState::new();
+        state.joined_topics.insert(topic.clone());
+        state.query_joined.insert(identity.clone());
+        state.query_ready.insert(identity.clone());
+        state.current_query = true;
+        state.current_query_ready = true;
+        state.current_channel = Some(("libera".to_string(), "peer".to_string()));
+
+        assert!(reset_query_join_failure(&mut state, &identity, &topic));
+        assert!(!state.query_joined.contains(&identity));
+        assert!(!state.query_ready.contains(&identity));
+        assert!(!state.joined_topics.contains(&topic));
+        assert!(!state.current_query_ready);
+    }
+
+    #[test]
+    fn query_history_merges_tail_and_after_pages_by_time_then_id() {
+        let key = ("libera".to_string(), "peer".to_string());
+        let mut state = WorkerState::new();
+        let tail = vec![
+            serde_json::json!({
+                "id": 12,
+                "server_time": 200,
+                "kind": "privmsg",
+                "sender": "peer",
+                "body": "second"
+            }),
+            serde_json::json!({
+                "id": 10,
+                "server_time": 100,
+                "kind": "privmsg",
+                "sender": "peer",
+                "body": "first"
+            }),
+        ];
+        merge_query_history(&mut state, &key, &tail);
+
+        let live = serde_json::json!({
+            "id": 13,
+            "server_time": 300,
+            "kind": "privmsg",
+            "sender": "peer",
+            "body": "third"
+        });
+        assert!(append_query_live_message(&mut state, &key, &live, None));
+        let after = vec![
+            live,
+            serde_json::json!({
+                "id": 14,
+                "server_time": 300,
+                "kind": "privmsg",
+                "sender": "peer",
+                "body": "fourth"
+            }),
+        ];
+        merge_query_history(&mut state, &key, &after);
+
+        let messages = &state.messages[&key];
+        assert_eq!(
+            messages
+                .iter()
+                .filter_map(|message| message.message_id)
+                .collect::<Vec<_>>(),
+            vec![10, 12, 13, 14]
+        );
+        assert_eq!(query_high_water_id(&state, &key), Some(14));
     }
 
     #[test]
@@ -4696,6 +5940,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
+        assert_eq!(IGNORED_KINDS.len(), 46);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -4704,7 +5949,6 @@ mod tests {
             "window_counts",
             "away_confirmed",
             "bundle_hash",
-            "query_windows_list",
         ] {
             assert!(
                 IGNORED_KINDS.contains(&kind),
@@ -4718,6 +5962,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"names_reply"));
         assert!(!IGNORED_KINDS.contains(&"topic_changed"));
         assert!(!IGNORED_KINDS.contains(&"channel_modes_changed"));
+        assert!(!IGNORED_KINDS.contains(&"query_windows_list"));
         assert!(!IGNORED_KINDS.contains(&"joined"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));

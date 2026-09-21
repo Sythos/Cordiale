@@ -186,6 +186,52 @@ impl GrappaClient {
         Ok(response.json::<Value>().await?)
     }
 
+    /// `GET /networks/:network_slug/channels/:channel_name/messages` —
+    /// returns a page of message rows as opaque JSON values. With no cursor,
+    /// Grappa returns the latest page (used when opening a query/channel for
+    /// the first time). With `after_id`, Grappa returns rows after that
+    /// message ID in ascending order; callers commonly set `limit` to 200
+    /// after a Phoenix join/rejoin ACK.
+    pub async fn fetch_messages(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel_name: &str,
+        after_id: Option<i64>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend([
+                "networks",
+                network_slug,
+                "channels",
+                channel_name,
+                "messages",
+            ]);
+
+        if after_id.is_some() || limit.is_some() {
+            let mut query = url.query_pairs_mut();
+            if let Some(after_id) = after_id {
+                query.append_pair("after", &after_id.to_string());
+            }
+            if let Some(limit) = limit {
+                query.append_pair("limit", &limit.to_string());
+            }
+        }
+
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Vec<Value>>().await?)
+    }
+
     /// `DELETE /networks/:network_slug/channels/:channel` — parts from an
     /// IRC channel and removes the joined/pseudo window on the server. A
     /// non-empty optional reason is sent as a query parameter, never a DELETE
@@ -883,6 +929,53 @@ mod tests {
             response.get("kind").and_then(|k| k.as_str()),
             Some("privmsg")
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_without_cursor_requests_the_latest_page() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/%23rust/messages"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 812, "body": "latest"},
+                {"id": 811, "body": "older"}
+            ])))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let messages = client
+            .fetch_messages("abc123", "libera", "#rust", None, None)
+            .await
+            .expect("fetch latest messages");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["id"], 812);
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_after_cursor_sends_cursor_and_limit() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/vjt/messages"))
+            .and(query_param("after", "812"))
+            .and(query_param("limit", "200"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 813, "body": "newer"}
+            ])))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let messages = client
+            .fetch_messages("abc123", "libera", "vjt", Some(812), Some(200))
+            .await
+            .expect("fetch messages after cursor");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], 813);
     }
 
     #[tokio::test]

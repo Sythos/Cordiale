@@ -31,12 +31,20 @@ struct ChannelEntry {
     kicked: bool,
 }
 
+// One open private-conversation window under its network.
+struct QueryEntry {
+    network: string,
+    nick: string,
+    label: string,
+}
+
 // One connected network in the sidebar, with its joined channels and
 // whether the channel list under it is currently shown (default: yes).
 struct NetworkGroup {
     network: string,
     expanded: bool,
     channels: [ChannelEntry],
+    queries: [QueryEntry],
 }
 
 // One color/weight run within a rendered chat line — mIRC control codes
@@ -350,6 +358,10 @@ export component AppWindow inherits Window {
     // when the server confirms there are no channel modes.
     in property <string> current-channel-modes: "";
     in property <bool> has-selected-channel: false;
+    in property <bool> current-query: false;
+    // A DM can be selected before its Phoenix topic joins and history load
+    // finish. Keep composition disabled until Rust marks it ready.
+    in property <bool> current-query-ready: false;
     // Only show the roster after Grappa confirms this window is joined.
     // Autojoin entries in `/boot` can be known but not currently connected.
     in property <bool> current-window-is-joined: false;
@@ -441,6 +453,7 @@ export component AppWindow inherits Window {
     callback member-ctcp-requested(string, string); // nick, verb
     callback member-query-requested(string);
     callback channel-selected(string, string);
+    callback query-selected(string, string);
     callback kicked-channel-dismiss-requested(string, string);
     callback network-toggle-requested(string);
     callback send-chat-message(string);
@@ -752,6 +765,13 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+
+                        for query in group.queries : Button {
+                            horizontal-stretch: 1;
+                            text: "↳ " + query.label;
+                            accessible-label: @tr("Private conversation with {} on {}", query.nick, query.network);
+                            clicked => { query-selected(query.network, query.nick); }
+                        }
                     }
                 }
             }
@@ -832,6 +852,7 @@ export component AppWindow inherits Window {
                     text: "📎";
                     accessible-label: @tr("Attach file");
                     width: 36px;
+                    enabled: !current-query || current-query-ready;
                     clicked => { attach-file-requested(); }
                 }
 
@@ -839,6 +860,7 @@ export component AppWindow inherits Window {
                     placeholder-text: @tr("Message");
                     accessible-label: @tr("Message");
                     text <=> compose-text;
+                    enabled: !current-query || current-query-ready;
                     accepted => { send-chat-message(compose-text); }
                     edited(new-text) => { compose-text-changed(new-text); }
                 }
@@ -847,7 +869,7 @@ export component AppWindow inherits Window {
                     text: "➤";
                     accessible-label: @tr("Send");
                     width: 36px;
-                    enabled: has-selected-channel;
+                    enabled: current-query ? current-query-ready : has-selected-channel;
                     clicked => { send-chat-message(compose-text); }
                 }
             }
@@ -867,12 +889,12 @@ export component AppWindow inherits Window {
             width: members-width;
             spacing: 4px;
 
-            if current-window-is-joined : Text {
+            if current-window-is-joined && !current-query : Text {
                 text: @tr("Members ({})", channel-members.length);
                 font-size: 14px;
             }
 
-            if current-window-is-joined : ListView {
+            if current-window-is-joined && !current-query : ListView {
                 vertical-stretch: 1;
 
                 for member in channel-members : MemberContextMenu {
@@ -891,7 +913,7 @@ export component AppWindow inherits Window {
 
             // Keep the global Actions row anchored at the bottom even when
             // the selected window isn't joined and the roster is hidden.
-            if !current-window-is-joined : Rectangle {
+            if !current-window-is-joined || current-query : Rectangle {
                 vertical-stretch: 1;
                 background: transparent;
             }
