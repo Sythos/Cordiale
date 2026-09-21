@@ -2307,6 +2307,9 @@ async fn handle_frame(
 ) {
     if frame.event == "phx_reply" {
         let status = frame.payload.get("status").and_then(Value::as_str);
+        if apply_window_counts_join_reply(state, &frame.topic, &frame.payload, status) {
+            refresh_network_groups(state, ui);
+        }
         if handle_own_nick_listener_join_reply(state, &frame.topic, status)
             == OwnNickListenerJoinReply::Rejected
         {
@@ -2914,6 +2917,59 @@ fn apply_window_counts(state: &mut WorkerState, topic: &str, payload: &Value) ->
     if !known_window && !own_nick_listener {
         return false;
     }
+    apply_window_mention_count(state, key, mentions)
+}
+
+/// Reads the server-authoritative mention seed from a successful Phoenix
+/// join reply. Missing or malformed counts default to zero, matching the
+/// join-reply narrowing used by Cicchetto.
+fn parse_window_counts_join_reply(
+    identifier: &str,
+    topic: &str,
+    payload: &Value,
+    status: Option<&str>,
+) -> Option<(WindowCountsKey, u64)> {
+    if status != Some("ok") {
+        return None;
+    }
+    let (network, channel) = channel_from_topic(topic)?;
+    if network.is_empty()
+        || channel.is_empty()
+        || !channel_topic_matches(identifier, topic, &network, &channel)
+    {
+        return None;
+    }
+
+    let mentions = payload
+        .get("response")
+        .and_then(|response| response.get("window_counts"))
+        .and_then(|counts| counts.get("mentions"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    Some((window_counts_key(&network, &channel), mentions))
+}
+
+fn apply_window_counts_join_reply(
+    state: &mut WorkerState,
+    topic: &str,
+    payload: &Value,
+    status: Option<&str>,
+) -> bool {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return false;
+    };
+    let Some((key, mentions)) = parse_window_counts_join_reply(identifier, topic, payload, status)
+    else {
+        return false;
+    };
+    apply_window_mention_count(state, key, mentions)
+}
+
+fn apply_window_mention_count(
+    state: &mut WorkerState,
+    key: WindowCountsKey,
+    mentions: u64,
+) -> bool {
     if mentions == 0 {
         return state.window_mentions.remove(&key).is_some();
     }
@@ -2950,6 +3006,12 @@ fn retain_window_mentions_for_open_windows(state: &mut WorkerState) {
             .query_windows
             .iter()
             .map(|query| window_counts_key(&query.network, &query.target_nick)),
+    );
+    retained.extend(
+        state
+            .own_nicks
+            .iter()
+            .map(|(network, nick)| window_counts_key(network, nick)),
     );
     state
         .window_mentions
@@ -6567,6 +6629,86 @@ mod tests {
     }
 
     #[test]
+    fn window_counts_seed_from_channel_query_and_own_nick_join_replies() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("sythos".to_string());
+        state
+            .own_nicks
+            .insert("libera".to_string(), "Sythos".to_string());
+        state
+            .window_mentions
+            .insert(window_counts_key("libera", "#cordiale"), 8);
+
+        let reply = serde_json::json!({
+            "status": "ok",
+            "response": {
+                "read_cursor": 17,
+                "window_counts": {
+                    "messages": 9,
+                    "mentions": 3,
+                    "events": 2,
+                    "severity": "mention"
+                }
+            }
+        });
+        for topic in [
+            channel_topic("sythos", "libera", "#Cordiale"),
+            query_topic("sythos", "libera", "Peer"),
+            own_nick_listener_topic("sythos", "libera", "Sythos"),
+        ] {
+            assert!(apply_window_counts_join_reply(
+                &mut state,
+                &topic,
+                &reply,
+                Some("ok")
+            ));
+        }
+
+        assert_eq!(
+            state
+                .window_mentions
+                .get(&window_counts_key("libera", "#cordiale")),
+            Some(&3)
+        );
+        assert_eq!(
+            state
+                .window_mentions
+                .get(&window_counts_key("libera", "Peer")),
+            Some(&3)
+        );
+        assert_eq!(
+            state
+                .window_mentions
+                .get(&window_counts_key("libera", "Sythos")),
+            Some(&3)
+        );
+
+        let no_counts = serde_json::json!({"status": "ok", "response": {}});
+        assert!(apply_window_counts_join_reply(
+            &mut state,
+            &query_topic("sythos", "libera", "Peer"),
+            &no_counts,
+            Some("ok")
+        ));
+        assert!(!state
+            .window_mentions
+            .contains_key(&window_counts_key("libera", "Peer")));
+
+        assert!(!apply_window_counts_join_reply(
+            &mut state,
+            &channel_topic("someone-else", "libera", "#Cordiale"),
+            &reply,
+            Some("ok")
+        ));
+        assert!(!apply_window_counts_join_reply(
+            &mut state,
+            &channel_topic("sythos", "libera", "#Cordiale"),
+            &reply,
+            Some("error")
+        ));
+    }
+
+    #[test]
     fn window_counts_on_own_nick_listener_updates_only_own_nick_window() {
         let mut state = WorkerState::new();
         state.identifier = Some("sythos".to_string());
@@ -6761,6 +6903,9 @@ mod tests {
     #[test]
     fn window_counts_removes_closed_query_counters_but_keeps_channels() {
         let mut state = WorkerState::new();
+        state
+            .own_nicks
+            .insert("libera".to_string(), "Sythos".to_string());
         state.channel_entries = vec![(
             "libera".to_string(),
             "#cordiale".to_string(),
@@ -6777,6 +6922,9 @@ mod tests {
         state
             .window_mentions
             .insert(window_counts_key("libera", "Peer"), 1);
+        state
+            .window_mentions
+            .insert(window_counts_key("libera", "Sythos"), 2);
 
         state.query_windows.clear();
         retain_window_mentions_for_open_windows(&mut state);
@@ -6790,6 +6938,12 @@ mod tests {
         assert!(!state
             .window_mentions
             .contains_key(&window_counts_key("libera", "Peer")));
+        assert_eq!(
+            state
+                .window_mentions
+                .get(&window_counts_key("libera", "Sythos")),
+            Some(&2)
+        );
     }
 
     #[test]

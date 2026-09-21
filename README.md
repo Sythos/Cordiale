@@ -90,10 +90,11 @@ known limitations are:
   applies live channel-topic cursor pushes last-write-wins (including a
   backward cursor from an authoritative event), clamping the badge to 0..99.
   Cordiale currently retains that badge in session state but does not yet map
-  it to an OS taskbar/dock icon badge. `window_counts` updates per-window
-  mention badges from the server; message and event totals remain locally
-  derived, matching Cicchetto. Peer queries update on their own topics, while
-  the own-nick listener targets the self-message window. This is not complete
+  it to an OS taskbar/dock icon badge. `window_counts` seeds per-window
+  mention badges from `/me` and successful joins, then updates them from
+  server pushes; message and event totals remain locally derived, matching
+  Cicchetto. Peer queries update on their own topics, while the own-nick
+  listener targets the self-message window. This is not complete
   DM parity: overflow or an invalid/missing authoritative query snapshot can
   still lose realtime DMs.
   Cicchetto is the behavior reference, and native parity work is still in
