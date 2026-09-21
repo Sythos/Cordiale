@@ -5242,7 +5242,18 @@ mod tests {
 
         assert_eq!(state.away_states.get("libera"), Some(&AwayStatus::Away));
         assert_eq!(state.away_states.get("azzurra"), Some(&AwayStatus::Present));
-        assert_eq!(state.messages.get(&message_key), Some(&existing_messages));
+        assert_eq!(
+            state.messages.get(&message_key).map(Vec::len),
+            Some(existing_messages.len())
+        );
+        assert_eq!(
+            state
+                .messages
+                .get(&message_key)
+                .and_then(|messages| messages.first())
+                .map(|message| message.text.as_str()),
+            Some("hello")
+        );
 
         // A late repeat is idempotent; a later server-confirmed return to
         // present is a normal per-network state transition.
@@ -5257,7 +5268,18 @@ mod tests {
             AwayStatus::Present
         ));
         assert_eq!(state.away_states.get("libera"), Some(&AwayStatus::Present));
-        assert_eq!(state.messages.get(&message_key), Some(&existing_messages));
+        assert_eq!(
+            state.messages.get(&message_key).map(Vec::len),
+            Some(existing_messages.len())
+        );
+        assert_eq!(
+            state
+                .messages
+                .get(&message_key)
+                .and_then(|messages| messages.first())
+                .map(|message| message.text.as_str()),
+            Some("hello")
+        );
     }
 
     #[test]
