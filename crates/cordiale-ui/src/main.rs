@@ -6958,11 +6958,7 @@ mod tests {
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
-        for kind in [
-            "window_counts",
-            "bundle_hash",
-            "mentions_bundle",
-        ] {
+        for kind in ["window_counts", "bundle_hash", "mentions_bundle"] {
             assert!(
                 IGNORED_KINDS.contains(&kind),
                 "{kind} should be in IGNORED_KINDS"
