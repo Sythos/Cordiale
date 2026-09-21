@@ -2319,8 +2319,8 @@ async fn handle_frame(
     // authoritative pushes last-write-wins, including a lower cursor from a
     // later-arriving frame, and treats the account-wide badge separately.
     if payload_kind == "read_cursor_set" {
-        if let Some(identifier) = state.identifier.as_deref() {
-            apply_read_cursor_set(state, identifier, &frame.topic, &frame.payload);
+        if let Some(identifier) = state.identifier.clone() {
+            apply_read_cursor_set(state, &identifier, &frame.topic, &frame.payload);
         }
         return;
     }
