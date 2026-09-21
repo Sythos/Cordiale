@@ -27,6 +27,8 @@ struct ChannelEntry {
     network: string,
     channel: string,
     label: string,
+    mention-badge: string,
+    mentions-description: string,
     failed: bool,
     kicked: bool,
 }
@@ -36,6 +38,8 @@ struct QueryEntry {
     network: string,
     nick: string,
     label: string,
+    mention-badge: string,
+    mentions-description: string,
 }
 
 // One connected network in the sidebar, with its joined channels and
@@ -745,10 +749,11 @@ export component AppWindow inherits Window {
 
                             Button {
                                 horizontal-stretch: 1;
-                                text: entry.label;
-                                accessible-label: entry.kicked
-                                    ? entry.label + " — kicked"
-                                    : (entry.failed ? entry.label + " — join failed" : entry.label);
+                                text: entry.label + entry.mention-badge;
+                                accessible-label: entry.label + entry.mentions-description
+                                    + (entry.kicked
+                                        ? " — kicked"
+                                        : (entry.failed ? " — join failed" : ""));
                                 // Cicchetto keeps failed and kicked channels as
                                 // muted, selectable pseudo-windows; details
                                 // remain in session state, not in the row.
@@ -768,8 +773,9 @@ export component AppWindow inherits Window {
 
                         for query in group.queries : Button {
                             horizontal-stretch: 1;
-                            text: "↳ " + query.label;
-                            accessible-label: @tr("Private conversation with {} on {}", query.nick, query.network);
+                            text: "↳ " + query.label + query.mention-badge;
+                            accessible-label: @tr("Private conversation with {} on {}", query.nick, query.network)
+                                + query.mentions-description;
                             clicked => { query-selected(query.network, query.nick); }
                         }
                     }
