@@ -2385,12 +2385,7 @@ async fn handle_frame(
                     });
                 }
             } else {
-                buffer_pending_own_nick_dm(
-                    state,
-                    &network,
-                    effective_payload,
-                    &frame.event,
-                );
+                buffer_pending_own_nick_dm(state, &network, effective_payload, &frame.event);
             }
         }
         return;
@@ -3607,8 +3602,7 @@ fn buffer_pending_own_nick_dm(
 fn drain_pending_own_nick_dms(state: &mut WorkerState) {
     let pending = std::mem::take(&mut state.pending_own_nick_dms);
     for dm in pending {
-        let Some(query) =
-            find_query_window(&state.query_windows, &dm.network, &dm.sender).cloned()
+        let Some(query) = find_query_window(&state.query_windows, &dm.network, &dm.sender).cloned()
         else {
             // A valid full snapshot is authoritative: if it didn't open the
             // sender's query, don't invent a client-side window or retain the
@@ -3617,12 +3611,7 @@ fn drain_pending_own_nick_dms(state: &mut WorkerState) {
         };
         let key = (query.network.clone(), query.target_nick.clone());
         require_query_full_history_if_unready(state, &key);
-        append_query_live_message(
-            state,
-            &key,
-            &dm.payload,
-            Some(&dm.event_fallback),
-        );
+        append_query_live_message(state, &key, &dm.payload, Some(&dm.event_fallback));
     }
 }
 
@@ -4941,10 +4930,9 @@ mod tests {
             serde_json::json!({"nick": "orphan"}),
         ]);
 
-        let expected: HashMap<String, String> =
-            [("libera".to_string(), "OldNick".to_string())]
-                .into_iter()
-                .collect();
+        let expected: HashMap<String, String> = [("libera".to_string(), "OldNick".to_string())]
+            .into_iter()
+            .collect();
         assert_eq!(nicks, expected);
     }
 
@@ -5040,14 +5028,20 @@ mod tests {
 
         let actions = apply_own_nick_change(&mut state, "vjt", "libera", "NewNick");
 
-        assert_eq!(actions, vec![OwnNickListenerAction::Join(new_topic.clone())]);
+        assert_eq!(
+            actions,
+            vec![OwnNickListenerAction::Join(new_topic.clone())]
+        );
         assert!(state.joined_topics.contains(&old_topic));
         assert!(!state.own_listener_ready.contains(&old_topic));
         assert!(state.joined_topics.contains(&new_topic));
         assert!(!state.own_listener_ready.contains(&new_topic));
         assert!(state.query_joined.contains(&old_query));
         assert!(state.query_ready.contains(&old_query));
-        assert_eq!(own_nick_listener_network_for_topic(&state, &old_topic), None);
+        assert_eq!(
+            own_nick_listener_network_for_topic(&state, &old_topic),
+            None
+        );
         assert!(matches!(
             resolve_query_topic(
                 &state.query_windows,
@@ -5072,7 +5066,10 @@ mod tests {
         let actions = apply_own_nick_change(&mut state, "vjt", "libera", "fOO");
 
         assert!(actions.is_empty());
-        assert_eq!(state.own_nicks.get("libera").map(String::as_str), Some("fOO"));
+        assert_eq!(
+            state.own_nicks.get("libera").map(String::as_str),
+            Some("fOO")
+        );
         assert!(state.joined_topics.contains(&topic));
         assert!(state.own_listener_ready.contains(&topic));
     }
@@ -5139,7 +5136,12 @@ mod tests {
         assert_eq!(key, ("libera".to_string(), "Peer".to_string()));
         let identity = query_window_key(&key.0, &key.1);
         require_query_full_history_if_unready(&mut state, &key);
-        assert!(append_query_live_message(&mut state, &key, &inbound, Some("message")));
+        assert!(append_query_live_message(
+            &mut state,
+            &key,
+            &inbound,
+            Some("message")
+        ));
         assert_eq!(
             state.messages.get(&key).unwrap()[0].text.as_str(),
             "inbound DM"
@@ -5159,10 +5161,7 @@ mod tests {
             own_nick_dm_query_key(&state, "libera", &unknown_sender),
             None
         );
-        assert_eq!(
-            own_nick_dm_query_key(&state, "azzurra", &inbound),
-            None
-        );
+        assert_eq!(own_nick_dm_query_key(&state, "azzurra", &inbound), None);
         assert_eq!(state.query_windows.len(), 1);
         assert_eq!(state.messages.len(), 1);
     }

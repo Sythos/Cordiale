@@ -369,7 +369,10 @@ mod tests {
 
         assert_eq!(message.join_ref.as_deref(), Some("join-7"));
         assert_eq!(message.message_ref.as_deref(), Some("1"));
-        assert_eq!(message.topic, "grappa:user:vjt/network:libera/channel:oldnick");
+        assert_eq!(
+            message.topic,
+            "grappa:user:vjt/network:libera/channel:oldnick"
+        );
         assert_eq!(message.event, "phx_leave");
         assert_eq!(message.payload, serde_json::json!({}));
     }
