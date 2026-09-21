@@ -578,6 +578,12 @@ enum OwnNickListenerJoinReply {
     Rejected,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AwayStatus {
+    Present,
+    Away,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -665,6 +671,9 @@ struct WorkerState {
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
+    /// Last server-confirmed self away state, kept independently per network
+    /// so a late away ACK cannot reset other per-network or message state.
+    away_states: HashMap<String, AwayStatus>,
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
@@ -717,6 +726,7 @@ impl WorkerState {
             current_channel: None,
             network_ids: HashMap::new(),
             own_nicks: HashMap::new(),
+            away_states: HashMap::new(),
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
             notify_nicks: Vec::new(),
@@ -1145,6 +1155,7 @@ async fn handle_connect(
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
             state.own_nicks = network_nicks_from_boot(&outcome);
+            state.away_states.clear();
             state.own_listener_ready.clear();
             state.current_query = false;
             state.current_query_ready = false;
@@ -2119,7 +2130,6 @@ const IGNORED_KINDS: &[&str] = &[
     // kicked, topic_changed, channel_modes_changed, and members_seeded/names_reply
     // are handled above.
     "window_counts",
-    "away_confirmed",
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
     "channels_changed",
@@ -2322,6 +2332,10 @@ async fn handle_frame(
         if let Some(identifier) = state.identifier.clone() {
             apply_read_cursor_set(state, &identifier, &frame.topic, &frame.payload);
         }
+        return;
+    }
+    if payload_kind == "away_confirmed" {
+        handle_away_confirmed(state, &frame.topic, &frame.payload);
         return;
     }
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
@@ -4313,6 +4327,53 @@ fn parse_own_nick_changed(
     Some((network.clone(), nick.to_string()))
 }
 
+fn parse_away_confirmed(
+    payload: &Value,
+    known_networks: &HashMap<String, i64>,
+) -> Option<(String, AwayStatus)> {
+    if payload.get("kind")?.as_str()? != "away_confirmed" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() || !known_networks.contains_key(network) {
+        return None;
+    }
+    let status = match payload.get("state")?.as_str()? {
+        "present" => AwayStatus::Present,
+        "away" => AwayStatus::Away,
+        _ => return None,
+    };
+    Some((network.to_string(), status))
+}
+
+fn apply_away_confirmed(
+    away_states: &mut HashMap<String, AwayStatus>,
+    network: &str,
+    status: AwayStatus,
+) -> bool {
+    if away_states.get(network) == Some(&status) {
+        return false;
+    }
+    away_states.insert(network.to_string(), status);
+    true
+}
+
+fn handle_away_confirmed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
+    let Some(user) = state.identifier.as_deref() else {
+        return;
+    };
+    if carrier_topic != format!("grappa:user:{user}") {
+        return;
+    }
+    let Some((network, status)) = parse_away_confirmed(payload, &state.network_ids) else {
+        persistence::log_line("away_confirmed rejected: invalid state or unknown network");
+        return;
+    };
+    if apply_away_confirmed(&mut state.away_states, &network, status) {
+        persistence::log_line(&format!("away_confirmed applied: {network}={status:?}"));
+    }
+}
+
 fn apply_own_nick_change(
     state: &mut WorkerState,
     user: &str,
@@ -5084,6 +5145,141 @@ mod tests {
         ] {
             assert_eq!(parse_own_nick_changed(&invalid, &network_slugs), None);
         }
+    }
+
+    #[test]
+    fn away_confirmed_maps_present_and_away_for_known_networks() {
+        let known_networks: HashMap<String, i64> =
+            [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+                .into_iter()
+                .collect();
+
+        for (state, expected) in [("present", AwayStatus::Present), ("away", AwayStatus::Away)] {
+            let payload = serde_json::json!({
+                "kind": "away_confirmed",
+                "network": "libera",
+                "state": state,
+                "future_field": true
+            });
+            assert_eq!(
+                parse_away_confirmed(&payload, &known_networks),
+                Some(("libera".to_string(), expected))
+            );
+        }
+    }
+
+    #[test]
+    fn away_confirmed_rejects_unknown_network_and_invalid_state() {
+        let known_networks: HashMap<String, i64> =
+            [("libera".to_string(), 7)].into_iter().collect();
+
+        for invalid in [
+            serde_json::json!({
+                "kind": "away_confirmed",
+                "network": "unknown",
+                "state": "away"
+            }),
+            serde_json::json!({
+                "kind": "away_confirmed",
+                "network": "libera",
+                "state": "unknown"
+            }),
+            serde_json::json!({
+                "kind": "away_confirmed",
+                "network": "libera",
+                "state": "awayish"
+            }),
+            serde_json::json!({
+                "kind": "other_kind",
+                "network": "libera",
+                "state": "away"
+            }),
+            serde_json::json!({
+                "kind": "away_confirmed",
+                "network": "   ",
+                "state": "present"
+            }),
+        ] {
+            assert_eq!(parse_away_confirmed(&invalid, &known_networks), None);
+        }
+    }
+
+    #[test]
+    fn late_away_confirmation_updates_one_network_without_resetting_other_state() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+            .into_iter()
+            .collect();
+        state
+            .away_states
+            .insert("azzurra".to_string(), AwayStatus::Present);
+
+        // `mentions_bundle` remains an independent gap. This models existing
+        // message state and ensures an away ACK can't clear broader UI state.
+        let message_key = ("libera".to_string(), "#rust".to_string());
+        let existing_messages = vec![render_message(
+            &serde_json::json!({"kind": "privmsg", "sender": "Alice", "body": "hello"}),
+            None,
+        )];
+        state
+            .messages
+            .insert(message_key.clone(), existing_messages.clone());
+
+        let away_payload = serde_json::json!({
+            "kind": "away_confirmed",
+            "network": "libera",
+            "state": "away"
+        });
+        handle_away_confirmed(
+            &mut state,
+            "grappa:user:vjt/network:libera/channel:#rust",
+            &away_payload,
+        );
+        assert!(!state.away_states.contains_key("libera"));
+
+        handle_away_confirmed(&mut state, "grappa:user:vjt", &away_payload);
+
+        assert_eq!(state.away_states.get("libera"), Some(&AwayStatus::Away));
+        assert_eq!(state.away_states.get("azzurra"), Some(&AwayStatus::Present));
+        assert_eq!(
+            state.messages.get(&message_key).map(Vec::len),
+            Some(existing_messages.len())
+        );
+        assert_eq!(
+            state
+                .messages
+                .get(&message_key)
+                .and_then(|messages| messages.first())
+                .map(|message| message.text.as_str()),
+            Some("hello")
+        );
+
+        // A late repeat is idempotent; a later server-confirmed return to
+        // present is a normal per-network state transition.
+        assert!(!apply_away_confirmed(
+            &mut state.away_states,
+            "libera",
+            AwayStatus::Away
+        ));
+        assert!(apply_away_confirmed(
+            &mut state.away_states,
+            "libera",
+            AwayStatus::Present
+        ));
+        assert_eq!(state.away_states.get("libera"), Some(&AwayStatus::Present));
+        assert_eq!(
+            state.messages.get(&message_key).map(Vec::len),
+            Some(existing_messages.len())
+        );
+        assert_eq!(
+            state
+                .messages
+                .get(&message_key)
+                .and_then(|messages| messages.first())
+                .map(|message| message.text.as_str()),
+            Some("hello")
+        );
     }
 
     #[test]
@@ -6758,11 +6954,11 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 44);
+        assert_eq!(IGNORED_KINDS.len(), 43);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
-        for kind in ["window_counts", "away_confirmed", "bundle_hash"] {
+        for kind in ["window_counts", "bundle_hash", "mentions_bundle"] {
             assert!(
                 IGNORED_KINDS.contains(&kind),
                 "{kind} should be in IGNORED_KINDS"
@@ -6778,6 +6974,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"read_cursor_set"));
         assert!(!IGNORED_KINDS.contains(&"query_windows_list"));
         assert!(!IGNORED_KINDS.contains(&"own_nick_changed"));
+        assert!(!IGNORED_KINDS.contains(&"away_confirmed"));
         assert!(!IGNORED_KINDS.contains(&"joined"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));

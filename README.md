@@ -70,10 +70,10 @@ known limitations are:
 - **Realtime event coverage (0.1.4 tester build)**: the current Grappa
   protocol lists 56 top-level event kinds. Cordiale handles `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
-  `query_windows_list`, `own_nick_changed`, `read_cursor_set`, `joined`,
-  `join_failed`, `kicked`, and `message`; the other 44 kinds are deliberately
-  ignored for this tester release. They won't appear as fake `event: payload`
-  chat messages. Query
+  `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
+  `away_confirmed`, `joined`, `join_failed`, `kicked`, and `message`; the
+  remaining 43 kinds are deliberately ignored for this tester release. They
+  won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
   sidebar rows, subscribe via Cicchetto's channel-shaped/ASCII-folded topic,
   and load/deduplicate history around join acknowledgements. The own-nick
@@ -99,7 +99,9 @@ known limitations are:
   `numeric` only in session state. A kick also keeps a muted, accessible,
   selectable pseudo-row without a roster; its `by` and `reason` metadata stay
   in session state, and its close control sends a server-side PART before
-  removing the row locally:
+  removing the row locally. Away confirmations validate the user-topic
+  carrier and known network, then update only that network's state; the
+  still-ignored `mentions_bundle` remains a separate event gap:
   - **Window, channel, and scrollback state**: `channel_created`,
     `window_counts`, `window_pending`, `window_invited`,
     `window_invite_declined`, `archive_changed`,
@@ -108,7 +110,7 @@ known limitations are:
     `network_attached`, `network_detached`, `connection_progress`,
     `connection_state_changed`, `isupport_changed`,
     `umode_changed`, `supported_umodes_changed`, `session_identity_changed`,
-    `away_confirmed`, `peer_away`, `auto_away_debounce_changed`,
+    `peer_away`, `auto_away_debounce_changed`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
     `server_settings_changed`, `web_session_severed`.
   - **Presence, queries, and server replies**: `presence_changed`,
