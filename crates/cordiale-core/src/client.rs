@@ -154,6 +154,30 @@ impl GrappaClient {
         Ok(response.json::<MeResponse>().await?)
     }
 
+    /// `GET /networks/:network_slug/channels` — returns the authoritative
+    /// channel envelopes for one network. Entries stay opaque until their
+    /// complete server schema is published.
+    pub async fn fetch_channels(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "channels"]);
+
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Vec<Value>>().await?)
+    }
+
     /// `POST /networks/:network_id/channels/:channel_id/messages` — sends a
     /// message, echoed back as opaque JSON (row shape not fully documented,
     /// see `docs/protocol-notes.md` §4).
@@ -885,6 +909,29 @@ mod tests {
 
         assert_eq!(boot.networks.len(), 1);
         assert_eq!(boot.channels.get("libera").map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn fetch_channels_uses_the_slug_path_and_bearer_token() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera%20chat/channels"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"name": "#rust", "joined": true},
+                {"name": "#cordiale", "joined": false}
+            ])))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let channels = client
+            .fetch_channels("abc123", "libera chat")
+            .await
+            .expect("fetch_channels");
+
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channels[0]["name"], "#rust");
     }
 
     #[tokio::test]

@@ -68,11 +68,13 @@ known limitations are:
   misalign arguments and leave a stale prefix; broader validation across
   server configurations is still needed.
 - **Realtime event coverage (0.1.4 tester build)**: the current Grappa
-  protocol lists 56 top-level event kinds. Cordiale handles `links_bundle`,
+  protocol lists 56 top-level event kinds. Cordiale handles 15 of them:
+  `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
-  `away_confirmed`, `window_counts`, `joined`, `join_failed`, `kicked`, and
-  `message`; the remaining 42 kinds are deliberately ignored for this tester
+  `away_confirmed`, `window_counts`, `channels_changed`, `joined`,
+  `join_failed`, `kicked`, and `message`; the remaining 41 kinds are
+  deliberately ignored for this tester
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
   sidebar rows, subscribe via Cicchetto's channel-shaped/ASCII-folded topic,
@@ -105,13 +107,18 @@ known limitations are:
   in session state, and its close control sends a server-side PART before
   removing the row locally. Away confirmations validate the user-topic
   carrier and known network, then update only that network's state; the
-  still-ignored `mentions_bundle` remains a separate event gap:
+  still-ignored `mentions_bundle` remains a separate event gap. Known gaps are
+  grouped below.
+  `channels_changed` validates the user-topic signal, refetches the
+  authoritative channel list, and reconciles sidebar rows and subscriptions
+  idempotently while preserving topics still owned by a query or own-nick
+  listener. A failed refresh keeps the existing state.
   - **Window, channel, and scrollback state**: `channel_created`,
     `window_pending`, `window_invited`,
     `window_invite_declined`, `archive_changed`,
     `archive_purged`.
-  - **Network, connection, identity, and settings**: `channels_changed`,
-    `network_attached`, `network_detached`, `connection_progress`,
+  - **Network, connection, identity, and settings**: `network_attached`,
+    `network_detached`, `connection_progress`,
     `connection_state_changed`, `isupport_changed`,
     `umode_changed`, `supported_umodes_changed`, `session_identity_changed`,
     `peer_away`, `auto_away_debounce_changed`,
