@@ -5784,12 +5784,12 @@ mod tests {
             .own_nicks
             .insert("libera".to_string(), "OwnNick".to_string());
 
-        let query_topic = query_topic(user, "libera", "Peer");
+        let active_query_topic = query_topic(user, "libera", "Peer");
         let stale_query_topic = query_topic(user, "libera", "FormerPeer");
         let own_topic = own_nick_listener_topic(user, "libera", "OwnNick");
         let channel_only_topic = channel_topic(user, "libera", "orphan");
         state.channel_topics.extend([
-            query_topic.clone(),
+            active_query_topic.clone(),
             stale_query_topic.clone(),
             own_topic.clone(),
             channel_only_topic.clone(),
@@ -5800,7 +5800,7 @@ mod tests {
             reconcile_channel_entries(&mut state, user, Vec::new()),
             vec![ChannelTopicAction::Leave(channel_only_topic.clone())]
         );
-        assert!(state.joined_topics.contains(&query_topic));
+        assert!(state.joined_topics.contains(&active_query_topic));
         assert!(state.joined_topics.contains(&stale_query_topic));
         assert!(state.joined_topics.contains(&own_topic));
         assert!(!state.joined_topics.contains(&channel_only_topic));
