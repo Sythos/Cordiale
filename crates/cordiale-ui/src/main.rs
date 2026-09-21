@@ -3332,8 +3332,7 @@ fn handle_window_pending(
     let Some(identifier) = state.identifier.clone() else {
         return;
     };
-    let Some((network, channel)) =
-        parse_window_pending_event(payload, carrier_topic, &identifier)
+    let Some((network, channel)) = parse_window_pending_event(payload, carrier_topic, &identifier)
     else {
         return;
     };
