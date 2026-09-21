@@ -29,6 +29,8 @@ struct ChannelEntry {
     label: string,
     mention-badge: string,
     mentions-description: string,
+    unread-count: string,
+    unread-description: string,
     failed: bool,
     kicked: bool,
 }
@@ -46,6 +48,7 @@ struct QueryEntry {
 // whether the channel list under it is currently shown (default: yes).
 struct NetworkGroup {
     network: string,
+    separator-before: bool,
     expanded: bool,
     channels: [ChannelEntry],
     queries: [QueryEntry],
@@ -733,6 +736,13 @@ export component AppWindow inherits Window {
                 for group in network-groups : VerticalLayout {
                     alignment: start;
                     spacing: 2px;
+                    padding-top: group.separator-before ? 8px : 0px;
+
+                    if group.separator-before : Rectangle {
+                        height: 1px;
+                        horizontal-stretch: 1;
+                        background: #808080;
+                    }
 
                     Button {
                         text: (group.expanded ? "▾ 🔌 " : "▸ 🔌 ") + group.network;
@@ -745,7 +755,7 @@ export component AppWindow inherits Window {
                         spacing: 2px;
 
                         for entry in group.channels : HorizontalBox {
-                            spacing: 2px;
+                            spacing: 6px;
 
                             Button {
                                 horizontal-stretch: 1;
@@ -759,6 +769,16 @@ export component AppWindow inherits Window {
                                 // remain in session state, not in the row.
                                 opacity: (entry.failed || entry.kicked) ? 0.55 : 1.0;
                                 clicked => { channel-selected(entry.network, entry.channel); }
+                            }
+
+                            if entry.unread-description != "" : Text {
+                                text: entry.unread-count;
+                                accessible-label: entry.unread-description;
+                                accessible-role: AccessibleRole.text;
+                                horizontal-alignment: right;
+                                min-width: 28px;
+                                font-size: 12px;
+                                font-weight: 700;
                             }
 
                             if entry.kicked : Button {
