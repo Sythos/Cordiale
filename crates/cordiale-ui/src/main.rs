@@ -583,6 +583,12 @@ enum OwnNickListenerJoinReply {
     Rejected,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChannelTopicAction {
+    Leave(String),
+    Join(String),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AwayStatus {
     Present,
@@ -641,6 +647,10 @@ struct WorkerState {
     /// `(network, channel, label)` from the last bootstrap, kept around so
     /// `ToggleNetwork` can rebuild the sidebar model without re-fetching.
     channel_entries: Vec<(String, String, String)>,
+    /// Channel topics owned by the latest authoritative `/boot` snapshot.
+    /// This stays separate because `joined_topics` also includes query and
+    /// own-nick listeners that may share the same channel-shaped topic.
+    channel_topics: std::collections::HashSet<String>,
     /// Full replacement from `query_windows_list`; query rows live beside
     /// channel rows while retaining their own window identity.
     query_windows: Vec<QueryWindow>,
@@ -723,6 +733,7 @@ impl WorkerState {
             members: HashMap::new(),
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
+            channel_topics: std::collections::HashSet::new(),
             query_windows: Vec::new(),
             pending_own_nick_dms: VecDeque::new(),
             query_joined: std::collections::HashSet::new(),
@@ -1205,6 +1216,7 @@ async fn handle_connect(
                 .iter()
                 .map(|(network, channel, _)| channel_topic(&session_identifier, network, channel))
                 .collect();
+            state.channel_topics = channel_topics_for_entries(&session_identifier, &entries);
             for (network, nick) in &state.own_nicks {
                 state.joined_topics.insert(own_nick_listener_topic(
                     &session_identifier,
@@ -2142,7 +2154,6 @@ const IGNORED_KINDS: &[&str] = &[
     // are handled above.
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
-    "channels_changed",
     "isupport_changed",
     "umode_changed",
     "session_identity_changed",
@@ -2333,6 +2344,10 @@ async fn handle_frame(
         return;
     };
     let payload_kind = event_kind.as_wire_name();
+    if payload_kind == "channels_changed" {
+        handle_channels_changed(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
     if payload_kind == "own_nick_changed" {
         handle_own_nick_changed(state, &frame.topic, &frame.payload);
         return;
@@ -4054,8 +4069,14 @@ fn to_ws_url(base_url: &str) -> String {
 /// would be redundant (that's what the old flat "network — channel" list
 /// did).
 fn channel_entries_from_boot(outcome: &BootstrapOutcome) -> Vec<(String, String, String)> {
+    channel_entries_from_channels(&outcome.boot.channels)
+}
+
+fn channel_entries_from_channels(
+    channels_by_network: &HashMap<String, Vec<Value>>,
+) -> Vec<(String, String, String)> {
     let mut entries = Vec::new();
-    for (network, channels) in &outcome.boot.channels {
+    for (network, channels) in channels_by_network {
         for (index, value) in channels.iter().enumerate() {
             let channel = value
                 .get("name")
@@ -4068,6 +4089,66 @@ fn channel_entries_from_boot(outcome: &BootstrapOutcome) -> Vec<(String, String,
         }
     }
     entries
+}
+
+fn channel_topics_for_entries(
+    user: &str,
+    entries: &[(String, String, String)],
+) -> std::collections::HashSet<String> {
+    entries
+        .iter()
+        .map(|(network, channel, _)| channel_topic(user, network, channel))
+        .collect()
+}
+
+fn channel_topic_is_owned_elsewhere(state: &WorkerState, user: &str, topic: &str) -> bool {
+    state
+        .query_windows
+        .iter()
+        .any(|query| query_topic(user, &query.network, &query.target_nick) == topic)
+        || state
+            .stale_query_topics
+            .iter()
+            .any(|(network, nick)| query_topic(user, network, nick) == topic)
+        || state
+            .own_nicks
+            .iter()
+            .any(|(network, nick)| own_nick_listener_topic(user, network, nick) == topic)
+}
+
+/// Replaces only the server-owned channel projection. Message history,
+/// cursors, query windows, and listener ownership remain untouched.
+fn reconcile_channel_entries(
+    state: &mut WorkerState,
+    user: &str,
+    entries: Vec<(String, String, String)>,
+) -> Vec<ChannelTopicAction> {
+    let next_topics = channel_topics_for_entries(user, &entries);
+    let previous_topics = std::mem::replace(&mut state.channel_topics, next_topics.clone());
+    let mut actions = Vec::new();
+
+    let mut removed_topics: Vec<String> =
+        previous_topics.difference(&next_topics).cloned().collect();
+    removed_topics.sort();
+    for topic in removed_topics {
+        if channel_topic_is_owned_elsewhere(state, user, &topic) {
+            continue;
+        }
+        if state.joined_topics.remove(&topic) {
+            actions.push(ChannelTopicAction::Leave(topic));
+        }
+    }
+
+    let mut desired_topics: Vec<String> = next_topics.into_iter().collect();
+    desired_topics.sort();
+    for topic in desired_topics {
+        if state.joined_topics.insert(topic.clone()) {
+            actions.push(ChannelTopicAction::Join(topic));
+        }
+    }
+
+    state.channel_entries = entries;
+    actions
 }
 
 /// Seeds the runtime joined map only from Grappa's explicit `/boot` flag.
@@ -4733,6 +4814,76 @@ fn handle_own_nick_changed(state: &mut WorkerState, carrier_topic: &str, payload
             }
         }
     }
+}
+
+fn is_channels_changed_signal(user: &str, carrier_topic: &str, payload: &Value) -> bool {
+    carrier_topic == format!("grappa:user:{user}")
+        && payload.get("kind").and_then(Value::as_str) == Some("channels_changed")
+}
+
+async fn handle_channels_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+    if !is_channels_changed_signal(&identifier, carrier_topic, payload) {
+        return;
+    }
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+
+    let mut networks: Vec<String> = state.network_ids.keys().cloned().collect();
+    networks.sort();
+    let mut requests = tokio::task::JoinSet::new();
+    for network in networks {
+        let client = client.clone();
+        let token = token.clone();
+        requests.spawn(async move {
+            let channels = client.fetch_channels(&token, &network).await;
+            (network, channels)
+        });
+    }
+
+    let mut channels_by_network = HashMap::new();
+    while let Some(result) = requests.join_next().await {
+        match result {
+            Ok((network, Ok(channels))) => {
+                channels_by_network.insert(network, channels);
+            }
+            Ok((_, Err(_))) | Err(_) => {
+                persistence::log_line(
+                    "channels_changed refresh failed; keeping existing channel state",
+                );
+                return;
+            }
+        }
+    }
+
+    if state.session.is_none() {
+        persistence::log_line(
+            "channels_changed refresh skipped without an active realtime session",
+        );
+        return;
+    }
+    let entries = channel_entries_from_channels(&channels_by_network);
+    let actions = reconcile_channel_entries(state, &identifier, entries);
+    let Some(session) = state.session.as_ref() else {
+        // Checked immediately before reconciliation; keep this defensive in
+        // case the state container changes independently in the future.
+        return;
+    };
+    for action in actions {
+        match action {
+            ChannelTopicAction::Leave(topic) => session.leave_topic(topic),
+            ChannelTopicAction::Join(topic) => session.join_topic(topic, true),
+        }
+    }
+    refresh_network_groups(state, ui);
 }
 
 /// Parses the authoritative `query_windows_list` full snapshot. If any row
@@ -5554,6 +5705,106 @@ mod tests {
                 .map(|message| message.text.as_str()),
             Some("hello")
         );
+    }
+
+    #[test]
+    fn channels_changed_signal_requires_exact_kind_and_user_topic() {
+        let payload = serde_json::json!({"kind": "channels_changed"});
+        assert!(is_channels_changed_signal(
+            "vjt",
+            "grappa:user:vjt",
+            &payload
+        ));
+        assert!(!is_channels_changed_signal(
+            "vjt",
+            "grappa:user:someone-else",
+            &payload
+        ));
+        assert!(!is_channels_changed_signal(
+            "vjt",
+            "grappa:user:vjt/network:libera/channel:#rust",
+            &payload
+        ));
+        assert!(!is_channels_changed_signal(
+            "vjt",
+            "grappa:user:vjt",
+            &serde_json::json!({"kind": "message"})
+        ));
+    }
+
+    #[test]
+    fn channels_changed_reconciles_authoritative_topics_idempotently() {
+        let entry = |channel: &str| {
+            (
+                "libera".to_string(),
+                channel.to_string(),
+                channel.to_string(),
+            )
+        };
+        let user = "vjt";
+        let mut state = WorkerState::new();
+        let initial = vec![entry("#alpha"), entry("#beta")];
+
+        assert_eq!(
+            reconcile_channel_entries(&mut state, user, initial.clone()),
+            vec![
+                ChannelTopicAction::Join(channel_topic(user, "libera", "#alpha")),
+                ChannelTopicAction::Join(channel_topic(user, "libera", "#beta")),
+            ]
+        );
+        assert_eq!(state.channel_entries, initial);
+        assert!(reconcile_channel_entries(&mut state, user, initial).is_empty());
+
+        let updated = vec![entry("#beta"), entry("#gamma")];
+        assert_eq!(
+            reconcile_channel_entries(&mut state, user, updated.clone()),
+            vec![
+                ChannelTopicAction::Leave(channel_topic(user, "libera", "#alpha")),
+                ChannelTopicAction::Join(channel_topic(user, "libera", "#gamma")),
+            ]
+        );
+        assert_eq!(state.channel_entries, updated);
+        assert_eq!(state.channel_topics.len(), 2);
+        assert!(reconcile_channel_entries(&mut state, user, updated).is_empty());
+    }
+
+    #[test]
+    fn channels_changed_keeps_topics_owned_by_queries_and_own_nick_listener() {
+        let user = "vjt";
+        let mut state = WorkerState::new();
+        state.query_windows.push(QueryWindow {
+            network: "libera".to_string(),
+            target_nick: "Peer".to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+        });
+        state
+            .stale_query_topics
+            .insert(query_window_key("libera", "FormerPeer"));
+        state
+            .own_nicks
+            .insert("libera".to_string(), "OwnNick".to_string());
+
+        let query_topic = query_topic(user, "libera", "Peer");
+        let stale_query_topic = query_topic(user, "libera", "FormerPeer");
+        let own_topic = own_nick_listener_topic(user, "libera", "OwnNick");
+        let channel_only_topic = channel_topic(user, "libera", "orphan");
+        state.channel_topics.extend([
+            query_topic.clone(),
+            stale_query_topic.clone(),
+            own_topic.clone(),
+            channel_only_topic.clone(),
+        ]);
+        state.joined_topics = state.channel_topics.clone();
+
+        assert_eq!(
+            reconcile_channel_entries(&mut state, user, Vec::new()),
+            vec![ChannelTopicAction::Leave(channel_only_topic.clone())]
+        );
+        assert!(state.joined_topics.contains(&query_topic));
+        assert!(state.joined_topics.contains(&stale_query_topic));
+        assert!(state.joined_topics.contains(&own_topic));
+        assert!(!state.joined_topics.contains(&channel_only_topic));
+        assert!(state.channel_topics.is_empty());
     }
 
     #[test]
@@ -7696,7 +7947,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 42);
+        assert_eq!(IGNORED_KINDS.len(), 41);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -7719,6 +7970,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"away_confirmed"));
         assert!(!IGNORED_KINDS.contains(&"window_counts"));
         assert!(!IGNORED_KINDS.contains(&"joined"));
+        assert!(!IGNORED_KINDS.contains(&"channels_changed"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));
         // "parted" is confirmed to never actually be sent by the server
