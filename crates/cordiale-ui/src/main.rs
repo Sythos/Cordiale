@@ -5154,10 +5154,7 @@ mod tests {
                 .into_iter()
                 .collect();
 
-        for (state, expected) in [
-            ("present", AwayStatus::Present),
-            ("away", AwayStatus::Away),
-        ] {
+        for (state, expected) in [("present", AwayStatus::Present), ("away", AwayStatus::Away)] {
             let payload = serde_json::json!({
                 "kind": "away_confirmed",
                 "network": "libera",
@@ -5244,10 +5241,7 @@ mod tests {
         handle_away_confirmed(&mut state, "grappa:user:vjt", &away_payload);
 
         assert_eq!(state.away_states.get("libera"), Some(&AwayStatus::Away));
-        assert_eq!(
-            state.away_states.get("azzurra"),
-            Some(&AwayStatus::Present)
-        );
+        assert_eq!(state.away_states.get("azzurra"), Some(&AwayStatus::Present));
         assert_eq!(state.messages.get(&message_key), Some(&existing_messages));
 
         // A late repeat is idempotent; a later server-confirmed return to
