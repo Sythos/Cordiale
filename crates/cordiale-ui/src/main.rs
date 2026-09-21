@@ -595,6 +595,14 @@ enum AwayStatus {
     Away,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SessionIdentity {
+    /// Authoritative NickServ/services verdict. This must not be inferred
+    /// from `account`, which is descriptive and may be absent even here.
+    identified: bool,
+    account: Option<String>,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -692,6 +700,10 @@ struct WorkerState {
     /// Last server-confirmed self away state, kept independently per network
     /// so a late away ACK cannot reset other per-network or message state.
     away_states: HashMap<String, AwayStatus>,
+    /// Last server-confirmed services identity for each network. Snapshot and
+    /// live `session_identity_changed` events share this same replacement
+    /// path; `identified` remains authoritative when `account` is `None`.
+    session_identities: HashMap<String, SessionIdentity>,
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
@@ -747,6 +759,7 @@ impl WorkerState {
             network_ids: HashMap::new(),
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
+            session_identities: HashMap::new(),
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
             notify_nicks: Vec::new(),
@@ -1177,6 +1190,7 @@ async fn handle_connect(
             state.network_ids = network_ids_from_boot(&outcome);
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
+            state.session_identities.clear();
             state.own_listener_ready.clear();
             state.current_query = false;
             state.current_query_ready = false;
@@ -2156,7 +2170,6 @@ const IGNORED_KINDS: &[&str] = &[
     // session/wire.ex's wire_event_kind union.
     "isupport_changed",
     "umode_changed",
-    "session_identity_changed",
     "supported_umodes_changed",
     "channel_created",
     "who_reply",
@@ -2364,6 +2377,10 @@ async fn handle_frame(
     }
     if payload_kind == "away_confirmed" {
         handle_away_confirmed(state, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "session_identity_changed" {
+        handle_session_identity_changed(state, &frame.topic, &frame.payload);
         return;
     }
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
@@ -4728,6 +4745,56 @@ fn handle_away_confirmed(state: &mut WorkerState, carrier_topic: &str, payload: 
     }
 }
 
+fn parse_session_identity_changed(
+    payload: &Value,
+    network_slugs: &HashMap<i64, String>,
+) -> Option<(String, SessionIdentity)> {
+    if payload.get("kind")?.as_str()? != "session_identity_changed" {
+        return None;
+    }
+    let network_id = payload.get("network_id")?.as_i64()?;
+    let network = network_slugs.get(&network_id)?;
+    let identified = payload.get("identified")?.as_bool()?;
+    let account = match payload.get("account")? {
+        Value::Null => None,
+        Value::String(account) => Some(account.clone()),
+        _ => return None,
+    };
+    Some((
+        network.clone(),
+        SessionIdentity {
+            identified,
+            account,
+        },
+    ))
+}
+
+fn handle_session_identity_changed(
+    state: &mut WorkerState,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(user) = state.identifier.as_deref() else {
+        return;
+    };
+    if carrier_topic != format!("grappa:user:{user}") {
+        return;
+    }
+    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+        persistence::log_line("session_identity_changed rejected: invalid network map");
+        return;
+    };
+    let Some((network, identity)) =
+        parse_session_identity_changed(payload, &network_slugs)
+    else {
+        persistence::log_line(
+            "session_identity_changed rejected: invalid payload or unknown network",
+        );
+        return;
+    };
+    state.session_identities.insert(network, identity);
+}
+
 fn apply_own_nick_change(
     state: &mut WorkerState,
     user: &str,
@@ -5627,6 +5694,153 @@ mod tests {
         ] {
             assert_eq!(parse_away_confirmed(&invalid, &known_networks), None);
         }
+    }
+
+    #[test]
+    fn session_identity_changed_preserves_true_with_null_account() {
+        let network_slugs: HashMap<i64, String> =
+            [(7, "libera".to_string())].into_iter().collect();
+        let payload = serde_json::json!({
+            "kind": "session_identity_changed",
+            "network_id": 7,
+            "identified": true,
+            "account": null,
+            "future_field": {"is_ignored": true}
+        });
+
+        assert_eq!(
+            parse_session_identity_changed(&payload, &network_slugs),
+            Some((
+                "libera".to_string(),
+                SessionIdentity {
+                    identified: true,
+                    account: None,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn session_identity_changed_rejects_unknown_network_and_invalid_fields() {
+        let network_slugs: HashMap<i64, String> =
+            [(7, "libera".to_string())].into_iter().collect();
+
+        for invalid in [
+            serde_json::json!({
+                "kind": "session_identity_changed",
+                "network_id": 8,
+                "identified": true,
+                "account": "vjt"
+            }),
+            serde_json::json!({
+                "kind": "session_identity_changed",
+                "network_id": "7",
+                "identified": true,
+                "account": "vjt"
+            }),
+            serde_json::json!({
+                "kind": "session_identity_changed",
+                "network_id": 7,
+                "identified": "true",
+                "account": "vjt"
+            }),
+            serde_json::json!({
+                "kind": "session_identity_changed",
+                "network_id": 7,
+                "identified": true
+            }),
+            serde_json::json!({
+                "kind": "session_identity_changed",
+                "network_id": 7,
+                "identified": true,
+                "account": 42
+            }),
+            serde_json::json!({
+                "kind": "other_kind",
+                "network_id": 7,
+                "identified": true,
+                "account": null
+            }),
+        ] {
+            assert_eq!(
+                parse_session_identity_changed(&invalid, &network_slugs),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn session_identity_changed_is_user_carrier_scoped_and_per_network() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+            .into_iter()
+            .collect();
+        let message_key = ("libera".to_string(), "#rust".to_string());
+        state.messages.insert(
+            message_key.clone(),
+            vec![render_message(
+                &serde_json::json!({"kind": "privmsg", "sender": "Alice", "body": "hello"}),
+                None,
+            )],
+        );
+        let identified_without_account = serde_json::json!({
+            "kind": "session_identity_changed",
+            "network_id": 7,
+            "identified": true,
+            "account": null
+        });
+
+        handle_session_identity_changed(
+            &mut state,
+            "grappa:user:vjt/network:libera/channel:#rust",
+            &identified_without_account,
+        );
+        assert!(state.session_identities.is_empty());
+
+        handle_session_identity_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &serde_json::json!({
+                "kind": "session_identity_changed",
+                "network_id": 99,
+                "identified": true,
+                "account": "unknown"
+            }),
+        );
+        assert!(state.session_identities.is_empty());
+
+        handle_session_identity_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &identified_without_account,
+        );
+        handle_session_identity_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &serde_json::json!({
+                "kind": "session_identity_changed",
+                "network_id": 9,
+                "identified": false,
+                "account": "descriptive-account"
+            }),
+        );
+
+        assert_eq!(
+            state.session_identities.get("libera"),
+            Some(&SessionIdentity {
+                identified: true,
+                account: None,
+            })
+        );
+        assert_eq!(
+            state.session_identities.get("azzurra"),
+            Some(&SessionIdentity {
+                identified: false,
+                account: Some("descriptive-account".to_string()),
+            })
+        );
+        assert_eq!(state.messages.get(&message_key).map(Vec::len), Some(1));
     }
 
     #[test]
@@ -7947,7 +8161,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 41);
+        assert_eq!(IGNORED_KINDS.len(), 40);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -7971,6 +8185,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"window_counts"));
         assert!(!IGNORED_KINDS.contains(&"joined"));
         assert!(!IGNORED_KINDS.contains(&"channels_changed"));
+        assert!(!IGNORED_KINDS.contains(&"session_identity_changed"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));
         // "parted" is confirmed to never actually be sent by the server
