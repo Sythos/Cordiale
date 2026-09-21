@@ -92,8 +92,10 @@ known limitations are:
   Cordiale currently retains that badge in session state but does not yet map
   it to an OS taskbar/dock icon badge. `window_counts` updates per-window
   mention badges from the server; message and event totals remain locally
-  derived, matching Cicchetto. This is not complete DM parity: overflow or an
-  invalid/missing authoritative query snapshot can still lose realtime DMs.
+  derived, matching Cicchetto. Peer queries update on their own topics, while
+  the own-nick listener targets the self-message window. This is not complete
+  DM parity: overflow or an invalid/missing authoritative query snapshot can
+  still lose realtime DMs.
   Cicchetto is the behavior reference, and native parity work is still in
   progress. A failed
   join keeps a muted pseudo-row, hides its roster, and retains `reason` and

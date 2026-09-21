@@ -2798,14 +2798,16 @@ fn mention_count_labels(count: u64) -> (String, String) {
 
 /// Validates a complete counts object, while returning only `mentions`: the
 /// `messages` and `events` totals remain locally derived, as in Cicchetto.
-/// Extra fields are intentionally ignored for forward compatibility.
+/// Missing or unknown string severity values normalize to `none`; severity
+/// does not affect the count. Extra fields are ignored for forward compatibility.
 fn parse_window_count_mentions(snapshot: &Value) -> Option<u64> {
     let _messages = snapshot.get("messages")?.as_u64()?;
     let mentions = snapshot.get("mentions")?.as_u64()?;
     let _events = snapshot.get("events")?.as_u64()?;
-    let severity = snapshot.get("severity")?.as_str()?;
-    if !matches!(severity, "mention" | "message" | "event" | "none") {
-        return None;
+    if let Some(severity) = snapshot.get("severity") {
+        // A missing severity defaults to `none`; a present non-string value is
+        // malformed, while an unknown string is a forward-compatible `none`.
+        let _severity = severity.as_str()?;
     }
     Some(mentions)
 }
@@ -2861,9 +2863,9 @@ fn parse_window_counts(
     Some((window_counts_key(&network, channel), mentions))
 }
 
-/// On Cicchetto's own-nick listener, the topic identifies the receiving nick
-/// while the event's `channel` identifies the peer query whose count changed.
-/// Accept that route only for a query in the latest authoritative snapshot.
+/// Cicchetto routes the own-nick listener's count to the self-message window,
+/// keyed by the current own nick. Peer-DM counts arrive on each peer query's
+/// own channel topic, not on this listener.
 fn parse_own_nick_window_counts(
     state: &WorkerState,
     topic: &str,
@@ -2878,19 +2880,26 @@ fn parse_own_nick_window_counts(
     }
     let mentions = parse_window_count_mentions(payload)?;
     let network = own_nick_listener_network_for_topic(state, topic)?;
-    let query = find_query_window(&state.query_windows, &network, channel)?;
-    Some((window_counts_key(&network, &query.target_nick), mentions))
+    let own_nick = state.own_nicks.get(&network)?;
+    if ascii_fold_channel(channel) != ascii_fold_channel(own_nick) {
+        return None;
+    }
+    Some((window_counts_key(&network, own_nick), mentions))
 }
 
 /// Applies one authoritative mention snapshot only to an existing channel or
-/// query row. Missing rows are ignored until an authoritative snapshot makes
-/// them visible; no synthetic sidebar entries are created from this event.
+/// query row. The own-nick listener is an exception: Cicchetto tracks its
+/// self-message window even though it is not a peer query row.
 fn apply_window_counts(state: &mut WorkerState, topic: &str, payload: &Value) -> bool {
-    let parsed = state
-        .identifier
-        .as_deref()
-        .and_then(|identifier| parse_window_counts(payload, topic, identifier))
-        .or_else(|| parse_own_nick_window_counts(state, topic, payload));
+    let own_nick_listener = own_nick_listener_network_for_topic(state, topic).is_some();
+    let parsed = if own_nick_listener {
+        parse_own_nick_window_counts(state, topic, payload)
+    } else {
+        state
+            .identifier
+            .as_deref()
+            .and_then(|identifier| parse_window_counts(payload, topic, identifier))
+    };
     let Some((key, mentions)) = parsed else {
         return false;
     };
@@ -2902,7 +2911,13 @@ fn apply_window_counts(state: &mut WorkerState, topic: &str, payload: &Value) ->
             .query_windows
             .iter()
             .any(|query| window_counts_key(&query.network, &query.target_nick) == key);
-    if !known_window || state.window_mentions.get(&key) == Some(&mentions) {
+    if !known_window && !own_nick_listener {
+        return false;
+    }
+    if mentions == 0 {
+        return state.window_mentions.remove(&key).is_some();
+    }
+    if state.window_mentions.get(&key) == Some(&mentions) {
         return false;
     }
     state.window_mentions.insert(key, mentions);
@@ -6458,6 +6473,28 @@ mod tests {
         );
         assert_eq!(state.window_mentions.len(), 2);
 
+        // Snapshots are absolute and last-arrival-wins, even when the count
+        // decreases (for example, when an older queued snapshot arrives late).
+        let lower_snapshot = serde_json::json!({
+            "kind": "window_counts",
+            "channel": "#cordiale",
+            "messages": 2,
+            "mentions": 2,
+            "events": 1,
+            "severity": "none"
+        });
+        assert!(apply_window_counts(
+            &mut state,
+            &channel_topic("sythos", "libera", "#cordiale"),
+            &lower_snapshot
+        ));
+        assert_eq!(
+            state
+                .window_mentions
+                .get(&window_counts_key("libera", "#cordiale")),
+            Some(&2)
+        );
+
         let cleared = serde_json::json!({
             "kind": "window_counts",
             "channel": "#cordiale",
@@ -6471,11 +6508,14 @@ mod tests {
             &channel_topic("sythos", "libera", "#cordiale"),
             &cleared
         ));
+        assert!(!state
+            .window_mentions
+            .contains_key(&window_counts_key("libera", "#cordiale")));
         assert_eq!(
             state
                 .window_mentions
-                .get(&window_counts_key("libera", "#cordiale")),
-            Some(&0)
+                .get(&window_counts_key("libera", "Peer")),
+            Some(&1)
         );
         assert_eq!(mention_count_labels(0), (String::new(), String::new()));
         assert_eq!(
@@ -6527,7 +6567,7 @@ mod tests {
     }
 
     #[test]
-    fn window_counts_on_own_nick_listener_updates_only_open_queries() {
+    fn window_counts_on_own_nick_listener_updates_only_own_nick_window() {
         let mut state = WorkerState::new();
         state.identifier = Some("sythos".to_string());
         state
@@ -6538,17 +6578,26 @@ mod tests {
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
         }];
+        state
+            .window_mentions
+            .insert(window_counts_key("libera", "Sythos"), 1);
+        state
+            .window_mentions
+            .insert(window_counts_key("libera", "Peer"), 2);
         let payload = serde_json::json!({
             "kind": "window_counts",
-            "channel": "peer",
-            "messages": 5,
-            "mentions": 2,
-            "events": 1,
-            "severity": "mention"
+            "channel": "sythos",
+            "messages": 1,
+            "mentions": 0,
+            "events": 0,
+            "severity": "message"
         });
         let own_nick_topic = own_nick_listener_topic("sythos", "libera", "Sythos");
 
         assert!(apply_window_counts(&mut state, &own_nick_topic, &payload));
+        assert!(!state
+            .window_mentions
+            .contains_key(&window_counts_key("libera", "Sythos")));
         assert_eq!(
             state
                 .window_mentions
@@ -6556,10 +6605,9 @@ mod tests {
             Some(&2)
         );
 
-        state.query_windows.clear();
         let unrelated = serde_json::json!({
             "kind": "window_counts",
-            "channel": "unopened-peer",
+            "channel": "Peer",
             "messages": 1,
             "mentions": 1,
             "events": 0,
@@ -6619,7 +6667,7 @@ mod tests {
                     "messages": 3,
                     "mentions": 2,
                     "events": 1,
-                    "severity": "future-severity"
+                    "severity": 42
                 }),
             ),
             (
@@ -6629,7 +6677,7 @@ mod tests {
                     "channel": "#cordiale",
                     "messages": 3,
                     "mentions": 2,
-                    "events": 1
+                    "severity": "mention"
                 }),
             ),
             (
@@ -6650,6 +6698,64 @@ mod tests {
             );
         }
         assert!(state.window_mentions.is_empty());
+    }
+
+    #[test]
+    fn window_counts_preserves_mentions_when_severity_is_missing_or_unknown() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("sythos".to_string());
+        state.channel_entries = vec![
+            (
+                "libera".to_string(),
+                "#unknown-severity".to_string(),
+                "#unknown-severity".to_string(),
+            ),
+            (
+                "libera".to_string(),
+                "#missing-severity".to_string(),
+                "#missing-severity".to_string(),
+            ),
+        ];
+
+        let unknown = serde_json::json!({
+            "kind": "window_counts",
+            "channel": "#unknown-severity",
+            "messages": 3,
+            "mentions": 2,
+            "events": 1,
+            "severity": "future-severity"
+        });
+        assert!(apply_window_counts(
+            &mut state,
+            &channel_topic("sythos", "libera", "#unknown-severity"),
+            &unknown
+        ));
+
+        let missing = serde_json::json!({
+            "kind": "window_counts",
+            "channel": "#missing-severity",
+            "messages": 5,
+            "mentions": 4,
+            "events": 2
+        });
+        assert!(apply_window_counts(
+            &mut state,
+            &channel_topic("sythos", "libera", "#missing-severity"),
+            &missing
+        ));
+
+        assert_eq!(
+            state
+                .window_mentions
+                .get(&window_counts_key("libera", "#unknown-severity")),
+            Some(&2)
+        );
+        assert_eq!(
+            state
+                .window_mentions
+                .get(&window_counts_key("libera", "#missing-severity")),
+            Some(&4)
+        );
     }
 
     #[test]
