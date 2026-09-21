@@ -70,10 +70,15 @@ known limitations are:
 - **Realtime event coverage (0.1.4 tester build)**: the current Grappa
   protocol lists 56 top-level event kinds. Cordiale handles `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
-  `joined`, `join_failed`, `kicked`, and `message`; the other 47 are
-  recognized but deliberately ignored for this tester release. They won't
-  appear as fake `event: payload` chat messages. Cicchetto is the behavior
-  reference, and native parity work is still in progress. A failed
+  `query_windows_list`, `joined`, `join_failed`, `kicked`, and `message`; the
+  other 46 kinds are deliberately ignored for this tester release. They won't
+  appear as fake `event: payload` chat messages. Query snapshots replace the
+  full query-window map, map network IDs to native sidebar rows, subscribe via
+  Cicchetto's channel-shaped/ASCII-folded topic, and load/deduplicate history
+  around join acknowledgements. This is not complete DM parity: read cursors,
+  window counts, and the separate own-nick listener/rename behavior remain
+  distinct gaps. Cicchetto is the behavior reference, and native parity work
+  is still in progress. A failed
   join keeps a muted pseudo-row, hides its roster, and retains `reason` and
   `numeric` only in session state. A kick also keeps a muted, accessible,
   selectable pseudo-row without a roster; its `by` and `reason` metadata stay
@@ -81,7 +86,7 @@ known limitations are:
   removing the row locally:
   - **Window, channel, and scrollback state**: `channel_created`,
     `read_cursor_set`, `window_counts`, `window_pending`, `window_invited`,
-    `window_invite_declined`, `query_windows_list`, `archive_changed`,
+    `window_invite_declined`, `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**: `channels_changed`,
     `network_attached`, `network_detached`, `connection_progress`,
