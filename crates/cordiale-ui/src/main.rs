@@ -2228,7 +2228,6 @@ const IGNORED_KINDS: &[&str] = &[
     "channel_created",
     "who_reply",
     "server_reply",
-    "window_invite_declined",
     "dcc_offer",
     "dcc_offer_resolved",
     "mentions_bundle",
@@ -2472,6 +2471,14 @@ async fn handle_frame(
     // topic so the eventual `joined`/`join_failed` event cannot race us.
     if payload_kind == "window_invited" {
         handle_window_invited(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+
+    // A declined invitation is a terminal removal broadcast on the user
+    // topic. The server has already removed the invited window, so there is
+    // no client-side IRC DECLINE command and no replacement `declined` state.
+    if payload_kind == "window_invite_declined" {
+        handle_window_invite_declined(state, ui, &frame.topic, &frame.payload);
         return;
     }
 
@@ -3681,6 +3688,140 @@ fn handle_window_invited(
     }
     refresh_invite_banner(state, ui);
     if state_changed || sidebar_changed {
+        refresh_network_groups(state, ui);
+    }
+}
+
+/// Parses the terminal `window_invite_declined` transition. Grappa sends it
+/// only on the authenticated user topic and intentionally omits `state`: the
+/// server has already removed the invited window. Unknown additive fields are
+/// tolerated for forward compatibility.
+fn parse_window_invite_declined_event(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String)> {
+    if identifier.is_empty()
+        || carrier_topic != format!("grappa:user:{identifier}")
+        || payload.get("kind").and_then(Value::as_str) != Some("window_invite_declined")
+    {
+        return None;
+    }
+
+    let network = payload.get("network").and_then(Value::as_str)?;
+    let channel = payload.get("channel").and_then(Value::as_str)?;
+    if network.trim().is_empty() || channel.trim().is_empty() {
+        return None;
+    }
+
+    Some((network.to_string(), channel.to_string()))
+}
+
+/// Removes all lifecycle metadata for a declined invitation. In particular,
+/// this also clears `Pending`, so a decline racing with the transient JOIN
+/// state cannot leave a stale pseudo-row behind. No `declined` state is
+/// created, and cached messages/drafts/topics remain untouched like
+/// Cicchetto's `forceParted` projection.
+fn clear_declined_window_state(
+    window_states: &mut HashMap<(String, String), ChannelWindowState>,
+    window_failures: &mut HashMap<(String, String), WindowFailure>,
+    window_kicks: &mut HashMap<(String, String), WindowKick>,
+    invited_by: &mut HashMap<(String, String), String>,
+    network: &str,
+    channel: &str,
+) -> bool {
+    let key = window_state_key(network, channel);
+    let state_removed = window_states.remove(&key).is_some();
+    let failure_removed = window_failures.remove(&key).is_some();
+    let kick_removed = window_kicks.remove(&key).is_some();
+    let invite_removed = invited_by.remove(&key).is_some();
+    state_removed || failure_removed || kick_removed || invite_removed
+}
+
+/// Applies the server-authoritative removal to both lifecycle state and the
+/// native sidebar projection. Repeated delivery is therefore a no-op.
+fn remove_declined_window(state: &mut WorkerState, network: &str, channel: &str) -> bool {
+    let lifecycle_changed = clear_declined_window_state(
+        &mut state.window_states,
+        &mut state.window_failures,
+        &mut state.window_kicks,
+        &mut state.invited_by,
+        network,
+        channel,
+    );
+    let sidebar_changed =
+        remove_sidebar_channel_entry(&mut state.channel_entries, network, channel);
+    lifecycle_changed || sidebar_changed
+}
+
+/// Removes the channel-topic subscription that was created for the invited
+/// window, while preserving a topic still owned by an open query or the
+/// own-nick listener (all three use the same Phoenix topic shape).
+fn remove_declined_channel_subscription(
+    state: &mut WorkerState,
+    identifier: &str,
+    network: &str,
+    channel: &str,
+) -> bool {
+    let canonical_topic = channel_topic(identifier, network, &ascii_fold_channel(channel));
+    let topic_is_owned_elsewhere =
+        channel_topic_is_owned_elsewhere(state, identifier, &canonical_topic);
+    let matching_channel_topics: Vec<String> = state
+        .channel_topics
+        .iter()
+        .filter(|topic| channel_topic_matches(identifier, topic, network, channel))
+        .cloned()
+        .collect();
+    let channel_topic_removed = !matching_channel_topics.is_empty();
+    for topic in matching_channel_topics {
+        state.channel_topics.remove(&topic);
+    }
+
+    let matching_joined_topics: Vec<String> = if topic_is_owned_elsewhere {
+        Vec::new()
+    } else {
+        state
+            .joined_topics
+            .iter()
+            .filter(|topic| channel_topic_matches(identifier, topic, network, channel))
+            .cloned()
+            .collect()
+    };
+    let joined_topic_removed = !matching_joined_topics.is_empty();
+    for topic in matching_joined_topics {
+        state.joined_topics.remove(&topic);
+        if let Some(handle) = state.session.as_ref() {
+            handle.leave_topic(topic);
+        }
+    }
+    channel_topic_removed || joined_topic_removed
+}
+
+fn handle_window_invite_declined(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+    let Some((network, channel)) =
+        parse_window_invite_declined_event(payload, carrier_topic, &identifier)
+    else {
+        return;
+    };
+    // Bootstrap remains authoritative for known networks; malformed or stale
+    // network names must not remove an unrelated row or lifecycle entry.
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+
+    let window_changed = remove_declined_window(state, &network, &channel);
+    let subscription_changed =
+        remove_declined_channel_subscription(state, &identifier, &network, &channel);
+    if window_changed || subscription_changed {
+        refresh_invite_banner(state, ui);
         refresh_network_groups(state, ui);
     }
 }
@@ -8501,6 +8642,70 @@ mod tests {
     }
 
     #[test]
+    fn parse_window_invite_declined_accepts_only_the_user_topic_without_state() {
+        let payload = serde_json::json!({
+            "kind": "window_invite_declined",
+            "network": "libera",
+            "channel": "#cordiale",
+            "future_field": true
+        });
+        let expected = Some(("libera".to_string(), "#cordiale".to_string()));
+
+        assert_eq!(
+            parse_window_invite_declined_event(&payload, "grappa:user:sythos", "sythos"),
+            expected
+        );
+        assert_eq!(
+            parse_window_invite_declined_event(
+                &payload,
+                &channel_topic("sythos", "libera", "#cordiale"),
+                "sythos"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_window_invite_declined_event(&payload, "grappa:user:other", "sythos"),
+            None
+        );
+
+        for malformed in [
+            serde_json::json!({
+                "kind": "window_invited",
+                "network": "libera",
+                "channel": "#cordiale"
+            }),
+            serde_json::json!({
+                "kind": "window_invite_declined",
+                "channel": "#cordiale"
+            }),
+            serde_json::json!({
+                "kind": "window_invite_declined",
+                "network": "libera"
+            }),
+            serde_json::json!({
+                "kind": "window_invite_declined",
+                "network": 7,
+                "channel": "#cordiale"
+            }),
+            serde_json::json!({
+                "kind": "window_invite_declined",
+                "network": "   ",
+                "channel": "#cordiale"
+            }),
+            serde_json::json!({
+                "kind": "window_invite_declined",
+                "network": "libera",
+                "channel": ""
+            }),
+        ] {
+            assert_eq!(
+                parse_window_invite_declined_event(&malformed, "grappa:user:sythos", "sythos"),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn invited_window_is_idempotent_and_replaces_stale_state() {
         let key = window_state_key("libera", "#cordiale");
         let mut states = HashMap::from([(key.clone(), ChannelWindowState::Failed)]);
@@ -8575,6 +8780,72 @@ mod tests {
             "*".to_string(),
         ));
         assert_eq!(invited_by.get(&key).map(String::as_str), Some("*"));
+    }
+
+    #[test]
+    fn declined_window_removes_invited_and_pending_state_and_sidebar_row() {
+        let key = window_state_key("libera", "#cordiale");
+        let mut state = WorkerState::new();
+        state
+            .window_states
+            .insert(key.clone(), ChannelWindowState::Pending);
+        state.window_failures.insert(
+            key.clone(),
+            WindowFailure {
+                reason: Some("stale failure".to_string()),
+                numeric: Some(Number::from(473)),
+            },
+        );
+        state.window_kicks.insert(
+            key.clone(),
+            WindowKick {
+                by: Some("stale actor".to_string()),
+                reason: Some("stale reason".to_string()),
+            },
+        );
+        state.invited_by.insert(key.clone(), "ChanServ".to_string());
+        state.channel_entries.push((
+            "libera".to_string(),
+            "#cordiale".to_string(),
+            "#cordiale".to_string(),
+        ));
+        state
+            .members
+            .insert(key.clone(), vec![("sythos".to_string(), "@".to_string())]);
+        state.messages.insert(key.clone(), Vec::new());
+        state.drafts.insert(key.clone(), "draft".to_string());
+        state.topics.insert(key.clone(), "topic".to_string());
+        let topic = channel_topic("sythos", "libera", "#cordiale");
+        state.channel_topics.insert(topic.clone());
+        state.joined_topics.insert(topic.clone());
+
+        assert!(remove_declined_window(&mut state, "libera", "#CoRdIaLe"));
+        assert!(!state.window_states.contains_key(&key));
+        assert!(!state.window_failures.contains_key(&key));
+        assert!(!state.window_kicks.contains_key(&key));
+        assert!(!state.invited_by.contains_key(&key));
+        assert!(state.channel_entries.is_empty());
+        // Lifecycle cleanup does not discard cached content or topic data.
+        assert!(state.members.contains_key(&key));
+        assert!(state.messages.contains_key(&key));
+        assert_eq!(state.drafts.get(&key).map(String::as_str), Some("draft"));
+        assert_eq!(state.topics.get(&key).map(String::as_str), Some("topic"));
+        assert!(remove_declined_channel_subscription(
+            &mut state,
+            "sythos",
+            "libera",
+            "#CoRdIaLe"
+        ));
+        assert!(state.channel_topics.is_empty());
+        assert!(state.joined_topics.is_empty());
+
+        assert!(!remove_declined_window(&mut state, "libera", "#cordiale"));
+        assert!(!remove_declined_channel_subscription(
+            &mut state,
+            "sythos",
+            "libera",
+            "#cordiale"
+        ));
     }
 
     #[test]
@@ -9372,7 +9643,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 35);
+        assert_eq!(IGNORED_KINDS.len(), 34);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -9404,6 +9675,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"kicked"));
         assert!(!IGNORED_KINDS.contains(&"window_pending"));
         assert!(!IGNORED_KINDS.contains(&"window_invited"));
+        assert!(!IGNORED_KINDS.contains(&"window_invite_declined"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
