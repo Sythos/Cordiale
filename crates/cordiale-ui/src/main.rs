@@ -3664,12 +3664,14 @@ fn handle_window_invited(
 
     // The event is deliberately not an auto-focus request. If the invited
     // window is already selected, keep the roster hidden until `joined`.
-    let selected_window_invited = state.current_channel.as_ref().is_some_and(
-        |(current_network, current_channel)| {
-            window_state_key(current_network, current_channel)
-                == window_state_key(&network, &channel)
-        },
-    );
+    let selected_window_invited =
+        state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, current_channel)| {
+                window_state_key(current_network, current_channel)
+                    == window_state_key(&network, &channel)
+            });
     if selected_window_invited {
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(|ui| {
@@ -8544,7 +8546,10 @@ mod tests {
             &mut channel_topics,
             topic.clone()
         ));
-        assert_eq!(joined_topics, std::collections::HashSet::from([topic.clone()]));
+        assert_eq!(
+            joined_topics,
+            std::collections::HashSet::from([topic.clone()])
+        );
         assert_eq!(channel_topics, std::collections::HashSet::from([topic]));
 
         assert!(!set_invited_window_state(
