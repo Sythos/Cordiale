@@ -154,6 +154,22 @@ impl GrappaClient {
         Ok(response.json::<MeResponse>().await?)
     }
 
+    /// `GET /networks` — refreshes server-authoritative home-network rows
+    /// after `connection_state_changed`. A link transition does not change
+    /// the attachment set or channel projection, so this is distinct from
+    /// refreshing `/boot` and `/me`.
+    pub async fn fetch_networks(&self, token: &str) -> Result<Vec<Value>, GrappaClientError> {
+        let url = format!("{}/networks", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Vec<Value>>().await?)
+    }
+
     /// `GET /networks/:network_slug/channels` — returns the authoritative
     /// channel envelopes for one network. Entries stay opaque until their
     /// complete server schema is published.
@@ -909,6 +925,35 @@ mod tests {
 
         assert_eq!(boot.networks.len(), 1);
         assert_eq!(boot.channels.get("libera").map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn fetch_networks_sends_the_bearer_token_and_parses_network_rows() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 7,
+                    "slug": "libera",
+                    "connection_state": "connected",
+                    "connection_state_reason": null,
+                    "connection_state_changed_at": null
+                }
+            ])))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let networks = client
+            .fetch_networks("abc123")
+            .await
+            .expect("fetch_networks");
+
+        assert_eq!(networks.len(), 1);
+        assert_eq!(networks[0]["slug"], "libera");
+        assert_eq!(networks[0]["connection_state"], "connected");
     }
 
     #[tokio::test]
