@@ -70,14 +70,15 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 20 of them:
+  lists 56 top-level event kinds. Cordiale handles 21 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
-  `away_confirmed`, `window_counts`, `channels_changed`, `window_pending`,
+  `away_confirmed`, `window_counts`, `channels_changed`,
   `session_identity_changed`, `isupport_changed`, `umode_changed`,
-  `supported_umodes_changed`, `joined`, `join_failed`, `kicked`, and `message`;
-  the remaining 36 kinds are
+  `supported_umodes_changed`, `joined`, `join_failed`, `kicked`,
+  `window_pending`, `window_invited`, and `message`;
+  the remaining 35 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -119,7 +120,13 @@ known limitations are:
   listener. A failed refresh keeps the existing state.
   `window_pending` creates an idempotent pending row from the live user-topic
   signal and subscribes to the channel topic so the subsequent `joined` or
-  `join_failed` event is not lost. The channel sidebar also displays
+  `join_failed` event is not lost. `window_invited` accepts the required
+  `inviter` field from both live and replayed user-topic events, creates an
+  invited row, ensures the channel-topic subscription, and shows a Join banner
+  without stealing focus. Neither event is seeded from a channel snapshot:
+  pending is live-only, while invited is replayed on the user topic. They are
+  distinct from one another and from the still-ignored terminal
+  `window_invite_declined` event. The channel sidebar also displays
   server-authoritative unread message counts and separates network groups
   visually. `session_identity_changed` stores the per-network `identified`
   verdict separately from its optional display account, including the valid
@@ -136,7 +143,6 @@ known limitations are:
   advertised by 004, preserving order and allowing empty/replayed snapshots;
   it never overwrites the active-mode store.
   - **Window, channel, and scrollback state**: `channel_created`,
-    `window_invited`,
     `window_invite_declined`, `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**: `network_attached`,
