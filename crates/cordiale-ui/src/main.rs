@@ -5067,63 +5067,66 @@ fn network_groups_model(
 ) -> Vec<NetworkGroup> {
     data.into_iter()
         .enumerate()
-        .map(|(index, (network, expanded, channels, queries, connection_label))| {
-            let channel_entries: Vec<ChannelEntry> = channels
-                .into_iter()
-                .map(|(channel, label)| {
-                    let failed = window_is_failed(&window_states, &network, &channel);
-                    let kicked = window_is_kicked(&window_states, &network, &channel);
-                    let invited = window_is_invited(&window_states, &network, &channel);
-                    let mention_count = window_mentions
-                        .get(&window_counts_key(&network, &channel))
-                        .copied()
-                        .unwrap_or_default();
-                    let (mention_badge, mentions_description) = mention_count_labels(mention_count);
-                    let (unread_count, unread_description) = unread_message_count_labels(
-                        window_messages
+        .map(
+            |(index, (network, expanded, channels, queries, connection_label))| {
+                let channel_entries: Vec<ChannelEntry> = channels
+                    .into_iter()
+                    .map(|(channel, label)| {
+                        let failed = window_is_failed(&window_states, &network, &channel);
+                        let kicked = window_is_kicked(&window_states, &network, &channel);
+                        let invited = window_is_invited(&window_states, &network, &channel);
+                        let mention_count = window_mentions
                             .get(&window_counts_key(&network, &channel))
-                            .copied(),
-                    );
-                    ChannelEntry {
-                        network: network.clone().into(),
-                        channel: channel.into(),
-                        label: label.into(),
-                        mention_badge: mention_badge.into(),
-                        mentions_description: mentions_description.into(),
-                        unread_count: unread_count.into(),
-                        unread_description: unread_description.into(),
-                        failed,
-                        kicked,
-                        invited,
-                    }
-                })
-                .collect();
-            let query_entries: Vec<QueryEntry> = queries
-                .into_iter()
-                .map(|(nick, label)| {
-                    let (mention_badge, mentions_description) = window_mentions
-                        .get(&window_counts_key(&network, &nick))
-                        .copied()
-                        .map(mention_count_labels)
-                        .unwrap_or_default();
-                    QueryEntry {
-                        network: network.clone().into(),
-                        nick: nick.into(),
-                        label: label.into(),
-                        mention_badge: mention_badge.into(),
-                        mentions_description: mentions_description.into(),
-                    }
-                })
-                .collect();
-            NetworkGroup {
-                network: network.into(),
-                connection_label: connection_label.into(),
-                separator_before: index > 0,
-                expanded,
-                channels: Rc::new(slint::VecModel::from(channel_entries)).into(),
-                queries: Rc::new(slint::VecModel::from(query_entries)).into(),
-            }
-        })
+                            .copied()
+                            .unwrap_or_default();
+                        let (mention_badge, mentions_description) =
+                            mention_count_labels(mention_count);
+                        let (unread_count, unread_description) = unread_message_count_labels(
+                            window_messages
+                                .get(&window_counts_key(&network, &channel))
+                                .copied(),
+                        );
+                        ChannelEntry {
+                            network: network.clone().into(),
+                            channel: channel.into(),
+                            label: label.into(),
+                            mention_badge: mention_badge.into(),
+                            mentions_description: mentions_description.into(),
+                            unread_count: unread_count.into(),
+                            unread_description: unread_description.into(),
+                            failed,
+                            kicked,
+                            invited,
+                        }
+                    })
+                    .collect();
+                let query_entries: Vec<QueryEntry> = queries
+                    .into_iter()
+                    .map(|(nick, label)| {
+                        let (mention_badge, mentions_description) = window_mentions
+                            .get(&window_counts_key(&network, &nick))
+                            .copied()
+                            .map(mention_count_labels)
+                            .unwrap_or_default();
+                        QueryEntry {
+                            network: network.clone().into(),
+                            nick: nick.into(),
+                            label: label.into(),
+                            mention_badge: mention_badge.into(),
+                            mentions_description: mentions_description.into(),
+                        }
+                    })
+                    .collect();
+                NetworkGroup {
+                    network: network.into(),
+                    connection_label: connection_label.into(),
+                    separator_before: index > 0,
+                    expanded,
+                    channels: Rc::new(slint::VecModel::from(channel_entries)).into(),
+                    queries: Rc::new(slint::VecModel::from(query_entries)).into(),
+                }
+            },
+        )
         .collect()
 }
 
@@ -10452,17 +10455,17 @@ mod tests {
             "future_field": true
         });
 
-        let transition = parse_connection_state_changed_event(
-            &payload,
-            "grappa:user:guest",
-            "guest",
-        )
-        .expect("valid visitor transition");
+        let transition =
+            parse_connection_state_changed_event(&payload, "grappa:user:guest", "guest")
+                .expect("valid visitor transition");
         assert_eq!(transition.network_id, 7);
         assert_eq!(transition.network_slug, "libera");
         assert_eq!(transition.from, NetworkConnectionStatus::Connected);
         assert_eq!(transition.snapshot.status, NetworkConnectionStatus::Failing);
-        assert_eq!(transition.snapshot.reason.as_deref(), Some("connection lost"));
+        assert_eq!(
+            transition.snapshot.reason.as_deref(),
+            Some("connection lost")
+        );
         assert_eq!(
             transition.snapshot.changed_at.as_deref(),
             Some("2026-09-22T10:20:30Z")
@@ -10488,12 +10491,9 @@ mod tests {
                 "connection_state_changed_at": null
             }
         });
-        assert!(parse_connection_state_changed_event(
-            &valid,
-            "grappa:user:sythos",
-            "sythos"
-        )
-        .is_some());
+        assert!(
+            parse_connection_state_changed_event(&valid, "grappa:user:sythos", "sythos").is_some()
+        );
 
         for (path, value) in [
             ("user_id", serde_json::json!(7)),
@@ -10504,53 +10504,42 @@ mod tests {
         ] {
             let mut invalid = valid.clone();
             invalid[path] = value;
-            assert!(parse_connection_state_changed_event(
-                &invalid,
-                "grappa:user:sythos",
-                "sythos"
-            )
-            .is_none());
+            assert!(
+                parse_connection_state_changed_event(&invalid, "grappa:user:sythos", "sythos")
+                    .is_none()
+            );
         }
 
         let mut mismatched_slug = valid.clone();
         mismatched_slug["network"]["slug"] = serde_json::json!("other");
-        assert!(
-            parse_connection_state_changed_event(
-                &mismatched_slug,
-                "grappa:user:sythos",
-                "sythos"
-            )
-            .is_none()
-        );
-
-        let mut mismatched_status = valid.clone();
-        mismatched_status["network"]["connection_state"] = serde_json::json!("failing");
-        assert!(
-            parse_connection_state_changed_event(
-                &mismatched_status,
-                "grappa:user:sythos",
-                "sythos"
-            )
-            .is_none()
-        );
-
-        let mut mismatched_id = valid.clone();
-        mismatched_id["network"]["id"] = serde_json::json!(9);
-        assert!(
-            parse_connection_state_changed_event(
-                &mismatched_id,
-                "grappa:user:sythos",
-                "sythos"
-            )
-            .is_none()
-        );
-
         assert!(parse_connection_state_changed_event(
-            &valid,
-            "grappa:user:other",
+            &mismatched_slug,
+            "grappa:user:sythos",
             "sythos"
         )
         .is_none());
+
+        let mut mismatched_status = valid.clone();
+        mismatched_status["network"]["connection_state"] = serde_json::json!("failing");
+        assert!(parse_connection_state_changed_event(
+            &mismatched_status,
+            "grappa:user:sythos",
+            "sythos"
+        )
+        .is_none());
+
+        let mut mismatched_id = valid.clone();
+        mismatched_id["network"]["id"] = serde_json::json!(9);
+        assert!(parse_connection_state_changed_event(
+            &mismatched_id,
+            "grappa:user:sythos",
+            "sythos"
+        )
+        .is_none());
+
+        assert!(
+            parse_connection_state_changed_event(&valid, "grappa:user:other", "sythos").is_none()
+        );
     }
 
     #[test]
@@ -10562,14 +10551,8 @@ mod tests {
         ]);
 
         assert_eq!(states.len(), 2);
-        assert_eq!(
-            states["libera"].status.sidebar_label(),
-            "reconnecting"
-        );
-        assert_eq!(
-            states["oftc"].status.sidebar_label(),
-            "connection failed"
-        );
+        assert_eq!(states["libera"].status.sidebar_label(), "reconnecting");
+        assert_eq!(states["oftc"].status.sidebar_label(), "connection failed");
     }
 
     #[test]
@@ -10594,11 +10577,7 @@ mod tests {
             (false, false)
         );
         assert_eq!(
-            record_network_connection_state(
-                &mut states,
-                "already-parked",
-                parked.clone()
-            ),
+            record_network_connection_state(&mut states, "already-parked", parked.clone()),
             (false, false)
         );
 
