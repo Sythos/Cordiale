@@ -519,6 +519,7 @@ fn main() -> Result<(), slint::PlatformError> {
 /// the background thread; the UI thread never touches it directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChannelWindowState {
+    Pending,
     Joined,
     Failed,
     Kicked,
@@ -2161,7 +2162,6 @@ const IGNORED_KINDS: &[&str] = &[
     "channel_created",
     "who_reply",
     "server_reply",
-    "window_pending",
     "window_invited",
     "window_invite_declined",
     "dcc_offer",
@@ -2373,6 +2373,16 @@ async fn handle_frame(
 
     if payload_kind == "query_windows_list" {
         handle_query_windows_list(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+
+    // A JOIN accepted by Grappa first creates a transient window on the user
+    // topic. Subscribe immediately to the channel-shaped topic so the
+    // subsequent `joined` or `join_failed` transition cannot race past this
+    // client. Unlike those terminal states, `window_pending` is live-only and
+    // must never be accepted from a channel reconnect snapshot.
+    if payload_kind == "window_pending" {
+        handle_window_pending(state, ui, &frame.topic, &frame.payload);
         return;
     }
 
@@ -3258,6 +3268,119 @@ fn ascii_fold_channel(channel: &str) -> String {
 /// `channelKey`: preserve the network slug and ASCII-fold only the channel.
 fn window_state_key(network: &str, channel: &str) -> (String, String) {
     (network.to_string(), ascii_fold_channel(channel))
+}
+
+/// Parses the live-only `window_pending` transition. Grappa emits this on the
+/// authenticated user topic before the channel subscription exists; accepting
+/// it anywhere else would accidentally turn a channel snapshot into a seed.
+/// Unknown additive fields are deliberately ignored for forward compatibility.
+fn parse_window_pending_event(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String)> {
+    if carrier_topic != format!("grappa:user:{identifier}")
+        || payload.get("kind").and_then(Value::as_str) != Some("window_pending")
+        || payload.get("state").and_then(Value::as_str) != Some("pending")
+    {
+        return None;
+    }
+
+    let network = payload.get("network").and_then(Value::as_str)?;
+    let channel = payload.get("channel").and_then(Value::as_str)?;
+    if network.is_empty() || channel.is_empty() {
+        return None;
+    }
+
+    Some((network.to_string(), channel.to_string()))
+}
+
+/// Mirrors Cicchetto's pending-window reducer: replace any stale terminal
+/// state and metadata without manufacturing history or a channel snapshot.
+fn set_pending_window_state(
+    window_states: &mut HashMap<(String, String), ChannelWindowState>,
+    window_failures: &mut HashMap<(String, String), WindowFailure>,
+    window_kicks: &mut HashMap<(String, String), WindowKick>,
+    invited_by: &mut HashMap<(String, String), String>,
+    network: &str,
+    channel: &str,
+) -> bool {
+    let key = window_state_key(network, channel);
+    let state_changed = window_states.insert(key.clone(), ChannelWindowState::Pending)
+        != Some(ChannelWindowState::Pending);
+    let failure_cleared = window_failures.remove(&key).is_some();
+    let kick_cleared = window_kicks.remove(&key).is_some();
+    let invite_cleared = invited_by.remove(&key).is_some();
+    state_changed || failure_cleared || kick_cleared || invite_cleared
+}
+
+fn register_pending_channel_topic(
+    joined_topics: &mut std::collections::HashSet<String>,
+    channel_topics: &mut std::collections::HashSet<String>,
+    topic: String,
+) -> bool {
+    channel_topics.insert(topic.clone());
+    joined_topics.insert(topic)
+}
+
+fn handle_window_pending(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+    let Some((network, channel)) = parse_window_pending_event(payload, carrier_topic, &identifier)
+    else {
+        return;
+    };
+    // The event identifies a window on an already bootstrapped network. Do
+    // not invent a new network from an unsolicited or stale payload.
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+
+    let state_changed = set_pending_window_state(
+        &mut state.window_states,
+        &mut state.window_failures,
+        &mut state.window_kicks,
+        &mut state.invited_by,
+        &network,
+        &channel,
+    );
+    let sidebar_changed =
+        upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
+
+    let topic = channel_topic(&identifier, &network, &channel);
+    let subscription_added = register_pending_channel_topic(
+        &mut state.joined_topics,
+        &mut state.channel_topics,
+        topic.clone(),
+    );
+    if let (true, Some(handle)) = (subscription_added, state.session.as_ref()) {
+        handle.join_topic(topic, true);
+    }
+
+    let selected_window_pending =
+        state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, current_channel)| {
+                window_state_key(current_network, current_channel)
+                    == window_state_key(&network, &channel)
+            });
+    if selected_window_pending {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_current_window_is_joined(false);
+            ui.set_can_moderate_members(false);
+        });
+    }
+    if state_changed || sidebar_changed {
+        refresh_network_groups(state, ui);
+    }
 }
 
 fn window_is_failed(
@@ -7224,6 +7347,137 @@ mod tests {
     }
 
     #[test]
+    fn parse_window_pending_accepts_only_live_user_topic_and_exact_fields() {
+        let payload = serde_json::json!({
+            "kind": "window_pending",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "pending",
+            "future_field": true
+        });
+        let expected = Some(("libera".to_string(), "#cordiale".to_string()));
+
+        assert_eq!(
+            parse_window_pending_event(&payload, "grappa:user:sythos", "sythos"),
+            expected
+        );
+        assert_eq!(
+            parse_window_pending_event(
+                &payload,
+                &channel_topic("sythos", "libera", "#cordiale"),
+                "sythos"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_window_pending_event(&payload, "grappa:user:other", "sythos"),
+            None
+        );
+
+        for malformed in [
+            serde_json::json!({
+                "kind": "window_pending",
+                "network": "libera",
+                "channel": "#cordiale",
+                "state": "joined"
+            }),
+            serde_json::json!({
+                "kind": "window_pending",
+                "network": "libera",
+                "state": "pending"
+            }),
+            serde_json::json!({
+                "kind": "window_pending",
+                "network": 7,
+                "channel": "#cordiale",
+                "state": "pending"
+            }),
+            serde_json::json!({
+                "kind": "window_pending",
+                "network": "libera",
+                "channel": "",
+                "state": "pending"
+            }),
+        ] {
+            assert_eq!(
+                parse_window_pending_event(&malformed, "grappa:user:sythos", "sythos"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn pending_window_is_idempotent_subscribes_once_and_transitions_to_joined() {
+        let key = window_state_key("libera", "#cordiale");
+        let mut states = HashMap::from([(key.clone(), ChannelWindowState::Failed)]);
+        let mut failures = HashMap::from([(
+            key.clone(),
+            WindowFailure {
+                reason: Some("old failure".to_string()),
+                numeric: Some(Number::from(473)),
+            },
+        )]);
+        let mut kicks = HashMap::from([(
+            key.clone(),
+            WindowKick {
+                by: Some("old actor".to_string()),
+                reason: None,
+            },
+        )]);
+        let mut invited_by = HashMap::from([(key.clone(), "ChanServ".to_string())]);
+        let mut joined_topics = std::collections::HashSet::new();
+        let mut channel_topics = std::collections::HashSet::new();
+        let topic = channel_topic("sythos", "libera", "#cordiale");
+
+        assert!(set_pending_window_state(
+            &mut states,
+            &mut failures,
+            &mut kicks,
+            &mut invited_by,
+            "libera",
+            "#CoRdIaLe"
+        ));
+        assert_eq!(states.get(&key), Some(&ChannelWindowState::Pending));
+        assert!(failures.is_empty());
+        assert!(kicks.is_empty());
+        assert!(invited_by.is_empty());
+        assert!(register_pending_channel_topic(
+            &mut joined_topics,
+            &mut channel_topics,
+            topic.clone()
+        ));
+
+        assert!(!set_pending_window_state(
+            &mut states,
+            &mut failures,
+            &mut kicks,
+            &mut invited_by,
+            "libera",
+            "#cordiale"
+        ));
+        assert!(!register_pending_channel_topic(
+            &mut joined_topics,
+            &mut channel_topics,
+            topic.clone()
+        ));
+        assert_eq!(
+            joined_topics,
+            std::collections::HashSet::from([topic.clone()])
+        );
+        assert_eq!(channel_topics, std::collections::HashSet::from([topic]));
+
+        assert!(set_joined_window_state(
+            &mut states,
+            &mut failures,
+            &mut kicks,
+            &mut invited_by,
+            "libera",
+            "#cordiale"
+        ));
+        assert_eq!(states.get(&key), Some(&ChannelWindowState::Joined));
+    }
+
+    #[test]
     fn boot_seeds_only_channels_with_an_explicit_true_joined_flag() {
         let channels = HashMap::from([(
             "libera".to_string(),
@@ -7947,7 +8201,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 41);
+        assert_eq!(IGNORED_KINDS.len(), 40);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -7973,6 +8227,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"channels_changed"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));
+        assert!(!IGNORED_KINDS.contains(&"window_pending"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
