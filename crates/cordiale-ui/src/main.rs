@@ -10128,7 +10128,7 @@ mod tests {
                         "sender": "alice",
                         "body": "hello"
                     })],
-                ]),
+                )]),
             )]),
         };
         let me = MeResponse {
