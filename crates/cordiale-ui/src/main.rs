@@ -5052,11 +5052,7 @@ fn parse_umode_changed(
     let mut modes = Vec::with_capacity(raw_modes.len());
     for value in raw_modes {
         let mode = value.as_str()?;
-        if mode.is_empty()
-            || mode.starts_with('+')
-            || mode.starts_with('-')
-            || !seen.insert(mode)
-        {
+        if mode.is_empty() || mode.starts_with('+') || mode.starts_with('-') || !seen.insert(mode) {
             return None;
         }
         modes.push(mode.to_string());
@@ -6250,10 +6246,7 @@ mod tests {
         );
 
         assert_eq!(state.user_modes_by_network.len(), 2);
-        assert_eq!(
-            state.user_modes_by_network["libera"],
-            ["i", "w", "s"]
-        );
+        assert_eq!(state.user_modes_by_network["libera"], ["i", "w", "s"]);
         assert_eq!(state.user_modes_by_network["azzurra"], ["w", "i"]);
 
         handle_umode_changed(
