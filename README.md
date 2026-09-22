@@ -70,13 +70,14 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 19 of them:
+  lists 56 top-level event kinds. Cordiale handles 20 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
   `away_confirmed`, `window_counts`, `channels_changed`, `window_pending`,
-  `session_identity_changed`, `isupport_changed`, `umode_changed`, `joined`,
-  `join_failed`, `kicked`, and `message`; the remaining 37 kinds are
+  `session_identity_changed`, `isupport_changed`, `umode_changed`,
+  `supported_umodes_changed`, `joined`, `join_failed`, `kicked`, and `message`;
+  the remaining 36 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -130,15 +131,17 @@ known limitations are:
   tolerating future additive fields.
   `umode_changed` likewise accepts only the exact user-topic carrier and a
   known positive network ID. It replaces only that network's ordered set of
-  active unsigned user modes, including empty snapshots and replayed frames;
-  supported-but-inactive modes remain a separate event gap.
+  active unsigned user modes, including empty snapshots and replayed frames.
+  `supported_umodes_changed` uses a separate per-network store for the modes
+  advertised by 004, preserving order and allowing empty/replayed snapshots;
+  it never overwrites the active-mode store.
   - **Window, channel, and scrollback state**: `channel_created`,
     `window_invited`,
     `window_invite_declined`, `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**: `network_attached`,
     `network_detached`, `connection_progress`,
-    `connection_state_changed`, `supported_umodes_changed`,
+    `connection_state_changed`,
     `peer_away`, `auto_away_debounce_changed`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
     `server_settings_changed`, `web_session_severed`.

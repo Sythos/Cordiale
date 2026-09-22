@@ -719,6 +719,11 @@ struct WorkerState {
     /// Ordered set of active IRC user modes for each known network. Live and
     /// replayed `umode_changed` snapshots replace only their own network.
     user_modes_by_network: HashMap<String, Vec<String>>,
+    /// Ordered set of IRC user modes advertised as supported by each known
+    /// network. This is intentionally separate from the active modes above;
+    /// live and replayed `supported_umodes_changed` snapshots replace only
+    /// their own network.
+    supported_user_modes_by_network: HashMap<String, Vec<String>>,
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
@@ -778,6 +783,7 @@ impl WorkerState {
             session_identities: HashMap::new(),
             isupport_by_network: HashMap::new(),
             user_modes_by_network: HashMap::new(),
+            supported_user_modes_by_network: HashMap::new(),
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
             notify_nicks: Vec::new(),
@@ -1070,6 +1076,7 @@ async fn run_worker(
                         persistence::log_line(&format!("session disconnected: {reason}"));
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
+                        state.supported_user_modes_by_network.clear();
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("disconnected".into());
                             ui.set_status_message(reason.into());
@@ -1080,6 +1087,7 @@ async fn run_worker(
                         persistence::log_line(&format!("session reconnecting: {reason}"));
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
+                        state.supported_user_modes_by_network.clear();
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("reconnecting".into());
                             ui.set_status_message(reason.into());
@@ -1212,6 +1220,7 @@ async fn handle_connect(
             state.session_identities.clear();
             state.isupport_by_network.clear();
             state.user_modes_by_network.clear();
+            state.supported_user_modes_by_network.clear();
             state.own_listener_ready.clear();
             state.current_query = false;
             state.current_query_ready = false;
@@ -2195,7 +2204,6 @@ const IGNORED_KINDS: &[&str] = &[
     // are handled above.
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
-    "supported_umodes_changed",
     "channel_created",
     "who_reply",
     "server_reply",
@@ -2413,6 +2421,10 @@ async fn handle_frame(
     }
     if payload_kind == "umode_changed" {
         handle_umode_changed(state, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "supported_umodes_changed" {
+        handle_supported_umodes_changed(state, &frame.topic, &frame.payload);
         return;
     }
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
@@ -5078,6 +5090,51 @@ fn handle_umode_changed(state: &mut WorkerState, carrier_topic: &str, payload: &
     state.user_modes_by_network.insert(network, modes);
 }
 
+fn parse_supported_umodes_changed(
+    payload: &Value,
+    network_slugs: &HashMap<i64, String>,
+) -> Option<(String, Vec<String>)> {
+    if payload.get("kind")?.as_str()? != "supported_umodes_changed" {
+        return None;
+    }
+    let network_id = payload.get("network_id")?.as_i64()?;
+    if network_id <= 0 {
+        return None;
+    }
+    let network = network_slugs.get(&network_id)?;
+    let raw_modes = payload.get("modes")?.as_array()?;
+    let mut seen = std::collections::HashSet::with_capacity(raw_modes.len());
+    let mut modes = Vec::with_capacity(raw_modes.len());
+    for value in raw_modes {
+        let mode = value.as_str()?;
+        if mode.is_empty() || mode.starts_with('+') || mode.starts_with('-') || !seen.insert(mode) {
+            return None;
+        }
+        modes.push(mode.to_string());
+    }
+    Some((network.clone(), modes))
+}
+
+fn handle_supported_umodes_changed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
+    let Some(user) = state.identifier.as_deref() else {
+        return;
+    };
+    if carrier_topic != format!("grappa:user:{user}") {
+        return;
+    }
+    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+        persistence::log_line("supported_umodes_changed rejected: invalid network map");
+        return;
+    };
+    let Some((network, modes)) = parse_supported_umodes_changed(payload, &network_slugs) else {
+        persistence::log_line(
+            "supported_umodes_changed rejected: invalid payload or unknown network",
+        );
+        return;
+    };
+    state.supported_user_modes_by_network.insert(network, modes);
+}
+
 fn apply_own_nick_change(
     state: &mut WorkerState,
     user: &str,
@@ -6295,6 +6352,100 @@ mod tests {
         ] {
             handle_umode_changed(&mut state, "grappa:user:vjt", &invalid);
             assert_eq!(state.user_modes_by_network, original);
+        }
+    }
+
+    #[test]
+    fn supported_umodes_changed_is_separate_ordered_per_network_and_replays_as_replacement() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+            .into_iter()
+            .collect();
+
+        handle_umode_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &serde_json::json!({
+                "kind": "umode_changed",
+                "network_id": 7,
+                "modes": ["i"]
+            }),
+        );
+        let libera = serde_json::json!({
+            "kind": "supported_umodes_changed",
+            "network_id": 7,
+            "modes": ["i", "w", "s"],
+            "future_field": true
+        });
+        handle_supported_umodes_changed(&mut state, "grappa:user:vjt", &libera);
+        handle_supported_umodes_changed(&mut state, "grappa:user:vjt", &libera);
+        handle_supported_umodes_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &serde_json::json!({
+                "kind": "supported_umodes_changed",
+                "network_id": 9,
+                "modes": ["w", "i"]
+            }),
+        );
+
+        assert_eq!(state.supported_user_modes_by_network.len(), 2);
+        assert_eq!(
+            state.supported_user_modes_by_network["libera"],
+            ["i", "w", "s"]
+        );
+        assert_eq!(state.supported_user_modes_by_network["azzurra"], ["w", "i"]);
+        assert_eq!(state.user_modes_by_network["libera"], ["i"]);
+
+        handle_supported_umodes_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &serde_json::json!({
+                "kind": "supported_umodes_changed",
+                "network_id": 7,
+                "modes": []
+            }),
+        );
+        assert!(state.supported_user_modes_by_network["libera"].is_empty());
+        assert_eq!(state.supported_user_modes_by_network["azzurra"], ["w", "i"]);
+        assert_eq!(state.user_modes_by_network["libera"], ["i"]);
+    }
+
+    #[test]
+    fn supported_umodes_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state.network_ids = [("libera".to_string(), 7)].into_iter().collect();
+        let accepted = serde_json::json!({
+            "kind": "supported_umodes_changed",
+            "network_id": 7,
+            "modes": ["i", "w"]
+        });
+
+        handle_supported_umodes_changed(
+            &mut state,
+            "grappa:user:vjt/network:libera/channel:#rust",
+            &accepted,
+        );
+        assert!(state.supported_user_modes_by_network.is_empty());
+
+        handle_supported_umodes_changed(&mut state, "grappa:user:vjt", &accepted);
+        let original = state.supported_user_modes_by_network.clone();
+        for invalid in [
+            serde_json::json!({"kind": "supported_umodes_changed", "network_id": 99, "modes": ["i"]}),
+            serde_json::json!({"kind": "supported_umodes_changed", "network_id": 0, "modes": ["i"]}),
+            serde_json::json!({"kind": "supported_umodes_changed", "network_id": "7", "modes": ["i"]}),
+            serde_json::json!({"kind": "supported_umodes_changed", "network_id": 7, "modes": "iw"}),
+            serde_json::json!({"kind": "supported_umodes_changed", "network_id": 7, "modes": ["i", 1]}),
+            serde_json::json!({"kind": "supported_umodes_changed", "network_id": 7, "modes": ["i", "i"]}),
+            serde_json::json!({"kind": "supported_umodes_changed", "network_id": 7, "modes": ["+i"]}),
+            serde_json::json!({"kind": "supported_umodes_changed", "network_id": 7, "modes": ["-i"]}),
+            serde_json::json!({"kind": "supported_umodes_changed", "network_id": 7, "modes": [""]}),
+            serde_json::json!({"kind": "other_kind", "network_id": 7, "modes": ["s"]}),
+        ] {
+            handle_supported_umodes_changed(&mut state, "grappa:user:vjt", &invalid);
+            assert_eq!(state.supported_user_modes_by_network, original);
         }
     }
 
@@ -8859,7 +9010,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 37);
+        assert_eq!(IGNORED_KINDS.len(), 36);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -8886,6 +9037,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"session_identity_changed"));
         assert!(!IGNORED_KINDS.contains(&"isupport_changed"));
         assert!(!IGNORED_KINDS.contains(&"umode_changed"));
+        assert!(!IGNORED_KINDS.contains(&"supported_umodes_changed"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));
         assert!(!IGNORED_KINDS.contains(&"window_pending"));
