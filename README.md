@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 24 of them:
+  lists 56 top-level event kinds. Cordiale handles 25 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -78,8 +78,8 @@ known limitations are:
   `session_identity_changed`, `isupport_changed`, `umode_changed`,
   `supported_umodes_changed`, `joined`, `join_failed`, `kicked`,
   `window_pending`, `window_invited`, `window_invite_declined`,
-  `network_attached`, `network_detached`, and `message`;
-  the remaining 32 kinds are
+  `network_attached`, `network_detached`, `connection_state_changed`, and
+  `message`; the remaining 31 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -154,12 +154,20 @@ known limitations are:
   treated as complete state snapshots. Replaying an identical attach event is
   idempotent: it reuses the same authoritative snapshot without duplicating
   channel or self-listener subscriptions.
+  `connection_state_changed` validates the user-topic carrier and matching
+  network identity, applies its home-network row immediately, then refreshes
+  `GET /networks`; initial state is seeded from `/boot` plus `/networks` so
+  an already parked connection is not mistaken for a new transition. It
+  updates only that network's IRC connection state in the
+  sidebar, distinguishing retrying `failing` from terminal `failed` and
+  leaving Phoenix socket reconnects and network attachment state alone. A
+  transition to `parked` or `failed` returns a selected window on that network
+  to the connected overview, but an initially parked/failed snapshot does not
+  steal the user's selection.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
-  - **Network, connection, identity, and settings**: `network_attached`,
-    `connection_progress`,
-    `connection_state_changed`,
+  - **Network, connection, identity, and settings**: `connection_progress`,
     `peer_away`, `auto_away_debounce_changed`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
     `server_settings_changed`, `web_session_severed`.

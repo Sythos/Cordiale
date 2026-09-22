@@ -629,6 +629,59 @@ struct SessionIdentity {
     account: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetworkConnectionStatus {
+    Connected,
+    Failing,
+    Parked,
+    Failed,
+}
+
+impl NetworkConnectionStatus {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "connected" => Some(Self::Connected),
+            "failing" => Some(Self::Failing),
+            "parked" => Some(Self::Parked),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Failing => "failing",
+            Self::Parked => "parked",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn sidebar_label(self) -> &'static str {
+        match self {
+            Self::Connected => "",
+            Self::Failing => "reconnecting",
+            Self::Parked => "paused",
+            Self::Failed => "connection failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NetworkConnectionSnapshot {
+    status: NetworkConnectionStatus,
+    reason: Option<String>,
+    changed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NetworkConnectionTransition {
+    network_id: i64,
+    network_slug: String,
+    from: NetworkConnectionStatus,
+    snapshot: NetworkConnectionSnapshot,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -722,6 +775,10 @@ struct WorkerState {
     /// isn't just string-vs-int bikeshedding: the server hard-rejects a
     /// non-integer `network_id` (`is_integer/1` guard), no slug fallback.
     network_ids: HashMap<String, i64>,
+    /// Last server-confirmed IRC connection state per network. This is
+    /// separate from the Phoenix socket's reconnect state and is refreshed
+    /// from `/networks` after a `connection_state_changed` push.
+    network_connection_states: HashMap<String, NetworkConnectionSnapshot>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -797,6 +854,7 @@ impl WorkerState {
             current_query_ready: false,
             current_channel: None,
             network_ids: HashMap::new(),
+            network_connection_states: HashMap::new(),
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1192,6 +1250,18 @@ async fn handle_connect(
     match result {
         Ok(outcome) => {
             persistence::log_line(&format!("connect succeeded: server={server_url}"));
+            let mut connection_states =
+                network_connection_states_from_entries(&outcome.boot.networks);
+            match client.fetch_networks(&outcome.token).await {
+                Ok(networks) => {
+                    connection_states.extend(network_connection_states_from_entries(&networks));
+                }
+                Err(error) => {
+                    persistence::log_line(&format!(
+                        "initial network-state refresh failed; using boot rows: {error:?}"
+                    ));
+                }
+            }
             if !is_guest_attempt {
                 remember_profile(&server_url, &identifier, &outcome.token);
             }
@@ -1234,6 +1304,7 @@ async fn handle_connect(
             state.members = members_from_boot(&outcome);
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
+            state.network_connection_states = connection_states;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -1310,8 +1381,12 @@ async fn handle_connect(
             state.settings_network = distinct_networks.first().cloned();
             let network_count = distinct_networks.len();
             let channel_count = entries.len();
-            let groups_data =
-                network_groups_data(&entries, &state.query_windows, &state.expanded_networks);
+            let groups_data = network_groups_data(
+                &entries,
+                &state.query_windows,
+                &state.expanded_networks,
+                &state.network_connection_states,
+            );
             let window_states = state.window_states.clone();
             let window_mentions = state.window_mentions.clone();
             let window_messages = state.window_messages.clone();
@@ -2208,7 +2283,7 @@ async fn handle_member_ctcp(
 /// Real kinds Grappa pushes to a regular (non-admin) user that Cordiale
 /// has no UI for yet — window-state transitions, ISUPPORT/umode/identity
 /// bookkeeping, DCC offers, WHOIS/WHOWAS/LUSERS/banlist/directory bundles,
-/// network-attach lifecycle, MONITOR/WATCH presence, the notify list,
+/// MONITOR/WATCH presence, the notify list,
 /// per-server settings, and more. Exhaustive as of this date: audited
 /// directly from the real server source (`session/wire.ex`'s
 /// `@type wire_event_kind` union — the authoritative closed set — plus
@@ -2252,8 +2327,7 @@ const IGNORED_KINDS: &[&str] = &[
     // scrollback/wire.ex.
     "archive_changed",
     "archive_purged",
-    // networks/wire.ex.
-    "connection_state_changed",
+    // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex.
     "auto_away_debounce_changed",
     "quit_part_reason_changed",
@@ -2418,6 +2492,10 @@ async fn handle_frame(
     }
     if payload_kind == "network_attached" {
         handle_network_attached(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "connection_state_changed" {
+        handle_connection_state_changed(state, ui, &frame.topic, &frame.payload).await;
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -4921,7 +4999,13 @@ fn messages_from_boot_response(boot: &BootResponse) -> MessagesByChannel {
 
 /// One sidebar network group as plain data: network slug, expand state,
 /// and its `(channel, label)` pairs.
-type NetworkGroupData = (String, bool, Vec<(String, String)>, Vec<(String, String)>);
+type NetworkGroupData = (
+    String,
+    bool,
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+    String,
+);
 type NetworkEntries = (Vec<(String, String)>, Vec<(String, String)>);
 
 /// Groups flat `(network, channel, label)` entries by network, sorted by
@@ -4940,6 +5024,7 @@ fn network_groups_data(
     entries: &[(String, String, String)],
     query_windows: &[QueryWindow],
     expanded: &HashMap<String, bool>,
+    connection_states: &HashMap<String, NetworkConnectionSnapshot>,
 ) -> Vec<NetworkGroupData> {
     let mut by_network: std::collections::BTreeMap<String, NetworkEntries> =
         std::collections::BTreeMap::new();
@@ -4962,7 +5047,11 @@ fn network_groups_data(
         .map(|(network, (mut channels, queries))| {
             channels.sort();
             let is_expanded = expanded.get(&network).copied().unwrap_or(true);
-            (network, is_expanded, channels, queries)
+            let connection_label = connection_states
+                .get(&network)
+                .map(|snapshot| snapshot.status.sidebar_label().to_string())
+                .unwrap_or_default();
+            (network, is_expanded, channels, queries, connection_label)
         })
         .collect()
 }
@@ -4978,7 +5067,7 @@ fn network_groups_model(
 ) -> Vec<NetworkGroup> {
     data.into_iter()
         .enumerate()
-        .map(|(index, (network, expanded, channels, queries))| {
+        .map(|(index, (network, expanded, channels, queries, connection_label))| {
             let channel_entries: Vec<ChannelEntry> = channels
                 .into_iter()
                 .map(|(channel, label)| {
@@ -5028,6 +5117,7 @@ fn network_groups_model(
                 .collect();
             NetworkGroup {
                 network: network.into(),
+                connection_label: connection_label.into(),
                 separator_before: index > 0,
                 expanded,
                 channels: Rc::new(slint::VecModel::from(channel_entries)).into(),
@@ -5045,6 +5135,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         &state.channel_entries,
         &state.query_windows,
         &state.expanded_networks,
+        &state.network_connection_states,
     );
     let window_states = state.window_states.clone();
     let window_mentions = state.window_mentions.clone();
@@ -5053,6 +5144,39 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let groups = network_groups_model(data, window_states, window_mentions, window_messages);
         ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
+    });
+}
+
+fn return_home_if_network_selected(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+) {
+    let selected_network_matches = state
+        .current_channel
+        .as_ref()
+        .is_some_and(|(selected_network, _)| selected_network == network);
+    if !selected_network_matches {
+        return;
+    }
+
+    state.current_channel = None;
+    state.current_query = false;
+    state.current_query_ready = false;
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_screen("connected".into());
+        ui.set_has_selected_channel(false);
+        ui.set_current_channel_label("".into());
+        ui.set_current_topic("".into());
+        ui.set_current_channel_modes("".into());
+        ui.set_current_window_is_joined(false);
+        ui.set_current_query(false);
+        ui.set_current_query_ready(false);
+        ui.set_can_moderate_members(false);
+        ui.set_compose_text("".into());
+        ui.set_chat_lines(Rc::new(slint::VecModel::from(Vec::<ChatLine>::new())).into());
+        ui.set_channel_members(Rc::new(slint::VecModel::from(Vec::<MemberRow>::new())).into());
     });
 }
 
@@ -5234,6 +5358,64 @@ fn network_ids_from_entries(networks: &[Value]) -> HashMap<String, i64> {
             Some((slug.to_string(), id))
         })
         .collect()
+}
+
+fn network_connection_states_from_entries(
+    networks: &[Value],
+) -> HashMap<String, NetworkConnectionSnapshot> {
+    networks
+        .iter()
+        .filter_map(|value| {
+            let slug = value.get("slug").and_then(Value::as_str)?;
+            if slug.trim().is_empty() {
+                return None;
+            }
+            let status = NetworkConnectionStatus::parse(
+                value.get("connection_state").and_then(Value::as_str)?,
+            )?;
+            let reason = value
+                .get("connection_state_reason")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let changed_at = value
+                .get("connection_state_changed_at")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            Some((
+                slug.to_string(),
+                NetworkConnectionSnapshot {
+                    status,
+                    reason,
+                    changed_at,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn record_network_connection_state(
+    states: &mut HashMap<String, NetworkConnectionSnapshot>,
+    slug: &str,
+    snapshot: NetworkConnectionSnapshot,
+) -> (bool, bool) {
+    let previous = states.insert(slug.to_string(), snapshot.clone());
+    let changed = previous.as_ref() != Some(&snapshot);
+    let return_home = previous.is_some_and(|previous| {
+        previous.status != snapshot.status
+            && matches!(
+                snapshot.status,
+                NetworkConnectionStatus::Parked | NetworkConnectionStatus::Failed
+            )
+    });
+    (changed, return_home)
+}
+
+fn parse_nullable_wire_string(value: &Value) -> Option<Option<String>> {
+    match value {
+        Value::Null => Some(None),
+        Value::String(value) => Some(Some(value.clone())),
+        _ => None,
+    }
 }
 
 fn network_nicks_from_boot(outcome: &BootstrapOutcome) -> HashMap<String, String> {
@@ -5680,6 +5862,74 @@ fn parse_network_lifecycle_event(
     Some((network_id, network_slug.to_string()))
 }
 
+fn parse_connection_state_changed_event(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<NetworkConnectionTransition> {
+    if identifier.is_empty()
+        || carrier_topic != format!("grappa:user:{identifier}")
+        || payload.get("kind").and_then(Value::as_str) != Some("connection_state_changed")
+    {
+        return None;
+    }
+
+    match payload.get("user_id")? {
+        Value::Null | Value::String(_) => {}
+        _ => return None,
+    }
+
+    let network_id = payload.get("network_id").and_then(Value::as_i64)?;
+    if network_id <= 0 {
+        return None;
+    }
+    let network_slug = payload.get("network_slug").and_then(Value::as_str)?;
+    if network_slug.trim().is_empty() {
+        return None;
+    }
+    let from = NetworkConnectionStatus::parse(payload.get("from").and_then(Value::as_str)?)?;
+    let status = NetworkConnectionStatus::parse(payload.get("to").and_then(Value::as_str)?)?;
+    let reason = parse_nullable_wire_string(payload.get("reason")?)?;
+    let changed_at = parse_nullable_wire_string(payload.get("at")?)?;
+
+    let network = payload.get("network")?.as_object()?;
+    if network.get("slug").and_then(Value::as_str) != Some(network_slug)
+        || network
+            .get("connection_state")
+            .and_then(Value::as_str)
+            .and_then(NetworkConnectionStatus::parse)
+            != Some(status)
+    {
+        return None;
+    }
+    if let Some(row_id) = network.get("id") {
+        if row_id.as_i64()? != network_id {
+            return None;
+        }
+    }
+    if let Some(row_reason) = network.get("connection_state_reason") {
+        if parse_nullable_wire_string(row_reason)? != reason {
+            return None;
+        }
+    }
+    if let Some(row_changed_at) = network.get("connection_state_changed_at") {
+        if parse_nullable_wire_string(row_changed_at)? != changed_at {
+            return None;
+        }
+    }
+
+    Some(NetworkConnectionTransition {
+        network_id,
+        network_slug: network_slug.to_string(),
+        from,
+        snapshot: NetworkConnectionSnapshot {
+            status,
+            reason,
+            changed_at,
+        },
+    })
+}
+
 #[cfg(test)]
 fn parse_network_detached_event(
     payload: &Value,
@@ -5763,6 +6013,7 @@ fn apply_network_rest_refresh(
     state.read_cursors = read_cursors_from_me(&me.read_cursors);
     state.badge_count = normalize_badge_count(Some(&me.badge_count));
     state.network_ids = network_ids_from_entries(&boot.networks);
+    state.network_connection_states = network_connection_states_from_entries(&boot.networks);
 
     let listener_actions = reconcile_own_nick_listener_topics(
         state,
@@ -5805,6 +6056,83 @@ fn apply_network_rest_refresh(
 enum NetworkLifecycleKind {
     Attached,
     Detached,
+}
+
+async fn handle_connection_state_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+    let Some(transition) =
+        parse_connection_state_changed_event(payload, carrier_topic, &identifier)
+    else {
+        return;
+    };
+    if state.network_ids.get(&transition.network_slug) != Some(&transition.network_id) {
+        persistence::log_line("connection_state_changed rejected: unknown or stale network");
+        return;
+    }
+
+    let network_slug = transition.network_slug.clone();
+    let (snapshot_changed, return_home) = record_network_connection_state(
+        &mut state.network_connection_states,
+        &network_slug,
+        transition.snapshot.clone(),
+    );
+    if return_home {
+        return_home_if_network_selected(state, ui, &network_slug);
+    }
+    if snapshot_changed {
+        refresh_network_groups(state, ui);
+    }
+    persistence::log_line(&format!(
+        "connection_state_changed: {network_slug} {} -> {}",
+        transition.from.wire_name(),
+        transition.snapshot.status.wire_name()
+    ));
+
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let networks = match client.fetch_networks(&token).await {
+        Ok(networks) => networks,
+        Err(error) => {
+            // The validated event carries the new home-network row, so keep
+            // that immediate state visible even if REST reconciliation fails.
+            persistence::log_line(&format!(
+                "connection_state_changed network refresh failed; keeping event row: {error:?}"
+            ));
+            return;
+        }
+    };
+
+    let refreshed_ids = network_ids_from_entries(&networks);
+    let refreshed_states = network_connection_states_from_entries(&networks);
+    let mut state_changed = false;
+    for (slug, snapshot) in refreshed_states {
+        let Some(expected_id) = state.network_ids.get(&slug) else {
+            continue;
+        };
+        if refreshed_ids
+            .get(&slug)
+            .is_some_and(|refreshed_id| refreshed_id != expected_id)
+        {
+            continue;
+        }
+        let (row_changed, return_home) =
+            record_network_connection_state(&mut state.network_connection_states, &slug, snapshot);
+        if return_home {
+            return_home_if_network_selected(state, ui, &slug);
+        }
+        state_changed |= row_changed;
+    }
+    if state_changed {
+        refresh_network_groups(state, ui);
+    }
 }
 
 impl NetworkLifecycleKind {
@@ -7682,7 +8010,7 @@ mod tests {
         assert_eq!(queries[1].target_nick, "newer");
         assert_eq!(queries[2].network, "azzurra");
 
-        let grouped = network_groups_data(&[], &queries, &HashMap::new());
+        let grouped = network_groups_data(&[], &queries, &HashMap::new(), &HashMap::new());
         let libera = grouped.iter().find(|group| group.0 == "libera").unwrap();
         assert_eq!(libera.3[0].0, "older");
         assert_eq!(libera.3[1].0, "newer");
@@ -9976,7 +10304,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 32);
+        assert_eq!(IGNORED_KINDS.len(), 31);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -10011,6 +10339,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"window_invite_declined"));
         assert!(!IGNORED_KINDS.contains(&"network_detached"));
         assert!(!IGNORED_KINDS.contains(&"network_attached"));
+        assert!(!IGNORED_KINDS.contains(&"connection_state_changed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -10099,6 +10428,208 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn parse_connection_state_changed_accepts_guest_user_topic_and_additive_fields() {
+        let payload = serde_json::json!({
+            "kind": "connection_state_changed",
+            "user_id": null,
+            "network_id": 7,
+            "network_slug": "libera",
+            "from": "connected",
+            "to": "failing",
+            "reason": "connection lost",
+            "at": "2026-09-22T10:20:30Z",
+            "network": {
+                "slug": "libera",
+                "nick": "sythos",
+                "connection_state": "failing",
+                "connection_state_reason": "connection lost",
+                "connection_state_changed_at": "2026-09-22T10:20:30Z",
+                "future_field": true
+            },
+            "future_field": true
+        });
+
+        let transition = parse_connection_state_changed_event(
+            &payload,
+            "grappa:user:guest",
+            "guest",
+        )
+        .expect("valid visitor transition");
+        assert_eq!(transition.network_id, 7);
+        assert_eq!(transition.network_slug, "libera");
+        assert_eq!(transition.from, NetworkConnectionStatus::Connected);
+        assert_eq!(transition.snapshot.status, NetworkConnectionStatus::Failing);
+        assert_eq!(transition.snapshot.reason.as_deref(), Some("connection lost"));
+        assert_eq!(
+            transition.snapshot.changed_at.as_deref(),
+            Some("2026-09-22T10:20:30Z")
+        );
+    }
+
+    #[test]
+    fn parse_connection_state_changed_rejects_invalid_or_mismatched_rows() {
+        let valid = serde_json::json!({
+            "kind": "connection_state_changed",
+            "user_id": "user-1",
+            "network_id": 7,
+            "network_slug": "libera",
+            "from": "failing",
+            "to": "failed",
+            "reason": null,
+            "at": null,
+            "network": {
+                "id": 7,
+                "slug": "libera",
+                "connection_state": "failed",
+                "connection_state_reason": null,
+                "connection_state_changed_at": null
+            }
+        });
+        assert!(parse_connection_state_changed_event(
+            &valid,
+            "grappa:user:sythos",
+            "sythos"
+        )
+        .is_some());
+
+        for (path, value) in [
+            ("user_id", serde_json::json!(7)),
+            ("network_id", serde_json::json!(0)),
+            ("from", serde_json::json!("unknown")),
+            ("to", serde_json::json!("unknown")),
+            ("network_slug", serde_json::json!("other")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[path] = value;
+            assert!(parse_connection_state_changed_event(
+                &invalid,
+                "grappa:user:sythos",
+                "sythos"
+            )
+            .is_none());
+        }
+
+        let mut mismatched_slug = valid.clone();
+        mismatched_slug["network"]["slug"] = serde_json::json!("other");
+        assert!(
+            parse_connection_state_changed_event(
+                &mismatched_slug,
+                "grappa:user:sythos",
+                "sythos"
+            )
+            .is_none()
+        );
+
+        let mut mismatched_status = valid.clone();
+        mismatched_status["network"]["connection_state"] = serde_json::json!("failing");
+        assert!(
+            parse_connection_state_changed_event(
+                &mismatched_status,
+                "grappa:user:sythos",
+                "sythos"
+            )
+            .is_none()
+        );
+
+        let mut mismatched_id = valid.clone();
+        mismatched_id["network"]["id"] = serde_json::json!(9);
+        assert!(
+            parse_connection_state_changed_event(
+                &mismatched_id,
+                "grappa:user:sythos",
+                "sythos"
+            )
+            .is_none()
+        );
+
+        assert!(parse_connection_state_changed_event(
+            &valid,
+            "grappa:user:other",
+            "sythos"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn network_connection_states_keep_failing_distinct_from_terminal_failure() {
+        let states = network_connection_states_from_entries(&[
+            serde_json::json!({"slug":"libera", "connection_state":"failing"}),
+            serde_json::json!({"slug":"oftc", "connection_state":"failed"}),
+            serde_json::json!({"slug":"bad", "connection_state":"future_state"}),
+        ]);
+
+        assert_eq!(states.len(), 2);
+        assert_eq!(
+            states["libera"].status.sidebar_label(),
+            "reconnecting"
+        );
+        assert_eq!(
+            states["oftc"].status.sidebar_label(),
+            "connection failed"
+        );
+    }
+
+    #[test]
+    fn network_connection_transition_returns_home_only_on_a_new_terminal_state() {
+        let mut states = network_connection_states_from_entries(&[
+            serde_json::json!({"slug":"libera", "connection_state":"connected"}),
+            serde_json::json!({"slug":"oftc", "connection_state":"failing"}),
+            serde_json::json!({"slug":"already-parked", "connection_state":"parked"}),
+        ]);
+        let parked = NetworkConnectionSnapshot {
+            status: NetworkConnectionStatus::Parked,
+            reason: None,
+            changed_at: Some("2026-09-22T10:20:30Z".to_string()),
+        };
+
+        assert_eq!(
+            record_network_connection_state(&mut states, "libera", parked.clone()),
+            (true, true)
+        );
+        assert_eq!(
+            record_network_connection_state(&mut states, "libera", parked.clone()),
+            (false, false)
+        );
+        assert_eq!(
+            record_network_connection_state(
+                &mut states,
+                "already-parked",
+                parked.clone()
+            ),
+            (false, false)
+        );
+
+        let failed = NetworkConnectionSnapshot {
+            status: NetworkConnectionStatus::Failed,
+            reason: None,
+            changed_at: None,
+        };
+        assert_eq!(
+            record_network_connection_state(&mut states, "oftc", failed),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn network_groups_show_per_network_connection_state() {
+        let entries = vec![(
+            "libera".to_string(),
+            "#rust".to_string(),
+            "#rust".to_string(),
+        )];
+        let connection_states = HashMap::from([(
+            "libera".to_string(),
+            NetworkConnectionSnapshot {
+                status: NetworkConnectionStatus::Parked,
+                reason: None,
+                changed_at: None,
+            },
+        )]);
+        let groups = network_groups_data(&entries, &[], &HashMap::new(), &connection_states);
+        assert_eq!(groups[0].4, "paused");
     }
 
     #[test]

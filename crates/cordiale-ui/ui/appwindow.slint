@@ -49,6 +49,7 @@ struct QueryEntry {
 // whether the channel list under it is currently shown (default: yes).
 struct NetworkGroup {
     network: string,
+    connection-label: string,
     separator-before: bool,
     expanded: bool,
     channels: [ChannelEntry],
@@ -777,7 +778,10 @@ export component AppWindow inherits Window {
                     }
 
                     Button {
-                        text: (group.expanded ? "▾ 🔌 " : "▸ 🔌 ") + group.network;
+                        text: (group.expanded ? "▾ 🔌 " : "▸ 🔌 ") + group.network
+                            + (group.connection-label == "" ? "" : " · " + group.connection-label);
+                        accessible-label: group.network
+                            + (group.connection-label == "" ? "" : " — " + group.connection-label);
                         clicked => { network-toggle-requested(group.network); }
                     }
 
