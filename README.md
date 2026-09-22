@@ -151,7 +151,9 @@ known limitations are:
   and history projections. The existing Phoenix session is retained while
   channel and self-listener subscriptions are reconciled; a failed REST
   refresh leaves the old state untouched. The events themselves are never
-  treated as complete state snapshots.
+  treated as complete state snapshots. Replaying an identical attach event is
+  idempotent: it reuses the same authoritative snapshot without duplicating
+  channel or self-listener subscriptions.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
