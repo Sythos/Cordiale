@@ -39,7 +39,9 @@ use cordiale_core::credentials::resolve_credential_store;
 use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
-use cordiale_core::rest::{BootResponse, DisplayPrefs, LoginRequest, MeResponse, SendMessageRequest};
+use cordiale_core::rest::{
+    BootResponse, DisplayPrefs, LoginRequest, MeResponse, SendMessageRequest,
+};
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::wire_event::ClientEventKind;
 
@@ -5686,9 +5688,9 @@ fn reconcile_own_nick_listener_topics(
     let mut actions = Vec::new();
 
     for (network, old_nick) in previous {
-        let same_topic = next_own_nicks.get(&network).is_some_and(|new_nick| {
-            ascii_fold_channel(new_nick) == ascii_fold_channel(&old_nick)
-        });
+        let same_topic = next_own_nicks
+            .get(&network)
+            .is_some_and(|new_nick| ascii_fold_channel(new_nick) == ascii_fold_channel(&old_nick));
         if same_topic {
             continue;
         }
@@ -5857,7 +5859,9 @@ async fn handle_network_detached(
     }
 
     refresh_network_groups(state, ui);
-    persistence::log_line(&format!("network_detached refreshed authoritative state for {network_slug}"));
+    persistence::log_line(&format!(
+        "network_detached refreshed authoritative state for {network_slug}"
+    ));
 }
 
 /// Parses the authoritative `query_windows_list` full snapshot. If any row
