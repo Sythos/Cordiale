@@ -2253,7 +2253,6 @@ const IGNORED_KINDS: &[&str] = &[
     "archive_changed",
     "archive_purged",
     // networks/wire.ex.
-    "network_attached",
     "connection_state_changed",
     // user_settings/wire.ex.
     "auto_away_debounce_changed",
@@ -2415,6 +2414,10 @@ async fn handle_frame(
     }
     if payload_kind == "network_detached" {
         handle_network_detached(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "network_attached" {
+        handle_network_attached(state, ui, &frame.topic, &frame.payload).await;
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -5648,19 +5651,20 @@ async fn handle_channels_changed(
     refresh_network_groups(state, ui);
 }
 
-/// Parses the authoritative `network_detached` signal.  The event is carried
+/// Parses an authoritative network lifecycle signal. The event is carried
 /// only by the authenticated user topic and identifies the network by both
-/// its stable integer id and its display slug.  Additive fields are ignored,
+/// its stable integer id and its display slug. Additive fields are ignored,
 /// but the two identity fields are required so a stale or malformed push can
-/// never make Cordiale remove an unrelated network locally.
-fn parse_network_detached_event(
+/// never make Cordiale mutate an unrelated network locally.
+fn parse_network_lifecycle_event(
     payload: &Value,
     carrier_topic: &str,
     identifier: &str,
+    expected_kind: &str,
 ) -> Option<(i64, String)> {
     if identifier.is_empty()
         || carrier_topic != format!("grappa:user:{identifier}")
-        || payload.get("kind").and_then(Value::as_str) != Some("network_detached")
+        || payload.get("kind").and_then(Value::as_str) != Some(expected_kind)
     {
         return None;
     }
@@ -5674,6 +5678,22 @@ fn parse_network_detached_event(
         return None;
     }
     Some((network_id, network_slug.to_string()))
+}
+
+fn parse_network_detached_event(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(i64, String)> {
+    parse_network_lifecycle_event(payload, carrier_topic, identifier, "network_detached")
+}
+
+fn parse_network_attached_event(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(i64, String)> {
+    parse_network_lifecycle_event(payload, carrier_topic, identifier, "network_attached")
 }
 
 /// Reconciles the self-message listener topics after an authoritative
@@ -5716,9 +5736,9 @@ fn reconcile_own_nick_listener_topics(
 }
 
 /// Applies the two REST snapshots that Cicchetto refreshes after a network
-/// detach.  The REST responses are fetched before any mutation, so a failed
-/// refresh leaves the existing projection intact.  The WebSocket session is
-/// preserved; only the state owned by `/boot` and `/me` is replaced and the
+/// attach or detach. The REST responses are fetched before any mutation, so a
+/// failed refresh leaves the existing projection intact. The WebSocket session
+/// is preserved; only the state owned by `/boot` and `/me` is replaced and the
 /// resulting topic differences are sent to the existing session.
 fn apply_network_rest_refresh(
     state: &mut WorkerState,
@@ -5779,25 +5799,57 @@ fn apply_network_rest_refresh(
     actions
 }
 
-async fn handle_network_detached(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetworkLifecycleKind {
+    Attached,
+    Detached,
+}
+
+impl NetworkLifecycleKind {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Attached => "network_attached",
+            Self::Detached => "network_detached",
+        }
+    }
+
+    fn parse(
+        self,
+        payload: &Value,
+        carrier_topic: &str,
+        identifier: &str,
+    ) -> Option<(i64, String)> {
+        parse_network_lifecycle_event(payload, carrier_topic, identifier, self.wire_name())
+    }
+}
+
+async fn handle_network_lifecycle(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     carrier_topic: &str,
     payload: &Value,
+    lifecycle: NetworkLifecycleKind,
 ) {
     let Some(identifier) = state.identifier.clone() else {
         return;
     };
     let Some((network_id, network_slug)) =
-        parse_network_detached_event(payload, carrier_topic, &identifier)
+        lifecycle.parse(payload, carrier_topic, &identifier)
     else {
         return;
     };
 
-    // Reject a signal that is not about a currently known network.  This is
-    // especially important for replayed/late events after a previous refresh.
-    if state.network_ids.get(&network_slug) != Some(&network_id) {
-        persistence::log_line("network_detached rejected: unknown or stale network");
+    // A detach must refer to the current projection before the refresh. An
+    // attach is allowed to introduce a network that is not known locally yet;
+    // its identity is checked against the refreshed authoritative snapshot
+    // below instead.
+    if lifecycle == NetworkLifecycleKind::Detached
+        && state.network_ids.get(&network_slug) != Some(&network_id)
+    {
+        persistence::log_line(&format!(
+            "{} rejected: unknown or stale network",
+            lifecycle.wire_name()
+        ));
         return;
     }
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
@@ -5808,7 +5860,8 @@ async fn handle_network_detached(
         Ok(boot) => boot,
         Err(error) => {
             persistence::log_line(&format!(
-                "network_detached boot refresh failed; keeping existing state: {error:?}"
+                "{} boot refresh failed; keeping existing state: {error:?}",
+                lifecycle.wire_name()
             ));
             return;
         }
@@ -5817,11 +5870,22 @@ async fn handle_network_detached(
         Ok(me) => me,
         Err(error) => {
             persistence::log_line(&format!(
-                "network_detached me refresh failed; keeping existing state: {error:?}"
+                "{} me refresh failed; keeping existing state: {error:?}",
+                lifecycle.wire_name()
             ));
             return;
         }
     };
+
+    // An attach may be the first local indication of a newly attached
+    // network, but a replayed/stale signal must not cause a projection change
+    // if the authoritative snapshot does not contain the same id/slug.
+    if lifecycle == NetworkLifecycleKind::Attached
+        && network_ids_from_entries(&boot.networks).get(&network_slug) != Some(&network_id)
+    {
+        persistence::log_line("network_attached rejected: unknown or stale network");
+        return;
+    }
 
     let actions = apply_network_rest_refresh(state, &identifier, &boot, &me);
     if let Some(session) = state.session.as_ref() {
@@ -5860,8 +5924,41 @@ async fn handle_network_detached(
 
     refresh_network_groups(state, ui);
     persistence::log_line(&format!(
-        "network_detached refreshed authoritative state for {network_slug}"
+        "{} refreshed authoritative state for {network_slug}",
+        lifecycle.wire_name()
     ));
+}
+
+async fn handle_network_detached(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    handle_network_lifecycle(
+        state,
+        ui,
+        carrier_topic,
+        payload,
+        NetworkLifecycleKind::Detached,
+    )
+    .await;
+}
+
+async fn handle_network_attached(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    handle_network_lifecycle(
+        state,
+        ui,
+        carrier_topic,
+        payload,
+        NetworkLifecycleKind::Attached,
+    )
+    .await;
 }
 
 /// Parses the authoritative `query_windows_list` full snapshot. If any row
@@ -9878,7 +9975,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 33);
+        assert_eq!(IGNORED_KINDS.len(), 32);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -9912,6 +10009,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"window_invited"));
         assert!(!IGNORED_KINDS.contains(&"window_invite_declined"));
         assert!(!IGNORED_KINDS.contains(&"network_detached"));
+        assert!(!IGNORED_KINDS.contains(&"network_attached"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -9958,6 +10056,115 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn parse_network_attached_accepts_only_the_authenticated_user_topic() {
+        let payload = serde_json::json!({
+            "kind": "network_attached",
+            "network_id": 7,
+            "network_slug": "libera",
+            "future_field": true
+        });
+        assert_eq!(
+            parse_network_attached_event(&payload, "grappa:user:sythos", "sythos"),
+            Some((7, "libera".to_string()))
+        );
+        assert_eq!(
+            parse_network_attached_event(&payload, "grappa:user:other", "sythos"),
+            None
+        );
+        assert_eq!(
+            parse_network_attached_event(
+                &payload,
+                "grappa:user:sythos/network:libera/channel:#rust",
+                "sythos"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_network_attached_rejects_invalid_identity_fields() {
+        for payload in [
+            serde_json::json!({"kind": "network_attached", "network_id": 0, "network_slug": "libera"}),
+            serde_json::json!({"kind": "network_attached", "network_id": -1, "network_slug": "libera"}),
+            serde_json::json!({"kind": "network_attached", "network_id": 7, "network_slug": "  "}),
+            serde_json::json!({"kind": "network_detached", "network_id": 7, "network_slug": "libera"}),
+            serde_json::json!({"kind": "network_attached", "network_id": "7", "network_slug": "libera"}),
+        ] {
+            assert_eq!(
+                parse_network_attached_event(&payload, "grappa:user:sythos", "sythos"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn network_attached_rest_refresh_is_idempotent() {
+        let boot = BootResponse {
+            networks: vec![serde_json::json!({
+                "id": 7,
+                "slug": "libera",
+                "nick": "sythos"
+            })],
+            channels: HashMap::from([(
+                "libera".to_string(),
+                vec![serde_json::json!({
+                    "name": "#rust",
+                    "joined": true,
+                    "topic": "Rust chat",
+                    "members": ["@alice", "+bob"]
+                })],
+            )]),
+            heads: HashMap::from([(
+                "libera".to_string(),
+                HashMap::from([(
+                    "#rust".to_string(),
+                    vec![serde_json::json!({
+                        "id": 11,
+                        "server_time": 100,
+                        "kind": "privmsg",
+                        "sender": "alice",
+                        "body": "hello"
+                    })],
+                ]),
+            )]),
+        };
+        let me = MeResponse {
+            read_cursors: serde_json::json!({"libera": {"#rust": 10}}),
+            unread_counts: serde_json::json!({
+                "libera": {"#rust": {"messages": 2, "mentions": 1}}
+            }),
+            badge_count: serde_json::json!(2),
+            is_admin: false,
+        };
+
+        let mut state = WorkerState::new();
+        state.identifier = Some("sythos".to_string());
+        let first_actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
+        let first_channel_entries = state.channel_entries.clone();
+        let first_joined_topics = state.joined_topics.clone();
+        let first_messages = state.messages.clone();
+        let first_members = state.members.clone();
+        let first_cursors = state.read_cursors.clone();
+        let first_counts = (state.window_messages.clone(), state.window_mentions.clone());
+
+        let second_actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
+
+        assert_eq!(first_actions.len(), 2);
+        assert!(second_actions.is_empty());
+        assert_eq!(state.channel_entries, first_channel_entries);
+        assert_eq!(state.joined_topics, first_joined_topics);
+        assert_eq!(state.messages, first_messages);
+        assert_eq!(state.members, first_members);
+        assert_eq!(state.read_cursors, first_cursors);
+        assert_eq!(
+            (&state.window_messages, &state.window_mentions),
+            (&first_counts.0, &first_counts.1)
+        );
+        assert_eq!(state.network_ids.get("libera"), Some(&7));
+        assert_eq!(state.own_nicks.get("libera"), Some(&"sythos".to_string()));
     }
 
     #[test]
