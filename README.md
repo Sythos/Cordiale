@@ -62,19 +62,21 @@ known limitations are:
 - **Channel members list** (the right-hand column with `@`/`%`/`+` role
   prefixes) is populated from `members_seeded`/`names_reply` pushes and
   updated from live join/part/quit/nick-change/mode traffic. The `boot`
-  snapshot remains best-effort. Cordiale has no ISUPPORT `CHANMODES`
-  table, so a `MODE` string that mixes a tracked prefix mode with another
-  argument-taking mode (for example, a ban and an op together) can
-  misalign arguments and leave a stale prefix; broader validation across
-  server configurations is still needed.
+  snapshot remains best-effort. Cordiale now retains the complete per-network
+  ISUPPORT snapshot, including the `CHANMODES` groups and prefix ordering, but
+  the channel-mode parser does not yet use that table. A `MODE` string that
+  mixes a tracked prefix mode with another argument-taking mode (for example,
+  a ban and an op together) can therefore still misalign arguments and leave a
+  stale prefix; broader validation across server configurations is still
+  needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 17 of them:
+  lists 56 top-level event kinds. Cordiale handles 18 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
   `away_confirmed`, `window_counts`, `channels_changed`, `window_pending`,
-  `session_identity_changed`, `joined`, `join_failed`, `kicked`, and `message`;
-  the remaining 39 kinds are
+  `session_identity_changed`, `isupport_changed`, `joined`, `join_failed`,
+  `kicked`, and `message`; the remaining 38 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -121,14 +123,18 @@ known limitations are:
   visually. `session_identity_changed` stores the per-network `identified`
   verdict separately from its optional display account, including the valid
   `identified=true, account=null` case.
+  `isupport_changed` validates the exact user-topic carrier and a known
+  positive network ID, then replaces only that network's complete typed
+  capability snapshot. It preserves ordered/string collections, maps,
+  nullable positive limits, the case-mapping enum, and frame budget while
+  tolerating future additive fields.
   - **Window, channel, and scrollback state**: `channel_created`,
     `window_invited`,
     `window_invite_declined`, `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**: `network_attached`,
     `network_detached`, `connection_progress`,
-    `connection_state_changed`, `isupport_changed`,
-    `umode_changed`, `supported_umodes_changed`,
+    `connection_state_changed`, `umode_changed`, `supported_umodes_changed`,
     `peer_away`, `auto_away_debounce_changed`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
     `server_settings_changed`, `web_session_severed`.

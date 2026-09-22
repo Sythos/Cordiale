@@ -37,6 +37,7 @@ use cordiale_core::bootstrap::{
 use cordiale_core::client::{GrappaClient, LoginError};
 use cordiale_core::credentials::resolve_credential_store;
 use cordiale_core::domain::{AuthMethod, Profile};
+use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::rest::{DisplayPrefs, LoginRequest, SendMessageRequest};
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
@@ -712,6 +713,9 @@ struct WorkerState {
     /// live `session_identity_changed` events share this same replacement
     /// path; `identified` remains authoritative when `account` is `None`.
     session_identities: HashMap<String, SessionIdentity>,
+    /// Last complete IRC ISUPPORT snapshot for each known network. Live and
+    /// replayed `isupport_changed` events replace only their own network.
+    isupport_by_network: HashMap<String, IsupportState>,
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
@@ -769,6 +773,7 @@ impl WorkerState {
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
+            isupport_by_network: HashMap::new(),
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
             notify_nicks: Vec::new(),
@@ -1201,6 +1206,7 @@ async fn handle_connect(
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
+            state.isupport_by_network.clear();
             state.own_listener_ready.clear();
             state.current_query = false;
             state.current_query_ready = false;
@@ -2184,7 +2190,6 @@ const IGNORED_KINDS: &[&str] = &[
     // are handled above.
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
-    "isupport_changed",
     "umode_changed",
     "supported_umodes_changed",
     "channel_created",
@@ -2396,6 +2401,10 @@ async fn handle_frame(
     }
     if payload_kind == "session_identity_changed" {
         handle_session_identity_changed(state, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "isupport_changed" {
+        handle_isupport_changed(state, &frame.topic, &frame.payload);
         return;
     }
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
@@ -4994,6 +5003,30 @@ fn handle_session_identity_changed(state: &mut WorkerState, carrier_topic: &str,
     state.session_identities.insert(network, identity);
 }
 
+fn handle_isupport_changed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
+    let Some(user) = state.identifier.as_deref() else {
+        return;
+    };
+    if carrier_topic != format!("grappa:user:{user}") {
+        return;
+    }
+    let Some(event) = parse_isupport_changed(payload) else {
+        persistence::log_line("isupport_changed rejected: invalid payload");
+        return;
+    };
+    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+        persistence::log_line("isupport_changed rejected: invalid network map");
+        return;
+    };
+    let Some(network) = network_slugs.get(&event.network_id) else {
+        persistence::log_line("isupport_changed rejected: unknown network");
+        return;
+    };
+    state
+        .isupport_by_network
+        .insert(network.clone(), event.state);
+}
+
 fn apply_own_nick_change(
     state: &mut WorkerState,
     user: &str,
@@ -6034,6 +6067,105 @@ mod tests {
             })
         );
         assert_eq!(state.messages.get(&message_key).map(Vec::len), Some(1));
+    }
+
+    fn isupport_payload(network_id: i64, casemapping: &str, frame_budget_base: u64) -> Value {
+        serde_json::json!({
+            "kind": "isupport_changed",
+            "network_id": network_id,
+            "chanmodes_a": ["b"],
+            "chanmodes_b": ["k"],
+            "chanmodes_c": ["l"],
+            "chanmodes_d": ["i", "m"],
+            "list_modes_queryable": ["b"],
+            "prefix": {"o": "@", "v": "+"},
+            "prefix_order": ["o", "v"],
+            "chantypes": ["#"],
+            "casemapping": casemapping,
+            "maxlist": {"b": 100},
+            "nicklen": 30,
+            "channellen": null,
+            "topiclen": 390,
+            "frame_budget_base": frame_budget_base,
+            "future_field": ["ignored"]
+        })
+    }
+
+    #[test]
+    fn isupport_changed_is_user_carrier_scoped_and_replaces_only_its_network() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+            .into_iter()
+            .collect();
+
+        handle_isupport_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &isupport_payload(7, "rfc1459", 4096),
+        );
+        handle_isupport_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &isupport_payload(9, "ascii", 2048),
+        );
+        let azzurra = state
+            .isupport_by_network
+            .get("azzurra")
+            .expect("second network snapshot")
+            .clone();
+
+        handle_isupport_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &isupport_payload(7, "rfc1459_strict", 8192),
+        );
+
+        assert_eq!(
+            state
+                .isupport_by_network
+                .get("libera")
+                .map(|state| state.frame_budget_base),
+            Some(8192)
+        );
+        assert_eq!(state.isupport_by_network.get("azzurra"), Some(&azzurra));
+    }
+
+    #[test]
+    fn isupport_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state.network_ids = [("libera".to_string(), 7)].into_iter().collect();
+
+        handle_isupport_changed(
+            &mut state,
+            "grappa:user:vjt/network:libera/channel:#rust",
+            &isupport_payload(7, "rfc1459", 4096),
+        );
+        handle_isupport_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &isupport_payload(99, "rfc1459", 4096),
+        );
+        handle_isupport_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &isupport_payload(7, "unicode", 4096),
+        );
+
+        assert!(state.isupport_by_network.is_empty());
+
+        handle_isupport_changed(
+            &mut state,
+            "grappa:user:vjt",
+            &isupport_payload(7, "rfc1459", 4096),
+        );
+        let accepted = state.isupport_by_network.clone();
+        let mut invalid = isupport_payload(7, "rfc1459", 4096);
+        invalid["maxlist"] = serde_json::json!({"b": 0});
+        handle_isupport_changed(&mut state, "grappa:user:vjt", &invalid);
+
+        assert_eq!(state.isupport_by_network, accepted);
     }
 
     #[test]
@@ -8597,7 +8729,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 39);
+        assert_eq!(IGNORED_KINDS.len(), 38);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -8622,6 +8754,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"joined"));
         assert!(!IGNORED_KINDS.contains(&"channels_changed"));
         assert!(!IGNORED_KINDS.contains(&"session_identity_changed"));
+        assert!(!IGNORED_KINDS.contains(&"isupport_changed"));
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));
         assert!(!IGNORED_KINDS.contains(&"window_pending"));
