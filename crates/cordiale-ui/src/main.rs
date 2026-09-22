@@ -4769,11 +4769,7 @@ fn parse_session_identity_changed(
     ))
 }
 
-fn handle_session_identity_changed(
-    state: &mut WorkerState,
-    carrier_topic: &str,
-    payload: &Value,
-) {
+fn handle_session_identity_changed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
     let Some(user) = state.identifier.as_deref() else {
         return;
     };
@@ -4784,9 +4780,7 @@ fn handle_session_identity_changed(
         persistence::log_line("session_identity_changed rejected: invalid network map");
         return;
     };
-    let Some((network, identity)) =
-        parse_session_identity_changed(payload, &network_slugs)
-    else {
+    let Some((network, identity)) = parse_session_identity_changed(payload, &network_slugs) else {
         persistence::log_line(
             "session_identity_changed rejected: invalid payload or unknown network",
         );
@@ -5698,8 +5692,7 @@ mod tests {
 
     #[test]
     fn session_identity_changed_preserves_true_with_null_account() {
-        let network_slugs: HashMap<i64, String> =
-            [(7, "libera".to_string())].into_iter().collect();
+        let network_slugs: HashMap<i64, String> = [(7, "libera".to_string())].into_iter().collect();
         let payload = serde_json::json!({
             "kind": "session_identity_changed",
             "network_id": 7,
@@ -5722,8 +5715,7 @@ mod tests {
 
     #[test]
     fn session_identity_changed_rejects_unknown_network_and_invalid_fields() {
-        let network_slugs: HashMap<i64, String> =
-            [(7, "libera".to_string())].into_iter().collect();
+        let network_slugs: HashMap<i64, String> = [(7, "libera".to_string())].into_iter().collect();
 
         for invalid in [
             serde_json::json!({
@@ -5810,11 +5802,7 @@ mod tests {
         );
         assert!(state.session_identities.is_empty());
 
-        handle_session_identity_changed(
-            &mut state,
-            "grappa:user:vjt",
-            &identified_without_account,
-        );
+        handle_session_identity_changed(&mut state, "grappa:user:vjt", &identified_without_account);
         handle_session_identity_changed(
             &mut state,
             "grappa:user:vjt",
