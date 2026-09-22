@@ -5680,6 +5680,7 @@ fn parse_network_lifecycle_event(
     Some((network_id, network_slug.to_string()))
 }
 
+#[cfg(test)]
 fn parse_network_detached_event(
     payload: &Value,
     carrier_topic: &str,
@@ -5688,6 +5689,7 @@ fn parse_network_detached_event(
     parse_network_lifecycle_event(payload, carrier_topic, identifier, "network_detached")
 }
 
+#[cfg(test)]
 fn parse_network_attached_event(
     payload: &Value,
     carrier_topic: &str,
@@ -10144,7 +10146,20 @@ mod tests {
         let first_actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
         let first_channel_entries = state.channel_entries.clone();
         let first_joined_topics = state.joined_topics.clone();
-        let first_messages = state.messages.clone();
+        let first_messages = state
+            .messages
+            .iter()
+            .map(|message| {
+                (
+                    message.timestamp.clone(),
+                    message.nick.clone(),
+                    message.text.clone(),
+                    message.italic,
+                    message.message_id,
+                    message.server_time,
+                )
+            })
+            .collect::<Vec<_>>();
         let first_members = state.members.clone();
         let first_cursors = state.read_cursors.clone();
         let first_counts = (state.window_messages.clone(), state.window_mentions.clone());
@@ -10155,7 +10170,23 @@ mod tests {
         assert!(second_actions.is_empty());
         assert_eq!(state.channel_entries, first_channel_entries);
         assert_eq!(state.joined_topics, first_joined_topics);
-        assert_eq!(state.messages, first_messages);
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .map(|message| {
+                    (
+                        message.timestamp.clone(),
+                        message.nick.clone(),
+                        message.text.clone(),
+                        message.italic,
+                        message.message_id,
+                        message.server_time,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            first_messages
+        );
         assert_eq!(state.members, first_members);
         assert_eq!(state.read_cursors, first_cursors);
         assert_eq!(
