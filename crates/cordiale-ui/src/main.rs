@@ -5115,11 +5115,7 @@ fn parse_supported_umodes_changed(
     Some((network.clone(), modes))
 }
 
-fn handle_supported_umodes_changed(
-    state: &mut WorkerState,
-    carrier_topic: &str,
-    payload: &Value,
-) {
+fn handle_supported_umodes_changed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
     let Some(user) = state.identifier.as_deref() else {
         return;
     };
@@ -5136,9 +5132,7 @@ fn handle_supported_umodes_changed(
         );
         return;
     };
-    state
-        .supported_user_modes_by_network
-        .insert(network, modes);
+    state.supported_user_modes_by_network.insert(network, modes);
 }
 
 fn apply_own_nick_change(
@@ -6397,7 +6391,10 @@ mod tests {
         );
 
         assert_eq!(state.supported_user_modes_by_network.len(), 2);
-        assert_eq!(state.supported_user_modes_by_network["libera"], ["i", "w", "s"]);
+        assert_eq!(
+            state.supported_user_modes_by_network["libera"],
+            ["i", "w", "s"]
+        );
         assert_eq!(state.supported_user_modes_by_network["azzurra"], ["w", "i"]);
         assert_eq!(state.user_modes_by_network["libera"], ["i"]);
 
