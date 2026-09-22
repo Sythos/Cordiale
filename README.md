@@ -67,7 +67,7 @@ known limitations are:
   argument-taking mode (for example, a ban and an op together) can
   misalign arguments and leave a stale prefix; broader validation across
   server configurations is still needed.
-- **Realtime event coverage (current main)**: the current Grappa protocol
+- **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
   lists 56 top-level event kinds. Cordiale handles 17 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
@@ -75,7 +75,7 @@ known limitations are:
   `away_confirmed`, `window_counts`, `channels_changed`, `window_pending`,
   `session_identity_changed`, `joined`, `join_failed`, `kicked`, and `message`;
   the remaining 39 kinds are
-  deliberately ignored for this tester
+  deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
   sidebar rows, subscribe via Cicchetto's channel-shaped/ASCII-folded topic,

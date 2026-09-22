@@ -453,6 +453,6 @@ jobs:
 
             Where four numeric components are supported, the fourth is the GitHub Actions run ID. Windows VERSIONINFO stores its reduction below 65535 in the numeric component and preserves the full ID in string metadata. macOS keeps the tag in `CFBundleShortVersionString`, uses a valid compact `CFBundleVersion`, and records the full run ID in `CordialeBuildID` and `CordialeBuildVersion`.
 
-            Tester note: the 51 known event kinds without a Cordiale handler are intentionally ignored for this preview build; they are not rendered as chat messages. See the README for the current list.
+            Tester note: the 39 currently unhandled event kinds are intentionally ignored for this alpha build; they are not rendered as chat messages. See the README for the current list.
 
             Heads up: every package here is unsigned, on every platform — no code-signing cert anywhere, even though the filenames don't say so. Windows SmartScreen and some Linux package managers might complain about it; that's expected for an unsigned, community-built app, not a sign of tampering. Each artifact still ships a SHA256SUMS file and a build provenance attestation if you want to verify it yourself — see [docs/installation.md](https://github.com/Sythos/Cordiale/blob/main/docs/installation.md).
