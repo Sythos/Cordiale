@@ -5833,8 +5833,7 @@ async fn handle_network_lifecycle(
     let Some(identifier) = state.identifier.clone() else {
         return;
     };
-    let Some((network_id, network_slug)) =
-        lifecycle.parse(payload, carrier_topic, &identifier)
+    let Some((network_id, network_slug)) = lifecycle.parse(payload, carrier_topic, &identifier)
     else {
         return;
     };
