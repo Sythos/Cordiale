@@ -39,7 +39,9 @@ use cordiale_core::credentials::resolve_credential_store;
 use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
-use cordiale_core::rest::{DisplayPrefs, LoginRequest, SendMessageRequest};
+use cordiale_core::rest::{
+    BootResponse, DisplayPrefs, LoginRequest, MeResponse, SendMessageRequest,
+};
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::wire_event::ClientEventKind;
 
@@ -2251,7 +2253,6 @@ const IGNORED_KINDS: &[&str] = &[
     "archive_changed",
     "archive_purged",
     // networks/wire.ex.
-    "network_detached",
     "network_attached",
     "connection_state_changed",
     // user_settings/wire.ex.
@@ -2410,6 +2411,10 @@ async fn handle_frame(
     let payload_kind = event_kind.as_wire_name();
     if payload_kind == "channels_changed" {
         handle_channels_changed(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "network_detached" {
+        handle_network_detached(state, ui, &frame.topic, &frame.payload).await;
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -4760,8 +4765,12 @@ fn joined_window_states_from_boot_channels(
 /// JSON schema given). Channels without one are simply absent from the
 /// map; the UI falls back to the plain channel label in that case.
 fn topics_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), String> {
+    topics_from_boot_response(&outcome.boot)
+}
+
+fn topics_from_boot_response(boot: &BootResponse) -> HashMap<(String, String), String> {
     let mut topics = HashMap::new();
-    for (network, channels) in &outcome.boot.channels {
+    for (network, channels) in &boot.channels {
         for value in channels {
             let channel = value
                 .get("name")
@@ -4791,10 +4800,14 @@ type MembersByChannel = HashMap<(String, String), Vec<MemberEntry>>;
 /// [...]}`) defensively. An unrecognized shape just yields no members for
 /// that channel rather than guessing further; see README's Known gaps.
 fn members_from_boot(outcome: &BootstrapOutcome) -> MembersByChannel {
+    members_from_boot_response(&outcome.boot)
+}
+
+fn members_from_boot_response(boot: &BootResponse) -> MembersByChannel {
     const FIELD_NAMES: &[&str] = &["members", "nicks", "names", "userlist", "who"];
 
     let mut members_by_channel = HashMap::new();
-    for (network, channels) in &outcome.boot.channels {
+    for (network, channels) in &boot.channels {
         for value in channels {
             let channel = value
                 .get("name")
@@ -4887,8 +4900,12 @@ fn sort_members_by_rank(members: &mut [MemberEntry]) {
 type MessagesByChannel = HashMap<(String, String), Vec<RenderedMessage>>;
 
 fn messages_from_boot(outcome: &BootstrapOutcome) -> MessagesByChannel {
+    messages_from_boot_response(&outcome.boot)
+}
+
+fn messages_from_boot_response(boot: &BootResponse) -> MessagesByChannel {
     let mut messages = HashMap::new();
-    for (network, channels) in &outcome.boot.heads {
+    for (network, channels) in &boot.heads {
         for (channel, rows) in channels {
             let lines: Vec<RenderedMessage> = rows.iter().map(render_history_entry).collect();
             if !lines.is_empty() {
@@ -5202,9 +5219,11 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
 /// guessed: callers treat a missing id as "can't send this command for
 /// that network" instead of sending a wrong one.
 fn network_ids_from_boot(outcome: &BootstrapOutcome) -> HashMap<String, i64> {
-    outcome
-        .boot
-        .networks
+    network_ids_from_entries(&outcome.boot.networks)
+}
+
+fn network_ids_from_entries(networks: &[Value]) -> HashMap<String, i64> {
+    networks
         .iter()
         .filter_map(|value| {
             let slug = value.get("slug").and_then(Value::as_str)?;
@@ -5627,6 +5646,222 @@ async fn handle_channels_changed(
         }
     }
     refresh_network_groups(state, ui);
+}
+
+/// Parses the authoritative `network_detached` signal.  The event is carried
+/// only by the authenticated user topic and identifies the network by both
+/// its stable integer id and its display slug.  Additive fields are ignored,
+/// but the two identity fields are required so a stale or malformed push can
+/// never make Cordiale remove an unrelated network locally.
+fn parse_network_detached_event(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(i64, String)> {
+    if identifier.is_empty()
+        || carrier_topic != format!("grappa:user:{identifier}")
+        || payload.get("kind").and_then(Value::as_str) != Some("network_detached")
+    {
+        return None;
+    }
+
+    let network_id = payload.get("network_id").and_then(Value::as_i64)?;
+    if network_id <= 0 {
+        return None;
+    }
+    let network_slug = payload.get("network_slug").and_then(Value::as_str)?;
+    if network_slug.trim().is_empty() {
+        return None;
+    }
+    Some((network_id, network_slug.to_string()))
+}
+
+/// Reconciles the self-message listener topics after an authoritative
+/// `/boot` refresh.  Channel-shaped topics are shared with query windows, so
+/// an old listener is left only when no open query still owns that topic.
+fn reconcile_own_nick_listener_topics(
+    state: &mut WorkerState,
+    user: &str,
+    next_own_nicks: HashMap<String, String>,
+) -> Vec<OwnNickListenerAction> {
+    let previous = std::mem::replace(&mut state.own_nicks, next_own_nicks.clone());
+    let mut actions = Vec::new();
+
+    for (network, old_nick) in previous {
+        let same_topic = next_own_nicks
+            .get(&network)
+            .is_some_and(|new_nick| ascii_fold_channel(new_nick) == ascii_fold_channel(&old_nick));
+        if same_topic {
+            continue;
+        }
+
+        let old_topic = own_nick_listener_topic(user, &network, &old_nick);
+        state.own_listener_ready.remove(&old_topic);
+        if find_query_window(&state.query_windows, &network, &old_nick).is_none()
+            && state.joined_topics.remove(&old_topic)
+        {
+            actions.push(OwnNickListenerAction::Leave(old_topic));
+        }
+    }
+
+    for (network, nick) in next_own_nicks {
+        let topic = own_nick_listener_topic(user, &network, &nick);
+        if state.joined_topics.insert(topic.clone()) {
+            state.own_listener_ready.remove(&topic);
+            actions.push(OwnNickListenerAction::Join(topic));
+        }
+    }
+
+    actions
+}
+
+/// Applies the two REST snapshots that Cicchetto refreshes after a network
+/// detach.  The REST responses are fetched before any mutation, so a failed
+/// refresh leaves the existing projection intact.  The WebSocket session is
+/// preserved; only the state owned by `/boot` and `/me` is replaced and the
+/// resulting topic differences are sent to the existing session.
+fn apply_network_rest_refresh(
+    state: &mut WorkerState,
+    identifier: &str,
+    boot: &BootResponse,
+    me: &MeResponse,
+) -> Vec<ChannelTopicAction> {
+    let entries = channel_entries_from_channels(&boot.channels);
+    let channel_actions = reconcile_channel_entries(state, identifier, entries);
+
+    state.window_states = joined_window_states_from_boot_channels(&boot.channels);
+    state.window_failures.clear();
+    state.window_kicks.clear();
+    state.invited_by.clear();
+    state.window_mentions = window_mentions_from_me(&me.unread_counts);
+    state.window_messages = window_messages_from_me(&me.unread_counts);
+    state.topics = topics_from_boot_response(boot);
+    state.members = members_from_boot_response(boot);
+    state.messages = messages_from_boot_response(boot);
+    state.read_cursors = read_cursors_from_me(&me.read_cursors);
+    state.badge_count = normalize_badge_count(Some(&me.badge_count));
+    state.network_ids = network_ids_from_entries(&boot.networks);
+
+    let listener_actions = reconcile_own_nick_listener_topics(
+        state,
+        identifier,
+        network_nicks_from_entries(&boot.networks),
+    );
+
+    // The refresh is authoritative for per-network transient snapshots too;
+    // discard entries for networks no longer present while preserving the
+    // latest values for networks that remain attached/parked.
+    let known_networks: std::collections::HashSet<&str> =
+        state.network_ids.keys().map(String::as_str).collect();
+    state
+        .away_states
+        .retain(|network, _| known_networks.contains(network.as_str()));
+    state
+        .session_identities
+        .retain(|network, _| known_networks.contains(network.as_str()));
+    state
+        .isupport_by_network
+        .retain(|network, _| known_networks.contains(network.as_str()));
+    state
+        .user_modes_by_network
+        .retain(|network, _| known_networks.contains(network.as_str()));
+    state
+        .supported_user_modes_by_network
+        .retain(|network, _| known_networks.contains(network.as_str()));
+
+    let mut actions = channel_actions;
+    for action in listener_actions {
+        actions.push(match action {
+            OwnNickListenerAction::Leave(topic) => ChannelTopicAction::Leave(topic),
+            OwnNickListenerAction::Join(topic) => ChannelTopicAction::Join(topic),
+        });
+    }
+    actions
+}
+
+async fn handle_network_detached(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+    let Some((network_id, network_slug)) =
+        parse_network_detached_event(payload, carrier_topic, &identifier)
+    else {
+        return;
+    };
+
+    // Reject a signal that is not about a currently known network.  This is
+    // especially important for replayed/late events after a previous refresh.
+    if state.network_ids.get(&network_slug) != Some(&network_id) {
+        persistence::log_line("network_detached rejected: unknown or stale network");
+        return;
+    }
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+
+    let boot = match client.fetch_boot(&token).await {
+        Ok(boot) => boot,
+        Err(error) => {
+            persistence::log_line(&format!(
+                "network_detached boot refresh failed; keeping existing state: {error:?}"
+            ));
+            return;
+        }
+    };
+    let me = match client.fetch_me(&token).await {
+        Ok(me) => me,
+        Err(error) => {
+            persistence::log_line(&format!(
+                "network_detached me refresh failed; keeping existing state: {error:?}"
+            ));
+            return;
+        }
+    };
+
+    let actions = apply_network_rest_refresh(state, &identifier, &boot, &me);
+    if let Some(session) = state.session.as_ref() {
+        for action in actions {
+            match action {
+                ChannelTopicAction::Leave(topic) => session.leave_topic(topic),
+                ChannelTopicAction::Join(topic) => {
+                    let is_own_listener =
+                        own_nick_listener_network_for_topic(state, &topic).is_some();
+                    session.join_topic(topic, !is_own_listener);
+                }
+            }
+        }
+    }
+
+    if let Some((current_network, _)) = state.current_channel.as_ref() {
+        if !state.network_ids.contains_key(current_network) {
+            state.current_channel = None;
+            state.current_query = false;
+            state.current_query_ready = false;
+            let _ = ui.upgrade_in_event_loop(|ui| {
+                ui.set_has_selected_channel(false);
+                ui.set_current_channel_label("".into());
+                ui.set_current_topic("".into());
+                ui.set_current_channel_modes("".into());
+                ui.set_current_window_is_joined(false);
+                ui.set_can_moderate_members(false);
+                ui.set_compose_text("".into());
+                ui.set_chat_lines(Rc::new(slint::VecModel::from(Vec::<ChatLine>::new())).into());
+                ui.set_channel_members(
+                    Rc::new(slint::VecModel::from(Vec::<MemberRow>::new())).into(),
+                );
+            });
+        }
+    }
+
+    refresh_network_groups(state, ui);
+    persistence::log_line(&format!(
+        "network_detached refreshed authoritative state for {network_slug}"
+    ));
 }
 
 /// Parses the authoritative `query_windows_list` full snapshot. If any row
@@ -9643,7 +9878,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 34);
+        assert_eq!(IGNORED_KINDS.len(), 33);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -9676,10 +9911,53 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"window_pending"));
         assert!(!IGNORED_KINDS.contains(&"window_invited"));
         assert!(!IGNORED_KINDS.contains(&"window_invite_declined"));
+        assert!(!IGNORED_KINDS.contains(&"network_detached"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
         assert!(!IGNORED_KINDS.contains(&"parted"));
+    }
+
+    #[test]
+    fn parse_network_detached_accepts_only_the_authenticated_user_topic() {
+        let payload = serde_json::json!({
+            "kind": "network_detached",
+            "network_id": 7,
+            "network_slug": "libera",
+            "future_field": true
+        });
+        assert_eq!(
+            parse_network_detached_event(&payload, "grappa:user:sythos", "sythos"),
+            Some((7, "libera".to_string()))
+        );
+        assert_eq!(
+            parse_network_detached_event(&payload, "grappa:user:other", "sythos"),
+            None
+        );
+        assert_eq!(
+            parse_network_detached_event(
+                &payload,
+                "grappa:user:sythos/network:libera/channel:#rust",
+                "sythos"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_network_detached_rejects_invalid_identity_fields() {
+        for payload in [
+            serde_json::json!({"kind": "network_detached", "network_id": 0, "network_slug": "libera"}),
+            serde_json::json!({"kind": "network_detached", "network_id": -1, "network_slug": "libera"}),
+            serde_json::json!({"kind": "network_detached", "network_id": 7, "network_slug": "  "}),
+            serde_json::json!({"kind": "network_attached", "network_id": 7, "network_slug": "libera"}),
+            serde_json::json!({"kind": "network_detached", "network_id": "7", "network_slug": "libera"}),
+        ] {
+            assert_eq!(
+                parse_network_detached_event(&payload, "grappa:user:sythos", "sythos"),
+                None
+            );
+        }
     }
 
     #[test]

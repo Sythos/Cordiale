@@ -70,15 +70,16 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 22 of them:
+  lists 56 top-level event kinds. Cordiale handles 23 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
   `away_confirmed`, `window_counts`, `channels_changed`,
   `session_identity_changed`, `isupport_changed`, `umode_changed`,
   `supported_umodes_changed`, `joined`, `join_failed`, `kicked`,
-  `window_pending`, `window_invited`, `window_invite_declined`, and `message`;
-  the remaining 34 kinds are
+  `window_pending`, `window_invited`, `window_invite_declined`,
+  `network_detached`, and `message`;
+  the remaining 33 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -144,11 +145,17 @@ known limitations are:
   `supported_umodes_changed` uses a separate per-network store for the modes
   advertised by 004, preserving order and allowing empty/replayed snapshots;
   it never overwrites the active-mode store.
+  `network_detached` validates the exact user-topic carrier and the matching
+  positive network id/slug, then refreshes `/boot` and `/me` before replacing
+  the network, channel, unread, cursor, roster, topic, and history projections.
+  The existing Phoenix session is retained while channel and self-listener
+  subscriptions are reconciled; a failed REST refresh leaves the old state
+  untouched. The event itself is never treated as a complete state snapshot.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**: `network_attached`,
-    `network_detached`, `connection_progress`,
+    `connection_progress`,
     `connection_state_changed`,
     `peer_away`, `auto_away_debounce_changed`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
