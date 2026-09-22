@@ -68,12 +68,13 @@ known limitations are:
   misalign arguments and leave a stale prefix; broader validation across
   server configurations is still needed.
 - **Realtime event coverage (current main)**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 16 of them:
+  lists 56 top-level event kinds. Cordiale handles 17 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
   `away_confirmed`, `window_counts`, `channels_changed`, `window_pending`,
-  `joined`, `join_failed`, `kicked`, and `message`; the remaining 40 kinds are
+  `session_identity_changed`, `joined`, `join_failed`, `kicked`, and `message`;
+  the remaining 39 kinds are
   deliberately ignored for this tester
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -117,7 +118,9 @@ known limitations are:
   signal and subscribes to the channel topic so the subsequent `joined` or
   `join_failed` event is not lost. The channel sidebar also displays
   server-authoritative unread message counts and separates network groups
-  visually.
+  visually. `session_identity_changed` stores the per-network `identified`
+  verdict separately from its optional display account, including the valid
+  `identified=true, account=null` case.
   - **Window, channel, and scrollback state**: `channel_created`,
     `window_invited`,
     `window_invite_declined`, `archive_changed`,
@@ -125,7 +128,7 @@ known limitations are:
   - **Network, connection, identity, and settings**: `network_attached`,
     `network_detached`, `connection_progress`,
     `connection_state_changed`, `isupport_changed`,
-    `umode_changed`, `supported_umodes_changed`, `session_identity_changed`,
+    `umode_changed`, `supported_umodes_changed`,
     `peer_away`, `auto_away_debounce_changed`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
     `server_settings_changed`, `web_session_severed`.
