@@ -244,6 +244,10 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_current_query(false);
             ui.set_current_query_ready(false);
             ui.set_can_moderate_members(false);
+            ui.set_window_invite_banner("".into());
+            ui.set_window_invite_network("".into());
+            ui.set_window_invite_channel("".into());
+            ui.set_window_invite_inviter("".into());
         }
     });
 
@@ -317,6 +321,17 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_query_window.send(WorkerCommand::SelectQuery {
             network: network.to_string(),
             nick: nick.to_string(),
+        });
+    });
+
+    // The invitation banner deliberately does not auto-focus a window. Its
+    // explicit Join action only opens the invited row; the server remains the
+    // authority for the subsequent pending/joined transition.
+    let tx_for_window_invite = worker_tx.clone();
+    ui.on_window_invite_join_requested(move |network, channel| {
+        let _ = tx_for_window_invite.send(WorkerCommand::SelectChannel {
+            network: network.to_string(),
+            channel: channel.to_string(),
         });
     });
 
@@ -521,6 +536,7 @@ fn main() -> Result<(), slint::PlatformError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChannelWindowState {
     Pending,
+    Invited,
     Joined,
     Failed,
     Kicked,
@@ -627,7 +643,8 @@ struct WorkerState {
     /// the channel row.
     window_kicks: HashMap<(String, String), WindowKick>,
     /// Invitation markers are cleared by terminal window transitions. The
-    /// invitation event itself remains unsupported until its own parity step.
+    /// marker is kept separately from the state enum so the banner can retain
+    /// the server-provided inviter while the sidebar only needs the state.
     invited_by: HashMap<(String, String), String>,
     /// Server-authoritative counts from `window_counts` and `/me.unread_counts`.
     /// Mentions remain separate so the existing highlight badge is preserved.
@@ -1308,6 +1325,10 @@ async fn handle_connect(
                 ui.set_status_kind("signed-in".into());
                 ui.set_status_network_count(network_count as i32);
                 ui.set_status_channel_count(channel_count as i32);
+                ui.set_window_invite_banner("".into());
+                ui.set_window_invite_network("".into());
+                ui.set_window_invite_channel("".into());
+                ui.set_window_invite_inviter("".into());
                 ui.set_current_query(false);
                 ui.set_current_query_ready(false);
                 let networks: Vec<slint::SharedString> =
@@ -2207,7 +2228,6 @@ const IGNORED_KINDS: &[&str] = &[
     "channel_created",
     "who_reply",
     "server_reply",
-    "window_invited",
     "window_invite_declined",
     "dcc_offer",
     "dcc_offer_resolved",
@@ -2447,6 +2467,14 @@ async fn handle_frame(
         return;
     }
 
+    // An invitation is replayable on the user topic, unlike the live-only
+    // pending transition. Store it immediately and join the matching channel
+    // topic so the eventual `joined`/`join_failed` event cannot race us.
+    if payload_kind == "window_invited" {
+        handle_window_invited(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+
     // Grappa doesn't use Phoenix Presence (`presence_state`/`presence_diff`)
     // — confirmed by reading Cicchetto's actual source
     // (`cicchetto/src/lib/subscribe.ts`). The full initial roster instead
@@ -2592,6 +2620,7 @@ async fn handle_frame(
             let ui = ui.clone();
             let _ = ui.upgrade_in_event_loop(|ui| ui.set_current_window_is_joined(true));
         }
+        refresh_invite_banner(state, ui);
         if state_changed || sidebar_changed {
             refresh_network_groups(state, ui);
         }
@@ -2639,6 +2668,7 @@ async fn handle_frame(
                 ui.set_can_moderate_members(false);
             });
         }
+        refresh_invite_banner(state, ui);
         if state_changed || sidebar_changed {
             refresh_network_groups(state, ui);
         }
@@ -2691,6 +2721,7 @@ async fn handle_frame(
                 ui.set_channel_members(empty_members.into());
             });
         }
+        refresh_invite_banner(state, ui);
         if state_changed || sidebar_changed {
             refresh_network_groups(state, ui);
         }
@@ -3495,6 +3526,160 @@ fn handle_window_pending(
             ui.set_can_moderate_members(false);
         });
     }
+    refresh_invite_banner(state, ui);
+    if state_changed || sidebar_changed {
+        refresh_network_groups(state, ui);
+    }
+}
+
+/// Parses the replayable `window_invited` transition. Grappa sends this only
+/// on the authenticated user topic; accepting a matching channel-topic frame
+/// would incorrectly seed invitation state from a channel snapshot.
+/// Unknown additive fields remain tolerated, while the required `inviter`
+/// field must be a JSON string (the server uses `"*"` when no prefix exists).
+fn parse_window_invited_event(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String, String)> {
+    if identifier.is_empty()
+        || carrier_topic != format!("grappa:user:{identifier}")
+        || payload.get("kind").and_then(Value::as_str) != Some("window_invited")
+        || payload.get("state").and_then(Value::as_str) != Some("invited")
+    {
+        return None;
+    }
+
+    let network = payload.get("network").and_then(Value::as_str)?;
+    let channel = payload.get("channel").and_then(Value::as_str)?;
+    let inviter = payload.get("inviter").and_then(Value::as_str)?;
+    if network.is_empty() || channel.is_empty() || inviter.is_empty() {
+        return None;
+    }
+
+    Some((
+        network.to_string(),
+        channel.to_string(),
+        inviter.to_string(),
+    ))
+}
+
+/// Mirrors Cicchetto's invited-window reducer: replace any stale terminal
+/// state, retain the required inviter for the Join banner, and make repeated
+/// live/replay delivery idempotent.
+fn set_invited_window_state(
+    window_states: &mut HashMap<(String, String), ChannelWindowState>,
+    window_failures: &mut HashMap<(String, String), WindowFailure>,
+    window_kicks: &mut HashMap<(String, String), WindowKick>,
+    invited_by: &mut HashMap<(String, String), String>,
+    network: &str,
+    channel: &str,
+    inviter: String,
+) -> bool {
+    let key = window_state_key(network, channel);
+    let state_changed = window_states.insert(key.clone(), ChannelWindowState::Invited)
+        != Some(ChannelWindowState::Invited);
+    let failure_cleared = window_failures.remove(&key).is_some();
+    let kick_cleared = window_kicks.remove(&key).is_some();
+    let inviter_changed = invited_by.get(&key) != Some(&inviter);
+    invited_by.insert(key, inviter);
+    state_changed || failure_cleared || kick_cleared || inviter_changed
+}
+
+/// Projects the most stable invited entry into the native banner. The
+/// invitation itself must not change `current_channel`, so receiving a live
+/// event never steals focus from the user's current window.
+fn refresh_invite_banner(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let banner = state
+        .invited_by
+        .iter()
+        .min_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|((network, channel), inviter)| {
+            (
+                format!("{network} {channel}"),
+                network.clone(),
+                channel.clone(),
+                inviter.clone(),
+            )
+        });
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        if let Some((label, network, channel, inviter)) = banner {
+            ui.set_window_invite_banner(
+                format!("Invited to {label} by {inviter}. Select Join to open it.").into(),
+            );
+            ui.set_window_invite_network(network.into());
+            ui.set_window_invite_channel(channel.into());
+            ui.set_window_invite_inviter(inviter.into());
+        } else {
+            ui.set_window_invite_banner("".into());
+            ui.set_window_invite_network("".into());
+            ui.set_window_invite_channel("".into());
+            ui.set_window_invite_inviter("".into());
+        }
+    });
+}
+
+fn handle_window_invited(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+    let Some((network, channel, inviter)) =
+        parse_window_invited_event(payload, carrier_topic, &identifier)
+    else {
+        return;
+    };
+    // Do not manufacture a sidebar/network entry from an invite for a stale
+    // or unknown network; the bootstrap snapshot remains authoritative.
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+
+    let state_changed = set_invited_window_state(
+        &mut state.window_states,
+        &mut state.window_failures,
+        &mut state.window_kicks,
+        &mut state.invited_by,
+        &network,
+        &channel,
+        inviter,
+    );
+    let sidebar_changed =
+        upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
+
+    let topic = channel_topic(&identifier, &network, &channel);
+    let subscription_added = register_pending_channel_topic(
+        &mut state.joined_topics,
+        &mut state.channel_topics,
+        topic.clone(),
+    );
+    if let (true, Some(handle)) = (subscription_added, state.session.as_ref()) {
+        handle.join_topic(topic, true);
+    }
+
+    // The event is deliberately not an auto-focus request. If the invited
+    // window is already selected, keep the roster hidden until `joined`.
+    let selected_window_invited =
+        state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, current_channel)| {
+                window_state_key(current_network, current_channel)
+                    == window_state_key(&network, &channel)
+            });
+    if selected_window_invited {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_current_window_is_joined(false);
+            ui.set_can_moderate_members(false);
+        });
+    }
+    refresh_invite_banner(state, ui);
     if state_changed || sidebar_changed {
         refresh_network_groups(state, ui);
     }
@@ -3516,9 +3701,17 @@ fn window_is_kicked(
     window_states.get(&window_state_key(network, channel)) == Some(&ChannelWindowState::Kicked)
 }
 
+fn window_is_invited(
+    window_states: &HashMap<(String, String), ChannelWindowState>,
+    network: &str,
+    channel: &str,
+) -> bool {
+    window_states.get(&window_state_key(network, channel)) == Some(&ChannelWindowState::Invited)
+}
+
 /// Adds a channel window to the session's sidebar source of truth after a
-/// server-reported join, join failure, or kick. The return value lets callers
-/// avoid rebuilding Slint models for duplicate live/snapshot delivery.
+/// server-reported join, invitation, join failure, or kick. The return value
+/// lets callers avoid rebuilding Slint models for duplicate delivery.
 fn upsert_channel_entry(
     entries: &mut Vec<(String, String, String)>,
     network: String,
@@ -4630,6 +4823,7 @@ fn network_groups_model(
                 .map(|(channel, label)| {
                     let failed = window_is_failed(&window_states, &network, &channel);
                     let kicked = window_is_kicked(&window_states, &network, &channel);
+                    let invited = window_is_invited(&window_states, &network, &channel);
                     let mention_count = window_mentions
                         .get(&window_counts_key(&network, &channel))
                         .copied()
@@ -4650,6 +4844,7 @@ fn network_groups_model(
                         unread_description: unread_description.into(),
                         failed,
                         kicked,
+                        invited,
                     }
                 })
                 .collect();
@@ -8216,6 +8411,173 @@ mod tests {
     }
 
     #[test]
+    fn parse_window_invited_accepts_only_the_user_topic_and_required_fields() {
+        let payload = serde_json::json!({
+            "kind": "window_invited",
+            "network": "libera",
+            "channel": "#cordiale",
+            "state": "invited",
+            "inviter": "*",
+            "future_field": true
+        });
+        let expected = Some((
+            "libera".to_string(),
+            "#cordiale".to_string(),
+            "*".to_string(),
+        ));
+
+        assert_eq!(
+            parse_window_invited_event(&payload, "grappa:user:sythos", "sythos"),
+            expected
+        );
+        assert_eq!(
+            parse_window_invited_event(
+                &payload,
+                &channel_topic("sythos", "libera", "#cordiale"),
+                "sythos"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_window_invited_event(&payload, "grappa:user:other", "sythos"),
+            None
+        );
+
+        for malformed in [
+            serde_json::json!({
+                "kind": "window_invited",
+                "network": "libera",
+                "channel": "#cordiale",
+                "state": "pending",
+                "inviter": "ChanServ"
+            }),
+            serde_json::json!({
+                "kind": "window_invited",
+                "network": "libera",
+                "channel": "#cordiale",
+                "state": "invited"
+            }),
+            serde_json::json!({
+                "kind": "window_invited",
+                "network": "libera",
+                "channel": "#cordiale",
+                "state": "invited",
+                "inviter": null
+            }),
+            serde_json::json!({
+                "kind": "window_invited",
+                "network": "",
+                "channel": "#cordiale",
+                "state": "invited",
+                "inviter": "ChanServ"
+            }),
+            serde_json::json!({
+                "kind": "window_invited",
+                "network": "libera",
+                "channel": "",
+                "state": "invited",
+                "inviter": "ChanServ"
+            }),
+            serde_json::json!({
+                "kind": "window_invited",
+                "network": "libera",
+                "channel": "#cordiale",
+                "state": "invited",
+                "inviter": ""
+            }),
+            serde_json::json!({
+                "kind": "window_invited",
+                "network": 7,
+                "channel": "#cordiale",
+                "state": "invited",
+                "inviter": "ChanServ"
+            }),
+        ] {
+            assert_eq!(
+                parse_window_invited_event(&malformed, "grappa:user:sythos", "sythos"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn invited_window_is_idempotent_and_replaces_stale_state() {
+        let key = window_state_key("libera", "#cordiale");
+        let mut states = HashMap::from([(key.clone(), ChannelWindowState::Failed)]);
+        let mut failures = HashMap::from([(
+            key.clone(),
+            WindowFailure {
+                reason: Some("old failure".to_string()),
+                numeric: Some(Number::from(473)),
+            },
+        )]);
+        let mut kicks = HashMap::from([(
+            key.clone(),
+            WindowKick {
+                by: Some("old actor".to_string()),
+                reason: None,
+            },
+        )]);
+        let mut invited_by = HashMap::new();
+        let mut joined_topics = std::collections::HashSet::new();
+        let mut channel_topics = std::collections::HashSet::new();
+        let topic = channel_topic("sythos", "libera", "#cordiale");
+
+        assert!(set_invited_window_state(
+            &mut states,
+            &mut failures,
+            &mut kicks,
+            &mut invited_by,
+            "libera",
+            "#CoRdIaLe",
+            "ChanServ".to_string(),
+        ));
+        assert_eq!(states.get(&key), Some(&ChannelWindowState::Invited));
+        assert!(failures.is_empty());
+        assert!(kicks.is_empty());
+        assert_eq!(invited_by.get(&key).map(String::as_str), Some("ChanServ"));
+        assert!(register_pending_channel_topic(
+            &mut joined_topics,
+            &mut channel_topics,
+            topic.clone()
+        ));
+        assert!(!register_pending_channel_topic(
+            &mut joined_topics,
+            &mut channel_topics,
+            topic.clone()
+        ));
+        assert_eq!(
+            joined_topics,
+            std::collections::HashSet::from([topic.clone()])
+        );
+        assert_eq!(channel_topics, std::collections::HashSet::from([topic]));
+
+        assert!(!set_invited_window_state(
+            &mut states,
+            &mut failures,
+            &mut kicks,
+            &mut invited_by,
+            "libera",
+            "#cordiale",
+            "ChanServ".to_string(),
+        ));
+        assert_eq!(invited_by.get(&key).map(String::as_str), Some("ChanServ"));
+
+        // A later inviter value is a real state replacement, not a duplicate;
+        // the required banner metadata follows the latest server frame.
+        assert!(set_invited_window_state(
+            &mut states,
+            &mut failures,
+            &mut kicks,
+            &mut invited_by,
+            "libera",
+            "#cordiale",
+            "*".to_string(),
+        ));
+        assert_eq!(invited_by.get(&key).map(String::as_str), Some("*"));
+    }
+
+    #[test]
     fn pending_window_is_idempotent_subscribes_once_and_transitions_to_joined() {
         let key = window_state_key("libera", "#cordiale");
         let mut states = HashMap::from([(key.clone(), ChannelWindowState::Failed)]);
@@ -9010,7 +9372,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 36);
+        assert_eq!(IGNORED_KINDS.len(), 35);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -9041,6 +9403,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"join_failed"));
         assert!(!IGNORED_KINDS.contains(&"kicked"));
         assert!(!IGNORED_KINDS.contains(&"window_pending"));
+        assert!(!IGNORED_KINDS.contains(&"window_invited"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
