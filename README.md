@@ -67,13 +67,13 @@ known limitations are:
   argument-taking mode (for example, a ban and an op together) can
   misalign arguments and leave a stale prefix; broader validation across
   server configurations is still needed.
-- **Realtime event coverage (0.1.4 tester build)**: the current Grappa
-  protocol lists 56 top-level event kinds. Cordiale handles 15 of them:
+- **Realtime event coverage (current main)**: the current Grappa protocol
+  lists 56 top-level event kinds. Cordiale handles 16 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
-  `away_confirmed`, `window_counts`, `channels_changed`, `joined`,
-  `join_failed`, `kicked`, and `message`; the remaining 41 kinds are
+  `away_confirmed`, `window_counts`, `channels_changed`, `window_pending`,
+  `joined`, `join_failed`, `kicked`, and `message`; the remaining 40 kinds are
   deliberately ignored for this tester
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -113,8 +113,13 @@ known limitations are:
   authoritative channel list, and reconciles sidebar rows and subscriptions
   idempotently while preserving topics still owned by a query or own-nick
   listener. A failed refresh keeps the existing state.
+  `window_pending` creates an idempotent pending row from the live user-topic
+  signal and subscribes to the channel topic so the subsequent `joined` or
+  `join_failed` event is not lost. The channel sidebar also displays
+  server-authoritative unread message counts and separates network groups
+  visually.
   - **Window, channel, and scrollback state**: `channel_created`,
-    `window_pending`, `window_invited`,
+    `window_invited`,
     `window_invite_declined`, `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**: `network_attached`,
