@@ -5402,7 +5402,9 @@ fn record_network_connection_state(
     snapshot: NetworkConnectionSnapshot,
 ) -> (bool, bool) {
     let previous = states.insert(slug.to_string(), snapshot.clone());
-    let changed = previous.as_ref() != Some(&snapshot);
+    let changed = previous
+        .as_ref()
+        .is_none_or(|previous| previous.status != snapshot.status);
     let return_home = previous.is_some_and(|previous| {
         previous.status != snapshot.status
             && matches!(
