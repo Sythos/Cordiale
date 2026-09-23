@@ -2013,6 +2013,7 @@ async fn handle_connect(
                     window_mentions,
                     window_messages,
                 );
+                ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
                 ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
             });
 
@@ -2111,6 +2112,7 @@ async fn handle_select_channel(
         let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         let member_rows = members_model(&members, dark_theme);
+        ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
 }
@@ -4958,6 +4960,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_can_moderate_members(can_moderate);
         let member_rows = members_model(&members, dark_theme);
+        ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
         let chat_lines = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(chat_lines)).into());
@@ -6121,6 +6124,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let groups = network_groups_model(data, window_states, window_mentions, window_messages);
+        ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
         ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
     });
 }
@@ -6268,6 +6272,67 @@ fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isu
         .get(network)
         .map(|isupport| isupport.casemapping)
         .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459)
+}
+
+/// The longest sidebar row label, as displayed, measured by the Slint probe
+/// that sets the sidebar's minimum width. Lengths are compared in
+/// characters; the probe then measures the real text.
+fn widest_sidebar_label(groups: &[NetworkGroup]) -> String {
+    use slint::Model as _;
+
+    fn keep_longer(widest: &mut String, candidate: String) {
+        if candidate.chars().count() > widest.chars().count() {
+            *widest = candidate;
+        }
+    }
+
+    let mut widest = String::new();
+    for group in groups {
+        let network_row = if group.parked {
+            format!("▸ {} [PARKED]", group.network)
+        } else if group.connection_label.is_empty() {
+            format!("▾ 🔌 {}", group.network)
+        } else {
+            format!("▾ 🔌 {} · {}", group.network, group.connection_label)
+        };
+        keep_longer(&mut widest, network_row);
+        for entry in group.channels.iter() {
+            let invited = if entry.invited { "🔔 " } else { "" };
+            keep_longer(
+                &mut widest,
+                format!("{invited}{}{}", entry.label, entry.mention_badge),
+            );
+        }
+        for query in group.queries.iter() {
+            keep_longer(
+                &mut widest,
+                format!("↳ {}{}", query.label, query.mention_badge),
+            );
+        }
+    }
+    widest
+}
+
+/// A run of `n` characters as long as the average member label as shown in
+/// the member column (`[@] nick` when the member has a role), rounded up;
+/// empty without members. The Slint probe measures it for the column's
+/// minimum width.
+fn members_average_probe(rows: &[MemberRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let total: usize = rows
+        .iter()
+        .map(|row| {
+            let name = row.name.chars().count();
+            if row.prefix.is_empty() {
+                name
+            } else {
+                name + row.prefix.chars().count() + 3
+            }
+        })
+        .sum();
+    "n".repeat(total.div_ceil(rows.len()))
 }
 
 fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
@@ -14286,6 +14351,53 @@ mod tests {
         assert_eq!(ascii[0].nick_prefix.to_string(), "");
         let query = chat_lines_model(&messages, false);
         assert_eq!(query[0].nick_prefix.to_string(), "");
+    }
+
+    #[test]
+    fn widest_sidebar_label_picks_the_longest_row() {
+        let channels = vec![
+            ChannelEntry {
+                label: "#rust".into(),
+                ..Default::default()
+            },
+            ChannelEntry {
+                label: "#a-much-longer-channel".into(),
+                mention_badge: " (2)".into(),
+                ..Default::default()
+            },
+        ];
+        let groups = vec![
+            NetworkGroup {
+                network: "libera".into(),
+                channels: Rc::new(slint::VecModel::from(channels)).into(),
+                ..Default::default()
+            },
+            NetworkGroup {
+                network: "azzurra".into(),
+                parked: true,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(widest_sidebar_label(&groups), "#a-much-longer-channel (2)");
+        assert_eq!(widest_sidebar_label(&[]), "");
+    }
+
+    #[test]
+    fn members_average_probe_counts_the_bracketed_prefix() {
+        assert_eq!(members_average_probe(&[]), "");
+        let rows = vec![
+            MemberRow {
+                name: "Sythos".into(),
+                prefix: "@".into(),
+                ..Default::default()
+            },
+            MemberRow {
+                name: "vjt".into(),
+                ..Default::default()
+            },
+        ];
+        // "[@] Sythos" is 10 characters and "vjt" 3: the average rounds up to 7.
+        assert_eq!(members_average_probe(&rows), "nnnnnnn");
     }
 
     #[test]
