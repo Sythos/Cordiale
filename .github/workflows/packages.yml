@@ -386,7 +386,7 @@ jobs:
           subject-path: dist/*
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cordiale-${{ matrix.artifact }}-${{ needs.build-metadata.outputs.package_version }}-attempt-${{ needs.build-metadata.outputs.build_attempt }}
           path: dist/*
@@ -424,7 +424,7 @@ jobs:
           subject-path: dist/*
 
       - name: Upload source archive
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cordiale-src-${{ needs.build-metadata.outputs.package_version }}-attempt-${{ needs.build-metadata.outputs.build_attempt }}
           path: dist/*
