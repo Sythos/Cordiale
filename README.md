@@ -22,6 +22,11 @@ Cordiale isn't the only way to sit on a Grappa server, and it's worth knowing wh
 
 Each of the above has its own maintainer(s) and its own issue tracker — if something's broken in Grappa, Cicchetto, Shottino, Resentin, or Bicchierino, that's the place to report it, not here.
 
+The channel sidebar and member list have resizable columns with content-based
+minimum widths. Channel rows sit directly below their network row, member
+roles appear in brackets (for example, `[@] Sythos`), and the member list's
+Actions menu includes a shortcut to the local Themes settings.
+
 ## Known gaps
 
 Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-irc/tree/main/cicchetto),

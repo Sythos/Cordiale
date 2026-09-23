@@ -530,6 +530,18 @@ export component AppWindow inherits Window {
     // screen columns (see `ResizeHandle`) — session-local, not persisted.
     property <length> sidebar-width: 180px;
     property <length> members-width: 160px;
+    // Texts measured by the invisible probes below to derive each side
+    // column's minimum width: the widest sidebar row label, and a run of
+    // average-width characters as long as the average member label.
+    in property <string> sidebar-widest-label: "";
+    in property <string> members-average-nick: "";
+    // The sidebar never gets narrower than its widest row (plus the row
+    // indent, the part button and the box padding); the member column never
+    // narrower than the average member label or its Actions button.
+    property <length> sidebar-min-width: max(120px, sidebar-label-probe.preferred-width + 90px);
+    property <length> members-min-width: max(
+        actions-probe.preferred-width + 16px,
+        members-nick-probe.preferred-width + 40px);
 
     in-out property <string> theme: "light";
     in property <bool> display-prefs-loaded: false;
@@ -929,6 +941,22 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Invisible measuring probes for the side columns' minimum widths.
+    sidebar-label-probe := Button {
+        text: sidebar-widest-label;
+        visible: false;
+        enabled: false;
+    }
+    members-nick-probe := Text {
+        text: members-average-nick;
+        visible: false;
+    }
+    actions-probe := Button {
+        text: "☰ " + @tr("Actions") + " ▾";
+        visible: false;
+        enabled: false;
+    }
+
     if screen == "splash" : VerticalBox {
         padding: 32px;
         spacing: 24px;
@@ -1079,7 +1107,7 @@ export component AppWindow inherits Window {
         spacing: 8px;
 
         VerticalBox {
-            width: sidebar-width;
+            width: max(sidebar-width, sidebar-min-width);
             spacing: 8px;
 
             HorizontalLayout {
@@ -1232,7 +1260,7 @@ export component AppWindow inherits Window {
 
                 for group in network-groups : VerticalLayout {
                     alignment: start;
-                    spacing: 2px;
+                    spacing: 0px;
                     padding-top: group.separator-before ? 8px : 0px;
 
                     if group.separator-before : Rectangle {
@@ -1248,7 +1276,7 @@ export component AppWindow inherits Window {
                             + (group.connection-label == "" ? "" : " — " + connection-label-text(group.connection-label));
                         clicked => { network-toggle-requested(group.network); }
                     }
-                    if group.parked : HorizontalBox {
+                    if group.parked : HorizontalLayout {
                         spacing: 4px;
                         Button {
                             text: group.expanded ? "▾" : "▸";
@@ -1264,13 +1292,15 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // Channel and query rows sit directly under their
+                    // network row, with no gap between them.
                     if group.expanded : VerticalLayout {
                         alignment: start;
                         padding-left: 16px;
-                        spacing: 2px;
+                        spacing: 0px;
 
-                        for entry in group.channels : HorizontalBox {
-                            spacing: 6px;
+                        for entry in group.channels : HorizontalLayout {
+                            spacing: 4px;
 
                             Button {
                                 horizontal-stretch: 1;
@@ -1328,8 +1358,8 @@ export component AppWindow inherits Window {
 
         ResizeHandle {
             target-width <=> sidebar-width;
-            target-min-width: 120px;
-            target-max-width: 360px;
+            target-min-width: sidebar-min-width;
+            target-max-width: max(360px, sidebar-min-width);
         }
 
         VerticalBox {
@@ -1461,12 +1491,12 @@ export component AppWindow inherits Window {
         // and hiding the whole column also hid it.
         ResizeHandle {
             target-width <=> members-width;
-            target-min-width: 100px;
-            target-max-width: 320px;
+            target-min-width: members-min-width;
+            target-max-width: max(320px, members-min-width);
         }
 
         VerticalBox {
-            width: members-width;
+            width: max(members-width, members-min-width);
             spacing: 4px;
 
             if current-window-is-joined && !current-query : Text {
@@ -1480,7 +1510,7 @@ export component AppWindow inherits Window {
                 for member in channel-members : MemberContextMenu {
                     target-nick: member.name;
                     can-moderate: can-moderate-members;
-                    display-text: member.prefix == "" ? member.name : member.prefix + member.name;
+                    display-text: member.prefix == "" ? member.name : "[" + member.prefix + "] " + member.name;
                     text-color: member.color;
                     mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
                     kick(nick) => { member-kick-requested(nick); }
@@ -1503,8 +1533,7 @@ export component AppWindow inherits Window {
             // — confirmed against its real source and the user's own
             // screenshot: a global nav/utility menu, not a per-member one.
             // Only lists what Cordiale actually has; Cicchetto's version
-            // also has rooms/radio/themes/archive/mute/switch-account,
-            // none of which Cordiale supports yet.
+            // also has rooms/radio/archive/mute/switch-account.
             HorizontalLayout {
                 alignment: start;
 
@@ -1517,6 +1546,13 @@ export component AppWindow inherits Window {
                     Menu {
                         MenuItem { title: @tr("Home"); activated => { home-requested(); } }
                         MenuItem { title: @tr("Settings"); activated => { screen = "settings"; } }
+                        MenuItem {
+                            title: @tr("Themes");
+                            activated => {
+                                screen = "settings";
+                                settings-section = "themes";
+                            }
+                        }
                         if is-admin : MenuItem {
                             title: @tr("Admin");
                             activated => {
