@@ -88,7 +88,7 @@ The known limitations are:
   a ban and an op together) can therefore still misalign arguments and leave a
   stale prefix; broader validation across server configurations is still
   needed.
-- **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
+- **Realtime event coverage (0.1.6 BETA (WIP))**: the current Grappa protocol
   lists 56 top-level event kinds, and Cordiale handles all of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
