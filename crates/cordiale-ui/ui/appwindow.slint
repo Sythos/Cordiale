@@ -550,6 +550,8 @@ export component AppWindow inherits Window {
             return @tr("Server administrator on {}", reply-network);
         } else if reply-kind == "whois_bundle" {
             return @tr("WHOIS {} on {}", reply-subject, reply-network);
+        } else if reply-kind == "whowas_bundle" {
+            return @tr("WHOWAS {} on {}", reply-subject, reply-network);
         } else {
             return reply-network;
         }
@@ -602,6 +604,10 @@ export component AppWindow inherits Window {
             return @tr("Java client");
         } else if key == "whois-avatar" {
             return @tr("Avatar available on the server");
+        } else if key == "whowas-logoff" {
+            return @tr("Last seen");
+        } else if key == "whowas-not-found" {
+            return @tr("The server has no history for this nick.");
         } else {
             return key;
         }

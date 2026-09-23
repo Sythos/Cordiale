@@ -2595,7 +2595,6 @@ const IGNORED_KINDS: &[&str] = &[
     "peer_away",
     "invite_ack",
     "lusers_bundle",
-    "whowas_bundle",
     "banlist_bundle",
     "directory_progress",
     "directory_complete",
@@ -2805,6 +2804,10 @@ async fn handle_frame(
     }
     if payload_kind == "whois_avatar_ready" {
         handle_whois_avatar_ready(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "whowas_bundle" {
+        handle_whowas_bundle(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -7213,6 +7216,76 @@ fn handle_whois_bundle(
     show_reply_view(state, ui, view);
 }
 
+/// Validates `whowas_bundle`: every key is required, the history fields are
+/// strings or `null`, and `not_found` separates "no history" (406) from a
+/// malformed payload, which is dropped.
+fn parse_whowas_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<ReplyView> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "whowas_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let target = payload.get("target")?.as_str()?;
+    let text = |key: &str| parse_nullable_wire_string(payload.get(key)?);
+    let user = text("user")?;
+    let host = text("host")?;
+    let realname = text("realname")?;
+    let server = text("server")?;
+    let logoff_time = text("logoff_time")?;
+    let not_found = payload.get("not_found")?.as_bool()?;
+
+    let mut rows: Vec<(String, String)> = Vec::new();
+    if not_found {
+        rows.push(("whowas-not-found".to_string(), String::new()));
+    } else {
+        let userhost = match (user, host) {
+            (Some(user), Some(host)) => Some(format!("{user}@{host}")),
+            (user, host) => user.or(host),
+        };
+        for (label, value) in [
+            ("whois-userhost", userhost),
+            ("whois-realname", realname),
+            ("whois-server", server),
+            ("whowas-logoff", logoff_time),
+        ] {
+            if let Some(value) = value.filter(|value| !value.is_empty()) {
+                rows.push((label.to_string(), value));
+            }
+        }
+    }
+    Some(ReplyView {
+        kind: "whowas_bundle",
+        subject: target.to_string(),
+        network: network.to_string(),
+        rows,
+    })
+}
+
+fn handle_whowas_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(view) = parse_whowas_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("whowas_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    show_reply_view(state, ui, view);
+}
+
 /// Validates `whois_avatar_ready`: `network`, `nick` and `avatar_url` are
 /// all required strings. Returns them in that order.
 fn parse_whois_avatar_ready(
@@ -7351,6 +7424,15 @@ fn parse_reply_command(body: &str, current_target: &str) -> Option<ReplyCommand>
                     "server": args.get(1),
                     "source": "user",
                 }),
+            })
+        }
+        "/whowas" => {
+            let Some(nick) = args.first() else {
+                return Some(ReplyCommand::Usage);
+            };
+            Some(ReplyCommand::Request {
+                verb: "whowas",
+                payload: serde_json::json!({ "nick": nick }),
             })
         }
         // An optional server argument targets another server's MOTD/ADMIN.
@@ -11535,7 +11617,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 23);
+        assert_eq!(IGNORED_KINDS.len(), 22);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -11579,6 +11661,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"server_reply"));
         assert!(!IGNORED_KINDS.contains(&"whois_bundle"));
         assert!(!IGNORED_KINDS.contains(&"whois_avatar_ready"));
+        assert!(!IGNORED_KINDS.contains(&"whowas_bundle"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -12234,6 +12317,74 @@ mod tests {
         assert_eq!(
             card.unwrap().avatar_url.as_deref(),
             Some("/networks/1/peer_avatar/alice")
+        );
+    }
+
+    #[test]
+    fn parse_whowas_bundle_separates_not_found_from_invalid() {
+        let topic = "grappa:user:vjt";
+        let found = serde_json::json!({
+            "kind": "whowas_bundle",
+            "network": "libera",
+            "target": "oldnick",
+            "user": "~old",
+            "host": "example.org",
+            "realname": "Old Nick",
+            "server": "irc.example.org",
+            "logoff_time": "Tue Sep 22 10:00:00 2026",
+            "not_found": false
+        });
+        let view = parse_whowas_bundle(&found, topic, "vjt").expect("valid whowas");
+        assert_eq!(view.kind, "whowas_bundle");
+        assert_eq!(view.subject, "oldnick");
+        assert_eq!(
+            view.rows[0],
+            ("whois-userhost".to_string(), "~old@example.org".to_string())
+        );
+        assert!(view.rows.contains(&(
+            "whowas-logoff".to_string(),
+            "Tue Sep 22 10:00:00 2026".to_string()
+        )));
+
+        let not_found = serde_json::json!({
+            "kind": "whowas_bundle",
+            "network": "libera",
+            "target": "ghost",
+            "user": null,
+            "host": null,
+            "realname": null,
+            "server": null,
+            "logoff_time": null,
+            "not_found": true
+        });
+        assert_eq!(
+            parse_whowas_bundle(&not_found, topic, "vjt").unwrap().rows,
+            vec![("whowas-not-found".to_string(), String::new())]
+        );
+
+        assert!(parse_whowas_bundle(&found, "grappa:user:other", "vjt").is_none());
+        for key in ["user", "logoff_time", "not_found", "target"] {
+            let mut broken = found.clone();
+            broken.as_object_mut().unwrap().remove(key);
+            assert!(
+                parse_whowas_bundle(&broken, topic, "vjt").is_none(),
+                "{key}"
+            );
+        }
+        let mut wrong_type = found.clone();
+        wrong_type["not_found"] = serde_json::json!("no");
+        assert!(parse_whowas_bundle(&wrong_type, topic, "vjt").is_none());
+
+        assert_eq!(
+            parse_reply_command("/whowas oldnick", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "whowas",
+                payload: serde_json::json!({"nick": "oldnick"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/whowas", "#rust"),
+            Some(ReplyCommand::Usage)
         );
     }
 
