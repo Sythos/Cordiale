@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 35 of them:
+  lists 56 top-level event kinds. Cordiale handles 36 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -81,8 +81,8 @@ known limitations are:
   `network_attached`, `network_detached`, `connection_state_changed`,
   `connection_progress`, `recover_progress`, `recover_result`,
   `web_session_severed`, `who_reply`, `server_reply`, `whois_bundle`,
-  `whois_avatar_ready`, `whowas_bundle`, `banlist_bundle`, and `message`; the
-  remaining 21 kinds are
+  `whois_avatar_ready`, `whowas_bundle`, `banlist_bundle`,
+  `auto_away_debounce_changed`, and `message`; the remaining 20 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -215,11 +215,15 @@ known limitations are:
   list unless given; `+e` and `e` are equivalent) shows `banlist_bundle`
   entries in the ircd's order, with the setter and timestamp when known. The
   list letter comes from the reply and is never assumed to be `b`.
+  Settings > General shows a read-only copy of preferences Grappa stores and
+  applies itself, updated live from their `*_changed` pushes and hidden until
+  announced: `auto_away_debounce_changed` keeps `null` (server default) and
+  `0` (off) distinct from a number of seconds.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**:
-    `peer_away`, `auto_away_debounce_changed`,
+    `peer_away`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
     `server_settings_changed`.
   - **Presence, queries, and server replies**: `presence_changed`,

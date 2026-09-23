@@ -252,6 +252,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_window_invite_channel("".into());
             ui.set_window_invite_inviter("".into());
             ui.set_recover_visible(false);
+            ui.set_server_pref_auto_away_debounce("".into());
         }
     });
 
@@ -798,6 +799,26 @@ struct RecoverPanel {
     outcome_reason: Option<String>,
 }
 
+/// The subject's auto-away delay as Grappa stores it: `null` defers to the
+/// server's own default, `0` turns auto-away off, anything else is seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoAwayDebounce {
+    ServerDefault,
+    Disabled,
+    Seconds(u64),
+}
+
+impl AutoAwayDebounce {
+    /// The token the Settings screen translates: `default`, `off`, or seconds.
+    fn display_token(self) -> String {
+        match self {
+            Self::ServerDefault => "default".to_string(),
+            Self::Disabled => "off".to_string(),
+            Self::Seconds(seconds) => seconds.to_string(),
+        }
+    }
+}
+
 /// The latest reply to a command this client issued (a requester event),
 /// shown on the reply screen. Rows are `(label key, value)`; an empty key is
 /// a plain line.
@@ -995,6 +1016,9 @@ struct WorkerState {
     /// The WHOIS card currently shown, kept so a later `whois_avatar_ready`
     /// can patch exactly this card and no other.
     whois_card: Option<WhoisBundle>,
+    /// Display copy of the account-wide auto-away delay; `None` until the
+    /// server announces it. Grappa applies the value itself.
+    auto_away_debounce: Option<AutoAwayDebounce>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -1075,6 +1099,7 @@ impl WorkerState {
             recover_panel: None,
             reply_view: None,
             whois_card: None,
+            auto_away_debounce: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1556,6 +1581,7 @@ async fn handle_connect(
             state.recover_panel = None;
             state.reply_view = None;
             state.whois_card = None;
+            state.auto_away_debounce = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -1658,6 +1684,7 @@ async fn handle_connect(
                 ui.set_window_invite_channel("".into());
                 ui.set_window_invite_inviter("".into());
                 ui.set_recover_visible(false);
+                ui.set_server_pref_auto_away_debounce("".into());
                 ui.set_current_query(false);
                 ui.set_current_query_ready(false);
                 let networks: Vec<slint::SharedString> =
@@ -2606,7 +2633,6 @@ const IGNORED_KINDS: &[&str] = &[
     "archive_purged",
     // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex.
-    "auto_away_debounce_changed",
     "quit_part_reason_changed",
     "auto_away_reason_changed",
     // notify/wire.ex.
@@ -2787,6 +2813,10 @@ async fn handle_frame(
     }
     if payload_kind == "web_session_severed" {
         handle_web_session_severed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "auto_away_debounce_changed" {
+        handle_auto_away_debounce_changed(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "who_reply" {
@@ -6763,6 +6793,56 @@ fn end_revoked_session(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, flo
         ui.set_saved_profile_server_url("".into());
         ui.set_status_kind(status.into());
         ui.set_status_message("".into());
+    });
+}
+
+/// Validates `auto_away_debounce_changed` on the exact user topic. The key
+/// is always present: `null` is meaningful (server default), not missing;
+/// a negative or non-integer value is rejected.
+fn parse_auto_away_debounce_changed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<AutoAwayDebounce> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "auto_away_debounce_changed" {
+        return None;
+    }
+    match payload.get("auto_away_debounce_seconds")? {
+        Value::Null => Some(AutoAwayDebounce::ServerDefault),
+        value => match value.as_u64()? {
+            0 => Some(AutoAwayDebounce::Disabled),
+            seconds => Some(AutoAwayDebounce::Seconds(seconds)),
+        },
+    }
+}
+
+/// Mirrors the server's stored auto-away delay into Settings. Cordiale never
+/// originates this value; it only reflects what Grappa announced.
+fn handle_auto_away_debounce_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(debounce) = parse_auto_away_debounce_changed(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("auto_away_debounce_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state.auto_away_debounce == Some(debounce) {
+        return;
+    }
+    state.auto_away_debounce = Some(debounce);
+    let token = debounce.display_token();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_server_pref_auto_away_debounce(token.into());
     });
 }
 
@@ -11717,7 +11797,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 21);
+        assert_eq!(IGNORED_KINDS.len(), 20);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -11763,6 +11843,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"whois_avatar_ready"));
         assert!(!IGNORED_KINDS.contains(&"whowas_bundle"));
         assert!(!IGNORED_KINDS.contains(&"banlist_bundle"));
+        assert!(!IGNORED_KINDS.contains(&"auto_away_debounce_changed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -12560,6 +12641,44 @@ mod tests {
         assert_eq!(
             parse_reply_command("/banlist", "alice"),
             Some(ReplyCommand::Usage)
+        );
+    }
+
+    #[test]
+    fn parse_auto_away_debounce_keeps_null_and_zero_distinct() {
+        let topic = "grappa:user:vjt";
+        let payload = |value: Value| serde_json::json!({"kind": "auto_away_debounce_changed", "auto_away_debounce_seconds": value});
+        assert_eq!(
+            parse_auto_away_debounce_changed(&payload(Value::Null), topic, "vjt"),
+            Some(AutoAwayDebounce::ServerDefault)
+        );
+        assert_eq!(
+            parse_auto_away_debounce_changed(&payload(serde_json::json!(0)), topic, "vjt"),
+            Some(AutoAwayDebounce::Disabled)
+        );
+        assert_eq!(
+            parse_auto_away_debounce_changed(&payload(serde_json::json!(300)), topic, "vjt"),
+            Some(AutoAwayDebounce::Seconds(300))
+        );
+        assert_eq!(AutoAwayDebounce::ServerDefault.display_token(), "default");
+        assert_eq!(AutoAwayDebounce::Disabled.display_token(), "off");
+        assert_eq!(AutoAwayDebounce::Seconds(300).display_token(), "300");
+
+        for invalid in [
+            payload(serde_json::json!(-1)),
+            payload(serde_json::json!(1.5)),
+            payload(serde_json::json!("300")),
+            serde_json::json!({"kind": "auto_away_debounce_changed"}),
+        ] {
+            assert_eq!(
+                parse_auto_away_debounce_changed(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_auto_away_debounce_changed(&payload(Value::Null), "grappa:user:other", "vjt"),
+            None
         );
     }
 

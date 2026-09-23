@@ -410,6 +410,9 @@ export component AppWindow inherits Window {
     in property <string> reply-subject: "";
     in property <string> reply-network: "";
     in property <[ReplyRow]> reply-rows: [];
+    // Server-stored preferences mirrored from `*_changed` pushes: "" until
+    // announced, then "default" (null), "off" (0) or a number of seconds.
+    in property <string> server-pref-auto-away-debounce: "";
     // "" while running, then "succeeded" or "failed" from `recover_result`.
     in property <string> recover-outcome: "";
     in property <string> recover-outcome-reason: "";
@@ -1336,6 +1339,19 @@ export component AppWindow inherits Window {
                 Button {
                     text: @tr("Disconnect");
                     clicked => { disconnect-requested(); }
+                }
+
+                // Read-only copies of preferences Grappa stores and applies
+                // itself; they update live from its `*_changed` pushes and
+                // stay hidden until the server has announced them.
+                if server-pref-auto-away-debounce != "" : Text {
+                    text: @tr("Auto-away delay: {}",
+                        server-pref-auto-away-debounce == "default"
+                            ? @tr("server default")
+                            : (server-pref-auto-away-debounce == "off"
+                                ? @tr("off")
+                                : @tr("{} seconds", server-pref-auto-away-debounce)));
+                    wrap: word-wrap;
                 }
 
                 if known-networks.length > 0 : VerticalBox {
