@@ -34,6 +34,29 @@ pub enum CaseMapping {
     Rfc1459Strict,
 }
 
+impl CaseMapping {
+    /// Folds `name` to its canonical lower-case form under this mapping:
+    /// `ascii` folds A-Z only, `rfc1459` also treats `[]\~` as the upper case
+    /// of `{}|^`, and `rfc1459_strict` does the same without `~`/`^`.
+    pub fn fold(self, name: &str) -> String {
+        name.chars()
+            .map(|character| match (self, character) {
+                (_, 'A'..='Z') => character.to_ascii_lowercase(),
+                (Self::Rfc1459 | Self::Rfc1459Strict, '[') => '{',
+                (Self::Rfc1459 | Self::Rfc1459Strict, ']') => '}',
+                (Self::Rfc1459 | Self::Rfc1459Strict, '\\') => '|',
+                (Self::Rfc1459, '~') => '^',
+                _ => character,
+            })
+            .collect()
+    }
+
+    /// Whether two nicks name the same user under this mapping.
+    pub fn nick_eq(self, left: &str, right: &str) -> bool {
+        self.fold(left) == self.fold(right)
+    }
+}
+
 /// Complete server capability snapshot for one network.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IsupportState {
@@ -139,6 +162,17 @@ fn nullable_positive_integer(value: &Value) -> Option<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn casemapping_folds_like_irc() {
+        assert!(CaseMapping::Ascii.nick_eq("Alice", "aLICE"));
+        assert!(!CaseMapping::Ascii.nick_eq("nick[a]", "nick{a}"));
+        assert!(CaseMapping::Rfc1459.nick_eq("Nick[a]\\~", "nick{a}|^"));
+        assert!(CaseMapping::Rfc1459Strict.nick_eq("Nick[a]\\", "nick{a}|"));
+        assert!(!CaseMapping::Rfc1459Strict.nick_eq("nick~", "nick^"));
+        // Non-ASCII letters are never folded by IRC casemappings.
+        assert!(!CaseMapping::Rfc1459.nick_eq("É", "é"));
+    }
 
     fn valid_payload() -> Value {
         serde_json::json!({

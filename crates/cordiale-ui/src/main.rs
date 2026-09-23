@@ -40,7 +40,8 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::rest::{
-    BootResponse, DisplayPrefs, LoginRequest, MeResponse, SendMessageRequest,
+    ArchiveEntry, BootResponse, DirectoryPage, DisplayPrefs, LoginRequest, MeResponse,
+    SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::wire_event::ClientEventKind;
@@ -69,6 +70,20 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    DismissRecover,
+    DirectoryRefresh,
+    DirectoryLoadMore,
+    DirectorySort(String),
+    DirectorySearch(String),
+    DirectoryClose,
+    DccOfferAnswer {
+        network: String,
+        offer_id: String,
+        accept: bool,
+    },
+    ArchiveDelete(String),
+    ArchiveClose,
+    DismissPeerAway,
     ToggleNetwork(String),
     SendMessage {
         body: String,
@@ -250,6 +265,12 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_window_invite_network("".into());
             ui.set_window_invite_channel("".into());
             ui.set_window_invite_inviter("".into());
+            ui.set_recover_visible(false);
+            ui.set_dcc_offers(slint::ModelRc::default());
+            ui.set_server_pref_auto_away_debounce("".into());
+            ui.set_server_pref_leave_message_known(false);
+            ui.set_server_pref_auto_away_reason_known(false);
+            ui.set_server_upload_limits_known(false);
         }
     });
 
@@ -343,6 +364,69 @@ fn main() -> Result<(), slint::PlatformError> {
             network: network.to_string(),
             channel: channel.to_string(),
         });
+    });
+
+    let tx_for_dismiss_recover = worker_tx.clone();
+    ui.on_recover_dismiss_requested(move || {
+        let _ = tx_for_dismiss_recover.send(WorkerCommand::DismissRecover);
+    });
+
+    let tx_for_directory_refresh = worker_tx.clone();
+    ui.on_directory_refresh_requested(move || {
+        let _ = tx_for_directory_refresh.send(WorkerCommand::DirectoryRefresh);
+    });
+
+    let tx_for_directory_load_more = worker_tx.clone();
+    ui.on_directory_load_more_requested(move || {
+        let _ = tx_for_directory_load_more.send(WorkerCommand::DirectoryLoadMore);
+    });
+
+    let tx_for_directory_sort = worker_tx.clone();
+    ui.on_directory_sort_requested(move |sort| {
+        let _ = tx_for_directory_sort.send(WorkerCommand::DirectorySort(sort.to_string()));
+    });
+
+    let tx_for_directory_search = worker_tx.clone();
+    ui.on_directory_search_requested(move |query| {
+        let _ = tx_for_directory_search.send(WorkerCommand::DirectorySearch(query.to_string()));
+    });
+
+    let tx_for_directory_close = worker_tx.clone();
+    ui.on_directory_closed(move || {
+        let _ = tx_for_directory_close.send(WorkerCommand::DirectoryClose);
+    });
+
+    let tx_for_dcc_accept = worker_tx.clone();
+    ui.on_dcc_offer_accept_requested(move |network, offer_id| {
+        let _ = tx_for_dcc_accept.send(WorkerCommand::DccOfferAnswer {
+            network: network.to_string(),
+            offer_id: offer_id.to_string(),
+            accept: true,
+        });
+    });
+
+    let tx_for_dcc_refuse = worker_tx.clone();
+    ui.on_dcc_offer_refuse_requested(move |network, offer_id| {
+        let _ = tx_for_dcc_refuse.send(WorkerCommand::DccOfferAnswer {
+            network: network.to_string(),
+            offer_id: offer_id.to_string(),
+            accept: false,
+        });
+    });
+
+    let tx_for_archive_delete = worker_tx.clone();
+    ui.on_archive_delete_requested(move |target| {
+        let _ = tx_for_archive_delete.send(WorkerCommand::ArchiveDelete(target.to_string()));
+    });
+
+    let tx_for_archive_close = worker_tx.clone();
+    ui.on_archive_closed(move || {
+        let _ = tx_for_archive_close.send(WorkerCommand::ArchiveClose);
+    });
+
+    let tx_for_peer_away_dismiss = worker_tx.clone();
+    ui.on_peer_away_dismiss_requested(move || {
+        let _ = tx_for_peer_away_dismiss.send(WorkerCommand::DismissPeerAway);
     });
 
     let tx_for_network_toggle = worker_tx.clone();
@@ -667,6 +751,277 @@ impl NetworkConnectionStatus {
     }
 }
 
+/// Transient upstream-connect progress from `connection_progress`. It is a
+/// live-only overlay, never replayed on join and never a substitute for the
+/// durable `connection_state` read from `/networks`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionProgressState {
+    Connecting,
+    Connected,
+}
+
+impl ConnectionProgressState {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "connecting" => Some(Self::Connecting),
+            "connected" => Some(Self::Connected),
+            _ => None,
+        }
+    }
+}
+
+/// Closed step set of Grappa's guided identity recovery (`/recover`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoverStep {
+    Identify,
+    Register,
+    Nick,
+    Recover,
+    Release,
+}
+
+impl RecoverStep {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "identify" => Some(Self::Identify),
+            "register" => Some(Self::Register),
+            "nick" => Some(Self::Nick),
+            "recover" => Some(Self::Recover),
+            "release" => Some(Self::Release),
+            _ => None,
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Identify => "identify",
+            Self::Register => "register",
+            Self::Nick => "nick",
+            Self::Recover => "recover",
+            Self::Release => "release",
+        }
+    }
+}
+
+/// Closed status set of one recovery step (`running | ok | failed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoverStepStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+impl RecoverStepStatus {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "running" => Some(Self::Running),
+            "ok" => Some(Self::Done),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "ok",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecoverStepEntry {
+    step: RecoverStep,
+    status: RecoverStepStatus,
+    /// Open string: Grappa may add reason tokens, so an unknown one must
+    /// never drop the step.
+    reason: Option<String>,
+}
+
+/// Terminal outcome of an identity recovery (`succeeded | failed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoverOutcome {
+    Succeeded,
+    Failed,
+}
+
+impl RecoverOutcome {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Cicchetto's `RecoverState`: opened only by the first `recover_progress`,
+/// bound to that event's network, cleared only by an explicit dismiss.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecoverPanel {
+    network: String,
+    steps: Vec<RecoverStepEntry>,
+    /// Set by `recover_result`; `None` while the recovery is still running.
+    outcome: Option<RecoverOutcome>,
+    /// Open failure token from `recover_result` (`null` on success).
+    outcome_reason: Option<String>,
+}
+
+/// The subject's auto-away delay as Grappa stores it: `null` defers to the
+/// server's own default, `0` turns auto-away off, anything else is seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AutoAwayDebounce {
+    ServerDefault,
+    Disabled,
+    Seconds(u64),
+}
+
+impl AutoAwayDebounce {
+    /// The token the Settings screen translates: `default`, `off`, or seconds.
+    fn display_token(self) -> String {
+        match self {
+            Self::ServerDefault => "default".to_string(),
+            Self::Disabled => "off".to_string(),
+            Self::Seconds(seconds) => seconds.to_string(),
+        }
+    }
+}
+
+/// The latest reply to a command this client issued (a requester event),
+/// shown on the reply screen. Rows are `(label key, value)`; an empty key is
+/// a plain line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReplyView {
+    kind: &'static str,
+    subject: String,
+    network: String,
+    rows: Vec<(String, String)>,
+}
+
+/// The archive of one network: windows with bouncer scrollback that are no
+/// longer joined or open, as listed by `GET /networks/:slug/archive`.
+struct ArchiveView {
+    network: String,
+    /// `None` until the first list arrives.
+    entries: Option<Vec<ArchiveEntry>>,
+    /// Translated error key for the last failed request, if any.
+    error: Option<&'static str>,
+}
+
+/// A `DCC SEND` offer Grappa holds until this user accepts or refuses it.
+/// `channel` is only where Cicchetto renders it (often `$server`); the
+/// offer is identified by `offer_id`, an opaque server string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DccOffer {
+    network: String,
+    channel: String,
+    offer_id: String,
+    from: String,
+    filename: String,
+    size: u64,
+}
+
+/// The channel directory for one network: a view over Grappa's last `LIST`
+/// snapshot, fetched over REST. `directory_*` pushes are only signals to
+/// fetch again; the rows always come from the server's page.
+struct DirectoryView {
+    network: String,
+    /// `users` or `name`, the two sorts the server knows.
+    sort: &'static str,
+    query: String,
+    /// Loaded rows (pages appended by "load more") plus the latest page's
+    /// cursor, total, status and capture time; `None` before the first load.
+    page: Option<DirectoryPage>,
+    /// Translated error key for the last failed request, if any.
+    error: Option<&'static str>,
+    /// A refresh was asked for and no `directory_*` push has answered yet.
+    refresh_pending: bool,
+    /// `reason` of the last `directory_failed` (an open string, e.g.
+    /// `timeout`); cleared by the next refresh or capture progress.
+    failed_reason: Option<String>,
+}
+
+impl DirectoryView {
+    fn new(network: String, query: String) -> Self {
+        Self {
+            network,
+            sort: "users",
+            query,
+            page: None,
+            error: None,
+            refresh_pending: false,
+            failed_reason: None,
+        }
+    }
+}
+
+/// One `who_reply` user row, all fields required by the wire contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WhoUser {
+    nick: String,
+    user: String,
+    host: String,
+    server: String,
+    modes: String,
+    channel: String,
+    hops: Option<i64>,
+    realname: Option<String>,
+}
+
+/// `whois_bundle` as the wire declares it. Every key is required except
+/// `source` (absent means `user`) and `avatar_url` (absent means `None`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WhoisBundle {
+    network: String,
+    target: String,
+    user: Option<String>,
+    host: Option<String>,
+    realname: Option<String>,
+    server: Option<String>,
+    server_info: Option<String>,
+    is_operator: bool,
+    oper_text: Option<String>,
+    idle_seconds: Option<i64>,
+    signon: Option<i64>,
+    channels: Option<Vec<String>>,
+    using_ssl: bool,
+    is_registered: bool,
+    is_admin: bool,
+    is_services_admin: bool,
+    is_helper: bool,
+    is_chanop: bool,
+    is_agent: bool,
+    is_java: bool,
+    umodes: Option<String>,
+    away_message: Option<String>,
+    actually_host: Option<String>,
+    actually_ip: Option<String>,
+    account: Option<String>,
+    secure: bool,
+    secure_cipher: Option<String>,
+    certfp: Option<String>,
+    /// `(numeric, text)` in wire order: 320 and numerics Grappa doesn't fold.
+    extra_lines: Option<Vec<(i64, String)>>,
+    /// Authenticated Grappa path to the cached peer avatar, not a third-party
+    /// URL; may arrive later through `whois_avatar_ready`.
+    avatar_url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WhoReply {
+    network: String,
+    target: String,
+    users: Vec<WhoUser>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NetworkConnectionSnapshot {
     status: NetworkConnectionStatus,
@@ -779,6 +1134,40 @@ struct WorkerState {
     /// separate from the Phoenix socket's reconnect state and is refreshed
     /// from `/networks` after a `connection_state_changed` push.
     network_connection_states: HashMap<String, NetworkConnectionSnapshot>,
+    /// Networks whose upstream IRC connect attempt is in flight, per the last
+    /// live `connection_progress`. Shown as a transient sidebar badge only;
+    /// cleared by `connected` and whenever the Phoenix socket drops, since
+    /// the event is never replayed and a missed `connected` would otherwise
+    /// leave the badge stuck.
+    connecting_networks: std::collections::HashSet<String>,
+    /// Identity-recovery panel driven entirely by server pushes; `None`
+    /// until the first `recover_progress` and again after a dismiss.
+    recover_panel: Option<RecoverPanel>,
+    /// Latest requester reply shown on the reply screen; never persisted
+    /// and never rendered into a chat window.
+    reply_view: Option<ReplyView>,
+    /// The WHOIS card currently shown, kept so a later `whois_avatar_ready`
+    /// can patch exactly this card and no other.
+    whois_card: Option<WhoisBundle>,
+    /// Display copy of the account-wide auto-away delay; `None` until the
+    /// server announces it. Grappa applies the value itself.
+    auto_away_debounce: Option<AutoAwayDebounce>,
+    /// Display copy of the remembered QUIT/PART text: outer `None` until
+    /// announced, inner `None` for `null` (the server's own fallback).
+    quit_part_reason: Option<Option<String>>,
+    /// Display copy of the auto-away text, same shape as `quit_part_reason`
+    /// (inner `None`: the server keeps its built-in text).
+    auto_away_reason: Option<Option<String>>,
+    /// Networks with a `/lusers` awaiting its bundle. The ircd also sends
+    /// LUSERS unasked at registration; only a requested bundle is shown,
+    /// and each request is consumed by the first matching bundle.
+    lusers_requested: std::collections::HashSet<String>,
+    /// The channel directory screen opened with `/list`, if any.
+    directory: Option<DirectoryView>,
+    /// DCC offers the server is holding for consent, in arrival order.
+    dcc_offers: Vec<DccOffer>,
+    /// The archive screen opened with `/archive`, if any.
+    archive: Option<ArchiveView>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -806,12 +1195,27 @@ struct WorkerState {
     /// The network the self-service Identity/Ignores/Perform/Notify
     /// sections currently act on.
     settings_network: Option<String>,
-    /// Session-local only: Grappa has no self-service `GET` for either of
-    /// these (the presence watchlist arrives via a WS snapshot, the
-    /// keyword watchlist has no documented `list` reply shape — see
-    /// `docs/protocol-notes.md` §4quater), so these don't survive a
-    /// reconnect/relaunch, unlike everything else in Settings.
-    notify_nicks: Vec<String>,
+    /// Presence watchlist nicks per network ID, replaced whole by every
+    /// `notify_list` snapshot (sent after join and after each change).
+    notify_lists: HashMap<i64, Vec<String>>,
+    /// Watched-nick presence per network ID, keyed by ASCII-folded nick.
+    /// A nick missing here reads as `unknown`.
+    presence_by_network: HashMap<i64, HashMap<String, Presence>>,
+    /// Last standalone away message (301) per `(network, folded peer)`,
+    /// shown above that peer's private window until dismissed.
+    peer_away: HashMap<(String, String), String>,
+    /// Latest back-from-away mentions summary per network, kept apart from
+    /// `reply_view` so a later reply can't lose it; `/mentions` reopens it.
+    mentions_bundles: HashMap<String, ReplyView>,
+    /// Upload limits from the latest `server_settings_changed`, shown read
+    /// only in Settings (Cordiale doesn't upload files yet).
+    upload_limits: Option<UploadLimits>,
+    /// Last announced web-client bundle `(hash, version)`, only to log a
+    /// change once; it names Cicchetto's build, not this app.
+    web_bundle: Option<(String, Option<String>)>,
+    /// Session-local only: the keyword watchlist has no documented `list`
+    /// reply shape (see `docs/protocol-notes.md` §4quater), so it doesn't
+    /// survive a reconnect/relaunch, unlike everything else in Settings.
     watch_patterns: Vec<String>,
     /// Current app theme, kept here too (not just in Slint's `theme`
     /// property) so message-rendering helpers running on this thread can
@@ -855,6 +1259,17 @@ impl WorkerState {
             current_channel: None,
             network_ids: HashMap::new(),
             network_connection_states: HashMap::new(),
+            connecting_networks: std::collections::HashSet::new(),
+            recover_panel: None,
+            reply_view: None,
+            whois_card: None,
+            auto_away_debounce: None,
+            quit_part_reason: None,
+            auto_away_reason: None,
+            lusers_requested: std::collections::HashSet::new(),
+            directory: None,
+            dcc_offers: Vec::new(),
+            archive: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -863,7 +1278,12 @@ impl WorkerState {
             supported_user_modes_by_network: HashMap::new(),
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
-            notify_nicks: Vec::new(),
+            notify_lists: HashMap::new(),
+            presence_by_network: HashMap::new(),
+            peer_away: HashMap::new(),
+            mentions_bundles: HashMap::new(),
+            upload_limits: None,
+            web_bundle: None,
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
         }
@@ -921,6 +1341,51 @@ async fn run_worker(
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
                         handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;
                     }
+                    Some(WorkerCommand::DismissRecover) => {
+                        state.recover_panel = None;
+                        push_recover_panel(&state, &ui);
+                    }
+                    Some(WorkerCommand::DirectoryRefresh) => {
+                        refresh_directory(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::DirectoryLoadMore) => {
+                        load_more_directory(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::DirectorySort(sort)) => {
+                        let sort = if sort == "name" { "name" } else { "users" };
+                        if let Some(view) = state.directory.as_mut() {
+                            view.sort = sort;
+                        }
+                        load_directory(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::DirectorySearch(query)) => {
+                        if let Some(view) = state.directory.as_mut() {
+                            view.query = query.trim().to_string();
+                        }
+                        load_directory(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::DirectoryClose) => {
+                        state.directory = None;
+                    }
+                    Some(WorkerCommand::DccOfferAnswer {
+                        network,
+                        offer_id,
+                        accept,
+                    }) => {
+                        answer_dcc_offer(&state, &ui, &network, &offer_id, accept).await;
+                    }
+                    Some(WorkerCommand::ArchiveDelete(target)) => {
+                        delete_archive_target(&mut state, &ui, &target).await;
+                    }
+                    Some(WorkerCommand::ArchiveClose) => {
+                        state.archive = None;
+                    }
+                    Some(WorkerCommand::DismissPeerAway) => {
+                        if let Some(key) = current_peer_away_key(&state) {
+                            state.peer_away.remove(&key);
+                        }
+                        push_peer_away_banner(&state, &ui);
+                    }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
                         let expanded = state.expanded_networks.entry(network).or_insert(true);
                         *expanded = !*expanded;
@@ -939,7 +1404,7 @@ async fn run_worker(
                         });
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
-                        handle_send_message(&state, &ui, body).await;
+                        handle_send_message(&mut state, &ui, body).await;
                         if let Some(key) = state.current_channel.clone() {
                             state.drafts.remove(&key);
                         }
@@ -1000,6 +1465,7 @@ async fn run_worker(
                     Some(WorkerCommand::SettingsNetworkSelected(network)) => {
                         state.settings_network = Some(network);
                         handle_settings_network_refresh(&state, &ui).await;
+                        push_notify_nicks(&state, &ui);
                     }
                     Some(WorkerCommand::IdentitySave {
                         nick,
@@ -1044,17 +1510,25 @@ async fn run_worker(
                     Some(WorkerCommand::VhostToggle(address)) => {
                         handle_vhost_toggle(&state, &ui, address).await;
                     }
+                    // The server answers each change with a full `notify_list`
+                    // snapshot; the local edit only avoids a stale row until
+                    // it arrives.
                     Some(WorkerCommand::NotifyAdd(nick)) => {
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
+                            let network_id = state.network_ids.get(network).copied();
                             if client
                                 .add_notify_nicks(token, network, vec![nick.clone()])
                                 .await
                                 .is_ok()
-                                && !state.notify_nicks.contains(&nick)
                             {
-                                state.notify_nicks.push(nick);
+                                if let Some(network_id) = network_id {
+                                    let nicks = state.notify_lists.entry(network_id).or_default();
+                                    if !nicks.contains(&nick) {
+                                        nicks.push(nick);
+                                    }
+                                }
                             }
                         }
                         push_notify_nicks(&state, &ui);
@@ -1063,8 +1537,13 @@ async fn run_worker(
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
+                            let network_id = state.network_ids.get(network).copied();
                             if client.remove_notify_nick(token, network, &nick).await.is_ok() {
-                                state.notify_nicks.retain(|existing| existing != &nick);
+                                if let Some(nicks) =
+                                    network_id.and_then(|id| state.notify_lists.get_mut(&id))
+                                {
+                                    nicks.retain(|existing| existing != &nick);
+                                }
                             }
                         }
                         push_notify_nicks(&state, &ui);
@@ -1149,11 +1628,24 @@ async fn run_worker(
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame).await;
                     }
+                    Some(SessionEvent::Disconnected { reason }) if state.session.is_none() => {
+                        // A deliberately ended session (sign-out, revoked
+                        // bearer) still reports its final socket close; it
+                        // must not overwrite the sign-in screen's status.
+                        persistence::log_line(&format!("ended session closed: {reason}"));
+                    }
+                    Some(SessionEvent::Reconnecting { reason }) if state.session.is_none() => {
+                        persistence::log_line(&format!("ended session not reconnecting: {reason}"));
+                    }
                     Some(SessionEvent::Disconnected { reason }) => {
                         persistence::log_line(&format!("session disconnected: {reason}"));
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
                         state.supported_user_modes_by_network.clear();
+                        if !state.connecting_networks.is_empty() {
+                            state.connecting_networks.clear();
+                            refresh_network_groups(&state, &ui);
+                        }
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("disconnected".into());
                             ui.set_status_message(reason.into());
@@ -1165,11 +1657,21 @@ async fn run_worker(
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
                         state.supported_user_modes_by_network.clear();
+                        if !state.connecting_networks.is_empty() {
+                            state.connecting_networks.clear();
+                            refresh_network_groups(&state, &ui);
+                        }
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("reconnecting".into());
                             ui.set_status_message(reason.into());
                             ui.set_current_query_ready(false);
                         });
+                    }
+                    Some(SessionEvent::AuthRejected { reason }) => {
+                        // The session task has already stopped retrying; a
+                        // lost `web_session_severed` push ends up here too.
+                        persistence::log_line(&format!("session bearer rejected: {reason}"));
+                        end_revoked_session(&mut state, &ui, false);
                     }
                     None => {
                         session_events = None;
@@ -1305,6 +1807,23 @@ async fn handle_connect(
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
             state.network_connection_states = connection_states;
+            state.connecting_networks.clear();
+            state.recover_panel = None;
+            state.reply_view = None;
+            state.whois_card = None;
+            state.auto_away_debounce = None;
+            state.quit_part_reason = None;
+            state.auto_away_reason = None;
+            state.lusers_requested.clear();
+            state.directory = None;
+            state.dcc_offers.clear();
+            state.archive = None;
+            state.notify_lists.clear();
+            state.presence_by_network.clear();
+            state.peer_away.clear();
+            state.mentions_bundles.clear();
+            state.upload_limits = None;
+            state.web_bundle = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -1406,6 +1925,12 @@ async fn handle_connect(
                 ui.set_window_invite_network("".into());
                 ui.set_window_invite_channel("".into());
                 ui.set_window_invite_inviter("".into());
+                ui.set_recover_visible(false);
+                ui.set_dcc_offers(slint::ModelRc::default());
+                ui.set_server_pref_auto_away_debounce("".into());
+                ui.set_server_pref_leave_message_known(false);
+                ui.set_server_pref_auto_away_reason_known(false);
+                ui.set_server_upload_limits_known(false);
                 ui.set_current_query(false);
                 ui.set_current_query_ready(false);
                 let networks: Vec<slint::SharedString> =
@@ -1564,6 +2089,7 @@ fn show_query_window(
     let dark_theme = state.theme == Theme::Dark;
     let query_ready = state.current_query_ready;
     let label = format!("{} — {}", query.network, query.target_nick);
+    push_peer_away_banner(state, ui);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
@@ -1774,7 +2300,7 @@ fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str) -> bool {
         .any(|(name, prefix)| name == identifier && prefix == "@")
 }
 
-async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
+async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
     if state.current_query && !state.current_query_ready {
         return;
     }
@@ -1790,6 +2316,58 @@ async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, b
     // doesn't scale (the user may have a dozen networks joined at once).
     if body.trim() == "/links" {
         handle_request_links(state, network.clone());
+        return;
+    }
+    // `/recover` starts Grappa's guided NickServ identity recovery on the
+    // active network; progress arrives only as `recover_progress` pushes,
+    // which open the panel — nothing is shown optimistically, like Cicchetto.
+    if body.trim() == "/recover" {
+        send_user_network_verb(state, network, "recover");
+        return;
+    }
+    // `/mentions` reopens the last away summary of the active network.
+    if body.trim().eq_ignore_ascii_case("/mentions") {
+        let bundle = state.mentions_bundles.get(network.as_str()).cloned();
+        match bundle {
+            Some(view) => show_reply_view(state, ui, view),
+            None => {
+                let ui = ui.clone();
+                let _ = ui.upgrade_in_event_loop(|ui| {
+                    ui.set_status_kind("no-mentions".into());
+                });
+            }
+        }
+        return;
+    }
+    // `/archive` lists the active network's archived windows.
+    if body.trim().eq_ignore_ascii_case("/archive") {
+        let network = network.clone();
+        open_archive(state, ui, network).await;
+        return;
+    }
+    // `/list [search]` opens the channel directory of the active network.
+    if let Some(query) = parse_list_command(&body) {
+        let network = network.clone();
+        open_directory(state, ui, network, query).await;
+        return;
+    }
+    // Commands answered by a requester reply (shown on the reply screen,
+    // never as a chat line) are pushed on the user topic, not sent as text.
+    if let Some(command) = parse_reply_command(&body, channel) {
+        match command {
+            ReplyCommand::Request { verb, payload } => {
+                if verb == "lusers" {
+                    state.lusers_requested.insert(network.to_string());
+                }
+                send_user_verb(state, network, verb, payload);
+            }
+            ReplyCommand::Usage => {
+                let ui = ui.clone();
+                let _ = ui.upgrade_in_event_loop(|ui| {
+                    ui.set_status_kind("command-usage".into());
+                });
+            }
+        }
         return;
     }
 
@@ -2095,20 +2673,75 @@ async fn handle_vhost_toggle(state: &WorkerState, ui: &slint::Weak<AppWindow>, a
     handle_settings_network_refresh(state, ui).await;
 }
 
-/// Pushes the session-local presence-watchlist nicks to the UI — see
-/// `WorkerState::notify_nicks`'s doc comment for why this is
-/// session-local rather than server-refetched.
+/// Pushes the presence watchlist of the network selected in Settings, each
+/// nick with its last known presence.
 fn push_notify_nicks(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let nicks: Vec<slint::SharedString> =
-        state.notify_nicks.iter().cloned().map(Into::into).collect();
+    let network_id = state
+        .settings_network
+        .as_ref()
+        .and_then(|network| state.network_ids.get(network))
+        .copied();
+    let presence = network_id.and_then(|id| state.presence_by_network.get(&id));
+    let rows: Vec<(String, &'static str)> = network_id
+        .and_then(|id| state.notify_lists.get(&id))
+        .into_iter()
+        .flatten()
+        .map(|nick| {
+            let known = presence
+                .and_then(|nicks| nicks.get(&presence_key(nick)))
+                .copied()
+                .unwrap_or(Presence::Unknown);
+            (nick.clone(), known.wire_name())
+        })
+        .collect();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        ui.set_settings_notify_nicks(Rc::new(slint::VecModel::from(nicks)).into());
+        let rows: Vec<NotifyRow> = rows
+            .into_iter()
+            .map(|(nick, presence)| NotifyRow {
+                nick: nick.into(),
+                presence: presence.into(),
+            })
+            .collect();
+        ui.set_settings_notify_nicks(Rc::new(slint::VecModel::from(rows)).into());
     });
 }
 
-/// Pushes the session-local keyword-watchlist patterns to the UI — same
-/// session-local caveat as `push_notify_nicks`.
+/// Presence of a watched nick, as Grappa reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Presence {
+    Online,
+    Offline,
+    /// No report yet, or no MONITOR/WATCH/ISON on this network.
+    Unknown,
+}
+
+impl Presence {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "online" => Some(Self::Online),
+            "offline" => Some(Self::Offline),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Offline => "offline",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Presence maps are keyed by ASCII-folded nick, like Grappa's snapshot.
+fn presence_key(nick: &str) -> String {
+    cordiale_core::isupport::CaseMapping::Ascii.fold(nick)
+}
+
+/// Pushes the session-local keyword-watchlist patterns to the UI — see
+/// `WorkerState::watch_patterns` for why they are session-local.
 fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let patterns: Vec<slint::SharedString> = state
         .watch_patterns
@@ -2127,6 +2760,17 @@ fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 /// network topic Cordiale doesn't currently join. The result arrives
 /// later as a `links_bundle` frame, handled in `handle_frame`.
 fn handle_request_links(state: &WorkerState, network: String) {
+    send_user_network_verb(state, &network, "links");
+}
+
+/// Pushes a `{network_id}`-only verb (`links`, `recover`) on the user topic.
+fn send_user_network_verb(state: &WorkerState, network: &str, verb: &str) {
+    send_user_verb(state, network, verb, serde_json::json!({}));
+}
+
+/// Pushes `verb` on the user topic with `payload` plus the network's integer
+/// `network_id`. `payload` must be a JSON object.
+fn send_user_verb(state: &WorkerState, network: &str, verb: &str, mut payload: Value) {
     let (Some(session), Some(identifier)) = (&state.session, &state.identifier) else {
         return;
     };
@@ -2134,15 +2778,15 @@ fn handle_request_links(state: &WorkerState, network: String) {
     // guard server-side, no slug fallback) — see
     // `docs/protocol-notes.md` §4ter. Silently do nothing rather than
     // send a request guaranteed to be rejected if the id isn't known.
-    let Some(&network_id) = state.network_ids.get(&network) else {
+    let Some(&network_id) = state.network_ids.get(network) else {
         return;
     };
+    let Value::Object(fields) = &mut payload else {
+        return;
+    };
+    fields.insert("network_id".to_string(), Value::from(network_id));
     let topic = format!("grappa:user:{identifier}");
-    session.send_command(
-        topic,
-        "links",
-        serde_json::json!({ "network_id": network_id }),
-    );
+    session.send_command(topic, verb, payload);
 }
 
 /// Shared setup for every `MemberContextMenu` action below: the session,
@@ -2280,65 +2924,15 @@ async fn handle_member_ctcp(
     }
 }
 
-/// Real kinds Grappa pushes to a regular (non-admin) user that Cordiale
-/// has no UI for yet — window-state transitions, ISUPPORT/umode/identity
-/// bookkeeping, DCC offers, WHOIS/WHOWAS/LUSERS/banlist/directory bundles,
-/// MONITOR/WATCH presence, the notify list,
-/// per-server settings, and more. Exhaustive as of this date: audited
-/// directly from the real server source (`session/wire.ex`'s
-/// `@type wire_event_kind` union — the authoritative closed set — plus
-/// every other non-admin `*/wire.ex` module in vjt/grappa-irc), not
-/// grepped or guessed. Per `docs/CLIENT_PROTOCOL.md` §4's own policy
-/// ("treat unknown `kind` values as ignorable"), these are dropped
-/// silently rather than shown as a raw dump. Deliberately excludes
-/// `"parted"`: two comments in the real
-/// server source (`session/server.ex`, `session/window_state.ex`) state
-/// there is intentionally no such broadcast — a self-part is signaled by
-/// the window disappearing from window-state, not a push, so listening
-/// for it here would be dead code matching nothing.
-const IGNORED_KINDS: &[&str] = &[
-    // Known from vjt/grappa-irc#2260 or the wire union (joined, join_failed,
-    // kicked, topic_changed, channel_modes_changed, and members_seeded/names_reply
-    // are handled above.
-    "bundle_hash",
-    // session/wire.ex's wire_event_kind union.
-    "channel_created",
-    "who_reply",
-    "server_reply",
-    "dcc_offer",
-    "dcc_offer_resolved",
-    "mentions_bundle",
-    "whois_bundle",
-    "whois_avatar_ready",
-    "peer_away",
-    "invite_ack",
-    "lusers_bundle",
-    "whowas_bundle",
-    "banlist_bundle",
-    "directory_progress",
-    "directory_complete",
-    "directory_failed",
-    "connection_progress",
-    "recover_progress",
-    "recover_result",
-    "presence_changed",
-    "presence_error",
-    "presence_snapshot",
-    // scrollback/wire.ex.
-    "archive_changed",
-    "archive_purged",
-    // networks/wire.ex: connection_state_changed is handled above.
-    // user_settings/wire.ex.
-    "auto_away_debounce_changed",
-    "quit_part_reason_changed",
-    "auto_away_reason_changed",
-    // rate_limit/wire.ex.
-    "web_session_severed",
-    // notify/wire.ex.
-    "notify_list",
-    // server_settings/wire.ex.
-    "server_settings_changed",
-];
+/// Whether a known event kind is rendered as a chat line. Only `message`
+/// envelopes are: every other kind of the protocol's closed set has its own
+/// handler (or explicit no-op) in `handle_frame`, and any kind that reaches
+/// the rendering path without one is dropped instead of becoming a raw
+/// chat line. `"parted"` is not a kind at all — a self-part shows up as the
+/// window leaving window-state, never as a push.
+fn renders_as_chat_line(kind: &str) -> bool {
+    kind == "message"
+}
 
 fn reset_query_session_readiness(state: &mut WorkerState) {
     state.query_joined.clear();
@@ -2496,6 +3090,131 @@ async fn handle_frame(
     }
     if payload_kind == "connection_state_changed" {
         handle_connection_state_changed(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "connection_progress" {
+        handle_connection_progress(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "recover_progress" {
+        handle_recover_progress(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "recover_result" {
+        handle_recover_result(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "web_session_severed" {
+        handle_web_session_severed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "auto_away_debounce_changed" {
+        handle_auto_away_debounce_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "quit_part_reason_changed" {
+        handle_quit_part_reason_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "auto_away_reason_changed" {
+        handle_auto_away_reason_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "who_reply" {
+        handle_who_reply(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "server_reply" {
+        handle_server_reply(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "whois_bundle" {
+        handle_whois_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "whois_avatar_ready" {
+        handle_whois_avatar_ready(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "whowas_bundle" {
+        handle_whowas_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "directory_progress" {
+        handle_directory_progress(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "directory_complete" {
+        handle_directory_complete(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "directory_failed" {
+        handle_directory_failed(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "dcc_offer" {
+        handle_dcc_offer(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "dcc_offer_resolved" {
+        handle_dcc_offer_resolved(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "archive_changed" {
+        handle_archive_changed(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "archive_purged" {
+        handle_archive_purged(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "notify_list" {
+        handle_notify_list(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "presence_snapshot" {
+        handle_presence_snapshot(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "presence_changed" {
+        handle_presence_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "presence_error" {
+        handle_presence_error(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "peer_away" {
+        handle_peer_away(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "mentions_bundle" {
+        handle_mentions_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "server_settings_changed" {
+        handle_server_settings_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "bundle_hash" {
+        handle_bundle_hash(state, &frame.topic, &frame.payload);
+        return;
+    }
+    // 329 RPL_CREATIONTIME changes no state: Cicchetto keeps the kind but
+    // dropped its join banner, so it is consumed without any UI.
+    if payload_kind == "channel_created" {
+        return;
+    }
+    if payload_kind == "invite_ack" {
+        handle_invite_ack(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "lusers_bundle" {
+        handle_lusers_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "banlist_bundle" {
+        handle_banlist_bundle(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -2826,7 +3545,7 @@ async fn handle_frame(
         return;
     }
 
-    if IGNORED_KINDS.contains(&payload_kind) {
+    if !renders_as_chat_line(payload_kind) {
         return;
     }
 
@@ -5056,6 +5775,19 @@ fn network_groups_data(
         .collect()
 }
 
+/// An in-flight upstream connect attempt outranks the durable label: a
+/// `failing`/`failed`/`parked` network that is connecting again shows that.
+fn apply_connecting_labels(
+    data: &mut [NetworkGroupData],
+    connecting: &std::collections::HashSet<String>,
+) {
+    for group in data.iter_mut() {
+        if connecting.contains(&group.0) {
+            group.4 = "connecting".to_string();
+        }
+    }
+}
+
 /// Builds the actual sidebar `NetworkGroup` Slint model out of
 /// `network_groups_data`'s plain grouping — must run on the UI thread,
 /// see that function's doc comment for why.
@@ -5134,12 +5866,13 @@ fn network_groups_model(
 /// sidebar as a fresh `network-groups` model — called after anything that
 /// changes either (a network's expand toggle, a fresh connect).
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let data = network_groups_data(
+    let mut data = network_groups_data(
         &state.channel_entries,
         &state.query_windows,
         &state.expanded_networks,
         &state.network_connection_states,
     );
+    apply_connecting_labels(&mut data, &state.connecting_networks);
     let window_states = state.window_states.clone();
     let window_mentions = state.window_mentions.clone();
     let window_messages = state.window_messages.clone();
@@ -6046,6 +6779,9 @@ fn apply_network_rest_refresh(
     state
         .supported_user_modes_by_network
         .retain(|network, _| known_networks.contains(network.as_str()));
+    state
+        .connecting_networks
+        .retain(|network| known_networks.contains(network.as_str()));
 
     let mut actions = channel_actions;
     for action in listener_actions {
@@ -6100,16 +6836,25 @@ async fn handle_connection_state_changed(
         transition.snapshot.status.wire_name()
     ));
 
+    reconcile_network_connection_states(state, ui, "connection_state_changed").await;
+}
+
+/// Refreshes `GET /networks` and applies each known network's durable
+/// connection state. A failed request keeps the current state: callers have
+/// already applied whatever their event carried.
+async fn reconcile_network_connection_states(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    context: &str,
+) {
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
         return;
     };
     let networks = match client.fetch_networks(&token).await {
         Ok(networks) => networks,
         Err(error) => {
-            // The validated event carries the new home-network row, so keep
-            // that immediate state visible even if REST reconciliation fails.
             persistence::log_line(&format!(
-                "connection_state_changed network refresh failed; keeping event row: {error:?}"
+                "{context} network refresh failed; keeping current state: {error:?}"
             ));
             return;
         }
@@ -6137,6 +6882,2762 @@ async fn handle_connection_state_changed(
     }
     if state_changed {
         refresh_network_groups(state, ui);
+    }
+}
+
+/// Validates `connection_progress`: `{kind, network, state}` on the exact
+/// authenticated user topic, for a network already in the `/boot` map. The
+/// state is a closed `connecting | connected` enum; extra fields are ignored.
+fn parse_connection_progress(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+    known_networks: &HashMap<String, i64>,
+) -> Option<(String, ConnectionProgressState)> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "connection_progress" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() || !known_networks.contains_key(network) {
+        return None;
+    }
+    let progress = ConnectionProgressState::parse(payload.get("state")?.as_str()?)?;
+    Some((network.to_string(), progress))
+}
+
+/// Applies one progress edge to the per-network connecting set, returning
+/// whether the visible badge changed. Duplicates are no-ops.
+fn apply_connection_progress(
+    connecting: &mut std::collections::HashSet<String>,
+    network: &str,
+    progress: ConnectionProgressState,
+) -> bool {
+    match progress {
+        ConnectionProgressState::Connecting => connecting.insert(network.to_string()),
+        ConnectionProgressState::Connected => connecting.remove(network),
+    }
+}
+
+/// `connecting` shows a transient per-network badge; `connected` (001
+/// RPL_WELCOME) clears it and refetches `GET /networks`, since the durable
+/// connection row only arrives through that endpoint, matching Cicchetto.
+async fn handle_connection_progress(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+    let Some((network, progress)) =
+        parse_connection_progress(payload, carrier_topic, &identifier, &state.network_ids)
+    else {
+        persistence::log_line("connection_progress rejected: invalid payload or unknown network");
+        return;
+    };
+    // A `/lusers` only belongs to the connection it was issued on: the
+    // registration burst of a new attempt is unsolicited.
+    if progress == ConnectionProgressState::Connecting {
+        state.lusers_requested.remove(&network);
+    }
+    if apply_connection_progress(&mut state.connecting_networks, &network, progress) {
+        refresh_network_groups(state, ui);
+    }
+    if progress == ConnectionProgressState::Connected {
+        reconcile_network_connection_states(state, ui, "connection_progress").await;
+    }
+}
+
+/// Validates `recover_progress` on the exact user topic: `network` a
+/// non-empty slug, `step`/`status` closed enums, and `reason` present as
+/// `null` or any string (an additive server reason must not drop the step).
+fn parse_recover_progress(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, RecoverStepEntry)> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "recover_progress" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let step = RecoverStep::parse(payload.get("step")?.as_str()?)?;
+    let status = RecoverStepStatus::parse(payload.get("status")?.as_str()?)?;
+    let reason = match payload.get("reason")? {
+        Value::Null => None,
+        Value::String(reason) => Some(reason.clone()),
+        _ => return None,
+    };
+    Some((
+        network.to_string(),
+        RecoverStepEntry {
+            step,
+            status,
+            reason,
+        },
+    ))
+}
+
+/// Cicchetto's `applyRecoverProgress`: the first event opens the panel for
+/// its network, an event for any other network is ignored while one is
+/// open, and a known step is replaced in place so the order stays stable.
+fn apply_recover_progress(
+    panel: &mut Option<RecoverPanel>,
+    network: &str,
+    entry: RecoverStepEntry,
+) -> bool {
+    if panel.is_none() {
+        *panel = Some(RecoverPanel {
+            network: network.to_string(),
+            steps: vec![entry],
+            outcome: None,
+            outcome_reason: None,
+        });
+        return true;
+    }
+    let Some(open) = panel.as_mut() else {
+        return false;
+    };
+    if open.network != network {
+        return false;
+    }
+    match open.steps.iter().position(|row| row.step == entry.step) {
+        Some(index) if open.steps[index] == entry => false,
+        Some(index) => {
+            open.steps[index] = entry;
+            true
+        }
+        None => {
+            open.steps.push(entry);
+            true
+        }
+    }
+}
+
+fn handle_recover_progress(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, entry)) = parse_recover_progress(payload, carrier_topic, identifier) else {
+        persistence::log_line("recover_progress rejected: invalid carrier or payload");
+        return;
+    };
+    if apply_recover_progress(&mut state.recover_panel, &network, entry) {
+        push_recover_panel(state, ui);
+    }
+}
+
+/// Validates `recover_result` on the exact user topic: non-empty `network`,
+/// closed `outcome`, and `reason` present as `null` or any string, so an
+/// additive failure token never drops this terminal event.
+fn parse_recover_result(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, RecoverOutcome, Option<String>)> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "recover_result" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let outcome = RecoverOutcome::parse(payload.get("outcome")?.as_str()?)?;
+    let reason = match payload.get("reason")? {
+        Value::Null => None,
+        Value::String(reason) => Some(reason.clone()),
+        _ => return None,
+    };
+    Some((network.to_string(), outcome, reason))
+}
+
+/// Cicchetto's `applyRecoverResult`: a no-op when no panel is open (dismissed
+/// mid-flight, or the progress events were lost) or when it belongs to
+/// another network; otherwise it records the conclusion.
+fn apply_recover_result(
+    panel: &mut Option<RecoverPanel>,
+    network: &str,
+    outcome: RecoverOutcome,
+    reason: Option<String>,
+) -> bool {
+    let Some(open) = panel.as_mut() else {
+        return false;
+    };
+    if open.network != network {
+        return false;
+    }
+    if open.outcome == Some(outcome) && open.outcome_reason == reason {
+        return false;
+    }
+    open.outcome = Some(outcome);
+    open.outcome_reason = reason;
+    true
+}
+
+fn handle_recover_result(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, outcome, reason)) = parse_recover_result(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("recover_result rejected: invalid carrier or payload");
+        return;
+    };
+    if apply_recover_result(&mut state.recover_panel, &network, outcome, reason) {
+        push_recover_panel(state, ui);
+    }
+}
+
+/// Validates `web_session_severed` on the exact user topic. `code` must be a
+/// string but any value is accepted: the action (sign out) does not depend on
+/// it, and an unknown future code must never leave the client holding a
+/// revoked bearer.
+fn parse_web_session_severed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<String> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "web_session_severed" {
+        return None;
+    }
+    Some(payload.get("code")?.as_str()?.to_string())
+}
+
+/// Grappa sends this best-effort, then revokes the bearer and closes the
+/// socket; the IRC session stays up. Like Cicchetto, sign out for every code
+/// and show the dedicated notice only for `rate_limit_flood`.
+fn handle_web_session_severed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(code) = parse_web_session_severed(payload, carrier_topic, identifier) else {
+        persistence::log_line("web_session_severed rejected: invalid carrier or payload");
+        return;
+    };
+    persistence::log_line(&format!("web session severed by server: code={code}"));
+    end_revoked_session(state, ui, code == "rate_limit_flood");
+}
+
+/// Ends a session whose bearer the server revoked: stops the Phoenix
+/// session so it never retries with that bearer, forgets a remembered copy
+/// of it, and returns to the sign-in screen through the normal disconnect
+/// path. No IRC QUIT is sent — the bouncer's IRC session is unaffected.
+fn end_revoked_session(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, flood: bool) {
+    if let Some(handle) = state.session.take() {
+        handle.shutdown();
+    }
+    if let (Some(client), Some(identifier)) = (state.client.as_ref(), state.identifier.as_deref()) {
+        forget_remembered_bearer(client.base_url(), identifier);
+    }
+    state.token = None;
+    let status = if flood {
+        "session-severed-flood"
+    } else {
+        "reauthentication-required"
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.invoke_disconnect_requested();
+        ui.set_saved_profile_identifier("".into());
+        ui.set_saved_profile_server_url("".into());
+        ui.set_status_kind(status.into());
+        ui.set_status_message("".into());
+    });
+}
+
+/// Validates `auto_away_debounce_changed` on the exact user topic. The key
+/// is always present: `null` is meaningful (server default), not missing;
+/// a negative or non-integer value is rejected.
+fn parse_auto_away_debounce_changed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<AutoAwayDebounce> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "auto_away_debounce_changed" {
+        return None;
+    }
+    match payload.get("auto_away_debounce_seconds")? {
+        Value::Null => Some(AutoAwayDebounce::ServerDefault),
+        value => match value.as_u64()? {
+            0 => Some(AutoAwayDebounce::Disabled),
+            seconds => Some(AutoAwayDebounce::Seconds(seconds)),
+        },
+    }
+}
+
+/// Mirrors the server's stored auto-away delay into Settings. Cordiale never
+/// originates this value; it only reflects what Grappa announced.
+fn handle_auto_away_debounce_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(debounce) = parse_auto_away_debounce_changed(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("auto_away_debounce_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state.auto_away_debounce == Some(debounce) {
+        return;
+    }
+    state.auto_away_debounce = Some(debounce);
+    let token = debounce.display_token();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_server_pref_auto_away_debounce(token.into());
+    });
+}
+
+/// Validates a user-settings echo whose single value is a string or `null`
+/// on the exact user topic. The key is always present: `null` is meaningful
+/// (the server falls back to its own text), not missing.
+fn parse_nullable_setting_echo(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+    kind: &str,
+    key: &str,
+) -> Option<Option<String>> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != kind {
+        return None;
+    }
+    parse_nullable_wire_string(payload.get(key)?)
+}
+
+/// Mirrors the server's remembered QUIT/PART text into Settings as a
+/// read-only display copy; Grappa stays the owner of the value.
+fn handle_quit_part_reason_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(reason) = parse_nullable_setting_echo(
+        payload,
+        carrier_topic,
+        identifier,
+        "quit_part_reason_changed",
+        "quit_part_reason",
+    ) else {
+        persistence::log_line("quit_part_reason_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state.quit_part_reason.as_ref() == Some(&reason) {
+        return;
+    }
+    state.quit_part_reason = Some(reason.clone());
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_server_pref_leave_message_set(reason.is_some());
+        ui.set_server_pref_leave_message(reason.unwrap_or_default().into());
+        ui.set_server_pref_leave_message_known(true);
+    });
+}
+
+/// Mirrors the server's auto-away text into Settings as a read-only display
+/// copy; `null` means Grappa keeps its own built-in text, never substituted.
+fn handle_auto_away_reason_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(reason) = parse_nullable_setting_echo(
+        payload,
+        carrier_topic,
+        identifier,
+        "auto_away_reason_changed",
+        "auto_away_reason",
+    ) else {
+        persistence::log_line("auto_away_reason_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state.auto_away_reason.as_ref() == Some(&reason) {
+        return;
+    }
+    state.auto_away_reason = Some(reason.clone());
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_server_pref_auto_away_reason_set(reason.is_some());
+        ui.set_server_pref_auto_away_reason(reason.unwrap_or_default().into());
+        ui.set_server_pref_auto_away_reason_known(true);
+    });
+}
+
+/// Mirrors `state.recover_panel` into the sidebar panel. The Slint row model
+/// is built inside the UI-thread closure because `ModelRc` is not `Send`.
+fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (visible, network, rows, outcome, outcome_reason) = match &state.recover_panel {
+        Some(panel) => (
+            true,
+            panel.network.clone(),
+            panel
+                .steps
+                .iter()
+                .map(|row| {
+                    (
+                        row.step.wire_name(),
+                        row.status.wire_name(),
+                        row.reason.clone().unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            panel.outcome.map(RecoverOutcome::wire_name).unwrap_or(""),
+            panel.outcome_reason.clone().unwrap_or_default(),
+        ),
+        None => (false, String::new(), Vec::new(), "", String::new()),
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<RecoverStepRow> = rows
+            .into_iter()
+            .map(|(step, status, reason)| RecoverStepRow {
+                step: step.into(),
+                status: status.into(),
+                reason: reason.into(),
+            })
+            .collect();
+        ui.set_recover_steps(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_recover_network(network.into());
+        ui.set_recover_outcome(outcome.into());
+        ui.set_recover_outcome_reason(outcome_reason.into());
+        ui.set_recover_visible(visible);
+    });
+}
+
+/// Requester replies all arrive on the exact authenticated user topic and
+/// only on the socket that asked; anything else is rejected before parsing.
+fn is_own_user_topic(carrier_topic: &str, identifier: &str) -> bool {
+    carrier_topic == format!("grappa:user:{identifier}")
+}
+
+/// Validates `who_reply` as strictly as Cicchetto: every user row must carry
+/// all string fields, `hops` an integer or `null` and `realname` a string or
+/// `null`; one malformed row drops the whole bundle.
+fn parse_who_reply(payload: &Value, carrier_topic: &str, identifier: &str) -> Option<WhoReply> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "who_reply" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let target = payload.get("target")?.as_str()?.to_string();
+    let mut users = Vec::new();
+    for row in payload.get("users")?.as_array()? {
+        let text = |key: &str| row.get(key).and_then(Value::as_str).map(str::to_string);
+        let hops = match row.get("hops")? {
+            Value::Null => None,
+            value => Some(value.as_i64()?),
+        };
+        users.push(WhoUser {
+            nick: text("nick")?,
+            user: text("user")?,
+            host: text("host")?,
+            server: text("server")?,
+            modes: text("modes")?,
+            channel: text("channel")?,
+            hops,
+            realname: parse_nullable_wire_string(row.get("realname")?)?,
+        });
+    }
+    Some(WhoReply {
+        network: network.to_string(),
+        target,
+        users,
+    })
+}
+
+/// One plain line per user, in wire order, mirroring the 352 reply layout.
+fn who_reply_view(reply: &WhoReply) -> ReplyView {
+    let rows = if reply.users.is_empty() {
+        vec![("who-empty".to_string(), String::new())]
+    } else {
+        reply
+            .users
+            .iter()
+            .map(|user| {
+                let hops = user
+                    .hops
+                    .map(|hops| format!(" ({hops})"))
+                    .unwrap_or_default();
+                let realname = user
+                    .realname
+                    .as_deref()
+                    .map(|realname| format!(" — {realname}"))
+                    .unwrap_or_default();
+                (
+                    String::new(),
+                    format!(
+                        "{} ({}@{}) {} · {} · {}{hops}{realname}",
+                        user.nick, user.user, user.host, user.modes, user.channel, user.server
+                    ),
+                )
+            })
+            .collect()
+    };
+    ReplyView {
+        kind: "who_reply",
+        subject: reply.target.clone(),
+        network: reply.network.clone(),
+        rows,
+    }
+}
+
+/// Stores a requester reply and opens the reply screen. It replaces any
+/// earlier reply (last-write-wins, like Cicchetto's per-network modals) and
+/// never touches chat history or the selected window.
+fn show_reply_view(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, view: ReplyView) {
+    push_reply_view(ui, &view, true);
+    state.reply_view = Some(view);
+}
+
+/// Mirrors a reply view into the UI; `open` also switches to the reply
+/// screen. An in-place refresh passes `false` so it never steals the screen.
+fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
+    let kind = view.kind;
+    let subject = view.subject.clone();
+    let network = view.network.clone();
+    let rows = view.rows.clone();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<ReplyRow> = rows
+            .into_iter()
+            .map(|(label, value)| ReplyRow {
+                label: label.into(),
+                value: value.into(),
+            })
+            .collect();
+        ui.set_reply_rows(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_reply_kind(kind.into());
+        ui.set_reply_subject(subject.into());
+        ui.set_reply_network(network.into());
+        if open {
+            ui.set_screen("reply".into());
+        }
+    });
+}
+
+/// Validates `dcc_offer` on the exact user topic: every field is required,
+/// `network` and `offer_id` non-empty, `size` a non-negative integer (the
+/// peer's claim). The filename was already made safe to display upstream.
+fn parse_dcc_offer(payload: &Value, carrier_topic: &str, identifier: &str) -> Option<DccOffer> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "dcc_offer" {
+        return None;
+    }
+    let text = |key: &str| payload.get(key)?.as_str().map(str::to_string);
+    let offer = DccOffer {
+        network: text("network")?,
+        channel: text("channel")?,
+        offer_id: text("offer_id")?,
+        from: text("from")?,
+        filename: text("filename")?,
+        size: payload.get("size")?.as_u64()?,
+    };
+    if offer.network.trim().is_empty() || offer.offer_id.is_empty() {
+        return None;
+    }
+    Some(offer)
+}
+
+/// Holds an offer, replacing one with the same `offer_id` in place (the
+/// subscribe backfill re-sends every held offer). Returns whether it changed.
+fn apply_dcc_offer(offers: &mut Vec<DccOffer>, offer: DccOffer) -> bool {
+    match offers
+        .iter()
+        .position(|held| held.offer_id == offer.offer_id)
+    {
+        Some(index) if offers[index] == offer => false,
+        Some(index) => {
+            offers[index] = offer;
+            true
+        }
+        None => {
+            offers.push(offer);
+            true
+        }
+    }
+}
+
+fn handle_dcc_offer(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(offer) = parse_dcc_offer(payload, carrier_topic, identifier) else {
+        persistence::log_line("dcc_offer rejected: invalid carrier or payload");
+        return;
+    };
+    if apply_dcc_offer(&mut state.dcc_offers, offer) {
+        push_dcc_offers(state, ui);
+    }
+}
+
+/// How a held DCC offer left the server's held set (closed on the wire).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DccResolution {
+    Accepted,
+    Refused,
+    Expired,
+}
+
+impl DccResolution {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(Self::Accepted),
+            "refused" => Some(Self::Refused),
+            "expired" => Some(Self::Expired),
+            _ => None,
+        }
+    }
+
+    fn status_kind(self) -> &'static str {
+        match self {
+            Self::Accepted => "dcc-accepted",
+            Self::Refused => "dcc-refused",
+            Self::Expired => "dcc-expired",
+        }
+    }
+}
+
+/// Validates `dcc_offer_resolved` on the exact user topic. `resolution` is
+/// the closed `accepted | refused | expired` set: a value a newer server
+/// invents drops the event, leaving a stale prompt rather than a wrong one.
+fn parse_dcc_offer_resolved(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, DccResolution)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "dcc_offer_resolved" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    payload.get("channel")?.as_str()?;
+    let offer_id = payload.get("offer_id")?.as_str()?;
+    if network.trim().is_empty() || offer_id.is_empty() {
+        return None;
+    }
+    let resolution = DccResolution::parse(payload.get("resolution")?.as_str()?)?;
+    Some((offer_id.to_string(), resolution))
+}
+
+/// Drops a held offer by id, returning it; an unknown id (held before this
+/// socket, resolved elsewhere) is a silent no-op.
+fn apply_dcc_offer_resolved(offers: &mut Vec<DccOffer>, offer_id: &str) -> Option<DccOffer> {
+    let index = offers.iter().position(|held| held.offer_id == offer_id)?;
+    Some(offers.remove(index))
+}
+
+/// Removes the resolved offer on every device and says what happened;
+/// whether this device, another one or the hold timeout resolved it, the
+/// reaction is the same.
+fn handle_dcc_offer_resolved(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((offer_id, resolution)) = parse_dcc_offer_resolved(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("dcc_offer_resolved rejected: invalid carrier or payload");
+        return;
+    };
+    let Some(offer) = apply_dcc_offer_resolved(&mut state.dcc_offers, &offer_id) else {
+        return;
+    };
+    push_dcc_offers(state, ui);
+    let status = resolution.status_kind();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_dcc_filename(offer.filename.into());
+        ui.set_status_dcc_from(offer.from.into());
+        ui.set_status_kind(status.into());
+    });
+}
+
+/// Mirrors the held offers into the sidebar consent panel.
+fn push_dcc_offers(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let offers: Vec<(String, String, String, String, String)> = state
+        .dcc_offers
+        .iter()
+        .map(|offer| {
+            (
+                offer.network.clone(),
+                offer.offer_id.clone(),
+                offer.from.clone(),
+                offer.filename.clone(),
+                format_file_size(offer.size),
+            )
+        })
+        .collect();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<DccOfferRow> = offers
+            .into_iter()
+            .map(|(network, offer_id, from, filename, size)| DccOfferRow {
+                network: network.into(),
+                offer_id: offer_id.into(),
+                from: from.into(),
+                filename: filename.into(),
+                size: size.into(),
+            })
+            .collect();
+        ui.set_dcc_offers(Rc::new(slint::VecModel::from(rows)).into());
+    });
+}
+
+/// Binary-prefixed size with one decimal above a KiB (`512 B`, `1.5 MiB`).
+fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// Accepts or refuses a held offer over REST. The panel is not changed
+/// here: the offer disappears only when `dcc_offer_resolved` arrives, so
+/// every device agrees on what the server actually did.
+async fn answer_dcc_offer(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    offer_id: &str,
+    accept: bool,
+) {
+    let (Some(client), Some(token)) = (state.client.as_ref(), state.token.as_deref()) else {
+        return;
+    };
+    let result = if accept {
+        client.accept_dcc_offer(token, network, offer_id).await
+    } else {
+        client.refuse_dcc_offer(token, network, offer_id).await
+    };
+    let Err(err) = result else {
+        return;
+    };
+    persistence::log_line(&format!("dcc offer answer failed: {err:?}"));
+    let status = dcc_answer_error_status(err.status().map(|status| status.as_u16()));
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_kind(status.into());
+    });
+}
+
+/// Status-bar key for a failed accept/refuse, by the documented statuses.
+fn dcc_answer_error_status(status: Option<u16>) -> &'static str {
+    match status {
+        Some(404) => "dcc-offer-gone",
+        Some(429) => "dcc-rate-limited",
+        Some(503) => "dcc-not-connected",
+        Some(507) => "dcc-no-space",
+        _ => "dcc-action-failed",
+    }
+}
+
+/// Opens the archive screen for `network` and loads its list.
+async fn open_archive(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, network: String) {
+    state.archive = Some(ArchiveView {
+        network,
+        entries: None,
+        error: None,
+    });
+    push_archive(state, ui, true);
+    load_archive(state, ui).await;
+}
+
+/// Refetches the open archive's list. The listing is metered upstream, so
+/// it runs only when the screen opens or a push says the list changed.
+async fn load_archive(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token), Some(view)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.archive.as_ref(),
+    ) else {
+        return;
+    };
+    let network = view.network.clone();
+    let result = client.fetch_archive(&token, &network).await;
+    let Some(view) = state.archive.as_mut() else {
+        return;
+    };
+    if view.network != network {
+        return;
+    }
+    match result {
+        Ok(entries) => {
+            view.entries = Some(entries);
+            view.error = None;
+        }
+        Err(err) => {
+            persistence::log_line(&format!("archive fetch failed: {err:?}"));
+            view.error = Some(archive_error_key(
+                err.status().map(|status| status.as_u16()),
+                "archive-fetch-failed",
+            ));
+        }
+    }
+    push_archive(state, ui, false);
+}
+
+/// Deletes one archived target's scrollback. The list is not edited here:
+/// the server's `archive_purged` push drives the refresh on every device.
+async fn delete_archive_target(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, target: &str) {
+    let (Some(client), Some(token), Some(view)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.archive.as_ref(),
+    ) else {
+        return;
+    };
+    let network = view.network.clone();
+    let Err(err) = client.delete_archive_target(&token, &network, target).await else {
+        return;
+    };
+    persistence::log_line(&format!("archive delete failed: {err:?}"));
+    if let Some(view) = state.archive.as_mut() {
+        if view.network == network {
+            view.error = Some(archive_error_key(
+                err.status().map(|status| status.as_u16()),
+                "archive-delete-failed",
+            ));
+        }
+    }
+    push_archive(state, ui, false);
+}
+
+/// `429` has its own message (the listing is rate limited upstream).
+fn archive_error_key(status: Option<u16>, fallback: &'static str) -> &'static str {
+    if status == Some(429) {
+        "archive-rate-limited"
+    } else {
+        fallback
+    }
+}
+
+/// Mirrors the open archive into the UI; `open` also switches to its screen
+/// and clears any pending delete confirmation.
+fn push_archive(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
+    let Some(view) = state.archive.as_ref() else {
+        return;
+    };
+    let network = view.network.clone();
+    let loaded = view.entries.is_some();
+    let error = view.error.unwrap_or("");
+    let rows: Vec<(String, String, String)> = view
+        .entries
+        .iter()
+        .flatten()
+        .map(|entry| {
+            (
+                entry.target.clone(),
+                entry.kind.clone(),
+                format_epoch_millis(entry.last_activity),
+            )
+        })
+        .collect();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<ArchiveRow> = rows
+            .into_iter()
+            .map(|(target, kind, last_activity)| ArchiveRow {
+                target: target.into(),
+                kind: kind.into(),
+                last_activity: last_activity.into(),
+            })
+            .collect();
+        ui.set_archive_rows(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_archive_network(network.into());
+        ui.set_archive_loaded(loaded);
+        ui.set_archive_error(error.into());
+        if open {
+            ui.set_archive_confirm_target("".into());
+            ui.set_screen("archive".into());
+        }
+    });
+}
+
+/// Local date and time of an epoch-millisecond timestamp; out-of-range
+/// values are shown raw.
+fn format_epoch_millis(millis: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(millis)
+        .map(|parsed| {
+            parsed
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| millis.to_string())
+}
+
+/// Validates `archive_changed` on the exact user topic: only a non-empty
+/// `network_slug` (this kind names the network by slug, not `network`).
+fn parse_archive_changed(payload: &Value, carrier_topic: &str, identifier: &str) -> Option<String> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "archive_changed" {
+        return None;
+    }
+    let network = payload.get("network_slug")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    Some(network.to_string())
+}
+
+/// A window moved into the archive (for example a PART): refetch the list
+/// if that network's archive is open, like Cicchetto's `loadArchive`.
+async fn handle_archive_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(network) = parse_archive_changed(payload, carrier_topic, identifier) else {
+        persistence::log_line("archive_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state
+        .archive
+        .as_ref()
+        .is_some_and(|view| view.network == network)
+    {
+        load_archive(state, ui).await;
+    }
+}
+
+/// Validates `archive_purged` on the exact user topic: a non-empty
+/// `network_slug` and `target` (channel- or query-shaped).
+fn parse_archive_purged(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "archive_purged" {
+        return None;
+    }
+    let network = payload.get("network_slug")?.as_str()?;
+    let target = payload.get("target")?.as_str()?;
+    if network.trim().is_empty() || target.trim().is_empty() {
+        return None;
+    }
+    Some((network.to_string(), target.to_string()))
+}
+
+/// Whether a `(network, window)` cache key names the purged target. The
+/// server deletes case-insensitively, so the window is compared with the
+/// network's casemapping.
+fn is_purged_window(
+    key: &(String, String),
+    network: &str,
+    target: &str,
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> bool {
+    key.0 == network && casemapping.nick_eq(&key.1, target)
+}
+
+/// The bouncer deleted a target's scrollback: forget the rows and unread
+/// seeds cached for it, so a later re-join can't show deleted history, then
+/// refresh the archive if it is open. Read cursors stay, like Cicchetto's.
+async fn handle_archive_purged(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, target)) = parse_archive_purged(payload, carrier_topic, identifier) else {
+        persistence::log_line("archive_purged rejected: invalid carrier or payload");
+        return;
+    };
+    let casemapping = state
+        .isupport_by_network
+        .get(&network)
+        .map(|isupport| isupport.casemapping)
+        .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459);
+    let purged = |key: &(String, String)| is_purged_window(key, &network, &target, casemapping);
+    state.messages.retain(|key, _| !purged(key));
+    state.window_messages.retain(|key, _| !purged(key));
+    state.window_mentions.retain(|key, _| !purged(key));
+    if state
+        .archive
+        .as_ref()
+        .is_some_and(|view| view.network == network)
+    {
+        load_archive(state, ui).await;
+    }
+}
+
+/// Validates `notify_list` on the exact user topic: `networks` maps each
+/// network ID (a decimal JSON key) to its entries, each needing an integer
+/// `network_id` and string `nick` and `added_at`. One bad key or entry drops
+/// the whole snapshot, like Cicchetto's schema. Returns nicks per network.
+fn parse_notify_list(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<HashMap<i64, Vec<String>>> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "notify_list" {
+        return None;
+    }
+    let mut lists = HashMap::new();
+    for (key, entries) in payload.get("networks")?.as_object()? {
+        let network_id: i64 = key.parse().ok()?;
+        let mut nicks = Vec::new();
+        for entry in entries.as_array()? {
+            entry.get("network_id")?.as_i64()?;
+            entry.get("added_at")?.as_str()?;
+            nicks.push(entry.get("nick")?.as_str()?.to_string());
+        }
+        lists.insert(network_id, nicks);
+    }
+    Some(lists)
+}
+
+/// Replaces every network's watchlist with the snapshot (an empty map
+/// clears them all) and refreshes the Settings list.
+fn handle_notify_list(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(lists) = parse_notify_list(payload, carrier_topic, identifier) else {
+        persistence::log_line("notify_list rejected: invalid carrier or payload");
+        return;
+    };
+    state.notify_lists = lists;
+    push_notify_nicks(state, ui);
+}
+
+/// Validates `presence_snapshot` on the exact user topic: an integer
+/// `network_id` and a `nicks` map of folded nick to `online | offline |
+/// unknown`. One unknown value drops the whole map, like Cicchetto.
+fn parse_presence_snapshot(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(i64, HashMap<String, Presence>)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "presence_snapshot" {
+        return None;
+    }
+    let network_id = payload.get("network_id")?.as_i64()?;
+    let nicks = payload
+        .get("nicks")?
+        .as_object()?
+        .iter()
+        .map(|(nick, presence)| Some((presence_key(nick), Presence::parse(presence.as_str()?)?)))
+        .collect::<Option<HashMap<_, _>>>()?;
+    Some((network_id, nicks))
+}
+
+/// Replaces one network's presence map (sent after join for live sessions)
+/// and repaints the watchlist.
+fn handle_presence_snapshot(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network_id, nicks)) = parse_presence_snapshot(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("presence_snapshot rejected: invalid carrier or payload");
+        return;
+    };
+    state.presence_by_network.insert(network_id, nicks);
+    push_notify_nicks(state, ui);
+}
+
+/// One validated `presence_changed` transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PresenceChange {
+    network_id: i64,
+    nick: String,
+    presence: Presence,
+    /// Part of the first report after a (re)registration: update the dot,
+    /// but don't announce it.
+    initial: bool,
+}
+
+/// Validates `presence_changed` on the exact user topic. `presence` is
+/// `online | offline` and `source` the closed `monitor | watch | ison` set
+/// (checked, not shown); `ts` must be a string.
+fn parse_presence_changed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<PresenceChange> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "presence_changed" {
+        return None;
+    }
+    let presence = match payload.get("presence")?.as_str()? {
+        "online" => Presence::Online,
+        "offline" => Presence::Offline,
+        _ => return None,
+    };
+    if !matches!(
+        payload.get("source")?.as_str()?,
+        "monitor" | "watch" | "ison"
+    ) {
+        return None;
+    }
+    payload.get("ts")?.as_str()?;
+    let nick = payload.get("nick")?.as_str()?;
+    if nick.is_empty() {
+        return None;
+    }
+    Some(PresenceChange {
+        network_id: payload.get("network_id")?.as_i64()?,
+        nick: nick.to_string(),
+        presence,
+        initial: payload.get("initial")?.as_bool()?,
+    })
+}
+
+/// Updates one watched nick's presence and, unless it is part of the
+/// initial report, says so in the status bar.
+fn handle_presence_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(change) = parse_presence_changed(payload, carrier_topic, identifier) else {
+        persistence::log_line("presence_changed rejected: invalid carrier or payload");
+        return;
+    };
+    state
+        .presence_by_network
+        .entry(change.network_id)
+        .or_default()
+        .insert(presence_key(&change.nick), change.presence);
+    push_notify_nicks(state, ui);
+    if change.initial {
+        return;
+    }
+    let network = network_slugs_by_id(&state.network_ids)
+        .and_then(|slugs| slugs.get(&change.network_id).cloned())
+        .unwrap_or_else(|| change.network_id.to_string());
+    let status = if change.presence == Presence::Online {
+        "presence-online"
+    } else {
+        "presence-offline"
+    };
+    let nick = change.nick;
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_presence_nick(nick.into());
+        ui.set_status_presence_network(network.into());
+        ui.set_status_kind(status.into());
+    });
+}
+
+/// Validates `presence_error` on the exact user topic: an integer
+/// `network_id`, a `reason` string (`list_full` today; kept open so a new
+/// reason still reaches the user) and the rejected target(s) in `detail`.
+fn parse_presence_error(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(i64, String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "presence_error" {
+        return None;
+    }
+    Some((
+        payload.get("network_id")?.as_i64()?,
+        payload.get("reason")?.as_str()?.to_string(),
+        payload.get("detail")?.as_str()?.to_string(),
+    ))
+}
+
+/// The ircd refused a watch registration (MONITOR/WATCH list full). Never
+/// silent: the rejected targets go to the status bar. The raw numeric also
+/// lands as a server notice upstream, which this does not replace.
+fn handle_presence_error(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network_id, reason, detail)) =
+        parse_presence_error(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("presence_error rejected: invalid carrier or payload");
+        return;
+    };
+    persistence::log_line(&format!(
+        "presence error on network {network_id}: reason={reason}"
+    ));
+    let network = network_slugs_by_id(&state.network_ids)
+        .and_then(|slugs| slugs.get(&network_id).cloned())
+        .unwrap_or_else(|| network_id.to_string());
+    let status = if reason == "list_full" {
+        "presence-list-full"
+    } else {
+        "presence-rejected"
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_presence_nick(detail.into());
+        ui.set_status_presence_network(network.into());
+        ui.set_status_kind(status.into());
+    });
+}
+
+/// Peer-away key: the network plus the peer folded with that network's
+/// casemapping, so `Alice` and `alice` share one message.
+fn peer_away_key(state: &WorkerState, network: &str, peer: &str) -> (String, String) {
+    let casemapping = state
+        .isupport_by_network
+        .get(network)
+        .map(|isupport| isupport.casemapping)
+        .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459);
+    (network.to_string(), casemapping.fold(peer))
+}
+
+/// The peer-away key of the open private window, if one is open.
+fn current_peer_away_key(state: &WorkerState) -> Option<(String, String)> {
+    if !state.current_query {
+        return None;
+    }
+    let (network, nick) = state.current_channel.as_ref()?;
+    Some(peer_away_key(state, network, nick))
+}
+
+/// Shows the open private window's away message, or hides the banner. The
+/// banner itself is only drawn while a private window is open.
+fn push_peer_away_banner(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (peer, message) = current_peer_away_key(state)
+        .and_then(|key| {
+            let message = state.peer_away.get(&key)?.clone();
+            let peer = state
+                .current_channel
+                .as_ref()
+                .map(|(_, nick)| nick.clone())
+                .unwrap_or_default();
+            Some((peer, message))
+        })
+        .map_or((String::new(), None), |(peer, message)| {
+            (peer, Some(message))
+        });
+    let visible = message.is_some();
+    let message = message.unwrap_or_default();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_peer_away_peer(peer.into());
+        ui.set_peer_away_message(message.into());
+        ui.set_peer_away_visible(visible);
+    });
+}
+
+/// Validates `peer_away` (a standalone 301 RPL_AWAY, not part of a WHOIS)
+/// on the exact user topic: `network` and `peer` non-empty, `message` a
+/// string that may be empty (no away text was given).
+fn parse_peer_away(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "peer_away" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    let peer = payload.get("peer")?.as_str()?;
+    if network.trim().is_empty() || peer.is_empty() {
+        return None;
+    }
+    let message = payload.get("message")?.as_str()?;
+    Some((network.to_string(), peer.to_string(), message.to_string()))
+}
+
+/// Remembers the peer's latest away message (replacing an older one) and
+/// refreshes the banner if that peer's private window is open. Never moves
+/// focus.
+fn handle_peer_away(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, peer, message)) = parse_peer_away(payload, carrier_topic, identifier) else {
+        persistence::log_line("peer_away rejected: invalid carrier or payload");
+        return;
+    };
+    let key = peer_away_key(state, &network, &peer);
+    let shown = current_peer_away_key(state).as_ref() == Some(&key);
+    state.peer_away.insert(key, message);
+    if shown {
+        push_peer_away_banner(state, ui);
+    }
+}
+
+/// The per-file upload limits Grappa advertises, as shown in Settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UploadLimits {
+    /// `embedded` or `litterbox`.
+    host: String,
+    image_bytes: u64,
+    video_bytes: u64,
+    /// `None` when the server omits it (Cicchetto then uses its own default).
+    video_seconds: Option<u64>,
+    document_bytes: u64,
+    audio_bytes: u64,
+}
+
+/// Validates `server_settings_changed` like Cicchetto: `upload.active_host`
+/// in `embedded | litterbox` and the image/video/document/audio/global caps
+/// positive integers are required; the optional fields and
+/// `http_host_aliases` (no native use) don't reject the snapshot.
+fn parse_server_settings_changed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<UploadLimits> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "server_settings_changed" {
+        return None;
+    }
+    let upload = payload.get("upload")?;
+    let cap = |key: &str| upload.get(key)?.as_u64().filter(|bytes| *bytes > 0);
+    let host = upload.get("active_host")?.as_str()?;
+    if !matches!(host, "embedded" | "litterbox") {
+        return None;
+    }
+    cap("global_cap_bytes")?;
+    Some(UploadLimits {
+        host: host.to_string(),
+        image_bytes: cap("image_per_file_cap_bytes")?,
+        video_bytes: cap("video_per_file_cap_bytes")?,
+        video_seconds: cap("video_max_duration_seconds"),
+        document_bytes: cap("document_per_file_cap_bytes")?,
+        audio_bytes: cap("audio_per_file_cap_bytes")?,
+    })
+}
+
+/// Mirrors the advertised upload limits into Settings > General.
+fn handle_server_settings_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(limits) = parse_server_settings_changed(payload, carrier_topic, identifier) else {
+        persistence::log_line("server_settings_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state.upload_limits.as_ref() == Some(&limits) {
+        return;
+    }
+    let row = UploadLimitsRow {
+        host: limits.host.clone().into(),
+        image: format_file_size(limits.image_bytes).into(),
+        video: format_file_size(limits.video_bytes).into(),
+        video_seconds: limits
+            .video_seconds
+            .map(|seconds| seconds.to_string())
+            .unwrap_or_default()
+            .into(),
+        document: format_file_size(limits.document_bytes).into(),
+        audio: format_file_size(limits.audio_bytes).into(),
+    };
+    state.upload_limits = Some(limits);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_server_upload_limits(row);
+        ui.set_server_upload_limits_known(true);
+    });
+}
+
+/// Validates `bundle_hash` on the exact user topic: a non-empty `hash` and
+/// an optional `version` (absent or non-string reads as none, like
+/// Cicchetto).
+fn parse_bundle_hash(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, Option<String>)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "bundle_hash" {
+        return None;
+    }
+    let hash = payload.get("hash")?.as_str()?;
+    if hash.is_empty() {
+        return None;
+    }
+    let version = payload
+        .get("version")
+        .and_then(Value::as_str)
+        .filter(|version| !version.is_empty())
+        .map(str::to_string);
+    Some((hash.to_string(), version))
+}
+
+/// The hash identifies the deployed Cicchetto web bundle, which has no
+/// native counterpart: it is consumed and logged when it changes, and never
+/// triggers a download or an update of this app.
+fn handle_bundle_hash(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(bundle) = parse_bundle_hash(payload, carrier_topic, identifier) else {
+        persistence::log_line("bundle_hash rejected: invalid carrier or payload");
+        return;
+    };
+    if state.web_bundle.as_ref() == Some(&bundle) {
+        return;
+    }
+    persistence::log_line(&format!(
+        "server web bundle: hash={} version={}",
+        bundle.0,
+        bundle.1.as_deref().unwrap_or("-")
+    ));
+    state.web_bundle = Some(bundle);
+}
+
+/// Message kinds of Grappa's scrollback (`Message.kind()`), the closed set a
+/// mentions entry may carry.
+const SCROLLBACK_MESSAGE_KINDS: [&str; 11] = [
+    "privmsg",
+    "notice",
+    "action",
+    "join",
+    "part",
+    "quit",
+    "nick_change",
+    "mode",
+    "topic",
+    "kick",
+    "server_event",
+];
+
+/// Validates `mentions_bundle` on the exact user topic and renders it as a
+/// reply view: the away period, the reason when set, then each message in
+/// the server's order. Every message needs an integer `server_time`,
+/// string `channel`/`sender`, string-or-`null` `body` and a known `kind`;
+/// one bad message drops the bundle, like Cicchetto's schema.
+fn parse_mentions_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<ReplyView> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "mentions_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let started = payload.get("away_started_at")?.as_str()?;
+    let ended = payload.get("away_ended_at")?.as_str()?;
+    let reason = parse_nullable_wire_string(payload.get("away_reason")?)?;
+    let mut rows = vec![(
+        "mentions-away-period".to_string(),
+        format!(
+            "{} – {}",
+            format_iso_timestamp(started),
+            format_iso_timestamp(ended)
+        ),
+    )];
+    if let Some(reason) = reason {
+        rows.push(("mentions-away-reason".to_string(), reason));
+    }
+    let messages = payload.get("messages")?.as_array()?;
+    for message in messages {
+        let server_time = message.get("server_time")?.as_i64()?;
+        let channel = message.get("channel")?.as_str()?;
+        let sender = message.get("sender")?.as_str()?;
+        let body = parse_nullable_wire_string(message.get("body")?)?.unwrap_or_default();
+        let kind = message.get("kind")?.as_str()?;
+        if !SCROLLBACK_MESSAGE_KINDS.contains(&kind) {
+            return None;
+        }
+        let text = if kind == "action" {
+            format!("* {sender} {body}")
+        } else {
+            format!("<{sender}> {body}")
+        };
+        rows.push((
+            String::new(),
+            format!("{} {channel} {text}", format_epoch_millis(server_time)),
+        ));
+    }
+    if messages.is_empty() {
+        rows.push(("mentions-empty".to_string(), String::new()));
+    }
+    Some(ReplyView {
+        kind: "mentions_bundle",
+        subject: String::new(),
+        network: network.to_string(),
+        rows,
+    })
+}
+
+/// Back from away: keeps the summary for `/mentions` and opens it, as
+/// Cicchetto focuses its mentions window (returning is the user's action).
+fn handle_mentions_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(view) = parse_mentions_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("mentions_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    state
+        .mentions_bundles
+        .insert(view.network.clone(), view.clone());
+    show_reply_view(state, ui, view);
+}
+
+/// `/list` alone or `/list <search>`; any other text is not this command.
+fn parse_list_command(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    let (command, rest) = trimmed
+        .split_once(char::is_whitespace)
+        .unwrap_or((trimmed, ""));
+    command
+        .eq_ignore_ascii_case("/list")
+        .then(|| rest.trim().to_string())
+}
+
+/// Opens the directory screen for `network` and loads its first page.
+async fn open_directory(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    query: String,
+) {
+    state.directory = Some(DirectoryView::new(network, query));
+    push_directory(state, ui, true);
+    load_directory(state, ui).await;
+}
+
+/// Fetches the first page for the open directory's sort and search,
+/// replacing any loaded rows (the snapshot may have been replaced).
+async fn load_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token), Some(view)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.directory.as_ref(),
+    ) else {
+        return;
+    };
+    let network = view.network.clone();
+    let sort = view.sort;
+    let query = view.query.clone();
+    let result = client
+        .fetch_directory(&token, &network, sort, &query, None)
+        .await;
+    let Some(view) = state.directory.as_mut() else {
+        return;
+    };
+    // The view may have changed network, sort or search meanwhile.
+    if view.network != network || view.sort != sort || view.query != query {
+        return;
+    }
+    match result {
+        Ok(page) => {
+            view.page = Some(page);
+            view.error = None;
+        }
+        Err(err) => {
+            persistence::log_line(&format!("directory fetch failed: {err:?}"));
+            view.error = Some("directory-fetch-failed");
+        }
+    }
+    push_directory(state, ui, false);
+}
+
+/// Appends the next page after the loaded rows, when the server has more.
+async fn load_more_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token), Some(view)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.directory.as_ref(),
+    ) else {
+        return;
+    };
+    let Some(cursor) = view.page.as_ref().and_then(|page| page.next_cursor.clone()) else {
+        return;
+    };
+    let network = view.network.clone();
+    let sort = view.sort;
+    let query = view.query.clone();
+    let result = client
+        .fetch_directory(&token, &network, sort, &query, Some(&cursor))
+        .await;
+    let Some(view) = state.directory.as_mut() else {
+        return;
+    };
+    let same_cursor = view
+        .page
+        .as_ref()
+        .and_then(|page| page.next_cursor.as_deref())
+        == Some(cursor.as_str());
+    if view.network != network || !same_cursor {
+        return;
+    }
+    match result {
+        Ok(next) => {
+            if let Some(page) = view.page.as_mut() {
+                page.entries.extend(next.entries);
+                page.next_cursor = next.next_cursor;
+                page.total = next.total;
+                page.captured_at = next.captured_at;
+                page.status = next.status;
+            }
+            view.error = None;
+        }
+        Err(err) => {
+            persistence::log_line(&format!("directory page fetch failed: {err:?}"));
+            view.error = Some("directory-fetch-failed");
+        }
+    }
+    push_directory(state, ui, false);
+}
+
+/// Asks Grappa for a fresh `LIST`. The button stays disabled until a
+/// `directory_*` push (or a failed request) releases it; the new rows are
+/// fetched when those pushes arrive.
+async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let Some(view) = state.directory.as_mut() else {
+        return;
+    };
+    if view.refresh_pending {
+        return;
+    }
+    view.refresh_pending = true;
+    view.failed_reason = None;
+    let network = view.network.clone();
+    push_directory(state, ui, false);
+    if let Err(err) = client.refresh_directory(&token, &network).await {
+        persistence::log_line(&format!("directory refresh failed: {err:?}"));
+        if let Some(view) = state.directory.as_mut() {
+            if view.network == network {
+                view.refresh_pending = false;
+                view.error = Some("directory-refresh-failed");
+            }
+        }
+        push_directory(state, ui, false);
+    }
+}
+
+/// Mirrors the open directory into the UI; `open` also switches to its
+/// screen. Nothing is pushed when no directory is open.
+fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
+    let Some(view) = state.directory.as_ref() else {
+        return;
+    };
+    let network = view.network.clone();
+    let sort = view.sort;
+    let query = view.query.clone();
+    let error = view.error.unwrap_or("");
+    let refresh_pending = view.refresh_pending;
+    let failed_reason = view.failed_reason.clone().unwrap_or_default();
+    let (rows, status, total, captured_at, has_more) = match &view.page {
+        Some(page) => (
+            page.entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.name.clone(),
+                        entry.user_count.to_string(),
+                        entry.topic.clone().unwrap_or_default(),
+                        entry.featured,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            page.status.clone(),
+            page.total.to_string(),
+            page.captured_at
+                .as_deref()
+                .map(format_iso_timestamp)
+                .unwrap_or_default(),
+            page.next_cursor.is_some(),
+        ),
+        None => (
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            false,
+        ),
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<DirectoryRow> = rows
+            .into_iter()
+            .map(|(name, users, topic, featured)| DirectoryRow {
+                name: name.into(),
+                users: users.into(),
+                topic: topic.into(),
+                featured,
+            })
+            .collect();
+        ui.set_directory_rows(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_directory_network(network.into());
+        ui.set_directory_sort(sort.into());
+        ui.set_directory_query(query.into());
+        ui.set_directory_status(status.into());
+        ui.set_directory_total(total.into());
+        ui.set_directory_captured_at(captured_at.into());
+        ui.set_directory_error(error.into());
+        ui.set_directory_refresh_pending(refresh_pending);
+        ui.set_directory_failed_reason(failed_reason.into());
+        ui.set_directory_has_more(has_more);
+        if open {
+            ui.set_screen("directory".into());
+        }
+    });
+}
+
+/// Local-time rendering of an ISO-8601 timestamp; an unparsable value is
+/// shown as sent.
+fn format_iso_timestamp(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|parsed| {
+            parsed
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+/// Validates `directory_progress` (`count`) or `directory_complete`
+/// (`total`) on the exact user topic: `network` a non-empty slug and the
+/// counter a non-negative integer (checked, not used — the rows always come
+/// from the REST page).
+fn parse_directory_count_signal(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+    kind: &str,
+    counter: &str,
+) -> Option<String> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != kind {
+        return None;
+    }
+    payload.get(counter)?.as_u64()?;
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    Some(network.to_string())
+}
+
+/// A capture is streaming: refetch the first page if that network's
+/// directory is open, like Cicchetto's `onDirectoryProgress`.
+async fn handle_directory_progress(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(network) = parse_directory_count_signal(
+        payload,
+        carrier_topic,
+        identifier,
+        "directory_progress",
+        "count",
+    ) else {
+        persistence::log_line("directory_progress rejected: invalid carrier or payload");
+        return;
+    };
+    reload_directory_after_push(state, ui, &network, None).await;
+}
+
+/// The capture finished (323 RPL_LISTEND) and the server replaced its
+/// snapshot: refetch the first page, replacing the loaded rows.
+async fn handle_directory_complete(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(network) = parse_directory_count_signal(
+        payload,
+        carrier_topic,
+        identifier,
+        "directory_complete",
+        "total",
+    ) else {
+        persistence::log_line("directory_complete rejected: invalid carrier or payload");
+        return;
+    };
+    reload_directory_after_push(state, ui, &network, None).await;
+}
+
+/// Validates `directory_failed` on the exact user topic: `network` a
+/// non-empty slug and `reason` any string (an open set; `timeout` today).
+fn parse_directory_failed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "directory_failed" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let reason = payload.get("reason")?.as_str()?;
+    Some((network.to_string(), reason.to_string()))
+}
+
+/// The capture was abandoned; the server kept its previous snapshot. Shows
+/// the reason and refetches, so the list stays the last good one.
+async fn handle_directory_failed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, reason)) = parse_directory_failed(payload, carrier_topic, identifier) else {
+        persistence::log_line("directory_failed rejected: invalid carrier or payload");
+        return;
+    };
+    reload_directory_after_push(state, ui, &network, Some(reason)).await;
+}
+
+/// Shared tail of the `directory_*` pushes: releases the refresh latch,
+/// records (or clears) the capture failure and refetches when the pushed
+/// network's directory is the open one.
+async fn reload_directory_after_push(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    failed_reason: Option<String>,
+) {
+    let Some(view) = state.directory.as_mut() else {
+        return;
+    };
+    if view.network != network {
+        return;
+    }
+    view.refresh_pending = false;
+    view.failed_reason = failed_reason;
+    push_directory(state, ui, false);
+    load_directory(state, ui).await;
+}
+
+fn handle_who_reply(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(reply) = parse_who_reply(payload, carrier_topic, identifier) else {
+        persistence::log_line("who_reply rejected: invalid carrier or payload");
+        return;
+    };
+    show_reply_view(state, ui, who_reply_view(&reply));
+}
+
+/// Validates `server_reply`: `source` is the closed `info | version | motd |
+/// admin` set and `lines` must hold only strings (kept in wire order, never
+/// rewritten). Returns `(network, source, lines)`.
+fn parse_server_reply(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, &'static str, Vec<String>)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "server_reply" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let source = match payload.get("source")?.as_str()? {
+        "info" => "info",
+        "version" => "version",
+        "motd" => "motd",
+        "admin" => "admin",
+        _ => return None,
+    };
+    let lines = payload
+        .get("lines")?
+        .as_array()?
+        .iter()
+        .map(|line| line.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    Some((network.to_string(), source, lines))
+}
+
+fn server_reply_view(network: &str, source: &'static str, lines: &[String]) -> ReplyView {
+    let rows = if lines.is_empty() {
+        vec![("reply-empty".to_string(), String::new())]
+    } else {
+        lines
+            .iter()
+            .map(|line| (String::new(), line.clone()))
+            .collect()
+    };
+    ReplyView {
+        kind: "server_reply",
+        subject: source.to_string(),
+        network: network.to_string(),
+        rows,
+    }
+}
+
+fn handle_server_reply(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, source, lines)) = parse_server_reply(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("server_reply rejected: invalid carrier or payload");
+        return;
+    };
+    show_reply_view(state, ui, server_reply_view(&network, source, &lines));
+}
+
+/// Validates `whois_bundle` field by field, like Cicchetto: any malformed
+/// field drops the whole bundle. `source` must be `user` or `rail` (absent
+/// means `user`); `avatar_url` may be absent.
+fn parse_whois_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<WhoisBundle> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "whois_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    match payload.get("source") {
+        None => {}
+        Some(source) if matches!(source.as_str(), Some("user" | "rail")) => {}
+        Some(_) => return None,
+    }
+    let text = |key: &str| parse_nullable_wire_string(payload.get(key)?);
+    let flag = |key: &str| payload.get(key)?.as_bool();
+    let number = |key: &str| match payload.get(key)? {
+        Value::Null => Some(None),
+        value => value.as_i64().map(Some),
+    };
+    let channels = match payload.get("channels")? {
+        Value::Null => None,
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .map(|item| item.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    };
+    let extra_lines = match payload.get("extra_lines")? {
+        Value::Null => None,
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .map(|item| {
+                    Some((
+                        item.get("numeric")?.as_i64()?,
+                        item.get("text")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    };
+    let avatar_url = match payload.get("avatar_url") {
+        None => None,
+        Some(value) => parse_nullable_wire_string(value)?,
+    };
+    Some(WhoisBundle {
+        network: network.to_string(),
+        target: payload.get("target")?.as_str()?.to_string(),
+        user: text("user")?,
+        host: text("host")?,
+        realname: text("realname")?,
+        server: text("server")?,
+        server_info: text("server_info")?,
+        is_operator: flag("is_operator")?,
+        oper_text: text("oper_text")?,
+        idle_seconds: number("idle_seconds")?,
+        signon: number("signon")?,
+        channels,
+        using_ssl: flag("using_ssl")?,
+        is_registered: flag("is_registered")?,
+        is_admin: flag("is_admin")?,
+        is_services_admin: flag("is_services_admin")?,
+        is_helper: flag("is_helper")?,
+        is_chanop: flag("is_chanop")?,
+        is_agent: flag("is_agent")?,
+        is_java: flag("is_java")?,
+        umodes: text("umodes")?,
+        away_message: text("away_message")?,
+        actually_host: text("actually_host")?,
+        actually_ip: text("actually_ip")?,
+        account: text("account")?,
+        secure: flag("secure")?,
+        secure_cipher: text("secure_cipher")?,
+        certfp: text("certfp")?,
+        extra_lines,
+        avatar_url,
+    })
+}
+
+/// `h:mm:ss`, without words to translate.
+fn format_idle(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    format!(
+        "{}:{:02}:{:02}",
+        seconds / 3600,
+        (seconds % 3600) / 60,
+        seconds % 60
+    )
+}
+
+fn format_signon(epoch_seconds: i64) -> String {
+    epoch_seconds
+        .checked_mul(1000)
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|moment| {
+            moment
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| epoch_seconds.to_string())
+}
+
+/// Label-keyed rows for the WHOIS card; empty fields are omitted, boolean
+/// flags become label-only rows, extra numerics stay in wire order.
+fn whois_bundle_view(bundle: &WhoisBundle) -> ReplyView {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut push = |label: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            rows.push((label.to_string(), value));
+        }
+    };
+    let userhost = match (&bundle.user, &bundle.host) {
+        (Some(user), Some(host)) => Some(format!("{user}@{host}")),
+        (None, Some(host)) => Some(host.clone()),
+        (Some(user), None) => Some(user.clone()),
+        (None, None) => None,
+    };
+    push("whois-userhost", userhost);
+    push("whois-realname", bundle.realname.clone());
+    push("whois-account", bundle.account.clone());
+    let server = match (&bundle.server, &bundle.server_info) {
+        (Some(server), Some(info)) => Some(format!("{server} ({info})")),
+        (server, _) => server.clone(),
+    };
+    push("whois-server", server);
+    push(
+        "whois-channels",
+        bundle.channels.as_ref().map(|channels| channels.join(" ")),
+    );
+    push("whois-idle", bundle.idle_seconds.map(format_idle));
+    push("whois-signon", bundle.signon.map(format_signon));
+    push("whois-away", bundle.away_message.clone());
+    push("whois-umodes", bundle.umodes.clone());
+    let actually = match (&bundle.actually_host, &bundle.actually_ip) {
+        (Some(host), Some(ip)) => Some(format!("{host} ({ip})")),
+        (host, ip) => host.clone().or_else(|| ip.clone()),
+    };
+    push("whois-actually", actually);
+    push("whois-certfp", bundle.certfp.clone());
+    if bundle.secure || bundle.using_ssl {
+        rows.push((
+            "whois-secure".to_string(),
+            bundle.secure_cipher.clone().unwrap_or_default(),
+        ));
+    }
+    if bundle.is_operator {
+        rows.push((
+            "whois-operator".to_string(),
+            bundle.oper_text.clone().unwrap_or_default(),
+        ));
+    }
+    for (flag, label) in [
+        (bundle.is_registered, "whois-registered"),
+        (bundle.is_admin, "whois-admin"),
+        (bundle.is_services_admin, "whois-services-admin"),
+        (bundle.is_helper, "whois-helper"),
+        (bundle.is_chanop, "whois-chanop"),
+        (bundle.is_agent, "whois-agent"),
+        (bundle.is_java, "whois-java"),
+    ] {
+        if flag {
+            rows.push((label.to_string(), String::new()));
+        }
+    }
+    for (numeric, text) in bundle.extra_lines.iter().flatten() {
+        rows.push((String::new(), format!("{numeric:03} {text}")));
+    }
+    // The avatar is an authenticated server path; the image itself is not
+    // rendered yet, only its availability.
+    if bundle.avatar_url.is_some() {
+        rows.push(("whois-avatar".to_string(), String::new()));
+    }
+    ReplyView {
+        kind: "whois_bundle",
+        subject: bundle.target.clone(),
+        network: bundle.network.clone(),
+        rows,
+    }
+}
+
+fn handle_whois_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(bundle) = parse_whois_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("whois_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    let view = whois_bundle_view(&bundle);
+    state.whois_card = Some(bundle);
+    show_reply_view(state, ui, view);
+}
+
+/// Validates `whowas_bundle`: every key is required, the history fields are
+/// strings or `null`, and `not_found` separates "no history" (406) from a
+/// malformed payload, which is dropped.
+fn parse_whowas_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<ReplyView> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "whowas_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let target = payload.get("target")?.as_str()?;
+    let text = |key: &str| parse_nullable_wire_string(payload.get(key)?);
+    let user = text("user")?;
+    let host = text("host")?;
+    let realname = text("realname")?;
+    let server = text("server")?;
+    let logoff_time = text("logoff_time")?;
+    let not_found = payload.get("not_found")?.as_bool()?;
+
+    let mut rows: Vec<(String, String)> = Vec::new();
+    if not_found {
+        rows.push(("whowas-not-found".to_string(), String::new()));
+    } else {
+        let userhost = match (user, host) {
+            (Some(user), Some(host)) => Some(format!("{user}@{host}")),
+            (user, host) => user.or(host),
+        };
+        for (label, value) in [
+            ("whois-userhost", userhost),
+            ("whois-realname", realname),
+            ("whois-server", server),
+            ("whowas-logoff", logoff_time),
+        ] {
+            if let Some(value) = value.filter(|value| !value.is_empty()) {
+                rows.push((label.to_string(), value));
+            }
+        }
+    }
+    Some(ReplyView {
+        kind: "whowas_bundle",
+        subject: target.to_string(),
+        network: network.to_string(),
+        rows,
+    })
+}
+
+fn handle_whowas_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(view) = parse_whowas_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("whowas_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    show_reply_view(state, ui, view);
+}
+
+/// Validates `banlist_bundle`: `mode` is whichever list letter was asked for
+/// (never assumed to be `b`), and each entry needs a string `mask` plus a
+/// string-or-`null` `setter` and `set_ts`; one bad entry drops the bundle.
+/// Entries keep the ircd's order.
+fn parse_banlist_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<ReplyView> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "banlist_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let channel = payload.get("channel")?.as_str()?;
+    let mode = payload.get("mode")?.as_str()?;
+    if mode.is_empty() {
+        return None;
+    }
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for entry in payload.get("entries")?.as_array()? {
+        let mask = entry.get("mask")?.as_str()?;
+        let setter = parse_nullable_wire_string(entry.get("setter")?)?;
+        let set_ts = parse_nullable_wire_string(entry.get("set_ts")?)?;
+        let details = [setter, set_ts]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let line = if details.is_empty() {
+            mask.to_string()
+        } else {
+            format!("{mask} — {details}")
+        };
+        rows.push((String::new(), line));
+    }
+    if rows.is_empty() {
+        rows.push(("banlist-empty".to_string(), String::new()));
+    }
+    Some(ReplyView {
+        kind: "banlist_bundle",
+        subject: format!("{channel} +{mode}"),
+        network: network.to_string(),
+        rows,
+    })
+}
+
+fn handle_banlist_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(view) = parse_banlist_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("banlist_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    show_reply_view(state, ui, view);
+}
+
+/// Validates `invite_ack` (341 RPL_INVITING) on the exact user topic:
+/// `network`, `channel` and `peer` are required non-empty strings. Returns
+/// them in that order.
+fn parse_invite_ack(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "invite_ack" {
+        return None;
+    }
+    let field = |key: &str| {
+        payload
+            .get(key)?
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+    };
+    Some((field("network")?, field("channel")?, field("peer")?))
+}
+
+/// Confirms a sent invite in the status bar. Every acknowledgement is shown,
+/// even repeats; it is transient and never stored, like Cicchetto's
+/// synthetic server-window row (Cordiale has no server window).
+fn handle_invite_ack(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, channel, peer)) = parse_invite_ack(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("invite_ack rejected: invalid carrier or payload");
+        return;
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_invite_peer(peer.into());
+        ui.set_status_invite_channel(channel.into());
+        ui.set_status_invite_network(network.into());
+        ui.set_status_kind("invite-sent".into());
+    });
+}
+
+/// The twelve LUSERS counters in display order, each with its reply label.
+const LUSERS_COUNTERS: [(&str, &str); 12] = [
+    ("total_users", "lusers-total-users"),
+    ("invisible", "lusers-invisible"),
+    ("servers", "lusers-servers"),
+    ("operators", "lusers-operators"),
+    ("unknown_connections", "lusers-unknown-connections"),
+    ("channels_formed", "lusers-channels-formed"),
+    ("local_clients", "lusers-local-clients"),
+    ("local_servers", "lusers-local-servers"),
+    ("current_local", "lusers-current-local"),
+    ("max_local", "lusers-max-local"),
+    ("current_global", "lusers-current-global"),
+    ("max_global", "lusers-max-global"),
+];
+
+/// Validates `lusers_bundle`: `network` is a required non-empty slug. Like
+/// Cicchetto, each counter is read on its own and a missing, `null` or
+/// non-integer one shows as unknown instead of dropping the other eleven —
+/// the bundle is display-only (253 RPL_LUSERUNKNOWN is optional upstream).
+fn parse_lusers_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<ReplyView> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "lusers_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let rows = LUSERS_COUNTERS
+        .iter()
+        .map(|(key, label)| {
+            let value = payload
+                .get(*key)
+                .and_then(Value::as_i64)
+                .map_or_else(|| "—".to_string(), |count| count.to_string());
+            (label.to_string(), value)
+        })
+        .collect();
+    Some(ReplyView {
+        kind: "lusers_bundle",
+        subject: String::new(),
+        network: network.to_string(),
+        rows,
+    })
+}
+
+/// Shows a LUSERS bundle only when this client asked for it with `/lusers`
+/// (consume-once); the unsolicited registration burst is dropped silently.
+fn handle_lusers_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(view) = parse_lusers_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("lusers_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    if !state.lusers_requested.remove(&view.network) {
+        return;
+    }
+    show_reply_view(state, ui, view);
+}
+
+/// Common channel prefixes, used only to tell a channel argument from a mode
+/// letter in `/banlist`. `+` is left out on purpose: `/banlist +e` means the
+/// exception list, not a modeless `+e` channel.
+fn looks_like_channel(name: &str) -> bool {
+    name.starts_with(['#', '&', '!'])
+}
+
+/// Validates `whois_avatar_ready`: `network`, `nick` and `avatar_url` are
+/// all required strings. Returns them in that order.
+fn parse_whois_avatar_ready(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "whois_avatar_ready" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    Some((
+        network.to_string(),
+        payload.get("nick")?.as_str()?.to_string(),
+        payload.get("avatar_url")?.as_str()?.to_string(),
+    ))
+}
+
+/// Cicchetto's `patchWhoisAvatarUrl`: patches only the open card for the
+/// same network and nick (compared with the network's casemapping); a late
+/// completion for a closed or different card is a silent no-op.
+fn apply_whois_avatar_ready(
+    card: &mut Option<WhoisBundle>,
+    network: &str,
+    nick: &str,
+    avatar_url: String,
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> bool {
+    let Some(card) = card.as_mut() else {
+        return false;
+    };
+    if card.network != network || !casemapping.nick_eq(&card.target, nick) {
+        return false;
+    }
+    if card.avatar_url.as_deref() == Some(avatar_url.as_str()) {
+        return false;
+    }
+    card.avatar_url = Some(avatar_url);
+    true
+}
+
+fn handle_whois_avatar_ready(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, nick, avatar_url)) =
+        parse_whois_avatar_ready(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("whois_avatar_ready rejected: invalid carrier or payload");
+        return;
+    };
+    // IRC's default mapping applies until the network's ISUPPORT says
+    // otherwise.
+    let casemapping = state
+        .isupport_by_network
+        .get(&network)
+        .map(|isupport| isupport.casemapping)
+        .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459);
+    if !apply_whois_avatar_ready(
+        &mut state.whois_card,
+        &network,
+        &nick,
+        avatar_url,
+        casemapping,
+    ) {
+        return;
+    }
+    let Some(card) = state.whois_card.as_ref() else {
+        return;
+    };
+    let shown = state.reply_view.as_ref().is_some_and(|view| {
+        view.kind == "whois_bundle" && view.network == card.network && view.subject == card.target
+    });
+    if shown {
+        let view = whois_bundle_view(card);
+        push_reply_view(ui, &view, false);
+        state.reply_view = Some(view);
+    }
+}
+
+/// A slash command sent as a user-topic verb and answered by a push (a
+/// requester reply, or the `invite_ack` acknowledgement): the WS verb plus
+/// its payload without `network_id` (added by `send_user_verb`), or `Usage`
+/// when a required argument is missing.
+#[derive(Debug, PartialEq)]
+enum ReplyCommand {
+    Request { verb: &'static str, payload: Value },
+    Usage,
+}
+
+/// Parses the reply-producing slash commands. `current_target` is the open
+/// window's channel (or query nick), used when an argument is optional.
+fn parse_reply_command(body: &str, current_target: &str) -> Option<ReplyCommand> {
+    let mut words = body.split_whitespace();
+    let command = words.next()?.to_ascii_lowercase();
+    let args: Vec<&str> = words.collect();
+    match command.as_str() {
+        "/who" => {
+            let target = args.first().copied().unwrap_or(current_target);
+            if target.is_empty() {
+                return Some(ReplyCommand::Usage);
+            }
+            Some(ReplyCommand::Request {
+                verb: "who",
+                payload: serde_json::json!({ "channel": target }),
+            })
+        }
+        "/info" => Some(ReplyCommand::Request {
+            verb: "info",
+            payload: serde_json::json!({}),
+        }),
+        "/version" => Some(ReplyCommand::Request {
+            verb: "version",
+            payload: serde_json::json!({}),
+        }),
+        // Same payload the member context menu sends; `server` asks a
+        // specific server (the two-argument IRC form) or stays `null`.
+        "/whois" => {
+            let Some(nick) = args.first() else {
+                return Some(ReplyCommand::Usage);
+            };
+            Some(ReplyCommand::Request {
+                verb: "whois",
+                payload: serde_json::json!({
+                    "nick": nick,
+                    "server": args.get(1),
+                    "source": "user",
+                }),
+            })
+        }
+        "/whowas" => {
+            let Some(nick) = args.first() else {
+                return Some(ReplyCommand::Usage);
+            };
+            Some(ReplyCommand::Request {
+                verb: "whowas",
+                payload: serde_json::json!({ "nick": nick }),
+            })
+        }
+        // `/banlist [#channel] [mode]`: the open channel by default, and the
+        // server itself defaults the list to `b`, so the mode is sent only
+        // when given.
+        "/banlist" => {
+            let (channel, rest) = match args.first() {
+                Some(first) if looks_like_channel(first) => (*first, &args[1..]),
+                _ => (current_target, &args[..]),
+            };
+            if !looks_like_channel(channel) {
+                return Some(ReplyCommand::Usage);
+            }
+            let payload = match rest.first().map(|mode| mode.trim_start_matches('+')) {
+                Some(mode) if !mode.is_empty() => {
+                    serde_json::json!({ "channel": channel, "mode": mode })
+                }
+                _ => serde_json::json!({ "channel": channel }),
+            };
+            Some(ReplyCommand::Request {
+                verb: "banlist",
+                payload,
+            })
+        }
+        // An optional server argument targets another server's MOTD/ADMIN.
+        "/motd" | "/admin" => {
+            let verb = if command == "/motd" { "motd" } else { "admin" };
+            let payload = match args.first() {
+                Some(target) => serde_json::json!({ "target": target }),
+                None => serde_json::json!({}),
+            };
+            Some(ReplyCommand::Request { verb, payload })
+        }
+        // `/invite <nick> [#channel]`: the open channel by default. The ircd's
+        // acknowledgement arrives as `invite_ack`; nothing is shown before it.
+        "/invite" => {
+            let Some(nick) = args.first() else {
+                return Some(ReplyCommand::Usage);
+            };
+            let channel = args.get(1).copied().unwrap_or(current_target);
+            if !looks_like_channel(channel) {
+                return Some(ReplyCommand::Usage);
+            }
+            Some(ReplyCommand::Request {
+                verb: "invite",
+                payload: serde_json::json!({ "channel": channel, "nick": nick }),
+            })
+        }
+        // `/lusers [mask [server]]`: both optional and positional, mask
+        // first; a server is never sent without a mask.
+        "/lusers" => {
+            let mut payload = serde_json::Map::new();
+            if let Some(mask) = args.first() {
+                payload.insert("mask".to_string(), Value::from(*mask));
+            }
+            if let Some(server) = args.get(1) {
+                payload.insert("server".to_string(), Value::from(*server));
+            }
+            Some(ReplyCommand::Request {
+                verb: "lusers",
+                payload: Value::Object(payload),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -10308,47 +13809,1767 @@ mod tests {
     }
 
     #[test]
-    fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 31);
-        // The kinds caught leaking as raw JSON in chat before being fixed
-        // this session — a regression here means one of them is no longer
-        // ignored and would start dumping raw JSON again.
-        for kind in ["bundle_hash", "mentions_bundle"] {
-            assert!(
-                IGNORED_KINDS.contains(&kind),
-                "{kind} should be in IGNORED_KINDS"
+    fn only_message_envelopes_render_as_chat_lines() {
+        assert!(renders_as_chat_line("message"));
+        // Every other kind has its own handler or explicit no-op; none may
+        // reach the chat-line path and leak as raw JSON.
+        for kind in [
+            "channel_created",
+            "bundle_hash",
+            "mentions_bundle",
+            "members_seeded",
+            "topic_changed",
+            "joined",
+            "server_settings_changed",
+        ] {
+            assert!(!renders_as_chat_line(kind), "{kind}");
+        }
+        // "parted" is confirmed never to be sent by the server, so it is
+        // not a protocol kind at all.
+        assert!(ClientEventKind::from_wire_name("parted").is_none());
+        assert!(ClientEventKind::from_wire_name("channel_created").is_some());
+    }
+
+    #[test]
+    fn parse_connection_progress_accepts_only_the_user_topic_and_known_network() {
+        let known: HashMap<String, i64> = HashMap::from([("libera".to_string(), 1)]);
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "connection_progress",
+            "network": "libera",
+            "state": "connecting",
+            "future_field": true
+        });
+        assert_eq!(
+            parse_connection_progress(&payload, topic, "vjt", &known),
+            Some(("libera".to_string(), ConnectionProgressState::Connecting))
+        );
+        let connected = serde_json::json!({
+            "kind": "connection_progress",
+            "network": "libera",
+            "state": "connected"
+        });
+        assert_eq!(
+            parse_connection_progress(&connected, topic, "vjt", &known),
+            Some(("libera".to_string(), ConnectionProgressState::Connected))
+        );
+
+        // Wrong carrier: another user's topic, or a channel-shaped topic.
+        assert_eq!(
+            parse_connection_progress(&payload, "grappa:user:other", "vjt", &known),
+            None
+        );
+        assert_eq!(
+            parse_connection_progress(
+                &payload,
+                "grappa:user:vjt/network:libera/channel:#rust",
+                "vjt",
+                &known
+            ),
+            None
+        );
+
+        for invalid in [
+            serde_json::json!({"kind": "connection_state_changed", "network": "libera", "state": "connecting"}),
+            serde_json::json!({"kind": "connection_progress", "network": "oftc", "state": "connecting"}),
+            serde_json::json!({"kind": "connection_progress", "network": "", "state": "connecting"}),
+            serde_json::json!({"kind": "connection_progress", "network": "libera", "state": "failed"}),
+            serde_json::json!({"kind": "connection_progress", "network": "libera"}),
+            serde_json::json!({"kind": "connection_progress", "state": "connecting"}),
+            serde_json::json!({"kind": "connection_progress", "network": 1, "state": "connecting"}),
+        ] {
+            assert_eq!(
+                parse_connection_progress(&invalid, topic, "vjt", &known),
+                None,
+                "{invalid} must be rejected"
             );
         }
-        // members_seeded/names_reply/topic_changed are handled, not
-        // ignored, so they must NOT be in this list — that would silently
-        // drop real state instead of applying it.
-        assert!(!IGNORED_KINDS.contains(&"members_seeded"));
-        assert!(!IGNORED_KINDS.contains(&"names_reply"));
-        assert!(!IGNORED_KINDS.contains(&"topic_changed"));
-        assert!(!IGNORED_KINDS.contains(&"channel_modes_changed"));
-        assert!(!IGNORED_KINDS.contains(&"read_cursor_set"));
-        assert!(!IGNORED_KINDS.contains(&"query_windows_list"));
-        assert!(!IGNORED_KINDS.contains(&"own_nick_changed"));
-        assert!(!IGNORED_KINDS.contains(&"away_confirmed"));
-        assert!(!IGNORED_KINDS.contains(&"window_counts"));
-        assert!(!IGNORED_KINDS.contains(&"joined"));
-        assert!(!IGNORED_KINDS.contains(&"channels_changed"));
-        assert!(!IGNORED_KINDS.contains(&"session_identity_changed"));
-        assert!(!IGNORED_KINDS.contains(&"isupport_changed"));
-        assert!(!IGNORED_KINDS.contains(&"umode_changed"));
-        assert!(!IGNORED_KINDS.contains(&"supported_umodes_changed"));
-        assert!(!IGNORED_KINDS.contains(&"join_failed"));
-        assert!(!IGNORED_KINDS.contains(&"kicked"));
-        assert!(!IGNORED_KINDS.contains(&"window_pending"));
-        assert!(!IGNORED_KINDS.contains(&"window_invited"));
-        assert!(!IGNORED_KINDS.contains(&"window_invite_declined"));
-        assert!(!IGNORED_KINDS.contains(&"network_detached"));
-        assert!(!IGNORED_KINDS.contains(&"network_attached"));
-        assert!(!IGNORED_KINDS.contains(&"connection_state_changed"));
-        // "parted" is confirmed to never actually be sent by the server
-        // — listing it here would be harmless but wrong documentation,
-        // so it must stay absent.
-        assert!(!IGNORED_KINDS.contains(&"parted"));
+    }
+
+    #[test]
+    fn connection_progress_toggles_the_badge_idempotently() {
+        let mut connecting = std::collections::HashSet::new();
+        assert!(apply_connection_progress(
+            &mut connecting,
+            "libera",
+            ConnectionProgressState::Connecting
+        ));
+        assert!(!apply_connection_progress(
+            &mut connecting,
+            "libera",
+            ConnectionProgressState::Connecting
+        ));
+        assert!(connecting.contains("libera"));
+        assert!(apply_connection_progress(
+            &mut connecting,
+            "libera",
+            ConnectionProgressState::Connected
+        ));
+        assert!(!apply_connection_progress(
+            &mut connecting,
+            "libera",
+            ConnectionProgressState::Connected
+        ));
+        assert!(connecting.is_empty());
+    }
+
+    #[test]
+    fn parse_recover_progress_validates_carrier_enums_and_open_reason() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "recover_progress",
+            "network": "azzurra",
+            "step": "identify",
+            "status": "failed",
+            "reason": "wrong_password",
+            "future_field": 1
+        });
+        assert_eq!(
+            parse_recover_progress(&payload, topic, "vjt"),
+            Some((
+                "azzurra".to_string(),
+                RecoverStepEntry {
+                    step: RecoverStep::Identify,
+                    status: RecoverStepStatus::Failed,
+                    reason: Some("wrong_password".to_string()),
+                }
+            ))
+        );
+        // A reason token the client doesn't know yet is kept, not rejected.
+        let future_reason = serde_json::json!({
+            "kind": "recover_progress",
+            "network": "azzurra",
+            "step": "release",
+            "status": "ok",
+            "reason": "some_future_reason"
+        });
+        assert_eq!(
+            parse_recover_progress(&future_reason, topic, "vjt").map(|(_, entry)| entry.reason),
+            Some(Some("some_future_reason".to_string()))
+        );
+        let running = serde_json::json!({
+            "kind": "recover_progress",
+            "network": "azzurra",
+            "step": "nick",
+            "status": "running",
+            "reason": null
+        });
+        assert_eq!(
+            parse_recover_progress(&running, topic, "vjt").map(|(_, entry)| entry.status),
+            Some(RecoverStepStatus::Running)
+        );
+
+        assert_eq!(
+            parse_recover_progress(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+        for invalid in [
+            serde_json::json!({"kind": "recover_result", "network": "azzurra", "step": "nick", "status": "ok", "reason": null}),
+            serde_json::json!({"kind": "recover_progress", "network": "", "step": "nick", "status": "ok", "reason": null}),
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "step": "ghost", "status": "ok", "reason": null}),
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "step": "nick", "status": "done", "reason": null}),
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "step": "nick", "status": "ok"}),
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "step": "nick", "status": "ok", "reason": 3}),
+        ] {
+            assert_eq!(
+                parse_recover_progress(&invalid, topic, "vjt"),
+                None,
+                "{invalid} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn recover_progress_opens_isolates_and_upserts_like_cicchetto() {
+        let entry = |step, status| RecoverStepEntry {
+            step,
+            status,
+            reason: None,
+        };
+        let mut panel = None;
+        assert!(apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            entry(RecoverStep::Identify, RecoverStepStatus::Running)
+        ));
+        assert!(apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            entry(RecoverStep::Nick, RecoverStepStatus::Running)
+        ));
+        // A known step is replaced in place, keeping the original order.
+        assert!(apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            entry(RecoverStep::Identify, RecoverStepStatus::Done)
+        ));
+        // Duplicates are no-ops.
+        assert!(!apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            entry(RecoverStep::Identify, RecoverStepStatus::Done)
+        ));
+        // Another network never mixes into the open panel.
+        assert!(!apply_recover_progress(
+            &mut panel,
+            "libera",
+            entry(RecoverStep::Release, RecoverStepStatus::Failed)
+        ));
+        let open = panel.clone().unwrap();
+        assert_eq!(open.network, "azzurra");
+        assert_eq!(
+            open.steps,
+            vec![
+                entry(RecoverStep::Identify, RecoverStepStatus::Done),
+                entry(RecoverStep::Nick, RecoverStepStatus::Running),
+            ]
+        );
+
+        // After a dismiss, the next progress event reopens a fresh panel.
+        panel = None;
+        assert!(apply_recover_progress(
+            &mut panel,
+            "libera",
+            entry(RecoverStep::Register, RecoverStepStatus::Running)
+        ));
+        assert_eq!(panel.unwrap().network, "libera");
+    }
+
+    #[test]
+    fn parse_recover_result_keeps_the_terminal_event_with_any_reason() {
+        let topic = "grappa:user:vjt";
+        let failed = serde_json::json!({
+            "kind": "recover_result",
+            "network": "azzurra",
+            "outcome": "failed",
+            "reason": "a_reason_added_later",
+            "future_field": []
+        });
+        assert_eq!(
+            parse_recover_result(&failed, topic, "vjt"),
+            Some((
+                "azzurra".to_string(),
+                RecoverOutcome::Failed,
+                Some("a_reason_added_later".to_string())
+            ))
+        );
+        let succeeded = serde_json::json!({
+            "kind": "recover_result",
+            "network": "azzurra",
+            "outcome": "succeeded",
+            "reason": null
+        });
+        assert_eq!(
+            parse_recover_result(&succeeded, topic, "vjt"),
+            Some(("azzurra".to_string(), RecoverOutcome::Succeeded, None))
+        );
+        assert_eq!(
+            parse_recover_result(&succeeded, "grappa:user:other", "vjt"),
+            None
+        );
+        for invalid in [
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "outcome": "failed", "reason": null}),
+            serde_json::json!({"kind": "recover_result", "network": "", "outcome": "failed", "reason": null}),
+            serde_json::json!({"kind": "recover_result", "network": "azzurra", "outcome": "partial", "reason": null}),
+            serde_json::json!({"kind": "recover_result", "network": "azzurra", "outcome": "failed"}),
+            serde_json::json!({"kind": "recover_result", "network": "azzurra", "outcome": "failed", "reason": false}),
+        ] {
+            assert_eq!(
+                parse_recover_result(&invalid, topic, "vjt"),
+                None,
+                "{invalid} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn recover_result_only_concludes_the_open_panel_of_its_network() {
+        // No panel open (dismissed, or progress never arrived): no-op.
+        let mut panel = None;
+        assert!(!apply_recover_result(
+            &mut panel,
+            "azzurra",
+            RecoverOutcome::Succeeded,
+            None
+        ));
+        assert!(panel.is_none());
+
+        assert!(apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            RecoverStepEntry {
+                step: RecoverStep::Identify,
+                status: RecoverStepStatus::Failed,
+                reason: Some("wrong_password".to_string()),
+            }
+        ));
+        // Another network cannot conclude it.
+        assert!(!apply_recover_result(
+            &mut panel,
+            "libera",
+            RecoverOutcome::Succeeded,
+            None
+        ));
+        assert_eq!(panel.as_ref().unwrap().outcome, None);
+
+        assert!(apply_recover_result(
+            &mut panel,
+            "azzurra",
+            RecoverOutcome::Failed,
+            Some("wrong_password".to_string())
+        ));
+        // Replaying the same result is a no-op.
+        assert!(!apply_recover_result(
+            &mut panel,
+            "azzurra",
+            RecoverOutcome::Failed,
+            Some("wrong_password".to_string())
+        ));
+        let open = panel.unwrap();
+        assert_eq!(open.outcome, Some(RecoverOutcome::Failed));
+        assert_eq!(open.outcome_reason.as_deref(), Some("wrong_password"));
+        assert_eq!(open.steps.len(), 1);
+    }
+
+    #[test]
+    fn parse_web_session_severed_accepts_any_string_code_on_the_user_topic() {
+        let topic = "grappa:user:vjt";
+        let flood = serde_json::json!({
+            "kind": "web_session_severed",
+            "code": "rate_limit_flood",
+            "future_field": true
+        });
+        assert_eq!(
+            parse_web_session_severed(&flood, topic, "vjt").as_deref(),
+            Some("rate_limit_flood")
+        );
+        // A code added by a later server still signs the client out.
+        let future_code =
+            serde_json::json!({"kind": "web_session_severed", "code": "admin_revoked"});
+        assert_eq!(
+            parse_web_session_severed(&future_code, topic, "vjt").as_deref(),
+            Some("admin_revoked")
+        );
+
+        assert_eq!(
+            parse_web_session_severed(&flood, "grappa:user:other", "vjt"),
+            None
+        );
+        assert_eq!(
+            parse_web_session_severed(
+                &flood,
+                "grappa:user:vjt/network:libera/channel:#rust",
+                "vjt"
+            ),
+            None
+        );
+        for invalid in [
+            serde_json::json!({"kind": "web_session_severed"}),
+            serde_json::json!({"kind": "web_session_severed", "code": null}),
+            serde_json::json!({"kind": "web_session_severed", "code": 429}),
+            serde_json::json!({"kind": "connection_progress", "code": "rate_limit_flood"}),
+        ] {
+            assert_eq!(
+                parse_web_session_severed(&invalid, topic, "vjt"),
+                None,
+                "{invalid} must be rejected"
+            );
+        }
+    }
+
+    fn who_user_json(nick: &str) -> Value {
+        serde_json::json!({
+            "nick": nick,
+            "user": "~u",
+            "host": "example.org",
+            "server": "irc.example.org",
+            "modes": "H@",
+            "channel": "#rust",
+            "hops": 0,
+            "realname": "Real Name"
+        })
+    }
+
+    #[test]
+    fn parse_who_reply_is_strict_per_row() {
+        let topic = "grappa:user:vjt";
+        let mut nulls = who_user_json("bob");
+        nulls["hops"] = Value::Null;
+        nulls["realname"] = Value::Null;
+        let payload = serde_json::json!({
+            "kind": "who_reply",
+            "network": "libera",
+            "target": "#rust",
+            "users": [who_user_json("alice"), nulls],
+            "future_field": 1
+        });
+        let reply = parse_who_reply(&payload, topic, "vjt").expect("valid who_reply");
+        assert_eq!(reply.network, "libera");
+        assert_eq!(reply.target, "#rust");
+        assert_eq!(reply.users.len(), 2);
+        assert_eq!(reply.users[0].hops, Some(0));
+        assert_eq!(reply.users[1].hops, None);
+        assert_eq!(reply.users[1].realname, None);
+
+        let empty = serde_json::json!({
+            "kind": "who_reply", "network": "libera", "target": "#rust", "users": []
+        });
+        let view = who_reply_view(&parse_who_reply(&empty, topic, "vjt").unwrap());
+        assert_eq!(view.rows, vec![("who-empty".to_string(), String::new())]);
+
+        assert!(parse_who_reply(&payload, "grappa:user:other", "vjt").is_none());
+        // One malformed row drops the whole bundle.
+        let mut bad_row = who_user_json("carol");
+        bad_row["modes"] = Value::Null;
+        let mut missing_realname = who_user_json("dave");
+        missing_realname.as_object_mut().unwrap().remove("realname");
+        let mut string_hops = who_user_json("erin");
+        string_hops["hops"] = serde_json::json!("2");
+        for bad in [bad_row, missing_realname, string_hops] {
+            let payload = serde_json::json!({
+                "kind": "who_reply",
+                "network": "libera",
+                "target": "#rust",
+                "users": [who_user_json("alice"), bad]
+            });
+            assert!(parse_who_reply(&payload, topic, "vjt").is_none());
+        }
+        let no_users =
+            serde_json::json!({"kind": "who_reply", "network": "libera", "target": "#rust"});
+        assert!(parse_who_reply(&no_users, topic, "vjt").is_none());
+    }
+
+    #[test]
+    fn parse_server_reply_accepts_only_the_four_sources_and_string_lines() {
+        let topic = "grappa:user:vjt";
+        for source in ["info", "version", "motd", "admin"] {
+            let payload = serde_json::json!({
+                "kind": "server_reply",
+                "network": "libera",
+                "source": source,
+                "lines": ["first line", "", "  indented"],
+                "future_field": null
+            });
+            let (network, parsed, lines) =
+                parse_server_reply(&payload, topic, "vjt").expect("valid server_reply");
+            assert_eq!(network, "libera");
+            assert_eq!(parsed, source);
+            assert_eq!(lines, vec!["first line", "", "  indented"]);
+        }
+        let empty = serde_json::json!({
+            "kind": "server_reply", "network": "libera", "source": "motd", "lines": []
+        });
+        let (network, source, lines) = parse_server_reply(&empty, topic, "vjt").unwrap();
+        assert_eq!(
+            server_reply_view(&network, source, &lines).rows,
+            vec![("reply-empty".to_string(), String::new())]
+        );
+        for invalid in [
+            serde_json::json!({"kind": "server_reply", "network": "libera", "source": "stats", "lines": []}),
+            serde_json::json!({"kind": "server_reply", "network": "libera", "source": "motd", "lines": ["ok", 7]}),
+            serde_json::json!({"kind": "server_reply", "network": "libera", "source": "motd"}),
+            serde_json::json!({"kind": "server_reply", "network": "", "source": "motd", "lines": []}),
+        ] {
+            assert!(
+                parse_server_reply(&invalid, topic, "vjt").is_none(),
+                "{invalid}"
+            );
+        }
+        assert!(parse_server_reply(&empty, "grappa:user:other", "vjt").is_none());
+    }
+
+    #[test]
+    fn server_reply_commands_map_to_their_verbs() {
+        let request = |verb: &'static str, payload: Value| ReplyCommand::Request { verb, payload };
+        assert_eq!(
+            parse_reply_command("/info", "#rust"),
+            Some(request("info", serde_json::json!({})))
+        );
+        assert_eq!(
+            parse_reply_command("/version", "#rust"),
+            Some(request("version", serde_json::json!({})))
+        );
+        assert_eq!(
+            parse_reply_command("/motd", "#rust"),
+            Some(request("motd", serde_json::json!({})))
+        );
+        assert_eq!(
+            parse_reply_command("/motd irc.example.org", "#rust"),
+            Some(request(
+                "motd",
+                serde_json::json!({"target": "irc.example.org"})
+            ))
+        );
+        assert_eq!(
+            parse_reply_command("/admin hub.example.org", "#rust"),
+            Some(request(
+                "admin",
+                serde_json::json!({"target": "hub.example.org"})
+            ))
+        );
+    }
+
+    fn whois_bundle_json() -> Value {
+        serde_json::json!({
+            "kind": "whois_bundle",
+            "network": "libera",
+            "target": "alice",
+            "source": "user",
+            "user": "~alice",
+            "host": "example.org",
+            "realname": "Alice",
+            "server": "irc.example.org",
+            "server_info": "Example IRC",
+            "is_operator": false,
+            "oper_text": null,
+            "idle_seconds": 3725,
+            "signon": null,
+            "channels": ["#rust", "@#cordiale"],
+            "using_ssl": true,
+            "is_registered": true,
+            "is_admin": false,
+            "is_services_admin": false,
+            "is_helper": false,
+            "is_chanop": false,
+            "is_agent": false,
+            "is_java": false,
+            "umodes": null,
+            "away_message": null,
+            "actually_host": null,
+            "actually_ip": null,
+            "account": "alice",
+            "secure": true,
+            "secure_cipher": "TLS_AES_256_GCM_SHA384",
+            "certfp": null,
+            "extra_lines": [{"numeric": 320, "text": "is a bot"}],
+            "avatar_url": null,
+            "future_field": {}
+        })
+    }
+
+    #[test]
+    fn parse_whois_bundle_is_strict_per_field() {
+        let topic = "grappa:user:vjt";
+        let bundle = parse_whois_bundle(&whois_bundle_json(), topic, "vjt").expect("valid bundle");
+        assert_eq!(bundle.target, "alice");
+        assert_eq!(bundle.idle_seconds, Some(3725));
+        assert_eq!(
+            bundle.channels,
+            Some(vec!["#rust".to_string(), "@#cordiale".to_string()])
+        );
+        assert_eq!(
+            bundle.extra_lines,
+            Some(vec![(320, "is a bot".to_string())])
+        );
+        assert_eq!(bundle.avatar_url, None);
+
+        let view = whois_bundle_view(&bundle);
+        assert_eq!(view.kind, "whois_bundle");
+        assert_eq!(view.subject, "alice");
+        assert!(view.rows.contains(&(
+            "whois-userhost".to_string(),
+            "~alice@example.org".to_string()
+        )));
+        assert!(view
+            .rows
+            .contains(&("whois-idle".to_string(), "1:02:05".to_string())));
+        assert!(view
+            .rows
+            .contains(&("whois-registered".to_string(), String::new())));
+        assert!(view
+            .rows
+            .contains(&(String::new(), "320 is a bot".to_string())));
+
+        // Tolerated: absent `source` (means user), `rail`, absent avatar.
+        let mut tolerated = whois_bundle_json();
+        let fields = tolerated.as_object_mut().unwrap();
+        fields.remove("source");
+        fields.remove("avatar_url");
+        assert!(parse_whois_bundle(&tolerated, topic, "vjt").is_some());
+        let mut rail = whois_bundle_json();
+        rail["source"] = serde_json::json!("rail");
+        assert!(parse_whois_bundle(&rail, topic, "vjt").is_some());
+
+        assert!(parse_whois_bundle(&whois_bundle_json(), "grappa:user:other", "vjt").is_none());
+        let breakers: [(&str, Option<Value>); 6] = [
+            ("source", Some(serde_json::json!("sidebar"))),
+            ("is_admin", None),
+            ("realname", None),
+            ("extra_lines", None),
+            ("channels", Some(serde_json::json!(["#ok", 3]))),
+            ("idle_seconds", Some(serde_json::json!("12"))),
+        ];
+        for (key, replacement) in breakers {
+            let mut broken = whois_bundle_json();
+            match replacement {
+                Some(value) => broken[key] = value,
+                None => {
+                    broken.as_object_mut().unwrap().remove(key);
+                }
+            }
+            assert!(
+                parse_whois_bundle(&broken, topic, "vjt").is_none(),
+                "{key} must invalidate the bundle"
+            );
+        }
+    }
+
+    #[test]
+    fn whois_avatar_ready_patches_only_the_matching_open_card() {
+        use cordiale_core::isupport::CaseMapping;
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "whois_avatar_ready",
+            "network": "libera",
+            "nick": "ALICE",
+            "avatar_url": "/networks/1/peer_avatar/alice"
+        });
+        let (network, nick, avatar_url) =
+            parse_whois_avatar_ready(&payload, topic, "vjt").expect("valid avatar event");
+        assert!(parse_whois_avatar_ready(&payload, "grappa:user:other", "vjt").is_none());
+        for missing in ["network", "nick", "avatar_url"] {
+            let mut broken = payload.clone();
+            broken.as_object_mut().unwrap().remove(missing);
+            assert!(parse_whois_avatar_ready(&broken, topic, "vjt").is_none());
+        }
+
+        // No open card: a late completion is a no-op.
+        let mut card = None;
+        assert!(!apply_whois_avatar_ready(
+            &mut card,
+            &network,
+            &nick,
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+
+        let mut bundle = parse_whois_bundle(&whois_bundle_json(), topic, "vjt").unwrap();
+        bundle.target = "Alice[x]".to_string();
+        card = Some(bundle);
+        // A different network or nick never gets patched.
+        assert!(!apply_whois_avatar_ready(
+            &mut card,
+            "oftc",
+            "alice{x}",
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+        assert!(!apply_whois_avatar_ready(
+            &mut card,
+            "libera",
+            "bob",
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+        // Same nick under the network's casemapping: patched once.
+        assert!(apply_whois_avatar_ready(
+            &mut card,
+            "libera",
+            "alice{x}",
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+        assert!(!apply_whois_avatar_ready(
+            &mut card,
+            "libera",
+            "alice{x}",
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+        assert_eq!(
+            card.unwrap().avatar_url.as_deref(),
+            Some("/networks/1/peer_avatar/alice")
+        );
+    }
+
+    #[test]
+    fn parse_whowas_bundle_separates_not_found_from_invalid() {
+        let topic = "grappa:user:vjt";
+        let found = serde_json::json!({
+            "kind": "whowas_bundle",
+            "network": "libera",
+            "target": "oldnick",
+            "user": "~old",
+            "host": "example.org",
+            "realname": "Old Nick",
+            "server": "irc.example.org",
+            "logoff_time": "Tue Sep 22 10:00:00 2026",
+            "not_found": false
+        });
+        let view = parse_whowas_bundle(&found, topic, "vjt").expect("valid whowas");
+        assert_eq!(view.kind, "whowas_bundle");
+        assert_eq!(view.subject, "oldnick");
+        assert_eq!(
+            view.rows[0],
+            ("whois-userhost".to_string(), "~old@example.org".to_string())
+        );
+        assert!(view.rows.contains(&(
+            "whowas-logoff".to_string(),
+            "Tue Sep 22 10:00:00 2026".to_string()
+        )));
+
+        let not_found = serde_json::json!({
+            "kind": "whowas_bundle",
+            "network": "libera",
+            "target": "ghost",
+            "user": null,
+            "host": null,
+            "realname": null,
+            "server": null,
+            "logoff_time": null,
+            "not_found": true
+        });
+        assert_eq!(
+            parse_whowas_bundle(&not_found, topic, "vjt").unwrap().rows,
+            vec![("whowas-not-found".to_string(), String::new())]
+        );
+
+        assert!(parse_whowas_bundle(&found, "grappa:user:other", "vjt").is_none());
+        for key in ["user", "logoff_time", "not_found", "target"] {
+            let mut broken = found.clone();
+            broken.as_object_mut().unwrap().remove(key);
+            assert!(
+                parse_whowas_bundle(&broken, topic, "vjt").is_none(),
+                "{key}"
+            );
+        }
+        let mut wrong_type = found.clone();
+        wrong_type["not_found"] = serde_json::json!("no");
+        assert!(parse_whowas_bundle(&wrong_type, topic, "vjt").is_none());
+
+        assert_eq!(
+            parse_reply_command("/whowas oldnick", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "whowas",
+                payload: serde_json::json!({"nick": "oldnick"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/whowas", "#rust"),
+            Some(ReplyCommand::Usage)
+        );
+    }
+
+    #[test]
+    fn parse_banlist_bundle_keeps_mode_and_entry_order() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "banlist_bundle",
+            "network": "libera",
+            "channel": "#rust",
+            "mode": "e",
+            "entries": [
+                {"mask": "*!*@a.example", "setter": "op", "set_ts": "1789900000"},
+                {"mask": "*!*@b.example", "setter": null, "set_ts": null}
+            ]
+        });
+        let view = parse_banlist_bundle(&payload, topic, "vjt").expect("valid banlist");
+        assert_eq!(view.subject, "#rust +e");
+        assert_eq!(
+            view.rows,
+            vec![
+                (String::new(), "*!*@a.example — op 1789900000".to_string()),
+                (String::new(), "*!*@b.example".to_string()),
+            ]
+        );
+        let empty = serde_json::json!({
+            "kind": "banlist_bundle", "network": "libera", "channel": "#rust",
+            "mode": "b", "entries": []
+        });
+        assert_eq!(
+            parse_banlist_bundle(&empty, topic, "vjt").unwrap().rows,
+            vec![("banlist-empty".to_string(), String::new())]
+        );
+        assert!(parse_banlist_bundle(&payload, "grappa:user:other", "vjt").is_none());
+        let mut no_mode = payload.clone();
+        no_mode.as_object_mut().unwrap().remove("mode");
+        assert!(parse_banlist_bundle(&no_mode, topic, "vjt").is_none());
+        let mut bad_entry = payload.clone();
+        bad_entry["entries"][1]["setter"] = serde_json::json!(5);
+        assert!(parse_banlist_bundle(&bad_entry, topic, "vjt").is_none());
+        let mut missing_ts = payload.clone();
+        missing_ts["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("set_ts");
+        assert!(parse_banlist_bundle(&missing_ts, topic, "vjt").is_none());
+    }
+
+    #[test]
+    fn banlist_command_defaults_to_the_open_channel() {
+        let request = |payload: Value| ReplyCommand::Request {
+            verb: "banlist",
+            payload,
+        };
+        assert_eq!(
+            parse_reply_command("/banlist", "#rust"),
+            Some(request(serde_json::json!({"channel": "#rust"})))
+        );
+        assert_eq!(
+            parse_reply_command("/banlist +e", "#rust"),
+            Some(request(
+                serde_json::json!({"channel": "#rust", "mode": "e"})
+            ))
+        );
+        assert_eq!(
+            parse_reply_command("/banlist #other I", "#rust"),
+            Some(request(
+                serde_json::json!({"channel": "#other", "mode": "I"})
+            ))
+        );
+        // In a query window there is no channel to default to.
+        assert_eq!(
+            parse_reply_command("/banlist", "alice"),
+            Some(ReplyCommand::Usage)
+        );
+    }
+
+    #[test]
+    fn parse_auto_away_debounce_keeps_null_and_zero_distinct() {
+        let topic = "grappa:user:vjt";
+        let payload = |value: Value| serde_json::json!({"kind": "auto_away_debounce_changed", "auto_away_debounce_seconds": value});
+        assert_eq!(
+            parse_auto_away_debounce_changed(&payload(Value::Null), topic, "vjt"),
+            Some(AutoAwayDebounce::ServerDefault)
+        );
+        assert_eq!(
+            parse_auto_away_debounce_changed(&payload(serde_json::json!(0)), topic, "vjt"),
+            Some(AutoAwayDebounce::Disabled)
+        );
+        assert_eq!(
+            parse_auto_away_debounce_changed(&payload(serde_json::json!(300)), topic, "vjt"),
+            Some(AutoAwayDebounce::Seconds(300))
+        );
+        assert_eq!(AutoAwayDebounce::ServerDefault.display_token(), "default");
+        assert_eq!(AutoAwayDebounce::Disabled.display_token(), "off");
+        assert_eq!(AutoAwayDebounce::Seconds(300).display_token(), "300");
+
+        for invalid in [
+            payload(serde_json::json!(-1)),
+            payload(serde_json::json!(1.5)),
+            payload(serde_json::json!("300")),
+            serde_json::json!({"kind": "auto_away_debounce_changed"}),
+        ] {
+            assert_eq!(
+                parse_auto_away_debounce_changed(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_auto_away_debounce_changed(&payload(Value::Null), "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn list_command_takes_an_optional_search() {
+        assert_eq!(parse_list_command("/list"), Some(String::new()));
+        assert_eq!(
+            parse_list_command("  /LIST  rust lang "),
+            Some("rust lang".to_string())
+        );
+        assert_eq!(parse_list_command("/listen"), None);
+        assert_eq!(parse_list_command("hello /list"), None);
+    }
+
+    #[test]
+    fn parse_directory_count_signal_checks_counter_and_network() {
+        let topic = "grappa:user:vjt";
+        let progress = |payload: &Value| {
+            parse_directory_count_signal(payload, topic, "vjt", "directory_progress", "count")
+        };
+        let complete = |payload: &Value| {
+            parse_directory_count_signal(payload, topic, "vjt", "directory_complete", "total")
+        };
+        assert_eq!(
+            progress(
+                &serde_json::json!({"kind": "directory_progress", "network": "libera", "count": 250})
+            ),
+            Some("libera".to_string())
+        );
+        assert_eq!(
+            complete(
+                &serde_json::json!({"kind": "directory_complete", "network": "libera", "total": 0})
+            ),
+            Some("libera".to_string())
+        );
+        for invalid in [
+            serde_json::json!({"kind": "directory_progress", "network": "libera", "count": -1}),
+            serde_json::json!({"kind": "directory_progress", "network": "libera"}),
+            serde_json::json!({"kind": "directory_progress", "network": "", "count": 1}),
+            serde_json::json!({"kind": "directory_complete", "network": "libera", "count": 1}),
+        ] {
+            assert_eq!(progress(&invalid), None, "{invalid}");
+        }
+        // `directory_complete` carries `total`, not `count`.
+        assert_eq!(
+            complete(
+                &serde_json::json!({"kind": "directory_complete", "network": "libera", "count": 1})
+            ),
+            None
+        );
+        assert_eq!(
+            parse_directory_count_signal(
+                &serde_json::json!({"kind": "directory_progress", "network": "libera", "count": 1}),
+                "grappa:user:other",
+                "vjt",
+                "directory_progress",
+                "count"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_directory_failed_keeps_any_reason() {
+        let topic = "grappa:user:vjt";
+        assert_eq!(
+            parse_directory_failed(
+                &serde_json::json!({"kind": "directory_failed", "network": "libera", "reason": "timeout"}),
+                topic,
+                "vjt"
+            ),
+            Some(("libera".to_string(), "timeout".to_string()))
+        );
+        // `reason` is an open set: a future token is kept, not rejected.
+        assert_eq!(
+            parse_directory_failed(
+                &serde_json::json!({"kind": "directory_failed", "network": "libera", "reason": "flood"}),
+                topic,
+                "vjt"
+            ),
+            Some(("libera".to_string(), "flood".to_string()))
+        );
+        for invalid in [
+            serde_json::json!({"kind": "directory_failed", "network": "libera"}),
+            serde_json::json!({"kind": "directory_failed", "network": "libera", "reason": null}),
+            serde_json::json!({"kind": "directory_failed", "network": "", "reason": "timeout"}),
+        ] {
+            assert_eq!(
+                parse_directory_failed(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_directory_failed(
+                &serde_json::json!({"kind": "directory_failed", "network": "libera", "reason": "timeout"}),
+                "grappa:user:other",
+                "vjt"
+            ),
+            None
+        );
+    }
+
+    fn dcc_offer_payload() -> Value {
+        serde_json::json!({
+            "kind": "dcc_offer",
+            "network": "libera",
+            "channel": "$server",
+            "offer_id": "off-1",
+            "from": "alice",
+            "filename": "notes.txt",
+            "size": 1536,
+            "future_field": true
+        })
+    }
+
+    #[test]
+    fn parse_dcc_offer_requires_every_field() {
+        let topic = "grappa:user:vjt";
+        let offer = parse_dcc_offer(&dcc_offer_payload(), topic, "vjt").expect("valid offer");
+        assert_eq!(offer.offer_id, "off-1");
+        assert_eq!(offer.channel, "$server");
+        assert_eq!(offer.size, 1536);
+        for key in ["network", "channel", "offer_id", "from", "filename", "size"] {
+            let mut missing = dcc_offer_payload();
+            missing.as_object_mut().expect("object").remove(key);
+            assert_eq!(parse_dcc_offer(&missing, topic, "vjt"), None, "{key}");
+        }
+        for (key, invalid) in [
+            ("size", serde_json::json!(-1)),
+            ("size", serde_json::json!("1536")),
+            ("offer_id", serde_json::json!("")),
+            ("offer_id", serde_json::json!(7)),
+            ("network", serde_json::json!(" ")),
+        ] {
+            let mut payload = dcc_offer_payload();
+            payload[key] = invalid;
+            assert_eq!(parse_dcc_offer(&payload, topic, "vjt"), None, "{key}");
+        }
+        assert_eq!(
+            parse_dcc_offer(&dcc_offer_payload(), "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn apply_dcc_offer_replaces_by_offer_id() {
+        let topic = "grappa:user:vjt";
+        let offer = parse_dcc_offer(&dcc_offer_payload(), topic, "vjt").expect("valid offer");
+        let mut offers = Vec::new();
+        assert!(apply_dcc_offer(&mut offers, offer.clone()));
+        // The subscribe backfill re-sends held offers: same offer, no change.
+        assert!(!apply_dcc_offer(&mut offers, offer.clone()));
+        let mut renamed = offer.clone();
+        renamed.filename = "notes-v2.txt".to_string();
+        assert!(apply_dcc_offer(&mut offers, renamed));
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].filename, "notes-v2.txt");
+        let mut other = offer;
+        other.offer_id = "off-2".to_string();
+        assert!(apply_dcc_offer(&mut offers, other));
+        assert_eq!(offers.len(), 2);
+    }
+
+    #[test]
+    fn dcc_offer_resolved_drops_only_a_held_offer() {
+        let topic = "grappa:user:vjt";
+        let resolved = |resolution: &str| {
+            serde_json::json!({
+                "kind": "dcc_offer_resolved",
+                "network": "libera",
+                "channel": "$server",
+                "offer_id": "off-1",
+                "resolution": resolution
+            })
+        };
+        for (wire, expected) in [
+            ("accepted", DccResolution::Accepted),
+            ("refused", DccResolution::Refused),
+            ("expired", DccResolution::Expired),
+        ] {
+            assert_eq!(
+                parse_dcc_offer_resolved(&resolved(wire), topic, "vjt"),
+                Some(("off-1".to_string(), expected))
+            );
+        }
+        // A resolution this client doesn't know drops the event.
+        assert_eq!(
+            parse_dcc_offer_resolved(&resolved("cancelled"), topic, "vjt"),
+            None
+        );
+        let mut missing_channel = resolved("accepted");
+        missing_channel
+            .as_object_mut()
+            .expect("object")
+            .remove("channel");
+        assert_eq!(
+            parse_dcc_offer_resolved(&missing_channel, topic, "vjt"),
+            None
+        );
+        assert_eq!(
+            parse_dcc_offer_resolved(&resolved("accepted"), "grappa:user:other", "vjt"),
+            None
+        );
+
+        let offer = parse_dcc_offer(&dcc_offer_payload(), topic, "vjt").expect("valid offer");
+        let mut offers = vec![offer];
+        assert_eq!(apply_dcc_offer_resolved(&mut offers, "unknown"), None);
+        assert_eq!(offers.len(), 1);
+        let removed = apply_dcc_offer_resolved(&mut offers, "off-1").expect("held");
+        assert_eq!(removed.filename, "notes.txt");
+        assert!(offers.is_empty());
+    }
+
+    #[test]
+    fn format_file_size_uses_binary_units() {
+        assert_eq!(format_file_size(0), "0 B");
+        assert_eq!(format_file_size(1023), "1023 B");
+        assert_eq!(format_file_size(1536), "1.5 KiB");
+        assert_eq!(format_file_size(5 * 1024 * 1024), "5.0 MiB");
+    }
+
+    #[test]
+    fn dcc_answer_errors_map_to_status_keys() {
+        assert_eq!(dcc_answer_error_status(Some(404)), "dcc-offer-gone");
+        assert_eq!(dcc_answer_error_status(Some(429)), "dcc-rate-limited");
+        assert_eq!(dcc_answer_error_status(Some(503)), "dcc-not-connected");
+        assert_eq!(dcc_answer_error_status(Some(507)), "dcc-no-space");
+        assert_eq!(dcc_answer_error_status(Some(500)), "dcc-action-failed");
+        assert_eq!(dcc_answer_error_status(None), "dcc-action-failed");
+    }
+
+    #[test]
+    fn parse_archive_changed_reads_network_slug() {
+        let topic = "grappa:user:vjt";
+        assert_eq!(
+            parse_archive_changed(
+                &serde_json::json!({"kind": "archive_changed", "network_slug": "libera"}),
+                topic,
+                "vjt"
+            ),
+            Some("libera".to_string())
+        );
+        for invalid in [
+            serde_json::json!({"kind": "archive_changed", "network": "libera"}),
+            serde_json::json!({"kind": "archive_changed", "network_slug": ""}),
+            serde_json::json!({"kind": "archive_purged", "network_slug": "libera"}),
+        ] {
+            assert_eq!(
+                parse_archive_changed(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_archive_changed(
+                &serde_json::json!({"kind": "archive_changed", "network_slug": "libera"}),
+                "grappa:user:other",
+                "vjt"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn archive_purged_matches_the_target_case_insensitively() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({"kind": "archive_purged", "network_slug": "libera", "target": "#Old"});
+        assert_eq!(
+            parse_archive_purged(&payload, topic, "vjt"),
+            Some(("libera".to_string(), "#Old".to_string()))
+        );
+        for invalid in [
+            serde_json::json!({"kind": "archive_purged", "network_slug": "libera"}),
+            serde_json::json!({"kind": "archive_purged", "network_slug": "libera", "target": ""}),
+            serde_json::json!({"kind": "archive_purged", "network": "libera", "target": "#old"}),
+        ] {
+            assert_eq!(
+                parse_archive_purged(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_archive_purged(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+
+        let mapping = cordiale_core::isupport::CaseMapping::Rfc1459;
+        let key = |network: &str, window: &str| (network.to_string(), window.to_string());
+        assert!(is_purged_window(
+            &key("libera", "#old"),
+            "libera",
+            "#Old",
+            mapping
+        ));
+        assert!(is_purged_window(
+            &key("libera", "Nick[a]"),
+            "libera",
+            "nick{a}",
+            mapping
+        ));
+        assert!(!is_purged_window(
+            &key("oftc", "#old"),
+            "libera",
+            "#Old",
+            mapping
+        ));
+        assert!(!is_purged_window(
+            &key("libera", "#older"),
+            "libera",
+            "#Old",
+            mapping
+        ));
+    }
+
+    #[test]
+    fn parse_notify_list_groups_nicks_by_network_id() {
+        let topic = "grappa:user:vjt";
+        let entry = |network_id: i64, nick: &str| serde_json::json!({"network_id": network_id, "nick": nick, "added_at": "2026-09-23T10:00:00Z"});
+        let payload = serde_json::json!({
+            "kind": "notify_list",
+            "networks": {"7": [entry(7, "alice"), entry(7, "bob")], "9": []}
+        });
+        let lists = parse_notify_list(&payload, topic, "vjt").expect("valid snapshot");
+        assert_eq!(
+            lists.get(&7),
+            Some(&vec!["alice".to_string(), "bob".to_string()])
+        );
+        assert_eq!(lists.get(&9), Some(&Vec::new()));
+        // An empty snapshot is valid and clears every list.
+        assert_eq!(
+            parse_notify_list(
+                &serde_json::json!({"kind": "notify_list", "networks": {}}),
+                topic,
+                "vjt"
+            ),
+            Some(HashMap::new())
+        );
+        for invalid in [
+            serde_json::json!({"kind": "notify_list"}),
+            serde_json::json!({"kind": "notify_list", "networks": {"libera": []}}),
+            serde_json::json!({"kind": "notify_list", "networks": {"7": [{"network_id": 7, "nick": "alice"}]}}),
+            serde_json::json!({"kind": "notify_list", "networks": {"7": [{"network_id": "7", "nick": "alice", "added_at": "x"}]}}),
+        ] {
+            assert_eq!(parse_notify_list(&invalid, topic, "vjt"), None, "{invalid}");
+        }
+        assert_eq!(
+            parse_notify_list(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_presence_snapshot_keeps_unknown_distinct() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "presence_snapshot",
+            "network_id": 7,
+            "nicks": {"alice": "online", "Bob": "offline", "carol": "unknown"}
+        });
+        let (network_id, nicks) =
+            parse_presence_snapshot(&payload, topic, "vjt").expect("valid snapshot");
+        assert_eq!(network_id, 7);
+        assert_eq!(nicks.get("alice"), Some(&Presence::Online));
+        assert_eq!(nicks.get("bob"), Some(&Presence::Offline));
+        assert_eq!(nicks.get("carol"), Some(&Presence::Unknown));
+        for invalid in [
+            serde_json::json!({"kind": "presence_snapshot", "network_id": 7, "nicks": {"alice": "away"}}),
+            serde_json::json!({"kind": "presence_snapshot", "network_id": "7", "nicks": {}}),
+            serde_json::json!({"kind": "presence_snapshot", "network_id": 7}),
+        ] {
+            assert_eq!(
+                parse_presence_snapshot(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_presence_snapshot(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+        // ASCII folding only: IRC brackets are not folded for presence keys.
+        assert_eq!(presence_key("Nick[A]"), "nick[a]");
+    }
+
+    #[test]
+    fn parse_presence_changed_validates_closed_sets() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "presence_changed",
+            "network_id": 7,
+            "nick": "Alice",
+            "presence": "online",
+            "initial": false,
+            "source": "monitor",
+            "ts": "2026-09-23T10:00:00Z"
+        });
+        assert_eq!(
+            parse_presence_changed(&payload, topic, "vjt"),
+            Some(PresenceChange {
+                network_id: 7,
+                nick: "Alice".to_string(),
+                presence: Presence::Online,
+                initial: false,
+            })
+        );
+        for (key, invalid) in [
+            ("presence", serde_json::json!("unknown")),
+            ("source", serde_json::json!("guess")),
+            ("initial", serde_json::json!("false")),
+            ("ts", serde_json::json!(1)),
+            ("nick", serde_json::json!("")),
+            ("network_id", serde_json::json!("7")),
+        ] {
+            let mut changed = payload.clone();
+            changed[key] = invalid;
+            assert_eq!(
+                parse_presence_changed(&changed, topic, "vjt"),
+                None,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            parse_presence_changed(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_presence_error_keeps_reason_open() {
+        let topic = "grappa:user:vjt";
+        let payload = |reason: &str| serde_json::json!({"kind": "presence_error", "network_id": 7, "reason": reason, "detail": "alice,bob"});
+        assert_eq!(
+            parse_presence_error(&payload("list_full"), topic, "vjt"),
+            Some((7, "list_full".to_string(), "alice,bob".to_string()))
+        );
+        assert_eq!(
+            parse_presence_error(&payload("target_rejected"), topic, "vjt"),
+            Some((7, "target_rejected".to_string(), "alice,bob".to_string()))
+        );
+        let mut missing_detail = payload("list_full");
+        missing_detail
+            .as_object_mut()
+            .expect("object")
+            .remove("detail");
+        assert_eq!(parse_presence_error(&missing_detail, topic, "vjt"), None);
+        assert_eq!(
+            parse_presence_error(&payload("list_full"), "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_peer_away_allows_an_empty_message() {
+        let topic = "grappa:user:vjt";
+        let payload = |message: Value| serde_json::json!({"kind": "peer_away", "network": "libera", "peer": "Alice", "message": message});
+        assert_eq!(
+            parse_peer_away(&payload(serde_json::json!("lunch")), topic, "vjt"),
+            Some((
+                "libera".to_string(),
+                "Alice".to_string(),
+                "lunch".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_peer_away(&payload(serde_json::json!("")), topic, "vjt"),
+            Some(("libera".to_string(), "Alice".to_string(), String::new()))
+        );
+        assert_eq!(parse_peer_away(&payload(Value::Null), topic, "vjt"), None);
+        assert_eq!(
+            parse_peer_away(
+                &serde_json::json!({"kind": "peer_away", "network": "libera", "peer": "", "message": "x"}),
+                topic,
+                "vjt"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_peer_away(
+                &payload(serde_json::json!("lunch")),
+                "grappa:user:other",
+                "vjt"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_mentions_bundle_keeps_order_and_null_bodies() {
+        let topic = "grappa:user:vjt";
+        let message = |kind: &str, body: Value| serde_json::json!({"server_time": 1790000000000_i64, "channel": "#rust", "sender": "alice", "body": body, "kind": kind});
+        let payload = serde_json::json!({
+            "kind": "mentions_bundle",
+            "network": "libera",
+            "away_started_at": "2026-09-23T08:00:00Z",
+            "away_ended_at": "2026-09-23T09:00:00Z",
+            "away_reason": null,
+            "messages": [message("privmsg", serde_json::json!("vjt: ping")), message("action", Value::Null)]
+        });
+        let view = parse_mentions_bundle(&payload, topic, "vjt").expect("valid bundle");
+        assert_eq!(view.kind, "mentions_bundle");
+        assert_eq!(view.network, "libera");
+        // Away period, then the two messages in order; no reason row for null.
+        assert_eq!(view.rows.len(), 3);
+        assert_eq!(view.rows[0].0, "mentions-away-period");
+        assert!(view.rows[1].1.ends_with("#rust <alice> vjt: ping"));
+        assert!(view.rows[2].1.ends_with("#rust * alice "));
+
+        let mut with_reason = payload.clone();
+        with_reason["away_reason"] = serde_json::json!("lunch");
+        let view = parse_mentions_bundle(&with_reason, topic, "vjt").expect("valid bundle");
+        assert_eq!(
+            view.rows[1],
+            ("mentions-away-reason".to_string(), "lunch".to_string())
+        );
+
+        for (key, invalid) in [
+            (
+                "messages",
+                serde_json::json!([message("wallops", serde_json::json!("x"))]),
+            ),
+            (
+                "messages",
+                serde_json::json!([{"server_time": "1", "channel": "#rust", "sender": "a", "body": null, "kind": "privmsg"}]),
+            ),
+            ("away_reason", serde_json::json!(5)),
+            ("away_ended_at", Value::Null),
+        ] {
+            let mut bad = payload.clone();
+            bad[key] = invalid;
+            assert!(parse_mentions_bundle(&bad, topic, "vjt").is_none(), "{key}");
+        }
+        assert!(parse_mentions_bundle(&payload, "grappa:user:other", "vjt").is_none());
+    }
+
+    #[test]
+    fn parse_server_settings_changed_requires_the_core_caps() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "server_settings_changed",
+            "upload": {
+                "active_host": "embedded",
+                "image_per_file_cap_bytes": 10485760,
+                "video_per_file_cap_bytes": 52428800,
+                "document_per_file_cap_bytes": 20971520,
+                "audio_per_file_cap_bytes": 20971520,
+                "global_cap_bytes": 1073741824,
+                "per_user_cap_bytes": 104857600,
+                "per_visitor_cap_bytes": 10485760,
+                "video_max_duration_seconds": 120
+            },
+            "http_host_aliases": ["irc.example.org"]
+        });
+        let limits = parse_server_settings_changed(&payload, topic, "vjt").expect("valid snapshot");
+        assert_eq!(limits.host, "embedded");
+        assert_eq!(limits.image_bytes, 10485760);
+        assert_eq!(limits.video_seconds, Some(120));
+
+        // Optional fields may be missing without dropping the snapshot.
+        let mut optional_missing = payload.clone();
+        optional_missing["upload"]
+            .as_object_mut()
+            .expect("object")
+            .remove("video_max_duration_seconds");
+        optional_missing
+            .as_object_mut()
+            .expect("object")
+            .remove("http_host_aliases");
+        let limits =
+            parse_server_settings_changed(&optional_missing, topic, "vjt").expect("still valid");
+        assert_eq!(limits.video_seconds, None);
+
+        for (key, invalid) in [
+            ("active_host", serde_json::json!("s3")),
+            ("image_per_file_cap_bytes", serde_json::json!(0)),
+            ("global_cap_bytes", Value::Null),
+            ("audio_per_file_cap_bytes", serde_json::json!("20971520")),
+        ] {
+            let mut bad = payload.clone();
+            bad["upload"][key] = invalid;
+            assert_eq!(
+                parse_server_settings_changed(&bad, topic, "vjt"),
+                None,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            parse_server_settings_changed(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_bundle_hash_treats_version_as_optional() {
+        let topic = "grappa:user:vjt";
+        assert_eq!(
+            parse_bundle_hash(
+                &serde_json::json!({"kind": "bundle_hash", "hash": "abc123", "version": "1.4.2"}),
+                topic,
+                "vjt"
+            ),
+            Some(("abc123".to_string(), Some("1.4.2".to_string())))
+        );
+        for version in [None, Some(Value::Null), Some(serde_json::json!(""))] {
+            let mut payload = serde_json::json!({"kind": "bundle_hash", "hash": "abc123"});
+            if let Some(version) = version {
+                payload["version"] = version;
+            }
+            assert_eq!(
+                parse_bundle_hash(&payload, topic, "vjt"),
+                Some(("abc123".to_string(), None))
+            );
+        }
+        for invalid in [
+            serde_json::json!({"kind": "bundle_hash", "hash": ""}),
+            serde_json::json!({"kind": "bundle_hash"}),
+        ] {
+            assert_eq!(parse_bundle_hash(&invalid, topic, "vjt"), None, "{invalid}");
+        }
+        assert_eq!(
+            parse_bundle_hash(
+                &serde_json::json!({"kind": "bundle_hash", "hash": "abc123"}),
+                "grappa:user:other",
+                "vjt"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn archive_errors_single_out_rate_limiting() {
+        assert_eq!(
+            archive_error_key(Some(429), "archive-fetch-failed"),
+            "archive-rate-limited"
+        );
+        assert_eq!(
+            archive_error_key(Some(500), "archive-fetch-failed"),
+            "archive-fetch-failed"
+        );
+        assert_eq!(
+            archive_error_key(None, "archive-delete-failed"),
+            "archive-delete-failed"
+        );
+    }
+
+    #[test]
+    fn invite_command_defaults_to_the_open_channel() {
+        assert_eq!(
+            parse_reply_command("/invite alice", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "invite",
+                payload: serde_json::json!({"channel": "#rust", "nick": "alice"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/invite alice #other", "bob"),
+            Some(ReplyCommand::Request {
+                verb: "invite",
+                payload: serde_json::json!({"channel": "#other", "nick": "alice"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/invite", "#rust"),
+            Some(ReplyCommand::Usage)
+        );
+        // A query window has no channel to invite into.
+        assert_eq!(
+            parse_reply_command("/invite alice", "bob"),
+            Some(ReplyCommand::Usage)
+        );
+    }
+
+    #[test]
+    fn parse_invite_ack_requires_every_field() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "invite_ack",
+            "network": "azzurra",
+            "channel": "#rust",
+            "peer": "alice",
+            "future_field": 1
+        });
+        assert_eq!(
+            parse_invite_ack(&payload, topic, "vjt"),
+            Some((
+                "azzurra".to_string(),
+                "#rust".to_string(),
+                "alice".to_string()
+            ))
+        );
+        for key in ["network", "channel", "peer"] {
+            let mut missing = payload.clone();
+            missing.as_object_mut().expect("object").remove(key);
+            assert_eq!(parse_invite_ack(&missing, topic, "vjt"), None, "{key}");
+            let mut empty = payload.clone();
+            empty[key] = serde_json::json!("");
+            assert_eq!(parse_invite_ack(&empty, topic, "vjt"), None, "{key}");
+        }
+        assert_eq!(parse_invite_ack(&payload, "grappa:user:other", "vjt"), None);
+    }
+
+    #[test]
+    fn lusers_command_sends_mask_and_server_only_when_given() {
+        let request = |payload: Value| {
+            Some(ReplyCommand::Request {
+                verb: "lusers",
+                payload,
+            })
+        };
+        assert_eq!(
+            parse_reply_command("/lusers", "#rust"),
+            request(serde_json::json!({}))
+        );
+        assert_eq!(
+            parse_reply_command("/lusers *", "#rust"),
+            request(serde_json::json!({"mask": "*"}))
+        );
+        assert_eq!(
+            parse_reply_command("/LUSERS * irc.example.org extra", "#rust"),
+            request(serde_json::json!({"mask": "*", "server": "irc.example.org"}))
+        );
+    }
+
+    #[test]
+    fn parse_lusers_bundle_shows_unknown_counters_without_dropping_the_rest() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "lusers_bundle",
+            "network": "azzurra",
+            "total_users": 120,
+            "invisible": 30,
+            "servers": 4,
+            "operators": 2,
+            "unknown_connections": null,
+            "channels_formed": 55,
+            "local_clients": 40,
+            "local_servers": 1,
+            "current_local": 40,
+            "max_local": 90,
+            "current_global": "garbled",
+            "future_field": true
+        });
+        let view = parse_lusers_bundle(&payload, topic, "vjt").expect("valid bundle");
+        assert_eq!(view.kind, "lusers_bundle");
+        assert_eq!(view.network, "azzurra");
+        assert_eq!(view.rows.len(), 12);
+        assert_eq!(
+            view.rows[0],
+            ("lusers-total-users".to_string(), "120".to_string())
+        );
+        assert_eq!(
+            view.rows[4],
+            ("lusers-unknown-connections".to_string(), "—".to_string())
+        );
+        // A non-integer counter and a missing one both read as unknown.
+        assert_eq!(view.rows[10].1, "—");
+        assert_eq!(view.rows[11].1, "—");
+
+        for invalid in [
+            serde_json::json!({"kind": "lusers_bundle", "total_users": 1}),
+            serde_json::json!({"kind": "lusers_bundle", "network": ""}),
+            serde_json::json!({"kind": "lusers_bundle", "network": 7}),
+            serde_json::json!({"kind": "whowas_bundle", "network": "azzurra"}),
+        ] {
+            assert!(
+                parse_lusers_bundle(&invalid, topic, "vjt").is_none(),
+                "{invalid}"
+            );
+        }
+        assert!(parse_lusers_bundle(&payload, "grappa:user:other", "vjt").is_none());
+    }
+
+    #[test]
+    fn parse_nullable_setting_echo_keeps_null_distinct_from_missing() {
+        let topic = "grappa:user:vjt";
+        let kind = "quit_part_reason_changed";
+        let key = "quit_part_reason";
+        let payload = |value: Value| serde_json::json!({"kind": kind, key: value});
+        assert_eq!(
+            parse_nullable_setting_echo(&payload(Value::Null), topic, "vjt", kind, key),
+            Some(None)
+        );
+        assert_eq!(
+            parse_nullable_setting_echo(
+                &payload(serde_json::json!("bye")),
+                topic,
+                "vjt",
+                kind,
+                key
+            ),
+            Some(Some("bye".to_string()))
+        );
+        assert_eq!(
+            parse_nullable_setting_echo(&payload(serde_json::json!("")), topic, "vjt", kind, key),
+            Some(Some(String::new()))
+        );
+
+        for invalid in [
+            payload(serde_json::json!(1)),
+            payload(serde_json::json!(["bye"])),
+            serde_json::json!({"kind": kind}),
+            serde_json::json!({"kind": "auto_away_reason_changed", key: "bye"}),
+        ] {
+            assert_eq!(
+                parse_nullable_setting_echo(&invalid, topic, "vjt", kind, key),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_nullable_setting_echo(
+                &payload(Value::Null),
+                "grappa:user:other",
+                "vjt",
+                kind,
+                key
+            ),
+            None
+        );
+        // The auto-away echo shares the shape under its own kind and key.
+        assert_eq!(
+            parse_nullable_setting_echo(
+                &serde_json::json!({"kind": "auto_away_reason_changed", "auto_away_reason": null}),
+                topic,
+                "vjt",
+                "auto_away_reason_changed",
+                "auto_away_reason"
+            ),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn whois_command_requires_a_nick() {
+        assert_eq!(
+            parse_reply_command("/whois alice", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "whois",
+                payload: serde_json::json!({"nick": "alice", "server": null, "source": "user"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/whois alice irc.example.org", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "whois",
+                payload: serde_json::json!({
+                    "nick": "alice",
+                    "server": "irc.example.org",
+                    "source": "user"
+                })
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/whois", "#rust"),
+            Some(ReplyCommand::Usage)
+        );
+        assert_eq!(format_idle(59), "0:00:59");
+        assert_eq!(format_idle(-5), "0:00:00");
+    }
+
+    #[test]
+    fn who_command_defaults_to_the_open_window() {
+        assert_eq!(
+            parse_reply_command("/who", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "who",
+                payload: serde_json::json!({"channel": "#rust"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/WHO #other extra", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "who",
+                payload: serde_json::json!({"channel": "#other"})
+            })
+        );
+        assert_eq!(parse_reply_command("/who", ""), Some(ReplyCommand::Usage));
+        assert_eq!(parse_reply_command("hello /who", "#rust"), None);
+        assert_eq!(parse_reply_command("/whoever", "#rust"), None);
+    }
+
+    #[test]
+    fn connecting_label_outranks_the_durable_connection_label() {
+        let entries = vec![
+            (
+                "libera".to_string(),
+                "#rust".to_string(),
+                "#rust".to_string(),
+            ),
+            (
+                "oftc".to_string(),
+                "#debian".to_string(),
+                "#debian".to_string(),
+            ),
+        ];
+        let connection_states = HashMap::from([(
+            "libera".to_string(),
+            NetworkConnectionSnapshot {
+                status: NetworkConnectionStatus::Failing,
+                reason: None,
+                changed_at: None,
+            },
+        )]);
+        let mut groups = network_groups_data(&entries, &[], &HashMap::new(), &connection_states);
+        let connecting = std::collections::HashSet::from(["libera".to_string()]);
+        apply_connecting_labels(&mut groups, &connecting);
+        assert_eq!(groups[0].0, "libera");
+        assert_eq!(groups[0].4, "connecting");
+        assert_eq!(groups[1].0, "oftc");
+        assert_eq!(groups[1].4, "");
     }
 
     #[test]

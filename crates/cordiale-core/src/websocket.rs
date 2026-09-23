@@ -67,6 +67,25 @@ impl std::fmt::Display for PhoenixSocketError {
     }
 }
 
+impl PhoenixSocketError {
+    /// Whether the upgrade was refused because the bearer is missing, invalid
+    /// or revoked. Grappa answers a bad bearer with 403 (`CLIENT_PROTOCOL.md`
+    /// §3a); retrying the same bearer can never succeed, unlike a network
+    /// error or a 5xx.
+    pub fn is_auth_rejection(&self) -> bool {
+        match self {
+            PhoenixSocketError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                is_auth_rejection_status(response.status().as_u16())
+            }
+            _ => false,
+        }
+    }
+}
+
+fn is_auth_rejection_status(status: u16) -> bool {
+    matches!(status, 401 | 403)
+}
+
 /// Builds the `Sec-WebSocket-Protocol` value Grappa expects for
 /// authentication, per `docs/protocol-notes.md` §2: the bearer travels in
 /// this header, never in the URL, so it stays out of access logs.
@@ -151,6 +170,17 @@ impl PhoenixSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_401_and_403_are_terminal_auth_rejections() {
+        assert!(is_auth_rejection_status(401));
+        assert!(is_auth_rejection_status(403));
+        // 426 is a protocol-version refusal and 5xx is transient: neither
+        // means the bearer itself is dead.
+        for status in [400, 404, 426, 429, 500, 502, 503] {
+            assert!(!is_auth_rejection_status(status), "{status}");
+        }
+    }
 
     #[test]
     fn bearer_subprotocol_base64_encodes_the_token_without_padding() {

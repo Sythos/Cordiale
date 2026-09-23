@@ -45,6 +45,66 @@ struct QueryEntry {
     mentions-description: string,
 }
 
+// One row of a server reply screen (WHO/WHOIS/WHOWAS/MOTD/ban list/LUSERS).
+// `label` is a key translated by `reply-label`, or empty for a plain line;
+// `value` is server data shown verbatim.
+struct ReplyRow {
+    label: string,
+    value: string,
+}
+
+// One DCC file offer Grappa holds until it is accepted or refused; `size`
+// is already formatted, `offer-id` is the server's opaque id.
+struct DccOfferRow {
+    network: string,
+    offer-id: string,
+    from: string,
+    filename: string,
+    size: string,
+}
+
+// One archived window (`/archive`): `kind` is the wire token (channel or
+// query) and `last-activity` an already formatted local time.
+struct ArchiveRow {
+    target: string,
+    kind: string,
+    last-activity: string,
+}
+
+// One watched nick in Settings > Watch Lists, with its presence token
+// (online, offline or unknown).
+struct NotifyRow {
+    nick: string,
+    presence: string,
+}
+
+// Per-file upload limits advertised by the server (sizes already
+// formatted; `video-seconds` empty when not advertised).
+struct UploadLimitsRow {
+    host: string,
+    image: string,
+    video: string,
+    video-seconds: string,
+    document: string,
+    audio: string,
+}
+
+// One channel of the directory screen (`/list`), as sent by the server.
+struct DirectoryRow {
+    name: string,
+    users: string,
+    topic: string,
+    featured: bool,
+}
+
+// One step of the identity-recovery panel, as raw wire tokens; the visible
+// labels are translated by the `recover-*-label` functions below.
+struct RecoverStepRow {
+    step: string,
+    status: string,
+    reason: string,
+}
+
 // One connected network in the sidebar, with its joined channels and
 // whether the channel list under it is currently shown (default: yes).
 struct NetworkGroup {
@@ -346,6 +406,17 @@ export component AppWindow inherits Window {
     in property <string> status-message: "";
     in property <int> status-network-count: 0;
     in property <int> status-channel-count: 0;
+    // Fill the `invite-sent` template (341 RPL_INVITING acknowledgement).
+    in property <string> status-invite-peer: "";
+    in property <string> status-invite-channel: "";
+    in property <string> status-invite-network: "";
+    // Fill the `presence-*` templates (for errors, `-nick` holds the
+    // rejected targets).
+    in property <string> status-presence-nick: "";
+    in property <string> status-presence-network: "";
+    // Fill the `dcc-accepted`/`dcc-refused`/`dcc-expired` templates.
+    in property <string> status-dcc-filename: "";
+    in property <string> status-dcc-from: "";
     in property <int> status-protocol-version: 0;
     in property <bool> connecting: false;
     // Base URLs of servers previously connected to successfully — see
@@ -368,6 +439,11 @@ export component AppWindow inherits Window {
     in property <string> current-channel-modes: "";
     in property <bool> has-selected-channel: false;
     in property <bool> current-query: false;
+    // Away message of the open private window's peer (a standalone 301);
+    // `peer-away-message` may be empty when the peer gave no text.
+    in property <bool> peer-away-visible: false;
+    in property <string> peer-away-peer: "";
+    in property <string> peer-away-message: "";
     // A DM can be selected before its Phoenix topic joins and history load
     // finish. Keep composition disabled until Rust marks it ready.
     in property <bool> current-query-ready: false;
@@ -380,6 +456,63 @@ export component AppWindow inherits Window {
     in property <string> window-invite-network: "";
     in property <string> window-invite-channel: "";
     in property <string> window-invite-inviter: "";
+    // Server-driven identity recovery (`/recover`): the first
+    // `recover_progress` opens this panel and later ones update their step
+    // in place. It is never opened locally.
+    in property <bool> recover-visible: false;
+    in property <string> recover-network: "";
+    in property <[RecoverStepRow]> recover-steps: [];
+    // Held DCC offers; each leaves only when the server resolves it.
+    in property <[DccOfferRow]> dcc-offers: [];
+    // Latest reply to a command this client issued (requester events). The
+    // screen opens only when the reply arrives, like Cicchetto's modals.
+    // `reply-kind` is the wire kind (e.g. "who_reply"); the title is
+    // composed and translated by `reply-title-text`.
+    in property <string> reply-kind: "";
+    in property <string> reply-subject: "";
+    in property <string> reply-network: "";
+    in property <[ReplyRow]> reply-rows: [];
+    // Archive of one network (`/archive`). `archive-confirm-target` is the
+    // row awaiting delete confirmation, set and cleared by the screen itself.
+    in property <string> archive-network: "";
+    in property <[ArchiveRow]> archive-rows: [];
+    in property <bool> archive-loaded: false;
+    in property <string> archive-error: "";
+    in-out property <string> archive-confirm-target: "";
+    // Channel directory of one network (`/list`). `directory-status` is the
+    // server's snapshot token (fresh/stale/no_results/unknown/loading) and
+    // `directory-error` a key translated by `directory-error-text`.
+    in property <string> directory-network: "";
+    in property <[DirectoryRow]> directory-rows: [];
+    in property <string> directory-status: "";
+    in property <string> directory-total: "";
+    in property <string> directory-captured-at: "";
+    in property <string> directory-error: "";
+    in property <string> directory-sort: "users";
+    in-out property <string> directory-query: "";
+    in property <bool> directory-has-more: false;
+    in property <bool> directory-refresh-pending: false;
+    // `reason` of the last failed capture (raw server token), or "".
+    in property <string> directory-failed-reason: "";
+    // Server-stored preferences mirrored from `*_changed` pushes: "" until
+    // announced, then "default" (null), "off" (0) or a number of seconds.
+    in property <string> server-pref-auto-away-debounce: "";
+    // Remembered QUIT/PART text: hidden until announced; `-set` is false
+    // for `null` (no message, the server uses its own fallback).
+    in property <bool> server-pref-leave-message-known: false;
+    in property <bool> server-pref-leave-message-set: false;
+    in property <string> server-pref-leave-message: "";
+    // Auto-away text: hidden until announced; `-set` is false for `null`
+    // (the server keeps its own built-in text).
+    in property <bool> server-pref-auto-away-reason-known: false;
+    in property <bool> server-pref-auto-away-reason-set: false;
+    in property <string> server-pref-auto-away-reason: "";
+    // Upload limits from `server_settings_changed`, hidden until announced.
+    in property <bool> server-upload-limits-known: false;
+    in property <UploadLimitsRow> server-upload-limits;
+    // "" while running, then "succeeded" or "failed" from `recover_result`.
+    in property <string> recover-outcome: "";
+    in property <string> recover-outcome-reason: "";
     // Boot snapshot plus live join/part/quit/nick-change updates —
     // doesn't track role (mode) changes yet, see README's Known gaps.
     // Already sorted ops-first by Rust.
@@ -444,7 +577,7 @@ export component AppWindow inherits Window {
     in-out property <string> new-alias-command: "";
     in-out property <string> new-alias-expansion: "";
     in property <[VhostOptionRow]> settings-vhost-options: [];
-    in property <[string]> settings-notify-nicks: [];
+    in property <[NotifyRow]> settings-notify-nicks: [];
     in-out property <string> new-notify-nick: "";
     in property <[string]> settings-watch-patterns: [];
     in-out property <string> new-watch-pattern: "";
@@ -471,6 +604,17 @@ export component AppWindow inherits Window {
     callback query-selected(string, string);
     callback window-invite-join-requested(string, string);
     callback kicked-channel-dismiss-requested(string, string);
+    callback recover-dismiss-requested();
+    callback peer-away-dismiss-requested();
+    callback dcc-offer-accept-requested(string, string); // network, offer id
+    callback dcc-offer-refuse-requested(string, string); // network, offer id
+    callback directory-refresh-requested();
+    callback directory-load-more-requested();
+    callback directory-sort-requested(string);
+    callback directory-search-requested(string);
+    callback directory-closed();
+    callback archive-delete-requested(string);
+    callback archive-closed();
     callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
@@ -503,6 +647,202 @@ export component AppWindow inherits Window {
     // get Rust-originated dynamic status text through Slint's `@tr()`
     // translation system, since `@tr()` only works on string literals
     // that live in a `.slint` file.
+    function reply-title-text() -> string {
+        if reply-kind == "who_reply" {
+            return @tr("WHO {} on {}", reply-subject, reply-network);
+        } else if reply-kind == "server_reply" && reply-subject == "motd" {
+            return @tr("Message of the day on {}", reply-network);
+        } else if reply-kind == "server_reply" && reply-subject == "info" {
+            return @tr("Server information on {}", reply-network);
+        } else if reply-kind == "server_reply" && reply-subject == "version" {
+            return @tr("Server version on {}", reply-network);
+        } else if reply-kind == "server_reply" && reply-subject == "admin" {
+            return @tr("Server administrator on {}", reply-network);
+        } else if reply-kind == "whois_bundle" {
+            return @tr("WHOIS {} on {}", reply-subject, reply-network);
+        } else if reply-kind == "whowas_bundle" {
+            return @tr("WHOWAS {} on {}", reply-subject, reply-network);
+        } else if reply-kind == "banlist_bundle" {
+            return @tr("Mode list {} on {}", reply-subject, reply-network);
+        } else if reply-kind == "mentions_bundle" {
+            return @tr("Mentions while you were away on {}", reply-network);
+        } else if reply-kind == "lusers_bundle" {
+            return @tr("Network statistics for {}", reply-network);
+        } else {
+            return reply-network;
+        }
+    }
+
+    function reply-label(key: string) -> string {
+        if key == "who-empty" {
+            return @tr("No users matched.");
+        } else if key == "reply-empty" {
+            return @tr("The server sent no lines.");
+        } else if key == "whois-userhost" {
+            return @tr("Address");
+        } else if key == "whois-realname" {
+            return @tr("Real name");
+        } else if key == "whois-server" {
+            return @tr("Server");
+        } else if key == "whois-account" {
+            return @tr("Account");
+        } else if key == "whois-channels" {
+            return @tr("Channels");
+        } else if key == "whois-idle" {
+            return @tr("Idle");
+        } else if key == "whois-signon" {
+            return @tr("Signed on");
+        } else if key == "whois-away" {
+            return @tr("Away");
+        } else if key == "whois-operator" {
+            return @tr("IRC operator");
+        } else if key == "whois-umodes" {
+            return @tr("User modes");
+        } else if key == "whois-secure" {
+            return @tr("Secure connection");
+        } else if key == "whois-certfp" {
+            return @tr("Certificate fingerprint");
+        } else if key == "whois-actually" {
+            return @tr("Actual host");
+        } else if key == "whois-registered" {
+            return @tr("Registered nick");
+        } else if key == "whois-admin" {
+            return @tr("Server administrator");
+        } else if key == "whois-services-admin" {
+            return @tr("Services administrator");
+        } else if key == "whois-helper" {
+            return @tr("Helper");
+        } else if key == "whois-chanop" {
+            return @tr("Channel operator");
+        } else if key == "whois-agent" {
+            return @tr("Agent");
+        } else if key == "whois-java" {
+            return @tr("Java client");
+        } else if key == "whois-avatar" {
+            return @tr("Avatar available on the server");
+        } else if key == "whowas-logoff" {
+            return @tr("Last seen");
+        } else if key == "whowas-not-found" {
+            return @tr("The server has no history for this nick.");
+        } else if key == "banlist-empty" {
+            return @tr("The list is empty.");
+        } else if key == "mentions-away-period" {
+            return @tr("Away");
+        } else if key == "mentions-away-reason" {
+            return @tr("Away message");
+        } else if key == "mentions-empty" {
+            return @tr("Nobody mentioned you.");
+        } else if key == "lusers-total-users" {
+            return @tr("Users");
+        } else if key == "lusers-invisible" {
+            return @tr("Invisible");
+        } else if key == "lusers-servers" {
+            return @tr("Servers");
+        } else if key == "lusers-operators" {
+            return @tr("Operators online");
+        } else if key == "lusers-unknown-connections" {
+            return @tr("Unknown connections");
+        } else if key == "lusers-channels-formed" {
+            return @tr("Channels formed");
+        } else if key == "lusers-local-clients" {
+            return @tr("Clients on this server");
+        } else if key == "lusers-local-servers" {
+            return @tr("Servers linked to this server");
+        } else if key == "lusers-current-local" {
+            return @tr("Current local users");
+        } else if key == "lusers-max-local" {
+            return @tr("Max local users");
+        } else if key == "lusers-current-global" {
+            return @tr("Current global users");
+        } else if key == "lusers-max-global" {
+            return @tr("Max global users");
+        } else {
+            return key;
+        }
+    }
+
+    function recover-step-label(step: string) -> string {
+        if step == "identify" {
+            return @tr("Identify with services");
+        } else if step == "register" {
+            return @tr("Confirm registration");
+        } else if step == "nick" {
+            return @tr("Switch nick");
+        } else if step == "recover" {
+            return @tr("Recover the nick");
+        } else if step == "release" {
+            return @tr("Release the nick");
+        } else {
+            return step;
+        }
+    }
+
+    function recover-status-label(status: string) -> string {
+        if status == "running" {
+            return @tr("in progress");
+        } else if status == "ok" {
+            return @tr("done");
+        } else if status == "failed" {
+            return @tr("failed");
+        } else {
+            return status;
+        }
+    }
+
+    // Grappa's four known reasons are localized; any additive future reason
+    // is shown verbatim rather than dropped.
+    function recover-reason-label(reason: string) -> string {
+        if reason == "wrong_password" {
+            return @tr("wrong password");
+        } else if reason == "nick_unavailable" {
+            return @tr("nick unavailable");
+        } else if reason == "services_declined" {
+            return @tr("services declined");
+        } else if reason == "identify_unconfirmed" {
+            return @tr("identification not confirmed");
+        } else {
+            return reason;
+        }
+    }
+
+    function directory-status-text() -> string {
+        if directory-status == "fresh" || directory-status == "stale" {
+            return directory-status == "fresh"
+                ? @tr("{} channels, listed {}.", directory-total, directory-captured-at)
+                : @tr("{} channels, listed {} (may be out of date).", directory-total, directory-captured-at);
+        } else if directory-status == "no_results" {
+            return @tr("The server listed no channels.");
+        } else if directory-status == "loading" {
+            return @tr("Listing channels…");
+        } else if directory-status == "unknown" {
+            return @tr("No channel list yet.");
+        } else {
+            return "";
+        }
+    }
+
+    function archive-error-text() -> string {
+        if archive-error == "archive-rate-limited" {
+            return @tr("Too many archive requests. Wait a moment and try again.");
+        } else if archive-error == "archive-fetch-failed" {
+            return @tr("Couldn't load the archive.");
+        } else if archive-error == "archive-delete-failed" {
+            return @tr("Couldn't delete that history.");
+        } else {
+            return archive-error;
+        }
+    }
+
+    function directory-error-text() -> string {
+        if directory-error == "directory-fetch-failed" {
+            return @tr("Couldn't load the channel list.");
+        } else if directory-error == "directory-refresh-failed" {
+            return @tr("Couldn't refresh the channel list. Is the network connected?");
+        } else {
+            return directory-error;
+        }
+    }
+
     function status-text() -> string {
         if status-kind == "signed-in" {
             return @tr("Signed in. {} network(s), {} channel(s).", status-network-count, status-channel-count);
@@ -510,6 +850,10 @@ export component AppWindow inherits Window {
             return @tr("Wrong username or password/token.");
         } else if status-kind == "reauthentication-required" {
             return @tr("Saved sign-in is unavailable. Enter your password or client token to sign in again.");
+        } else if status-kind == "command-usage" {
+            return @tr("That command is missing an argument, for example: /whowas <nick>.");
+        } else if status-kind == "session-severed-flood" {
+            return @tr("You were signed out because this client sent too many requests. Your IRC session is still running; sign in again to continue.");
         } else if status-kind == "two-factor-required" {
             return @tr("This account has two-factor authentication enabled. Sign in from a browser instead.");
         } else if status-kind == "too-many-attempts" {
@@ -528,6 +872,34 @@ export component AppWindow inherits Window {
             return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "reconnecting" {
             return status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
+        } else if status-kind == "presence-online" {
+            return @tr("{} is now online on {}.", status-presence-nick, status-presence-network);
+        } else if status-kind == "presence-offline" {
+            return @tr("{} went offline on {}.", status-presence-nick, status-presence-network);
+        } else if status-kind == "presence-list-full" {
+            return @tr("The watch list on {} is full; not watched: {}.", status-presence-network, status-presence-nick);
+        } else if status-kind == "presence-rejected" {
+            return @tr("The server on {} refused to watch: {}.", status-presence-network, status-presence-nick);
+        } else if status-kind == "dcc-accepted" {
+            return @tr("Accepted {} from {}; the transfer runs on the server.", status-dcc-filename, status-dcc-from);
+        } else if status-kind == "dcc-refused" {
+            return @tr("Refused {} from {}.", status-dcc-filename, status-dcc-from);
+        } else if status-kind == "dcc-expired" {
+            return @tr("The offer of {} from {} expired.", status-dcc-filename, status-dcc-from);
+        } else if status-kind == "dcc-offer-gone" {
+            return @tr("That file offer is no longer available.");
+        } else if status-kind == "dcc-rate-limited" {
+            return @tr("Daily file transfer limit reached. Try again later.");
+        } else if status-kind == "dcc-not-connected" {
+            return @tr("That network isn't connected, so the file offer can't be answered.");
+        } else if status-kind == "dcc-no-space" {
+            return @tr("The server has no room left for this file.");
+        } else if status-kind == "dcc-action-failed" {
+            return @tr("Couldn't answer the file offer.");
+        } else if status-kind == "no-mentions" {
+            return @tr("No away summary for this network yet.");
+        } else if status-kind == "invite-sent" {
+            return @tr("Invited {} to {} on {}.", status-invite-peer, status-invite-channel, status-invite-network);
         } else if status-kind == "attach-unsupported" {
             return @tr("Attachments aren't supported yet.");
         } else {
@@ -763,6 +1135,76 @@ export component AppWindow inherits Window {
                 }
             }
 
+            if recover-visible : Rectangle {
+                background: theme == "dark" ? #1f2d3a : #e3f0ff;
+                border-width: 1px;
+                border-color: theme == "dark" ? #4a7fb0 : #3d7cc9;
+                padding: 6px;
+                VerticalBox {
+                    spacing: 2px;
+                    Text {
+                        text: @tr("Identity recovery on {}", recover-network);
+                        wrap: word-wrap;
+                        font-weight: 700;
+                        accessible-role: AccessibleRole.text;
+                    }
+                    for row in recover-steps : Text {
+                        text: row.reason == ""
+                            ? @tr("{}: {}", recover-step-label(row.step), recover-status-label(row.status))
+                            : @tr("{}: {} ({})", recover-step-label(row.step), recover-status-label(row.status), recover-reason-label(row.reason));
+                        wrap: word-wrap;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    if recover-outcome != "" : Text {
+                        text: recover-outcome == "succeeded"
+                            ? @tr("Identity recovered.")
+                            : (recover-outcome-reason == ""
+                                ? @tr("Recovery failed.")
+                                : @tr("Recovery failed ({}).", recover-reason-label(recover-outcome-reason)));
+                        wrap: word-wrap;
+                        font-weight: 700;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    Button {
+                        text: @tr("Dismiss");
+                        accessible-label: @tr("Dismiss identity recovery");
+                        clicked => { recover-dismiss-requested(); }
+                    }
+                }
+            }
+
+            for offer in dcc-offers : Rectangle {
+                background: theme == "dark" ? #2a2438 : #f0eaff;
+                border-width: 1px;
+                border-color: theme == "dark" ? #8a74c9 : #6b4fc0;
+                padding: 6px;
+                VerticalBox {
+                    spacing: 2px;
+                    Text {
+                        text: @tr("{} offers {} ({}) on {}", offer.from, offer.filename, offer.size, offer.network);
+                        wrap: word-wrap;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    HorizontalBox {
+                        spacing: 4px;
+                        padding: 0px;
+                        Button {
+                            text: @tr("Accept");
+                            accessible-label: @tr("Accept {} from {}", offer.filename, offer.from);
+                            clicked => { dcc-offer-accept-requested(offer.network, offer.offer-id); }
+                        }
+                        Button {
+                            text: @tr("Refuse");
+                            accessible-label: @tr("Refuse {} from {}", offer.filename, offer.from);
+                            clicked => { dcc-offer-refuse-requested(offer.network, offer.offer-id); }
+                        }
+                    }
+                }
+            }
+
             ListView {
                 vertical-stretch: 1;
 
@@ -863,6 +1305,28 @@ export component AppWindow inherits Window {
             if current-channel-modes != "" : Text {
                 text: current-channel-modes;
                 font-size: 12px;
+            }
+            if current-query && peer-away-visible : Rectangle {
+                background: theme == "dark" ? #3a321f : #fff2bf;
+                border-width: 1px;
+                border-color: theme == "dark" ? #c99b2e : #b58a00;
+                HorizontalBox {
+                    spacing: 4px;
+                    Text {
+                        text: peer-away-message == ""
+                            ? @tr("{} is away.", peer-away-peer)
+                            : @tr("{} is away: {}", peer-away-peer, peer-away-message);
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    Button {
+                        text: @tr("Dismiss");
+                        accessible-label: @tr("Dismiss away message");
+                        clicked => { peer-away-dismiss-requested(); }
+                    }
+                }
             }
 
             ListView {
@@ -1136,6 +1600,37 @@ export component AppWindow inherits Window {
                     clicked => { disconnect-requested(); }
                 }
 
+                // Read-only copies of preferences Grappa stores and applies
+                // itself; they update live from its `*_changed` pushes and
+                // stay hidden until the server has announced them.
+                if server-pref-auto-away-debounce != "" : Text {
+                    text: @tr("Auto-away delay: {}",
+                        server-pref-auto-away-debounce == "default"
+                            ? @tr("server default")
+                            : (server-pref-auto-away-debounce == "off"
+                                ? @tr("off")
+                                : @tr("{} seconds", server-pref-auto-away-debounce)));
+                    wrap: word-wrap;
+                }
+                if server-pref-leave-message-known : Text {
+                    text: server-pref-leave-message-set
+                        ? @tr("Quit/part message: {}", server-pref-leave-message)
+                        : @tr("Quit/part message: none (server default)");
+                    wrap: word-wrap;
+                }
+                if server-pref-auto-away-reason-known : Text {
+                    text: server-pref-auto-away-reason-set
+                        ? @tr("Auto-away message: {}", server-pref-auto-away-reason)
+                        : @tr("Auto-away message: server default");
+                    wrap: word-wrap;
+                }
+                if server-upload-limits-known : Text {
+                    text: server-upload-limits.video-seconds == ""
+                        ? @tr("Server upload limits ({}): images {}, videos {}, documents {}, audio {}.", server-upload-limits.host, server-upload-limits.image, server-upload-limits.video, server-upload-limits.document, server-upload-limits.audio)
+                        : @tr("Server upload limits ({}): images {}, videos {} (up to {} s), documents {}, audio {}.", server-upload-limits.host, server-upload-limits.image, server-upload-limits.video, server-upload-limits.video-seconds, server-upload-limits.document, server-upload-limits.audio);
+                    wrap: word-wrap;
+                }
+
                 if known-networks.length > 0 : VerticalBox {
                     padding-top: 8px;
                     spacing: 4px;
@@ -1264,14 +1759,16 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                for nick in settings-notify-nicks : HorizontalBox {
+                for row in settings-notify-nicks : HorizontalBox {
                     Text {
-                        text: nick;
+                        text: row.presence == "online"
+                            ? @tr("{} (online)", row.nick)
+                            : (row.presence == "offline" ? @tr("{} (offline)", row.nick) : row.nick);
                         wrap: word-wrap;
                     }
                     Button {
                         text: @tr("Delete");
-                        clicked => { notify-remove-requested(nick); }
+                        clicked => { notify-remove-requested(row.nick); }
                     }
                 }
                 HorizontalBox {
@@ -1571,6 +2068,196 @@ export component AppWindow inherits Window {
                         wrap: word-wrap;
                     }
                 }
+            }
+        }
+    }
+
+    if screen == "reply" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: reply-title-text();
+            font-size: 18px;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for row in reply-rows : Text {
+                text: row.label == ""
+                    ? row.value
+                    : (row.value == "" ? reply-label(row.label) : @tr("{}: {}", reply-label(row.label), row.value));
+                wrap: word-wrap;
+                accessible-role: AccessibleRole.text;
+            }
+        }
+
+        Button {
+            text: @tr("Back");
+            clicked => { screen = "connected"; }
+        }
+    }
+
+    if screen == "archive" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: @tr("Archive on {}", archive-network);
+            font-size: 18px;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        Text {
+            text: !archive-loaded
+                ? @tr("Loading…")
+                : (archive-rows.length == 0
+                    ? @tr("No archived windows.")
+                    : @tr("Windows you left that still have history on the bouncer."));
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        if archive-error != "" : Text {
+            text: archive-error-text();
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+            accessible-live-region: AccessibleLiveness.polite;
+        }
+
+        if archive-confirm-target != "" : HorizontalBox {
+            padding: 0px;
+            spacing: 4px;
+
+            Text {
+                text: @tr("Delete all history of {} on {}? Only the bouncer's copy is removed.", archive-confirm-target, archive-network);
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                accessible-role: AccessibleRole.text;
+            }
+
+            Button {
+                text: @tr("Delete");
+                clicked => {
+                    archive-delete-requested(archive-confirm-target);
+                    archive-confirm-target = "";
+                }
+            }
+
+            Button {
+                text: @tr("Cancel");
+                clicked => { archive-confirm-target = ""; }
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for row in archive-rows : HorizontalBox {
+                padding: 0px;
+                spacing: 4px;
+
+                Text {
+                    text: row.kind == "query"
+                        ? @tr("{} (private, last active {})", row.target, row.last-activity)
+                        : @tr("{} (last active {})", row.target, row.last-activity);
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    accessible-role: AccessibleRole.text;
+                }
+
+                Button {
+                    text: @tr("Delete history");
+                    accessible-label: @tr("Delete history of {}", row.target);
+                    clicked => { archive-confirm-target = row.target; }
+                }
+            }
+        }
+
+        Button {
+            text: @tr("Back");
+            clicked => {
+                screen = "connected";
+                archive-closed();
+            }
+        }
+    }
+
+    if screen == "directory" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: @tr("Channels on {}", directory-network);
+            font-size: 18px;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        Text {
+            text: directory-status-text();
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        if directory-failed-reason != "" : Text {
+            text: @tr("The last channel listing failed ({}); showing the previous list.", directory-failed-reason);
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        if directory-error != "" : Text {
+            text: directory-error-text();
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        HorizontalBox {
+            padding: 0px;
+
+            LineEdit {
+                placeholder-text: @tr("Search channels");
+                accessible-label: @tr("Search channels");
+                text <=> directory-query;
+                accepted => { directory-search-requested(directory-query); }
+            }
+
+            Button {
+                text: directory-sort == "name" ? @tr("Sort by users") : @tr("Sort by name");
+                clicked => { directory-sort-requested(directory-sort == "name" ? "users" : "name"); }
+            }
+
+            Button {
+                text: directory-refresh-pending ? @tr("Refreshing…") : @tr("Refresh");
+                enabled: !directory-refresh-pending;
+                clicked => { directory-refresh-requested(); }
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for row in directory-rows : Text {
+                text: row.topic == ""
+                    ? @tr("{} ({} users)", row.name, row.users)
+                    : @tr("{} ({} users) — {}", row.name, row.users, row.topic);
+                font-weight: row.featured ? 700 : 400;
+                wrap: word-wrap;
+                accessible-role: AccessibleRole.text;
+            }
+        }
+
+        if directory-has-more : Button {
+            text: @tr("Load more");
+            clicked => { directory-load-more-requested(); }
+        }
+
+        Button {
+            text: @tr("Back");
+            clicked => {
+                screen = "connected";
+                directory-closed();
             }
         }
     }

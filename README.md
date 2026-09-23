@@ -40,12 +40,16 @@ known limitations are:
 - **Settings** has no way to read back your *current* per-network
   identity (nick/ident/realname): the fields start blank, and saving
   them blank leaves your existing values untouched.
-- **Watch Lists** can send presence and keyword additions/removals, but the
-  UI does not restore their server-side state: Cordiale currently ignores
-  the presence `notify_list` snapshot, and the keyword-list reply has no
-  confirmed shape. The displayed lists are session-local and are cleared
-  by an explicit disconnect or app restart; an automatic WebSocket
-  reconnect can leave stale local entries.
+- **Watch Lists**: the presence (notify) list shown for the network
+  selected in Settings comes from the server's `notify_list` snapshot, sent
+  after joining and after every change, with each nick's presence from
+  `presence_snapshot` (online, offline, or plain when unknown), updated by
+  `presence_changed`, which also announces each later transition in the
+  status bar (never the initial report after connecting); a
+  `presence_error` (watch list full) names the nicks that could not be
+  watched. The keyword list still has no confirmed reply shape, so it stays
+  session-local: cleared by an explicit disconnect or app restart, and an
+  automatic WebSocket reconnect can leave stale local entries.
 - **On-Connect Commands** is a single-line field, not a multi-line
   editor — separate multiple commands yourself.
 - The **`/links` graph window** has no pan/zoom yet.
@@ -70,7 +74,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 25 of them:
+  lists 56 top-level event kinds, and Cordiale handles all of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -78,10 +82,19 @@ known limitations are:
   `session_identity_changed`, `isupport_changed`, `umode_changed`,
   `supported_umodes_changed`, `joined`, `join_failed`, `kicked`,
   `window_pending`, `window_invited`, `window_invite_declined`,
-  `network_attached`, `network_detached`, `connection_state_changed`, and
-  `message`; the remaining 31 kinds are
-  deliberately ignored for this alpha
-  release. They won't appear as fake `event: payload` chat messages. Query
+  `network_attached`, `network_detached`, `connection_state_changed`,
+  `connection_progress`, `recover_progress`, `recover_result`,
+  `web_session_severed`, `who_reply`, `server_reply`, `whois_bundle`,
+  `whois_avatar_ready`, `whowas_bundle`, `banlist_bundle`,
+  `auto_away_debounce_changed`, `quit_part_reason_changed`,
+  `auto_away_reason_changed`, `lusers_bundle`, `invite_ack`,
+  `directory_progress`, `directory_complete`, `directory_failed`,
+  `dcc_offer`, `dcc_offer_resolved`, `archive_changed`, `archive_purged`,
+  `notify_list`, `presence_snapshot`, `presence_changed`, `presence_error`,
+  `peer_away`, `mentions_bundle`, `server_settings_changed`, `bundle_hash`,
+  `channel_created` (consumed without UI, as Cicchetto does), and `message`.
+  Only `message` envelopes become chat lines, so no event appears as a fake
+  `event: payload` chat message. Query
   snapshots replace the full query-window map, map network IDs to native
   sidebar rows, subscribe via Cicchetto's channel-shaped/ASCII-folded topic,
   and load/deduplicate history around join acknowledgements. The own-nick
@@ -164,24 +177,98 @@ known limitations are:
   transition to `parked` or `failed` returns a selected window on that network
   to the connected overview, but an initially parked/failed snapshot does not
   steal the user's selection.
-  - **Window, channel, and scrollback state**: `channel_created`,
-    `archive_changed`,
-    `archive_purged`.
-  - **Network, connection, identity, and settings**: `connection_progress`,
-    `peer_away`, `auto_away_debounce_changed`,
-    `auto_away_reason_changed`, `quit_part_reason_changed`,
-    `server_settings_changed`, `web_session_severed`.
-  - **Presence, queries, and server replies**: `presence_changed`,
-    `presence_error`, `presence_snapshot`, `notify_list`, `who_reply`,
-    `whois_bundle`, `whois_avatar_ready`, `whowas_bundle`, `lusers_bundle`,
-    `banlist_bundle`, `server_reply`, `invite_ack`, `mentions_bundle`.
-  - **Transfers and other asynchronous work**: `dcc_offer`,
-    `dcc_offer_resolved`, `directory_progress`, `directory_complete`,
-    `directory_failed`, `recover_progress`, `recover_result`, `bundle_hash`.
-  - Unknown future event kinds are also silently dropped, as Grappa's
-    protocol requires. Within message envelopes, `topic`, `kick`, and
-    `server_event` still use generic system-message rendering rather than
-    dedicated text.
+  `connection_progress` is a live-only user-topic overlay: `connecting` shows
+  a transient `connecting` label on that network's sidebar row (taking
+  precedence over the durable connection label), and `connected` clears it
+  and refreshes `GET /networks`. The overlay is dropped whenever the Phoenix
+  socket disconnects, because the event is never replayed and a missed
+  `connected` would otherwise leave the label stuck.
+  `/recover` asks Grappa to run its guided NickServ identity recovery on the
+  active network. Nothing is shown optimistically: the first live
+  `recover_progress` opens a sidebar panel bound to that event's network,
+  later steps replace their own row in place, events for another network are
+  ignored while it is open, and unknown future reason tokens are shown
+  verbatim. The panel closes only when dismissed. `recover_result` records the
+  terminal outcome and reason on that open panel only; it is a no-op when the
+  panel was dismissed or belongs to another network. A server rejection of the
+  command itself (for example, nothing to recover) is not surfaced yet.
+  `web_session_severed` (Grappa's flood protection) signs Cordiale out for any
+  string `code`: the Phoenix session is stopped so it never retries with the
+  revoked bearer, a remembered copy of that bearer is forgotten, and the
+  sign-in screen returns. `rate_limit_flood` gets a dedicated notice explaining
+  that the IRC session is still running; other codes show the generic
+  sign-in-again message. Because the event is best-effort, a WebSocket
+  upgrade refused with 401/403 now ends the session the same way instead of
+  retrying forever, and a shut-down session no longer keeps reconnecting in
+  the background during its back-off.
+  Replies to commands this client issued (requester events) open a reply
+  screen instead of a chat line; the latest reply replaces the previous one
+  and the selected window is left alone. `/who [target]` (defaulting to the
+  open window) shows `who_reply` one user per line; the bundle is validated
+  row by row and dropped entirely if any row is malformed. A reply-producing
+  command missing a required argument shows a usage hint instead of being sent
+  as chat text. `/motd [server]`, `/info`, `/version` and `/admin [server]`
+  show `server_reply` lines in wire order; its `source` is validated against
+  the closed `info | version | motd | admin` set. The connection-time MOTD is
+  unaffected: it still arrives as ordinary server-window scrollback.
+  `/whois <nick> [server]` and the member menu's WHOIS show a `whois_bundle`
+  card; every field is validated (absent `source` means `user`, absent
+  `avatar_url` means none), nullable values are omitted, flags become rows,
+  and extra numerics keep their wire order. A cached avatar is only noted,
+  not drawn. `whois_avatar_ready` patches only the card for the same network
+  and nick (compared with the network's ISUPPORT casemapping, RFC1459 until
+  known) and refreshes it in place without reopening the reply screen; a late
+  completion for another or replaced card is ignored. `/whowas <nick>` shows
+  the most recent `whowas_bundle` record, or a "no history" line when the
+  server reports `not_found`; a malformed bundle is dropped instead.
+  `/banlist [#channel] [mode]` (the open channel and the server's default `b`
+  list unless given; `+e` and `e` are equivalent) shows `banlist_bundle`
+  entries in the ircd's order, with the setter and timestamp when known. The
+  list letter comes from the reply and is never assumed to be `b`.
+  `/lusers [mask [server]]` shows the next `lusers_bundle` for that network
+  as twelve counters (unknown ones as `—`); the unsolicited LUSERS burst an
+  ircd sends at registration is dropped, and a new connection attempt
+  cancels a pending request. `/invite <nick> [#channel]` (the open channel
+  by default) is confirmed in the status bar only when the ircd's
+  `invite_ack` arrives. `/list [search]` opens a read-only channel directory
+  for the active network, paged from Grappa's last `LIST` snapshot
+  (`GET /networks/:slug/directory`, sort by users or name, search, load
+  more); Refresh asks for a new capture, `directory_progress` refetches the
+  first page while it streams and `directory_complete` once the new
+  snapshot has replaced the old one; `directory_failed` shows the server's
+  reason while keeping the previous list. A `dcc_offer` (a file a peer
+  offered, held by Grappa until you consent) appears in the sidebar with
+  Accept and Refuse, sent over REST; the offer is never dropped locally,
+  only when the server resolves it, and an offer re-sent on subscribe
+  replaces the held one. `dcc_offer_resolved` (accepted, refused or
+  expired, from any device) removes it and says which in the status bar.
+  `/archive` lists the active network's archived windows (left channels
+  and closed queries that still have history on the bouncer), with a
+  confirmed "Delete history" per entry; `archive_changed` refetches the
+  list while it is open (the listing is rate limited upstream, so it is
+  never polled). `archive_purged` forgets the cached rows and unread counts
+  of the deleted target (matched with the network's casemapping), so a
+  later re-join never shows deleted history, and refreshes the open list.
+  A `peer_away` (a standalone 301 away reply) is remembered per network and
+  peer and shown as a dismissible banner above that peer's private window
+  when it is open; a newer message replaces the older one. Coming back
+  from away, `mentions_bundle` opens a summary of the messages that
+  mentioned you (away period, away message, then each line in order);
+  `/mentions` reopens the last one for the active network.
+  Settings > General shows a read-only copy of preferences Grappa stores and
+  applies itself, updated live from their `*_changed` pushes and hidden until
+  announced: `auto_away_debounce_changed` keeps `null` (server default) and
+  `0` (off) distinct from a number of seconds, and `quit_part_reason_changed`
+  shows the remembered QUIT/PART text or, for `null`, that the server uses its
+  own default; `auto_away_reason_changed` does the same for the auto-away
+  text, whose `null` keeps Grappa's built-in message. The same section
+  shows the per-file upload limits from `server_settings_changed`; Cordiale
+  does not upload files yet, so they are informational only.
+  `bundle_hash` names the deployed Cicchetto web build: it is validated
+  and logged when it changes, and never downloads or updates anything.
+  Unknown future event kinds are silently dropped, as Grappa's protocol
+  requires. Within message envelopes, `topic`, `kick`, and `server_event`
+  still use generic system-message rendering rather than dedicated text.
 - Performance hasn't been profiled — deliberately deferred until after
   broader field testing surfaces real usage patterns.
 

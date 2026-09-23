@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
@@ -102,12 +102,21 @@ pub enum SessionEvent {
     Reconnecting {
         reason: String,
     },
+    /// Terminal: the WebSocket upgrade was refused with 401/403, so the
+    /// bearer is missing, invalid or revoked. The session has stopped and
+    /// will not retry with that bearer.
+    AuthRejected {
+        reason: String,
+    },
 }
 
 /// A handle to a running session: send commands, nothing else. Drop it (or
 /// call `shutdown`) to end the session.
 pub struct SessionHandle {
     commands: mpsc::UnboundedSender<SessionCommand>,
+    /// Observed during the reconnect back-off too, where the command queue
+    /// isn't read; dropping the handle also stops the session.
+    shutdown: watch::Sender<bool>,
 }
 
 impl SessionHandle {
@@ -141,6 +150,7 @@ impl SessionHandle {
     }
 
     pub fn shutdown(&self) {
+        let _ = self.shutdown.send(true);
         let _ = self.commands.send(SessionCommand::Shutdown);
     }
 }
@@ -156,15 +166,37 @@ pub fn spawn_session(
 ) -> (SessionHandle, mpsc::UnboundedReceiver<SessionEvent>) {
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    tokio::spawn(run_session(ws_url, token, user, command_rx, event_tx));
+    tokio::spawn(run_session(
+        ws_url,
+        token,
+        user,
+        command_rx,
+        event_tx,
+        shutdown_rx,
+    ));
 
     (
         SessionHandle {
             commands: command_tx,
+            shutdown: shutdown_tx,
         },
         event_rx,
     )
+}
+
+/// Waits out the reconnect delay. Returns `false` when the session was shut
+/// down, or its handle dropped, in the meantime: no further reconnect then.
+async fn wait_before_reconnect(shutdown: &mut watch::Receiver<bool>) -> bool {
+    if *shutdown.borrow() {
+        return false;
+    }
+    let stopped = tokio::select! {
+        _ = sleep(RECONNECT_DELAY) => false,
+        _ = shutdown.changed() => true,
+    };
+    !stopped && !*shutdown.borrow()
 }
 
 async fn run_session(
@@ -173,6 +205,7 @@ async fn run_session(
     user: String,
     mut commands: mpsc::UnboundedReceiver<SessionCommand>,
     events: mpsc::UnboundedSender<SessionEvent>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     let user_topic = format!("grappa:user:{user}");
     // Every joined topic, including the user topic itself, keyed to the
@@ -182,13 +215,24 @@ async fn run_session(
     let mut joined_topics: HashMap<String, JoinedTopic> = HashMap::new();
 
     'reconnect: loop {
+        if *shutdown.borrow() {
+            return;
+        }
         let mut socket = match PhoenixSocket::connect(&ws_url, &token).await {
             Ok(socket) => socket,
+            Err(err) if err.is_auth_rejection() => {
+                let _ = events.send(SessionEvent::AuthRejected {
+                    reason: format!("connect refused: {err}"),
+                });
+                return;
+            }
             Err(err) => {
                 let _ = events.send(SessionEvent::Reconnecting {
                     reason: format!("connect failed: {err}"),
                 });
-                sleep(RECONNECT_DELAY).await;
+                if !wait_before_reconnect(&mut shutdown).await {
+                    return;
+                }
                 continue 'reconnect;
             }
         };
@@ -201,7 +245,9 @@ async fn run_session(
                 let _ = events.send(SessionEvent::Reconnecting {
                     reason: format!("user topic join failed: {err}"),
                 });
-                sleep(RECONNECT_DELAY).await;
+                if !wait_before_reconnect(&mut shutdown).await {
+                    return;
+                }
                 continue 'reconnect;
             }
         };
@@ -245,7 +291,9 @@ async fn run_session(
                         let _ = events.send(SessionEvent::Disconnected {
                             reason: format!("heartbeat send failed: {err}"),
                         });
-                        sleep(RECONNECT_DELAY).await;
+                        if !wait_before_reconnect(&mut shutdown).await {
+                            return;
+                        }
                         continue 'reconnect;
                     }
                 }
@@ -298,14 +346,18 @@ async fn run_session(
                             let _ = events.send(SessionEvent::Disconnected {
                                 reason: "socket closed".to_string(),
                             });
-                            sleep(RECONNECT_DELAY).await;
+                            if !wait_before_reconnect(&mut shutdown).await {
+                                return;
+                            }
                             continue 'reconnect;
                         }
                         Err(err) => {
                             let _ = events.send(SessionEvent::Disconnected {
                                 reason: format!("read failed: {err}"),
                             });
-                            sleep(RECONNECT_DELAY).await;
+                            if !wait_before_reconnect(&mut shutdown).await {
+                                return;
+                            }
                             continue 'reconnect;
                         }
                     }
@@ -352,6 +404,20 @@ fn leave_message(topic: &str, joined: &JoinedTopic, refs: &mut RefCounter) -> Ph
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reconnect_wait_stops_immediately_once_shut_down() {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        shutdown_tx.send(true).expect("receiver alive");
+        assert!(!wait_before_reconnect(&mut shutdown_rx).await);
+    }
+
+    #[tokio::test]
+    async fn reconnect_wait_stops_when_the_handle_is_dropped() {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        drop(shutdown_tx);
+        assert!(!wait_before_reconnect(&mut shutdown_rx).await);
+    }
 
     #[test]
     fn leave_frame_uses_join_ref_and_a_fresh_message_ref() {

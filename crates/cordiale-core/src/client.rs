@@ -39,8 +39,8 @@ use crate::profile::{
     NotifyAddRequest, PerformUpdateRequest, PerformView, VhostSelectionRequest, VhostSettingsView,
 };
 use crate::rest::{
-    BootResponse, ConfigResponse, DisplayPrefs, LoginRequest, LoginResponse, MeResponse,
-    SendMessageRequest,
+    ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage, DisplayPrefs,
+    LoginRequest, LoginResponse, MeResponse, SendMessageRequest,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -103,6 +103,12 @@ impl GrappaClient {
             http: Client::new(),
             base_url: base_url.into(),
         }
+    }
+
+    /// The normalized server URL this client was built with — the same key
+    /// the remembered-profile store uses.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     /// `GET /api/config` — the first, unauthenticated call to a server.
@@ -779,6 +785,157 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `GET /networks/:slug/directory` — one page of the last completed
+    /// `LIST` snapshot, sorted by `sort` (`users` or `name`), filtered by
+    /// `query` when non-empty and continued from `cursor`. The server starts
+    /// the first capture on its own when it has none yet.
+    pub async fn fetch_directory(
+        &self,
+        token: &str,
+        network_slug: &str,
+        sort: &str,
+        query: &str,
+        cursor: Option<&str>,
+    ) -> Result<DirectoryPage, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "directory"]);
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("sort", sort);
+            if !query.is_empty() {
+                pairs.append_pair("q", query);
+            }
+            if let Some(cursor) = cursor {
+                pairs.append_pair("cursor", cursor);
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<DirectoryPage>().await?)
+    }
+
+    /// `POST /networks/:slug/directory/refresh` — asks for a fresh `LIST`
+    /// capture. `202` both when it starts and when one is already running;
+    /// progress then arrives as `directory_*` pushes.
+    pub async fn refresh_directory(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "directory", "refresh"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `POST /networks/:slug/dcc_offers/:offer_id/accept` — consents to a
+    /// held DCC offer. `202`: the transfer runs on the server and the offer
+    /// leaves the held set through a `dcc_offer_resolved` push, never here.
+    pub async fn accept_dcc_offer(
+        &self,
+        token: &str,
+        network_slug: &str,
+        offer_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "dcc_offers", offer_id, "accept"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /networks/:slug/dcc_offers/:offer_id` — refuses a held DCC
+    /// offer. Nothing is sent to the peer; the removal still arrives as a
+    /// `dcc_offer_resolved` push.
+    pub async fn refuse_dcc_offer(
+        &self,
+        token: &str,
+        network_slug: &str,
+        offer_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "dcc_offers", offer_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /networks/:slug/archive` — windows with scrollback that are no
+    /// longer joined or open, newest first. Metered by the server: an empty
+    /// bucket answers `429`.
+    pub async fn fetch_archive(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<Vec<ArchiveEntry>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "archive"]);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ArchiveResponse>().await?.archive)
+    }
+
+    /// `DELETE /networks/:slug/archive/:target` — drops the bouncer's
+    /// scrollback for one archived target (`204`). The IRC channel itself
+    /// is untouched; the change arrives as an `archive_purged` push.
+    pub async fn delete_archive_target(
+        &self,
+        token: &str,
+        network_slug: &str,
+        target: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "archive", target]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `DELETE /networks/:slug/notify/:nick`.
     pub async fn remove_notify_nick(
         &self,
@@ -1406,5 +1563,111 @@ mod tests {
             .add_notify_nicks("abc123", "libera", vec!["vjt".to_string()])
             .await
             .expect("add_notify_nicks");
+    }
+    #[tokio::test]
+    async fn fetch_directory_sends_sort_query_and_cursor() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/directory"))
+            .and(query_param("sort", "name"))
+            .and(query_param("q", "rust"))
+            .and(query_param("cursor", "c2"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{"name": "#rust", "topic": null, "user_count": 9, "featured": false}],
+                "next_cursor": null,
+                "total": 1,
+                "captured_at": null,
+                "status": "loading"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let page = client
+            .fetch_directory("abc123", "libera", "name", "rust", Some("c2"))
+            .await
+            .expect("fetch_directory");
+        assert_eq!(page.entries[0].name, "#rust");
+        assert_eq!(page.status, "loading");
+    }
+
+    #[tokio::test]
+    async fn dcc_offer_answers_use_the_offer_path() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/dcc_offers/off-1/accept"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/dcc_offers/off-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/dcc_offers/gone"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .accept_dcc_offer("abc123", "libera", "off-1")
+            .await
+            .expect("accept_dcc_offer");
+        client
+            .refuse_dcc_offer("abc123", "libera", "off-2")
+            .await
+            .expect("refuse_dcc_offer");
+        let err = client
+            .refuse_dcc_offer("abc123", "libera", "gone")
+            .await
+            .expect_err("404");
+        assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn archive_list_and_delete_encode_the_target() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/archive"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "archive": [{"target": "#old", "kind": "channel", "last_activity": 1790000000000_i64}]
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/archive/%23old"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let entries = client
+            .fetch_archive("abc123", "libera")
+            .await
+            .expect("fetch_archive");
+        assert_eq!(entries[0].target, "#old");
+        client
+            .delete_archive_target("abc123", "libera", "#old")
+            .await
+            .expect("delete_archive_target");
+    }
+
+    #[tokio::test]
+    async fn refresh_directory_accepts_202() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/directory/refresh"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .refresh_directory("abc123", "libera")
+            .await
+            .expect("refresh_directory");
     }
 }
