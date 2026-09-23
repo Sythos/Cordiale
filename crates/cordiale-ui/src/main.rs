@@ -2900,7 +2900,6 @@ const IGNORED_KINDS: &[&str] = &[
     "channel_created",
     "mentions_bundle",
     "peer_away",
-    "presence_changed",
     "presence_error",
     // scrollback/wire.ex.
     // networks/wire.ex: connection_state_changed is handled above.
@@ -3150,6 +3149,10 @@ async fn handle_frame(
     }
     if payload_kind == "presence_snapshot" {
         handle_presence_snapshot(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "presence_changed" {
+        handle_presence_changed(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7982,6 +7985,96 @@ fn handle_presence_snapshot(
     };
     state.presence_by_network.insert(network_id, nicks);
     push_notify_nicks(state, ui);
+}
+
+/// One validated `presence_changed` transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PresenceChange {
+    network_id: i64,
+    nick: String,
+    presence: Presence,
+    /// Part of the first report after a (re)registration: update the dot,
+    /// but don't announce it.
+    initial: bool,
+}
+
+/// Validates `presence_changed` on the exact user topic. `presence` is
+/// `online | offline` and `source` the closed `monitor | watch | ison` set
+/// (checked, not shown); `ts` must be a string.
+fn parse_presence_changed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<PresenceChange> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "presence_changed" {
+        return None;
+    }
+    let presence = match payload.get("presence")?.as_str()? {
+        "online" => Presence::Online,
+        "offline" => Presence::Offline,
+        _ => return None,
+    };
+    if !matches!(
+        payload.get("source")?.as_str()?,
+        "monitor" | "watch" | "ison"
+    ) {
+        return None;
+    }
+    payload.get("ts")?.as_str()?;
+    let nick = payload.get("nick")?.as_str()?;
+    if nick.is_empty() {
+        return None;
+    }
+    Some(PresenceChange {
+        network_id: payload.get("network_id")?.as_i64()?,
+        nick: nick.to_string(),
+        presence,
+        initial: payload.get("initial")?.as_bool()?,
+    })
+}
+
+/// Updates one watched nick's presence and, unless it is part of the
+/// initial report, says so in the status bar.
+fn handle_presence_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(change) = parse_presence_changed(payload, carrier_topic, identifier) else {
+        persistence::log_line("presence_changed rejected: invalid carrier or payload");
+        return;
+    };
+    state
+        .presence_by_network
+        .entry(change.network_id)
+        .or_default()
+        .insert(presence_key(&change.nick), change.presence);
+    push_notify_nicks(state, ui);
+    if change.initial {
+        return;
+    }
+    let network = network_slugs_by_id(&state.network_ids)
+        .and_then(|slugs| slugs.get(&change.network_id).cloned())
+        .unwrap_or_else(|| change.network_id.to_string());
+    let status = if change.presence == Presence::Online {
+        "presence-online"
+    } else {
+        "presence-offline"
+    };
+    let nick = change.nick;
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_presence_nick(nick.into());
+        ui.set_status_presence_network(network.into());
+        ui.set_status_kind(status.into());
+    });
 }
 
 /// `/list` alone or `/list <search>`; any other text is not this command.
@@ -13284,7 +13377,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 7);
+        assert_eq!(IGNORED_KINDS.len(), 6);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -13344,6 +13437,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"archive_purged"));
         assert!(!IGNORED_KINDS.contains(&"notify_list"));
         assert!(!IGNORED_KINDS.contains(&"presence_snapshot"));
+        assert!(!IGNORED_KINDS.contains(&"presence_changed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -14563,6 +14657,49 @@ mod tests {
         );
         // ASCII folding only: IRC brackets are not folded for presence keys.
         assert_eq!(presence_key("Nick[A]"), "nick[a]");
+    }
+
+    #[test]
+    fn parse_presence_changed_validates_closed_sets() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "presence_changed",
+            "network_id": 7,
+            "nick": "Alice",
+            "presence": "online",
+            "initial": false,
+            "source": "monitor",
+            "ts": "2026-09-23T10:00:00Z"
+        });
+        assert_eq!(
+            parse_presence_changed(&payload, topic, "vjt"),
+            Some(PresenceChange {
+                network_id: 7,
+                nick: "Alice".to_string(),
+                presence: Presence::Online,
+                initial: false,
+            })
+        );
+        for (key, invalid) in [
+            ("presence", serde_json::json!("unknown")),
+            ("source", serde_json::json!("guess")),
+            ("initial", serde_json::json!("false")),
+            ("ts", serde_json::json!(1)),
+            ("nick", serde_json::json!("")),
+            ("network_id", serde_json::json!("7")),
+        ] {
+            let mut changed = payload.clone();
+            changed[key] = invalid;
+            assert_eq!(
+                parse_presence_changed(&changed, topic, "vjt"),
+                None,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            parse_presence_changed(&payload, "grappa:user:other", "vjt"),
+            None
+        );
     }
 
     #[test]

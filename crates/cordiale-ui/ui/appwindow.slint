@@ -399,6 +399,9 @@ export component AppWindow inherits Window {
     in property <string> status-invite-peer: "";
     in property <string> status-invite-channel: "";
     in property <string> status-invite-network: "";
+    // Fill the `presence-online`/`presence-offline` templates.
+    in property <string> status-presence-nick: "";
+    in property <string> status-presence-network: "";
     // Fill the `dcc-accepted`/`dcc-refused`/`dcc-expired` templates.
     in property <string> status-dcc-filename: "";
     in property <string> status-dcc-from: "";
@@ -840,6 +843,10 @@ export component AppWindow inherits Window {
             return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "reconnecting" {
             return status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
+        } else if status-kind == "presence-online" {
+            return @tr("{} is now online on {}.", status-presence-nick, status-presence-network);
+        } else if status-kind == "presence-offline" {
+            return @tr("{} went offline on {}.", status-presence-nick, status-presence-network);
         } else if status-kind == "dcc-accepted" {
             return @tr("Accepted {} from {}; the transfer runs on the server.", status-dcc-filename, status-dcc-from);
         } else if status-kind == "dcc-refused" {
