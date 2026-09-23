@@ -53,6 +53,16 @@ struct ReplyRow {
     value: string,
 }
 
+// One DCC file offer Grappa holds until it is accepted or refused; `size`
+// is already formatted, `offer-id` is the server's opaque id.
+struct DccOfferRow {
+    network: string,
+    offer-id: string,
+    from: string,
+    filename: string,
+    size: string,
+}
+
 // One channel of the directory screen (`/list`), as sent by the server.
 struct DirectoryRow {
     name: string,
@@ -414,6 +424,8 @@ export component AppWindow inherits Window {
     in property <bool> recover-visible: false;
     in property <string> recover-network: "";
     in property <[RecoverStepRow]> recover-steps: [];
+    // Held DCC offers; each leaves only when the server resolves it.
+    in property <[DccOfferRow]> dcc-offers: [];
     // Latest reply to a command this client issued (requester events). The
     // screen opens only when the reply arrives, like Cicchetto's modals.
     // `reply-kind` is the wire kind (e.g. "who_reply"); the title is
@@ -545,6 +557,8 @@ export component AppWindow inherits Window {
     callback window-invite-join-requested(string, string);
     callback kicked-channel-dismiss-requested(string, string);
     callback recover-dismiss-requested();
+    callback dcc-offer-accept-requested(string, string); // network, offer id
+    callback dcc-offer-refuse-requested(string, string); // network, offer id
     callback directory-refresh-requested();
     callback directory-load-more-requested();
     callback directory-sort-requested(string);
@@ -787,6 +801,16 @@ export component AppWindow inherits Window {
             return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "reconnecting" {
             return status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
+        } else if status-kind == "dcc-offer-gone" {
+            return @tr("That file offer is no longer available.");
+        } else if status-kind == "dcc-rate-limited" {
+            return @tr("Daily file transfer limit reached. Try again later.");
+        } else if status-kind == "dcc-not-connected" {
+            return @tr("That network isn't connected, so the file offer can't be answered.");
+        } else if status-kind == "dcc-no-space" {
+            return @tr("The server has no room left for this file.");
+        } else if status-kind == "dcc-action-failed" {
+            return @tr("Couldn't answer the file offer.");
         } else if status-kind == "invite-sent" {
             return @tr("Invited {} to {} on {}.", status-invite-peer, status-invite-channel, status-invite-network);
         } else if status-kind == "attach-unsupported" {
@@ -1060,6 +1084,36 @@ export component AppWindow inherits Window {
                         text: @tr("Dismiss");
                         accessible-label: @tr("Dismiss identity recovery");
                         clicked => { recover-dismiss-requested(); }
+                    }
+                }
+            }
+
+            for offer in dcc-offers : Rectangle {
+                background: theme == "dark" ? #2a2438 : #f0eaff;
+                border-width: 1px;
+                border-color: theme == "dark" ? #8a74c9 : #6b4fc0;
+                padding: 6px;
+                VerticalBox {
+                    spacing: 2px;
+                    Text {
+                        text: @tr("{} offers {} ({}) on {}", offer.from, offer.filename, offer.size, offer.network);
+                        wrap: word-wrap;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    HorizontalBox {
+                        spacing: 4px;
+                        padding: 0px;
+                        Button {
+                            text: @tr("Accept");
+                            accessible-label: @tr("Accept {} from {}", offer.filename, offer.from);
+                            clicked => { dcc-offer-accept-requested(offer.network, offer.offer-id); }
+                        }
+                        Button {
+                            text: @tr("Refuse");
+                            accessible-label: @tr("Refuse {} from {}", offer.filename, offer.from);
+                            clicked => { dcc-offer-refuse-requested(offer.network, offer.offer-id); }
+                        }
                     }
                 }
             }

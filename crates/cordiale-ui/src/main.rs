@@ -75,6 +75,11 @@ enum WorkerCommand {
     DirectorySort(String),
     DirectorySearch(String),
     DirectoryClose,
+    DccOfferAnswer {
+        network: String,
+        offer_id: String,
+        accept: bool,
+    },
     ToggleNetwork(String),
     SendMessage {
         body: String,
@@ -257,6 +262,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_window_invite_channel("".into());
             ui.set_window_invite_inviter("".into());
             ui.set_recover_visible(false);
+            ui.set_dcc_offers(slint::ModelRc::default());
             ui.set_server_pref_auto_away_debounce("".into());
             ui.set_server_pref_leave_message_known(false);
             ui.set_server_pref_auto_away_reason_known(false);
@@ -383,6 +389,24 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_directory_close = worker_tx.clone();
     ui.on_directory_closed(move || {
         let _ = tx_for_directory_close.send(WorkerCommand::DirectoryClose);
+    });
+
+    let tx_for_dcc_accept = worker_tx.clone();
+    ui.on_dcc_offer_accept_requested(move |network, offer_id| {
+        let _ = tx_for_dcc_accept.send(WorkerCommand::DccOfferAnswer {
+            network: network.to_string(),
+            offer_id: offer_id.to_string(),
+            accept: true,
+        });
+    });
+
+    let tx_for_dcc_refuse = worker_tx.clone();
+    ui.on_dcc_offer_refuse_requested(move |network, offer_id| {
+        let _ = tx_for_dcc_refuse.send(WorkerCommand::DccOfferAnswer {
+            network: network.to_string(),
+            offer_id: offer_id.to_string(),
+            accept: false,
+        });
     });
 
     let tx_for_network_toggle = worker_tx.clone();
@@ -862,6 +886,19 @@ struct ReplyView {
     rows: Vec<(String, String)>,
 }
 
+/// A `DCC SEND` offer Grappa holds until this user accepts or refuses it.
+/// `channel` is only where Cicchetto renders it (often `$server`); the
+/// offer is identified by `offer_id`, an opaque server string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DccOffer {
+    network: String,
+    channel: String,
+    offer_id: String,
+    from: String,
+    filename: String,
+    size: u64,
+}
+
 /// The channel directory for one network: a view over Grappa's last `LIST`
 /// snapshot, fetched over REST. `directory_*` pushes are only signals to
 /// fetch again; the rows always come from the server's page.
@@ -1097,6 +1134,8 @@ struct WorkerState {
     lusers_requested: std::collections::HashSet<String>,
     /// The channel directory screen opened with `/list`, if any.
     directory: Option<DirectoryView>,
+    /// DCC offers the server is holding for consent, in arrival order.
+    dcc_offers: Vec<DccOffer>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -1182,6 +1221,7 @@ impl WorkerState {
             auto_away_reason: None,
             lusers_requested: std::collections::HashSet::new(),
             directory: None,
+            dcc_offers: Vec::new(),
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1273,6 +1313,13 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::DirectoryClose) => {
                         state.directory = None;
+                    }
+                    Some(WorkerCommand::DccOfferAnswer {
+                        network,
+                        offer_id,
+                        accept,
+                    }) => {
+                        answer_dcc_offer(&state, &ui, &network, &offer_id, accept).await;
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
                         let expanded = state.expanded_networks.entry(network).or_insert(true);
@@ -1690,6 +1737,7 @@ async fn handle_connect(
             state.auto_away_reason = None;
             state.lusers_requested.clear();
             state.directory = None;
+            state.dcc_offers.clear();
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -1792,6 +1840,7 @@ async fn handle_connect(
                 ui.set_window_invite_channel("".into());
                 ui.set_window_invite_inviter("".into());
                 ui.set_recover_visible(false);
+                ui.set_dcc_offers(slint::ModelRc::default());
                 ui.set_server_pref_auto_away_debounce("".into());
                 ui.set_server_pref_leave_message_known(false);
                 ui.set_server_pref_auto_away_reason_known(false);
@@ -2735,7 +2784,6 @@ const IGNORED_KINDS: &[&str] = &[
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
     "channel_created",
-    "dcc_offer",
     "dcc_offer_resolved",
     "mentions_bundle",
     "peer_away",
@@ -2969,6 +3017,10 @@ async fn handle_frame(
     }
     if payload_kind == "directory_failed" {
         handle_directory_failed(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "dcc_offer" {
+        handle_dcc_offer(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7233,6 +7285,154 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
     });
 }
 
+/// Validates `dcc_offer` on the exact user topic: every field is required,
+/// `network` and `offer_id` non-empty, `size` a non-negative integer (the
+/// peer's claim). The filename was already made safe to display upstream.
+fn parse_dcc_offer(payload: &Value, carrier_topic: &str, identifier: &str) -> Option<DccOffer> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "dcc_offer" {
+        return None;
+    }
+    let text = |key: &str| payload.get(key)?.as_str().map(str::to_string);
+    let offer = DccOffer {
+        network: text("network")?,
+        channel: text("channel")?,
+        offer_id: text("offer_id")?,
+        from: text("from")?,
+        filename: text("filename")?,
+        size: payload.get("size")?.as_u64()?,
+    };
+    if offer.network.trim().is_empty() || offer.offer_id.is_empty() {
+        return None;
+    }
+    Some(offer)
+}
+
+/// Holds an offer, replacing one with the same `offer_id` in place (the
+/// subscribe backfill re-sends every held offer). Returns whether it changed.
+fn apply_dcc_offer(offers: &mut Vec<DccOffer>, offer: DccOffer) -> bool {
+    match offers
+        .iter()
+        .position(|held| held.offer_id == offer.offer_id)
+    {
+        Some(index) if offers[index] == offer => false,
+        Some(index) => {
+            offers[index] = offer;
+            true
+        }
+        None => {
+            offers.push(offer);
+            true
+        }
+    }
+}
+
+fn handle_dcc_offer(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(offer) = parse_dcc_offer(payload, carrier_topic, identifier) else {
+        persistence::log_line("dcc_offer rejected: invalid carrier or payload");
+        return;
+    };
+    if apply_dcc_offer(&mut state.dcc_offers, offer) {
+        push_dcc_offers(state, ui);
+    }
+}
+
+/// Mirrors the held offers into the sidebar consent panel.
+fn push_dcc_offers(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let offers: Vec<(String, String, String, String, String)> = state
+        .dcc_offers
+        .iter()
+        .map(|offer| {
+            (
+                offer.network.clone(),
+                offer.offer_id.clone(),
+                offer.from.clone(),
+                offer.filename.clone(),
+                format_file_size(offer.size),
+            )
+        })
+        .collect();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<DccOfferRow> = offers
+            .into_iter()
+            .map(|(network, offer_id, from, filename, size)| DccOfferRow {
+                network: network.into(),
+                offer_id: offer_id.into(),
+                from: from.into(),
+                filename: filename.into(),
+                size: size.into(),
+            })
+            .collect();
+        ui.set_dcc_offers(Rc::new(slint::VecModel::from(rows)).into());
+    });
+}
+
+/// Binary-prefixed size with one decimal above a KiB (`512 B`, `1.5 MiB`).
+fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// Accepts or refuses a held offer over REST. The panel is not changed
+/// here: the offer disappears only when `dcc_offer_resolved` arrives, so
+/// every device agrees on what the server actually did.
+async fn answer_dcc_offer(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    offer_id: &str,
+    accept: bool,
+) {
+    let (Some(client), Some(token)) = (state.client.as_ref(), state.token.as_deref()) else {
+        return;
+    };
+    let result = if accept {
+        client.accept_dcc_offer(token, network, offer_id).await
+    } else {
+        client.refuse_dcc_offer(token, network, offer_id).await
+    };
+    let Err(err) = result else {
+        return;
+    };
+    persistence::log_line(&format!("dcc offer answer failed: {err:?}"));
+    let status = dcc_answer_error_status(err.status().map(|status| status.as_u16()));
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_kind(status.into());
+    });
+}
+
+/// Status-bar key for a failed accept/refuse, by the documented statuses.
+fn dcc_answer_error_status(status: Option<u16>) -> &'static str {
+    match status {
+        Some(404) => "dcc-offer-gone",
+        Some(429) => "dcc-rate-limited",
+        Some(503) => "dcc-not-connected",
+        Some(507) => "dcc-no-space",
+        _ => "dcc-action-failed",
+    }
+}
+
 /// `/list` alone or `/list <search>`; any other text is not this command.
 fn parse_list_command(body: &str) -> Option<String> {
     let trimmed = body.trim();
@@ -7285,7 +7485,7 @@ async fn load_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
             view.error = None;
         }
         Err(err) => {
-            persistence::log_line(&format!("directory fetch failed: {err}"));
+            persistence::log_line(&format!("directory fetch failed: {err:?}"));
             view.error = Some("directory-fetch-failed");
         }
     }
@@ -7333,7 +7533,7 @@ async fn load_more_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow
             view.error = None;
         }
         Err(err) => {
-            persistence::log_line(&format!("directory page fetch failed: {err}"));
+            persistence::log_line(&format!("directory page fetch failed: {err:?}"));
             view.error = Some("directory-fetch-failed");
         }
     }
@@ -7358,7 +7558,7 @@ async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
     let network = view.network.clone();
     push_directory(state, ui, false);
     if let Err(err) = client.refresh_directory(&token, &network).await {
-        persistence::log_line(&format!("directory refresh failed: {err}"));
+        persistence::log_line(&format!("directory refresh failed: {err:?}"));
         if let Some(view) = state.directory.as_mut() {
             if view.network == network {
                 view.refresh_pending = false;
@@ -12533,7 +12733,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 13);
+        assert_eq!(IGNORED_KINDS.len(), 12);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -12587,6 +12787,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"directory_progress"));
         assert!(!IGNORED_KINDS.contains(&"directory_complete"));
         assert!(!IGNORED_KINDS.contains(&"directory_failed"));
+        assert!(!IGNORED_KINDS.contains(&"dcc_offer"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -13523,6 +13724,85 @@ mod tests {
             ),
             None
         );
+    }
+
+    fn dcc_offer_payload() -> Value {
+        serde_json::json!({
+            "kind": "dcc_offer",
+            "network": "libera",
+            "channel": "$server",
+            "offer_id": "off-1",
+            "from": "alice",
+            "filename": "notes.txt",
+            "size": 1536,
+            "future_field": true
+        })
+    }
+
+    #[test]
+    fn parse_dcc_offer_requires_every_field() {
+        let topic = "grappa:user:vjt";
+        let offer = parse_dcc_offer(&dcc_offer_payload(), topic, "vjt").expect("valid offer");
+        assert_eq!(offer.offer_id, "off-1");
+        assert_eq!(offer.channel, "$server");
+        assert_eq!(offer.size, 1536);
+        for key in ["network", "channel", "offer_id", "from", "filename", "size"] {
+            let mut missing = dcc_offer_payload();
+            missing.as_object_mut().expect("object").remove(key);
+            assert_eq!(parse_dcc_offer(&missing, topic, "vjt"), None, "{key}");
+        }
+        for (key, invalid) in [
+            ("size", serde_json::json!(-1)),
+            ("size", serde_json::json!("1536")),
+            ("offer_id", serde_json::json!("")),
+            ("offer_id", serde_json::json!(7)),
+            ("network", serde_json::json!(" ")),
+        ] {
+            let mut payload = dcc_offer_payload();
+            payload[key] = invalid;
+            assert_eq!(parse_dcc_offer(&payload, topic, "vjt"), None, "{key}");
+        }
+        assert_eq!(
+            parse_dcc_offer(&dcc_offer_payload(), "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn apply_dcc_offer_replaces_by_offer_id() {
+        let topic = "grappa:user:vjt";
+        let offer = parse_dcc_offer(&dcc_offer_payload(), topic, "vjt").expect("valid offer");
+        let mut offers = Vec::new();
+        assert!(apply_dcc_offer(&mut offers, offer.clone()));
+        // The subscribe backfill re-sends held offers: same offer, no change.
+        assert!(!apply_dcc_offer(&mut offers, offer.clone()));
+        let mut renamed = offer.clone();
+        renamed.filename = "notes-v2.txt".to_string();
+        assert!(apply_dcc_offer(&mut offers, renamed));
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].filename, "notes-v2.txt");
+        let mut other = offer;
+        other.offer_id = "off-2".to_string();
+        assert!(apply_dcc_offer(&mut offers, other));
+        assert_eq!(offers.len(), 2);
+    }
+
+    #[test]
+    fn format_file_size_uses_binary_units() {
+        assert_eq!(format_file_size(0), "0 B");
+        assert_eq!(format_file_size(1023), "1023 B");
+        assert_eq!(format_file_size(1536), "1.5 KiB");
+        assert_eq!(format_file_size(5 * 1024 * 1024), "5.0 MiB");
+    }
+
+    #[test]
+    fn dcc_answer_errors_map_to_status_keys() {
+        assert_eq!(dcc_answer_error_status(Some(404)), "dcc-offer-gone");
+        assert_eq!(dcc_answer_error_status(Some(429)), "dcc-rate-limited");
+        assert_eq!(dcc_answer_error_status(Some(503)), "dcc-not-connected");
+        assert_eq!(dcc_answer_error_status(Some(507)), "dcc-no-space");
+        assert_eq!(dcc_answer_error_status(Some(500)), "dcc-action-failed");
+        assert_eq!(dcc_answer_error_status(None), "dcc-action-failed");
     }
 
     #[test]

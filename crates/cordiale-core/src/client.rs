@@ -844,6 +844,52 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `POST /networks/:slug/dcc_offers/:offer_id/accept` — consents to a
+    /// held DCC offer. `202`: the transfer runs on the server and the offer
+    /// leaves the held set through a `dcc_offer_resolved` push, never here.
+    pub async fn accept_dcc_offer(
+        &self,
+        token: &str,
+        network_slug: &str,
+        offer_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "dcc_offers", offer_id, "accept"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /networks/:slug/dcc_offers/:offer_id` — refuses a held DCC
+    /// offer. Nothing is sent to the peer; the removal still arrives as a
+    /// `dcc_offer_resolved` push.
+    pub async fn refuse_dcc_offer(
+        &self,
+        token: &str,
+        network_slug: &str,
+        offer_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "dcc_offers", offer_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `DELETE /networks/:slug/notify/:nick`.
     pub async fn remove_notify_nick(
         &self,
@@ -1498,6 +1544,41 @@ mod tests {
             .expect("fetch_directory");
         assert_eq!(page.entries[0].name, "#rust");
         assert_eq!(page.status, "loading");
+    }
+
+    #[tokio::test]
+    async fn dcc_offer_answers_use_the_offer_path() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/dcc_offers/off-1/accept"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/dcc_offers/off-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/dcc_offers/gone"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .accept_dcc_offer("abc123", "libera", "off-1")
+            .await
+            .expect("accept_dcc_offer");
+        client
+            .refuse_dcc_offer("abc123", "libera", "off-2")
+            .await
+            .expect("refuse_dcc_offer");
+        let err = client
+            .refuse_dcc_offer("abc123", "libera", "gone")
+            .await
+            .expect_err("404");
+        assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
     }
 
     #[tokio::test]
