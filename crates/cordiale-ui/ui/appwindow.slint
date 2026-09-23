@@ -362,6 +362,10 @@ export component AppWindow inherits Window {
     in property <string> status-message: "";
     in property <int> status-network-count: 0;
     in property <int> status-channel-count: 0;
+    // Fill the `invite-sent` template (341 RPL_INVITING acknowledgement).
+    in property <string> status-invite-peer: "";
+    in property <string> status-invite-channel: "";
+    in property <string> status-invite-network: "";
     in property <int> status-protocol-version: 0;
     in property <bool> connecting: false;
     // Base URLs of servers previously connected to successfully — see
@@ -729,6 +733,8 @@ export component AppWindow inherits Window {
             return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "reconnecting" {
             return status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
+        } else if status-kind == "invite-sent" {
+            return @tr("Invited {} to {} on {}.", status-invite-peer, status-invite-channel, status-invite-network);
         } else if status-kind == "attach-unsupported" {
             return @tr("Attachments aren't supported yet.");
         } else {

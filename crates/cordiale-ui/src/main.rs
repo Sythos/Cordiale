@@ -2643,7 +2643,6 @@ const IGNORED_KINDS: &[&str] = &[
     "dcc_offer_resolved",
     "mentions_bundle",
     "peer_away",
-    "invite_ack",
     "directory_progress",
     "directory_complete",
     "directory_failed",
@@ -2865,6 +2864,10 @@ async fn handle_frame(
     }
     if payload_kind == "whowas_bundle" {
         handle_whowas_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "invite_ack" {
+        handle_invite_ack(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "lusers_bundle" {
@@ -7559,6 +7562,56 @@ fn handle_banlist_bundle(
     show_reply_view(state, ui, view);
 }
 
+/// Validates `invite_ack` (341 RPL_INVITING) on the exact user topic:
+/// `network`, `channel` and `peer` are required non-empty strings. Returns
+/// them in that order.
+fn parse_invite_ack(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "invite_ack" {
+        return None;
+    }
+    let field = |key: &str| {
+        payload
+            .get(key)?
+            .as_str()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+    };
+    Some((field("network")?, field("channel")?, field("peer")?))
+}
+
+/// Confirms a sent invite in the status bar. Every acknowledgement is shown,
+/// even repeats; it is transient and never stored, like Cicchetto's
+/// synthetic server-window row (Cordiale has no server window).
+fn handle_invite_ack(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, channel, peer)) = parse_invite_ack(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("invite_ack rejected: invalid carrier or payload");
+        return;
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_invite_peer(peer.into());
+        ui.set_status_invite_channel(channel.into());
+        ui.set_status_invite_network(network.into());
+        ui.set_status_kind("invite-sent".into());
+    });
+}
+
 /// The twelve LUSERS counters in display order, each with its reply label.
 const LUSERS_COUNTERS: [(&str, &str); 12] = [
     ("total_users", "lusers-total-users"),
@@ -7731,9 +7784,10 @@ fn handle_whois_avatar_ready(
     }
 }
 
-/// A slash command answered by a requester reply: the WS verb plus its
-/// payload without `network_id` (added by `send_user_verb`), or `Usage` when
-/// a required argument is missing.
+/// A slash command sent as a user-topic verb and answered by a push (a
+/// requester reply, or the `invite_ack` acknowledgement): the WS verb plus
+/// its payload without `network_id` (added by `send_user_verb`), or `Usage`
+/// when a required argument is missing.
 #[derive(Debug, PartialEq)]
 enum ReplyCommand {
     Request { verb: &'static str, payload: Value },
@@ -7819,6 +7873,21 @@ fn parse_reply_command(body: &str, current_target: &str) -> Option<ReplyCommand>
                 None => serde_json::json!({}),
             };
             Some(ReplyCommand::Request { verb, payload })
+        }
+        // `/invite <nick> [#channel]`: the open channel by default. The ircd's
+        // acknowledgement arrives as `invite_ack`; nothing is shown before it.
+        "/invite" => {
+            let Some(nick) = args.first() else {
+                return Some(ReplyCommand::Usage);
+            };
+            let channel = args.get(1).copied().unwrap_or(current_target);
+            if !looks_like_channel(channel) {
+                return Some(ReplyCommand::Usage);
+            }
+            Some(ReplyCommand::Request {
+                verb: "invite",
+                payload: serde_json::json!({ "channel": channel, "nick": nick }),
+            })
         }
         // `/lusers [mask [server]]`: both optional and positional, mask
         // first; a server is never sent without a mask.
@@ -12008,7 +12077,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 17);
+        assert_eq!(IGNORED_KINDS.len(), 16);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -12058,6 +12127,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"quit_part_reason_changed"));
         assert!(!IGNORED_KINDS.contains(&"auto_away_reason_changed"));
         assert!(!IGNORED_KINDS.contains(&"lusers_bundle"));
+        assert!(!IGNORED_KINDS.contains(&"invite_ack"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -12894,6 +12964,62 @@ mod tests {
             parse_auto_away_debounce_changed(&payload(Value::Null), "grappa:user:other", "vjt"),
             None
         );
+    }
+
+    #[test]
+    fn invite_command_defaults_to_the_open_channel() {
+        assert_eq!(
+            parse_reply_command("/invite alice", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "invite",
+                payload: serde_json::json!({"channel": "#rust", "nick": "alice"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/invite alice #other", "bob"),
+            Some(ReplyCommand::Request {
+                verb: "invite",
+                payload: serde_json::json!({"channel": "#other", "nick": "alice"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/invite", "#rust"),
+            Some(ReplyCommand::Usage)
+        );
+        // A query window has no channel to invite into.
+        assert_eq!(
+            parse_reply_command("/invite alice", "bob"),
+            Some(ReplyCommand::Usage)
+        );
+    }
+
+    #[test]
+    fn parse_invite_ack_requires_every_field() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "invite_ack",
+            "network": "azzurra",
+            "channel": "#rust",
+            "peer": "alice",
+            "future_field": 1
+        });
+        assert_eq!(
+            parse_invite_ack(&payload, topic, "vjt"),
+            Some((
+                "azzurra".to_string(),
+                "#rust".to_string(),
+                "alice".to_string()
+            ))
+        );
+        for key in ["network", "channel", "peer"] {
+            let mut missing = payload.clone();
+            missing.as_object_mut().expect("object").remove(key);
+            assert_eq!(parse_invite_ack(&missing, topic, "vjt"), None, "{key}");
+            let mut empty = payload.clone();
+            empty[key] = serde_json::json!("");
+            assert_eq!(parse_invite_ack(&empty, topic, "vjt"), None, "{key}");
+        }
+        assert_eq!(parse_invite_ack(&payload, "grappa:user:other", "vjt"), None);
     }
 
     #[test]
