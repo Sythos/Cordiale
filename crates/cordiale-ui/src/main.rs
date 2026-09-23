@@ -16166,7 +16166,11 @@ mod tests {
             is_admin: false,
         };
         let actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
-        assert_eq!(actions, vec![ChannelTopicAction::Leave(obsolete_topic)]);
+        assert_eq!(actions.len(), 2);
+        assert!(actions.contains(&ChannelTopicAction::Leave(obsolete_topic)));
+        assert!(actions.contains(&ChannelTopicAction::Join(channel_topic(
+            "sythos", "libera", "sythos"
+        ))));
         assert!(!state.network_ids.contains_key("deleted"));
         assert!(state.channel_entries.is_empty());
         assert!(state.query_windows.is_empty());
