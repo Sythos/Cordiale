@@ -27,6 +27,15 @@ minimum widths. Channel rows sit directly below their network row, member
 roles appear in brackets (for example, `[@] Sythos`), and the member list's
 Actions menu includes a shortcut to the local Themes settings.
 
+At launch Cordiale signs in automatically with the last remembered profile,
+using its Grappa bearer or the login password kept in the OS keyring if the
+bearer is rejected. It restores the last selected channel when that channel
+is still joined. The login password stays in the native keyring (Windows
+Credential Manager, macOS Keychain, or Linux Secret Service), never in
+Cordiale's own files; without a keyring it is not stored. The eject button
+at the top of the sidebar, or Disconnect in the Actions menu, signs out and
+turns off automatic sign-in until the next successful sign-in.
+
 ## Known gaps
 
 Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-irc/tree/main/cicchetto),
@@ -35,9 +44,7 @@ Cordiale still has these user-visible or behavioral gaps:
 - **Themes:** Cordiale has local Light/Dark styling, but not Cicchetto's
   server-backed theme gallery, day/night pairing, custom-theme editor, or
   theme synchronization. The Themes menu entry opens only local controls.
-- **Sign-in and account security:** a remembered Grappa bearer can be reused
-  after pressing Connect, but Cordiale does not connect automatically. It
-  does not retain the login password for reuse or expose Cicchetto's
+- **Sign-in and account security:** Cordiale does not expose Cicchetto's
   TOTP/passkey management.
 - **Admin tools:** the panel lacks vhost grants, credentials, server-wide
   settings writes, network creation/editing/deletion, user creation/password

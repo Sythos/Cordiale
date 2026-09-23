@@ -39,7 +39,9 @@ where applicable, fixed.
   access, admin privileges) beyond what the Grappa server's documented
   client protocol and actual behavior grant — see `docs/protocol-notes.md`.
 - Secrets (passwords, per-client tokens) are never logged or written to
-  `settings.json`/`servers.json` in plain text.
+  `settings.json`/`servers.json` in plain text. The login password kept for
+  automatic sign-in lives only in the native OS keyring and is never written
+  to the non-secure fallback store.
 - Build, test and packaging run only in GitHub Actions; no release artifact
   is produced on a local development machine.
 

@@ -1133,15 +1133,22 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Low-frequency action once a session is up; Disconnect
-                // moved into Settings > General (the network section)
-                // instead of sitting here as its own permanent button.
                 Button {
                     text: "⚙";
                     accessible-label: @tr("Settings");
                     width: 32px;
                     height: 32px;
                     clicked => { screen = "settings"; }
+                }
+
+                // Signing out is how the user switches accounts: it also
+                // turns off the automatic sign-in at the next launch.
+                Button {
+                    text: "⏏";
+                    accessible-label: @tr("Disconnect");
+                    width: 32px;
+                    height: 32px;
+                    clicked => { disconnect-requested(); }
                 }
             }
 

@@ -78,10 +78,19 @@ pub struct Settings {
     /// app doesn't drop back to the bare network overview every time.
     #[serde(default)]
     pub last_channel: Option<(String, String)>,
+    /// Sign in automatically at launch with the remembered profile. A
+    /// manual disconnect turns it off (so another account can be used) and
+    /// the next successful sign-in turns it back on.
+    #[serde(default = "default_auto_connect")]
+    pub auto_connect: bool,
 }
 
 fn current_settings_schema_version() -> u32 {
     1
+}
+
+fn default_auto_connect() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -91,6 +100,7 @@ impl Default for Settings {
             language: None,
             theme: Theme::default(),
             last_channel: None,
+            auto_connect: default_auto_connect(),
         }
     }
 }
@@ -290,12 +300,21 @@ mod tests {
     }
 
     #[test]
+    fn settings_without_auto_connect_default_to_signing_in() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
+        assert!(decoded.auto_connect);
+        assert!(Settings::default().auto_connect);
+    }
+
+    #[test]
     fn settings_round_trip_through_json_preserves_chosen_language() {
         let settings = Settings {
             schema_version: 1,
             language: Some(Language::It),
             theme: Theme::Dark,
             last_channel: Some(("libera".to_string(), "#rust".to_string())),
+            auto_connect: false,
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");
