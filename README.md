@@ -74,7 +74,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 51 of them:
+  lists 56 top-level event kinds. Cordiale handles 52 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -91,7 +91,7 @@ known limitations are:
   `directory_progress`, `directory_complete`, `directory_failed`,
   `dcc_offer`, `dcc_offer_resolved`, `archive_changed`, `archive_purged`,
   `notify_list`, `presence_snapshot`, `presence_changed`, `presence_error`,
-  and `message`; the remaining 5 kinds are
+  `peer_away`, and `message`; the remaining 4 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -248,6 +248,9 @@ known limitations are:
   never polled). `archive_purged` forgets the cached rows and unread counts
   of the deleted target (matched with the network's casemapping), so a
   later re-join never shows deleted history, and refreshes the open list.
+  A `peer_away` (a standalone 301 away reply) is remembered per network and
+  peer and shown as a dismissible banner above that peer's private window
+  when it is open; a newer message replaces the older one.
   Settings > General shows a read-only copy of preferences Grappa stores and
   applies itself, updated live from their `*_changed` pushes and hidden until
   announced: `auto_away_debounce_changed` keeps `null` (server default) and
@@ -257,7 +260,6 @@ known limitations are:
   text, whose `null` keeps Grappa's built-in message.
   - **Window, channel, and scrollback state**: `channel_created`.
   - **Network, connection, identity, and settings**:
-    `peer_away`,
     `server_settings_changed`.
   - **Presence, queries, and server replies**: `mentions_bundle`.
   - **Transfers and other asynchronous work**: `bundle_hash`.

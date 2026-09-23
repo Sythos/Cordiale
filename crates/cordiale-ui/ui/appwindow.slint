@@ -428,6 +428,11 @@ export component AppWindow inherits Window {
     in property <string> current-channel-modes: "";
     in property <bool> has-selected-channel: false;
     in property <bool> current-query: false;
+    // Away message of the open private window's peer (a standalone 301);
+    // `peer-away-message` may be empty when the peer gave no text.
+    in property <bool> peer-away-visible: false;
+    in property <string> peer-away-peer: "";
+    in property <string> peer-away-message: "";
     // A DM can be selected before its Phoenix topic joins and history load
     // finish. Keep composition disabled until Rust marks it ready.
     in property <bool> current-query-ready: false;
@@ -586,6 +591,7 @@ export component AppWindow inherits Window {
     callback window-invite-join-requested(string, string);
     callback kicked-channel-dismiss-requested(string, string);
     callback recover-dismiss-requested();
+    callback peer-away-dismiss-requested();
     callback dcc-offer-accept-requested(string, string); // network, offer id
     callback dcc-offer-refuse-requested(string, string); // network, offer id
     callback directory-refresh-requested();
@@ -1275,6 +1281,28 @@ export component AppWindow inherits Window {
             if current-channel-modes != "" : Text {
                 text: current-channel-modes;
                 font-size: 12px;
+            }
+            if current-query && peer-away-visible : Rectangle {
+                background: theme == "dark" ? #3a321f : #fff2bf;
+                border-width: 1px;
+                border-color: theme == "dark" ? #c99b2e : #b58a00;
+                HorizontalBox {
+                    spacing: 4px;
+                    Text {
+                        text: peer-away-message == ""
+                            ? @tr("{} is away.", peer-away-peer)
+                            : @tr("{} is away: {}", peer-away-peer, peer-away-message);
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    Button {
+                        text: @tr("Dismiss");
+                        accessible-label: @tr("Dismiss away message");
+                        clicked => { peer-away-dismiss-requested(); }
+                    }
+                }
             }
 
             ListView {

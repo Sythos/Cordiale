@@ -83,6 +83,7 @@ enum WorkerCommand {
     },
     ArchiveDelete(String),
     ArchiveClose,
+    DismissPeerAway,
     ToggleNetwork(String),
     SendMessage {
         body: String,
@@ -420,6 +421,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_archive_close = worker_tx.clone();
     ui.on_archive_closed(move || {
         let _ = tx_for_archive_close.send(WorkerCommand::ArchiveClose);
+    });
+
+    let tx_for_peer_away_dismiss = worker_tx.clone();
+    ui.on_peer_away_dismiss_requested(move || {
+        let _ = tx_for_peer_away_dismiss.send(WorkerCommand::DismissPeerAway);
     });
 
     let tx_for_network_toggle = worker_tx.clone();
@@ -1194,6 +1200,9 @@ struct WorkerState {
     /// Watched-nick presence per network ID, keyed by ASCII-folded nick.
     /// A nick missing here reads as `unknown`.
     presence_by_network: HashMap<i64, HashMap<String, Presence>>,
+    /// Last standalone away message (301) per `(network, folded peer)`,
+    /// shown above that peer's private window until dismissed.
+    peer_away: HashMap<(String, String), String>,
     /// Session-local only: the keyword watchlist has no documented `list`
     /// reply shape (see `docs/protocol-notes.md` §4quater), so it doesn't
     /// survive a reconnect/relaunch, unlike everything else in Settings.
@@ -1261,6 +1270,7 @@ impl WorkerState {
             settings_network: None,
             notify_lists: HashMap::new(),
             presence_by_network: HashMap::new(),
+            peer_away: HashMap::new(),
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
         }
@@ -1356,6 +1366,12 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
+                    }
+                    Some(WorkerCommand::DismissPeerAway) => {
+                        if let Some(key) = current_peer_away_key(&state) {
+                            state.peer_away.remove(&key);
+                        }
+                        push_peer_away_banner(&state, &ui);
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
                         let expanded = state.expanded_networks.entry(network).or_insert(true);
@@ -1791,6 +1807,7 @@ async fn handle_connect(
             state.archive = None;
             state.notify_lists.clear();
             state.presence_by_network.clear();
+            state.peer_away.clear();
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2055,6 +2072,7 @@ fn show_query_window(
     let dark_theme = state.theme == Theme::Dark;
     let query_ready = state.current_query_ready;
     let label = format!("{} — {}", query.network, query.target_nick);
+    push_peer_away_banner(state, ui);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
@@ -2899,7 +2917,6 @@ const IGNORED_KINDS: &[&str] = &[
     // session/wire.ex's wire_event_kind union.
     "channel_created",
     "mentions_bundle",
-    "peer_away",
     // scrollback/wire.ex.
     // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex: all three settings echoes are handled above.
@@ -3156,6 +3173,10 @@ async fn handle_frame(
     }
     if payload_kind == "presence_error" {
         handle_presence_error(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "peer_away" {
+        handle_peer_away(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -8136,6 +8157,99 @@ fn handle_presence_error(
         ui.set_status_presence_network(network.into());
         ui.set_status_kind(status.into());
     });
+}
+
+/// Peer-away key: the network plus the peer folded with that network's
+/// casemapping, so `Alice` and `alice` share one message.
+fn peer_away_key(state: &WorkerState, network: &str, peer: &str) -> (String, String) {
+    let casemapping = state
+        .isupport_by_network
+        .get(network)
+        .map(|isupport| isupport.casemapping)
+        .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459);
+    (network.to_string(), casemapping.fold(peer))
+}
+
+/// The peer-away key of the open private window, if one is open.
+fn current_peer_away_key(state: &WorkerState) -> Option<(String, String)> {
+    if !state.current_query {
+        return None;
+    }
+    let (network, nick) = state.current_channel.as_ref()?;
+    Some(peer_away_key(state, network, nick))
+}
+
+/// Shows the open private window's away message, or hides the banner. The
+/// banner itself is only drawn while a private window is open.
+fn push_peer_away_banner(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (peer, message) = current_peer_away_key(state)
+        .and_then(|key| {
+            let message = state.peer_away.get(&key)?.clone();
+            let peer = state
+                .current_channel
+                .as_ref()
+                .map(|(_, nick)| nick.clone())
+                .unwrap_or_default();
+            Some((peer, message))
+        })
+        .map_or((String::new(), None), |(peer, message)| {
+            (peer, Some(message))
+        });
+    let visible = message.is_some();
+    let message = message.unwrap_or_default();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_peer_away_peer(peer.into());
+        ui.set_peer_away_message(message.into());
+        ui.set_peer_away_visible(visible);
+    });
+}
+
+/// Validates `peer_away` (a standalone 301 RPL_AWAY, not part of a WHOIS)
+/// on the exact user topic: `network` and `peer` non-empty, `message` a
+/// string that may be empty (no away text was given).
+fn parse_peer_away(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "peer_away" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    let peer = payload.get("peer")?.as_str()?;
+    if network.trim().is_empty() || peer.is_empty() {
+        return None;
+    }
+    let message = payload.get("message")?.as_str()?;
+    Some((network.to_string(), peer.to_string(), message.to_string()))
+}
+
+/// Remembers the peer's latest away message (replacing an older one) and
+/// refreshes the banner if that peer's private window is open. Never moves
+/// focus.
+fn handle_peer_away(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, peer, message)) = parse_peer_away(payload, carrier_topic, identifier) else {
+        persistence::log_line("peer_away rejected: invalid carrier or payload");
+        return;
+    };
+    let key = peer_away_key(state, &network, &peer);
+    let shown = current_peer_away_key(state).as_ref() == Some(&key);
+    state.peer_away.insert(key, message);
+    if shown {
+        push_peer_away_banner(state, ui);
+    }
 }
 
 /// `/list` alone or `/list <search>`; any other text is not this command.
@@ -13438,7 +13552,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 5);
+        assert_eq!(IGNORED_KINDS.len(), 4);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -13500,6 +13614,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"presence_snapshot"));
         assert!(!IGNORED_KINDS.contains(&"presence_changed"));
         assert!(!IGNORED_KINDS.contains(&"presence_error"));
+        assert!(!IGNORED_KINDS.contains(&"peer_away"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -14784,6 +14899,41 @@ mod tests {
         assert_eq!(parse_presence_error(&missing_detail, topic, "vjt"), None);
         assert_eq!(
             parse_presence_error(&payload("list_full"), "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_peer_away_allows_an_empty_message() {
+        let topic = "grappa:user:vjt";
+        let payload = |message: Value| serde_json::json!({"kind": "peer_away", "network": "libera", "peer": "Alice", "message": message});
+        assert_eq!(
+            parse_peer_away(&payload(serde_json::json!("lunch")), topic, "vjt"),
+            Some((
+                "libera".to_string(),
+                "Alice".to_string(),
+                "lunch".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_peer_away(&payload(serde_json::json!("")), topic, "vjt"),
+            Some(("libera".to_string(), "Alice".to_string(), String::new()))
+        );
+        assert_eq!(parse_peer_away(&payload(Value::Null), topic, "vjt"), None);
+        assert_eq!(
+            parse_peer_away(
+                &serde_json::json!({"kind": "peer_away", "network": "libera", "peer": "", "message": "x"}),
+                topic,
+                "vjt"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_peer_away(
+                &payload(serde_json::json!("lunch")),
+                "grappa:user:other",
+                "vjt"
+            ),
             None
         );
     }
