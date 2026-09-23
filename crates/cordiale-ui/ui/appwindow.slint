@@ -34,6 +34,7 @@ struct ChannelEntry {
     failed: bool,
     kicked: bool,
     invited: bool,
+    joined: bool,
 }
 
 // One open private-conversation window under its network.
@@ -110,6 +111,7 @@ struct RecoverStepRow {
 struct NetworkGroup {
     network: string,
     connection-label: string,
+    parked: bool,
     separator-before: bool,
     expanded: bool,
     channels: [ChannelEntry],
@@ -136,6 +138,7 @@ struct ChatLine {
     timestamp: string,
     timestamp-color: color,
     nick: string,
+    nick-prefix: string,
     nick-color: color,
     italic: bool,
     segments: [MessageSegment],
@@ -601,6 +604,7 @@ export component AppWindow inherits Window {
     callback member-ctcp-requested(string, string); // nick, verb
     callback member-query-requested(string);
     callback channel-selected(string, string);
+    callback channel-part-requested(string, string);
     callback query-selected(string, string);
     callback window-invite-join-requested(string, string);
     callback kicked-channel-dismiss-requested(string, string);
@@ -868,6 +872,8 @@ export component AppWindow inherits Window {
             return @tr("This server's protocol version ({}) is too old for Cordiale.", status-protocol-version);
         } else if status-kind == "send-failed" {
             return @tr("Couldn't send that message.");
+        } else if status-kind == "part-failed" {
+            return @tr("Couldn't leave the channel. Please try again.");
         } else if status-kind == "disconnected" {
             return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "reconnecting" {
@@ -1219,12 +1225,27 @@ export component AppWindow inherits Window {
                         background: #808080;
                     }
 
-                    Button {
+                    if !group.parked : Button {
                         text: (group.expanded ? "▾ 🔌 " : "▸ 🔌 ") + group.network
                             + (group.connection-label == "" ? "" : " · " + group.connection-label);
                         accessible-label: group.network
                             + (group.connection-label == "" ? "" : " — " + group.connection-label);
                         clicked => { network-toggle-requested(group.network); }
+                    }
+                    if group.parked : HorizontalBox {
+                        spacing: 4px;
+                        Button {
+                            text: group.expanded ? "▾" : "▸";
+                            width: 28px;
+                            accessible-label: @tr("Expand or collapse parked network {}", group.network);
+                            clicked => { network-toggle-requested(group.network); }
+                        }
+                        Text {
+                            text: group.network + " [PARKED]";
+                            font-italic: true;
+                            vertical-alignment: center;
+                            accessible-role: AccessibleRole.text;
+                        }
                     }
 
                     if group.expanded : VerticalLayout {
@@ -1269,6 +1290,12 @@ export component AppWindow inherits Window {
                                     kicked-channel-dismiss-requested(entry.network, entry.channel);
                                 }
                             }
+                            if entry.joined : Button {
+                                text: "×";
+                                accessible-label: @tr("Leave channel {} on {}", entry.channel, entry.network);
+                                width: 28px;
+                                clicked => { channel-part-requested(entry.network, entry.channel); }
+                            }
                         }
 
                         for query in group.queries : Button {
@@ -1292,15 +1319,24 @@ export component AppWindow inherits Window {
         VerticalBox {
             spacing: 8px;
 
-            // Topic bar: capped at roughly 3 lines so a long topic can't
-            // push the chat list off-screen. Falls back to the plain
-            // channel label when the server hasn't sent a topic.
             Text {
-                text: current-topic == "" ? current-channel-label : current-topic;
+                text: current-channel-label;
                 font-size: 14px;
-                wrap: word-wrap;
-                max-height: 54px;
-                vertical-alignment: top;
+                font-weight: 700;
+            }
+            if has-selected-channel && !current-query : Rectangle {
+                height: 60px;
+                background: theme == "dark" ? #242424 : #f5f5f5;
+                border-width: 1px;
+                border-color: theme == "dark" ? #5c5c5c : #d0d0d0;
+                padding: 3px;
+                Text {
+                    text: current-topic == "" ? @tr("No topic set") : current-topic;
+                    font-size: 14px;
+                    wrap: word-wrap;
+                    max-height: 54px;
+                    vertical-alignment: top;
+                }
             }
             if current-channel-modes != "" : Text {
                 text: current-channel-modes;
@@ -1345,7 +1381,7 @@ export component AppWindow inherits Window {
                     if line.nick != "" : MemberContextMenu {
                         target-nick: line.nick;
                         can-moderate: can-moderate-members;
-                        display-text: "<" + line.nick + "> ";
+                        display-text: "<" + line.nick-prefix + line.nick + "> ";
                         text-color: line.nick-color;
                         text-bold: true;
                         text-italic: line.italic;
