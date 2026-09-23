@@ -2784,7 +2784,6 @@ const IGNORED_KINDS: &[&str] = &[
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
     "channel_created",
-    "dcc_offer_resolved",
     "mentions_bundle",
     "peer_away",
     "presence_changed",
@@ -3021,6 +3020,10 @@ async fn handle_frame(
     }
     if payload_kind == "dcc_offer" {
         handle_dcc_offer(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "dcc_offer_resolved" {
+        handle_dcc_offer_resolved(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7345,6 +7348,94 @@ fn handle_dcc_offer(
     if apply_dcc_offer(&mut state.dcc_offers, offer) {
         push_dcc_offers(state, ui);
     }
+}
+
+/// How a held DCC offer left the server's held set (closed on the wire).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DccResolution {
+    Accepted,
+    Refused,
+    Expired,
+}
+
+impl DccResolution {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(Self::Accepted),
+            "refused" => Some(Self::Refused),
+            "expired" => Some(Self::Expired),
+            _ => None,
+        }
+    }
+
+    fn status_kind(self) -> &'static str {
+        match self {
+            Self::Accepted => "dcc-accepted",
+            Self::Refused => "dcc-refused",
+            Self::Expired => "dcc-expired",
+        }
+    }
+}
+
+/// Validates `dcc_offer_resolved` on the exact user topic. `resolution` is
+/// the closed `accepted | refused | expired` set: a value a newer server
+/// invents drops the event, leaving a stale prompt rather than a wrong one.
+fn parse_dcc_offer_resolved(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, DccResolution)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "dcc_offer_resolved" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    payload.get("channel")?.as_str()?;
+    let offer_id = payload.get("offer_id")?.as_str()?;
+    if network.trim().is_empty() || offer_id.is_empty() {
+        return None;
+    }
+    let resolution = DccResolution::parse(payload.get("resolution")?.as_str()?)?;
+    Some((offer_id.to_string(), resolution))
+}
+
+/// Drops a held offer by id, returning it; an unknown id (held before this
+/// socket, resolved elsewhere) is a silent no-op.
+fn apply_dcc_offer_resolved(offers: &mut Vec<DccOffer>, offer_id: &str) -> Option<DccOffer> {
+    let index = offers.iter().position(|held| held.offer_id == offer_id)?;
+    Some(offers.remove(index))
+}
+
+/// Removes the resolved offer on every device and says what happened;
+/// whether this device, another one or the hold timeout resolved it, the
+/// reaction is the same.
+fn handle_dcc_offer_resolved(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((offer_id, resolution)) = parse_dcc_offer_resolved(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("dcc_offer_resolved rejected: invalid carrier or payload");
+        return;
+    };
+    let Some(offer) = apply_dcc_offer_resolved(&mut state.dcc_offers, &offer_id) else {
+        return;
+    };
+    push_dcc_offers(state, ui);
+    let status = resolution.status_kind();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_dcc_filename(offer.filename.into());
+        ui.set_status_dcc_from(offer.from.into());
+        ui.set_status_kind(status.into());
+    });
 }
 
 /// Mirrors the held offers into the sidebar consent panel.
@@ -12733,7 +12824,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 12);
+        assert_eq!(IGNORED_KINDS.len(), 11);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -12788,6 +12879,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"directory_complete"));
         assert!(!IGNORED_KINDS.contains(&"directory_failed"));
         assert!(!IGNORED_KINDS.contains(&"dcc_offer"));
+        assert!(!IGNORED_KINDS.contains(&"dcc_offer_resolved"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -13785,6 +13877,56 @@ mod tests {
         other.offer_id = "off-2".to_string();
         assert!(apply_dcc_offer(&mut offers, other));
         assert_eq!(offers.len(), 2);
+    }
+
+    #[test]
+    fn dcc_offer_resolved_drops_only_a_held_offer() {
+        let topic = "grappa:user:vjt";
+        let resolved = |resolution: &str| {
+            serde_json::json!({
+                "kind": "dcc_offer_resolved",
+                "network": "libera",
+                "channel": "$server",
+                "offer_id": "off-1",
+                "resolution": resolution
+            })
+        };
+        for (wire, expected) in [
+            ("accepted", DccResolution::Accepted),
+            ("refused", DccResolution::Refused),
+            ("expired", DccResolution::Expired),
+        ] {
+            assert_eq!(
+                parse_dcc_offer_resolved(&resolved(wire), topic, "vjt"),
+                Some(("off-1".to_string(), expected))
+            );
+        }
+        // A resolution this client doesn't know drops the event.
+        assert_eq!(
+            parse_dcc_offer_resolved(&resolved("cancelled"), topic, "vjt"),
+            None
+        );
+        let mut missing_channel = resolved("accepted");
+        missing_channel
+            .as_object_mut()
+            .expect("object")
+            .remove("channel");
+        assert_eq!(
+            parse_dcc_offer_resolved(&missing_channel, topic, "vjt"),
+            None
+        );
+        assert_eq!(
+            parse_dcc_offer_resolved(&resolved("accepted"), "grappa:user:other", "vjt"),
+            None
+        );
+
+        let offer = parse_dcc_offer(&dcc_offer_payload(), topic, "vjt").expect("valid offer");
+        let mut offers = vec![offer];
+        assert_eq!(apply_dcc_offer_resolved(&mut offers, "unknown"), None);
+        assert_eq!(offers.len(), 1);
+        let removed = apply_dcc_offer_resolved(&mut offers, "off-1").expect("held");
+        assert_eq!(removed.filename, "notes.txt");
+        assert!(offers.is_empty());
     }
 
     #[test]

@@ -384,6 +384,9 @@ export component AppWindow inherits Window {
     in property <string> status-invite-peer: "";
     in property <string> status-invite-channel: "";
     in property <string> status-invite-network: "";
+    // Fill the `dcc-accepted`/`dcc-refused`/`dcc-expired` templates.
+    in property <string> status-dcc-filename: "";
+    in property <string> status-dcc-from: "";
     in property <int> status-protocol-version: 0;
     in property <bool> connecting: false;
     // Base URLs of servers previously connected to successfully — see
@@ -801,6 +804,12 @@ export component AppWindow inherits Window {
             return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "reconnecting" {
             return status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
+        } else if status-kind == "dcc-accepted" {
+            return @tr("Accepted {} from {}; the transfer runs on the server.", status-dcc-filename, status-dcc-from);
+        } else if status-kind == "dcc-refused" {
+            return @tr("Refused {} from {}.", status-dcc-filename, status-dcc-from);
+        } else if status-kind == "dcc-expired" {
+            return @tr("The offer of {} from {} expired.", status-dcc-filename, status-dcc-from);
         } else if status-kind == "dcc-offer-gone" {
             return @tr("That file offer is no longer available.");
         } else if status-kind == "dcc-rate-limited" {

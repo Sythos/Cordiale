@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 44 of them:
+  lists 56 top-level event kinds. Cordiale handles 45 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -85,7 +85,8 @@ known limitations are:
   `auto_away_debounce_changed`, `quit_part_reason_changed`,
   `auto_away_reason_changed`, `lusers_bundle`, `invite_ack`,
   `directory_progress`, `directory_complete`, `directory_failed`,
-  `dcc_offer`, and `message`; the remaining 12 kinds are
+  `dcc_offer`, `dcc_offer_resolved`, and `message`; the remaining 11 kinds
+  are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -233,7 +234,8 @@ known limitations are:
   offered, held by Grappa until you consent) appears in the sidebar with
   Accept and Refuse, sent over REST; the offer is never dropped locally,
   only when the server resolves it, and an offer re-sent on subscribe
-  replaces the held one.
+  replaces the held one. `dcc_offer_resolved` (accepted, refused or
+  expired, from any device) removes it and says which in the status bar.
   Settings > General shows a read-only copy of preferences Grappa stores and
   applies itself, updated live from their `*_changed` pushes and hidden until
   announced: `auto_away_debounce_changed` keeps `null` (server default) and
@@ -250,8 +252,7 @@ known limitations are:
   - **Presence, queries, and server replies**: `presence_changed`,
     `presence_error`, `presence_snapshot`, `notify_list`,
     `mentions_bundle`.
-  - **Transfers and other asynchronous work**: `dcc_offer_resolved`,
-    `bundle_hash`.
+  - **Transfers and other asynchronous work**: `bundle_hash`.
   - Unknown future event kinds are also silently dropped, as Grappa's
     protocol requires. Within message envelopes, `topic`, `kick`, and
     `server_event` still use generic system-message rendering rather than
