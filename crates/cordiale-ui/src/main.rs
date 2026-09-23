@@ -5157,7 +5157,11 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
         .or_else(|| payload.get("message"))
         .and_then(Value::as_str);
     let kind = payload.get("kind").and_then(Value::as_str);
-    let reason = payload.get("reason").and_then(Value::as_str);
+    // Grappa stores the PART/QUIT/KICK reason in `body`; a top-level
+    // `reason` is still honoured for older rows. An empty reason is none.
+    let reason = body
+        .or_else(|| payload.get("reason").and_then(Value::as_str))
+        .filter(|reason| !reason.is_empty());
 
     let event_text = match kind {
         Some("join") => Some(format!("→ {} joined", nick.unwrap_or("someone"))),
@@ -5204,6 +5208,28 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
                 nick.unwrap_or("someone")
             ))
         }
+        // KICK: the kicker is the sender, the kicked nick is `meta.target`
+        // and the optional reason is the body.
+        Some("kick") => {
+            let target = payload
+                .get("meta")
+                .and_then(|meta| meta.get("target"))
+                .and_then(Value::as_str)
+                .unwrap_or("someone");
+            let kicker = nick.unwrap_or("someone");
+            Some(match reason {
+                Some(reason) => format!("⊘ {target} was kicked by {kicker} ({reason})"),
+                None => format!("⊘ {target} was kicked by {kicker}"),
+            })
+        }
+        // TOPIC: the body is the new topic; an empty one clears it.
+        Some("topic") => Some(match body.filter(|topic| !topic.is_empty()) {
+            Some(topic) => format!(
+                "* {} changed the topic to: {topic}",
+                nick.unwrap_or("someone")
+            ),
+            None => format!("* {} cleared the topic", nick.unwrap_or("someone")),
+        }),
         // CTCP ACTION (`/me`) — the inner kind riding under a `message`
         // envelope, confirmed real by auditing `scrollback/message.ex`
         // directly. The body is the plain action text,
@@ -5232,7 +5258,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
     // keeps the normal `<nick> text` shape but renders italic, same as
     // join/part/quit — distinguishing it from an ordinary privmsg without
     // hiding its content the way a synthesized sentence would.
-    let italic = kind == Some("notice");
+    let italic = matches!(kind, Some("notice") | Some("server_event"));
 
     match (nick, body) {
         (Some(nick), Some(body)) => RenderedMessage {
@@ -14053,6 +14079,58 @@ mod tests {
         assert_eq!(rendered.nick.as_deref(), Some("vjt"));
         assert_eq!(rendered.text, "hello from the real channel");
         assert!(!rendered.italic);
+    }
+
+    #[test]
+    fn render_message_reads_part_quit_and_kick_reasons_from_the_body() {
+        let part = serde_json::json!({"kind": "part", "sender": "vjt", "body": "bye"});
+        assert_eq!(render_message(&part, None).text, "← vjt left (bye)");
+        let quit = serde_json::json!({"kind": "quit", "sender": "vjt", "body": ""});
+        assert_eq!(render_message(&quit, None).text, "⇐ vjt quit");
+
+        let kick = serde_json::json!({
+            "kind": "kick",
+            "sender": "op",
+            "body": null,
+            "meta": {"target": "spammer"}
+        });
+        let rendered = render_message(&kick, None);
+        assert_eq!(rendered.text, "⊘ spammer was kicked by op");
+        assert!(rendered.italic);
+        let kick_with_reason = serde_json::json!({
+            "kind": "kick",
+            "sender": "op",
+            "body": "flood",
+            "meta": {"target": "spammer"}
+        });
+        assert_eq!(
+            render_message(&kick_with_reason, None).text,
+            "⊘ spammer was kicked by op (flood)"
+        );
+    }
+
+    #[test]
+    fn render_message_formats_topic_and_server_events() {
+        let topic = serde_json::json!({"kind": "topic", "sender": "vjt", "body": "Rust talk"});
+        assert_eq!(
+            render_message(&topic, None).text,
+            "* vjt changed the topic to: Rust talk"
+        );
+        let cleared = serde_json::json!({"kind": "topic", "sender": "vjt", "body": ""});
+        assert_eq!(
+            render_message(&cleared, None).text,
+            "* vjt cleared the topic"
+        );
+
+        let server_event = serde_json::json!({
+            "kind": "server_event",
+            "sender": "irc.example.org",
+            "body": "Server going down"
+        });
+        let rendered = render_message(&server_event, None);
+        assert_eq!(rendered.nick.as_deref(), Some("irc.example.org"));
+        assert_eq!(rendered.text, "Server going down");
+        assert!(rendered.italic);
     }
 
     #[test]

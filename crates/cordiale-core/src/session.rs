@@ -254,7 +254,7 @@ async fn run_session(
         joined_topics.insert(
             user_topic.clone(),
             JoinedTopic {
-                join_ref: user_join_ref,
+                join_ref: user_join_ref.clone(),
                 presence: true,
             },
         );
@@ -331,14 +331,20 @@ async fn run_session(
                 frame = socket.next_message() => {
                     match frame {
                         Ok(Some(message)) => {
-                            if message.topic == user_topic && message.event == "phx_reply" {
-                                let protocol_version = message
-                                    .payload
-                                    .get("response")
-                                    .and_then(|response| response.get("protocol_version"))
-                                    .and_then(|version| version.as_u64())
-                                    .map(|version| version as u32);
-                                let _ = events.send(SessionEvent::Connected { protocol_version });
+                            match user_join_outcome(&message, &user_topic, &user_join_ref) {
+                                Some(Ok(protocol_version)) => {
+                                    let _ = events.send(SessionEvent::Connected { protocol_version });
+                                }
+                                Some(Err(reason)) => {
+                                    let _ = events.send(SessionEvent::Reconnecting {
+                                        reason: format!("user topic join rejected: {reason}"),
+                                    });
+                                    if !wait_before_reconnect(&mut shutdown).await {
+                                        return;
+                                    }
+                                    continue 'reconnect;
+                                }
+                                None => {}
                             }
                             let _ = events.send(SessionEvent::Frame(message));
                         }
@@ -369,6 +375,41 @@ async fn run_session(
 
 /// Joins `topic`, returning the `join_ref` the server now associates with
 /// it — required on every subsequent command frame for that topic.
+/// Reads the server's answer to the user-topic join: `None` for any other
+/// frame (replies to later commands on the same topic included), the
+/// advertised protocol version on `status: "ok"`, and the server's reason
+/// (or the status itself) otherwise.
+fn user_join_outcome(
+    message: &PhoenixMessage,
+    user_topic: &str,
+    join_ref: &str,
+) -> Option<Result<Option<u32>, String>> {
+    if message.topic != user_topic
+        || message.event != "phx_reply"
+        || message.message_ref.as_deref() != Some(join_ref)
+    {
+        return None;
+    }
+    let status = message
+        .payload
+        .get("status")
+        .and_then(|status| status.as_str())
+        .unwrap_or("missing");
+    let response = message.payload.get("response");
+    if status != "ok" {
+        let reason = response
+            .and_then(|response| response.get("reason"))
+            .and_then(|reason| reason.as_str())
+            .unwrap_or(status);
+        return Some(Err(reason.to_string()));
+    }
+    let protocol_version = response
+        .and_then(|response| response.get("protocol_version"))
+        .and_then(|version| version.as_u64())
+        .and_then(|version| u32::try_from(version).ok());
+    Some(Ok(protocol_version))
+}
+
 async fn join(
     socket: &mut PhoenixSocket,
     refs: &mut RefCounter,
@@ -404,6 +445,45 @@ fn leave_message(topic: &str, joined: &JoinedTopic, refs: &mut RefCounter) -> Ph
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reply(message_ref: &str, payload: serde_json::Value) -> PhoenixMessage {
+        PhoenixMessage {
+            join_ref: Some("1".to_string()),
+            message_ref: Some(message_ref.to_string()),
+            topic: "grappa:user:vjt".to_string(),
+            event: "phx_reply".to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn user_join_outcome_reads_only_the_join_reply() {
+        let ok = reply(
+            "1",
+            serde_json::json!({"status": "ok", "response": {"protocol_version": 26}}),
+        );
+        assert_eq!(
+            user_join_outcome(&ok, "grappa:user:vjt", "1"),
+            Some(Ok(Some(26)))
+        );
+        // A reply to a later command on the same topic is not the join.
+        let verb_reply = reply("7", serde_json::json!({"status": "ok", "response": {}}));
+        assert_eq!(user_join_outcome(&verb_reply, "grappa:user:vjt", "1"), None);
+        let rejected = reply(
+            "1",
+            serde_json::json!({"status": "error", "response": {"reason": "unauthorized"}}),
+        );
+        assert_eq!(
+            user_join_outcome(&rejected, "grappa:user:vjt", "1"),
+            Some(Err("unauthorized".to_string()))
+        );
+        let bare_error = reply("1", serde_json::json!({"status": "error"}));
+        assert_eq!(
+            user_join_outcome(&bare_error, "grappa:user:vjt", "1"),
+            Some(Err("error".to_string()))
+        );
+        assert_eq!(user_join_outcome(&ok, "grappa:user:other", "1"), None);
+    }
 
     #[tokio::test]
     async fn reconnect_wait_stops_immediately_once_shut_down() {
