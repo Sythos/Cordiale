@@ -1188,12 +1188,12 @@ struct WorkerState {
     /// The network the self-service Identity/Ignores/Perform/Notify
     /// sections currently act on.
     settings_network: Option<String>,
-    /// Session-local only: Grappa has no self-service `GET` for either of
-    /// these (the presence watchlist arrives via a WS snapshot, the
-    /// keyword watchlist has no documented `list` reply shape — see
-    /// `docs/protocol-notes.md` §4quater), so these don't survive a
-    /// reconnect/relaunch, unlike everything else in Settings.
-    notify_nicks: Vec<String>,
+    /// Presence watchlist nicks per network ID, replaced whole by every
+    /// `notify_list` snapshot (sent after join and after each change).
+    notify_lists: HashMap<i64, Vec<String>>,
+    /// Session-local only: the keyword watchlist has no documented `list`
+    /// reply shape (see `docs/protocol-notes.md` §4quater), so it doesn't
+    /// survive a reconnect/relaunch, unlike everything else in Settings.
     watch_patterns: Vec<String>,
     /// Current app theme, kept here too (not just in Slint's `theme`
     /// property) so message-rendering helpers running on this thread can
@@ -1256,7 +1256,7 @@ impl WorkerState {
             supported_user_modes_by_network: HashMap::new(),
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
-            notify_nicks: Vec::new(),
+            notify_lists: HashMap::new(),
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
         }
@@ -1432,6 +1432,7 @@ async fn run_worker(
                     Some(WorkerCommand::SettingsNetworkSelected(network)) => {
                         state.settings_network = Some(network);
                         handle_settings_network_refresh(&state, &ui).await;
+                        push_notify_nicks(&state, &ui);
                     }
                     Some(WorkerCommand::IdentitySave {
                         nick,
@@ -1476,17 +1477,25 @@ async fn run_worker(
                     Some(WorkerCommand::VhostToggle(address)) => {
                         handle_vhost_toggle(&state, &ui, address).await;
                     }
+                    // The server answers each change with a full `notify_list`
+                    // snapshot; the local edit only avoids a stale row until
+                    // it arrives.
                     Some(WorkerCommand::NotifyAdd(nick)) => {
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
+                            let network_id = state.network_ids.get(network).copied();
                             if client
                                 .add_notify_nicks(token, network, vec![nick.clone()])
                                 .await
                                 .is_ok()
-                                && !state.notify_nicks.contains(&nick)
                             {
-                                state.notify_nicks.push(nick);
+                                if let Some(network_id) = network_id {
+                                    let nicks = state.notify_lists.entry(network_id).or_default();
+                                    if !nicks.contains(&nick) {
+                                        nicks.push(nick);
+                                    }
+                                }
                             }
                         }
                         push_notify_nicks(&state, &ui);
@@ -1495,8 +1504,13 @@ async fn run_worker(
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
+                            let network_id = state.network_ids.get(network).copied();
                             if client.remove_notify_nick(token, network, &nick).await.is_ok() {
-                                state.notify_nicks.retain(|existing| existing != &nick);
+                                if let Some(nicks) =
+                                    network_id.and_then(|id| state.notify_lists.get_mut(&id))
+                                {
+                                    nicks.retain(|existing| existing != &nick);
+                                }
                             }
                         }
                         push_notify_nicks(&state, &ui);
@@ -1771,6 +1785,7 @@ async fn handle_connect(
             state.directory = None;
             state.dcc_offers.clear();
             state.archive = None;
+            state.notify_lists.clear();
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2604,20 +2619,26 @@ async fn handle_vhost_toggle(state: &WorkerState, ui: &slint::Weak<AppWindow>, a
     handle_settings_network_refresh(state, ui).await;
 }
 
-/// Pushes the session-local presence-watchlist nicks to the UI — see
-/// `WorkerState::notify_nicks`'s doc comment for why this is
-/// session-local rather than server-refetched.
+/// Pushes the presence watchlist of the network selected in Settings.
 fn push_notify_nicks(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let nicks: Vec<slint::SharedString> =
-        state.notify_nicks.iter().cloned().map(Into::into).collect();
+    let nicks: Vec<slint::SharedString> = state
+        .settings_network
+        .as_ref()
+        .and_then(|network| state.network_ids.get(network))
+        .and_then(|network_id| state.notify_lists.get(network_id))
+        .into_iter()
+        .flatten()
+        .cloned()
+        .map(Into::into)
+        .collect();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_settings_notify_nicks(Rc::new(slint::VecModel::from(nicks)).into());
     });
 }
 
-/// Pushes the session-local keyword-watchlist patterns to the UI — same
-/// session-local caveat as `push_notify_nicks`.
+/// Pushes the session-local keyword-watchlist patterns to the UI — see
+/// `WorkerState::watch_patterns` for why they are session-local.
 fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let patterns: Vec<slint::SharedString> = state
         .watch_patterns
@@ -2832,7 +2853,6 @@ const IGNORED_KINDS: &[&str] = &[
     // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex: all three settings echoes are handled above.
     // notify/wire.ex.
-    "notify_list",
     // server_settings/wire.ex.
     "server_settings_changed",
 ];
@@ -3069,6 +3089,10 @@ async fn handle_frame(
     }
     if payload_kind == "archive_purged" {
         handle_archive_purged(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "notify_list" {
+        handle_notify_list(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7809,6 +7833,54 @@ async fn handle_archive_purged(
     {
         load_archive(state, ui).await;
     }
+}
+
+/// Validates `notify_list` on the exact user topic: `networks` maps each
+/// network ID (a decimal JSON key) to its entries, each needing an integer
+/// `network_id` and string `nick` and `added_at`. One bad key or entry drops
+/// the whole snapshot, like Cicchetto's schema. Returns nicks per network.
+fn parse_notify_list(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<HashMap<i64, Vec<String>>> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "notify_list" {
+        return None;
+    }
+    let mut lists = HashMap::new();
+    for (key, entries) in payload.get("networks")?.as_object()? {
+        let network_id: i64 = key.parse().ok()?;
+        let mut nicks = Vec::new();
+        for entry in entries.as_array()? {
+            entry.get("network_id")?.as_i64()?;
+            entry.get("added_at")?.as_str()?;
+            nicks.push(entry.get("nick")?.as_str()?.to_string());
+        }
+        lists.insert(network_id, nicks);
+    }
+    Some(lists)
+}
+
+/// Replaces every network's watchlist with the snapshot (an empty map
+/// clears them all) and refreshes the Settings list.
+fn handle_notify_list(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(lists) = parse_notify_list(payload, carrier_topic, identifier) else {
+        persistence::log_line("notify_list rejected: invalid carrier or payload");
+        return;
+    };
+    state.notify_lists = lists;
+    push_notify_nicks(state, ui);
 }
 
 /// `/list` alone or `/list <search>`; any other text is not this command.
@@ -13111,7 +13183,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 9);
+        assert_eq!(IGNORED_KINDS.len(), 8);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -13169,6 +13241,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"dcc_offer_resolved"));
         assert!(!IGNORED_KINDS.contains(&"archive_changed"));
         assert!(!IGNORED_KINDS.contains(&"archive_purged"));
+        assert!(!IGNORED_KINDS.contains(&"notify_list"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -14318,6 +14391,43 @@ mod tests {
             "#Old",
             mapping
         ));
+    }
+
+    #[test]
+    fn parse_notify_list_groups_nicks_by_network_id() {
+        let topic = "grappa:user:vjt";
+        let entry = |network_id: i64, nick: &str| serde_json::json!({"network_id": network_id, "nick": nick, "added_at": "2026-09-23T10:00:00Z"});
+        let payload = serde_json::json!({
+            "kind": "notify_list",
+            "networks": {"7": [entry(7, "alice"), entry(7, "bob")], "9": []}
+        });
+        let lists = parse_notify_list(&payload, topic, "vjt").expect("valid snapshot");
+        assert_eq!(
+            lists.get(&7),
+            Some(&vec!["alice".to_string(), "bob".to_string()])
+        );
+        assert_eq!(lists.get(&9), Some(&Vec::new()));
+        // An empty snapshot is valid and clears every list.
+        assert_eq!(
+            parse_notify_list(
+                &serde_json::json!({"kind": "notify_list", "networks": {}}),
+                topic,
+                "vjt"
+            ),
+            Some(HashMap::new())
+        );
+        for invalid in [
+            serde_json::json!({"kind": "notify_list"}),
+            serde_json::json!({"kind": "notify_list", "networks": {"libera": []}}),
+            serde_json::json!({"kind": "notify_list", "networks": {"7": [{"network_id": 7, "nick": "alice"}]}}),
+            serde_json::json!({"kind": "notify_list", "networks": {"7": [{"network_id": "7", "nick": "alice", "added_at": "x"}]}}),
+        ] {
+            assert_eq!(parse_notify_list(&invalid, topic, "vjt"), None, "{invalid}");
+        }
+        assert_eq!(
+            parse_notify_list(&payload, "grappa:user:other", "vjt"),
+            None
+        );
     }
 
     #[test]

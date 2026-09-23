@@ -40,12 +40,12 @@ known limitations are:
 - **Settings** has no way to read back your *current* per-network
   identity (nick/ident/realname): the fields start blank, and saving
   them blank leaves your existing values untouched.
-- **Watch Lists** can send presence and keyword additions/removals, but the
-  UI does not restore their server-side state: Cordiale currently ignores
-  the presence `notify_list` snapshot, and the keyword-list reply has no
-  confirmed shape. The displayed lists are session-local and are cleared
-  by an explicit disconnect or app restart; an automatic WebSocket
-  reconnect can leave stale local entries.
+- **Watch Lists**: the presence (notify) list shown for the network
+  selected in Settings comes from the server's `notify_list` snapshot, sent
+  after joining and after every change. The keyword list still has no
+  confirmed reply shape, so it stays session-local: cleared by an explicit
+  disconnect or app restart, and an automatic WebSocket reconnect can leave
+  stale local entries.
 - **On-Connect Commands** is a single-line field, not a multi-line
   editor — separate multiple commands yourself.
 - The **`/links` graph window** has no pan/zoom yet.
@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 47 of them:
+  lists 56 top-level event kinds. Cordiale handles 48 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -86,7 +86,7 @@ known limitations are:
   `auto_away_reason_changed`, `lusers_bundle`, `invite_ack`,
   `directory_progress`, `directory_complete`, `directory_failed`,
   `dcc_offer`, `dcc_offer_resolved`, `archive_changed`, `archive_purged`,
-  and `message`; the remaining 9 kinds are
+  `notify_list`, and `message`; the remaining 8 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -255,8 +255,7 @@ known limitations are:
     `peer_away`,
     `server_settings_changed`.
   - **Presence, queries, and server replies**: `presence_changed`,
-    `presence_error`, `presence_snapshot`, `notify_list`,
-    `mentions_bundle`.
+    `presence_error`, `presence_snapshot`, `mentions_bundle`.
   - **Transfers and other asynchronous work**: `bundle_hash`.
   - Unknown future event kinds are also silently dropped, as Grappa's
     protocol requires. Within message envelopes, `topic`, `kick`, and
