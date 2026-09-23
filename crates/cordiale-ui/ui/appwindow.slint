@@ -651,6 +651,22 @@ export component AppWindow inherits Window {
     // get Rust-originated dynamic status text through Slint's `@tr()`
     // translation system, since `@tr()` only works on string literals
     // that live in a `.slint` file.
+    // Sidebar connection labels arrive from Rust as English keys
+    // ("connecting", "reconnecting", "paused", "connection failed").
+    function connection-label-text(label: string) -> string {
+        if label == "connecting" {
+            return @tr("connecting");
+        } else if label == "reconnecting" {
+            return @tr("reconnecting");
+        } else if label == "paused" {
+            return @tr("paused");
+        } else if label == "connection failed" {
+            return @tr("connection failed");
+        } else {
+            return label;
+        }
+    }
+
     function reply-title-text() -> string {
         if reply-kind == "who_reply" {
             return @tr("WHO {} on {}", reply-subject, reply-network);
@@ -1227,9 +1243,9 @@ export component AppWindow inherits Window {
 
                     if !group.parked : Button {
                         text: (group.expanded ? "▾ 🔌 " : "▸ 🔌 ") + group.network
-                            + (group.connection-label == "" ? "" : " · " + group.connection-label);
+                            + (group.connection-label == "" ? "" : " · " + connection-label-text(group.connection-label));
                         accessible-label: group.network
-                            + (group.connection-label == "" ? "" : " — " + group.connection-label);
+                            + (group.connection-label == "" ? "" : " — " + connection-label-text(group.connection-label));
                         clicked => { network-toggle-requested(group.network); }
                     }
                     if group.parked : HorizontalBox {
@@ -1241,7 +1257,7 @@ export component AppWindow inherits Window {
                             clicked => { network-toggle-requested(group.network); }
                         }
                         Text {
-                            text: group.network + " [PARKED]";
+                            text: @tr("{} [PARKED]", group.network);
                             font-italic: true;
                             vertical-alignment: center;
                             accessible-role: AccessibleRole.text;
