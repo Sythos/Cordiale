@@ -119,7 +119,7 @@ jobs:
             Set-Content -Path "dist\SHA256SUMS-windows-x64-dev" -Encoding ascii
 
       - name: Upload DEV installer
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cordiale-windows-x64-dev-${{ steps.metadata.outputs.package_version }}-attempt-${{ steps.metadata.outputs.build_attempt }}
           path: dist/*
