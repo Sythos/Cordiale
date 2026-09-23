@@ -8,7 +8,7 @@ per Grappa's documented client protocol.
 
 ## Why Cordiale
 
-Some of us just want to sit on Grappa without hauling a full browser engine along for the ride. Gecko, WebKit, Chromium — doesn't matter which one, even the "vanilla" build with zero bloatware still helps itself to 700–800MB of RAM just to render some chat. Cordiale's whole pitch is being the cheap-on-resources alternative: Rust and Slint give it enough cross-compile flexibility to cover Windows on both x64 and ARM64 (yes, Surface people, you're covered), a handful of popular Linux distros as proper native packages, and the usual adaptable `.tar.gz` for whichever distro didn't make the automated build lineup.
+Some of us just want to sit on Grappa without hauling a full browser engine along for the ride. Gecko, WebKit, Chromium — doesn't matter which one, even the "vanilla" build with zero bloatware still helps itself to 700–800MB of RAM just to render some chat. Cordiale's whole pitch is being the cheap-on-resources alternative: Rust and Slint give it enough cross-compile flexibility to cover Windows on both x64 and ARM64 (yes, Surface people, you're covered), a handful of popular Linux distros as proper native packages, macOS on Apple Silicon, and the usual adaptable `.tar.gz` for whichever distro didn't make the automated build lineup.
 
 ## The wider Grappa ecosystem
 
@@ -53,9 +53,10 @@ known limitations are:
 - **On-Connect Commands** is a single-line field, not a multi-line
   editor — separate multiple commands yourself.
 - The **`/links` graph window** has no pan/zoom yet.
-- **Guest/visitor access**: leave the password blank to enter the guest flow.
-  Whether guest access is available is up to the selected Grappa server;
-  Cordiale doesn't send a made-up shared guest password.
+- **Guest/visitor access**: leave the password blank to try the guest flow:
+  Cordiale signs in as `guest`/`guest`, the credentials observed for
+  Grappa's visitor login. Whether guest access is accepted is up to the
+  selected Grappa server; it is not a capability the protocol guarantees.
 - **Attachments** are not implemented: the paperclip displays an explicit
   unsupported status. The client protocol does not define a plain upload
   endpoint; DCC/file transfer needs separate implementation work.
@@ -126,8 +127,8 @@ known limitations are:
   in session state, and its close control sends a server-side PART before
   removing the row locally. Away confirmations validate the user-topic
   carrier and known network, then update only that network's state; the
-  still-ignored `mentions_bundle` remains a separate event gap. Known gaps are
-  grouped below.
+  back-from-away `mentions_bundle` summary is handled separately (see
+  below). Known gaps are grouped below.
   `channels_changed` validates the user-topic signal, refetches the
   authoritative channel list, and reconciles sidebar rows and subscriptions
   idempotently while preserving topics still owned by a query or own-nick
