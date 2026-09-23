@@ -912,7 +912,7 @@ dependencies = [
 
 [[package]]
 name = "cordiale-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "dirs",
  "futures-util",
@@ -927,7 +927,7 @@ dependencies = [
 
 [[package]]
 name = "cordiale-ui"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "cordiale-core",
  "slint",
