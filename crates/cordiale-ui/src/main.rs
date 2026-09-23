@@ -1203,6 +1203,9 @@ struct WorkerState {
     /// Last standalone away message (301) per `(network, folded peer)`,
     /// shown above that peer's private window until dismissed.
     peer_away: HashMap<(String, String), String>,
+    /// Latest back-from-away mentions summary per network, kept apart from
+    /// `reply_view` so a later reply can't lose it; `/mentions` reopens it.
+    mentions_bundles: HashMap<String, ReplyView>,
     /// Session-local only: the keyword watchlist has no documented `list`
     /// reply shape (see `docs/protocol-notes.md` §4quater), so it doesn't
     /// survive a reconnect/relaunch, unlike everything else in Settings.
@@ -1271,6 +1274,7 @@ impl WorkerState {
             notify_lists: HashMap::new(),
             presence_by_network: HashMap::new(),
             peer_away: HashMap::new(),
+            mentions_bundles: HashMap::new(),
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
         }
@@ -1808,6 +1812,7 @@ async fn handle_connect(
             state.notify_lists.clear();
             state.presence_by_network.clear();
             state.peer_away.clear();
+            state.mentions_bundles.clear();
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2306,6 +2311,20 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     // which open the panel — nothing is shown optimistically, like Cicchetto.
     if body.trim() == "/recover" {
         send_user_network_verb(state, network, "recover");
+        return;
+    }
+    // `/mentions` reopens the last away summary of the active network.
+    if body.trim().eq_ignore_ascii_case("/mentions") {
+        let bundle = state.mentions_bundles.get(network.as_str()).cloned();
+        match bundle {
+            Some(view) => show_reply_view(state, ui, view),
+            None => {
+                let ui = ui.clone();
+                let _ = ui.upgrade_in_event_loop(|ui| {
+                    ui.set_status_kind("no-mentions".into());
+                });
+            }
+        }
         return;
     }
     // `/archive` lists the active network's archived windows.
@@ -2916,7 +2935,6 @@ const IGNORED_KINDS: &[&str] = &[
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
     "channel_created",
-    "mentions_bundle",
     // scrollback/wire.ex.
     // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex: all three settings echoes are handled above.
@@ -3177,6 +3195,10 @@ async fn handle_frame(
     }
     if payload_kind == "peer_away" {
         handle_peer_away(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "mentions_bundle" {
+        handle_mentions_bundle(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -8252,6 +8274,108 @@ fn handle_peer_away(
     }
 }
 
+/// Message kinds of Grappa's scrollback (`Message.kind()`), the closed set a
+/// mentions entry may carry.
+const SCROLLBACK_MESSAGE_KINDS: [&str; 11] = [
+    "privmsg",
+    "notice",
+    "action",
+    "join",
+    "part",
+    "quit",
+    "nick_change",
+    "mode",
+    "topic",
+    "kick",
+    "server_event",
+];
+
+/// Validates `mentions_bundle` on the exact user topic and renders it as a
+/// reply view: the away period, the reason when set, then each message in
+/// the server's order. Every message needs an integer `server_time`,
+/// string `channel`/`sender`, string-or-`null` `body` and a known `kind`;
+/// one bad message drops the bundle, like Cicchetto's schema.
+fn parse_mentions_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<ReplyView> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "mentions_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let started = payload.get("away_started_at")?.as_str()?;
+    let ended = payload.get("away_ended_at")?.as_str()?;
+    let reason = parse_nullable_wire_string(payload.get("away_reason")?)?;
+    let mut rows = vec![(
+        "mentions-away-period".to_string(),
+        format!(
+            "{} – {}",
+            format_iso_timestamp(started),
+            format_iso_timestamp(ended)
+        ),
+    )];
+    if let Some(reason) = reason {
+        rows.push(("mentions-away-reason".to_string(), reason));
+    }
+    let messages = payload.get("messages")?.as_array()?;
+    for message in messages {
+        let server_time = message.get("server_time")?.as_i64()?;
+        let channel = message.get("channel")?.as_str()?;
+        let sender = message.get("sender")?.as_str()?;
+        let body = parse_nullable_wire_string(message.get("body")?)?.unwrap_or_default();
+        let kind = message.get("kind")?.as_str()?;
+        if !SCROLLBACK_MESSAGE_KINDS.contains(&kind) {
+            return None;
+        }
+        let text = if kind == "action" {
+            format!("* {sender} {body}")
+        } else {
+            format!("<{sender}> {body}")
+        };
+        rows.push((
+            String::new(),
+            format!("{} {channel} {text}", format_epoch_millis(server_time)),
+        ));
+    }
+    if messages.is_empty() {
+        rows.push(("mentions-empty".to_string(), String::new()));
+    }
+    Some(ReplyView {
+        kind: "mentions_bundle",
+        subject: String::new(),
+        network: network.to_string(),
+        rows,
+    })
+}
+
+/// Back from away: keeps the summary for `/mentions` and opens it, as
+/// Cicchetto focuses its mentions window (returning is the user's action).
+fn handle_mentions_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(view) = parse_mentions_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("mentions_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    state
+        .mentions_bundles
+        .insert(view.network.clone(), view.clone());
+    show_reply_view(state, ui, view);
+}
+
 /// `/list` alone or `/list <search>`; any other text is not this command.
 fn parse_list_command(body: &str) -> Option<String> {
     let trimmed = body.trim();
@@ -8417,7 +8541,7 @@ fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) 
             page.total.to_string(),
             page.captured_at
                 .as_deref()
-                .map(format_directory_captured_at)
+                .map(format_iso_timestamp)
                 .unwrap_or_default(),
             page.next_cursor.is_some(),
         ),
@@ -8457,9 +8581,9 @@ fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) 
     });
 }
 
-/// Local-time rendering of the snapshot's ISO-8601 capture time; an
-/// unparsable value is shown as sent.
-fn format_directory_captured_at(raw: &str) -> String {
+/// Local-time rendering of an ISO-8601 timestamp; an unparsable value is
+/// shown as sent.
+fn format_iso_timestamp(raw: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(raw)
         .map(|parsed| {
             parsed
@@ -13552,11 +13676,11 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 4);
+        assert_eq!(IGNORED_KINDS.len(), 3);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
-        for kind in ["bundle_hash", "mentions_bundle"] {
+        for kind in ["bundle_hash"] {
             assert!(
                 IGNORED_KINDS.contains(&kind),
                 "{kind} should be in IGNORED_KINDS"
@@ -13615,6 +13739,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"presence_changed"));
         assert!(!IGNORED_KINDS.contains(&"presence_error"));
         assert!(!IGNORED_KINDS.contains(&"peer_away"));
+        assert!(!IGNORED_KINDS.contains(&"mentions_bundle"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -14936,6 +15061,54 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn parse_mentions_bundle_keeps_order_and_null_bodies() {
+        let topic = "grappa:user:vjt";
+        let message = |kind: &str, body: Value| serde_json::json!({"server_time": 1790000000000_i64, "channel": "#rust", "sender": "alice", "body": body, "kind": kind});
+        let payload = serde_json::json!({
+            "kind": "mentions_bundle",
+            "network": "libera",
+            "away_started_at": "2026-09-23T08:00:00Z",
+            "away_ended_at": "2026-09-23T09:00:00Z",
+            "away_reason": null,
+            "messages": [message("privmsg", serde_json::json!("vjt: ping")), message("action", Value::Null)]
+        });
+        let view = parse_mentions_bundle(&payload, topic, "vjt").expect("valid bundle");
+        assert_eq!(view.kind, "mentions_bundle");
+        assert_eq!(view.network, "libera");
+        // Away period, then the two messages in order; no reason row for null.
+        assert_eq!(view.rows.len(), 3);
+        assert_eq!(view.rows[0].0, "mentions-away-period");
+        assert!(view.rows[1].1.ends_with("#rust <alice> vjt: ping"));
+        assert!(view.rows[2].1.ends_with("#rust * alice "));
+
+        let mut with_reason = payload.clone();
+        with_reason["away_reason"] = serde_json::json!("lunch");
+        let view = parse_mentions_bundle(&with_reason, topic, "vjt").expect("valid bundle");
+        assert_eq!(
+            view.rows[1],
+            ("mentions-away-reason".to_string(), "lunch".to_string())
+        );
+
+        for (key, invalid) in [
+            (
+                "messages",
+                serde_json::json!([message("wallops", serde_json::json!("x"))]),
+            ),
+            (
+                "messages",
+                serde_json::json!([{"server_time": "1", "channel": "#rust", "sender": "a", "body": null, "kind": "privmsg"}]),
+            ),
+            ("away_reason", serde_json::json!(5)),
+            ("away_ended_at", Value::Null),
+        ] {
+            let mut bad = payload.clone();
+            bad[key] = invalid;
+            assert!(parse_mentions_bundle(&bad, topic, "vjt").is_none(), "{key}");
+        }
+        assert!(parse_mentions_bundle(&payload, "grappa:user:other", "vjt").is_none());
     }
 
     #[test]

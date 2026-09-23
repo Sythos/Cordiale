@@ -650,6 +650,8 @@ export component AppWindow inherits Window {
             return @tr("WHOWAS {} on {}", reply-subject, reply-network);
         } else if reply-kind == "banlist_bundle" {
             return @tr("Mode list {} on {}", reply-subject, reply-network);
+        } else if reply-kind == "mentions_bundle" {
+            return @tr("Mentions while you were away on {}", reply-network);
         } else if reply-kind == "lusers_bundle" {
             return @tr("Network statistics for {}", reply-network);
         } else {
@@ -710,6 +712,12 @@ export component AppWindow inherits Window {
             return @tr("The server has no history for this nick.");
         } else if key == "banlist-empty" {
             return @tr("The list is empty.");
+        } else if key == "mentions-away-period" {
+            return @tr("Away");
+        } else if key == "mentions-away-reason" {
+            return @tr("Away message");
+        } else if key == "mentions-empty" {
+            return @tr("Nobody mentioned you.");
         } else if key == "lusers-total-users" {
             return @tr("Users");
         } else if key == "lusers-invisible" {
@@ -874,6 +882,8 @@ export component AppWindow inherits Window {
             return @tr("The server has no room left for this file.");
         } else if status-kind == "dcc-action-failed" {
             return @tr("Couldn't answer the file offer.");
+        } else if status-kind == "no-mentions" {
+            return @tr("No away summary for this network yet.");
         } else if status-kind == "invite-sent" {
             return @tr("Invited {} to {} on {}.", status-invite-peer, status-invite-channel, status-invite-network);
         } else if status-kind == "attach-unsupported" {
