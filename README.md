@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 26 of them:
+  lists 56 top-level event kinds. Cordiale handles 27 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -79,7 +79,8 @@ known limitations are:
   `supported_umodes_changed`, `joined`, `join_failed`, `kicked`,
   `window_pending`, `window_invited`, `window_invite_declined`,
   `network_attached`, `network_detached`, `connection_state_changed`,
-  `connection_progress`, and `message`; the remaining 30 kinds are
+  `connection_progress`, `recover_progress`, and `message`; the remaining 29
+  kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -170,6 +171,13 @@ known limitations are:
   and refreshes `GET /networks`. The overlay is dropped whenever the Phoenix
   socket disconnects, because the event is never replayed and a missed
   `connected` would otherwise leave the label stuck.
+  `/recover` asks Grappa to run its guided NickServ identity recovery on the
+  active network. Nothing is shown optimistically: the first live
+  `recover_progress` opens a sidebar panel bound to that event's network,
+  later steps replace their own row in place, events for another network are
+  ignored while it is open, and unknown future reason tokens are shown
+  verbatim. The panel closes only when dismissed. A server rejection of the
+  command itself (for example, nothing to recover) is not surfaced yet.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
@@ -183,7 +191,7 @@ known limitations are:
     `banlist_bundle`, `server_reply`, `invite_ack`, `mentions_bundle`.
   - **Transfers and other asynchronous work**: `dcc_offer`,
     `dcc_offer_resolved`, `directory_progress`, `directory_complete`,
-    `directory_failed`, `recover_progress`, `recover_result`, `bundle_hash`.
+    `directory_failed`, `recover_result`, `bundle_hash`.
   - Unknown future event kinds are also silently dropped, as Grappa's
     protocol requires. Within message envelopes, `topic`, `kick`, and
     `server_event` still use generic system-message rendering rather than

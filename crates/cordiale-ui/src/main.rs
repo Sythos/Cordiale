@@ -69,6 +69,7 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    DismissRecover,
     ToggleNetwork(String),
     SendMessage {
         body: String,
@@ -250,6 +251,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_window_invite_network("".into());
             ui.set_window_invite_channel("".into());
             ui.set_window_invite_inviter("".into());
+            ui.set_recover_visible(false);
         }
     });
 
@@ -343,6 +345,11 @@ fn main() -> Result<(), slint::PlatformError> {
             network: network.to_string(),
             channel: channel.to_string(),
         });
+    });
+
+    let tx_for_dismiss_recover = worker_tx.clone();
+    ui.on_recover_dismiss_requested(move || {
+        let _ = tx_for_dismiss_recover.send(WorkerCommand::DismissRecover);
     });
 
     let tx_for_network_toggle = worker_tx.clone();
@@ -686,6 +693,83 @@ impl ConnectionProgressState {
     }
 }
 
+/// Closed step set of Grappa's guided identity recovery (`/recover`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoverStep {
+    Identify,
+    Register,
+    Nick,
+    Recover,
+    Release,
+}
+
+impl RecoverStep {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "identify" => Some(Self::Identify),
+            "register" => Some(Self::Register),
+            "nick" => Some(Self::Nick),
+            "recover" => Some(Self::Recover),
+            "release" => Some(Self::Release),
+            _ => None,
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Identify => "identify",
+            Self::Register => "register",
+            Self::Nick => "nick",
+            Self::Recover => "recover",
+            Self::Release => "release",
+        }
+    }
+}
+
+/// Closed status set of one recovery step (`running | ok | failed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoverStepStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+impl RecoverStepStatus {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "running" => Some(Self::Running),
+            "ok" => Some(Self::Done),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Done => "ok",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecoverStepEntry {
+    step: RecoverStep,
+    status: RecoverStepStatus,
+    /// Open string: Grappa may add reason tokens, so an unknown one must
+    /// never drop the step.
+    reason: Option<String>,
+}
+
+/// Cicchetto's `RecoverState`: opened only by the first `recover_progress`,
+/// bound to that event's network, cleared only by an explicit dismiss.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RecoverPanel {
+    network: String,
+    steps: Vec<RecoverStepEntry>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NetworkConnectionSnapshot {
     status: NetworkConnectionStatus,
@@ -804,6 +888,9 @@ struct WorkerState {
     /// the event is never replayed and a missed `connected` would otherwise
     /// leave the badge stuck.
     connecting_networks: std::collections::HashSet<String>,
+    /// Identity-recovery panel driven entirely by server pushes; `None`
+    /// until the first `recover_progress` and again after a dismiss.
+    recover_panel: Option<RecoverPanel>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -881,6 +968,7 @@ impl WorkerState {
             network_ids: HashMap::new(),
             network_connection_states: HashMap::new(),
             connecting_networks: std::collections::HashSet::new(),
+            recover_panel: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -946,6 +1034,10 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
                         handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;
+                    }
+                    Some(WorkerCommand::DismissRecover) => {
+                        state.recover_panel = None;
+                        push_recover_panel(&state, &ui);
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
                         let expanded = state.expanded_networks.entry(network).or_insert(true);
@@ -1340,6 +1432,7 @@ async fn handle_connect(
             state.network_ids = network_ids_from_boot(&outcome);
             state.network_connection_states = connection_states;
             state.connecting_networks.clear();
+            state.recover_panel = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -1441,6 +1534,7 @@ async fn handle_connect(
                 ui.set_window_invite_network("".into());
                 ui.set_window_invite_channel("".into());
                 ui.set_window_invite_inviter("".into());
+                ui.set_recover_visible(false);
                 ui.set_current_query(false);
                 ui.set_current_query_ready(false);
                 let networks: Vec<slint::SharedString> =
@@ -1827,6 +1921,13 @@ async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, b
         handle_request_links(state, network.clone());
         return;
     }
+    // `/recover` starts Grappa's guided NickServ identity recovery on the
+    // active network; progress arrives only as `recover_progress` pushes,
+    // which open the panel — nothing is shown optimistically, like Cicchetto.
+    if body.trim() == "/recover" {
+        send_user_network_verb(state, network, "recover");
+        return;
+    }
 
     let request = SendMessageRequest::plain(body);
     if client
@@ -2162,6 +2263,11 @@ fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 /// network topic Cordiale doesn't currently join. The result arrives
 /// later as a `links_bundle` frame, handled in `handle_frame`.
 fn handle_request_links(state: &WorkerState, network: String) {
+    send_user_network_verb(state, &network, "links");
+}
+
+/// Pushes a `{network_id}`-only verb (`links`, `recover`) on the user topic.
+fn send_user_network_verb(state: &WorkerState, network: &str, verb: &str) {
     let (Some(session), Some(identifier)) = (&state.session, &state.identifier) else {
         return;
     };
@@ -2169,15 +2275,11 @@ fn handle_request_links(state: &WorkerState, network: String) {
     // guard server-side, no slug fallback) — see
     // `docs/protocol-notes.md` §4ter. Silently do nothing rather than
     // send a request guaranteed to be rejected if the id isn't known.
-    let Some(&network_id) = state.network_ids.get(&network) else {
+    let Some(&network_id) = state.network_ids.get(network) else {
         return;
     };
     let topic = format!("grappa:user:{identifier}");
-    session.send_command(
-        topic,
-        "links",
-        serde_json::json!({ "network_id": network_id }),
-    );
+    session.send_command(topic, verb, serde_json::json!({ "network_id": network_id }));
 }
 
 /// Shared setup for every `MemberContextMenu` action below: the session,
@@ -2353,7 +2455,6 @@ const IGNORED_KINDS: &[&str] = &[
     "directory_progress",
     "directory_complete",
     "directory_failed",
-    "recover_progress",
     "recover_result",
     "presence_changed",
     "presence_error",
@@ -2534,6 +2635,10 @@ async fn handle_frame(
     }
     if payload_kind == "connection_progress" {
         handle_connection_progress(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "recover_progress" {
+        handle_recover_progress(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -6264,6 +6369,130 @@ async fn handle_connection_progress(
     if progress == ConnectionProgressState::Connected {
         reconcile_network_connection_states(state, ui, "connection_progress").await;
     }
+}
+
+/// Validates `recover_progress` on the exact user topic: `network` a
+/// non-empty slug, `step`/`status` closed enums, and `reason` present as
+/// `null` or any string (an additive server reason must not drop the step).
+fn parse_recover_progress(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, RecoverStepEntry)> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "recover_progress" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let step = RecoverStep::parse(payload.get("step")?.as_str()?)?;
+    let status = RecoverStepStatus::parse(payload.get("status")?.as_str()?)?;
+    let reason = match payload.get("reason")? {
+        Value::Null => None,
+        Value::String(reason) => Some(reason.clone()),
+        _ => return None,
+    };
+    Some((
+        network.to_string(),
+        RecoverStepEntry {
+            step,
+            status,
+            reason,
+        },
+    ))
+}
+
+/// Cicchetto's `applyRecoverProgress`: the first event opens the panel for
+/// its network, an event for any other network is ignored while one is
+/// open, and a known step is replaced in place so the order stays stable.
+fn apply_recover_progress(
+    panel: &mut Option<RecoverPanel>,
+    network: &str,
+    entry: RecoverStepEntry,
+) -> bool {
+    if panel.is_none() {
+        *panel = Some(RecoverPanel {
+            network: network.to_string(),
+            steps: vec![entry],
+        });
+        return true;
+    }
+    let Some(open) = panel.as_mut() else {
+        return false;
+    };
+    if open.network != network {
+        return false;
+    }
+    match open.steps.iter().position(|row| row.step == entry.step) {
+        Some(index) if open.steps[index] == entry => false,
+        Some(index) => {
+            open.steps[index] = entry;
+            true
+        }
+        None => {
+            open.steps.push(entry);
+            true
+        }
+    }
+}
+
+fn handle_recover_progress(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, entry)) = parse_recover_progress(payload, carrier_topic, identifier) else {
+        persistence::log_line("recover_progress rejected: invalid carrier or payload");
+        return;
+    };
+    if apply_recover_progress(&mut state.recover_panel, &network, entry) {
+        push_recover_panel(state, ui);
+    }
+}
+
+/// Mirrors `state.recover_panel` into the sidebar panel. The Slint row model
+/// is built inside the UI-thread closure because `ModelRc` is not `Send`.
+fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (visible, network, rows) = match &state.recover_panel {
+        Some(panel) => (
+            true,
+            panel.network.clone(),
+            panel
+                .steps
+                .iter()
+                .map(|row| {
+                    (
+                        row.step.wire_name(),
+                        row.status.wire_name(),
+                        row.reason.clone().unwrap_or_default(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ),
+        None => (false, String::new(), Vec::new()),
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<RecoverStepRow> = rows
+            .into_iter()
+            .map(|(step, status, reason)| RecoverStepRow {
+                step: step.into(),
+                status: status.into(),
+                reason: reason.into(),
+            })
+            .collect();
+        ui.set_recover_steps(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_recover_network(network.into());
+        ui.set_recover_visible(visible);
+    });
 }
 
 impl NetworkLifecycleKind {
@@ -10435,7 +10664,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 30);
+        assert_eq!(IGNORED_KINDS.len(), 29);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -10472,6 +10701,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"network_attached"));
         assert!(!IGNORED_KINDS.contains(&"connection_state_changed"));
         assert!(!IGNORED_KINDS.contains(&"connection_progress"));
+        assert!(!IGNORED_KINDS.contains(&"recover_progress"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -10559,6 +10789,128 @@ mod tests {
             ConnectionProgressState::Connected
         ));
         assert!(connecting.is_empty());
+    }
+
+    #[test]
+    fn parse_recover_progress_validates_carrier_enums_and_open_reason() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "recover_progress",
+            "network": "azzurra",
+            "step": "identify",
+            "status": "failed",
+            "reason": "wrong_password",
+            "future_field": 1
+        });
+        assert_eq!(
+            parse_recover_progress(&payload, topic, "vjt"),
+            Some((
+                "azzurra".to_string(),
+                RecoverStepEntry {
+                    step: RecoverStep::Identify,
+                    status: RecoverStepStatus::Failed,
+                    reason: Some("wrong_password".to_string()),
+                }
+            ))
+        );
+        // A reason token the client doesn't know yet is kept, not rejected.
+        let future_reason = serde_json::json!({
+            "kind": "recover_progress",
+            "network": "azzurra",
+            "step": "release",
+            "status": "ok",
+            "reason": "some_future_reason"
+        });
+        assert_eq!(
+            parse_recover_progress(&future_reason, topic, "vjt").map(|(_, entry)| entry.reason),
+            Some(Some("some_future_reason".to_string()))
+        );
+        let running = serde_json::json!({
+            "kind": "recover_progress",
+            "network": "azzurra",
+            "step": "nick",
+            "status": "running",
+            "reason": null
+        });
+        assert_eq!(
+            parse_recover_progress(&running, topic, "vjt").map(|(_, entry)| entry.status),
+            Some(RecoverStepStatus::Running)
+        );
+
+        assert_eq!(
+            parse_recover_progress(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+        for invalid in [
+            serde_json::json!({"kind": "recover_result", "network": "azzurra", "step": "nick", "status": "ok", "reason": null}),
+            serde_json::json!({"kind": "recover_progress", "network": "", "step": "nick", "status": "ok", "reason": null}),
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "step": "ghost", "status": "ok", "reason": null}),
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "step": "nick", "status": "done", "reason": null}),
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "step": "nick", "status": "ok"}),
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "step": "nick", "status": "ok", "reason": 3}),
+        ] {
+            assert_eq!(
+                parse_recover_progress(&invalid, topic, "vjt"),
+                None,
+                "{invalid} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn recover_progress_opens_isolates_and_upserts_like_cicchetto() {
+        let entry = |step, status| RecoverStepEntry {
+            step,
+            status,
+            reason: None,
+        };
+        let mut panel = None;
+        assert!(apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            entry(RecoverStep::Identify, RecoverStepStatus::Running)
+        ));
+        assert!(apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            entry(RecoverStep::Nick, RecoverStepStatus::Running)
+        ));
+        // A known step is replaced in place, keeping the original order.
+        assert!(apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            entry(RecoverStep::Identify, RecoverStepStatus::Done)
+        ));
+        // Duplicates are no-ops.
+        assert!(!apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            entry(RecoverStep::Identify, RecoverStepStatus::Done)
+        ));
+        // Another network never mixes into the open panel.
+        assert!(!apply_recover_progress(
+            &mut panel,
+            "libera",
+            entry(RecoverStep::Release, RecoverStepStatus::Failed)
+        ));
+        let open = panel.clone().unwrap();
+        assert_eq!(open.network, "azzurra");
+        assert_eq!(
+            open.steps,
+            vec![
+                entry(RecoverStep::Identify, RecoverStepStatus::Done),
+                entry(RecoverStep::Nick, RecoverStepStatus::Running),
+            ]
+        );
+
+        // After a dismiss, the next progress event reopens a fresh panel.
+        panel = None;
+        assert!(apply_recover_progress(
+            &mut panel,
+            "libera",
+            entry(RecoverStep::Register, RecoverStepStatus::Running)
+        ));
+        assert_eq!(panel.unwrap().network, "libera");
     }
 
     #[test]

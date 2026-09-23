@@ -45,6 +45,14 @@ struct QueryEntry {
     mentions-description: string,
 }
 
+// One step of the identity-recovery panel, as raw wire tokens; the visible
+// labels are translated by the `recover-*-label` functions below.
+struct RecoverStepRow {
+    step: string,
+    status: string,
+    reason: string,
+}
+
 // One connected network in the sidebar, with its joined channels and
 // whether the channel list under it is currently shown (default: yes).
 struct NetworkGroup {
@@ -380,6 +388,12 @@ export component AppWindow inherits Window {
     in property <string> window-invite-network: "";
     in property <string> window-invite-channel: "";
     in property <string> window-invite-inviter: "";
+    // Server-driven identity recovery (`/recover`): the first
+    // `recover_progress` opens this panel and later ones update their step
+    // in place. It is never opened locally.
+    in property <bool> recover-visible: false;
+    in property <string> recover-network: "";
+    in property <[RecoverStepRow]> recover-steps: [];
     // Boot snapshot plus live join/part/quit/nick-change updates —
     // doesn't track role (mode) changes yet, see README's Known gaps.
     // Already sorted ops-first by Rust.
@@ -471,6 +485,7 @@ export component AppWindow inherits Window {
     callback query-selected(string, string);
     callback window-invite-join-requested(string, string);
     callback kicked-channel-dismiss-requested(string, string);
+    callback recover-dismiss-requested();
     callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
@@ -503,6 +518,50 @@ export component AppWindow inherits Window {
     // get Rust-originated dynamic status text through Slint's `@tr()`
     // translation system, since `@tr()` only works on string literals
     // that live in a `.slint` file.
+    function recover-step-label(step: string) -> string {
+        if step == "identify" {
+            return @tr("Identify with services");
+        } else if step == "register" {
+            return @tr("Confirm registration");
+        } else if step == "nick" {
+            return @tr("Switch nick");
+        } else if step == "recover" {
+            return @tr("Recover the nick");
+        } else if step == "release" {
+            return @tr("Release the nick");
+        } else {
+            return step;
+        }
+    }
+
+    function recover-status-label(status: string) -> string {
+        if status == "running" {
+            return @tr("in progress");
+        } else if status == "ok" {
+            return @tr("done");
+        } else if status == "failed" {
+            return @tr("failed");
+        } else {
+            return status;
+        }
+    }
+
+    // Grappa's four known reasons are localized; any additive future reason
+    // is shown verbatim rather than dropped.
+    function recover-reason-label(reason: string) -> string {
+        if reason == "wrong_password" {
+            return @tr("wrong password");
+        } else if reason == "nick_unavailable" {
+            return @tr("nick unavailable");
+        } else if reason == "services_declined" {
+            return @tr("services declined");
+        } else if reason == "identify_unconfirmed" {
+            return @tr("identification not confirmed");
+        } else {
+            return reason;
+        }
+    }
+
     function status-text() -> string {
         if status-kind == "signed-in" {
             return @tr("Signed in. {} network(s), {} channel(s).", status-network-count, status-channel-count);
@@ -759,6 +818,35 @@ export component AppWindow inherits Window {
                         clicked => {
                             window-invite-join-requested(window-invite-network, window-invite-channel);
                         }
+                    }
+                }
+            }
+
+            if recover-visible : Rectangle {
+                background: theme == "dark" ? #1f2d3a : #e3f0ff;
+                border-width: 1px;
+                border-color: theme == "dark" ? #4a7fb0 : #3d7cc9;
+                padding: 6px;
+                VerticalBox {
+                    spacing: 2px;
+                    Text {
+                        text: @tr("Identity recovery on {}", recover-network);
+                        wrap: word-wrap;
+                        font-weight: 700;
+                        accessible-role: AccessibleRole.text;
+                    }
+                    for row in recover-steps : Text {
+                        text: row.reason == ""
+                            ? @tr("{}: {}", recover-step-label(row.step), recover-status-label(row.status))
+                            : @tr("{}: {} ({})", recover-step-label(row.step), recover-status-label(row.status), recover-reason-label(row.reason));
+                        wrap: word-wrap;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    Button {
+                        text: @tr("Dismiss");
+                        accessible-label: @tr("Dismiss identity recovery");
+                        clicked => { recover-dismiss-requested(); }
                     }
                 }
             }
