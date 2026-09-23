@@ -1402,7 +1402,10 @@ async fn run_worker(
                         push_peer_away_banner(&state, &ui);
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
-                        let expanded = state.expanded_networks.entry(network).or_insert(true);
+                        let initially_expanded = !state.network_connection_states.get(&network).is_some_and(
+                            |snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked),
+                        );
+                        let expanded = state.expanded_networks.entry(network).or_insert(initially_expanded);
                         *expanded = !*expanded;
                         refresh_network_groups(&state, &ui);
                     }
@@ -5825,6 +5828,7 @@ type NetworkGroupData = (
     Vec<(String, String)>,
     Vec<(String, String)>,
     String,
+    bool,
 );
 type NetworkEntries = (Vec<(String, String)>, Vec<(String, String)>);
 
@@ -5870,12 +5874,22 @@ fn network_groups_data(
         .into_iter()
         .map(|(network, (mut channels, queries))| {
             channels.sort();
-            let is_expanded = expanded.get(&network).copied().unwrap_or(true);
+            let parked = connection_states
+                .get(&network)
+                .is_some_and(|snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked));
+            let is_expanded = expanded.get(&network).copied().unwrap_or(!parked);
             let connection_label = connection_states
                 .get(&network)
                 .map(|snapshot| snapshot.status.sidebar_label().to_string())
                 .unwrap_or_default();
-            (network, is_expanded, channels, queries, connection_label)
+            (
+                network,
+                is_expanded,
+                channels,
+                queries,
+                connection_label,
+                parked,
+            )
         })
         .collect()
 }
@@ -5905,7 +5919,7 @@ fn network_groups_model(
     data.into_iter()
         .enumerate()
         .map(
-            |(index, (network, expanded, channels, queries, connection_label))| {
+            |(index, (network, expanded, channels, queries, connection_label, parked))| {
                 let channel_entries: Vec<ChannelEntry> = channels
                     .into_iter()
                     .map(|(channel, label)| {
@@ -5962,6 +5976,7 @@ fn network_groups_model(
                     connection_label: connection_label.into(),
                     separator_before: index > 0,
                     expanded,
+                    parked,
                     channels: Rc::new(slint::VecModel::from(channel_entries)).into(),
                     queries: Rc::new(slint::VecModel::from(query_entries)).into(),
                 }
@@ -6023,6 +6038,17 @@ fn return_home_if_network_selected(
         ui.set_chat_lines(Rc::new(slint::VecModel::from(Vec::<ChatLine>::new())).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(Vec::<MemberRow>::new())).into());
     });
+}
+
+fn collapse_if_parked(state: &mut WorkerState, network: &str) -> bool {
+    if state
+        .network_connection_states
+        .get(network)
+        .is_some_and(|snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked))
+    {
+        return state.expanded_networks.insert(network.to_string(), false) != Some(false);
+    }
+    false
 }
 
 /// Converts one already-rendered message into the Slint `ChatLine` model.
@@ -6845,8 +6871,34 @@ fn apply_network_rest_refresh(
     boot: &BootResponse,
     me: &MeResponse,
 ) -> Vec<ChannelTopicAction> {
-    let entries = channel_entries_from_channels(&boot.channels);
+    let next_network_ids = network_ids_from_entries(&boot.networks);
+    let mut entries = channel_entries_from_channels(&boot.channels);
+    entries.retain(|(network, _, _)| next_network_ids.contains_key(network));
     let channel_actions = reconcile_channel_entries(state, identifier, entries);
+
+    // The account's /boot network list is authoritative. A removed network
+    // must not be recreated by an old query row or a late channel snapshot.
+    state
+        .query_windows
+        .retain(|query| next_network_ids.contains_key(&query.network));
+    state
+        .expanded_networks
+        .retain(|network, _| next_network_ids.contains_key(network));
+    state
+        .query_joined
+        .retain(|(network, _)| next_network_ids.contains_key(network));
+    state
+        .query_ready
+        .retain(|(network, _)| next_network_ids.contains_key(network));
+    state
+        .query_full_history_required
+        .retain(|(network, _)| next_network_ids.contains_key(network));
+    state
+        .stale_query_topics
+        .retain(|(network, _)| next_network_ids.contains_key(network));
+    state
+        .recent_channels
+        .retain(|(network, _)| next_network_ids.contains_key(network));
 
     state.window_states = joined_window_states_from_boot_channels(&boot.channels);
     state.window_failures.clear();
@@ -6859,7 +6911,7 @@ fn apply_network_rest_refresh(
     state.messages = messages_from_boot_response(boot);
     state.read_cursors = read_cursors_from_me(&me.read_cursors);
     state.badge_count = normalize_badge_count(Some(&me.badge_count));
-    state.network_ids = network_ids_from_entries(&boot.networks);
+    state.network_ids = next_network_ids;
     state.network_connection_states = network_connection_states_from_entries(&boot.networks);
 
     let listener_actions = reconcile_own_nick_listener_topics(
@@ -6899,6 +6951,24 @@ fn apply_network_rest_refresh(
             OwnNickListenerAction::Join(topic) => ChannelTopicAction::Join(topic),
         });
     }
+    let mut obsolete_topics: Vec<String> = state
+        .joined_topics
+        .iter()
+        .filter(|topic| {
+            query_from_topic(identifier, topic)
+                .is_some_and(|(network, _)| !state.network_ids.contains_key(&network))
+        })
+        .cloned()
+        .collect();
+    obsolete_topics.sort();
+    for topic in obsolete_topics {
+        state.joined_topics.remove(&topic);
+        if !actions.iter().any(
+            |action| matches!(action, ChannelTopicAction::Leave(existing) if existing == &topic),
+        ) {
+            actions.push(ChannelTopicAction::Leave(topic));
+        }
+    }
     actions
 }
 
@@ -6933,10 +7003,11 @@ async fn handle_connection_state_changed(
         &network_slug,
         transition.snapshot.clone(),
     );
+    let collapsed = snapshot_changed && collapse_if_parked(state, &network_slug);
     if return_home {
         return_home_if_network_selected(state, ui, &network_slug);
     }
-    if snapshot_changed {
+    if snapshot_changed || collapsed {
         refresh_network_groups(state, ui);
     }
     persistence::log_line(&format!(
@@ -6984,6 +7055,9 @@ async fn reconcile_network_connection_states(
         }
         let (row_changed, return_home) =
             record_network_connection_state(&mut state.network_connection_states, &slug, snapshot);
+        if row_changed {
+            state_changed |= collapse_if_parked(state, &slug);
+        }
         if return_home {
             return_home_if_network_selected(state, ui, &slug);
         }
@@ -9845,25 +9919,15 @@ async fn handle_network_lifecycle(
         }
     }
 
-    if let Some((current_network, _)) = state.current_channel.as_ref() {
-        if !state.network_ids.contains_key(current_network) {
-            state.current_channel = None;
-            state.current_query = false;
-            state.current_query_ready = false;
-            let _ = ui.upgrade_in_event_loop(|ui| {
-                ui.set_has_selected_channel(false);
-                ui.set_current_channel_label("".into());
-                ui.set_current_topic("".into());
-                ui.set_current_channel_modes("".into());
-                ui.set_current_window_is_joined(false);
-                ui.set_can_moderate_members(false);
-                ui.set_compose_text("".into());
-                ui.set_chat_lines(Rc::new(slint::VecModel::from(Vec::<ChatLine>::new())).into());
-                ui.set_channel_members(
-                    Rc::new(slint::VecModel::from(Vec::<MemberRow>::new())).into(),
-                );
-            });
-        }
+    let is_parked = state
+        .network_connection_states
+        .get(&network_slug)
+        .is_some_and(|snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked));
+    if is_parked {
+        collapse_if_parked(state, &network_slug);
+    }
+    if !state.network_ids.contains_key(&network_slug) || is_parked {
+        return_home_if_network_selected(state, ui, &network_slug);
     }
 
     refresh_network_groups(state, ui);
@@ -15959,6 +16023,16 @@ mod tests {
             &HashMap::new(),
         );
         assert_eq!(groups[0].4, "paused");
+        assert!(groups[0].5);
+        assert!(!groups[0].1);
+        let reopened = network_groups_data(
+            &entries,
+            &[],
+            &HashMap::from([("libera".to_string(), true)]),
+            &connection_states,
+            &HashMap::new(),
+        );
+        assert!(reopened[0].1);
     }
 
     #[test]
@@ -16060,6 +16134,60 @@ mod tests {
         );
         assert_eq!(state.network_ids.get("libera"), Some(&7));
         assert_eq!(state.own_nicks.get("libera"), Some(&"sythos".to_string()));
+    }
+
+    #[test]
+    fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("sythos".to_string());
+        state.network_ids.insert("deleted".to_string(), 9);
+        state.query_windows.push(QueryWindow {
+            network: "deleted".to_string(),
+            target_nick: "alice".to_string(),
+            opened_at: "now".to_string(),
+        });
+        let obsolete_topic = channel_topic("sythos", "deleted", "alice");
+        state.joined_topics.insert(obsolete_topic.clone());
+        state
+            .query_ready
+            .insert(("deleted".to_string(), "alice".to_string()));
+        let boot = BootResponse {
+            networks: vec![serde_json::json!({"id": 7, "slug": "libera", "nick": "sythos"})],
+            channels: HashMap::from([(
+                "deleted".to_string(),
+                vec![serde_json::json!({"name": "#stale", "joined": true})],
+            )]),
+            heads: HashMap::new(),
+        };
+        let me = MeResponse {
+            read_cursors: serde_json::json!({}),
+            unread_counts: serde_json::json!({}),
+            badge_count: serde_json::json!(0),
+            is_admin: false,
+        };
+        let actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
+        assert_eq!(actions.len(), 2);
+        assert!(actions.contains(&ChannelTopicAction::Leave(obsolete_topic)));
+        assert!(actions.contains(&ChannelTopicAction::Join(channel_topic(
+            "sythos", "libera", "sythos"
+        ))));
+        assert!(!state.network_ids.contains_key("deleted"));
+        assert!(state.channel_entries.is_empty());
+        assert!(state.query_windows.is_empty());
+        assert!(state.query_ready.is_empty());
+        assert_eq!(
+            state.joined_topics,
+            std::collections::HashSet::from([channel_topic("sythos", "libera", "sythos")])
+        );
+        let groups = network_groups_data(
+            &state.channel_entries,
+            &state.query_windows,
+            &state.expanded_networks,
+            &state.network_connection_states,
+            &state.network_ids,
+        );
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "libera");
     }
 
     #[test]
