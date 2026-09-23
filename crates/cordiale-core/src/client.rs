@@ -105,6 +105,12 @@ impl GrappaClient {
         }
     }
 
+    /// The normalized server URL this client was built with — the same key
+    /// the remembered-profile store uses.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// `GET /api/config` — the first, unauthenticated call to a server.
     pub async fn fetch_config(&self) -> Result<ConfigResponse, GrappaClientError> {
         let url = format!("{}/api/config", self.base_url);

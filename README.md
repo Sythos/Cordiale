@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 28 of them:
+  lists 56 top-level event kinds. Cordiale handles 29 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -79,8 +79,8 @@ known limitations are:
   `supported_umodes_changed`, `joined`, `join_failed`, `kicked`,
   `window_pending`, `window_invited`, `window_invite_declined`,
   `network_attached`, `network_detached`, `connection_state_changed`,
-  `connection_progress`, `recover_progress`, `recover_result`, and `message`;
-  the remaining 28 kinds are
+  `connection_progress`, `recover_progress`, `recover_result`,
+  `web_session_severed`, and `message`; the remaining 27 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -180,13 +180,22 @@ known limitations are:
   terminal outcome and reason on that open panel only; it is a no-op when the
   panel was dismissed or belongs to another network. A server rejection of the
   command itself (for example, nothing to recover) is not surfaced yet.
+  `web_session_severed` (Grappa's flood protection) signs Cordiale out for any
+  string `code`: the Phoenix session is stopped so it never retries with the
+  revoked bearer, a remembered copy of that bearer is forgotten, and the
+  sign-in screen returns. `rate_limit_flood` gets a dedicated notice explaining
+  that the IRC session is still running; other codes show the generic
+  sign-in-again message. Because the event is best-effort, a WebSocket
+  upgrade refused with 401/403 now ends the session the same way instead of
+  retrying forever, and a shut-down session no longer keeps reconnecting in
+  the background during its back-off.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**:
     `peer_away`, `auto_away_debounce_changed`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
-    `server_settings_changed`, `web_session_severed`.
+    `server_settings_changed`.
   - **Presence, queries, and server replies**: `presence_changed`,
     `presence_error`, `presence_snapshot`, `notify_list`, `who_reply`,
     `whois_bundle`, `whois_avatar_ready`, `whowas_bundle`, `lusers_bundle`,

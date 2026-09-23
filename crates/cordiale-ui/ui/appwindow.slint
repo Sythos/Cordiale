@@ -572,6 +572,8 @@ export component AppWindow inherits Window {
             return @tr("Wrong username or password/token.");
         } else if status-kind == "reauthentication-required" {
             return @tr("Saved sign-in is unavailable. Enter your password or client token to sign in again.");
+        } else if status-kind == "session-severed-flood" {
+            return @tr("You were signed out because this client sent too many requests. Your IRC session is still running; sign in again to continue.");
         } else if status-kind == "two-factor-required" {
             return @tr("This account has two-factor authentication enabled. Sign in from a browser instead.");
         } else if status-kind == "too-many-attempts" {

@@ -1295,6 +1295,15 @@ async fn run_worker(
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame).await;
                     }
+                    Some(SessionEvent::Disconnected { reason }) if state.session.is_none() => {
+                        // A deliberately ended session (sign-out, revoked
+                        // bearer) still reports its final socket close; it
+                        // must not overwrite the sign-in screen's status.
+                        persistence::log_line(&format!("ended session closed: {reason}"));
+                    }
+                    Some(SessionEvent::Reconnecting { reason }) if state.session.is_none() => {
+                        persistence::log_line(&format!("ended session not reconnecting: {reason}"));
+                    }
                     Some(SessionEvent::Disconnected { reason }) => {
                         persistence::log_line(&format!("session disconnected: {reason}"));
                         reset_query_session_readiness(&mut state);
@@ -1324,6 +1333,12 @@ async fn run_worker(
                             ui.set_status_message(reason.into());
                             ui.set_current_query_ready(false);
                         });
+                    }
+                    Some(SessionEvent::AuthRejected { reason }) => {
+                        // The session task has already stopped retrying; a
+                        // lost `web_session_severed` push ends up here too.
+                        persistence::log_line(&format!("session bearer rejected: {reason}"));
+                        end_revoked_session(&mut state, &ui, false);
                     }
                     None => {
                         session_events = None;
@@ -2494,8 +2509,6 @@ const IGNORED_KINDS: &[&str] = &[
     "auto_away_debounce_changed",
     "quit_part_reason_changed",
     "auto_away_reason_changed",
-    // rate_limit/wire.ex.
-    "web_session_severed",
     // notify/wire.ex.
     "notify_list",
     // server_settings/wire.ex.
@@ -2670,6 +2683,10 @@ async fn handle_frame(
     }
     if payload_kind == "recover_result" {
         handle_recover_result(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "web_session_severed" {
+        handle_web_session_severed(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -6558,6 +6575,71 @@ fn handle_recover_result(
     if apply_recover_result(&mut state.recover_panel, &network, outcome, reason) {
         push_recover_panel(state, ui);
     }
+}
+
+/// Validates `web_session_severed` on the exact user topic. `code` must be a
+/// string but any value is accepted: the action (sign out) does not depend on
+/// it, and an unknown future code must never leave the client holding a
+/// revoked bearer.
+fn parse_web_session_severed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<String> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "web_session_severed" {
+        return None;
+    }
+    Some(payload.get("code")?.as_str()?.to_string())
+}
+
+/// Grappa sends this best-effort, then revokes the bearer and closes the
+/// socket; the IRC session stays up. Like Cicchetto, sign out for every code
+/// and show the dedicated notice only for `rate_limit_flood`.
+fn handle_web_session_severed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(code) = parse_web_session_severed(payload, carrier_topic, identifier) else {
+        persistence::log_line("web_session_severed rejected: invalid carrier or payload");
+        return;
+    };
+    persistence::log_line(&format!("web session severed by server: code={code}"));
+    end_revoked_session(state, ui, code == "rate_limit_flood");
+}
+
+/// Ends a session whose bearer the server revoked: stops the Phoenix
+/// session so it never retries with that bearer, forgets a remembered copy
+/// of it, and returns to the sign-in screen through the normal disconnect
+/// path. No IRC QUIT is sent — the bouncer's IRC session is unaffected.
+fn end_revoked_session(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, flood: bool) {
+    if let Some(handle) = state.session.take() {
+        handle.shutdown();
+    }
+    if let (Some(client), Some(identifier)) = (state.client.as_ref(), state.identifier.as_deref()) {
+        forget_remembered_bearer(client.base_url(), identifier);
+    }
+    state.token = None;
+    let status = if flood {
+        "session-severed-flood"
+    } else {
+        "reauthentication-required"
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.invoke_disconnect_requested();
+        ui.set_saved_profile_identifier("".into());
+        ui.set_saved_profile_server_url("".into());
+        ui.set_status_kind(status.into());
+        ui.set_status_message("".into());
+    });
 }
 
 /// Mirrors `state.recover_panel` into the sidebar panel. The Slint row model
@@ -10770,7 +10852,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 28);
+        assert_eq!(IGNORED_KINDS.len(), 27);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -10809,6 +10891,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"connection_progress"));
         assert!(!IGNORED_KINDS.contains(&"recover_progress"));
         assert!(!IGNORED_KINDS.contains(&"recover_result"));
+        assert!(!IGNORED_KINDS.contains(&"web_session_severed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -11114,6 +11197,52 @@ mod tests {
         assert_eq!(open.outcome, Some(RecoverOutcome::Failed));
         assert_eq!(open.outcome_reason.as_deref(), Some("wrong_password"));
         assert_eq!(open.steps.len(), 1);
+    }
+
+    #[test]
+    fn parse_web_session_severed_accepts_any_string_code_on_the_user_topic() {
+        let topic = "grappa:user:vjt";
+        let flood = serde_json::json!({
+            "kind": "web_session_severed",
+            "code": "rate_limit_flood",
+            "future_field": true
+        });
+        assert_eq!(
+            parse_web_session_severed(&flood, topic, "vjt").as_deref(),
+            Some("rate_limit_flood")
+        );
+        // A code added by a later server still signs the client out.
+        let future_code =
+            serde_json::json!({"kind": "web_session_severed", "code": "admin_revoked"});
+        assert_eq!(
+            parse_web_session_severed(&future_code, topic, "vjt").as_deref(),
+            Some("admin_revoked")
+        );
+
+        assert_eq!(
+            parse_web_session_severed(&flood, "grappa:user:other", "vjt"),
+            None
+        );
+        assert_eq!(
+            parse_web_session_severed(
+                &flood,
+                "grappa:user:vjt/network:libera/channel:#rust",
+                "vjt"
+            ),
+            None
+        );
+        for invalid in [
+            serde_json::json!({"kind": "web_session_severed"}),
+            serde_json::json!({"kind": "web_session_severed", "code": null}),
+            serde_json::json!({"kind": "web_session_severed", "code": 429}),
+            serde_json::json!({"kind": "connection_progress", "code": "rate_limit_flood"}),
+        ] {
+            assert_eq!(
+                parse_web_session_severed(&invalid, topic, "vjt"),
+                None,
+                "{invalid} must be rejected"
+            );
+        }
     }
 
     #[test]
