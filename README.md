@@ -267,8 +267,9 @@ known limitations are:
   `bundle_hash` names the deployed Cicchetto web build: it is validated
   and logged when it changes, and never downloads or updates anything.
   Unknown future event kinds are silently dropped, as Grappa's protocol
-  requires. Within message envelopes, `topic`, `kick`, and `server_event`
-  still use generic system-message rendering rather than dedicated text.
+  requires. Within message envelopes, `kick` and `topic` rows get their own
+  sentences, PART/QUIT/KICK reasons are read from the row body, and
+  `server_event` lines render like notices.
 - Performance hasn't been profiled — deliberately deferred until after
   broader field testing surfaces real usage patterns.
 
