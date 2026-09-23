@@ -169,10 +169,6 @@ msgid "Not available yet — this section needs Grappa REST/WS endpoints Cordial
 msgstr "Aún no disponible: esta sección necesita endpoints REST/WS de Grappa que Cordiale todavía no implementa."
 
 msgctxt "AppWindow"
-msgid "Links for {}"
-msgstr "Enlaces para {}"
-
-msgctxt "AppWindow"
 msgid "Vhosts, credentials, server-wide settings write, and the live admin event stream aren't built yet."
 msgstr "Los vhosts, las credenciales, la escritura de ajustes del servidor y el flujo de eventos de admin en vivo todavía no están implementados."
 
@@ -327,3 +323,655 @@ msgstr "Comandos al conectar (uno por línea, separados por punto y coma)"
 msgctxt "AppWindow"
 msgid "Credits"
 msgstr "Créditos"
+
+msgctxt "MemberContextMenu"
+msgid "Op"
+msgstr "Op"
+
+msgctxt "MemberContextMenu"
+msgid "Deop"
+msgstr "Deop"
+
+msgctxt "MemberContextMenu"
+msgid "Voice"
+msgstr "Voice"
+
+msgctxt "MemberContextMenu"
+msgid "Devoice"
+msgstr "Devoice"
+
+msgctxt "MemberContextMenu"
+msgid "Kick"
+msgstr "Kick"
+
+msgctxt "MemberContextMenu"
+msgid "Ban"
+msgstr "Ban"
+
+msgctxt "MemberContextMenu"
+msgid "WHOIS"
+msgstr "WHOIS"
+
+msgctxt "MemberContextMenu"
+msgid "CTCP"
+msgstr "CTCP"
+
+msgctxt "MemberContextMenu"
+msgid "Query"
+msgstr "Mensaje privado"
+
+msgctxt "AppWindow"
+msgid "connecting"
+msgstr "conectando"
+
+msgctxt "AppWindow"
+msgid "reconnecting"
+msgstr "reconectando"
+
+msgctxt "AppWindow"
+msgid "paused"
+msgstr "pausado"
+
+msgctxt "AppWindow"
+msgid "connection failed"
+msgstr "conexión fallida"
+
+msgctxt "AppWindow"
+msgid "WHO {} on {}"
+msgstr "WHO {} en {}"
+
+msgctxt "AppWindow"
+msgid "Message of the day on {}"
+msgstr "Mensaje del día en {}"
+
+msgctxt "AppWindow"
+msgid "Server information on {}"
+msgstr "Información del servidor en {}"
+
+msgctxt "AppWindow"
+msgid "Server version on {}"
+msgstr "Versión del servidor en {}"
+
+msgctxt "AppWindow"
+msgid "Server administrator on {}"
+msgstr "Administrador del servidor en {}"
+
+msgctxt "AppWindow"
+msgid "WHOIS {} on {}"
+msgstr "WHOIS {} en {}"
+
+msgctxt "AppWindow"
+msgid "WHOWAS {} on {}"
+msgstr "WHOWAS {} en {}"
+
+msgctxt "AppWindow"
+msgid "Mode list {} on {}"
+msgstr "Lista de modos {} en {}"
+
+msgctxt "AppWindow"
+msgid "Mentions while you were away on {}"
+msgstr "Menciones mientras estabas ausente en {}"
+
+msgctxt "AppWindow"
+msgid "Network statistics for {}"
+msgstr "Estadísticas de red para {}"
+
+msgctxt "AppWindow"
+msgid "No users matched."
+msgstr "Ningún usuario coincide."
+
+msgctxt "AppWindow"
+msgid "The server sent no lines."
+msgstr "El servidor no envió ninguna línea."
+
+msgctxt "AppWindow"
+msgid "Address"
+msgstr "Dirección"
+
+msgctxt "AppWindow"
+msgid "Server"
+msgstr "Servidor"
+
+msgctxt "AppWindow"
+msgid "Account"
+msgstr "Cuenta"
+
+msgctxt "AppWindow"
+msgid "Channels"
+msgstr "Canales"
+
+msgctxt "AppWindow"
+msgid "Idle"
+msgstr "Inactivo"
+
+msgctxt "AppWindow"
+msgid "Signed on"
+msgstr "Conectado desde"
+
+msgctxt "AppWindow"
+msgid "Away"
+msgstr "Ausente"
+
+msgctxt "AppWindow"
+msgid "IRC operator"
+msgstr "Operador de IRC"
+
+msgctxt "AppWindow"
+msgid "User modes"
+msgstr "Modos de usuario"
+
+msgctxt "AppWindow"
+msgid "Secure connection"
+msgstr "Conexión segura"
+
+msgctxt "AppWindow"
+msgid "Certificate fingerprint"
+msgstr "Huella del certificado"
+
+msgctxt "AppWindow"
+msgid "Actual host"
+msgstr "Host real"
+
+msgctxt "AppWindow"
+msgid "Registered nick"
+msgstr "Nick registrado"
+
+msgctxt "AppWindow"
+msgid "Server administrator"
+msgstr "Administrador del servidor"
+
+msgctxt "AppWindow"
+msgid "Services administrator"
+msgstr "Administrador de servicios"
+
+msgctxt "AppWindow"
+msgid "Helper"
+msgstr "Ayudante"
+
+msgctxt "AppWindow"
+msgid "Channel operator"
+msgstr "Operador del canal"
+
+msgctxt "AppWindow"
+msgid "Agent"
+msgstr "Agente"
+
+msgctxt "AppWindow"
+msgid "Java client"
+msgstr "Cliente Java"
+
+msgctxt "AppWindow"
+msgid "Avatar available on the server"
+msgstr "Avatar disponible en el servidor"
+
+msgctxt "AppWindow"
+msgid "Last seen"
+msgstr "Visto por última vez"
+
+msgctxt "AppWindow"
+msgid "The server has no history for this nick."
+msgstr "El servidor no tiene historial para este nick."
+
+msgctxt "AppWindow"
+msgid "The list is empty."
+msgstr "La lista está vacía."
+
+msgctxt "AppWindow"
+msgid "Away message"
+msgstr "Mensaje de ausencia"
+
+msgctxt "AppWindow"
+msgid "Nobody mentioned you."
+msgstr "Nadie te mencionó."
+
+msgctxt "AppWindow"
+msgid "Invisible"
+msgstr "Invisible"
+
+msgctxt "AppWindow"
+msgid "Servers"
+msgstr "Servidores"
+
+msgctxt "AppWindow"
+msgid "Operators online"
+msgstr "Operadores conectados"
+
+msgctxt "AppWindow"
+msgid "Unknown connections"
+msgstr "Conexiones desconocidas"
+
+msgctxt "AppWindow"
+msgid "Channels formed"
+msgstr "Canales creados"
+
+msgctxt "AppWindow"
+msgid "Clients on this server"
+msgstr "Clientes en este servidor"
+
+msgctxt "AppWindow"
+msgid "Servers linked to this server"
+msgstr "Servidores enlazados a este servidor"
+
+msgctxt "AppWindow"
+msgid "Current local users"
+msgstr "Usuarios locales actuales"
+
+msgctxt "AppWindow"
+msgid "Max local users"
+msgstr "Máximo de usuarios locales"
+
+msgctxt "AppWindow"
+msgid "Current global users"
+msgstr "Usuarios globales actuales"
+
+msgctxt "AppWindow"
+msgid "Max global users"
+msgstr "Máximo de usuarios globales"
+
+msgctxt "AppWindow"
+msgid "Identify with services"
+msgstr "Identificarse con los servicios"
+
+msgctxt "AppWindow"
+msgid "Confirm registration"
+msgstr "Confirmar registro"
+
+msgctxt "AppWindow"
+msgid "Switch nick"
+msgstr "Cambiar de nick"
+
+msgctxt "AppWindow"
+msgid "Recover the nick"
+msgstr "Recuperar el nick"
+
+msgctxt "AppWindow"
+msgid "Release the nick"
+msgstr "Liberar el nick"
+
+msgctxt "AppWindow"
+msgid "in progress"
+msgstr "en curso"
+
+msgctxt "AppWindow"
+msgid "done"
+msgstr "hecho"
+
+msgctxt "AppWindow"
+msgid "failed"
+msgstr "fallido"
+
+msgctxt "AppWindow"
+msgid "wrong password"
+msgstr "contraseña incorrecta"
+
+msgctxt "AppWindow"
+msgid "nick unavailable"
+msgstr "nick no disponible"
+
+msgctxt "AppWindow"
+msgid "services declined"
+msgstr "servicios rechazados"
+
+msgctxt "AppWindow"
+msgid "identification not confirmed"
+msgstr "identificación no confirmada"
+
+msgctxt "AppWindow"
+msgid "{} channels, listed {}."
+msgstr "{} canales, listados {}."
+
+msgctxt "AppWindow"
+msgid "{} channels, listed {} (may be out of date)."
+msgstr "{} canales, listados {} (puede estar desactualizada)."
+
+msgctxt "AppWindow"
+msgid "The server listed no channels."
+msgstr "El servidor no listó ningún canal."
+
+msgctxt "AppWindow"
+msgid "Listing channels…"
+msgstr "Listando canales…"
+
+msgctxt "AppWindow"
+msgid "No channel list yet."
+msgstr "Aún no hay lista de canales."
+
+msgctxt "AppWindow"
+msgid "Too many archive requests. Wait a moment and try again."
+msgstr "Demasiadas solicitudes de archivo. Espera un momento e inténtalo de nuevo."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the archive."
+msgstr "No se pudo cargar el archivo."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete that history."
+msgstr "No se pudo eliminar ese historial."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the channel list."
+msgstr "No se pudo cargar la lista de canales."
+
+msgctxt "AppWindow"
+msgid "Couldn't refresh the channel list. Is the network connected?"
+msgstr "No se pudo actualizar la lista de canales. ¿Está la red conectada?"
+
+msgctxt "AppWindow"
+msgid "That command is missing an argument, for example: /whowas <nick>."
+msgstr "A ese comando le falta un argumento, por ejemplo: /whowas <nick>."
+
+msgctxt "AppWindow"
+msgid "You were signed out because this client sent too many requests. Your IRC session is still running; sign in again to continue."
+msgstr "Se cerró tu sesión porque este cliente envió demasiadas solicitudes. Tu sesión de IRC sigue activa; inicia sesión de nuevo para continuar."
+
+msgctxt "AppWindow"
+msgid "Couldn't leave the channel. Please try again."
+msgstr "No se pudo salir del canal. Inténtalo de nuevo."
+
+msgctxt "AppWindow"
+msgid "Disconnected. Reconnecting… ({})"
+msgstr "Desconectado. Reconectando… ({})"
+
+msgctxt "AppWindow"
+msgid "Reconnecting… ({})"
+msgstr "Reconectando… ({})"
+
+msgctxt "AppWindow"
+msgid "{} is now online on {}."
+msgstr "{} ahora está en línea en {}."
+
+msgctxt "AppWindow"
+msgid "{} went offline on {}."
+msgstr "{} se desconectó en {}."
+
+msgctxt "AppWindow"
+msgid "The watch list on {} is full; not watched: {}."
+msgstr "La lista de seguimiento de {} está llena; sin vigilar: {}."
+
+msgctxt "AppWindow"
+msgid "The server on {} refused to watch: {}."
+msgstr "El servidor en {} se negó a vigilar: {}."
+
+msgctxt "AppWindow"
+msgid "Accepted {} from {}; the transfer runs on the server."
+msgstr "Se aceptó {} de {}; la transferencia se ejecuta en el servidor."
+
+msgctxt "AppWindow"
+msgid "Refused {} from {}."
+msgstr "Se rechazó {} de {}."
+
+msgctxt "AppWindow"
+msgid "The offer of {} from {} expired."
+msgstr "La oferta de {} de {} expiró."
+
+msgctxt "AppWindow"
+msgid "That file offer is no longer available."
+msgstr "Esa oferta de archivo ya no está disponible."
+
+msgctxt "AppWindow"
+msgid "Daily file transfer limit reached. Try again later."
+msgstr "Se alcanzó el límite diario de transferencia de archivos. Inténtalo más tarde."
+
+msgctxt "AppWindow"
+msgid "That network isn't connected, so the file offer can't be answered."
+msgstr "Esa red no está conectada, así que no se puede responder a la oferta de archivo."
+
+msgctxt "AppWindow"
+msgid "The server has no room left for this file."
+msgstr "El servidor no tiene espacio para este archivo."
+
+msgctxt "AppWindow"
+msgid "Couldn't answer the file offer."
+msgstr "No se pudo responder a la oferta de archivo."
+
+msgctxt "AppWindow"
+msgid "No away summary for this network yet."
+msgstr "Aún no hay resumen de ausencia para esta red."
+
+msgctxt "AppWindow"
+msgid "Invited {} to {} on {}."
+msgstr "Se invitó a {} a {} en {}."
+
+msgctxt "AppWindow"
+msgid "Attachments aren't supported yet."
+msgstr "Los archivos adjuntos aún no son compatibles."
+
+msgctxt "AppWindow"
+msgid "Home"
+msgstr "Inicio"
+
+msgctxt "AppWindow"
+msgid "Join"
+msgstr "Unirse"
+
+msgctxt "AppWindow"
+msgid "Join invited channel"
+msgstr "Unirse al canal invitado"
+
+msgctxt "AppWindow"
+msgid "Identity recovery on {}"
+msgstr "Recuperación de identidad en {}"
+
+msgctxt "AppWindow"
+msgid "{}: {}"
+msgstr "{}: {}"
+
+msgctxt "AppWindow"
+msgid "{}: {} ({})"
+msgstr "{}: {} ({})"
+
+msgctxt "AppWindow"
+msgid "Identity recovered."
+msgstr "Identidad recuperada."
+
+msgctxt "AppWindow"
+msgid "Recovery failed."
+msgstr "Error en la recuperación."
+
+msgctxt "AppWindow"
+msgid "Recovery failed ({})."
+msgstr "Error en la recuperación ({})."
+
+msgctxt "AppWindow"
+msgid "Dismiss"
+msgstr "Descartar"
+
+msgctxt "AppWindow"
+msgid "Dismiss identity recovery"
+msgstr "Descartar recuperación de identidad"
+
+msgctxt "AppWindow"
+msgid "{} offers {} ({}) on {}"
+msgstr "{} ofrece {} ({}) en {}"
+
+msgctxt "AppWindow"
+msgid "Accept"
+msgstr "Aceptar"
+
+msgctxt "AppWindow"
+msgid "Accept {} from {}"
+msgstr "Aceptar {} de {}"
+
+msgctxt "AppWindow"
+msgid "Refuse"
+msgstr "Rechazar"
+
+msgctxt "AppWindow"
+msgid "Refuse {} from {}"
+msgstr "Rechazar {} de {}"
+
+msgctxt "AppWindow"
+msgid "Expand or collapse parked network {}"
+msgstr "Expandir o contraer la red aparcada {}"
+
+msgctxt "AppWindow"
+msgid "{} [PARKED]"
+msgstr "{} [APARCADA]"
+
+msgctxt "AppWindow"
+msgid "Dismiss kicked channel {}"
+msgstr "Descartar canal expulsado {}"
+
+msgctxt "AppWindow"
+msgid "Leave channel {} on {}"
+msgstr "Salir del canal {} en {}"
+
+msgctxt "AppWindow"
+msgid "Private conversation with {} on {}"
+msgstr "Conversación privada con {} en {}"
+
+msgctxt "AppWindow"
+msgid "No topic set"
+msgstr "Sin tema establecido"
+
+msgctxt "AppWindow"
+msgid "{} is away."
+msgstr "{} está ausente."
+
+msgctxt "AppWindow"
+msgid "{} is away: {}"
+msgstr "{} está ausente: {}"
+
+msgctxt "AppWindow"
+msgid "Dismiss away message"
+msgstr "Descartar mensaje de ausencia"
+
+msgctxt "AppWindow"
+msgid "Attach file"
+msgstr "Adjuntar archivo"
+
+msgctxt "AppWindow"
+msgid "Members ({})"
+msgstr "Miembros ({})"
+
+msgctxt "AppWindow"
+msgid "Actions"
+msgstr "Acciones"
+
+msgctxt "AppWindow"
+msgid "Connection"
+msgstr "Conexión"
+
+msgctxt "AppWindow"
+msgid "Auto-away delay: {}"
+msgstr "Retraso de ausencia automática: {}"
+
+msgctxt "AppWindow"
+msgid "server default"
+msgstr "predeterminado del servidor"
+
+msgctxt "AppWindow"
+msgid "off"
+msgstr "desactivado"
+
+msgctxt "AppWindow"
+msgid "{} seconds"
+msgstr "{} segundos"
+
+msgctxt "AppWindow"
+msgid "Quit/part message: {}"
+msgstr "Mensaje de quit/part: {}"
+
+msgctxt "AppWindow"
+msgid "Quit/part message: none (server default)"
+msgstr "Mensaje de quit/part: ninguno (predeterminado del servidor)"
+
+msgctxt "AppWindow"
+msgid "Auto-away message: {}"
+msgstr "Mensaje de ausencia automática: {}"
+
+msgctxt "AppWindow"
+msgid "Auto-away message: server default"
+msgstr "Mensaje de ausencia automática: predeterminado del servidor"
+
+msgctxt "AppWindow"
+msgid "Server upload limits ({}): images {}, videos {}, documents {}, audio {}."
+msgstr "Límites de subida del servidor ({}): imágenes {}, vídeos {}, documentos {}, audio {}."
+
+msgctxt "AppWindow"
+msgid "Server upload limits ({}): images {}, videos {} (up to {} s), documents {}, audio {}."
+msgstr "Límites de subida del servidor ({}): imágenes {}, vídeos {} (hasta {} s), documentos {}, audio {}."
+
+msgctxt "AppWindow"
+msgid "Local only for now — a theme driven by Grappa itself will be a separate option once the server supports one."
+msgstr "Por ahora es solo local — un tema gestionado por el propio Grappa será una opción aparte en cuanto el servidor lo admita."
+
+msgctxt "AppWindow"
+msgid "{} (online)"
+msgstr "{} (en línea)"
+
+msgctxt "AppWindow"
+msgid "{} (offline)"
+msgstr "{} (desconectado)"
+
+msgctxt "AppWindow"
+msgid "Archive on {}"
+msgstr "Archivo en {}"
+
+msgctxt "AppWindow"
+msgid "No archived windows."
+msgstr "No hay ventanas archivadas."
+
+msgctxt "AppWindow"
+msgid "Windows you left that still have history on the bouncer."
+msgstr "Ventanas que abandonaste que todavía tienen historial en el bouncer."
+
+msgctxt "AppWindow"
+msgid "Delete all history of {} on {}? Only the bouncer's copy is removed."
+msgstr "¿Eliminar todo el historial de {} en {}? Solo se elimina la copia del bouncer."
+
+msgctxt "AppWindow"
+msgid "Cancel"
+msgstr "Cancelar"
+
+msgctxt "AppWindow"
+msgid "{} (private, last active {})"
+msgstr "{} (privado, última actividad {})"
+
+msgctxt "AppWindow"
+msgid "{} (last active {})"
+msgstr "{} (última actividad {})"
+
+msgctxt "AppWindow"
+msgid "Delete history"
+msgstr "Eliminar historial"
+
+msgctxt "AppWindow"
+msgid "Delete history of {}"
+msgstr "Eliminar historial de {}"
+
+msgctxt "AppWindow"
+msgid "Channels on {}"
+msgstr "Canales en {}"
+
+msgctxt "AppWindow"
+msgid "The last channel listing failed ({}); showing the previous list."
+msgstr "El último listado de canales falló ({}); se muestra la lista anterior."
+
+msgctxt "AppWindow"
+msgid "Search channels"
+msgstr "Buscar canales"
+
+msgctxt "AppWindow"
+msgid "Sort by users"
+msgstr "Ordenar por usuarios"
+
+msgctxt "AppWindow"
+msgid "Sort by name"
+msgstr "Ordenar por nombre"
+
+msgctxt "AppWindow"
+msgid "Refreshing…"
+msgstr "Actualizando…"
+
+msgctxt "AppWindow"
+msgid "{} ({} users)"
+msgstr "{} ({} usuarios)"
+
+msgctxt "AppWindow"
+msgid "{} ({} users) — {}"
+msgstr "{} ({} usuarios) — {}"
+
+msgctxt "AppWindow"
+msgid "Load more"
+msgstr "Cargar más"
