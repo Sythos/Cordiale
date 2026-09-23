@@ -26,6 +26,8 @@
 //! dependency here. `cordiale-ui` owns the tokio runtime and the thread
 //! this eventually runs on.
 
+use std::time::Duration;
+
 use reqwest::{Client, StatusCode};
 
 use serde_json::Value;
@@ -97,10 +99,23 @@ impl From<reqwest::Error> for LoginError {
     }
 }
 
+/// Longest time to establish a connection to the server.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest time for a whole request, so a server that stops answering
+/// can't stall the app's single worker indefinitely.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl GrappaClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        // Building only fails if the TLS backend can't initialise; the
+        // default client then fails its first request the same way.
+        let http = Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| Client::new());
         GrappaClient {
-            http: Client::new(),
+            http,
             base_url: base_url.into(),
         }
     }
