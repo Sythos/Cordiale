@@ -9,7 +9,7 @@ fallback documented in code and never presented as real protection — see
 
 ## Supported versions
 
-Cordiale is alpha software (0.1.x releases). Only the `main` branch is
+Cordiale is pre-1.0 software (0.1.x releases). Only the `main` branch is
 supported: fixes land there and ship in the next tagged release, and older
 releases are not maintained.
 
