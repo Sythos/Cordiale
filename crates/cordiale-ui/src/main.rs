@@ -62,6 +62,10 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    PartChannel {
+        network: String,
+        channel: String,
+    },
     SelectQuery {
         network: String,
         nick: String,
@@ -334,6 +338,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_channel = worker_tx.clone();
     ui.on_channel_selected(move |network, channel| {
         let _ = tx_for_channel.send(WorkerCommand::SelectChannel {
+            network: network.to_string(),
+            channel: channel.to_string(),
+        });
+    });
+
+    let tx_for_part = worker_tx.clone();
+    ui.on_channel_part_requested(move |network, channel| {
+        let _ = tx_for_part.send(WorkerCommand::PartChannel {
             network: network.to_string(),
             channel: channel.to_string(),
         });
@@ -1335,6 +1347,9 @@ async fn run_worker(
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
+                    Some(WorkerCommand::PartChannel { network, channel }) => {
+                        handle_part_channel(&mut state, &ui, network, channel).await;
+                    }
                     Some(WorkerCommand::SelectQuery { network, nick }) => {
                         handle_select_query(&mut state, &ui, network, nick).await;
                     }
@@ -1905,6 +1920,7 @@ async fn handle_connect(
                 &state.query_windows,
                 &state.expanded_networks,
                 &state.network_connection_states,
+                &state.network_ids,
             );
             let window_states = state.window_states.clone();
             let window_mentions = state.window_mentions.clone();
@@ -2033,6 +2049,91 @@ async fn handle_select_channel(
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         let member_rows = members_model(&members, dark_theme);
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
+    });
+}
+
+/// A successful REST response is the server's acknowledgement of PART. Keep
+/// the sidebar and current view intact on failure, then reconcile local topic
+/// ownership only after that acknowledgement.
+async fn handle_part_channel(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: String,
+) {
+    let key = window_state_key(&network, &channel);
+    if state.window_states.get(&key) != Some(&ChannelWindowState::Joined)
+        || !state
+            .channel_entries
+            .iter()
+            .any(|(entry_network, entry_channel, _)| {
+                window_state_key(entry_network, entry_channel) == key
+            })
+    {
+        return;
+    }
+    let (Some(client), Some(token), Some(identifier)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.identifier.clone(),
+    ) else {
+        return;
+    };
+
+    if let Err(error) = client.part_channel(&token, &network, &channel, None).await {
+        persistence::log_line(&format!("channel part failed: {error:?}"));
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("part-failed".into()));
+        return;
+    }
+
+    let selected =
+        state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, current_channel)| {
+                !state.current_query && window_state_key(current_network, current_channel) == key
+            });
+    let mut remaining_entries = state.channel_entries.clone();
+    remove_sidebar_channel_entry(&mut remaining_entries, &network, &channel);
+    let actions = reconcile_channel_entries(state, &identifier, remaining_entries);
+    if let Some(session) = state.session.as_ref() {
+        for action in actions {
+            if let ChannelTopicAction::Leave(topic) = action {
+                session.leave_topic(topic);
+            }
+        }
+    }
+    state.window_states.remove(&key);
+    state.window_failures.remove(&key);
+    state.window_kicks.remove(&key);
+    state.invited_by.remove(&key);
+    state.channel_modes.remove(&key);
+    state.topics.remove(&(network.clone(), channel.clone()));
+    state.members.remove(&(network.clone(), channel.clone()));
+    state.messages.remove(&(network.clone(), channel.clone()));
+    state.drafts.remove(&(network.clone(), channel.clone()));
+    state
+        .recent_channels
+        .retain(|(recent_network, recent_channel)| {
+            window_state_key(recent_network, recent_channel) != key
+        });
+    refresh_network_groups(state, ui);
+
+    if selected {
+        state.current_channel = None;
+        state.current_query = false;
+        state.current_query_ready = false;
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.last_channel = None;
+        let _ = persistence::save_settings(&settings);
+        clear_closed_query_view(ui);
+    }
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        if ui.get_status_kind().as_str() == "part-failed" {
+            ui.set_status_kind("signed-in".into());
+        }
     });
 }
 
@@ -5744,6 +5845,7 @@ fn network_groups_data(
     query_windows: &[QueryWindow],
     expanded: &HashMap<String, bool>,
     connection_states: &HashMap<String, NetworkConnectionSnapshot>,
+    known_networks: &HashMap<String, i64>,
 ) -> Vec<NetworkGroupData> {
     let mut by_network: std::collections::BTreeMap<String, NetworkEntries> =
         std::collections::BTreeMap::new();
@@ -5760,6 +5862,9 @@ fn network_groups_data(
             .or_default()
             .1
             .push((query.target_nick.clone(), query.target_nick.clone()));
+    }
+    for network in known_networks.keys() {
+        by_network.entry(network.clone()).or_default();
     }
     by_network
         .into_iter()
@@ -5829,6 +5934,8 @@ fn network_groups_model(
                             failed,
                             kicked,
                             invited,
+                            joined: window_states.get(&window_state_key(&network, &channel))
+                                == Some(&ChannelWindowState::Joined),
                         }
                     })
                     .collect();
@@ -5871,6 +5978,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         &state.query_windows,
         &state.expanded_networks,
         &state.network_connection_states,
+        &state.network_ids,
     );
     apply_connecting_labels(&mut data, &state.connecting_networks);
     let window_states = state.window_states.clone();
@@ -11516,7 +11624,13 @@ mod tests {
         assert_eq!(queries[1].target_nick, "newer");
         assert_eq!(queries[2].network, "azzurra");
 
-        let grouped = network_groups_data(&[], &queries, &HashMap::new(), &HashMap::new());
+        let grouped = network_groups_data(
+            &[],
+            &queries,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         let libera = grouped.iter().find(|group| group.0 == "libera").unwrap();
         assert_eq!(libera.3[0].0, "older");
         assert_eq!(libera.3[1].0, "newer");
@@ -15563,7 +15677,13 @@ mod tests {
                 changed_at: None,
             },
         )]);
-        let mut groups = network_groups_data(&entries, &[], &HashMap::new(), &connection_states);
+        let mut groups = network_groups_data(
+            &entries,
+            &[],
+            &HashMap::new(),
+            &connection_states,
+            &HashMap::new(),
+        );
         let connecting = std::collections::HashSet::from(["libera".to_string()]);
         apply_connecting_labels(&mut groups, &connecting);
         assert_eq!(groups[0].0, "libera");
@@ -15830,8 +15950,23 @@ mod tests {
                 changed_at: None,
             },
         )]);
-        let groups = network_groups_data(&entries, &[], &HashMap::new(), &connection_states);
+        let groups = network_groups_data(
+            &entries,
+            &[],
+            &HashMap::new(),
+            &connection_states,
+            &HashMap::new(),
+        );
         assert_eq!(groups[0].4, "paused");
+    }
+
+    #[test]
+    fn a_network_remains_in_the_sidebar_after_its_last_channel_is_removed() {
+        let networks = HashMap::from([("libera".to_string(), 7)]);
+        let groups = network_groups_data(&[], &[], &HashMap::new(), &HashMap::new(), &networks);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "libera");
+        assert!(groups[0].2.is_empty());
     }
 
     #[test]
