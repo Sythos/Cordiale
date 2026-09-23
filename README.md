@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 25 of them:
+  lists 56 top-level event kinds. Cordiale handles 26 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -78,8 +78,8 @@ known limitations are:
   `session_identity_changed`, `isupport_changed`, `umode_changed`,
   `supported_umodes_changed`, `joined`, `join_failed`, `kicked`,
   `window_pending`, `window_invited`, `window_invite_declined`,
-  `network_attached`, `network_detached`, `connection_state_changed`, and
-  `message`; the remaining 31 kinds are
+  `network_attached`, `network_detached`, `connection_state_changed`,
+  `connection_progress`, and `message`; the remaining 30 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -164,10 +164,16 @@ known limitations are:
   transition to `parked` or `failed` returns a selected window on that network
   to the connected overview, but an initially parked/failed snapshot does not
   steal the user's selection.
+  `connection_progress` is a live-only user-topic overlay: `connecting` shows
+  a transient `connecting` label on that network's sidebar row (taking
+  precedence over the durable connection label), and `connected` clears it
+  and refreshes `GET /networks`. The overlay is dropped whenever the Phoenix
+  socket disconnects, because the event is never replayed and a missed
+  `connected` would otherwise leave the label stuck.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
-  - **Network, connection, identity, and settings**: `connection_progress`,
+  - **Network, connection, identity, and settings**:
     `peer_away`, `auto_away_debounce_changed`,
     `auto_away_reason_changed`, `quit_part_reason_changed`,
     `server_settings_changed`, `web_session_severed`.

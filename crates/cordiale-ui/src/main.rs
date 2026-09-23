@@ -667,6 +667,25 @@ impl NetworkConnectionStatus {
     }
 }
 
+/// Transient upstream-connect progress from `connection_progress`. It is a
+/// live-only overlay, never replayed on join and never a substitute for the
+/// durable `connection_state` read from `/networks`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionProgressState {
+    Connecting,
+    Connected,
+}
+
+impl ConnectionProgressState {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "connecting" => Some(Self::Connecting),
+            "connected" => Some(Self::Connected),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NetworkConnectionSnapshot {
     status: NetworkConnectionStatus,
@@ -779,6 +798,12 @@ struct WorkerState {
     /// separate from the Phoenix socket's reconnect state and is refreshed
     /// from `/networks` after a `connection_state_changed` push.
     network_connection_states: HashMap<String, NetworkConnectionSnapshot>,
+    /// Networks whose upstream IRC connect attempt is in flight, per the last
+    /// live `connection_progress`. Shown as a transient sidebar badge only;
+    /// cleared by `connected` and whenever the Phoenix socket drops, since
+    /// the event is never replayed and a missed `connected` would otherwise
+    /// leave the badge stuck.
+    connecting_networks: std::collections::HashSet<String>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -855,6 +880,7 @@ impl WorkerState {
             current_channel: None,
             network_ids: HashMap::new(),
             network_connection_states: HashMap::new(),
+            connecting_networks: std::collections::HashSet::new(),
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1154,6 +1180,10 @@ async fn run_worker(
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
                         state.supported_user_modes_by_network.clear();
+                        if !state.connecting_networks.is_empty() {
+                            state.connecting_networks.clear();
+                            refresh_network_groups(&state, &ui);
+                        }
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("disconnected".into());
                             ui.set_status_message(reason.into());
@@ -1165,6 +1195,10 @@ async fn run_worker(
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
                         state.supported_user_modes_by_network.clear();
+                        if !state.connecting_networks.is_empty() {
+                            state.connecting_networks.clear();
+                            refresh_network_groups(&state, &ui);
+                        }
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("reconnecting".into());
                             ui.set_status_message(reason.into());
@@ -1305,6 +1339,7 @@ async fn handle_connect(
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
             state.network_connection_states = connection_states;
+            state.connecting_networks.clear();
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2318,7 +2353,6 @@ const IGNORED_KINDS: &[&str] = &[
     "directory_progress",
     "directory_complete",
     "directory_failed",
-    "connection_progress",
     "recover_progress",
     "recover_result",
     "presence_changed",
@@ -2496,6 +2530,10 @@ async fn handle_frame(
     }
     if payload_kind == "connection_state_changed" {
         handle_connection_state_changed(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "connection_progress" {
+        handle_connection_progress(state, ui, &frame.topic, &frame.payload).await;
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -5056,6 +5094,19 @@ fn network_groups_data(
         .collect()
 }
 
+/// An in-flight upstream connect attempt outranks the durable label: a
+/// `failing`/`failed`/`parked` network that is connecting again shows that.
+fn apply_connecting_labels(
+    data: &mut [NetworkGroupData],
+    connecting: &std::collections::HashSet<String>,
+) {
+    for group in data.iter_mut() {
+        if connecting.contains(&group.0) {
+            group.4 = "connecting".to_string();
+        }
+    }
+}
+
 /// Builds the actual sidebar `NetworkGroup` Slint model out of
 /// `network_groups_data`'s plain grouping — must run on the UI thread,
 /// see that function's doc comment for why.
@@ -5134,12 +5185,13 @@ fn network_groups_model(
 /// sidebar as a fresh `network-groups` model — called after anything that
 /// changes either (a network's expand toggle, a fresh connect).
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let data = network_groups_data(
+    let mut data = network_groups_data(
         &state.channel_entries,
         &state.query_windows,
         &state.expanded_networks,
         &state.network_connection_states,
     );
+    apply_connecting_labels(&mut data, &state.connecting_networks);
     let window_states = state.window_states.clone();
     let window_mentions = state.window_mentions.clone();
     let window_messages = state.window_messages.clone();
@@ -6046,6 +6098,9 @@ fn apply_network_rest_refresh(
     state
         .supported_user_modes_by_network
         .retain(|network, _| known_networks.contains(network.as_str()));
+    state
+        .connecting_networks
+        .retain(|network| known_networks.contains(network.as_str()));
 
     let mut actions = channel_actions;
     for action in listener_actions {
@@ -6100,16 +6155,25 @@ async fn handle_connection_state_changed(
         transition.snapshot.status.wire_name()
     ));
 
+    reconcile_network_connection_states(state, ui, "connection_state_changed").await;
+}
+
+/// Refreshes `GET /networks` and applies each known network's durable
+/// connection state. A failed request keeps the current state: callers have
+/// already applied whatever their event carried.
+async fn reconcile_network_connection_states(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    context: &str,
+) {
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
         return;
     };
     let networks = match client.fetch_networks(&token).await {
         Ok(networks) => networks,
         Err(error) => {
-            // The validated event carries the new home-network row, so keep
-            // that immediate state visible even if REST reconciliation fails.
             persistence::log_line(&format!(
-                "connection_state_changed network refresh failed; keeping event row: {error:?}"
+                "{context} network refresh failed; keeping current state: {error:?}"
             ));
             return;
         }
@@ -6137,6 +6201,68 @@ async fn handle_connection_state_changed(
     }
     if state_changed {
         refresh_network_groups(state, ui);
+    }
+}
+
+/// Validates `connection_progress`: `{kind, network, state}` on the exact
+/// authenticated user topic, for a network already in the `/boot` map. The
+/// state is a closed `connecting | connected` enum; extra fields are ignored.
+fn parse_connection_progress(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+    known_networks: &HashMap<String, i64>,
+) -> Option<(String, ConnectionProgressState)> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "connection_progress" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() || !known_networks.contains_key(network) {
+        return None;
+    }
+    let progress = ConnectionProgressState::parse(payload.get("state")?.as_str()?)?;
+    Some((network.to_string(), progress))
+}
+
+/// Applies one progress edge to the per-network connecting set, returning
+/// whether the visible badge changed. Duplicates are no-ops.
+fn apply_connection_progress(
+    connecting: &mut std::collections::HashSet<String>,
+    network: &str,
+    progress: ConnectionProgressState,
+) -> bool {
+    match progress {
+        ConnectionProgressState::Connecting => connecting.insert(network.to_string()),
+        ConnectionProgressState::Connected => connecting.remove(network),
+    }
+}
+
+/// `connecting` shows a transient per-network badge; `connected` (001
+/// RPL_WELCOME) clears it and refetches `GET /networks`, since the durable
+/// connection row only arrives through that endpoint, matching Cicchetto.
+async fn handle_connection_progress(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.clone() else {
+        return;
+    };
+    let Some((network, progress)) =
+        parse_connection_progress(payload, carrier_topic, &identifier, &state.network_ids)
+    else {
+        persistence::log_line("connection_progress rejected: invalid payload or unknown network");
+        return;
+    };
+    if apply_connection_progress(&mut state.connecting_networks, &network, progress) {
+        refresh_network_groups(state, ui);
+    }
+    if progress == ConnectionProgressState::Connected {
+        reconcile_network_connection_states(state, ui, "connection_progress").await;
     }
 }
 
@@ -10309,7 +10435,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 31);
+        assert_eq!(IGNORED_KINDS.len(), 30);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -10345,10 +10471,125 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"network_detached"));
         assert!(!IGNORED_KINDS.contains(&"network_attached"));
         assert!(!IGNORED_KINDS.contains(&"connection_state_changed"));
+        assert!(!IGNORED_KINDS.contains(&"connection_progress"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
         assert!(!IGNORED_KINDS.contains(&"parted"));
+    }
+
+    #[test]
+    fn parse_connection_progress_accepts_only_the_user_topic_and_known_network() {
+        let known: HashMap<String, i64> = HashMap::from([("libera".to_string(), 1)]);
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "connection_progress",
+            "network": "libera",
+            "state": "connecting",
+            "future_field": true
+        });
+        assert_eq!(
+            parse_connection_progress(&payload, topic, "vjt", &known),
+            Some(("libera".to_string(), ConnectionProgressState::Connecting))
+        );
+        let connected = serde_json::json!({
+            "kind": "connection_progress",
+            "network": "libera",
+            "state": "connected"
+        });
+        assert_eq!(
+            parse_connection_progress(&connected, topic, "vjt", &known),
+            Some(("libera".to_string(), ConnectionProgressState::Connected))
+        );
+
+        // Wrong carrier: another user's topic, or a channel-shaped topic.
+        assert_eq!(
+            parse_connection_progress(&payload, "grappa:user:other", "vjt", &known),
+            None
+        );
+        assert_eq!(
+            parse_connection_progress(
+                &payload,
+                "grappa:user:vjt/network:libera/channel:#rust",
+                "vjt",
+                &known
+            ),
+            None
+        );
+
+        for invalid in [
+            serde_json::json!({"kind": "connection_state_changed", "network": "libera", "state": "connecting"}),
+            serde_json::json!({"kind": "connection_progress", "network": "oftc", "state": "connecting"}),
+            serde_json::json!({"kind": "connection_progress", "network": "", "state": "connecting"}),
+            serde_json::json!({"kind": "connection_progress", "network": "libera", "state": "failed"}),
+            serde_json::json!({"kind": "connection_progress", "network": "libera"}),
+            serde_json::json!({"kind": "connection_progress", "state": "connecting"}),
+            serde_json::json!({"kind": "connection_progress", "network": 1, "state": "connecting"}),
+        ] {
+            assert_eq!(
+                parse_connection_progress(&invalid, topic, "vjt", &known),
+                None,
+                "{invalid} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_progress_toggles_the_badge_idempotently() {
+        let mut connecting = std::collections::HashSet::new();
+        assert!(apply_connection_progress(
+            &mut connecting,
+            "libera",
+            ConnectionProgressState::Connecting
+        ));
+        assert!(!apply_connection_progress(
+            &mut connecting,
+            "libera",
+            ConnectionProgressState::Connecting
+        ));
+        assert!(connecting.contains("libera"));
+        assert!(apply_connection_progress(
+            &mut connecting,
+            "libera",
+            ConnectionProgressState::Connected
+        ));
+        assert!(!apply_connection_progress(
+            &mut connecting,
+            "libera",
+            ConnectionProgressState::Connected
+        ));
+        assert!(connecting.is_empty());
+    }
+
+    #[test]
+    fn connecting_label_outranks_the_durable_connection_label() {
+        let entries = vec![
+            (
+                "libera".to_string(),
+                "#rust".to_string(),
+                "#rust".to_string(),
+            ),
+            (
+                "oftc".to_string(),
+                "#debian".to_string(),
+                "#debian".to_string(),
+            ),
+        ];
+        let connection_states = HashMap::from([(
+            "libera".to_string(),
+            NetworkConnectionSnapshot {
+                status: NetworkConnectionStatus::Failing,
+                reason: None,
+                changed_at: None,
+            },
+        )]);
+        let mut groups = network_groups_data(&entries, &[], &HashMap::new(), &connection_states);
+        let connecting = std::collections::HashSet::from(["libera".to_string()]);
+        apply_connecting_labels(&mut groups, &connecting);
+        assert_eq!(groups[0].0, "libera");
+        assert_eq!(groups[0].4, "connecting");
+        assert_eq!(groups[1].0, "oftc");
+        assert_eq!(groups[1].4, "");
     }
 
     #[test]
