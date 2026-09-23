@@ -435,6 +435,8 @@ export component AppWindow inherits Window {
     in-out property <string> directory-query: "";
     in property <bool> directory-has-more: false;
     in property <bool> directory-refresh-pending: false;
+    // `reason` of the last failed capture (raw server token), or "".
+    in property <string> directory-failed-reason: "";
     // Server-stored preferences mirrored from `*_changed` pushes: "" until
     // announced, then "default" (null), "off" (0) or a number of seconds.
     in property <string> server-pref-auto-away-debounce: "";
@@ -1940,6 +1942,12 @@ export component AppWindow inherits Window {
 
         Text {
             text: directory-status-text();
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        if directory-failed-reason != "" : Text {
+            text: @tr("The last channel listing failed ({}); showing the previous list.", directory-failed-reason);
             wrap: word-wrap;
             accessible-role: AccessibleRole.text;
         }

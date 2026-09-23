@@ -877,6 +877,9 @@ struct DirectoryView {
     error: Option<&'static str>,
     /// A refresh was asked for and no `directory_*` push has answered yet.
     refresh_pending: bool,
+    /// `reason` of the last `directory_failed` (an open string, e.g.
+    /// `timeout`); cleared by the next refresh or capture progress.
+    failed_reason: Option<String>,
 }
 
 impl DirectoryView {
@@ -888,6 +891,7 @@ impl DirectoryView {
             page: None,
             error: None,
             refresh_pending: false,
+            failed_reason: None,
         }
     }
 }
@@ -2735,7 +2739,6 @@ const IGNORED_KINDS: &[&str] = &[
     "dcc_offer_resolved",
     "mentions_bundle",
     "peer_away",
-    "directory_failed",
     "presence_changed",
     "presence_error",
     "presence_snapshot",
@@ -2962,6 +2965,10 @@ async fn handle_frame(
     }
     if payload_kind == "directory_complete" {
         handle_directory_complete(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "directory_failed" {
+        handle_directory_failed(state, ui, &frame.topic, &frame.payload).await;
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7347,6 +7354,7 @@ async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
         return;
     }
     view.refresh_pending = true;
+    view.failed_reason = None;
     let network = view.network.clone();
     push_directory(state, ui, false);
     if let Err(err) = client.refresh_directory(&token, &network).await {
@@ -7372,6 +7380,7 @@ fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) 
     let query = view.query.clone();
     let error = view.error.unwrap_or("");
     let refresh_pending = view.refresh_pending;
+    let failed_reason = view.failed_reason.clone().unwrap_or_default();
     let (rows, status, total, captured_at, has_more) = match &view.page {
         Some(page) => (
             page.entries
@@ -7421,6 +7430,7 @@ fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) 
         ui.set_directory_captured_at(captured_at.into());
         ui.set_directory_error(error.into());
         ui.set_directory_refresh_pending(refresh_pending);
+        ui.set_directory_failed_reason(failed_reason.into());
         ui.set_directory_has_more(has_more);
         if open {
             ui.set_screen("directory".into());
@@ -7487,7 +7497,7 @@ async fn handle_directory_progress(
         persistence::log_line("directory_progress rejected: invalid carrier or payload");
         return;
     };
-    reload_directory_after_push(state, ui, &network).await;
+    reload_directory_after_push(state, ui, &network, None).await;
 }
 
 /// The capture finished (323 RPL_LISTEND) and the server replaced its
@@ -7511,15 +7521,56 @@ async fn handle_directory_complete(
         persistence::log_line("directory_complete rejected: invalid carrier or payload");
         return;
     };
-    reload_directory_after_push(state, ui, &network).await;
+    reload_directory_after_push(state, ui, &network, None).await;
 }
 
-/// Shared tail of the `directory_*` pushes: releases the refresh latch and
-/// refetches when the pushed network's directory is the open one.
+/// Validates `directory_failed` on the exact user topic: `network` a
+/// non-empty slug and `reason` any string (an open set; `timeout` today).
+fn parse_directory_failed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "directory_failed" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let reason = payload.get("reason")?.as_str()?;
+    Some((network.to_string(), reason.to_string()))
+}
+
+/// The capture was abandoned; the server kept its previous snapshot. Shows
+/// the reason and refetches, so the list stays the last good one.
+async fn handle_directory_failed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, reason)) = parse_directory_failed(payload, carrier_topic, identifier) else {
+        persistence::log_line("directory_failed rejected: invalid carrier or payload");
+        return;
+    };
+    reload_directory_after_push(state, ui, &network, Some(reason)).await;
+}
+
+/// Shared tail of the `directory_*` pushes: releases the refresh latch,
+/// records (or clears) the capture failure and refetches when the pushed
+/// network's directory is the open one.
 async fn reload_directory_after_push(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     network: &str,
+    failed_reason: Option<String>,
 ) {
     let Some(view) = state.directory.as_mut() else {
         return;
@@ -7528,6 +7579,8 @@ async fn reload_directory_after_push(
         return;
     }
     view.refresh_pending = false;
+    view.failed_reason = failed_reason;
+    push_directory(state, ui, false);
     load_directory(state, ui).await;
 }
 
@@ -12480,7 +12533,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 14);
+        assert_eq!(IGNORED_KINDS.len(), 13);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -12533,6 +12586,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"invite_ack"));
         assert!(!IGNORED_KINDS.contains(&"directory_progress"));
         assert!(!IGNORED_KINDS.contains(&"directory_complete"));
+        assert!(!IGNORED_KINDS.contains(&"directory_failed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -13425,6 +13479,47 @@ mod tests {
                 "vjt",
                 "directory_progress",
                 "count"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_directory_failed_keeps_any_reason() {
+        let topic = "grappa:user:vjt";
+        assert_eq!(
+            parse_directory_failed(
+                &serde_json::json!({"kind": "directory_failed", "network": "libera", "reason": "timeout"}),
+                topic,
+                "vjt"
+            ),
+            Some(("libera".to_string(), "timeout".to_string()))
+        );
+        // `reason` is an open set: a future token is kept, not rejected.
+        assert_eq!(
+            parse_directory_failed(
+                &serde_json::json!({"kind": "directory_failed", "network": "libera", "reason": "flood"}),
+                topic,
+                "vjt"
+            ),
+            Some(("libera".to_string(), "flood".to_string()))
+        );
+        for invalid in [
+            serde_json::json!({"kind": "directory_failed", "network": "libera"}),
+            serde_json::json!({"kind": "directory_failed", "network": "libera", "reason": null}),
+            serde_json::json!({"kind": "directory_failed", "network": "", "reason": "timeout"}),
+        ] {
+            assert_eq!(
+                parse_directory_failed(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_directory_failed(
+                &serde_json::json!({"kind": "directory_failed", "network": "libera", "reason": "timeout"}),
+                "grappa:user:other",
+                "vjt"
             ),
             None
         );
