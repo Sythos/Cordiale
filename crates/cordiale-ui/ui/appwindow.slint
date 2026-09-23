@@ -394,6 +394,9 @@ export component AppWindow inherits Window {
     in property <bool> recover-visible: false;
     in property <string> recover-network: "";
     in property <[RecoverStepRow]> recover-steps: [];
+    // "" while running, then "succeeded" or "failed" from `recover_result`.
+    in property <string> recover-outcome: "";
+    in property <string> recover-outcome-reason: "";
     // Boot snapshot plus live join/part/quit/nick-change updates —
     // doesn't track role (mode) changes yet, see README's Known gaps.
     // Already sorted ops-first by Rust.
@@ -840,6 +843,17 @@ export component AppWindow inherits Window {
                             ? @tr("{}: {}", recover-step-label(row.step), recover-status-label(row.status))
                             : @tr("{}: {} ({})", recover-step-label(row.step), recover-status-label(row.status), recover-reason-label(row.reason));
                         wrap: word-wrap;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    if recover-outcome != "" : Text {
+                        text: recover-outcome == "succeeded"
+                            ? @tr("Identity recovered.")
+                            : (recover-outcome-reason == ""
+                                ? @tr("Recovery failed.")
+                                : @tr("Recovery failed ({}).", recover-reason-label(recover-outcome-reason)));
+                        wrap: word-wrap;
+                        font-weight: 700;
                         accessible-role: AccessibleRole.text;
                         accessible-live-region: AccessibleLiveness.polite;
                     }

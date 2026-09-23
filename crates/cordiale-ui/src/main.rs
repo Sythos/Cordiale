@@ -762,12 +762,40 @@ struct RecoverStepEntry {
     reason: Option<String>,
 }
 
+/// Terminal outcome of an identity recovery (`succeeded | failed`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoverOutcome {
+    Succeeded,
+    Failed,
+}
+
+impl RecoverOutcome {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "succeeded" => Some(Self::Succeeded),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// Cicchetto's `RecoverState`: opened only by the first `recover_progress`,
 /// bound to that event's network, cleared only by an explicit dismiss.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RecoverPanel {
     network: String,
     steps: Vec<RecoverStepEntry>,
+    /// Set by `recover_result`; `None` while the recovery is still running.
+    outcome: Option<RecoverOutcome>,
+    /// Open failure token from `recover_result` (`null` on success).
+    outcome_reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2455,7 +2483,6 @@ const IGNORED_KINDS: &[&str] = &[
     "directory_progress",
     "directory_complete",
     "directory_failed",
-    "recover_result",
     "presence_changed",
     "presence_error",
     "presence_snapshot",
@@ -2639,6 +2666,10 @@ async fn handle_frame(
     }
     if payload_kind == "recover_progress" {
         handle_recover_progress(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "recover_result" {
+        handle_recover_result(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -6418,6 +6449,8 @@ fn apply_recover_progress(
         *panel = Some(RecoverPanel {
             network: network.to_string(),
             steps: vec![entry],
+            outcome: None,
+            outcome_reason: None,
         });
         return true;
     }
@@ -6458,10 +6491,79 @@ fn handle_recover_progress(
     }
 }
 
+/// Validates `recover_result` on the exact user topic: non-empty `network`,
+/// closed `outcome`, and `reason` present as `null` or any string, so an
+/// additive failure token never drops this terminal event.
+fn parse_recover_result(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, RecoverOutcome, Option<String>)> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "recover_result" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let outcome = RecoverOutcome::parse(payload.get("outcome")?.as_str()?)?;
+    let reason = match payload.get("reason")? {
+        Value::Null => None,
+        Value::String(reason) => Some(reason.clone()),
+        _ => return None,
+    };
+    Some((network.to_string(), outcome, reason))
+}
+
+/// Cicchetto's `applyRecoverResult`: a no-op when no panel is open (dismissed
+/// mid-flight, or the progress events were lost) or when it belongs to
+/// another network; otherwise it records the conclusion.
+fn apply_recover_result(
+    panel: &mut Option<RecoverPanel>,
+    network: &str,
+    outcome: RecoverOutcome,
+    reason: Option<String>,
+) -> bool {
+    let Some(open) = panel.as_mut() else {
+        return false;
+    };
+    if open.network != network {
+        return false;
+    }
+    if open.outcome == Some(outcome) && open.outcome_reason == reason {
+        return false;
+    }
+    open.outcome = Some(outcome);
+    open.outcome_reason = reason;
+    true
+}
+
+fn handle_recover_result(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, outcome, reason)) = parse_recover_result(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("recover_result rejected: invalid carrier or payload");
+        return;
+    };
+    if apply_recover_result(&mut state.recover_panel, &network, outcome, reason) {
+        push_recover_panel(state, ui);
+    }
+}
+
 /// Mirrors `state.recover_panel` into the sidebar panel. The Slint row model
 /// is built inside the UI-thread closure because `ModelRc` is not `Send`.
 fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (visible, network, rows) = match &state.recover_panel {
+    let (visible, network, rows, outcome, outcome_reason) = match &state.recover_panel {
         Some(panel) => (
             true,
             panel.network.clone(),
@@ -6476,8 +6578,10 @@ fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
                     )
                 })
                 .collect::<Vec<_>>(),
+            panel.outcome.map(RecoverOutcome::wire_name).unwrap_or(""),
+            panel.outcome_reason.clone().unwrap_or_default(),
         ),
-        None => (false, String::new(), Vec::new()),
+        None => (false, String::new(), Vec::new(), "", String::new()),
     };
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -6491,6 +6595,8 @@ fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
             .collect();
         ui.set_recover_steps(Rc::new(slint::VecModel::from(rows)).into());
         ui.set_recover_network(network.into());
+        ui.set_recover_outcome(outcome.into());
+        ui.set_recover_outcome_reason(outcome_reason.into());
         ui.set_recover_visible(visible);
     });
 }
@@ -10664,7 +10770,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 29);
+        assert_eq!(IGNORED_KINDS.len(), 28);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -10702,6 +10808,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"connection_state_changed"));
         assert!(!IGNORED_KINDS.contains(&"connection_progress"));
         assert!(!IGNORED_KINDS.contains(&"recover_progress"));
+        assert!(!IGNORED_KINDS.contains(&"recover_result"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -10911,6 +11018,102 @@ mod tests {
             entry(RecoverStep::Register, RecoverStepStatus::Running)
         ));
         assert_eq!(panel.unwrap().network, "libera");
+    }
+
+    #[test]
+    fn parse_recover_result_keeps_the_terminal_event_with_any_reason() {
+        let topic = "grappa:user:vjt";
+        let failed = serde_json::json!({
+            "kind": "recover_result",
+            "network": "azzurra",
+            "outcome": "failed",
+            "reason": "a_reason_added_later",
+            "future_field": []
+        });
+        assert_eq!(
+            parse_recover_result(&failed, topic, "vjt"),
+            Some((
+                "azzurra".to_string(),
+                RecoverOutcome::Failed,
+                Some("a_reason_added_later".to_string())
+            ))
+        );
+        let succeeded = serde_json::json!({
+            "kind": "recover_result",
+            "network": "azzurra",
+            "outcome": "succeeded",
+            "reason": null
+        });
+        assert_eq!(
+            parse_recover_result(&succeeded, topic, "vjt"),
+            Some(("azzurra".to_string(), RecoverOutcome::Succeeded, None))
+        );
+        assert_eq!(
+            parse_recover_result(&succeeded, "grappa:user:other", "vjt"),
+            None
+        );
+        for invalid in [
+            serde_json::json!({"kind": "recover_progress", "network": "azzurra", "outcome": "failed", "reason": null}),
+            serde_json::json!({"kind": "recover_result", "network": "", "outcome": "failed", "reason": null}),
+            serde_json::json!({"kind": "recover_result", "network": "azzurra", "outcome": "partial", "reason": null}),
+            serde_json::json!({"kind": "recover_result", "network": "azzurra", "outcome": "failed"}),
+            serde_json::json!({"kind": "recover_result", "network": "azzurra", "outcome": "failed", "reason": false}),
+        ] {
+            assert_eq!(
+                parse_recover_result(&invalid, topic, "vjt"),
+                None,
+                "{invalid} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn recover_result_only_concludes_the_open_panel_of_its_network() {
+        // No panel open (dismissed, or progress never arrived): no-op.
+        let mut panel = None;
+        assert!(!apply_recover_result(
+            &mut panel,
+            "azzurra",
+            RecoverOutcome::Succeeded,
+            None
+        ));
+        assert!(panel.is_none());
+
+        assert!(apply_recover_progress(
+            &mut panel,
+            "azzurra",
+            RecoverStepEntry {
+                step: RecoverStep::Identify,
+                status: RecoverStepStatus::Failed,
+                reason: Some("wrong_password".to_string()),
+            }
+        ));
+        // Another network cannot conclude it.
+        assert!(!apply_recover_result(
+            &mut panel,
+            "libera",
+            RecoverOutcome::Succeeded,
+            None
+        ));
+        assert_eq!(panel.as_ref().unwrap().outcome, None);
+
+        assert!(apply_recover_result(
+            &mut panel,
+            "azzurra",
+            RecoverOutcome::Failed,
+            Some("wrong_password".to_string())
+        ));
+        // Replaying the same result is a no-op.
+        assert!(!apply_recover_result(
+            &mut panel,
+            "azzurra",
+            RecoverOutcome::Failed,
+            Some("wrong_password".to_string())
+        ));
+        let open = panel.unwrap();
+        assert_eq!(open.outcome, Some(RecoverOutcome::Failed));
+        assert_eq!(open.outcome_reason.as_deref(), Some("wrong_password"));
+        assert_eq!(open.steps.len(), 1);
     }
 
     #[test]
