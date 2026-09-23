@@ -5912,6 +5912,8 @@ fn network_groups_model(
                         let failed = window_is_failed(&window_states, &network, &channel);
                         let kicked = window_is_kicked(&window_states, &network, &channel);
                         let invited = window_is_invited(&window_states, &network, &channel);
+                        let joined = window_states.get(&window_state_key(&network, &channel))
+                            == Some(&ChannelWindowState::Joined);
                         let mention_count = window_mentions
                             .get(&window_counts_key(&network, &channel))
                             .copied()
@@ -5934,8 +5936,7 @@ fn network_groups_model(
                             failed,
                             kicked,
                             invited,
-                            joined: window_states.get(&window_state_key(&network, &channel))
-                                == Some(&ChannelWindowState::Joined),
+                            joined,
                         }
                     })
                     .collect();
