@@ -2924,33 +2924,15 @@ async fn handle_member_ctcp(
     }
 }
 
-/// Real kinds Grappa pushes to a regular (non-admin) user that Cordiale
-/// has no UI for yet — window-state transitions, ISUPPORT/umode/identity
-/// bookkeeping, DCC offers, WHOIS/WHOWAS/LUSERS/banlist/directory bundles,
-/// MONITOR/WATCH presence, the notify list,
-/// per-server settings, and more. Exhaustive as of this date: audited
-/// directly from the real server source (`session/wire.ex`'s
-/// `@type wire_event_kind` union — the authoritative closed set — plus
-/// every other non-admin `*/wire.ex` module in vjt/grappa-irc), not
-/// grepped or guessed. Per `docs/CLIENT_PROTOCOL.md` §4's own policy
-/// ("treat unknown `kind` values as ignorable"), these are dropped
-/// silently rather than shown as a raw dump. Deliberately excludes
-/// `"parted"`: two comments in the real
-/// server source (`session/server.ex`, `session/window_state.ex`) state
-/// there is intentionally no such broadcast — a self-part is signaled by
-/// the window disappearing from window-state, not a push, so listening
-/// for it here would be dead code matching nothing.
-const IGNORED_KINDS: &[&str] = &[
-    // Known from vjt/grappa-irc#2260 or the wire union (joined, join_failed,
-    // kicked, topic_changed, channel_modes_changed, and members_seeded/names_reply
-    // are handled above.
-    // session/wire.ex's wire_event_kind union.
-    "channel_created",
-    // scrollback/wire.ex.
-    // networks/wire.ex: connection_state_changed is handled above.
-    // user_settings/wire.ex: all three settings echoes are handled above.
-    // notify/wire.ex.
-];
+/// Whether a known event kind is rendered as a chat line. Only `message`
+/// envelopes are: every other kind of the protocol's closed set has its own
+/// handler (or explicit no-op) in `handle_frame`, and any kind that reaches
+/// the rendering path without one is dropped instead of becoming a raw
+/// chat line. `"parted"` is not a kind at all — a self-part shows up as the
+/// window leaving window-state, never as a push.
+fn renders_as_chat_line(kind: &str) -> bool {
+    kind == "message"
+}
 
 fn reset_query_session_readiness(state: &mut WorkerState) {
     state.query_joined.clear();
@@ -3216,6 +3198,11 @@ async fn handle_frame(
     }
     if payload_kind == "bundle_hash" {
         handle_bundle_hash(state, &frame.topic, &frame.payload);
+        return;
+    }
+    // 329 RPL_CREATIONTIME changes no state: Cicchetto keeps the kind but
+    // dropped its join banner, so it is consumed without any UI.
+    if payload_kind == "channel_created" {
         return;
     }
     if payload_kind == "invite_ack" {
@@ -3558,7 +3545,7 @@ async fn handle_frame(
         return;
     }
 
-    if IGNORED_KINDS.contains(&payload_kind) {
+    if !renders_as_chat_line(payload_kind) {
         return;
     }
 
@@ -13822,71 +13809,25 @@ mod tests {
     }
 
     #[test]
-    fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 1);
-        // `channel_created` is Cicchetto's own no-op; it must stay out of
-        // the message path so it never shows up as a raw JSON chat line.
-        assert!(IGNORED_KINDS.contains(&"channel_created"));
-        // members_seeded/names_reply/topic_changed are handled, not
-        // ignored, so they must NOT be in this list — that would silently
-        // drop real state instead of applying it.
-        assert!(!IGNORED_KINDS.contains(&"members_seeded"));
-        assert!(!IGNORED_KINDS.contains(&"names_reply"));
-        assert!(!IGNORED_KINDS.contains(&"topic_changed"));
-        assert!(!IGNORED_KINDS.contains(&"channel_modes_changed"));
-        assert!(!IGNORED_KINDS.contains(&"read_cursor_set"));
-        assert!(!IGNORED_KINDS.contains(&"query_windows_list"));
-        assert!(!IGNORED_KINDS.contains(&"own_nick_changed"));
-        assert!(!IGNORED_KINDS.contains(&"away_confirmed"));
-        assert!(!IGNORED_KINDS.contains(&"window_counts"));
-        assert!(!IGNORED_KINDS.contains(&"joined"));
-        assert!(!IGNORED_KINDS.contains(&"channels_changed"));
-        assert!(!IGNORED_KINDS.contains(&"session_identity_changed"));
-        assert!(!IGNORED_KINDS.contains(&"isupport_changed"));
-        assert!(!IGNORED_KINDS.contains(&"umode_changed"));
-        assert!(!IGNORED_KINDS.contains(&"supported_umodes_changed"));
-        assert!(!IGNORED_KINDS.contains(&"join_failed"));
-        assert!(!IGNORED_KINDS.contains(&"kicked"));
-        assert!(!IGNORED_KINDS.contains(&"window_pending"));
-        assert!(!IGNORED_KINDS.contains(&"window_invited"));
-        assert!(!IGNORED_KINDS.contains(&"window_invite_declined"));
-        assert!(!IGNORED_KINDS.contains(&"network_detached"));
-        assert!(!IGNORED_KINDS.contains(&"network_attached"));
-        assert!(!IGNORED_KINDS.contains(&"connection_state_changed"));
-        assert!(!IGNORED_KINDS.contains(&"connection_progress"));
-        assert!(!IGNORED_KINDS.contains(&"recover_progress"));
-        assert!(!IGNORED_KINDS.contains(&"recover_result"));
-        assert!(!IGNORED_KINDS.contains(&"web_session_severed"));
-        assert!(!IGNORED_KINDS.contains(&"who_reply"));
-        assert!(!IGNORED_KINDS.contains(&"server_reply"));
-        assert!(!IGNORED_KINDS.contains(&"whois_bundle"));
-        assert!(!IGNORED_KINDS.contains(&"whois_avatar_ready"));
-        assert!(!IGNORED_KINDS.contains(&"whowas_bundle"));
-        assert!(!IGNORED_KINDS.contains(&"banlist_bundle"));
-        assert!(!IGNORED_KINDS.contains(&"auto_away_debounce_changed"));
-        assert!(!IGNORED_KINDS.contains(&"quit_part_reason_changed"));
-        assert!(!IGNORED_KINDS.contains(&"auto_away_reason_changed"));
-        assert!(!IGNORED_KINDS.contains(&"lusers_bundle"));
-        assert!(!IGNORED_KINDS.contains(&"invite_ack"));
-        assert!(!IGNORED_KINDS.contains(&"directory_progress"));
-        assert!(!IGNORED_KINDS.contains(&"directory_complete"));
-        assert!(!IGNORED_KINDS.contains(&"directory_failed"));
-        assert!(!IGNORED_KINDS.contains(&"dcc_offer"));
-        assert!(!IGNORED_KINDS.contains(&"dcc_offer_resolved"));
-        assert!(!IGNORED_KINDS.contains(&"archive_changed"));
-        assert!(!IGNORED_KINDS.contains(&"archive_purged"));
-        assert!(!IGNORED_KINDS.contains(&"notify_list"));
-        assert!(!IGNORED_KINDS.contains(&"presence_snapshot"));
-        assert!(!IGNORED_KINDS.contains(&"presence_changed"));
-        assert!(!IGNORED_KINDS.contains(&"presence_error"));
-        assert!(!IGNORED_KINDS.contains(&"peer_away"));
-        assert!(!IGNORED_KINDS.contains(&"mentions_bundle"));
-        assert!(!IGNORED_KINDS.contains(&"server_settings_changed"));
-        assert!(!IGNORED_KINDS.contains(&"bundle_hash"));
-        // "parted" is confirmed to never actually be sent by the server
-        // — listing it here would be harmless but wrong documentation,
-        // so it must stay absent.
-        assert!(!IGNORED_KINDS.contains(&"parted"));
+    fn only_message_envelopes_render_as_chat_lines() {
+        assert!(renders_as_chat_line("message"));
+        // Every other kind has its own handler or explicit no-op; none may
+        // reach the chat-line path and leak as raw JSON.
+        for kind in [
+            "channel_created",
+            "bundle_hash",
+            "mentions_bundle",
+            "members_seeded",
+            "topic_changed",
+            "joined",
+            "server_settings_changed",
+        ] {
+            assert!(!renders_as_chat_line(kind), "{kind}");
+        }
+        // "parted" is confirmed never to be sent by the server, so it is
+        // not a protocol kind at all.
+        assert!(ClientEventKind::from_wire_name("parted").is_none());
+        assert!(ClientEventKind::from_wire_name("channel_created").is_some());
     }
 
     #[test]

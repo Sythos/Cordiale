@@ -74,7 +74,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 55 of them:
+  lists 56 top-level event kinds, and Cordiale handles all of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -92,9 +92,9 @@ known limitations are:
   `dcc_offer`, `dcc_offer_resolved`, `archive_changed`, `archive_purged`,
   `notify_list`, `presence_snapshot`, `presence_changed`, `presence_error`,
   `peer_away`, `mentions_bundle`, `server_settings_changed`, `bundle_hash`,
-  and `message`; the remaining kind is
-  deliberately ignored for this alpha
-  release. They won't appear as fake `event: payload` chat messages. Query
+  `channel_created` (consumed without UI, as Cicchetto does), and `message`.
+  Only `message` envelopes become chat lines, so no event appears as a fake
+  `event: payload` chat message. Query
   snapshots replace the full query-window map, map network IDs to native
   sidebar rows, subscribe via Cicchetto's channel-shaped/ASCII-folded topic,
   and load/deduplicate history around join acknowledgements. The own-nick
@@ -266,11 +266,9 @@ known limitations are:
   does not upload files yet, so they are informational only.
   `bundle_hash` names the deployed Cicchetto web build: it is validated
   and logged when it changes, and never downloads or updates anything.
-  - **Window, channel, and scrollback state**: `channel_created`.
-  - Unknown future event kinds are also silently dropped, as Grappa's
-    protocol requires. Within message envelopes, `topic`, `kick`, and
-    `server_event` still use generic system-message rendering rather than
-    dedicated text.
+  Unknown future event kinds are silently dropped, as Grappa's protocol
+  requires. Within message envelopes, `topic`, `kick`, and `server_event`
+  still use generic system-message rendering rather than dedicated text.
 - Performance hasn't been profiled — deliberately deferred until after
   broader field testing surfaces real usage patterns.
 
