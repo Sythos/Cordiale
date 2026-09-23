@@ -270,6 +270,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_server_pref_auto_away_debounce("".into());
             ui.set_server_pref_leave_message_known(false);
             ui.set_server_pref_auto_away_reason_known(false);
+            ui.set_server_upload_limits_known(false);
         }
     });
 
@@ -1206,6 +1207,9 @@ struct WorkerState {
     /// Latest back-from-away mentions summary per network, kept apart from
     /// `reply_view` so a later reply can't lose it; `/mentions` reopens it.
     mentions_bundles: HashMap<String, ReplyView>,
+    /// Upload limits from the latest `server_settings_changed`, shown read
+    /// only in Settings (Cordiale doesn't upload files yet).
+    upload_limits: Option<UploadLimits>,
     /// Session-local only: the keyword watchlist has no documented `list`
     /// reply shape (see `docs/protocol-notes.md` §4quater), so it doesn't
     /// survive a reconnect/relaunch, unlike everything else in Settings.
@@ -1275,6 +1279,7 @@ impl WorkerState {
             presence_by_network: HashMap::new(),
             peer_away: HashMap::new(),
             mentions_bundles: HashMap::new(),
+            upload_limits: None,
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
         }
@@ -1813,6 +1818,7 @@ async fn handle_connect(
             state.presence_by_network.clear();
             state.peer_away.clear();
             state.mentions_bundles.clear();
+            state.upload_limits = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -1919,6 +1925,7 @@ async fn handle_connect(
                 ui.set_server_pref_auto_away_debounce("".into());
                 ui.set_server_pref_leave_message_known(false);
                 ui.set_server_pref_auto_away_reason_known(false);
+                ui.set_server_upload_limits_known(false);
                 ui.set_current_query(false);
                 ui.set_current_query_ready(false);
                 let networks: Vec<slint::SharedString> =
@@ -2939,8 +2946,6 @@ const IGNORED_KINDS: &[&str] = &[
     // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex: all three settings echoes are handled above.
     // notify/wire.ex.
-    // server_settings/wire.ex.
-    "server_settings_changed",
 ];
 
 fn reset_query_session_readiness(state: &mut WorkerState) {
@@ -3199,6 +3204,10 @@ async fn handle_frame(
     }
     if payload_kind == "mentions_bundle" {
         handle_mentions_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "server_settings_changed" {
+        handle_server_settings_changed(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -8272,6 +8281,88 @@ fn handle_peer_away(
     if shown {
         push_peer_away_banner(state, ui);
     }
+}
+
+/// The per-file upload limits Grappa advertises, as shown in Settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UploadLimits {
+    /// `embedded` or `litterbox`.
+    host: String,
+    image_bytes: u64,
+    video_bytes: u64,
+    /// `None` when the server omits it (Cicchetto then uses its own default).
+    video_seconds: Option<u64>,
+    document_bytes: u64,
+    audio_bytes: u64,
+}
+
+/// Validates `server_settings_changed` like Cicchetto: `upload.active_host`
+/// in `embedded | litterbox` and the image/video/document/audio/global caps
+/// positive integers are required; the optional fields and
+/// `http_host_aliases` (no native use) don't reject the snapshot.
+fn parse_server_settings_changed(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<UploadLimits> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "server_settings_changed" {
+        return None;
+    }
+    let upload = payload.get("upload")?;
+    let cap = |key: &str| upload.get(key)?.as_u64().filter(|bytes| *bytes > 0);
+    let host = upload.get("active_host")?.as_str()?;
+    if !matches!(host, "embedded" | "litterbox") {
+        return None;
+    }
+    cap("global_cap_bytes")?;
+    Some(UploadLimits {
+        host: host.to_string(),
+        image_bytes: cap("image_per_file_cap_bytes")?,
+        video_bytes: cap("video_per_file_cap_bytes")?,
+        video_seconds: cap("video_max_duration_seconds"),
+        document_bytes: cap("document_per_file_cap_bytes")?,
+        audio_bytes: cap("audio_per_file_cap_bytes")?,
+    })
+}
+
+/// Mirrors the advertised upload limits into Settings > General.
+fn handle_server_settings_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(limits) = parse_server_settings_changed(payload, carrier_topic, identifier) else {
+        persistence::log_line("server_settings_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state.upload_limits.as_ref() == Some(&limits) {
+        return;
+    }
+    let row = UploadLimitsRow {
+        host: limits.host.clone().into(),
+        image: format_file_size(limits.image_bytes).into(),
+        video: format_file_size(limits.video_bytes).into(),
+        video_seconds: limits
+            .video_seconds
+            .map(|seconds| seconds.to_string())
+            .unwrap_or_default()
+            .into(),
+        document: format_file_size(limits.document_bytes).into(),
+        audio: format_file_size(limits.audio_bytes).into(),
+    };
+    state.upload_limits = Some(limits);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_server_upload_limits(row);
+        ui.set_server_upload_limits_known(true);
+    });
 }
 
 /// Message kinds of Grappa's scrollback (`Message.kind()`), the closed set a
@@ -13676,7 +13767,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 3);
+        assert_eq!(IGNORED_KINDS.len(), 2);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -13740,6 +13831,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"presence_error"));
         assert!(!IGNORED_KINDS.contains(&"peer_away"));
         assert!(!IGNORED_KINDS.contains(&"mentions_bundle"));
+        assert!(!IGNORED_KINDS.contains(&"server_settings_changed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -15109,6 +15201,63 @@ mod tests {
             assert!(parse_mentions_bundle(&bad, topic, "vjt").is_none(), "{key}");
         }
         assert!(parse_mentions_bundle(&payload, "grappa:user:other", "vjt").is_none());
+    }
+
+    #[test]
+    fn parse_server_settings_changed_requires_the_core_caps() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "server_settings_changed",
+            "upload": {
+                "active_host": "embedded",
+                "image_per_file_cap_bytes": 10485760,
+                "video_per_file_cap_bytes": 52428800,
+                "document_per_file_cap_bytes": 20971520,
+                "audio_per_file_cap_bytes": 20971520,
+                "global_cap_bytes": 1073741824,
+                "per_user_cap_bytes": 104857600,
+                "per_visitor_cap_bytes": 10485760,
+                "video_max_duration_seconds": 120
+            },
+            "http_host_aliases": ["irc.example.org"]
+        });
+        let limits = parse_server_settings_changed(&payload, topic, "vjt").expect("valid snapshot");
+        assert_eq!(limits.host, "embedded");
+        assert_eq!(limits.image_bytes, 10485760);
+        assert_eq!(limits.video_seconds, Some(120));
+
+        // Optional fields may be missing without dropping the snapshot.
+        let mut optional_missing = payload.clone();
+        optional_missing["upload"]
+            .as_object_mut()
+            .expect("object")
+            .remove("video_max_duration_seconds");
+        optional_missing
+            .as_object_mut()
+            .expect("object")
+            .remove("http_host_aliases");
+        let limits =
+            parse_server_settings_changed(&optional_missing, topic, "vjt").expect("still valid");
+        assert_eq!(limits.video_seconds, None);
+
+        for (key, invalid) in [
+            ("active_host", serde_json::json!("s3")),
+            ("image_per_file_cap_bytes", serde_json::json!(0)),
+            ("global_cap_bytes", Value::Null),
+            ("audio_per_file_cap_bytes", serde_json::json!("20971520")),
+        ] {
+            let mut bad = payload.clone();
+            bad["upload"][key] = invalid;
+            assert_eq!(
+                parse_server_settings_changed(&bad, topic, "vjt"),
+                None,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            parse_server_settings_changed(&payload, "grappa:user:other", "vjt"),
+            None
+        );
     }
 
     #[test]

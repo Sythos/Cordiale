@@ -74,7 +74,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 53 of them:
+  lists 56 top-level event kinds. Cordiale handles 54 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -91,7 +91,8 @@ known limitations are:
   `directory_progress`, `directory_complete`, `directory_failed`,
   `dcc_offer`, `dcc_offer_resolved`, `archive_changed`, `archive_purged`,
   `notify_list`, `presence_snapshot`, `presence_changed`, `presence_error`,
-  `peer_away`, `mentions_bundle`, and `message`; the remaining 3 kinds are
+  `peer_away`, `mentions_bundle`, `server_settings_changed`, and `message`;
+  the remaining 2 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -260,10 +261,10 @@ known limitations are:
   `0` (off) distinct from a number of seconds, and `quit_part_reason_changed`
   shows the remembered QUIT/PART text or, for `null`, that the server uses its
   own default; `auto_away_reason_changed` does the same for the auto-away
-  text, whose `null` keeps Grappa's built-in message.
+  text, whose `null` keeps Grappa's built-in message. The same section
+  shows the per-file upload limits from `server_settings_changed`; Cordiale
+  does not upload files yet, so they are informational only.
   - **Window, channel, and scrollback state**: `channel_created`.
-  - **Network, connection, identity, and settings**:
-    `server_settings_changed`.
   - **Transfers and other asynchronous work**: `bundle_hash`.
   - Unknown future event kinds are also silently dropped, as Grappa's
     protocol requires. Within message envelopes, `topic`, `kick`, and

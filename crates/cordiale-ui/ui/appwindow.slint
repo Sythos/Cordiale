@@ -78,6 +78,17 @@ struct NotifyRow {
     presence: string,
 }
 
+// Per-file upload limits advertised by the server (sizes already
+// formatted; `video-seconds` empty when not advertised).
+struct UploadLimitsRow {
+    host: string,
+    image: string,
+    video: string,
+    video-seconds: string,
+    document: string,
+    audio: string,
+}
+
 // One channel of the directory screen (`/list`), as sent by the server.
 struct DirectoryRow {
     name: string,
@@ -496,6 +507,9 @@ export component AppWindow inherits Window {
     in property <bool> server-pref-auto-away-reason-known: false;
     in property <bool> server-pref-auto-away-reason-set: false;
     in property <string> server-pref-auto-away-reason: "";
+    // Upload limits from `server_settings_changed`, hidden until announced.
+    in property <bool> server-upload-limits-known: false;
+    in property <UploadLimitsRow> server-upload-limits;
     // "" while running, then "succeeded" or "failed" from `recover_result`.
     in property <string> recover-outcome: "";
     in property <string> recover-outcome-reason: "";
@@ -1608,6 +1622,12 @@ export component AppWindow inherits Window {
                     text: server-pref-auto-away-reason-set
                         ? @tr("Auto-away message: {}", server-pref-auto-away-reason)
                         : @tr("Auto-away message: server default");
+                    wrap: word-wrap;
+                }
+                if server-upload-limits-known : Text {
+                    text: server-upload-limits.video-seconds == ""
+                        ? @tr("Server upload limits ({}): images {}, videos {}, documents {}, audio {}.", server-upload-limits.host, server-upload-limits.image, server-upload-limits.video, server-upload-limits.document, server-upload-limits.audio)
+                        : @tr("Server upload limits ({}): images {}, videos {} (up to {} s), documents {}, audio {}.", server-upload-limits.host, server-upload-limits.image, server-upload-limits.video, server-upload-limits.video-seconds, server-upload-limits.document, server-upload-limits.audio);
                     wrap: word-wrap;
                 }
 
