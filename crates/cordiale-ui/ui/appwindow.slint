@@ -45,9 +45,9 @@ struct QueryEntry {
     mentions-description: string,
 }
 
-// One row of a server reply screen (WHO/WHOIS/WHOWAS/MOTD/ban list). `label`
-// is a key translated by `reply-label`, or empty for a plain line; `value`
-// is server data shown verbatim.
+// One row of a server reply screen (WHO/WHOIS/WHOWAS/MOTD/ban list/LUSERS).
+// `label` is a key translated by `reply-label`, or empty for a plain line;
+// `value` is server data shown verbatim.
 struct ReplyRow {
     label: string,
     value: string,
@@ -567,6 +567,8 @@ export component AppWindow inherits Window {
             return @tr("WHOWAS {} on {}", reply-subject, reply-network);
         } else if reply-kind == "banlist_bundle" {
             return @tr("Mode list {} on {}", reply-subject, reply-network);
+        } else if reply-kind == "lusers_bundle" {
+            return @tr("Network statistics for {}", reply-network);
         } else {
             return reply-network;
         }
@@ -625,6 +627,30 @@ export component AppWindow inherits Window {
             return @tr("The server has no history for this nick.");
         } else if key == "banlist-empty" {
             return @tr("The list is empty.");
+        } else if key == "lusers-total-users" {
+            return @tr("Users");
+        } else if key == "lusers-invisible" {
+            return @tr("Invisible");
+        } else if key == "lusers-servers" {
+            return @tr("Servers");
+        } else if key == "lusers-operators" {
+            return @tr("Operators online");
+        } else if key == "lusers-unknown-connections" {
+            return @tr("Unknown connections");
+        } else if key == "lusers-channels-formed" {
+            return @tr("Channels formed");
+        } else if key == "lusers-local-clients" {
+            return @tr("Clients on this server");
+        } else if key == "lusers-local-servers" {
+            return @tr("Servers linked to this server");
+        } else if key == "lusers-current-local" {
+            return @tr("Current local users");
+        } else if key == "lusers-max-local" {
+            return @tr("Max local users");
+        } else if key == "lusers-current-global" {
+            return @tr("Current global users");
+        } else if key == "lusers-max-global" {
+            return @tr("Max global users");
         } else {
             return key;
         }

@@ -1027,6 +1027,10 @@ struct WorkerState {
     /// Display copy of the auto-away text, same shape as `quit_part_reason`
     /// (inner `None`: the server keeps its built-in text).
     auto_away_reason: Option<Option<String>>,
+    /// Networks with a `/lusers` awaiting its bundle. The ircd also sends
+    /// LUSERS unasked at registration; only a requested bundle is shown,
+    /// and each request is consumed by the first matching bundle.
+    lusers_requested: std::collections::HashSet<String>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -1110,6 +1114,7 @@ impl WorkerState {
             auto_away_debounce: None,
             quit_part_reason: None,
             auto_away_reason: None,
+            lusers_requested: std::collections::HashSet::new(),
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1198,7 +1203,7 @@ async fn run_worker(
                         });
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
-                        handle_send_message(&state, &ui, body).await;
+                        handle_send_message(&mut state, &ui, body).await;
                         if let Some(key) = state.current_channel.clone() {
                             state.drafts.remove(&key);
                         }
@@ -1594,6 +1599,7 @@ async fn handle_connect(
             state.auto_away_debounce = None;
             state.quit_part_reason = None;
             state.auto_away_reason = None;
+            state.lusers_requested.clear();
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2067,7 +2073,7 @@ fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str) -> bool {
         .any(|(name, prefix)| name == identifier && prefix == "@")
 }
 
-async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
+async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
     if state.current_query && !state.current_query_ready {
         return;
     }
@@ -2097,6 +2103,9 @@ async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, b
     if let Some(command) = parse_reply_command(&body, channel) {
         match command {
             ReplyCommand::Request { verb, payload } => {
+                if verb == "lusers" {
+                    state.lusers_requested.insert(network.to_string());
+                }
                 send_user_verb(state, network, verb, payload);
             }
             ReplyCommand::Usage => {
@@ -2635,7 +2644,6 @@ const IGNORED_KINDS: &[&str] = &[
     "mentions_bundle",
     "peer_away",
     "invite_ack",
-    "lusers_bundle",
     "directory_progress",
     "directory_complete",
     "directory_failed",
@@ -2857,6 +2865,10 @@ async fn handle_frame(
     }
     if payload_kind == "whowas_bundle" {
         handle_whowas_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "lusers_bundle" {
+        handle_lusers_bundle(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "banlist_bundle" {
@@ -6585,6 +6597,11 @@ async fn handle_connection_progress(
         persistence::log_line("connection_progress rejected: invalid payload or unknown network");
         return;
     };
+    // A `/lusers` only belongs to the connection it was issued on: the
+    // registration burst of a new attempt is unsolicited.
+    if progress == ConnectionProgressState::Connecting {
+        state.lusers_requested.remove(&network);
+    }
     if apply_connection_progress(&mut state.connecting_networks, &network, progress) {
         refresh_network_groups(state, ui);
     }
@@ -7542,6 +7559,80 @@ fn handle_banlist_bundle(
     show_reply_view(state, ui, view);
 }
 
+/// The twelve LUSERS counters in display order, each with its reply label.
+const LUSERS_COUNTERS: [(&str, &str); 12] = [
+    ("total_users", "lusers-total-users"),
+    ("invisible", "lusers-invisible"),
+    ("servers", "lusers-servers"),
+    ("operators", "lusers-operators"),
+    ("unknown_connections", "lusers-unknown-connections"),
+    ("channels_formed", "lusers-channels-formed"),
+    ("local_clients", "lusers-local-clients"),
+    ("local_servers", "lusers-local-servers"),
+    ("current_local", "lusers-current-local"),
+    ("max_local", "lusers-max-local"),
+    ("current_global", "lusers-current-global"),
+    ("max_global", "lusers-max-global"),
+];
+
+/// Validates `lusers_bundle`: `network` is a required non-empty slug. Like
+/// Cicchetto, each counter is read on its own and a missing, `null` or
+/// non-integer one shows as unknown instead of dropping the other eleven —
+/// the bundle is display-only (253 RPL_LUSERUNKNOWN is optional upstream).
+fn parse_lusers_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<ReplyView> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "lusers_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let rows = LUSERS_COUNTERS
+        .iter()
+        .map(|(key, label)| {
+            let value = payload
+                .get(*key)
+                .and_then(Value::as_i64)
+                .map_or_else(|| "—".to_string(), |count| count.to_string());
+            (label.to_string(), value)
+        })
+        .collect();
+    Some(ReplyView {
+        kind: "lusers_bundle",
+        subject: String::new(),
+        network: network.to_string(),
+        rows,
+    })
+}
+
+/// Shows a LUSERS bundle only when this client asked for it with `/lusers`
+/// (consume-once); the unsolicited registration burst is dropped silently.
+fn handle_lusers_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(view) = parse_lusers_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("lusers_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    if !state.lusers_requested.remove(&view.network) {
+        return;
+    }
+    show_reply_view(state, ui, view);
+}
+
 /// Common channel prefixes, used only to tell a channel argument from a mode
 /// letter in `/banlist`. `+` is left out on purpose: `/banlist +e` means the
 /// exception list, not a modeless `+e` channel.
@@ -7728,6 +7819,21 @@ fn parse_reply_command(body: &str, current_target: &str) -> Option<ReplyCommand>
                 None => serde_json::json!({}),
             };
             Some(ReplyCommand::Request { verb, payload })
+        }
+        // `/lusers [mask [server]]`: both optional and positional, mask
+        // first; a server is never sent without a mask.
+        "/lusers" => {
+            let mut payload = serde_json::Map::new();
+            if let Some(mask) = args.first() {
+                payload.insert("mask".to_string(), Value::from(*mask));
+            }
+            if let Some(server) = args.get(1) {
+                payload.insert("server".to_string(), Value::from(*server));
+            }
+            Some(ReplyCommand::Request {
+                verb: "lusers",
+                payload: Value::Object(payload),
+            })
         }
         _ => None,
     }
@@ -11902,7 +12008,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 18);
+        assert_eq!(IGNORED_KINDS.len(), 17);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -11951,6 +12057,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"auto_away_debounce_changed"));
         assert!(!IGNORED_KINDS.contains(&"quit_part_reason_changed"));
         assert!(!IGNORED_KINDS.contains(&"auto_away_reason_changed"));
+        assert!(!IGNORED_KINDS.contains(&"lusers_bundle"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -12787,6 +12894,77 @@ mod tests {
             parse_auto_away_debounce_changed(&payload(Value::Null), "grappa:user:other", "vjt"),
             None
         );
+    }
+
+    #[test]
+    fn lusers_command_sends_mask_and_server_only_when_given() {
+        let request = |payload: Value| {
+            Some(ReplyCommand::Request {
+                verb: "lusers",
+                payload,
+            })
+        };
+        assert_eq!(
+            parse_reply_command("/lusers", "#rust"),
+            request(serde_json::json!({}))
+        );
+        assert_eq!(
+            parse_reply_command("/lusers *", "#rust"),
+            request(serde_json::json!({"mask": "*"}))
+        );
+        assert_eq!(
+            parse_reply_command("/LUSERS * irc.example.org extra", "#rust"),
+            request(serde_json::json!({"mask": "*", "server": "irc.example.org"}))
+        );
+    }
+
+    #[test]
+    fn parse_lusers_bundle_shows_unknown_counters_without_dropping_the_rest() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "lusers_bundle",
+            "network": "azzurra",
+            "total_users": 120,
+            "invisible": 30,
+            "servers": 4,
+            "operators": 2,
+            "unknown_connections": null,
+            "channels_formed": 55,
+            "local_clients": 40,
+            "local_servers": 1,
+            "current_local": 40,
+            "max_local": 90,
+            "current_global": "garbled",
+            "future_field": true
+        });
+        let view = parse_lusers_bundle(&payload, topic, "vjt").expect("valid bundle");
+        assert_eq!(view.kind, "lusers_bundle");
+        assert_eq!(view.network, "azzurra");
+        assert_eq!(view.rows.len(), 12);
+        assert_eq!(
+            view.rows[0],
+            ("lusers-total-users".to_string(), "120".to_string())
+        );
+        assert_eq!(
+            view.rows[4],
+            ("lusers-unknown-connections".to_string(), "—".to_string())
+        );
+        // A non-integer counter and a missing one both read as unknown.
+        assert_eq!(view.rows[10].1, "—");
+        assert_eq!(view.rows[11].1, "—");
+
+        for invalid in [
+            serde_json::json!({"kind": "lusers_bundle", "total_users": 1}),
+            serde_json::json!({"kind": "lusers_bundle", "network": ""}),
+            serde_json::json!({"kind": "lusers_bundle", "network": 7}),
+            serde_json::json!({"kind": "whowas_bundle", "network": "azzurra"}),
+        ] {
+            assert!(
+                parse_lusers_bundle(&invalid, topic, "vjt").is_none(),
+                "{invalid}"
+            );
+        }
+        assert!(parse_lusers_bundle(&payload, "grappa:user:other", "vjt").is_none());
     }
 
     #[test]
