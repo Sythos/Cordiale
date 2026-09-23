@@ -2592,7 +2592,6 @@ const IGNORED_KINDS: &[&str] = &[
     "dcc_offer",
     "dcc_offer_resolved",
     "mentions_bundle",
-    "whois_avatar_ready",
     "peer_away",
     "invite_ack",
     "lusers_bundle",
@@ -2802,6 +2801,10 @@ async fn handle_frame(
     }
     if payload_kind == "whois_bundle" {
         handle_whois_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "whois_avatar_ready" {
+        handle_whois_avatar_ready(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -6884,11 +6887,17 @@ fn who_reply_view(reply: &WhoReply) -> ReplyView {
 /// earlier reply (last-write-wins, like Cicchetto's per-network modals) and
 /// never touches chat history or the selected window.
 fn show_reply_view(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, view: ReplyView) {
+    push_reply_view(ui, &view, true);
+    state.reply_view = Some(view);
+}
+
+/// Mirrors a reply view into the UI; `open` also switches to the reply
+/// screen. An in-place refresh passes `false` so it never steals the screen.
+fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
     let kind = view.kind;
     let subject = view.subject.clone();
     let network = view.network.clone();
     let rows = view.rows.clone();
-    state.reply_view = Some(view);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let rows: Vec<ReplyRow> = rows
@@ -6902,7 +6911,9 @@ fn show_reply_view(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, view: R
         ui.set_reply_kind(kind.into());
         ui.set_reply_subject(subject.into());
         ui.set_reply_network(network.into());
-        ui.set_screen("reply".into());
+        if open {
+            ui.set_screen("reply".into());
+        }
     });
 }
 
@@ -7200,6 +7211,97 @@ fn handle_whois_bundle(
     let view = whois_bundle_view(&bundle);
     state.whois_card = Some(bundle);
     show_reply_view(state, ui, view);
+}
+
+/// Validates `whois_avatar_ready`: `network`, `nick` and `avatar_url` are
+/// all required strings. Returns them in that order.
+fn parse_whois_avatar_ready(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "whois_avatar_ready" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    Some((
+        network.to_string(),
+        payload.get("nick")?.as_str()?.to_string(),
+        payload.get("avatar_url")?.as_str()?.to_string(),
+    ))
+}
+
+/// Cicchetto's `patchWhoisAvatarUrl`: patches only the open card for the
+/// same network and nick (compared with the network's casemapping); a late
+/// completion for a closed or different card is a silent no-op.
+fn apply_whois_avatar_ready(
+    card: &mut Option<WhoisBundle>,
+    network: &str,
+    nick: &str,
+    avatar_url: String,
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> bool {
+    let Some(card) = card.as_mut() else {
+        return false;
+    };
+    if card.network != network || !casemapping.nick_eq(&card.target, nick) {
+        return false;
+    }
+    if card.avatar_url.as_deref() == Some(avatar_url.as_str()) {
+        return false;
+    }
+    card.avatar_url = Some(avatar_url);
+    true
+}
+
+fn handle_whois_avatar_ready(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, nick, avatar_url)) =
+        parse_whois_avatar_ready(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("whois_avatar_ready rejected: invalid carrier or payload");
+        return;
+    };
+    // IRC's default mapping applies until the network's ISUPPORT says
+    // otherwise.
+    let casemapping = state
+        .isupport_by_network
+        .get(&network)
+        .map(|isupport| isupport.casemapping)
+        .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459);
+    if !apply_whois_avatar_ready(
+        &mut state.whois_card,
+        &network,
+        &nick,
+        avatar_url,
+        casemapping,
+    ) {
+        return;
+    }
+    let Some(card) = state.whois_card.as_ref() else {
+        return;
+    };
+    let shown = state.reply_view.as_ref().is_some_and(|view| {
+        view.kind == "whois_bundle" && view.network == card.network && view.subject == card.target
+    });
+    if shown {
+        let view = whois_bundle_view(card);
+        push_reply_view(ui, &view, false);
+        state.reply_view = Some(view);
+    }
 }
 
 /// A slash command answered by a requester reply: the WS verb plus its
@@ -11433,7 +11535,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 24);
+        assert_eq!(IGNORED_KINDS.len(), 23);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -11476,6 +11578,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"who_reply"));
         assert!(!IGNORED_KINDS.contains(&"server_reply"));
         assert!(!IGNORED_KINDS.contains(&"whois_bundle"));
+        assert!(!IGNORED_KINDS.contains(&"whois_avatar_ready"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -12064,6 +12167,74 @@ mod tests {
                 "{key} must invalidate the bundle"
             );
         }
+    }
+
+    #[test]
+    fn whois_avatar_ready_patches_only_the_matching_open_card() {
+        use cordiale_core::isupport::CaseMapping;
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "whois_avatar_ready",
+            "network": "libera",
+            "nick": "ALICE",
+            "avatar_url": "/networks/1/peer_avatar/alice"
+        });
+        let (network, nick, avatar_url) =
+            parse_whois_avatar_ready(&payload, topic, "vjt").expect("valid avatar event");
+        assert!(parse_whois_avatar_ready(&payload, "grappa:user:other", "vjt").is_none());
+        for missing in ["network", "nick", "avatar_url"] {
+            let mut broken = payload.clone();
+            broken.as_object_mut().unwrap().remove(missing);
+            assert!(parse_whois_avatar_ready(&broken, topic, "vjt").is_none());
+        }
+
+        // No open card: a late completion is a no-op.
+        let mut card = None;
+        assert!(!apply_whois_avatar_ready(
+            &mut card,
+            &network,
+            &nick,
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+
+        let mut bundle = parse_whois_bundle(&whois_bundle_json(), topic, "vjt").unwrap();
+        bundle.target = "Alice[x]".to_string();
+        card = Some(bundle);
+        // A different network or nick never gets patched.
+        assert!(!apply_whois_avatar_ready(
+            &mut card,
+            "oftc",
+            "alice{x}",
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+        assert!(!apply_whois_avatar_ready(
+            &mut card,
+            "libera",
+            "bob",
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+        // Same nick under the network's casemapping: patched once.
+        assert!(apply_whois_avatar_ready(
+            &mut card,
+            "libera",
+            "alice{x}",
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+        assert!(!apply_whois_avatar_ready(
+            &mut card,
+            "libera",
+            "alice{x}",
+            avatar_url.clone(),
+            CaseMapping::Rfc1459
+        ));
+        assert_eq!(
+            card.unwrap().avatar_url.as_deref(),
+            Some("/networks/1/peer_avatar/alice")
+        );
     }
 
     #[test]
