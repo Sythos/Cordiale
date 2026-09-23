@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 29 of them:
+  lists 56 top-level event kinds. Cordiale handles 30 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -80,7 +80,8 @@ known limitations are:
   `window_pending`, `window_invited`, `window_invite_declined`,
   `network_attached`, `network_detached`, `connection_state_changed`,
   `connection_progress`, `recover_progress`, `recover_result`,
-  `web_session_severed`, and `message`; the remaining 27 kinds are
+  `web_session_severed`, `who_reply`, and `message`; the remaining 26 kinds
+  are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -189,6 +190,13 @@ known limitations are:
   upgrade refused with 401/403 now ends the session the same way instead of
   retrying forever, and a shut-down session no longer keeps reconnecting in
   the background during its back-off.
+  Replies to commands this client issued (requester events) open a reply
+  screen instead of a chat line; the latest reply replaces the previous one
+  and the selected window is left alone. `/who [target]` (defaulting to the
+  open window) shows `who_reply` one user per line; the bundle is validated
+  row by row and dropped entirely if any row is malformed. A reply-producing
+  command missing a required argument shows a usage hint instead of being sent
+  as chat text.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
@@ -197,7 +205,7 @@ known limitations are:
     `auto_away_reason_changed`, `quit_part_reason_changed`,
     `server_settings_changed`.
   - **Presence, queries, and server replies**: `presence_changed`,
-    `presence_error`, `presence_snapshot`, `notify_list`, `who_reply`,
+    `presence_error`, `presence_snapshot`, `notify_list`,
     `whois_bundle`, `whois_avatar_ready`, `whowas_bundle`, `lusers_bundle`,
     `banlist_bundle`, `server_reply`, `invite_ack`, `mentions_bundle`.
   - **Transfers and other asynchronous work**: `dcc_offer`,

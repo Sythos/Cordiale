@@ -798,6 +798,37 @@ struct RecoverPanel {
     outcome_reason: Option<String>,
 }
 
+/// The latest reply to a command this client issued (a requester event),
+/// shown on the reply screen. Rows are `(label key, value)`; an empty key is
+/// a plain line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReplyView {
+    kind: &'static str,
+    subject: String,
+    network: String,
+    rows: Vec<(String, String)>,
+}
+
+/// One `who_reply` user row, all fields required by the wire contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WhoUser {
+    nick: String,
+    user: String,
+    host: String,
+    server: String,
+    modes: String,
+    channel: String,
+    hops: Option<i64>,
+    realname: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WhoReply {
+    network: String,
+    target: String,
+    users: Vec<WhoUser>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NetworkConnectionSnapshot {
     status: NetworkConnectionStatus,
@@ -919,6 +950,9 @@ struct WorkerState {
     /// Identity-recovery panel driven entirely by server pushes; `None`
     /// until the first `recover_progress` and again after a dismiss.
     recover_panel: Option<RecoverPanel>,
+    /// Latest requester reply shown on the reply screen; never persisted
+    /// and never rendered into a chat window.
+    reply_view: Option<ReplyView>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -997,6 +1031,7 @@ impl WorkerState {
             network_connection_states: HashMap::new(),
             connecting_networks: std::collections::HashSet::new(),
             recover_panel: None,
+            reply_view: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1476,6 +1511,7 @@ async fn handle_connect(
             state.network_connection_states = connection_states;
             state.connecting_networks.clear();
             state.recover_panel = None;
+            state.reply_view = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -1971,6 +2007,22 @@ async fn handle_send_message(state: &WorkerState, ui: &slint::Weak<AppWindow>, b
         send_user_network_verb(state, network, "recover");
         return;
     }
+    // Commands answered by a requester reply (shown on the reply screen,
+    // never as a chat line) are pushed on the user topic, not sent as text.
+    if let Some(command) = parse_reply_command(&body, channel) {
+        match command {
+            ReplyCommand::Request { verb, payload } => {
+                send_user_verb(state, network, verb, payload);
+            }
+            ReplyCommand::Usage => {
+                let ui = ui.clone();
+                let _ = ui.upgrade_in_event_loop(|ui| {
+                    ui.set_status_kind("command-usage".into());
+                });
+            }
+        }
+        return;
+    }
 
     let request = SendMessageRequest::plain(body);
     if client
@@ -2311,6 +2363,12 @@ fn handle_request_links(state: &WorkerState, network: String) {
 
 /// Pushes a `{network_id}`-only verb (`links`, `recover`) on the user topic.
 fn send_user_network_verb(state: &WorkerState, network: &str, verb: &str) {
+    send_user_verb(state, network, verb, serde_json::json!({}));
+}
+
+/// Pushes `verb` on the user topic with `payload` plus the network's integer
+/// `network_id`. `payload` must be a JSON object.
+fn send_user_verb(state: &WorkerState, network: &str, verb: &str, mut payload: Value) {
     let (Some(session), Some(identifier)) = (&state.session, &state.identifier) else {
         return;
     };
@@ -2321,8 +2379,12 @@ fn send_user_network_verb(state: &WorkerState, network: &str, verb: &str) {
     let Some(&network_id) = state.network_ids.get(network) else {
         return;
     };
+    let Value::Object(fields) = &mut payload else {
+        return;
+    };
+    fields.insert("network_id".to_string(), Value::from(network_id));
     let topic = format!("grappa:user:{identifier}");
-    session.send_command(topic, verb, serde_json::json!({ "network_id": network_id }));
+    session.send_command(topic, verb, payload);
 }
 
 /// Shared setup for every `MemberContextMenu` action below: the session,
@@ -2483,7 +2545,6 @@ const IGNORED_KINDS: &[&str] = &[
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
     "channel_created",
-    "who_reply",
     "server_reply",
     "dcc_offer",
     "dcc_offer_resolved",
@@ -2687,6 +2748,10 @@ async fn handle_frame(
     }
     if payload_kind == "web_session_severed" {
         handle_web_session_severed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "who_reply" {
+        handle_who_reply(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -6681,6 +6746,160 @@ fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         ui.set_recover_outcome_reason(outcome_reason.into());
         ui.set_recover_visible(visible);
     });
+}
+
+/// Requester replies all arrive on the exact authenticated user topic and
+/// only on the socket that asked; anything else is rejected before parsing.
+fn is_own_user_topic(carrier_topic: &str, identifier: &str) -> bool {
+    carrier_topic == format!("grappa:user:{identifier}")
+}
+
+/// Validates `who_reply` as strictly as Cicchetto: every user row must carry
+/// all string fields, `hops` an integer or `null` and `realname` a string or
+/// `null`; one malformed row drops the whole bundle.
+fn parse_who_reply(payload: &Value, carrier_topic: &str, identifier: &str) -> Option<WhoReply> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "who_reply" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let target = payload.get("target")?.as_str()?.to_string();
+    let mut users = Vec::new();
+    for row in payload.get("users")?.as_array()? {
+        let text = |key: &str| row.get(key).and_then(Value::as_str).map(str::to_string);
+        let hops = match row.get("hops")? {
+            Value::Null => None,
+            value => Some(value.as_i64()?),
+        };
+        users.push(WhoUser {
+            nick: text("nick")?,
+            user: text("user")?,
+            host: text("host")?,
+            server: text("server")?,
+            modes: text("modes")?,
+            channel: text("channel")?,
+            hops,
+            realname: parse_nullable_wire_string(row.get("realname")?)?,
+        });
+    }
+    Some(WhoReply {
+        network: network.to_string(),
+        target,
+        users,
+    })
+}
+
+/// One plain line per user, in wire order, mirroring the 352 reply layout.
+fn who_reply_view(reply: &WhoReply) -> ReplyView {
+    let rows = if reply.users.is_empty() {
+        vec![("who-empty".to_string(), String::new())]
+    } else {
+        reply
+            .users
+            .iter()
+            .map(|user| {
+                let hops = user
+                    .hops
+                    .map(|hops| format!(" ({hops})"))
+                    .unwrap_or_default();
+                let realname = user
+                    .realname
+                    .as_deref()
+                    .map(|realname| format!(" — {realname}"))
+                    .unwrap_or_default();
+                (
+                    String::new(),
+                    format!(
+                        "{} ({}@{}) {} · {} · {}{hops}{realname}",
+                        user.nick, user.user, user.host, user.modes, user.channel, user.server
+                    ),
+                )
+            })
+            .collect()
+    };
+    ReplyView {
+        kind: "who_reply",
+        subject: reply.target.clone(),
+        network: reply.network.clone(),
+        rows,
+    }
+}
+
+/// Stores a requester reply and opens the reply screen. It replaces any
+/// earlier reply (last-write-wins, like Cicchetto's per-network modals) and
+/// never touches chat history or the selected window.
+fn show_reply_view(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, view: ReplyView) {
+    let kind = view.kind;
+    let subject = view.subject.clone();
+    let network = view.network.clone();
+    let rows = view.rows.clone();
+    state.reply_view = Some(view);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<ReplyRow> = rows
+            .into_iter()
+            .map(|(label, value)| ReplyRow {
+                label: label.into(),
+                value: value.into(),
+            })
+            .collect();
+        ui.set_reply_rows(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_reply_kind(kind.into());
+        ui.set_reply_subject(subject.into());
+        ui.set_reply_network(network.into());
+        ui.set_screen("reply".into());
+    });
+}
+
+fn handle_who_reply(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(reply) = parse_who_reply(payload, carrier_topic, identifier) else {
+        persistence::log_line("who_reply rejected: invalid carrier or payload");
+        return;
+    };
+    show_reply_view(state, ui, who_reply_view(&reply));
+}
+
+/// A slash command answered by a requester reply: the WS verb plus its
+/// payload without `network_id` (added by `send_user_verb`), or `Usage` when
+/// a required argument is missing.
+#[derive(Debug, PartialEq)]
+enum ReplyCommand {
+    Request { verb: &'static str, payload: Value },
+    Usage,
+}
+
+/// Parses the reply-producing slash commands. `current_target` is the open
+/// window's channel (or query nick), used when an argument is optional.
+fn parse_reply_command(body: &str, current_target: &str) -> Option<ReplyCommand> {
+    let mut words = body.split_whitespace();
+    let command = words.next()?.to_ascii_lowercase();
+    let args: Vec<&str> = words.collect();
+    match command.as_str() {
+        "/who" => {
+            let target = args.first().copied().unwrap_or(current_target);
+            if target.is_empty() {
+                return Some(ReplyCommand::Usage);
+            }
+            Some(ReplyCommand::Request {
+                verb: "who",
+                payload: serde_json::json!({ "channel": target }),
+            })
+        }
+        _ => None,
+    }
 }
 
 impl NetworkLifecycleKind {
@@ -10852,7 +11071,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 27);
+        assert_eq!(IGNORED_KINDS.len(), 26);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -10892,6 +11111,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"recover_progress"));
         assert!(!IGNORED_KINDS.contains(&"recover_result"));
         assert!(!IGNORED_KINDS.contains(&"web_session_severed"));
+        assert!(!IGNORED_KINDS.contains(&"who_reply"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -11243,6 +11463,89 @@ mod tests {
                 "{invalid} must be rejected"
             );
         }
+    }
+
+    fn who_user_json(nick: &str) -> Value {
+        serde_json::json!({
+            "nick": nick,
+            "user": "~u",
+            "host": "example.org",
+            "server": "irc.example.org",
+            "modes": "H@",
+            "channel": "#rust",
+            "hops": 0,
+            "realname": "Real Name"
+        })
+    }
+
+    #[test]
+    fn parse_who_reply_is_strict_per_row() {
+        let topic = "grappa:user:vjt";
+        let mut nulls = who_user_json("bob");
+        nulls["hops"] = Value::Null;
+        nulls["realname"] = Value::Null;
+        let payload = serde_json::json!({
+            "kind": "who_reply",
+            "network": "libera",
+            "target": "#rust",
+            "users": [who_user_json("alice"), nulls],
+            "future_field": 1
+        });
+        let reply = parse_who_reply(&payload, topic, "vjt").expect("valid who_reply");
+        assert_eq!(reply.network, "libera");
+        assert_eq!(reply.target, "#rust");
+        assert_eq!(reply.users.len(), 2);
+        assert_eq!(reply.users[0].hops, Some(0));
+        assert_eq!(reply.users[1].hops, None);
+        assert_eq!(reply.users[1].realname, None);
+
+        let empty = serde_json::json!({
+            "kind": "who_reply", "network": "libera", "target": "#rust", "users": []
+        });
+        let view = who_reply_view(&parse_who_reply(&empty, topic, "vjt").unwrap());
+        assert_eq!(view.rows, vec![("who-empty".to_string(), String::new())]);
+
+        assert!(parse_who_reply(&payload, "grappa:user:other", "vjt").is_none());
+        // One malformed row drops the whole bundle.
+        let mut bad_row = who_user_json("carol");
+        bad_row["modes"] = Value::Null;
+        let mut missing_realname = who_user_json("dave");
+        missing_realname.as_object_mut().unwrap().remove("realname");
+        let mut string_hops = who_user_json("erin");
+        string_hops["hops"] = serde_json::json!("2");
+        for bad in [bad_row, missing_realname, string_hops] {
+            let payload = serde_json::json!({
+                "kind": "who_reply",
+                "network": "libera",
+                "target": "#rust",
+                "users": [who_user_json("alice"), bad]
+            });
+            assert!(parse_who_reply(&payload, topic, "vjt").is_none());
+        }
+        let no_users =
+            serde_json::json!({"kind": "who_reply", "network": "libera", "target": "#rust"});
+        assert!(parse_who_reply(&no_users, topic, "vjt").is_none());
+    }
+
+    #[test]
+    fn who_command_defaults_to_the_open_window() {
+        assert_eq!(
+            parse_reply_command("/who", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "who",
+                payload: serde_json::json!({"channel": "#rust"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/WHO #other extra", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "who",
+                payload: serde_json::json!({"channel": "#other"})
+            })
+        );
+        assert_eq!(parse_reply_command("/who", ""), Some(ReplyCommand::Usage));
+        assert_eq!(parse_reply_command("hello /who", "#rust"), None);
+        assert_eq!(parse_reply_command("/whoever", "#rust"), None);
     }
 
     #[test]

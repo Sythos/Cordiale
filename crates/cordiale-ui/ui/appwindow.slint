@@ -45,6 +45,14 @@ struct QueryEntry {
     mentions-description: string,
 }
 
+// One row of a server reply screen (WHO/WHOIS/WHOWAS/MOTD/ban list). `label`
+// is a key translated by `reply-label`, or empty for a plain line; `value`
+// is server data shown verbatim.
+struct ReplyRow {
+    label: string,
+    value: string,
+}
+
 // One step of the identity-recovery panel, as raw wire tokens; the visible
 // labels are translated by the `recover-*-label` functions below.
 struct RecoverStepRow {
@@ -394,6 +402,14 @@ export component AppWindow inherits Window {
     in property <bool> recover-visible: false;
     in property <string> recover-network: "";
     in property <[RecoverStepRow]> recover-steps: [];
+    // Latest reply to a command this client issued (requester events). The
+    // screen opens only when the reply arrives, like Cicchetto's modals.
+    // `reply-kind` is the wire kind (e.g. "who_reply"); the title is
+    // composed and translated by `reply-title-text`.
+    in property <string> reply-kind: "";
+    in property <string> reply-subject: "";
+    in property <string> reply-network: "";
+    in property <[ReplyRow]> reply-rows: [];
     // "" while running, then "succeeded" or "failed" from `recover_result`.
     in property <string> recover-outcome: "";
     in property <string> recover-outcome-reason: "";
@@ -521,6 +537,22 @@ export component AppWindow inherits Window {
     // get Rust-originated dynamic status text through Slint's `@tr()`
     // translation system, since `@tr()` only works on string literals
     // that live in a `.slint` file.
+    function reply-title-text() -> string {
+        if reply-kind == "who_reply" {
+            return @tr("WHO {} on {}", reply-subject, reply-network);
+        } else {
+            return reply-network;
+        }
+    }
+
+    function reply-label(key: string) -> string {
+        if key == "who-empty" {
+            return @tr("No users matched.");
+        } else {
+            return key;
+        }
+    }
+
     function recover-step-label(step: string) -> string {
         if step == "identify" {
             return @tr("Identify with services");
@@ -572,6 +604,8 @@ export component AppWindow inherits Window {
             return @tr("Wrong username or password/token.");
         } else if status-kind == "reauthentication-required" {
             return @tr("Saved sign-in is unavailable. Enter your password or client token to sign in again.");
+        } else if status-kind == "command-usage" {
+            return @tr("That command is missing an argument, for example: /whowas <nick>.");
         } else if status-kind == "session-severed-flood" {
             return @tr("You were signed out because this client sent too many requests. Your IRC session is still running; sign in again to continue.");
         } else if status-kind == "two-factor-required" {
@@ -1676,6 +1710,34 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    if screen == "reply" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: reply-title-text();
+            font-size: 18px;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for row in reply-rows : Text {
+                text: row.label == ""
+                    ? row.value
+                    : (row.value == "" ? reply-label(row.label) : @tr("{}: {}", reply-label(row.label), row.value));
+                wrap: word-wrap;
+                accessible-role: AccessibleRole.text;
+            }
+        }
+
+        Button {
+            text: @tr("Back");
+            clicked => { screen = "connected"; }
         }
     }
 
