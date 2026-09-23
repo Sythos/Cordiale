@@ -62,6 +62,10 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    PartChannel {
+        network: String,
+        channel: String,
+    },
     SelectQuery {
         network: String,
         nick: String,
@@ -334,6 +338,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_channel = worker_tx.clone();
     ui.on_channel_selected(move |network, channel| {
         let _ = tx_for_channel.send(WorkerCommand::SelectChannel {
+            network: network.to_string(),
+            channel: channel.to_string(),
+        });
+    });
+
+    let tx_for_part = worker_tx.clone();
+    ui.on_channel_part_requested(move |network, channel| {
+        let _ = tx_for_part.send(WorkerCommand::PartChannel {
             network: network.to_string(),
             channel: channel.to_string(),
         });
@@ -1336,6 +1348,9 @@ async fn run_worker(
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
+                    Some(WorkerCommand::PartChannel { network, channel }) => {
+                        handle_part_channel(&mut state, &ui, network, channel).await;
+                    }
                     Some(WorkerCommand::SelectQuery { network, nick }) => {
                         handle_select_query(&mut state, &ui, network, nick).await;
                     }
@@ -1388,7 +1403,10 @@ async fn run_worker(
                         push_peer_away_banner(&state, &ui);
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
-                        let expanded = state.expanded_networks.entry(network).or_insert(true);
+                        let initially_expanded = !state.network_connection_states.get(&network).is_some_and(
+                            |snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked),
+                        );
+                        let expanded = state.expanded_networks.entry(network).or_insert(initially_expanded);
                         *expanded = !*expanded;
                         refresh_network_groups(&state, &ui);
                     }
@@ -1906,6 +1924,7 @@ async fn handle_connect(
                 &state.query_windows,
                 &state.expanded_networks,
                 &state.network_connection_states,
+                &state.network_ids,
             );
             let window_states = state.window_states.clone();
             let window_mentions = state.window_mentions.clone();
@@ -2017,6 +2036,7 @@ async fn handle_select_channel(
         == Some(&ChannelWindowState::Joined);
     let can_moderate = is_own_nick_an_op(&members, &identifier);
     let dark_theme = state.theme == Theme::Dark;
+    let casemapping = network_casemapping(state, &network);
 
     let label = format!("{network} — {channel}");
     let ui = ui.clone();
@@ -2030,10 +2050,95 @@ async fn handle_select_channel(
         ui.set_current_query_ready(false);
         ui.set_compose_text(draft.into());
         ui.set_can_moderate_members(can_moderate);
-        let model = chat_lines_model(&lines, dark_theme);
+        let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         let member_rows = members_model(&members, dark_theme);
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
+    });
+}
+
+/// A successful REST response is the server's acknowledgement of PART. Keep
+/// the sidebar and current view intact on failure, then reconcile local topic
+/// ownership only after that acknowledgement.
+async fn handle_part_channel(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: String,
+) {
+    let key = window_state_key(&network, &channel);
+    if state.window_states.get(&key) != Some(&ChannelWindowState::Joined)
+        || !state
+            .channel_entries
+            .iter()
+            .any(|(entry_network, entry_channel, _)| {
+                window_state_key(entry_network, entry_channel) == key
+            })
+    {
+        return;
+    }
+    let (Some(client), Some(token), Some(identifier)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.identifier.clone(),
+    ) else {
+        return;
+    };
+
+    if let Err(error) = client.part_channel(&token, &network, &channel, None).await {
+        persistence::log_line(&format!("channel part failed: {error:?}"));
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("part-failed".into()));
+        return;
+    }
+
+    let selected =
+        state
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, current_channel)| {
+                !state.current_query && window_state_key(current_network, current_channel) == key
+            });
+    let mut remaining_entries = state.channel_entries.clone();
+    remove_sidebar_channel_entry(&mut remaining_entries, &network, &channel);
+    let actions = reconcile_channel_entries(state, &identifier, remaining_entries);
+    if let Some(session) = state.session.as_ref() {
+        for action in actions {
+            if let ChannelTopicAction::Leave(topic) = action {
+                session.leave_topic(topic);
+            }
+        }
+    }
+    state.window_states.remove(&key);
+    state.window_failures.remove(&key);
+    state.window_kicks.remove(&key);
+    state.invited_by.remove(&key);
+    state.channel_modes.remove(&key);
+    state.topics.remove(&(network.clone(), channel.clone()));
+    state.members.remove(&(network.clone(), channel.clone()));
+    state.messages.remove(&(network.clone(), channel.clone()));
+    state.drafts.remove(&(network.clone(), channel.clone()));
+    state
+        .recent_channels
+        .retain(|(recent_network, recent_channel)| {
+            window_state_key(recent_network, recent_channel) != key
+        });
+    refresh_network_groups(state, ui);
+
+    if selected {
+        state.current_channel = None;
+        state.current_query = false;
+        state.current_query_ready = false;
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.last_channel = None;
+        let _ = persistence::save_settings(&settings);
+        clear_closed_query_view(ui);
+    }
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        if ui.get_status_kind().as_str() == "part-failed" {
+            ui.set_status_kind("signed-in".into());
+        }
     });
 }
 
@@ -2405,13 +2510,31 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
         .as_ref()
         .and_then(|key| state.messages.get(key))
         .cloned();
+    let current_roster = state
+        .current_channel
+        .as_ref()
+        .filter(|_| !state.current_query)
+        .map(|key| {
+            (
+                state.members.get(key).cloned().unwrap_or_default(),
+                network_casemapping(state, &key.0),
+            )
+        });
 
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_theme(theme_to_slint(new_theme));
         ui.invoke_apply_color_scheme();
         if let Some(lines) = current_lines {
-            let model = chat_lines_model(&lines, new_theme == Theme::Dark);
+            let model = match current_roster {
+                Some((members, casemapping)) => chat_lines_model_with_roster(
+                    &lines,
+                    new_theme == Theme::Dark,
+                    &members,
+                    casemapping,
+                ),
+                None => chat_lines_model(&lines, new_theme == Theme::Dark),
+            };
             ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         }
     });
@@ -3240,6 +3363,13 @@ async fn handle_frame(
     }
     if payload_kind == "isupport_changed" {
         handle_isupport_changed(state, &frame.topic, &frame.payload);
+        if let Some(key) = state
+            .current_channel
+            .as_ref()
+            .filter(|_| !state.current_query)
+        {
+            push_members_update(state, ui, key);
+        }
         return;
     }
     if payload_kind == "umode_changed" {
@@ -3600,9 +3730,11 @@ async fn handle_frame(
     if state.current_channel.as_ref() == Some(&key) {
         let lines = state.messages[&key].clone();
         let dark_theme = state.theme == Theme::Dark;
+        let members = state.members.get(&key).cloned().unwrap_or_default();
+        let casemapping = network_casemapping(state, &network);
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
-            let model = chat_lines_model(&lines, dark_theme);
+            let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
             ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         });
     }
@@ -4753,17 +4885,24 @@ fn apply_members_seeded(state: &mut WorkerState, payload: &Value) -> Option<(Str
 /// — shared by every member-list mutation path (`members_seeded`,
 /// incremental join/part/nick_change, channel selection).
 fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(String, String)) {
+    if state.current_query {
+        return;
+    }
     let members = state.members.get(key).cloned().unwrap_or_default();
     let can_moderate = state
         .identifier
         .as_deref()
         .is_some_and(|identifier| is_own_nick_an_op(&members, identifier));
     let dark_theme = state.theme == Theme::Dark;
+    let lines = state.messages.get(key).cloned().unwrap_or_default();
+    let casemapping = network_casemapping(state, &key.0);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_can_moderate_members(can_moderate);
         let member_rows = members_model(&members, dark_theme);
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
+        let chat_lines = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
+        ui.set_chat_lines(Rc::new(slint::VecModel::from(chat_lines)).into());
     });
 }
 
@@ -5749,6 +5888,7 @@ type NetworkGroupData = (
     Vec<(String, String)>,
     Vec<(String, String)>,
     String,
+    bool,
 );
 type NetworkEntries = (Vec<(String, String)>, Vec<(String, String)>);
 
@@ -5769,6 +5909,7 @@ fn network_groups_data(
     query_windows: &[QueryWindow],
     expanded: &HashMap<String, bool>,
     connection_states: &HashMap<String, NetworkConnectionSnapshot>,
+    known_networks: &HashMap<String, i64>,
 ) -> Vec<NetworkGroupData> {
     let mut by_network: std::collections::BTreeMap<String, NetworkEntries> =
         std::collections::BTreeMap::new();
@@ -5786,16 +5927,29 @@ fn network_groups_data(
             .1
             .push((query.target_nick.clone(), query.target_nick.clone()));
     }
+    for network in known_networks.keys() {
+        by_network.entry(network.clone()).or_default();
+    }
     by_network
         .into_iter()
         .map(|(network, (mut channels, queries))| {
             channels.sort();
-            let is_expanded = expanded.get(&network).copied().unwrap_or(true);
+            let parked = connection_states
+                .get(&network)
+                .is_some_and(|snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked));
+            let is_expanded = expanded.get(&network).copied().unwrap_or(!parked);
             let connection_label = connection_states
                 .get(&network)
                 .map(|snapshot| snapshot.status.sidebar_label().to_string())
                 .unwrap_or_default();
-            (network, is_expanded, channels, queries, connection_label)
+            (
+                network,
+                is_expanded,
+                channels,
+                queries,
+                connection_label,
+                parked,
+            )
         })
         .collect()
 }
@@ -5825,13 +5979,15 @@ fn network_groups_model(
     data.into_iter()
         .enumerate()
         .map(
-            |(index, (network, expanded, channels, queries, connection_label))| {
+            |(index, (network, expanded, channels, queries, connection_label, parked))| {
                 let channel_entries: Vec<ChannelEntry> = channels
                     .into_iter()
                     .map(|(channel, label)| {
                         let failed = window_is_failed(&window_states, &network, &channel);
                         let kicked = window_is_kicked(&window_states, &network, &channel);
                         let invited = window_is_invited(&window_states, &network, &channel);
+                        let joined = window_states.get(&window_state_key(&network, &channel))
+                            == Some(&ChannelWindowState::Joined);
                         let mention_count = window_mentions
                             .get(&window_counts_key(&network, &channel))
                             .copied()
@@ -5854,6 +6010,7 @@ fn network_groups_model(
                             failed,
                             kicked,
                             invited,
+                            joined,
                         }
                     })
                     .collect();
@@ -5879,6 +6036,7 @@ fn network_groups_model(
                     connection_label: connection_label.into(),
                     separator_before: index > 0,
                     expanded,
+                    parked,
                     channels: Rc::new(slint::VecModel::from(channel_entries)).into(),
                     queries: Rc::new(slint::VecModel::from(query_entries)).into(),
                 }
@@ -5896,6 +6054,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         &state.query_windows,
         &state.expanded_networks,
         &state.network_connection_states,
+        &state.network_ids,
     );
     apply_connecting_labels(&mut data, &state.connecting_networks);
     let window_states = state.window_states.clone();
@@ -5941,6 +6100,17 @@ fn return_home_if_network_selected(
     });
 }
 
+fn collapse_if_parked(state: &mut WorkerState, network: &str) -> bool {
+    if state
+        .network_connection_states
+        .get(network)
+        .is_some_and(|snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked))
+    {
+        return state.expanded_networks.insert(network.to_string(), false) != Some(false);
+    }
+    false
+}
+
 /// Converts one already-rendered message into the Slint `ChatLine` model.
 /// `timestamp` and `nick` are their own fields rather than folded into
 /// `segments` (as they briefly were) so the markup can style/wrap the
@@ -5952,7 +6122,11 @@ fn return_home_if_network_selected(
 /// `dark_theme`. Maps `cordiale_core::formatting::ColorSegment`'s
 /// abstract `(u8, u8, u8)` into a real `slint::Color` only here — the
 /// core crate stays free of any Slint dependency.
-fn chat_line_from_message(message: &RenderedMessage, dark_theme: bool) -> ChatLine {
+fn chat_line_from_message(
+    message: &RenderedMessage,
+    dark_theme: bool,
+    nick_prefix: &str,
+) -> ChatLine {
     let (nick, nick_color_value) = match &message.nick {
         Some(nick) => {
             let (r, g, b) = nick_color(nick, dark_theme);
@@ -5983,6 +6157,7 @@ fn chat_line_from_message(message: &RenderedMessage, dark_theme: bool) -> ChatLi
         timestamp: message.timestamp.clone().into(),
         timestamp_color: muted_color(dark_theme),
         nick: nick.into(),
+        nick_prefix: nick_prefix.into(),
         nick_color: nick_color_value,
         italic: message.italic,
         segments: Rc::new(slint::VecModel::from(segments)).into(),
@@ -5990,10 +6165,51 @@ fn chat_line_from_message(message: &RenderedMessage, dark_theme: bool) -> ChatLi
 }
 
 fn chat_lines_model(messages: &[RenderedMessage], dark_theme: bool) -> Vec<ChatLine> {
+    chat_lines_model_with_roster(
+        messages,
+        dark_theme,
+        &[],
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+    )
+}
+
+fn member_prefix_for_nick<'a>(
+    members: &'a [MemberEntry],
+    nick: &str,
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> &'a str {
+    members
+        .iter()
+        .find(|(member_nick, _)| casemapping.nick_eq(member_nick, nick))
+        .map(|(_, prefix)| prefix.as_str())
+        .unwrap_or("")
+}
+
+fn chat_lines_model_with_roster(
+    messages: &[RenderedMessage],
+    dark_theme: bool,
+    members: &[MemberEntry],
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> Vec<ChatLine> {
     messages
         .iter()
-        .map(|message| chat_line_from_message(message, dark_theme))
+        .map(|message| {
+            let prefix = message
+                .nick
+                .as_deref()
+                .map(|nick| member_prefix_for_nick(members, nick, casemapping))
+                .unwrap_or("");
+            chat_line_from_message(message, dark_theme, prefix)
+        })
         .collect()
+}
+
+fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isupport::CaseMapping {
+    state
+        .isupport_by_network
+        .get(network)
+        .map(|isupport| isupport.casemapping)
+        .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459)
 }
 
 fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
@@ -6761,8 +6977,34 @@ fn apply_network_rest_refresh(
     boot: &BootResponse,
     me: &MeResponse,
 ) -> Vec<ChannelTopicAction> {
-    let entries = channel_entries_from_channels(&boot.channels);
+    let next_network_ids = network_ids_from_entries(&boot.networks);
+    let mut entries = channel_entries_from_channels(&boot.channels);
+    entries.retain(|(network, _, _)| next_network_ids.contains_key(network));
     let channel_actions = reconcile_channel_entries(state, identifier, entries);
+
+    // The account's /boot network list is authoritative. A removed network
+    // must not be recreated by an old query row or a late channel snapshot.
+    state
+        .query_windows
+        .retain(|query| next_network_ids.contains_key(&query.network));
+    state
+        .expanded_networks
+        .retain(|network, _| next_network_ids.contains_key(network));
+    state
+        .query_joined
+        .retain(|(network, _)| next_network_ids.contains_key(network));
+    state
+        .query_ready
+        .retain(|(network, _)| next_network_ids.contains_key(network));
+    state
+        .query_full_history_required
+        .retain(|(network, _)| next_network_ids.contains_key(network));
+    state
+        .stale_query_topics
+        .retain(|(network, _)| next_network_ids.contains_key(network));
+    state
+        .recent_channels
+        .retain(|(network, _)| next_network_ids.contains_key(network));
 
     state.window_states = joined_window_states_from_boot_channels(&boot.channels);
     state.window_failures.clear();
@@ -6775,7 +7017,7 @@ fn apply_network_rest_refresh(
     state.messages = messages_from_boot_response(boot);
     state.read_cursors = read_cursors_from_me(&me.read_cursors);
     state.badge_count = normalize_badge_count(Some(&me.badge_count));
-    state.network_ids = network_ids_from_entries(&boot.networks);
+    state.network_ids = next_network_ids;
     state.network_connection_states = network_connection_states_from_entries(&boot.networks);
 
     let listener_actions = reconcile_own_nick_listener_topics(
@@ -6815,6 +7057,24 @@ fn apply_network_rest_refresh(
             OwnNickListenerAction::Join(topic) => ChannelTopicAction::Join(topic),
         });
     }
+    let mut obsolete_topics: Vec<String> = state
+        .joined_topics
+        .iter()
+        .filter(|topic| {
+            query_from_topic(identifier, topic)
+                .is_some_and(|(network, _)| !state.network_ids.contains_key(&network))
+        })
+        .cloned()
+        .collect();
+    obsolete_topics.sort();
+    for topic in obsolete_topics {
+        state.joined_topics.remove(&topic);
+        if !actions.iter().any(
+            |action| matches!(action, ChannelTopicAction::Leave(existing) if existing == &topic),
+        ) {
+            actions.push(ChannelTopicAction::Leave(topic));
+        }
+    }
     actions
 }
 
@@ -6849,10 +7109,11 @@ async fn handle_connection_state_changed(
         &network_slug,
         transition.snapshot.clone(),
     );
+    let collapsed = snapshot_changed && collapse_if_parked(state, &network_slug);
     if return_home {
         return_home_if_network_selected(state, ui, &network_slug);
     }
-    if snapshot_changed {
+    if snapshot_changed || collapsed {
         refresh_network_groups(state, ui);
     }
     persistence::log_line(&format!(
@@ -6900,6 +7161,9 @@ async fn reconcile_network_connection_states(
         }
         let (row_changed, return_home) =
             record_network_connection_state(&mut state.network_connection_states, &slug, snapshot);
+        if row_changed {
+            state_changed |= collapse_if_parked(state, &slug);
+        }
         if return_home {
             return_home_if_network_selected(state, ui, &slug);
         }
@@ -9761,25 +10025,15 @@ async fn handle_network_lifecycle(
         }
     }
 
-    if let Some((current_network, _)) = state.current_channel.as_ref() {
-        if !state.network_ids.contains_key(current_network) {
-            state.current_channel = None;
-            state.current_query = false;
-            state.current_query_ready = false;
-            let _ = ui.upgrade_in_event_loop(|ui| {
-                ui.set_has_selected_channel(false);
-                ui.set_current_channel_label("".into());
-                ui.set_current_topic("".into());
-                ui.set_current_channel_modes("".into());
-                ui.set_current_window_is_joined(false);
-                ui.set_can_moderate_members(false);
-                ui.set_compose_text("".into());
-                ui.set_chat_lines(Rc::new(slint::VecModel::from(Vec::<ChatLine>::new())).into());
-                ui.set_channel_members(
-                    Rc::new(slint::VecModel::from(Vec::<MemberRow>::new())).into(),
-                );
-            });
-        }
+    let is_parked = state
+        .network_connection_states
+        .get(&network_slug)
+        .is_some_and(|snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked));
+    if is_parked {
+        collapse_if_parked(state, &network_slug);
+    }
+    if !state.network_ids.contains_key(&network_slug) || is_parked {
+        return_home_if_network_selected(state, ui, &network_slug);
     }
 
     refresh_network_groups(state, ui);
@@ -11541,7 +11795,13 @@ mod tests {
         assert_eq!(queries[1].target_nick, "newer");
         assert_eq!(queries[2].network, "azzurra");
 
-        let grouped = network_groups_data(&[], &queries, &HashMap::new(), &HashMap::new());
+        let grouped = network_groups_data(
+            &[],
+            &queries,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         let libera = grouped.iter().find(|group| group.0 == "libera").unwrap();
         assert_eq!(libera.3[0].0, "older");
         assert_eq!(libera.3[1].0, "newer");
@@ -13873,6 +14133,33 @@ mod tests {
     }
 
     #[test]
+    fn chat_nick_prefix_follows_the_current_channel_roster() {
+        use cordiale_core::isupport::CaseMapping;
+
+        let message = render_message(
+            &serde_json::json!({"kind": "privmsg", "sender": "{alice}", "body": "hello"}),
+            None,
+        );
+        let messages = vec![message];
+        let mut members = vec![("[Alice]".to_string(), "@".to_string())];
+        let original_nick = messages[0].nick.clone();
+
+        let op = chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Rfc1459);
+        assert_eq!(op[0].nick.to_string(), "{alice}");
+        assert_eq!(op[0].nick_prefix.to_string(), "@");
+
+        members[0].1 = "+".to_string();
+        let voice = chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Rfc1459);
+        assert_eq!(voice[0].nick_prefix.to_string(), "+");
+        assert_eq!(messages[0].nick, original_nick);
+
+        let ascii = chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Ascii);
+        assert_eq!(ascii[0].nick_prefix.to_string(), "");
+        let query = chat_lines_model(&messages, false);
+        assert_eq!(query[0].nick_prefix.to_string(), "");
+    }
+
+    #[test]
     fn render_message_formats_a_ctcp_action_as_a_sentence() {
         let inner = serde_json::json!({
             "kind": "action",
@@ -15640,7 +15927,13 @@ mod tests {
                 changed_at: None,
             },
         )]);
-        let mut groups = network_groups_data(&entries, &[], &HashMap::new(), &connection_states);
+        let mut groups = network_groups_data(
+            &entries,
+            &[],
+            &HashMap::new(),
+            &connection_states,
+            &HashMap::new(),
+        );
         let connecting = std::collections::HashSet::from(["libera".to_string()]);
         apply_connecting_labels(&mut groups, &connecting);
         assert_eq!(groups[0].0, "libera");
@@ -15907,8 +16200,33 @@ mod tests {
                 changed_at: None,
             },
         )]);
-        let groups = network_groups_data(&entries, &[], &HashMap::new(), &connection_states);
+        let groups = network_groups_data(
+            &entries,
+            &[],
+            &HashMap::new(),
+            &connection_states,
+            &HashMap::new(),
+        );
         assert_eq!(groups[0].4, "paused");
+        assert!(groups[0].5);
+        assert!(!groups[0].1);
+        let reopened = network_groups_data(
+            &entries,
+            &[],
+            &HashMap::from([("libera".to_string(), true)]),
+            &connection_states,
+            &HashMap::new(),
+        );
+        assert!(reopened[0].1);
+    }
+
+    #[test]
+    fn a_network_remains_in_the_sidebar_after_its_last_channel_is_removed() {
+        let networks = HashMap::from([("libera".to_string(), 7)]);
+        let groups = network_groups_data(&[], &[], &HashMap::new(), &HashMap::new(), &networks);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "libera");
+        assert!(groups[0].2.is_empty());
     }
 
     #[test]
@@ -16001,6 +16319,60 @@ mod tests {
         );
         assert_eq!(state.network_ids.get("libera"), Some(&7));
         assert_eq!(state.own_nicks.get("libera"), Some(&"sythos".to_string()));
+    }
+
+    #[test]
+    fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("sythos".to_string());
+        state.network_ids.insert("deleted".to_string(), 9);
+        state.query_windows.push(QueryWindow {
+            network: "deleted".to_string(),
+            target_nick: "alice".to_string(),
+            opened_at: "now".to_string(),
+        });
+        let obsolete_topic = channel_topic("sythos", "deleted", "alice");
+        state.joined_topics.insert(obsolete_topic.clone());
+        state
+            .query_ready
+            .insert(("deleted".to_string(), "alice".to_string()));
+        let boot = BootResponse {
+            networks: vec![serde_json::json!({"id": 7, "slug": "libera", "nick": "sythos"})],
+            channels: HashMap::from([(
+                "deleted".to_string(),
+                vec![serde_json::json!({"name": "#stale", "joined": true})],
+            )]),
+            heads: HashMap::new(),
+        };
+        let me = MeResponse {
+            read_cursors: serde_json::json!({}),
+            unread_counts: serde_json::json!({}),
+            badge_count: serde_json::json!(0),
+            is_admin: false,
+        };
+        let actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
+        assert_eq!(actions.len(), 2);
+        assert!(actions.contains(&ChannelTopicAction::Leave(obsolete_topic)));
+        assert!(actions.contains(&ChannelTopicAction::Join(channel_topic(
+            "sythos", "libera", "sythos"
+        ))));
+        assert!(!state.network_ids.contains_key("deleted"));
+        assert!(state.channel_entries.is_empty());
+        assert!(state.query_windows.is_empty());
+        assert!(state.query_ready.is_empty());
+        assert_eq!(
+            state.joined_topics,
+            std::collections::HashSet::from([channel_topic("sythos", "libera", "sythos")])
+        );
+        let groups = network_groups_data(
+            &state.channel_entries,
+            &state.query_windows,
+            &state.expanded_networks,
+            &state.network_connection_states,
+            &state.network_ids,
+        );
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, "libera");
     }
 
     #[test]

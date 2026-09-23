@@ -28,8 +28,23 @@ Cordiale is functional end to end (REST bootstrap, realtime WebSocket
 session, channel/message view, self-service settings, admin panel for
 `is_admin` accounts). It has been exercised through the GUI against a live
 Grappa instance during development, but that does not amount to exhaustive
-validation across server versions, configurations, or every feature. The
-known limitations are:
+validation across server versions, configurations, or every feature.
+
+The channel sidebar has a close button for joined channels. It sends Grappa's
+PART request and removes the window after a successful server response; a
+failed request leaves the window open. The selected channel header shows the
+network and channel above a separate, three-line topic panel.
+
+Parked networks collapse their channel and query rows and show an italic
+`[PARKED]` label; their group can still be expanded manually. An authoritative
+`/boot` refresh after network removal clears that network and its windows from
+the sidebar and leaves its obsolete realtime subscriptions.
+
+In channel chat, a speaker's nick uses the role prefix currently shown in
+that channel's member list. Changes to the roster or user modes update visible
+lines without rewriting message history; private conversations remain unprefixed.
+
+The known limitations are:
 
 - **Admin panel** implements overview; session listing/disconnect; user
   listing, `is_admin` toggle, and deletion; network listing/circuit reset;
@@ -74,7 +89,7 @@ known limitations are:
   a ban and an op together) can therefore still misalign arguments and leave a
   stale prefix; broader validation across server configurations is still
   needed.
-- **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
+- **Realtime event coverage (0.1.6 BETA (WIP))**: the current Grappa protocol
   lists 56 top-level event kinds, and Cordiale handles all of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
