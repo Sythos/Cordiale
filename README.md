@@ -44,6 +44,15 @@ In channel chat, a speaker's nick uses the role prefix currently shown in
 that channel's member list. Changes to the roster or user modes update visible
 lines without rewriting message history; private conversations remain unprefixed.
 
+At launch Cordiale signs in automatically with the last remembered profile
+(its Grappa bearer, or the login password kept in the OS keyring when the
+bearer has expired) and reopens the last selected chat. The login password
+is stored only in the native keyring (Windows Credential Manager, macOS
+Keychain, Linux Secret Service), never in Cordiale's own files; without a
+keyring it is not stored. The ⏏ button at the top of the sidebar (or
+Disconnect in the Actions menu) signs out and turns off the automatic
+sign-in until the next successful one, which is how you switch accounts.
+
 The known limitations are:
 
 - **Admin panel** implements overview; session listing/disconnect; user
