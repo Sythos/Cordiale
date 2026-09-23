@@ -399,7 +399,8 @@ export component AppWindow inherits Window {
     in property <string> status-invite-peer: "";
     in property <string> status-invite-channel: "";
     in property <string> status-invite-network: "";
-    // Fill the `presence-online`/`presence-offline` templates.
+    // Fill the `presence-*` templates (for errors, `-nick` holds the
+    // rejected targets).
     in property <string> status-presence-nick: "";
     in property <string> status-presence-network: "";
     // Fill the `dcc-accepted`/`dcc-refused`/`dcc-expired` templates.
@@ -847,6 +848,10 @@ export component AppWindow inherits Window {
             return @tr("{} is now online on {}.", status-presence-nick, status-presence-network);
         } else if status-kind == "presence-offline" {
             return @tr("{} went offline on {}.", status-presence-nick, status-presence-network);
+        } else if status-kind == "presence-list-full" {
+            return @tr("The watch list on {} is full; not watched: {}.", status-presence-network, status-presence-nick);
+        } else if status-kind == "presence-rejected" {
+            return @tr("The server on {} refused to watch: {}.", status-presence-network, status-presence-nick);
         } else if status-kind == "dcc-accepted" {
             return @tr("Accepted {} from {}; the transfer runs on the server.", status-dcc-filename, status-dcc-from);
         } else if status-kind == "dcc-refused" {

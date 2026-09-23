@@ -2900,7 +2900,6 @@ const IGNORED_KINDS: &[&str] = &[
     "channel_created",
     "mentions_bundle",
     "peer_away",
-    "presence_error",
     // scrollback/wire.ex.
     // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex: all three settings echoes are handled above.
@@ -3153,6 +3152,10 @@ async fn handle_frame(
     }
     if payload_kind == "presence_changed" {
         handle_presence_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "presence_error" {
+        handle_presence_error(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -8072,6 +8075,64 @@ fn handle_presence_changed(
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_status_presence_nick(nick.into());
+        ui.set_status_presence_network(network.into());
+        ui.set_status_kind(status.into());
+    });
+}
+
+/// Validates `presence_error` on the exact user topic: an integer
+/// `network_id`, a `reason` string (`list_full` today; kept open so a new
+/// reason still reaches the user) and the rejected target(s) in `detail`.
+fn parse_presence_error(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(i64, String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "presence_error" {
+        return None;
+    }
+    Some((
+        payload.get("network_id")?.as_i64()?,
+        payload.get("reason")?.as_str()?.to_string(),
+        payload.get("detail")?.as_str()?.to_string(),
+    ))
+}
+
+/// The ircd refused a watch registration (MONITOR/WATCH list full). Never
+/// silent: the rejected targets go to the status bar. The raw numeric also
+/// lands as a server notice upstream, which this does not replace.
+fn handle_presence_error(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network_id, reason, detail)) =
+        parse_presence_error(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("presence_error rejected: invalid carrier or payload");
+        return;
+    };
+    persistence::log_line(&format!(
+        "presence error on network {network_id}: reason={reason}"
+    ));
+    let network = network_slugs_by_id(&state.network_ids)
+        .and_then(|slugs| slugs.get(&network_id).cloned())
+        .unwrap_or_else(|| network_id.to_string());
+    let status = if reason == "list_full" {
+        "presence-list-full"
+    } else {
+        "presence-rejected"
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_presence_nick(detail.into());
         ui.set_status_presence_network(network.into());
         ui.set_status_kind(status.into());
     });
@@ -13377,7 +13438,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 6);
+        assert_eq!(IGNORED_KINDS.len(), 5);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -13438,6 +13499,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"notify_list"));
         assert!(!IGNORED_KINDS.contains(&"presence_snapshot"));
         assert!(!IGNORED_KINDS.contains(&"presence_changed"));
+        assert!(!IGNORED_KINDS.contains(&"presence_error"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -14698,6 +14760,30 @@ mod tests {
         }
         assert_eq!(
             parse_presence_changed(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_presence_error_keeps_reason_open() {
+        let topic = "grappa:user:vjt";
+        let payload = |reason: &str| serde_json::json!({"kind": "presence_error", "network_id": 7, "reason": reason, "detail": "alice,bob"});
+        assert_eq!(
+            parse_presence_error(&payload("list_full"), topic, "vjt"),
+            Some((7, "list_full".to_string(), "alice,bob".to_string()))
+        );
+        assert_eq!(
+            parse_presence_error(&payload("target_rejected"), topic, "vjt"),
+            Some((7, "target_rejected".to_string(), "alice,bob".to_string()))
+        );
+        let mut missing_detail = payload("list_full");
+        missing_detail
+            .as_object_mut()
+            .expect("object")
+            .remove("detail");
+        assert_eq!(parse_presence_error(&missing_detail, topic, "vjt"), None);
+        assert_eq!(
+            parse_presence_error(&payload("list_full"), "grappa:user:other", "vjt"),
             None
         );
     }
