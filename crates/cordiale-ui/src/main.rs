@@ -1210,6 +1210,9 @@ struct WorkerState {
     /// Upload limits from the latest `server_settings_changed`, shown read
     /// only in Settings (Cordiale doesn't upload files yet).
     upload_limits: Option<UploadLimits>,
+    /// Last announced web-client bundle `(hash, version)`, only to log a
+    /// change once; it names Cicchetto's build, not this app.
+    web_bundle: Option<(String, Option<String>)>,
     /// Session-local only: the keyword watchlist has no documented `list`
     /// reply shape (see `docs/protocol-notes.md` §4quater), so it doesn't
     /// survive a reconnect/relaunch, unlike everything else in Settings.
@@ -1280,6 +1283,7 @@ impl WorkerState {
             peer_away: HashMap::new(),
             mentions_bundles: HashMap::new(),
             upload_limits: None,
+            web_bundle: None,
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
         }
@@ -1819,6 +1823,7 @@ async fn handle_connect(
             state.peer_away.clear();
             state.mentions_bundles.clear();
             state.upload_limits = None;
+            state.web_bundle = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2939,7 +2944,6 @@ const IGNORED_KINDS: &[&str] = &[
     // Known from vjt/grappa-irc#2260 or the wire union (joined, join_failed,
     // kicked, topic_changed, channel_modes_changed, and members_seeded/names_reply
     // are handled above.
-    "bundle_hash",
     // session/wire.ex's wire_event_kind union.
     "channel_created",
     // scrollback/wire.ex.
@@ -3208,6 +3212,10 @@ async fn handle_frame(
     }
     if payload_kind == "server_settings_changed" {
         handle_server_settings_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "bundle_hash" {
+        handle_bundle_hash(state, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -8363,6 +8371,54 @@ fn handle_server_settings_changed(
         ui.set_server_upload_limits(row);
         ui.set_server_upload_limits_known(true);
     });
+}
+
+/// Validates `bundle_hash` on the exact user topic: a non-empty `hash` and
+/// an optional `version` (absent or non-string reads as none, like
+/// Cicchetto).
+fn parse_bundle_hash(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, Option<String>)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "bundle_hash" {
+        return None;
+    }
+    let hash = payload.get("hash")?.as_str()?;
+    if hash.is_empty() {
+        return None;
+    }
+    let version = payload
+        .get("version")
+        .and_then(Value::as_str)
+        .filter(|version| !version.is_empty())
+        .map(str::to_string);
+    Some((hash.to_string(), version))
+}
+
+/// The hash identifies the deployed Cicchetto web bundle, which has no
+/// native counterpart: it is consumed and logged when it changes, and never
+/// triggers a download or an update of this app.
+fn handle_bundle_hash(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(bundle) = parse_bundle_hash(payload, carrier_topic, identifier) else {
+        persistence::log_line("bundle_hash rejected: invalid carrier or payload");
+        return;
+    };
+    if state.web_bundle.as_ref() == Some(&bundle) {
+        return;
+    }
+    persistence::log_line(&format!(
+        "server web bundle: hash={} version={}",
+        bundle.0,
+        bundle.1.as_deref().unwrap_or("-")
+    ));
+    state.web_bundle = Some(bundle);
 }
 
 /// Message kinds of Grappa's scrollback (`Message.kind()`), the closed set a
@@ -13767,16 +13823,10 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 2);
-        // The kinds caught leaking as raw JSON in chat before being fixed
-        // this session — a regression here means one of them is no longer
-        // ignored and would start dumping raw JSON again.
-        for kind in ["bundle_hash"] {
-            assert!(
-                IGNORED_KINDS.contains(&kind),
-                "{kind} should be in IGNORED_KINDS"
-            );
-        }
+        assert_eq!(IGNORED_KINDS.len(), 1);
+        // `channel_created` is Cicchetto's own no-op; it must stay out of
+        // the message path so it never shows up as a raw JSON chat line.
+        assert!(IGNORED_KINDS.contains(&"channel_created"));
         // members_seeded/names_reply/topic_changed are handled, not
         // ignored, so they must NOT be in this list — that would silently
         // drop real state instead of applying it.
@@ -13832,6 +13882,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"peer_away"));
         assert!(!IGNORED_KINDS.contains(&"mentions_bundle"));
         assert!(!IGNORED_KINDS.contains(&"server_settings_changed"));
+        assert!(!IGNORED_KINDS.contains(&"bundle_hash"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -15256,6 +15307,43 @@ mod tests {
         }
         assert_eq!(
             parse_server_settings_changed(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_bundle_hash_treats_version_as_optional() {
+        let topic = "grappa:user:vjt";
+        assert_eq!(
+            parse_bundle_hash(
+                &serde_json::json!({"kind": "bundle_hash", "hash": "abc123", "version": "1.4.2"}),
+                topic,
+                "vjt"
+            ),
+            Some(("abc123".to_string(), Some("1.4.2".to_string())))
+        );
+        for version in [None, Some(Value::Null), Some(serde_json::json!(""))] {
+            let mut payload = serde_json::json!({"kind": "bundle_hash", "hash": "abc123"});
+            if let Some(version) = version {
+                payload["version"] = version;
+            }
+            assert_eq!(
+                parse_bundle_hash(&payload, topic, "vjt"),
+                Some(("abc123".to_string(), None))
+            );
+        }
+        for invalid in [
+            serde_json::json!({"kind": "bundle_hash", "hash": ""}),
+            serde_json::json!({"kind": "bundle_hash"}),
+        ] {
+            assert_eq!(parse_bundle_hash(&invalid, topic, "vjt"), None, "{invalid}");
+        }
+        assert_eq!(
+            parse_bundle_hash(
+                &serde_json::json!({"kind": "bundle_hash", "hash": "abc123"}),
+                "grappa:user:other",
+                "vjt"
+            ),
             None
         );
     }
