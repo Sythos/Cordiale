@@ -39,8 +39,8 @@ use crate::profile::{
     NotifyAddRequest, PerformUpdateRequest, PerformView, VhostSelectionRequest, VhostSettingsView,
 };
 use crate::rest::{
-    BootResponse, ConfigResponse, DirectoryPage, DisplayPrefs, LoginRequest, LoginResponse,
-    MeResponse, SendMessageRequest,
+    ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage, DisplayPrefs,
+    LoginRequest, LoginResponse, MeResponse, SendMessageRequest,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -890,6 +890,52 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `GET /networks/:slug/archive` — windows with scrollback that are no
+    /// longer joined or open, newest first. Metered by the server: an empty
+    /// bucket answers `429`.
+    pub async fn fetch_archive(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<Vec<ArchiveEntry>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "archive"]);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ArchiveResponse>().await?.archive)
+    }
+
+    /// `DELETE /networks/:slug/archive/:target` — drops the bouncer's
+    /// scrollback for one archived target (`204`). The IRC channel itself
+    /// is untouched; the change arrives as an `archive_purged` push.
+    pub async fn delete_archive_target(
+        &self,
+        token: &str,
+        network_slug: &str,
+        target: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "archive", target]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `DELETE /networks/:slug/notify/:nick`.
     pub async fn remove_notify_nick(
         &self,
@@ -1579,6 +1625,34 @@ mod tests {
             .await
             .expect_err("404");
         assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn archive_list_and_delete_encode_the_target() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/archive"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "archive": [{"target": "#old", "kind": "channel", "last_activity": 1790000000000_i64}]
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/archive/%23old"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let entries = client
+            .fetch_archive("abc123", "libera")
+            .await
+            .expect("fetch_archive");
+        assert_eq!(entries[0].target, "#old");
+        client
+            .delete_archive_target("abc123", "libera", "#old")
+            .await
+            .expect("delete_archive_target");
     }
 
     #[tokio::test]

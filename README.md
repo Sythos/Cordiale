@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 45 of them:
+  lists 56 top-level event kinds. Cordiale handles 46 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -85,8 +85,8 @@ known limitations are:
   `auto_away_debounce_changed`, `quit_part_reason_changed`,
   `auto_away_reason_changed`, `lusers_bundle`, `invite_ack`,
   `directory_progress`, `directory_complete`, `directory_failed`,
-  `dcc_offer`, `dcc_offer_resolved`, and `message`; the remaining 11 kinds
-  are
+  `dcc_offer`, `dcc_offer_resolved`, `archive_changed`, and `message`; the
+  remaining 10 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -236,6 +236,11 @@ known limitations are:
   only when the server resolves it, and an offer re-sent on subscribe
   replaces the held one. `dcc_offer_resolved` (accepted, refused or
   expired, from any device) removes it and says which in the status bar.
+  `/archive` lists the active network's archived windows (left channels
+  and closed queries that still have history on the bouncer), with a
+  confirmed "Delete history" per entry; `archive_changed` refetches the
+  list while it is open (the listing is rate limited upstream, so it is
+  never polled).
   Settings > General shows a read-only copy of preferences Grappa stores and
   applies itself, updated live from their `*_changed` pushes and hidden until
   announced: `auto_away_debounce_changed` keeps `null` (server default) and
@@ -244,7 +249,6 @@ known limitations are:
   own default; `auto_away_reason_changed` does the same for the auto-away
   text, whose `null` keeps Grappa's built-in message.
   - **Window, channel, and scrollback state**: `channel_created`,
-    `archive_changed`,
     `archive_purged`.
   - **Network, connection, identity, and settings**:
     `peer_away`,

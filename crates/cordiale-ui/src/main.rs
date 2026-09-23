@@ -40,7 +40,8 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::rest::{
-    BootResponse, DirectoryPage, DisplayPrefs, LoginRequest, MeResponse, SendMessageRequest,
+    ArchiveEntry, BootResponse, DirectoryPage, DisplayPrefs, LoginRequest, MeResponse,
+    SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::wire_event::ClientEventKind;
@@ -80,6 +81,8 @@ enum WorkerCommand {
         offer_id: String,
         accept: bool,
     },
+    ArchiveDelete(String),
+    ArchiveClose,
     ToggleNetwork(String),
     SendMessage {
         body: String,
@@ -407,6 +410,16 @@ fn main() -> Result<(), slint::PlatformError> {
             offer_id: offer_id.to_string(),
             accept: false,
         });
+    });
+
+    let tx_for_archive_delete = worker_tx.clone();
+    ui.on_archive_delete_requested(move |target| {
+        let _ = tx_for_archive_delete.send(WorkerCommand::ArchiveDelete(target.to_string()));
+    });
+
+    let tx_for_archive_close = worker_tx.clone();
+    ui.on_archive_closed(move || {
+        let _ = tx_for_archive_close.send(WorkerCommand::ArchiveClose);
     });
 
     let tx_for_network_toggle = worker_tx.clone();
@@ -886,6 +899,16 @@ struct ReplyView {
     rows: Vec<(String, String)>,
 }
 
+/// The archive of one network: windows with bouncer scrollback that are no
+/// longer joined or open, as listed by `GET /networks/:slug/archive`.
+struct ArchiveView {
+    network: String,
+    /// `None` until the first list arrives.
+    entries: Option<Vec<ArchiveEntry>>,
+    /// Translated error key for the last failed request, if any.
+    error: Option<&'static str>,
+}
+
 /// A `DCC SEND` offer Grappa holds until this user accepts or refuses it.
 /// `channel` is only where Cicchetto renders it (often `$server`); the
 /// offer is identified by `offer_id`, an opaque server string.
@@ -1136,6 +1159,8 @@ struct WorkerState {
     directory: Option<DirectoryView>,
     /// DCC offers the server is holding for consent, in arrival order.
     dcc_offers: Vec<DccOffer>,
+    /// The archive screen opened with `/archive`, if any.
+    archive: Option<ArchiveView>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -1222,6 +1247,7 @@ impl WorkerState {
             lusers_requested: std::collections::HashSet::new(),
             directory: None,
             dcc_offers: Vec::new(),
+            archive: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1320,6 +1346,12 @@ async fn run_worker(
                         accept,
                     }) => {
                         answer_dcc_offer(&state, &ui, &network, &offer_id, accept).await;
+                    }
+                    Some(WorkerCommand::ArchiveDelete(target)) => {
+                        delete_archive_target(&mut state, &ui, &target).await;
+                    }
+                    Some(WorkerCommand::ArchiveClose) => {
+                        state.archive = None;
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
                         let expanded = state.expanded_networks.entry(network).or_insert(true);
@@ -1738,6 +1770,7 @@ async fn handle_connect(
             state.lusers_requested.clear();
             state.directory = None;
             state.dcc_offers.clear();
+            state.archive = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2235,6 +2268,12 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     // which open the panel — nothing is shown optimistically, like Cicchetto.
     if body.trim() == "/recover" {
         send_user_network_verb(state, network, "recover");
+        return;
+    }
+    // `/archive` lists the active network's archived windows.
+    if body.trim().eq_ignore_ascii_case("/archive") {
+        let network = network.clone();
+        open_archive(state, ui, network).await;
         return;
     }
     // `/list [search]` opens the channel directory of the active network.
@@ -2790,7 +2829,6 @@ const IGNORED_KINDS: &[&str] = &[
     "presence_error",
     "presence_snapshot",
     // scrollback/wire.ex.
-    "archive_changed",
     "archive_purged",
     // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex: all three settings echoes are handled above.
@@ -3024,6 +3062,10 @@ async fn handle_frame(
     }
     if payload_kind == "dcc_offer_resolved" {
         handle_dcc_offer_resolved(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "archive_changed" {
+        handle_archive_changed(state, ui, &frame.topic, &frame.payload).await;
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7521,6 +7563,181 @@ fn dcc_answer_error_status(status: Option<u16>) -> &'static str {
         Some(503) => "dcc-not-connected",
         Some(507) => "dcc-no-space",
         _ => "dcc-action-failed",
+    }
+}
+
+/// Opens the archive screen for `network` and loads its list.
+async fn open_archive(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, network: String) {
+    state.archive = Some(ArchiveView {
+        network,
+        entries: None,
+        error: None,
+    });
+    push_archive(state, ui, true);
+    load_archive(state, ui).await;
+}
+
+/// Refetches the open archive's list. The listing is metered upstream, so
+/// it runs only when the screen opens or a push says the list changed.
+async fn load_archive(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token), Some(view)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.archive.as_ref(),
+    ) else {
+        return;
+    };
+    let network = view.network.clone();
+    let result = client.fetch_archive(&token, &network).await;
+    let Some(view) = state.archive.as_mut() else {
+        return;
+    };
+    if view.network != network {
+        return;
+    }
+    match result {
+        Ok(entries) => {
+            view.entries = Some(entries);
+            view.error = None;
+        }
+        Err(err) => {
+            persistence::log_line(&format!("archive fetch failed: {err:?}"));
+            view.error = Some(archive_error_key(
+                err.status().map(|status| status.as_u16()),
+                "archive-fetch-failed",
+            ));
+        }
+    }
+    push_archive(state, ui, false);
+}
+
+/// Deletes one archived target's scrollback. The list is not edited here:
+/// the server's `archive_purged` push drives the refresh on every device.
+async fn delete_archive_target(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, target: &str) {
+    let (Some(client), Some(token), Some(view)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.archive.as_ref(),
+    ) else {
+        return;
+    };
+    let network = view.network.clone();
+    let Err(err) = client.delete_archive_target(&token, &network, target).await else {
+        return;
+    };
+    persistence::log_line(&format!("archive delete failed: {err:?}"));
+    if let Some(view) = state.archive.as_mut() {
+        if view.network == network {
+            view.error = Some(archive_error_key(
+                err.status().map(|status| status.as_u16()),
+                "archive-delete-failed",
+            ));
+        }
+    }
+    push_archive(state, ui, false);
+}
+
+/// `429` has its own message (the listing is rate limited upstream).
+fn archive_error_key(status: Option<u16>, fallback: &'static str) -> &'static str {
+    if status == Some(429) {
+        "archive-rate-limited"
+    } else {
+        fallback
+    }
+}
+
+/// Mirrors the open archive into the UI; `open` also switches to its screen
+/// and clears any pending delete confirmation.
+fn push_archive(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
+    let Some(view) = state.archive.as_ref() else {
+        return;
+    };
+    let network = view.network.clone();
+    let loaded = view.entries.is_some();
+    let error = view.error.unwrap_or("");
+    let rows: Vec<(String, String, String)> = view
+        .entries
+        .iter()
+        .flatten()
+        .map(|entry| {
+            (
+                entry.target.clone(),
+                entry.kind.clone(),
+                format_epoch_millis(entry.last_activity),
+            )
+        })
+        .collect();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<ArchiveRow> = rows
+            .into_iter()
+            .map(|(target, kind, last_activity)| ArchiveRow {
+                target: target.into(),
+                kind: kind.into(),
+                last_activity: last_activity.into(),
+            })
+            .collect();
+        ui.set_archive_rows(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_archive_network(network.into());
+        ui.set_archive_loaded(loaded);
+        ui.set_archive_error(error.into());
+        if open {
+            ui.set_archive_confirm_target("".into());
+            ui.set_screen("archive".into());
+        }
+    });
+}
+
+/// Local date and time of an epoch-millisecond timestamp; out-of-range
+/// values are shown raw.
+fn format_epoch_millis(millis: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(millis)
+        .map(|parsed| {
+            parsed
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| millis.to_string())
+}
+
+/// Validates `archive_changed` on the exact user topic: only a non-empty
+/// `network_slug` (this kind names the network by slug, not `network`).
+fn parse_archive_changed(payload: &Value, carrier_topic: &str, identifier: &str) -> Option<String> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "archive_changed" {
+        return None;
+    }
+    let network = payload.get("network_slug")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    Some(network.to_string())
+}
+
+/// A window moved into the archive (for example a PART): refetch the list
+/// if that network's archive is open, like Cicchetto's `loadArchive`.
+async fn handle_archive_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(network) = parse_archive_changed(payload, carrier_topic, identifier) else {
+        persistence::log_line("archive_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state
+        .archive
+        .as_ref()
+        .is_some_and(|view| view.network == network)
+    {
+        load_archive(state, ui).await;
     }
 }
 
@@ -12824,7 +13041,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 11);
+        assert_eq!(IGNORED_KINDS.len(), 10);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -12880,6 +13097,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"directory_failed"));
         assert!(!IGNORED_KINDS.contains(&"dcc_offer"));
         assert!(!IGNORED_KINDS.contains(&"dcc_offer_resolved"));
+        assert!(!IGNORED_KINDS.contains(&"archive_changed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -13945,6 +14163,54 @@ mod tests {
         assert_eq!(dcc_answer_error_status(Some(507)), "dcc-no-space");
         assert_eq!(dcc_answer_error_status(Some(500)), "dcc-action-failed");
         assert_eq!(dcc_answer_error_status(None), "dcc-action-failed");
+    }
+
+    #[test]
+    fn parse_archive_changed_reads_network_slug() {
+        let topic = "grappa:user:vjt";
+        assert_eq!(
+            parse_archive_changed(
+                &serde_json::json!({"kind": "archive_changed", "network_slug": "libera"}),
+                topic,
+                "vjt"
+            ),
+            Some("libera".to_string())
+        );
+        for invalid in [
+            serde_json::json!({"kind": "archive_changed", "network": "libera"}),
+            serde_json::json!({"kind": "archive_changed", "network_slug": ""}),
+            serde_json::json!({"kind": "archive_purged", "network_slug": "libera"}),
+        ] {
+            assert_eq!(
+                parse_archive_changed(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_archive_changed(
+                &serde_json::json!({"kind": "archive_changed", "network_slug": "libera"}),
+                "grappa:user:other",
+                "vjt"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn archive_errors_single_out_rate_limiting() {
+        assert_eq!(
+            archive_error_key(Some(429), "archive-fetch-failed"),
+            "archive-rate-limited"
+        );
+        assert_eq!(
+            archive_error_key(Some(500), "archive-fetch-failed"),
+            "archive-fetch-failed"
+        );
+        assert_eq!(
+            archive_error_key(None, "archive-delete-failed"),
+            "archive-delete-failed"
+        );
     }
 
     #[test]

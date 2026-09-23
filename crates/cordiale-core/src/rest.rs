@@ -206,9 +206,39 @@ pub struct DirectoryPage {
     pub status: String,
 }
 
+/// One archived window of `GET /networks/:slug/archive`: a channel or query
+/// target that still has scrollback but is no longer joined or open.
+/// `kind` is the wire string (`channel` or `query`); `last_activity` is the
+/// newest message's `server_time` in epoch milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ArchiveEntry {
+    pub target: String,
+    pub kind: String,
+    pub last_activity: i64,
+}
+
+/// Response body of `GET /networks/:slug/archive`, newest activity first.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ArchiveResponse {
+    pub archive: Vec<ArchiveEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_response_parses_entries_in_order() {
+        let json = r##"{"archive": [
+            {"target": "#old", "kind": "channel", "last_activity": 1790000000000},
+            {"target": "alice", "kind": "query", "last_activity": 1780000000000}
+        ]}"##;
+
+        let response: ArchiveResponse = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(response.archive.len(), 2);
+        assert_eq!(response.archive[0].target, "#old");
+        assert_eq!(response.archive[1].kind, "query");
+    }
 
     #[test]
     fn directory_page_parses_rows_and_null_fields() {

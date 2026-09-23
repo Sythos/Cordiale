@@ -63,6 +63,14 @@ struct DccOfferRow {
     size: string,
 }
 
+// One archived window (`/archive`): `kind` is the wire token (channel or
+// query) and `last-activity` an already formatted local time.
+struct ArchiveRow {
+    target: string,
+    kind: string,
+    last-activity: string,
+}
+
 // One channel of the directory screen (`/list`), as sent by the server.
 struct DirectoryRow {
     name: string,
@@ -437,6 +445,13 @@ export component AppWindow inherits Window {
     in property <string> reply-subject: "";
     in property <string> reply-network: "";
     in property <[ReplyRow]> reply-rows: [];
+    // Archive of one network (`/archive`). `archive-confirm-target` is the
+    // row awaiting delete confirmation, set and cleared by the screen itself.
+    in property <string> archive-network: "";
+    in property <[ArchiveRow]> archive-rows: [];
+    in property <bool> archive-loaded: false;
+    in property <string> archive-error: "";
+    in-out property <string> archive-confirm-target: "";
     // Channel directory of one network (`/list`). `directory-status` is the
     // server's snapshot token (fresh/stale/no_results/unknown/loading) and
     // `directory-error` a key translated by `directory-error-text`.
@@ -567,6 +582,8 @@ export component AppWindow inherits Window {
     callback directory-sort-requested(string);
     callback directory-search-requested(string);
     callback directory-closed();
+    callback archive-delete-requested(string);
+    callback archive-closed();
     callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
@@ -762,6 +779,18 @@ export component AppWindow inherits Window {
             return @tr("No channel list yet.");
         } else {
             return "";
+        }
+    }
+
+    function archive-error-text() -> string {
+        if archive-error == "archive-rate-limited" {
+            return @tr("Too many archive requests. Wait a moment and try again.");
+        } else if archive-error == "archive-fetch-failed" {
+            return @tr("Couldn't load the archive.");
+        } else if archive-error == "archive-delete-failed" {
+            return @tr("Couldn't delete that history.");
+        } else {
+            return archive-error;
         }
     }
 
@@ -1989,6 +2018,91 @@ export component AppWindow inherits Window {
         Button {
             text: @tr("Back");
             clicked => { screen = "connected"; }
+        }
+    }
+
+    if screen == "archive" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: @tr("Archive on {}", archive-network);
+            font-size: 18px;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        Text {
+            text: !archive-loaded
+                ? @tr("Loading…")
+                : (archive-rows.length == 0
+                    ? @tr("No archived windows.")
+                    : @tr("Windows you left that still have history on the bouncer."));
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        if archive-error != "" : Text {
+            text: archive-error-text();
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+            accessible-live-region: AccessibleLiveness.polite;
+        }
+
+        if archive-confirm-target != "" : HorizontalBox {
+            padding: 0px;
+            spacing: 4px;
+
+            Text {
+                text: @tr("Delete all history of {} on {}? Only the bouncer's copy is removed.", archive-confirm-target, archive-network);
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                accessible-role: AccessibleRole.text;
+            }
+
+            Button {
+                text: @tr("Delete");
+                clicked => {
+                    archive-delete-requested(archive-confirm-target);
+                    archive-confirm-target = "";
+                }
+            }
+
+            Button {
+                text: @tr("Cancel");
+                clicked => { archive-confirm-target = ""; }
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for row in archive-rows : HorizontalBox {
+                padding: 0px;
+                spacing: 4px;
+
+                Text {
+                    text: row.kind == "query"
+                        ? @tr("{} (private, last active {})", row.target, row.last-activity)
+                        : @tr("{} (last active {})", row.target, row.last-activity);
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    accessible-role: AccessibleRole.text;
+                }
+
+                Button {
+                    text: @tr("Delete history");
+                    accessible-label: @tr("Delete history of {}", row.target);
+                    clicked => { archive-confirm-target = row.target; }
+                }
+            }
+        }
+
+        Button {
+            text: @tr("Back");
+            clicked => {
+                screen = "connected";
+                archive-closed();
+            }
         }
     }
 
