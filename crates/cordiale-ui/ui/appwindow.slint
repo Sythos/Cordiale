@@ -138,6 +138,7 @@ struct ChatLine {
     timestamp: string,
     timestamp-color: color,
     nick: string,
+    nick-prefix: string,
     nick-color: color,
     italic: bool,
     segments: [MessageSegment],
@@ -1380,7 +1381,7 @@ export component AppWindow inherits Window {
                     if line.nick != "" : MemberContextMenu {
                         target-nick: line.nick;
                         can-moderate: can-moderate-members;
-                        display-text: "<" + line.nick + "> ";
+                        display-text: "<" + line.nick-prefix + line.nick + "> ";
                         text-color: line.nick-color;
                         text-bold: true;
                         text-italic: line.italic;
