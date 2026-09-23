@@ -28,8 +28,14 @@ Cordiale is functional end to end (REST bootstrap, realtime WebSocket
 session, channel/message view, self-service settings, admin panel for
 `is_admin` accounts). It has been exercised through the GUI against a live
 Grappa instance during development, but that does not amount to exhaustive
-validation across server versions, configurations, or every feature. The
-known limitations are:
+validation across server versions, configurations, or every feature.
+
+The channel sidebar has a close button for joined channels. It sends Grappa's
+PART request and removes the window after a successful server response; a
+failed request leaves the window open. The selected channel header shows the
+network and channel above a separate, three-line topic panel.
+
+The known limitations are:
 
 - **Admin panel** implements overview; session listing/disconnect; user
   listing, `is_admin` toggle, and deletion; network listing/circuit reset;
