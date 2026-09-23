@@ -418,6 +418,11 @@ export component AppWindow inherits Window {
     in property <bool> server-pref-leave-message-known: false;
     in property <bool> server-pref-leave-message-set: false;
     in property <string> server-pref-leave-message: "";
+    // Auto-away text: hidden until announced; `-set` is false for `null`
+    // (the server keeps its own built-in text).
+    in property <bool> server-pref-auto-away-reason-known: false;
+    in property <bool> server-pref-auto-away-reason-set: false;
+    in property <string> server-pref-auto-away-reason: "";
     // "" while running, then "succeeded" or "failed" from `recover_result`.
     in property <string> recover-outcome: "";
     in property <string> recover-outcome-reason: "";
@@ -1362,6 +1367,12 @@ export component AppWindow inherits Window {
                     text: server-pref-leave-message-set
                         ? @tr("Quit/part message: {}", server-pref-leave-message)
                         : @tr("Quit/part message: none (server default)");
+                    wrap: word-wrap;
+                }
+                if server-pref-auto-away-reason-known : Text {
+                    text: server-pref-auto-away-reason-set
+                        ? @tr("Auto-away message: {}", server-pref-auto-away-reason)
+                        : @tr("Auto-away message: server default");
                     wrap: word-wrap;
                 }
 

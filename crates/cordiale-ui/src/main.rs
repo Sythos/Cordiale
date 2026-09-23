@@ -254,6 +254,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_recover_visible(false);
             ui.set_server_pref_auto_away_debounce("".into());
             ui.set_server_pref_leave_message_known(false);
+            ui.set_server_pref_auto_away_reason_known(false);
         }
     });
 
@@ -1023,6 +1024,9 @@ struct WorkerState {
     /// Display copy of the remembered QUIT/PART text: outer `None` until
     /// announced, inner `None` for `null` (the server's own fallback).
     quit_part_reason: Option<Option<String>>,
+    /// Display copy of the auto-away text, same shape as `quit_part_reason`
+    /// (inner `None`: the server keeps its built-in text).
+    auto_away_reason: Option<Option<String>>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -1105,6 +1109,7 @@ impl WorkerState {
             whois_card: None,
             auto_away_debounce: None,
             quit_part_reason: None,
+            auto_away_reason: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1588,6 +1593,7 @@ async fn handle_connect(
             state.whois_card = None;
             state.auto_away_debounce = None;
             state.quit_part_reason = None;
+            state.auto_away_reason = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -1692,6 +1698,7 @@ async fn handle_connect(
                 ui.set_recover_visible(false);
                 ui.set_server_pref_auto_away_debounce("".into());
                 ui.set_server_pref_leave_message_known(false);
+                ui.set_server_pref_auto_away_reason_known(false);
                 ui.set_current_query(false);
                 ui.set_current_query_ready(false);
                 let networks: Vec<slint::SharedString> =
@@ -2639,9 +2646,7 @@ const IGNORED_KINDS: &[&str] = &[
     "archive_changed",
     "archive_purged",
     // networks/wire.ex: connection_state_changed is handled above.
-    // user_settings/wire.ex: auto_away_debounce_changed and
-    // quit_part_reason_changed are handled above.
-    "auto_away_reason_changed",
+    // user_settings/wire.ex: all three settings echoes are handled above.
     // notify/wire.ex.
     "notify_list",
     // server_settings/wire.ex.
@@ -2828,6 +2833,10 @@ async fn handle_frame(
     }
     if payload_kind == "quit_part_reason_changed" {
         handle_quit_part_reason_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "auto_away_reason_changed" {
+        handle_auto_away_reason_changed(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "who_reply" {
@@ -6906,6 +6915,39 @@ fn handle_quit_part_reason_changed(
         ui.set_server_pref_leave_message_set(reason.is_some());
         ui.set_server_pref_leave_message(reason.unwrap_or_default().into());
         ui.set_server_pref_leave_message_known(true);
+    });
+}
+
+/// Mirrors the server's auto-away text into Settings as a read-only display
+/// copy; `null` means Grappa keeps its own built-in text, never substituted.
+fn handle_auto_away_reason_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(reason) = parse_nullable_setting_echo(
+        payload,
+        carrier_topic,
+        identifier,
+        "auto_away_reason_changed",
+        "auto_away_reason",
+    ) else {
+        persistence::log_line("auto_away_reason_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state.auto_away_reason.as_ref() == Some(&reason) {
+        return;
+    }
+    state.auto_away_reason = Some(reason.clone());
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_server_pref_auto_away_reason_set(reason.is_some());
+        ui.set_server_pref_auto_away_reason(reason.unwrap_or_default().into());
+        ui.set_server_pref_auto_away_reason_known(true);
     });
 }
 
@@ -11860,7 +11902,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 19);
+        assert_eq!(IGNORED_KINDS.len(), 18);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -11908,6 +11950,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"banlist_bundle"));
         assert!(!IGNORED_KINDS.contains(&"auto_away_debounce_changed"));
         assert!(!IGNORED_KINDS.contains(&"quit_part_reason_changed"));
+        assert!(!IGNORED_KINDS.contains(&"auto_away_reason_changed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -12792,6 +12835,17 @@ mod tests {
                 key
             ),
             None
+        );
+        // The auto-away echo shares the shape under its own kind and key.
+        assert_eq!(
+            parse_nullable_setting_echo(
+                &serde_json::json!({"kind": "auto_away_reason_changed", "auto_away_reason": null}),
+                topic,
+                "vjt",
+                "auto_away_reason_changed",
+                "auto_away_reason"
+            ),
+            Some(None)
         );
     }
 
