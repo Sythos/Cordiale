@@ -43,6 +43,12 @@ the sidebar and leaves its obsolete realtime subscriptions.
 In channel chat, a speaker's nick uses the role prefix currently shown in
 that channel's member list. Changes to the roster or user modes update visible
 lines without rewriting message history; private conversations remain unprefixed.
+The member list shows each role in brackets (`[@] Sythos`, `[+] nick`), and
+the two side columns can be resized but never shrink below their content: the
+sidebar stops at its widest network or channel row, the member list at the
+average nick width or its Actions button, whichever is wider. Channel rows
+sit directly under their network row, and Themes is reachable from the
+Actions menu.
 
 The known limitations are:
 
