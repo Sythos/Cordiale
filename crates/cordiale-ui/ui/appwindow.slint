@@ -71,6 +71,13 @@ struct ArchiveRow {
     last-activity: string,
 }
 
+// One watched nick in Settings > Watch Lists, with its presence token
+// (online, offline or unknown).
+struct NotifyRow {
+    nick: string,
+    presence: string,
+}
+
 // One channel of the directory screen (`/list`), as sent by the server.
 struct DirectoryRow {
     name: string,
@@ -547,7 +554,7 @@ export component AppWindow inherits Window {
     in-out property <string> new-alias-command: "";
     in-out property <string> new-alias-expansion: "";
     in property <[VhostOptionRow]> settings-vhost-options: [];
-    in property <[string]> settings-notify-nicks: [];
+    in property <[NotifyRow]> settings-notify-nicks: [];
     in-out property <string> new-notify-nick: "";
     in property <[string]> settings-watch-patterns: [];
     in-out property <string> new-watch-pattern: "";
@@ -1682,14 +1689,16 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                for nick in settings-notify-nicks : HorizontalBox {
+                for row in settings-notify-nicks : HorizontalBox {
                     Text {
-                        text: nick;
+                        text: row.presence == "online"
+                            ? @tr("{} (online)", row.nick)
+                            : (row.presence == "offline" ? @tr("{} (offline)", row.nick) : row.nick);
                         wrap: word-wrap;
                     }
                     Button {
                         text: @tr("Delete");
-                        clicked => { notify-remove-requested(nick); }
+                        clicked => { notify-remove-requested(row.nick); }
                     }
                 }
                 HorizontalBox {

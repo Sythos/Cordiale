@@ -1191,6 +1191,9 @@ struct WorkerState {
     /// Presence watchlist nicks per network ID, replaced whole by every
     /// `notify_list` snapshot (sent after join and after each change).
     notify_lists: HashMap<i64, Vec<String>>,
+    /// Watched-nick presence per network ID, keyed by ASCII-folded nick.
+    /// A nick missing here reads as `unknown`.
+    presence_by_network: HashMap<i64, HashMap<String, Presence>>,
     /// Session-local only: the keyword watchlist has no documented `list`
     /// reply shape (see `docs/protocol-notes.md` §4quater), so it doesn't
     /// survive a reconnect/relaunch, unlike everything else in Settings.
@@ -1257,6 +1260,7 @@ impl WorkerState {
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
             notify_lists: HashMap::new(),
+            presence_by_network: HashMap::new(),
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
         }
@@ -1786,6 +1790,7 @@ async fn handle_connect(
             state.dcc_offers.clear();
             state.archive = None;
             state.notify_lists.clear();
+            state.presence_by_network.clear();
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2619,22 +2624,71 @@ async fn handle_vhost_toggle(state: &WorkerState, ui: &slint::Weak<AppWindow>, a
     handle_settings_network_refresh(state, ui).await;
 }
 
-/// Pushes the presence watchlist of the network selected in Settings.
+/// Pushes the presence watchlist of the network selected in Settings, each
+/// nick with its last known presence.
 fn push_notify_nicks(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let nicks: Vec<slint::SharedString> = state
+    let network_id = state
         .settings_network
         .as_ref()
         .and_then(|network| state.network_ids.get(network))
-        .and_then(|network_id| state.notify_lists.get(network_id))
+        .copied();
+    let presence = network_id.and_then(|id| state.presence_by_network.get(&id));
+    let rows: Vec<(String, &'static str)> = network_id
+        .and_then(|id| state.notify_lists.get(&id))
         .into_iter()
         .flatten()
-        .cloned()
-        .map(Into::into)
+        .map(|nick| {
+            let known = presence
+                .and_then(|nicks| nicks.get(&presence_key(nick)))
+                .copied()
+                .unwrap_or(Presence::Unknown);
+            (nick.clone(), known.wire_name())
+        })
         .collect();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        ui.set_settings_notify_nicks(Rc::new(slint::VecModel::from(nicks)).into());
+        let rows: Vec<NotifyRow> = rows
+            .into_iter()
+            .map(|(nick, presence)| NotifyRow {
+                nick: nick.into(),
+                presence: presence.into(),
+            })
+            .collect();
+        ui.set_settings_notify_nicks(Rc::new(slint::VecModel::from(rows)).into());
     });
+}
+
+/// Presence of a watched nick, as Grappa reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Presence {
+    Online,
+    Offline,
+    /// No report yet, or no MONITOR/WATCH/ISON on this network.
+    Unknown,
+}
+
+impl Presence {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "online" => Some(Self::Online),
+            "offline" => Some(Self::Offline),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Offline => "offline",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Presence maps are keyed by ASCII-folded nick, like Grappa's snapshot.
+fn presence_key(nick: &str) -> String {
+    cordiale_core::isupport::CaseMapping::Ascii.fold(nick)
 }
 
 /// Pushes the session-local keyword-watchlist patterns to the UI — see
@@ -2848,7 +2902,6 @@ const IGNORED_KINDS: &[&str] = &[
     "peer_away",
     "presence_changed",
     "presence_error",
-    "presence_snapshot",
     // scrollback/wire.ex.
     // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex: all three settings echoes are handled above.
@@ -3093,6 +3146,10 @@ async fn handle_frame(
     }
     if payload_kind == "notify_list" {
         handle_notify_list(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "presence_snapshot" {
+        handle_presence_snapshot(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7880,6 +7937,50 @@ fn handle_notify_list(
         return;
     };
     state.notify_lists = lists;
+    push_notify_nicks(state, ui);
+}
+
+/// Validates `presence_snapshot` on the exact user topic: an integer
+/// `network_id` and a `nicks` map of folded nick to `online | offline |
+/// unknown`. One unknown value drops the whole map, like Cicchetto.
+fn parse_presence_snapshot(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(i64, HashMap<String, Presence>)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "presence_snapshot" {
+        return None;
+    }
+    let network_id = payload.get("network_id")?.as_i64()?;
+    let nicks = payload
+        .get("nicks")?
+        .as_object()?
+        .iter()
+        .map(|(nick, presence)| Some((presence_key(nick), Presence::parse(presence.as_str()?)?)))
+        .collect::<Option<HashMap<_, _>>>()?;
+    Some((network_id, nicks))
+}
+
+/// Replaces one network's presence map (sent after join for live sessions)
+/// and repaints the watchlist.
+fn handle_presence_snapshot(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network_id, nicks)) = parse_presence_snapshot(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("presence_snapshot rejected: invalid carrier or payload");
+        return;
+    };
+    state.presence_by_network.insert(network_id, nicks);
     push_notify_nicks(state, ui);
 }
 
@@ -13183,7 +13284,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 8);
+        assert_eq!(IGNORED_KINDS.len(), 7);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -13242,6 +13343,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"archive_changed"));
         assert!(!IGNORED_KINDS.contains(&"archive_purged"));
         assert!(!IGNORED_KINDS.contains(&"notify_list"));
+        assert!(!IGNORED_KINDS.contains(&"presence_snapshot"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -14428,6 +14530,39 @@ mod tests {
             parse_notify_list(&payload, "grappa:user:other", "vjt"),
             None
         );
+    }
+
+    #[test]
+    fn parse_presence_snapshot_keeps_unknown_distinct() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "presence_snapshot",
+            "network_id": 7,
+            "nicks": {"alice": "online", "Bob": "offline", "carol": "unknown"}
+        });
+        let (network_id, nicks) =
+            parse_presence_snapshot(&payload, topic, "vjt").expect("valid snapshot");
+        assert_eq!(network_id, 7);
+        assert_eq!(nicks.get("alice"), Some(&Presence::Online));
+        assert_eq!(nicks.get("bob"), Some(&Presence::Offline));
+        assert_eq!(nicks.get("carol"), Some(&Presence::Unknown));
+        for invalid in [
+            serde_json::json!({"kind": "presence_snapshot", "network_id": 7, "nicks": {"alice": "away"}}),
+            serde_json::json!({"kind": "presence_snapshot", "network_id": "7", "nicks": {}}),
+            serde_json::json!({"kind": "presence_snapshot", "network_id": 7}),
+        ] {
+            assert_eq!(
+                parse_presence_snapshot(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_presence_snapshot(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+        // ASCII folding only: IRC brackets are not folded for presence keys.
+        assert_eq!(presence_key("Nick[A]"), "nick[a]");
     }
 
     #[test]
