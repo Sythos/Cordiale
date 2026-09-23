@@ -111,6 +111,7 @@ struct RecoverStepRow {
 struct NetworkGroup {
     network: string,
     connection-label: string,
+    parked: bool,
     separator-before: bool,
     expanded: bool,
     channels: [ChannelEntry],
@@ -1223,12 +1224,27 @@ export component AppWindow inherits Window {
                         background: #808080;
                     }
 
-                    Button {
+                    if !group.parked : Button {
                         text: (group.expanded ? "▾ 🔌 " : "▸ 🔌 ") + group.network
                             + (group.connection-label == "" ? "" : " · " + group.connection-label);
                         accessible-label: group.network
                             + (group.connection-label == "" ? "" : " — " + group.connection-label);
                         clicked => { network-toggle-requested(group.network); }
+                    }
+                    if group.parked : HorizontalBox {
+                        spacing: 4px;
+                        Button {
+                            text: group.expanded ? "▾" : "▸";
+                            width: 28px;
+                            accessible-label: @tr("Expand or collapse parked network {}", group.network);
+                            clicked => { network-toggle-requested(group.network); }
+                        }
+                        Text {
+                            text: group.network + " [PARKED]";
+                            font-italic: true;
+                            vertical-alignment: center;
+                            accessible-role: AccessibleRole.text;
+                        }
                     }
 
                     if group.expanded : VerticalLayout {

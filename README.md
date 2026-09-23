@@ -35,6 +35,11 @@ PART request and removes the window after a successful server response; a
 failed request leaves the window open. The selected channel header shows the
 network and channel above a separate, three-line topic panel.
 
+Parked networks collapse their channel and query rows and show an italic
+`[PARKED]` label; their group can still be expanded manually. An authoritative
+`/boot` refresh after network removal clears that network and its windows from
+the sidebar and leaves its obsolete realtime subscriptions.
+
 The known limitations are:
 
 - **Admin panel** implements overview; session listing/disconnect; user
