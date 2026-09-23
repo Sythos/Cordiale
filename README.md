@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 31 of them:
+  lists 56 top-level event kinds. Cordiale handles 32 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -80,8 +80,8 @@ known limitations are:
   `window_pending`, `window_invited`, `window_invite_declined`,
   `network_attached`, `network_detached`, `connection_state_changed`,
   `connection_progress`, `recover_progress`, `recover_result`,
-  `web_session_severed`, `who_reply`, `server_reply`, and `message`; the
-  remaining 25 kinds are
+  `web_session_severed`, `who_reply`, `server_reply`, `whois_bundle`, and
+  `message`; the remaining 24 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -200,6 +200,11 @@ known limitations are:
   show `server_reply` lines in wire order; its `source` is validated against
   the closed `info | version | motd | admin` set. The connection-time MOTD is
   unaffected: it still arrives as ordinary server-window scrollback.
+  `/whois <nick> [server]` and the member menu's WHOIS show a `whois_bundle`
+  card; every field is validated (absent `source` means `user`, absent
+  `avatar_url` means none), nullable values are omitted, flags become rows,
+  and extra numerics keep their wire order. A cached avatar is only noted,
+  not drawn.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
@@ -209,7 +214,7 @@ known limitations are:
     `server_settings_changed`.
   - **Presence, queries, and server replies**: `presence_changed`,
     `presence_error`, `presence_snapshot`, `notify_list`,
-    `whois_bundle`, `whois_avatar_ready`, `whowas_bundle`, `lusers_bundle`,
+    `whois_avatar_ready`, `whowas_bundle`, `lusers_bundle`,
     `banlist_bundle`, `invite_ack`, `mentions_bundle`.
   - **Transfers and other asynchronous work**: `dcc_offer`,
     `dcc_offer_resolved`, `directory_progress`, `directory_complete`,

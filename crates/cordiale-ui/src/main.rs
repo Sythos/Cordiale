@@ -822,6 +822,45 @@ struct WhoUser {
     realname: Option<String>,
 }
 
+/// `whois_bundle` as the wire declares it. Every key is required except
+/// `source` (absent means `user`) and `avatar_url` (absent means `None`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WhoisBundle {
+    network: String,
+    target: String,
+    user: Option<String>,
+    host: Option<String>,
+    realname: Option<String>,
+    server: Option<String>,
+    server_info: Option<String>,
+    is_operator: bool,
+    oper_text: Option<String>,
+    idle_seconds: Option<i64>,
+    signon: Option<i64>,
+    channels: Option<Vec<String>>,
+    using_ssl: bool,
+    is_registered: bool,
+    is_admin: bool,
+    is_services_admin: bool,
+    is_helper: bool,
+    is_chanop: bool,
+    is_agent: bool,
+    is_java: bool,
+    umodes: Option<String>,
+    away_message: Option<String>,
+    actually_host: Option<String>,
+    actually_ip: Option<String>,
+    account: Option<String>,
+    secure: bool,
+    secure_cipher: Option<String>,
+    certfp: Option<String>,
+    /// `(numeric, text)` in wire order: 320 and numerics Grappa doesn't fold.
+    extra_lines: Option<Vec<(i64, String)>>,
+    /// Authenticated Grappa path to the cached peer avatar, not a third-party
+    /// URL; may arrive later through `whois_avatar_ready`.
+    avatar_url: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WhoReply {
     network: String,
@@ -953,6 +992,9 @@ struct WorkerState {
     /// Latest requester reply shown on the reply screen; never persisted
     /// and never rendered into a chat window.
     reply_view: Option<ReplyView>,
+    /// The WHOIS card currently shown, kept so a later `whois_avatar_ready`
+    /// can patch exactly this card and no other.
+    whois_card: Option<WhoisBundle>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -1032,6 +1074,7 @@ impl WorkerState {
             connecting_networks: std::collections::HashSet::new(),
             recover_panel: None,
             reply_view: None,
+            whois_card: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1512,6 +1555,7 @@ async fn handle_connect(
             state.connecting_networks.clear();
             state.recover_panel = None;
             state.reply_view = None;
+            state.whois_card = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2548,7 +2592,6 @@ const IGNORED_KINDS: &[&str] = &[
     "dcc_offer",
     "dcc_offer_resolved",
     "mentions_bundle",
-    "whois_bundle",
     "whois_avatar_ready",
     "peer_away",
     "invite_ack",
@@ -2755,6 +2798,10 @@ async fn handle_frame(
     }
     if payload_kind == "server_reply" {
         handle_server_reply(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "whois_bundle" {
+        handle_whois_bundle(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -6943,6 +6990,218 @@ fn handle_server_reply(
     show_reply_view(state, ui, server_reply_view(&network, source, &lines));
 }
 
+/// Validates `whois_bundle` field by field, like Cicchetto: any malformed
+/// field drops the whole bundle. `source` must be `user` or `rail` (absent
+/// means `user`); `avatar_url` may be absent.
+fn parse_whois_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<WhoisBundle> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "whois_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    match payload.get("source") {
+        None => {}
+        Some(source) if matches!(source.as_str(), Some("user" | "rail")) => {}
+        Some(_) => return None,
+    }
+    let text = |key: &str| parse_nullable_wire_string(payload.get(key)?);
+    let flag = |key: &str| payload.get(key)?.as_bool();
+    let number = |key: &str| match payload.get(key)? {
+        Value::Null => Some(None),
+        value => value.as_i64().map(Some),
+    };
+    let channels = match payload.get("channels")? {
+        Value::Null => None,
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .map(|item| item.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    };
+    let extra_lines = match payload.get("extra_lines")? {
+        Value::Null => None,
+        Value::Array(items) => Some(
+            items
+                .iter()
+                .map(|item| {
+                    Some((
+                        item.get("numeric")?.as_i64()?,
+                        item.get("text")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    };
+    let avatar_url = match payload.get("avatar_url") {
+        None => None,
+        Some(value) => parse_nullable_wire_string(value)?,
+    };
+    Some(WhoisBundle {
+        network: network.to_string(),
+        target: payload.get("target")?.as_str()?.to_string(),
+        user: text("user")?,
+        host: text("host")?,
+        realname: text("realname")?,
+        server: text("server")?,
+        server_info: text("server_info")?,
+        is_operator: flag("is_operator")?,
+        oper_text: text("oper_text")?,
+        idle_seconds: number("idle_seconds")?,
+        signon: number("signon")?,
+        channels,
+        using_ssl: flag("using_ssl")?,
+        is_registered: flag("is_registered")?,
+        is_admin: flag("is_admin")?,
+        is_services_admin: flag("is_services_admin")?,
+        is_helper: flag("is_helper")?,
+        is_chanop: flag("is_chanop")?,
+        is_agent: flag("is_agent")?,
+        is_java: flag("is_java")?,
+        umodes: text("umodes")?,
+        away_message: text("away_message")?,
+        actually_host: text("actually_host")?,
+        actually_ip: text("actually_ip")?,
+        account: text("account")?,
+        secure: flag("secure")?,
+        secure_cipher: text("secure_cipher")?,
+        certfp: text("certfp")?,
+        extra_lines,
+        avatar_url,
+    })
+}
+
+/// `h:mm:ss`, without words to translate.
+fn format_idle(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    format!(
+        "{}:{:02}:{:02}",
+        seconds / 3600,
+        (seconds % 3600) / 60,
+        seconds % 60
+    )
+}
+
+fn format_signon(epoch_seconds: i64) -> String {
+    epoch_seconds
+        .checked_mul(1000)
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|moment| {
+            moment
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| epoch_seconds.to_string())
+}
+
+/// Label-keyed rows for the WHOIS card; empty fields are omitted, boolean
+/// flags become label-only rows, extra numerics stay in wire order.
+fn whois_bundle_view(bundle: &WhoisBundle) -> ReplyView {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut push = |label: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            rows.push((label.to_string(), value));
+        }
+    };
+    let userhost = match (&bundle.user, &bundle.host) {
+        (Some(user), Some(host)) => Some(format!("{user}@{host}")),
+        (None, Some(host)) => Some(host.clone()),
+        (Some(user), None) => Some(user.clone()),
+        (None, None) => None,
+    };
+    push("whois-userhost", userhost);
+    push("whois-realname", bundle.realname.clone());
+    push("whois-account", bundle.account.clone());
+    let server = match (&bundle.server, &bundle.server_info) {
+        (Some(server), Some(info)) => Some(format!("{server} ({info})")),
+        (server, _) => server.clone(),
+    };
+    push("whois-server", server);
+    push(
+        "whois-channels",
+        bundle.channels.as_ref().map(|channels| channels.join(" ")),
+    );
+    push("whois-idle", bundle.idle_seconds.map(format_idle));
+    push("whois-signon", bundle.signon.map(format_signon));
+    push("whois-away", bundle.away_message.clone());
+    push("whois-umodes", bundle.umodes.clone());
+    let actually = match (&bundle.actually_host, &bundle.actually_ip) {
+        (Some(host), Some(ip)) => Some(format!("{host} ({ip})")),
+        (host, ip) => host.clone().or_else(|| ip.clone()),
+    };
+    push("whois-actually", actually);
+    push("whois-certfp", bundle.certfp.clone());
+    if bundle.secure || bundle.using_ssl {
+        rows.push((
+            "whois-secure".to_string(),
+            bundle.secure_cipher.clone().unwrap_or_default(),
+        ));
+    }
+    if bundle.is_operator {
+        rows.push((
+            "whois-operator".to_string(),
+            bundle.oper_text.clone().unwrap_or_default(),
+        ));
+    }
+    for (flag, label) in [
+        (bundle.is_registered, "whois-registered"),
+        (bundle.is_admin, "whois-admin"),
+        (bundle.is_services_admin, "whois-services-admin"),
+        (bundle.is_helper, "whois-helper"),
+        (bundle.is_chanop, "whois-chanop"),
+        (bundle.is_agent, "whois-agent"),
+        (bundle.is_java, "whois-java"),
+    ] {
+        if flag {
+            rows.push((label.to_string(), String::new()));
+        }
+    }
+    for (numeric, text) in bundle.extra_lines.iter().flatten() {
+        rows.push((String::new(), format!("{numeric:03} {text}")));
+    }
+    // The avatar is an authenticated server path; the image itself is not
+    // rendered yet, only its availability.
+    if bundle.avatar_url.is_some() {
+        rows.push(("whois-avatar".to_string(), String::new()));
+    }
+    ReplyView {
+        kind: "whois_bundle",
+        subject: bundle.target.clone(),
+        network: bundle.network.clone(),
+        rows,
+    }
+}
+
+fn handle_whois_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(bundle) = parse_whois_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("whois_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    let view = whois_bundle_view(&bundle);
+    state.whois_card = Some(bundle);
+    show_reply_view(state, ui, view);
+}
+
 /// A slash command answered by a requester reply: the WS verb plus its
 /// payload without `network_id` (added by `send_user_verb`), or `Usage` when
 /// a required argument is missing.
@@ -6977,6 +7236,21 @@ fn parse_reply_command(body: &str, current_target: &str) -> Option<ReplyCommand>
             verb: "version",
             payload: serde_json::json!({}),
         }),
+        // Same payload the member context menu sends; `server` asks a
+        // specific server (the two-argument IRC form) or stays `null`.
+        "/whois" => {
+            let Some(nick) = args.first() else {
+                return Some(ReplyCommand::Usage);
+            };
+            Some(ReplyCommand::Request {
+                verb: "whois",
+                payload: serde_json::json!({
+                    "nick": nick,
+                    "server": args.get(1),
+                    "source": "user",
+                }),
+            })
+        }
         // An optional server argument targets another server's MOTD/ADMIN.
         "/motd" | "/admin" => {
             let verb = if command == "/motd" { "motd" } else { "admin" };
@@ -11159,7 +11433,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 25);
+        assert_eq!(IGNORED_KINDS.len(), 24);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -11201,6 +11475,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"web_session_severed"));
         assert!(!IGNORED_KINDS.contains(&"who_reply"));
         assert!(!IGNORED_KINDS.contains(&"server_reply"));
+        assert!(!IGNORED_KINDS.contains(&"whois_bundle"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -11684,6 +11959,139 @@ mod tests {
                 serde_json::json!({"target": "hub.example.org"})
             ))
         );
+    }
+
+    fn whois_bundle_json() -> Value {
+        serde_json::json!({
+            "kind": "whois_bundle",
+            "network": "libera",
+            "target": "alice",
+            "source": "user",
+            "user": "~alice",
+            "host": "example.org",
+            "realname": "Alice",
+            "server": "irc.example.org",
+            "server_info": "Example IRC",
+            "is_operator": false,
+            "oper_text": null,
+            "idle_seconds": 3725,
+            "signon": null,
+            "channels": ["#rust", "@#cordiale"],
+            "using_ssl": true,
+            "is_registered": true,
+            "is_admin": false,
+            "is_services_admin": false,
+            "is_helper": false,
+            "is_chanop": false,
+            "is_agent": false,
+            "is_java": false,
+            "umodes": null,
+            "away_message": null,
+            "actually_host": null,
+            "actually_ip": null,
+            "account": "alice",
+            "secure": true,
+            "secure_cipher": "TLS_AES_256_GCM_SHA384",
+            "certfp": null,
+            "extra_lines": [{"numeric": 320, "text": "is a bot"}],
+            "avatar_url": null,
+            "future_field": {}
+        })
+    }
+
+    #[test]
+    fn parse_whois_bundle_is_strict_per_field() {
+        let topic = "grappa:user:vjt";
+        let bundle = parse_whois_bundle(&whois_bundle_json(), topic, "vjt").expect("valid bundle");
+        assert_eq!(bundle.target, "alice");
+        assert_eq!(bundle.idle_seconds, Some(3725));
+        assert_eq!(
+            bundle.channels,
+            Some(vec!["#rust".to_string(), "@#cordiale".to_string()])
+        );
+        assert_eq!(
+            bundle.extra_lines,
+            Some(vec![(320, "is a bot".to_string())])
+        );
+        assert_eq!(bundle.avatar_url, None);
+
+        let view = whois_bundle_view(&bundle);
+        assert_eq!(view.kind, "whois_bundle");
+        assert_eq!(view.subject, "alice");
+        assert!(view.rows.contains(&(
+            "whois-userhost".to_string(),
+            "~alice@example.org".to_string()
+        )));
+        assert!(view
+            .rows
+            .contains(&("whois-idle".to_string(), "1:02:05".to_string())));
+        assert!(view
+            .rows
+            .contains(&("whois-registered".to_string(), String::new())));
+        assert!(view
+            .rows
+            .contains(&(String::new(), "320 is a bot".to_string())));
+
+        // Tolerated: absent `source` (means user), `rail`, absent avatar.
+        let mut tolerated = whois_bundle_json();
+        let fields = tolerated.as_object_mut().unwrap();
+        fields.remove("source");
+        fields.remove("avatar_url");
+        assert!(parse_whois_bundle(&tolerated, topic, "vjt").is_some());
+        let mut rail = whois_bundle_json();
+        rail["source"] = serde_json::json!("rail");
+        assert!(parse_whois_bundle(&rail, topic, "vjt").is_some());
+
+        assert!(parse_whois_bundle(&whois_bundle_json(), "grappa:user:other", "vjt").is_none());
+        let breakers: [(&str, Option<Value>); 6] = [
+            ("source", Some(serde_json::json!("sidebar"))),
+            ("is_admin", None),
+            ("realname", None),
+            ("extra_lines", None),
+            ("channels", Some(serde_json::json!(["#ok", 3]))),
+            ("idle_seconds", Some(serde_json::json!("12"))),
+        ];
+        for (key, replacement) in breakers {
+            let mut broken = whois_bundle_json();
+            match replacement {
+                Some(value) => broken[key] = value,
+                None => {
+                    broken.as_object_mut().unwrap().remove(key);
+                }
+            }
+            assert!(
+                parse_whois_bundle(&broken, topic, "vjt").is_none(),
+                "{key} must invalidate the bundle"
+            );
+        }
+    }
+
+    #[test]
+    fn whois_command_requires_a_nick() {
+        assert_eq!(
+            parse_reply_command("/whois alice", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "whois",
+                payload: serde_json::json!({"nick": "alice", "server": null, "source": "user"})
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/whois alice irc.example.org", "#rust"),
+            Some(ReplyCommand::Request {
+                verb: "whois",
+                payload: serde_json::json!({
+                    "nick": "alice",
+                    "server": "irc.example.org",
+                    "source": "user"
+                })
+            })
+        );
+        assert_eq!(
+            parse_reply_command("/whois", "#rust"),
+            Some(ReplyCommand::Usage)
+        );
+        assert_eq!(format_idle(59), "0:00:59");
+        assert_eq!(format_idle(-5), "0:00:00");
     }
 
     #[test]

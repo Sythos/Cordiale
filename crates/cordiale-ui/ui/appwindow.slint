@@ -548,6 +548,8 @@ export component AppWindow inherits Window {
             return @tr("Server version on {}", reply-network);
         } else if reply-kind == "server_reply" && reply-subject == "admin" {
             return @tr("Server administrator on {}", reply-network);
+        } else if reply-kind == "whois_bundle" {
+            return @tr("WHOIS {} on {}", reply-subject, reply-network);
         } else {
             return reply-network;
         }
@@ -558,6 +560,48 @@ export component AppWindow inherits Window {
             return @tr("No users matched.");
         } else if key == "reply-empty" {
             return @tr("The server sent no lines.");
+        } else if key == "whois-userhost" {
+            return @tr("Address");
+        } else if key == "whois-realname" {
+            return @tr("Real name");
+        } else if key == "whois-server" {
+            return @tr("Server");
+        } else if key == "whois-account" {
+            return @tr("Account");
+        } else if key == "whois-channels" {
+            return @tr("Channels");
+        } else if key == "whois-idle" {
+            return @tr("Idle");
+        } else if key == "whois-signon" {
+            return @tr("Signed on");
+        } else if key == "whois-away" {
+            return @tr("Away");
+        } else if key == "whois-operator" {
+            return @tr("IRC operator");
+        } else if key == "whois-umodes" {
+            return @tr("User modes");
+        } else if key == "whois-secure" {
+            return @tr("Secure connection");
+        } else if key == "whois-certfp" {
+            return @tr("Certificate fingerprint");
+        } else if key == "whois-actually" {
+            return @tr("Actual host");
+        } else if key == "whois-registered" {
+            return @tr("Registered nick");
+        } else if key == "whois-admin" {
+            return @tr("Server administrator");
+        } else if key == "whois-services-admin" {
+            return @tr("Services administrator");
+        } else if key == "whois-helper" {
+            return @tr("Helper");
+        } else if key == "whois-chanop" {
+            return @tr("Channel operator");
+        } else if key == "whois-agent" {
+            return @tr("Agent");
+        } else if key == "whois-java" {
+            return @tr("Java client");
+        } else if key == "whois-avatar" {
+            return @tr("Avatar available on the server");
         } else {
             return key;
         }
