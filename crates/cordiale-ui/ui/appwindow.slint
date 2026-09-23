@@ -540,6 +540,14 @@ export component AppWindow inherits Window {
     function reply-title-text() -> string {
         if reply-kind == "who_reply" {
             return @tr("WHO {} on {}", reply-subject, reply-network);
+        } else if reply-kind == "server_reply" && reply-subject == "motd" {
+            return @tr("Message of the day on {}", reply-network);
+        } else if reply-kind == "server_reply" && reply-subject == "info" {
+            return @tr("Server information on {}", reply-network);
+        } else if reply-kind == "server_reply" && reply-subject == "version" {
+            return @tr("Server version on {}", reply-network);
+        } else if reply-kind == "server_reply" && reply-subject == "admin" {
+            return @tr("Server administrator on {}", reply-network);
         } else {
             return reply-network;
         }
@@ -548,6 +556,8 @@ export component AppWindow inherits Window {
     function reply-label(key: string) -> string {
         if key == "who-empty" {
             return @tr("No users matched.");
+        } else if key == "reply-empty" {
+            return @tr("The server sent no lines.");
         } else {
             return key;
         }

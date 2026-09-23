@@ -2545,7 +2545,6 @@ const IGNORED_KINDS: &[&str] = &[
     "bundle_hash",
     // session/wire.ex's wire_event_kind union.
     "channel_created",
-    "server_reply",
     "dcc_offer",
     "dcc_offer_resolved",
     "mentions_bundle",
@@ -2752,6 +2751,10 @@ async fn handle_frame(
     }
     if payload_kind == "who_reply" {
         handle_who_reply(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "server_reply" {
+        handle_server_reply(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -6872,6 +6875,74 @@ fn handle_who_reply(
     show_reply_view(state, ui, who_reply_view(&reply));
 }
 
+/// Validates `server_reply`: `source` is the closed `info | version | motd |
+/// admin` set and `lines` must hold only strings (kept in wire order, never
+/// rewritten). Returns `(network, source, lines)`.
+fn parse_server_reply(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, &'static str, Vec<String>)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "server_reply" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let source = match payload.get("source")?.as_str()? {
+        "info" => "info",
+        "version" => "version",
+        "motd" => "motd",
+        "admin" => "admin",
+        _ => return None,
+    };
+    let lines = payload
+        .get("lines")?
+        .as_array()?
+        .iter()
+        .map(|line| line.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    Some((network.to_string(), source, lines))
+}
+
+fn server_reply_view(network: &str, source: &'static str, lines: &[String]) -> ReplyView {
+    let rows = if lines.is_empty() {
+        vec![("reply-empty".to_string(), String::new())]
+    } else {
+        lines
+            .iter()
+            .map(|line| (String::new(), line.clone()))
+            .collect()
+    };
+    ReplyView {
+        kind: "server_reply",
+        subject: source.to_string(),
+        network: network.to_string(),
+        rows,
+    }
+}
+
+fn handle_server_reply(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, source, lines)) = parse_server_reply(payload, carrier_topic, identifier)
+    else {
+        persistence::log_line("server_reply rejected: invalid carrier or payload");
+        return;
+    };
+    show_reply_view(state, ui, server_reply_view(&network, source, &lines));
+}
+
 /// A slash command answered by a requester reply: the WS verb plus its
 /// payload without `network_id` (added by `send_user_verb`), or `Usage` when
 /// a required argument is missing.
@@ -6897,6 +6968,23 @@ fn parse_reply_command(body: &str, current_target: &str) -> Option<ReplyCommand>
                 verb: "who",
                 payload: serde_json::json!({ "channel": target }),
             })
+        }
+        "/info" => Some(ReplyCommand::Request {
+            verb: "info",
+            payload: serde_json::json!({}),
+        }),
+        "/version" => Some(ReplyCommand::Request {
+            verb: "version",
+            payload: serde_json::json!({}),
+        }),
+        // An optional server argument targets another server's MOTD/ADMIN.
+        "/motd" | "/admin" => {
+            let verb = if command == "/motd" { "motd" } else { "admin" };
+            let payload = match args.first() {
+                Some(target) => serde_json::json!({ "target": target }),
+                None => serde_json::json!({}),
+            };
+            Some(ReplyCommand::Request { verb, payload })
         }
         _ => None,
     }
@@ -11071,7 +11159,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 26);
+        assert_eq!(IGNORED_KINDS.len(), 25);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -11112,6 +11200,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"recover_result"));
         assert!(!IGNORED_KINDS.contains(&"web_session_severed"));
         assert!(!IGNORED_KINDS.contains(&"who_reply"));
+        assert!(!IGNORED_KINDS.contains(&"server_reply"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -11525,6 +11614,76 @@ mod tests {
         let no_users =
             serde_json::json!({"kind": "who_reply", "network": "libera", "target": "#rust"});
         assert!(parse_who_reply(&no_users, topic, "vjt").is_none());
+    }
+
+    #[test]
+    fn parse_server_reply_accepts_only_the_four_sources_and_string_lines() {
+        let topic = "grappa:user:vjt";
+        for source in ["info", "version", "motd", "admin"] {
+            let payload = serde_json::json!({
+                "kind": "server_reply",
+                "network": "libera",
+                "source": source,
+                "lines": ["first line", "", "  indented"],
+                "future_field": null
+            });
+            let (network, parsed, lines) =
+                parse_server_reply(&payload, topic, "vjt").expect("valid server_reply");
+            assert_eq!(network, "libera");
+            assert_eq!(parsed, source);
+            assert_eq!(lines, vec!["first line", "", "  indented"]);
+        }
+        let empty = serde_json::json!({
+            "kind": "server_reply", "network": "libera", "source": "motd", "lines": []
+        });
+        let (network, source, lines) = parse_server_reply(&empty, topic, "vjt").unwrap();
+        assert_eq!(
+            server_reply_view(&network, source, &lines).rows,
+            vec![("reply-empty".to_string(), String::new())]
+        );
+        for invalid in [
+            serde_json::json!({"kind": "server_reply", "network": "libera", "source": "stats", "lines": []}),
+            serde_json::json!({"kind": "server_reply", "network": "libera", "source": "motd", "lines": ["ok", 7]}),
+            serde_json::json!({"kind": "server_reply", "network": "libera", "source": "motd"}),
+            serde_json::json!({"kind": "server_reply", "network": "", "source": "motd", "lines": []}),
+        ] {
+            assert!(
+                parse_server_reply(&invalid, topic, "vjt").is_none(),
+                "{invalid}"
+            );
+        }
+        assert!(parse_server_reply(&empty, "grappa:user:other", "vjt").is_none());
+    }
+
+    #[test]
+    fn server_reply_commands_map_to_their_verbs() {
+        let request = |verb: &'static str, payload: Value| ReplyCommand::Request { verb, payload };
+        assert_eq!(
+            parse_reply_command("/info", "#rust"),
+            Some(request("info", serde_json::json!({})))
+        );
+        assert_eq!(
+            parse_reply_command("/version", "#rust"),
+            Some(request("version", serde_json::json!({})))
+        );
+        assert_eq!(
+            parse_reply_command("/motd", "#rust"),
+            Some(request("motd", serde_json::json!({})))
+        );
+        assert_eq!(
+            parse_reply_command("/motd irc.example.org", "#rust"),
+            Some(request(
+                "motd",
+                serde_json::json!({"target": "irc.example.org"})
+            ))
+        );
+        assert_eq!(
+            parse_reply_command("/admin hub.example.org", "#rust"),
+            Some(request(
+                "admin",
+                serde_json::json!({"target": "hub.example.org"})
+            ))
+        );
     }
 
     #[test]
