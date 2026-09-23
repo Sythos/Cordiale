@@ -253,6 +253,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_window_invite_inviter("".into());
             ui.set_recover_visible(false);
             ui.set_server_pref_auto_away_debounce("".into());
+            ui.set_server_pref_leave_message_known(false);
         }
     });
 
@@ -1019,6 +1020,9 @@ struct WorkerState {
     /// Display copy of the account-wide auto-away delay; `None` until the
     /// server announces it. Grappa applies the value itself.
     auto_away_debounce: Option<AutoAwayDebounce>,
+    /// Display copy of the remembered QUIT/PART text: outer `None` until
+    /// announced, inner `None` for `null` (the server's own fallback).
+    quit_part_reason: Option<Option<String>>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -1100,6 +1104,7 @@ impl WorkerState {
             reply_view: None,
             whois_card: None,
             auto_away_debounce: None,
+            quit_part_reason: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1582,6 +1587,7 @@ async fn handle_connect(
             state.reply_view = None;
             state.whois_card = None;
             state.auto_away_debounce = None;
+            state.quit_part_reason = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -1685,6 +1691,7 @@ async fn handle_connect(
                 ui.set_window_invite_inviter("".into());
                 ui.set_recover_visible(false);
                 ui.set_server_pref_auto_away_debounce("".into());
+                ui.set_server_pref_leave_message_known(false);
                 ui.set_current_query(false);
                 ui.set_current_query_ready(false);
                 let networks: Vec<slint::SharedString> =
@@ -2632,8 +2639,8 @@ const IGNORED_KINDS: &[&str] = &[
     "archive_changed",
     "archive_purged",
     // networks/wire.ex: connection_state_changed is handled above.
-    // user_settings/wire.ex.
-    "quit_part_reason_changed",
+    // user_settings/wire.ex: auto_away_debounce_changed and
+    // quit_part_reason_changed are handled above.
     "auto_away_reason_changed",
     // notify/wire.ex.
     "notify_list",
@@ -2817,6 +2824,10 @@ async fn handle_frame(
     }
     if payload_kind == "auto_away_debounce_changed" {
         handle_auto_away_debounce_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "quit_part_reason_changed" {
+        handle_quit_part_reason_changed(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "who_reply" {
@@ -6843,6 +6854,58 @@ fn handle_auto_away_debounce_changed(
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_server_pref_auto_away_debounce(token.into());
+    });
+}
+
+/// Validates a user-settings echo whose single value is a string or `null`
+/// on the exact user topic. The key is always present: `null` is meaningful
+/// (the server falls back to its own text), not missing.
+fn parse_nullable_setting_echo(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+    kind: &str,
+    key: &str,
+) -> Option<Option<String>> {
+    if carrier_topic != format!("grappa:user:{identifier}") {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != kind {
+        return None;
+    }
+    parse_nullable_wire_string(payload.get(key)?)
+}
+
+/// Mirrors the server's remembered QUIT/PART text into Settings as a
+/// read-only display copy; Grappa stays the owner of the value.
+fn handle_quit_part_reason_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(reason) = parse_nullable_setting_echo(
+        payload,
+        carrier_topic,
+        identifier,
+        "quit_part_reason_changed",
+        "quit_part_reason",
+    ) else {
+        persistence::log_line("quit_part_reason_changed rejected: invalid carrier or payload");
+        return;
+    };
+    if state.quit_part_reason.as_ref() == Some(&reason) {
+        return;
+    }
+    state.quit_part_reason = Some(reason.clone());
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_server_pref_leave_message_set(reason.is_some());
+        ui.set_server_pref_leave_message(reason.unwrap_or_default().into());
+        ui.set_server_pref_leave_message_known(true);
     });
 }
 
@@ -11797,7 +11860,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 20);
+        assert_eq!(IGNORED_KINDS.len(), 19);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -11844,6 +11907,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"whowas_bundle"));
         assert!(!IGNORED_KINDS.contains(&"banlist_bundle"));
         assert!(!IGNORED_KINDS.contains(&"auto_away_debounce_changed"));
+        assert!(!IGNORED_KINDS.contains(&"quit_part_reason_changed"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -12678,6 +12742,55 @@ mod tests {
         }
         assert_eq!(
             parse_auto_away_debounce_changed(&payload(Value::Null), "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_nullable_setting_echo_keeps_null_distinct_from_missing() {
+        let topic = "grappa:user:vjt";
+        let kind = "quit_part_reason_changed";
+        let key = "quit_part_reason";
+        let payload = |value: Value| serde_json::json!({"kind": kind, key: value});
+        assert_eq!(
+            parse_nullable_setting_echo(&payload(Value::Null), topic, "vjt", kind, key),
+            Some(None)
+        );
+        assert_eq!(
+            parse_nullable_setting_echo(
+                &payload(serde_json::json!("bye")),
+                topic,
+                "vjt",
+                kind,
+                key
+            ),
+            Some(Some("bye".to_string()))
+        );
+        assert_eq!(
+            parse_nullable_setting_echo(&payload(serde_json::json!("")), topic, "vjt", kind, key),
+            Some(Some(String::new()))
+        );
+
+        for invalid in [
+            payload(serde_json::json!(1)),
+            payload(serde_json::json!(["bye"])),
+            serde_json::json!({"kind": kind}),
+            serde_json::json!({"kind": "auto_away_reason_changed", key: "bye"}),
+        ] {
+            assert_eq!(
+                parse_nullable_setting_echo(&invalid, topic, "vjt", kind, key),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_nullable_setting_echo(
+                &payload(Value::Null),
+                "grappa:user:other",
+                "vjt",
+                kind,
+                key
+            ),
             None
         );
     }

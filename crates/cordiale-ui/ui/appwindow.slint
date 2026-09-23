@@ -413,6 +413,11 @@ export component AppWindow inherits Window {
     // Server-stored preferences mirrored from `*_changed` pushes: "" until
     // announced, then "default" (null), "off" (0) or a number of seconds.
     in property <string> server-pref-auto-away-debounce: "";
+    // Remembered QUIT/PART text: hidden until announced; `-set` is false
+    // for `null` (no message, the server uses its own fallback).
+    in property <bool> server-pref-leave-message-known: false;
+    in property <bool> server-pref-leave-message-set: false;
+    in property <string> server-pref-leave-message: "";
     // "" while running, then "succeeded" or "failed" from `recover_result`.
     in property <string> recover-outcome: "";
     in property <string> recover-outcome-reason: "";
@@ -1351,6 +1356,12 @@ export component AppWindow inherits Window {
                             : (server-pref-auto-away-debounce == "off"
                                 ? @tr("off")
                                 : @tr("{} seconds", server-pref-auto-away-debounce)));
+                    wrap: word-wrap;
+                }
+                if server-pref-leave-message-known : Text {
+                    text: server-pref-leave-message-set
+                        ? @tr("Quit/part message: {}", server-pref-leave-message)
+                        : @tr("Quit/part message: none (server default)");
                     wrap: word-wrap;
                 }
 
