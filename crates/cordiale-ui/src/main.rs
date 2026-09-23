@@ -2829,7 +2829,6 @@ const IGNORED_KINDS: &[&str] = &[
     "presence_error",
     "presence_snapshot",
     // scrollback/wire.ex.
-    "archive_purged",
     // networks/wire.ex: connection_state_changed is handled above.
     // user_settings/wire.ex: all three settings echoes are handled above.
     // notify/wire.ex.
@@ -3066,6 +3065,10 @@ async fn handle_frame(
     }
     if payload_kind == "archive_changed" {
         handle_archive_changed(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "archive_purged" {
+        handle_archive_purged(state, ui, &frame.topic, &frame.payload).await;
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7732,6 +7735,73 @@ async fn handle_archive_changed(
         persistence::log_line("archive_changed rejected: invalid carrier or payload");
         return;
     };
+    if state
+        .archive
+        .as_ref()
+        .is_some_and(|view| view.network == network)
+    {
+        load_archive(state, ui).await;
+    }
+}
+
+/// Validates `archive_purged` on the exact user topic: a non-empty
+/// `network_slug` and `target` (channel- or query-shaped).
+fn parse_archive_purged(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<(String, String)> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "archive_purged" {
+        return None;
+    }
+    let network = payload.get("network_slug")?.as_str()?;
+    let target = payload.get("target")?.as_str()?;
+    if network.trim().is_empty() || target.trim().is_empty() {
+        return None;
+    }
+    Some((network.to_string(), target.to_string()))
+}
+
+/// Whether a `(network, window)` cache key names the purged target. The
+/// server deletes case-insensitively, so the window is compared with the
+/// network's casemapping.
+fn is_purged_window(
+    key: &(String, String),
+    network: &str,
+    target: &str,
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> bool {
+    key.0 == network && casemapping.nick_eq(&key.1, target)
+}
+
+/// The bouncer deleted a target's scrollback: forget the rows and unread
+/// seeds cached for it, so a later re-join can't show deleted history, then
+/// refresh the archive if it is open. Read cursors stay, like Cicchetto's.
+async fn handle_archive_purged(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some((network, target)) = parse_archive_purged(payload, carrier_topic, identifier) else {
+        persistence::log_line("archive_purged rejected: invalid carrier or payload");
+        return;
+    };
+    let casemapping = state
+        .isupport_by_network
+        .get(&network)
+        .map(|isupport| isupport.casemapping)
+        .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459);
+    let purged = |key: &(String, String)| is_purged_window(key, &network, &target, casemapping);
+    state.messages.retain(|key, _| !purged(key));
+    state.window_messages.retain(|key, _| !purged(key));
+    state.window_mentions.retain(|key, _| !purged(key));
     if state
         .archive
         .as_ref()
@@ -13041,7 +13111,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 10);
+        assert_eq!(IGNORED_KINDS.len(), 9);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -13098,6 +13168,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"dcc_offer"));
         assert!(!IGNORED_KINDS.contains(&"dcc_offer_resolved"));
         assert!(!IGNORED_KINDS.contains(&"archive_changed"));
+        assert!(!IGNORED_KINDS.contains(&"archive_purged"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -14195,6 +14266,58 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn archive_purged_matches_the_target_case_insensitively() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({"kind": "archive_purged", "network_slug": "libera", "target": "#Old"});
+        assert_eq!(
+            parse_archive_purged(&payload, topic, "vjt"),
+            Some(("libera".to_string(), "#Old".to_string()))
+        );
+        for invalid in [
+            serde_json::json!({"kind": "archive_purged", "network_slug": "libera"}),
+            serde_json::json!({"kind": "archive_purged", "network_slug": "libera", "target": ""}),
+            serde_json::json!({"kind": "archive_purged", "network": "libera", "target": "#old"}),
+        ] {
+            assert_eq!(
+                parse_archive_purged(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_archive_purged(&payload, "grappa:user:other", "vjt"),
+            None
+        );
+
+        let mapping = cordiale_core::isupport::CaseMapping::Rfc1459;
+        let key = |network: &str, window: &str| (network.to_string(), window.to_string());
+        assert!(is_purged_window(
+            &key("libera", "#old"),
+            "libera",
+            "#Old",
+            mapping
+        ));
+        assert!(is_purged_window(
+            &key("libera", "Nick[a]"),
+            "libera",
+            "nick{a}",
+            mapping
+        ));
+        assert!(!is_purged_window(
+            &key("oftc", "#old"),
+            "libera",
+            "#Old",
+            mapping
+        ));
+        assert!(!is_purged_window(
+            &key("libera", "#older"),
+            "libera",
+            "#Old",
+            mapping
+        ));
     }
 
     #[test]
