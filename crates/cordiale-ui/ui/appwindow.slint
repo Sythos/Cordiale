@@ -552,6 +552,8 @@ export component AppWindow inherits Window {
             return @tr("WHOIS {} on {}", reply-subject, reply-network);
         } else if reply-kind == "whowas_bundle" {
             return @tr("WHOWAS {} on {}", reply-subject, reply-network);
+        } else if reply-kind == "banlist_bundle" {
+            return @tr("Mode list {} on {}", reply-subject, reply-network);
         } else {
             return reply-network;
         }
@@ -608,6 +610,8 @@ export component AppWindow inherits Window {
             return @tr("Last seen");
         } else if key == "whowas-not-found" {
             return @tr("The server has no history for this nick.");
+        } else if key == "banlist-empty" {
+            return @tr("The list is empty.");
         } else {
             return key;
         }

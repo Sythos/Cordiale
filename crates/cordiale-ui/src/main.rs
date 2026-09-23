@@ -2595,7 +2595,6 @@ const IGNORED_KINDS: &[&str] = &[
     "peer_away",
     "invite_ack",
     "lusers_bundle",
-    "banlist_bundle",
     "directory_progress",
     "directory_complete",
     "directory_failed",
@@ -2808,6 +2807,10 @@ async fn handle_frame(
     }
     if payload_kind == "whowas_bundle" {
         handle_whowas_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "banlist_bundle" {
+        handle_banlist_bundle(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "own_nick_changed" {
@@ -7286,6 +7289,81 @@ fn handle_whowas_bundle(
     show_reply_view(state, ui, view);
 }
 
+/// Validates `banlist_bundle`: `mode` is whichever list letter was asked for
+/// (never assumed to be `b`), and each entry needs a string `mask` plus a
+/// string-or-`null` `setter` and `set_ts`; one bad entry drops the bundle.
+/// Entries keep the ircd's order.
+fn parse_banlist_bundle(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<ReplyView> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "banlist_bundle" {
+        return None;
+    }
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    let channel = payload.get("channel")?.as_str()?;
+    let mode = payload.get("mode")?.as_str()?;
+    if mode.is_empty() {
+        return None;
+    }
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for entry in payload.get("entries")?.as_array()? {
+        let mask = entry.get("mask")?.as_str()?;
+        let setter = parse_nullable_wire_string(entry.get("setter")?)?;
+        let set_ts = parse_nullable_wire_string(entry.get("set_ts")?)?;
+        let details = [setter, set_ts]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let line = if details.is_empty() {
+            mask.to_string()
+        } else {
+            format!("{mask} — {details}")
+        };
+        rows.push((String::new(), line));
+    }
+    if rows.is_empty() {
+        rows.push(("banlist-empty".to_string(), String::new()));
+    }
+    Some(ReplyView {
+        kind: "banlist_bundle",
+        subject: format!("{channel} +{mode}"),
+        network: network.to_string(),
+        rows,
+    })
+}
+
+fn handle_banlist_bundle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(view) = parse_banlist_bundle(payload, carrier_topic, identifier) else {
+        persistence::log_line("banlist_bundle rejected: invalid carrier or payload");
+        return;
+    };
+    show_reply_view(state, ui, view);
+}
+
+/// Common channel prefixes, used only to tell a channel argument from a mode
+/// letter in `/banlist`. `+` is left out on purpose: `/banlist +e` means the
+/// exception list, not a modeless `+e` channel.
+fn looks_like_channel(name: &str) -> bool {
+    name.starts_with(['#', '&', '!'])
+}
+
 /// Validates `whois_avatar_ready`: `network`, `nick` and `avatar_url` are
 /// all required strings. Returns them in that order.
 fn parse_whois_avatar_ready(
@@ -7433,6 +7511,28 @@ fn parse_reply_command(body: &str, current_target: &str) -> Option<ReplyCommand>
             Some(ReplyCommand::Request {
                 verb: "whowas",
                 payload: serde_json::json!({ "nick": nick }),
+            })
+        }
+        // `/banlist [#channel] [mode]`: the open channel by default, and the
+        // server itself defaults the list to `b`, so the mode is sent only
+        // when given.
+        "/banlist" => {
+            let (channel, rest) = match args.first() {
+                Some(first) if looks_like_channel(first) => (*first, &args[1..]),
+                _ => (current_target, &args[..]),
+            };
+            if !looks_like_channel(channel) {
+                return Some(ReplyCommand::Usage);
+            }
+            let payload = match rest.first().map(|mode| mode.trim_start_matches('+')) {
+                Some(mode) if !mode.is_empty() => {
+                    serde_json::json!({ "channel": channel, "mode": mode })
+                }
+                _ => serde_json::json!({ "channel": channel }),
+            };
+            Some(ReplyCommand::Request {
+                verb: "banlist",
+                payload,
             })
         }
         // An optional server argument targets another server's MOTD/ADMIN.
@@ -11617,7 +11717,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 22);
+        assert_eq!(IGNORED_KINDS.len(), 21);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -11662,6 +11762,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"whois_bundle"));
         assert!(!IGNORED_KINDS.contains(&"whois_avatar_ready"));
         assert!(!IGNORED_KINDS.contains(&"whowas_bundle"));
+        assert!(!IGNORED_KINDS.contains(&"banlist_bundle"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -12384,6 +12485,80 @@ mod tests {
         );
         assert_eq!(
             parse_reply_command("/whowas", "#rust"),
+            Some(ReplyCommand::Usage)
+        );
+    }
+
+    #[test]
+    fn parse_banlist_bundle_keeps_mode_and_entry_order() {
+        let topic = "grappa:user:vjt";
+        let payload = serde_json::json!({
+            "kind": "banlist_bundle",
+            "network": "libera",
+            "channel": "#rust",
+            "mode": "e",
+            "entries": [
+                {"mask": "*!*@a.example", "setter": "op", "set_ts": "1789900000"},
+                {"mask": "*!*@b.example", "setter": null, "set_ts": null}
+            ]
+        });
+        let view = parse_banlist_bundle(&payload, topic, "vjt").expect("valid banlist");
+        assert_eq!(view.subject, "#rust +e");
+        assert_eq!(
+            view.rows,
+            vec![
+                (String::new(), "*!*@a.example — op 1789900000".to_string()),
+                (String::new(), "*!*@b.example".to_string()),
+            ]
+        );
+        let empty = serde_json::json!({
+            "kind": "banlist_bundle", "network": "libera", "channel": "#rust",
+            "mode": "b", "entries": []
+        });
+        assert_eq!(
+            parse_banlist_bundle(&empty, topic, "vjt").unwrap().rows,
+            vec![("banlist-empty".to_string(), String::new())]
+        );
+        assert!(parse_banlist_bundle(&payload, "grappa:user:other", "vjt").is_none());
+        let mut no_mode = payload.clone();
+        no_mode.as_object_mut().unwrap().remove("mode");
+        assert!(parse_banlist_bundle(&no_mode, topic, "vjt").is_none());
+        let mut bad_entry = payload.clone();
+        bad_entry["entries"][1]["setter"] = serde_json::json!(5);
+        assert!(parse_banlist_bundle(&bad_entry, topic, "vjt").is_none());
+        let mut missing_ts = payload.clone();
+        missing_ts["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("set_ts");
+        assert!(parse_banlist_bundle(&missing_ts, topic, "vjt").is_none());
+    }
+
+    #[test]
+    fn banlist_command_defaults_to_the_open_channel() {
+        let request = |payload: Value| ReplyCommand::Request {
+            verb: "banlist",
+            payload,
+        };
+        assert_eq!(
+            parse_reply_command("/banlist", "#rust"),
+            Some(request(serde_json::json!({"channel": "#rust"})))
+        );
+        assert_eq!(
+            parse_reply_command("/banlist +e", "#rust"),
+            Some(request(
+                serde_json::json!({"channel": "#rust", "mode": "e"})
+            ))
+        );
+        assert_eq!(
+            parse_reply_command("/banlist #other I", "#rust"),
+            Some(request(
+                serde_json::json!({"channel": "#other", "mode": "I"})
+            ))
+        );
+        // In a query window there is no channel to default to.
+        assert_eq!(
+            parse_reply_command("/banlist", "alice"),
             Some(ReplyCommand::Usage)
         );
     }

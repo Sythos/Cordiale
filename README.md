@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 34 of them:
+  lists 56 top-level event kinds. Cordiale handles 35 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -81,8 +81,8 @@ known limitations are:
   `network_attached`, `network_detached`, `connection_state_changed`,
   `connection_progress`, `recover_progress`, `recover_result`,
   `web_session_severed`, `who_reply`, `server_reply`, `whois_bundle`,
-  `whois_avatar_ready`, `whowas_bundle`, and `message`; the remaining 22
-  kinds are
+  `whois_avatar_ready`, `whowas_bundle`, `banlist_bundle`, and `message`; the
+  remaining 21 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -211,6 +211,10 @@ known limitations are:
   completion for another or replaced card is ignored. `/whowas <nick>` shows
   the most recent `whowas_bundle` record, or a "no history" line when the
   server reports `not_found`; a malformed bundle is dropped instead.
+  `/banlist [#channel] [mode]` (the open channel and the server's default `b`
+  list unless given; `+e` and `e` are equivalent) shows `banlist_bundle`
+  entries in the ircd's order, with the setter and timestamp when known. The
+  list letter comes from the reply and is never assumed to be `b`.
   - **Window, channel, and scrollback state**: `channel_created`,
     `archive_changed`,
     `archive_purged`.
@@ -221,7 +225,7 @@ known limitations are:
   - **Presence, queries, and server replies**: `presence_changed`,
     `presence_error`, `presence_snapshot`, `notify_list`,
     `lusers_bundle`,
-    `banlist_bundle`, `invite_ack`, `mentions_bundle`.
+    `invite_ack`, `mentions_bundle`.
   - **Transfers and other asynchronous work**: `dcc_offer`,
     `dcc_offer_resolved`, `directory_progress`, `directory_complete`,
     `directory_failed`, `bundle_hash`.
