@@ -40,7 +40,7 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::rest::{
-    BootResponse, DisplayPrefs, LoginRequest, MeResponse, SendMessageRequest,
+    BootResponse, DirectoryPage, DisplayPrefs, LoginRequest, MeResponse, SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::wire_event::ClientEventKind;
@@ -70,6 +70,11 @@ enum WorkerCommand {
         channel: String,
     },
     DismissRecover,
+    DirectoryRefresh,
+    DirectoryLoadMore,
+    DirectorySort(String),
+    DirectorySearch(String),
+    DirectoryClose,
     ToggleNetwork(String),
     SendMessage {
         body: String,
@@ -353,6 +358,31 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_dismiss_recover = worker_tx.clone();
     ui.on_recover_dismiss_requested(move || {
         let _ = tx_for_dismiss_recover.send(WorkerCommand::DismissRecover);
+    });
+
+    let tx_for_directory_refresh = worker_tx.clone();
+    ui.on_directory_refresh_requested(move || {
+        let _ = tx_for_directory_refresh.send(WorkerCommand::DirectoryRefresh);
+    });
+
+    let tx_for_directory_load_more = worker_tx.clone();
+    ui.on_directory_load_more_requested(move || {
+        let _ = tx_for_directory_load_more.send(WorkerCommand::DirectoryLoadMore);
+    });
+
+    let tx_for_directory_sort = worker_tx.clone();
+    ui.on_directory_sort_requested(move |sort| {
+        let _ = tx_for_directory_sort.send(WorkerCommand::DirectorySort(sort.to_string()));
+    });
+
+    let tx_for_directory_search = worker_tx.clone();
+    ui.on_directory_search_requested(move |query| {
+        let _ = tx_for_directory_search.send(WorkerCommand::DirectorySearch(query.to_string()));
+    });
+
+    let tx_for_directory_close = worker_tx.clone();
+    ui.on_directory_closed(move || {
+        let _ = tx_for_directory_close.send(WorkerCommand::DirectoryClose);
     });
 
     let tx_for_network_toggle = worker_tx.clone();
@@ -832,6 +862,36 @@ struct ReplyView {
     rows: Vec<(String, String)>,
 }
 
+/// The channel directory for one network: a view over Grappa's last `LIST`
+/// snapshot, fetched over REST. `directory_*` pushes are only signals to
+/// fetch again; the rows always come from the server's page.
+struct DirectoryView {
+    network: String,
+    /// `users` or `name`, the two sorts the server knows.
+    sort: &'static str,
+    query: String,
+    /// Loaded rows (pages appended by "load more") plus the latest page's
+    /// cursor, total, status and capture time; `None` before the first load.
+    page: Option<DirectoryPage>,
+    /// Translated error key for the last failed request, if any.
+    error: Option<&'static str>,
+    /// A refresh was asked for and no `directory_*` push has answered yet.
+    refresh_pending: bool,
+}
+
+impl DirectoryView {
+    fn new(network: String, query: String) -> Self {
+        Self {
+            network,
+            sort: "users",
+            query,
+            page: None,
+            error: None,
+            refresh_pending: false,
+        }
+    }
+}
+
 /// One `who_reply` user row, all fields required by the wire contract.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WhoUser {
@@ -1031,6 +1091,8 @@ struct WorkerState {
     /// LUSERS unasked at registration; only a requested bundle is shown,
     /// and each request is consumed by the first matching bundle.
     lusers_requested: std::collections::HashSet<String>,
+    /// The channel directory screen opened with `/list`, if any.
+    directory: Option<DirectoryView>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -1115,6 +1177,7 @@ impl WorkerState {
             quit_part_reason: None,
             auto_away_reason: None,
             lusers_requested: std::collections::HashSet::new(),
+            directory: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -1184,6 +1247,28 @@ async fn run_worker(
                     Some(WorkerCommand::DismissRecover) => {
                         state.recover_panel = None;
                         push_recover_panel(&state, &ui);
+                    }
+                    Some(WorkerCommand::DirectoryRefresh) => {
+                        refresh_directory(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::DirectoryLoadMore) => {
+                        load_more_directory(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::DirectorySort(sort)) => {
+                        let sort = if sort == "name" { "name" } else { "users" };
+                        if let Some(view) = state.directory.as_mut() {
+                            view.sort = sort;
+                        }
+                        load_directory(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::DirectorySearch(query)) => {
+                        if let Some(view) = state.directory.as_mut() {
+                            view.query = query.trim().to_string();
+                        }
+                        load_directory(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::DirectoryClose) => {
+                        state.directory = None;
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
                         let expanded = state.expanded_networks.entry(network).or_insert(true);
@@ -1600,6 +1685,7 @@ async fn handle_connect(
             state.quit_part_reason = None;
             state.auto_away_reason = None;
             state.lusers_requested.clear();
+            state.directory = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -2096,6 +2182,12 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     // which open the panel — nothing is shown optimistically, like Cicchetto.
     if body.trim() == "/recover" {
         send_user_network_verb(state, network, "recover");
+        return;
+    }
+    // `/list [search]` opens the channel directory of the active network.
+    if let Some(query) = parse_list_command(&body) {
+        let network = network.clone();
+        open_directory(state, ui, network, query).await;
         return;
     }
     // Commands answered by a requester reply (shown on the reply screen,
@@ -2643,7 +2735,6 @@ const IGNORED_KINDS: &[&str] = &[
     "dcc_offer_resolved",
     "mentions_bundle",
     "peer_away",
-    "directory_progress",
     "directory_complete",
     "directory_failed",
     "presence_changed",
@@ -2864,6 +2955,10 @@ async fn handle_frame(
     }
     if payload_kind == "whowas_bundle" {
         handle_whowas_bundle(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "directory_progress" {
+        handle_directory_progress(state, ui, &frame.topic, &frame.payload).await;
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7126,6 +7221,278 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
             ui.set_screen("reply".into());
         }
     });
+}
+
+/// `/list` alone or `/list <search>`; any other text is not this command.
+fn parse_list_command(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    let (command, rest) = trimmed
+        .split_once(char::is_whitespace)
+        .unwrap_or((trimmed, ""));
+    command
+        .eq_ignore_ascii_case("/list")
+        .then(|| rest.trim().to_string())
+}
+
+/// Opens the directory screen for `network` and loads its first page.
+async fn open_directory(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    query: String,
+) {
+    state.directory = Some(DirectoryView::new(network, query));
+    push_directory(state, ui, true);
+    load_directory(state, ui).await;
+}
+
+/// Fetches the first page for the open directory's sort and search,
+/// replacing any loaded rows (the snapshot may have been replaced).
+async fn load_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token), Some(view)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.directory.as_ref(),
+    ) else {
+        return;
+    };
+    let network = view.network.clone();
+    let sort = view.sort;
+    let query = view.query.clone();
+    let result = client
+        .fetch_directory(&token, &network, sort, &query, None)
+        .await;
+    let Some(view) = state.directory.as_mut() else {
+        return;
+    };
+    // The view may have changed network, sort or search meanwhile.
+    if view.network != network || view.sort != sort || view.query != query {
+        return;
+    }
+    match result {
+        Ok(page) => {
+            view.page = Some(page);
+            view.error = None;
+        }
+        Err(err) => {
+            persistence::log_line(&format!("directory fetch failed: {err}"));
+            view.error = Some("directory-fetch-failed");
+        }
+    }
+    push_directory(state, ui, false);
+}
+
+/// Appends the next page after the loaded rows, when the server has more.
+async fn load_more_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token), Some(view)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.directory.as_ref(),
+    ) else {
+        return;
+    };
+    let Some(cursor) = view.page.as_ref().and_then(|page| page.next_cursor.clone()) else {
+        return;
+    };
+    let network = view.network.clone();
+    let sort = view.sort;
+    let query = view.query.clone();
+    let result = client
+        .fetch_directory(&token, &network, sort, &query, Some(&cursor))
+        .await;
+    let Some(view) = state.directory.as_mut() else {
+        return;
+    };
+    let same_cursor = view
+        .page
+        .as_ref()
+        .and_then(|page| page.next_cursor.as_deref())
+        == Some(cursor.as_str());
+    if view.network != network || !same_cursor {
+        return;
+    }
+    match result {
+        Ok(next) => {
+            if let Some(page) = view.page.as_mut() {
+                page.entries.extend(next.entries);
+                page.next_cursor = next.next_cursor;
+                page.total = next.total;
+                page.captured_at = next.captured_at;
+                page.status = next.status;
+            }
+            view.error = None;
+        }
+        Err(err) => {
+            persistence::log_line(&format!("directory page fetch failed: {err}"));
+            view.error = Some("directory-fetch-failed");
+        }
+    }
+    push_directory(state, ui, false);
+}
+
+/// Asks Grappa for a fresh `LIST`. The button stays disabled until a
+/// `directory_*` push (or a failed request) releases it; the new rows are
+/// fetched when those pushes arrive.
+async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let Some(view) = state.directory.as_mut() else {
+        return;
+    };
+    if view.refresh_pending {
+        return;
+    }
+    view.refresh_pending = true;
+    let network = view.network.clone();
+    push_directory(state, ui, false);
+    if let Err(err) = client.refresh_directory(&token, &network).await {
+        persistence::log_line(&format!("directory refresh failed: {err}"));
+        if let Some(view) = state.directory.as_mut() {
+            if view.network == network {
+                view.refresh_pending = false;
+                view.error = Some("directory-refresh-failed");
+            }
+        }
+        push_directory(state, ui, false);
+    }
+}
+
+/// Mirrors the open directory into the UI; `open` also switches to its
+/// screen. Nothing is pushed when no directory is open.
+fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
+    let Some(view) = state.directory.as_ref() else {
+        return;
+    };
+    let network = view.network.clone();
+    let sort = view.sort;
+    let query = view.query.clone();
+    let error = view.error.unwrap_or("");
+    let refresh_pending = view.refresh_pending;
+    let (rows, status, total, captured_at, has_more) = match &view.page {
+        Some(page) => (
+            page.entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.name.clone(),
+                        entry.user_count.to_string(),
+                        entry.topic.clone().unwrap_or_default(),
+                        entry.featured,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            page.status.clone(),
+            page.total.to_string(),
+            page.captured_at
+                .as_deref()
+                .map(format_directory_captured_at)
+                .unwrap_or_default(),
+            page.next_cursor.is_some(),
+        ),
+        None => (
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            false,
+        ),
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<DirectoryRow> = rows
+            .into_iter()
+            .map(|(name, users, topic, featured)| DirectoryRow {
+                name: name.into(),
+                users: users.into(),
+                topic: topic.into(),
+                featured,
+            })
+            .collect();
+        ui.set_directory_rows(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_directory_network(network.into());
+        ui.set_directory_sort(sort.into());
+        ui.set_directory_query(query.into());
+        ui.set_directory_status(status.into());
+        ui.set_directory_total(total.into());
+        ui.set_directory_captured_at(captured_at.into());
+        ui.set_directory_error(error.into());
+        ui.set_directory_refresh_pending(refresh_pending);
+        ui.set_directory_has_more(has_more);
+        if open {
+            ui.set_screen("directory".into());
+        }
+    });
+}
+
+/// Local-time rendering of the snapshot's ISO-8601 capture time; an
+/// unparsable value is shown as sent.
+fn format_directory_captured_at(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|parsed| {
+            parsed
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| raw.to_string())
+}
+
+/// Validates `directory_progress` on the exact user topic: `network` a
+/// non-empty slug and `count` a non-negative integer (checked, not used —
+/// the rows always come from the REST page).
+fn parse_directory_progress(
+    payload: &Value,
+    carrier_topic: &str,
+    identifier: &str,
+) -> Option<String> {
+    if !is_own_user_topic(carrier_topic, identifier) {
+        return None;
+    }
+    if payload.get("kind")?.as_str()? != "directory_progress" {
+        return None;
+    }
+    payload.get("count")?.as_u64()?;
+    let network = payload.get("network")?.as_str()?;
+    if network.trim().is_empty() {
+        return None;
+    }
+    Some(network.to_string())
+}
+
+/// A capture is streaming: refetch the first page if that network's
+/// directory is open, like Cicchetto's `onDirectoryProgress`.
+async fn handle_directory_progress(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(network) = parse_directory_progress(payload, carrier_topic, identifier) else {
+        persistence::log_line("directory_progress rejected: invalid carrier or payload");
+        return;
+    };
+    reload_directory_after_push(state, ui, &network).await;
+}
+
+/// Shared tail of the `directory_*` pushes: releases the refresh latch and
+/// refetches when the pushed network's directory is the open one.
+async fn reload_directory_after_push(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+) {
+    let Some(view) = state.directory.as_mut() else {
+        return;
+    };
+    if view.network != network {
+        return;
+    }
+    view.refresh_pending = false;
+    load_directory(state, ui).await;
 }
 
 fn handle_who_reply(
@@ -12077,7 +12444,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 16);
+        assert_eq!(IGNORED_KINDS.len(), 15);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -12128,6 +12495,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"auto_away_reason_changed"));
         assert!(!IGNORED_KINDS.contains(&"lusers_bundle"));
         assert!(!IGNORED_KINDS.contains(&"invite_ack"));
+        assert!(!IGNORED_KINDS.contains(&"directory_progress"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -12962,6 +13330,44 @@ mod tests {
         }
         assert_eq!(
             parse_auto_away_debounce_changed(&payload(Value::Null), "grappa:user:other", "vjt"),
+            None
+        );
+    }
+
+    #[test]
+    fn list_command_takes_an_optional_search() {
+        assert_eq!(parse_list_command("/list"), Some(String::new()));
+        assert_eq!(
+            parse_list_command("  /LIST  rust lang "),
+            Some("rust lang".to_string())
+        );
+        assert_eq!(parse_list_command("/listen"), None);
+        assert_eq!(parse_list_command("hello /list"), None);
+    }
+
+    #[test]
+    fn parse_directory_progress_checks_count_and_network() {
+        let topic = "grappa:user:vjt";
+        let payload =
+            serde_json::json!({"kind": "directory_progress", "network": "libera", "count": 250});
+        assert_eq!(
+            parse_directory_progress(&payload, topic, "vjt"),
+            Some("libera".to_string())
+        );
+        for invalid in [
+            serde_json::json!({"kind": "directory_progress", "network": "libera", "count": -1}),
+            serde_json::json!({"kind": "directory_progress", "network": "libera"}),
+            serde_json::json!({"kind": "directory_progress", "network": "", "count": 1}),
+            serde_json::json!({"kind": "directory_complete", "network": "libera", "count": 1}),
+        ] {
+            assert_eq!(
+                parse_directory_progress(&invalid, topic, "vjt"),
+                None,
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            parse_directory_progress(&payload, "grappa:user:other", "vjt"),
             None
         );
     }

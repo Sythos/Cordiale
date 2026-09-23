@@ -53,6 +53,14 @@ struct ReplyRow {
     value: string,
 }
 
+// One channel of the directory screen (`/list`), as sent by the server.
+struct DirectoryRow {
+    name: string,
+    users: string,
+    topic: string,
+    featured: bool,
+}
+
 // One step of the identity-recovery panel, as raw wire tokens; the visible
 // labels are translated by the `recover-*-label` functions below.
 struct RecoverStepRow {
@@ -414,6 +422,19 @@ export component AppWindow inherits Window {
     in property <string> reply-subject: "";
     in property <string> reply-network: "";
     in property <[ReplyRow]> reply-rows: [];
+    // Channel directory of one network (`/list`). `directory-status` is the
+    // server's snapshot token (fresh/stale/no_results/unknown/loading) and
+    // `directory-error` a key translated by `directory-error-text`.
+    in property <string> directory-network: "";
+    in property <[DirectoryRow]> directory-rows: [];
+    in property <string> directory-status: "";
+    in property <string> directory-total: "";
+    in property <string> directory-captured-at: "";
+    in property <string> directory-error: "";
+    in property <string> directory-sort: "users";
+    in-out property <string> directory-query: "";
+    in property <bool> directory-has-more: false;
+    in property <bool> directory-refresh-pending: false;
     // Server-stored preferences mirrored from `*_changed` pushes: "" until
     // announced, then "default" (null), "off" (0) or a number of seconds.
     in property <string> server-pref-auto-away-debounce: "";
@@ -522,6 +543,11 @@ export component AppWindow inherits Window {
     callback window-invite-join-requested(string, string);
     callback kicked-channel-dismiss-requested(string, string);
     callback recover-dismiss-requested();
+    callback directory-refresh-requested();
+    callback directory-load-more-requested();
+    callback directory-sort-requested(string);
+    callback directory-search-requested(string);
+    callback directory-closed();
     callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
@@ -701,6 +727,32 @@ export component AppWindow inherits Window {
             return @tr("identification not confirmed");
         } else {
             return reason;
+        }
+    }
+
+    function directory-status-text() -> string {
+        if directory-status == "fresh" || directory-status == "stale" {
+            return directory-status == "fresh"
+                ? @tr("{} channels, listed {}.", directory-total, directory-captured-at)
+                : @tr("{} channels, listed {} (may be out of date).", directory-total, directory-captured-at);
+        } else if directory-status == "no_results" {
+            return @tr("The server listed no channels.");
+        } else if directory-status == "loading" {
+            return @tr("Listing channels…");
+        } else if directory-status == "unknown" {
+            return @tr("No channel list yet.");
+        } else {
+            return "";
+        }
+    }
+
+    function directory-error-text() -> string {
+        if directory-error == "directory-fetch-failed" {
+            return @tr("Couldn't load the channel list.");
+        } else if directory-error == "directory-refresh-failed" {
+            return @tr("Couldn't refresh the channel list. Is the network connected?");
+        } else {
+            return directory-error;
         }
     }
 
@@ -1872,6 +1924,77 @@ export component AppWindow inherits Window {
         Button {
             text: @tr("Back");
             clicked => { screen = "connected"; }
+        }
+    }
+
+    if screen == "directory" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: @tr("Channels on {}", directory-network);
+            font-size: 18px;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        Text {
+            text: directory-status-text();
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        if directory-error != "" : Text {
+            text: directory-error-text();
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        HorizontalBox {
+            padding: 0px;
+
+            LineEdit {
+                placeholder-text: @tr("Search channels");
+                accessible-label: @tr("Search channels");
+                text <=> directory-query;
+                accepted => { directory-search-requested(directory-query); }
+            }
+
+            Button {
+                text: directory-sort == "name" ? @tr("Sort by users") : @tr("Sort by name");
+                clicked => { directory-sort-requested(directory-sort == "name" ? "users" : "name"); }
+            }
+
+            Button {
+                text: directory-refresh-pending ? @tr("Refreshing…") : @tr("Refresh");
+                enabled: !directory-refresh-pending;
+                clicked => { directory-refresh-requested(); }
+            }
+        }
+
+        ListView {
+            vertical-stretch: 1;
+            for row in directory-rows : Text {
+                text: row.topic == ""
+                    ? @tr("{} ({} users)", row.name, row.users)
+                    : @tr("{} ({} users) — {}", row.name, row.users, row.topic);
+                font-weight: row.featured ? 700 : 400;
+                wrap: word-wrap;
+                accessible-role: AccessibleRole.text;
+            }
+        }
+
+        if directory-has-more : Button {
+            text: @tr("Load more");
+            clicked => { directory-load-more-requested(); }
+        }
+
+        Button {
+            text: @tr("Back");
+            clicked => {
+                screen = "connected";
+                directory-closed();
+            }
         }
     }
 

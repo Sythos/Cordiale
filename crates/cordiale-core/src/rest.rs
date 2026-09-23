@@ -182,9 +182,55 @@ pub struct DisplayPrefs {
     pub bold_mentions: Option<bool>,
 }
 
+/// One channel of `GET /networks/:slug/directory`, as captured from the
+/// ircd's `LIST` reply.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DirectoryEntry {
+    pub name: String,
+    pub topic: Option<String>,
+    pub user_count: i64,
+    #[serde(default)]
+    pub featured: bool,
+}
+
+/// Response body of `GET /networks/:slug/directory`: one keyset page of the
+/// last completed `LIST` snapshot. `status` stays the raw wire token
+/// (`fresh | stale | no_results | unknown | loading`) so an additive value
+/// doesn't fail the whole page; `captured_at` is ISO-8601 or `null`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DirectoryPage {
+    pub entries: Vec<DirectoryEntry>,
+    pub next_cursor: Option<String>,
+    pub total: u64,
+    pub captured_at: Option<String>,
+    pub status: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directory_page_parses_rows_and_null_fields() {
+        let json = r##"{
+            "entries": [
+                {"name": "#rust", "topic": null, "user_count": 42, "featured": true},
+                {"name": "#cafe", "topic": "coffee", "user_count": 3, "featured": false}
+            ],
+            "next_cursor": null,
+            "total": 2,
+            "captured_at": "2026-09-23T10:00:00Z",
+            "status": "fresh"
+        }"##;
+
+        let page: DirectoryPage = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.entries[0].topic, None);
+        assert!(page.entries[0].featured);
+        assert_eq!(page.entries[1].topic.as_deref(), Some("coffee"));
+        assert_eq!(page.next_cursor, None);
+        assert_eq!(page.status, "fresh");
+    }
 
     #[test]
     fn config_response_parses_without_push_content_encoding() {

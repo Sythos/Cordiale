@@ -39,8 +39,8 @@ use crate::profile::{
     NotifyAddRequest, PerformUpdateRequest, PerformView, VhostSelectionRequest, VhostSettingsView,
 };
 use crate::rest::{
-    BootResponse, ConfigResponse, DisplayPrefs, LoginRequest, LoginResponse, MeResponse,
-    SendMessageRequest,
+    BootResponse, ConfigResponse, DirectoryPage, DisplayPrefs, LoginRequest, LoginResponse,
+    MeResponse, SendMessageRequest,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -785,6 +785,65 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `GET /networks/:slug/directory` — one page of the last completed
+    /// `LIST` snapshot, sorted by `sort` (`users` or `name`), filtered by
+    /// `query` when non-empty and continued from `cursor`. The server starts
+    /// the first capture on its own when it has none yet.
+    pub async fn fetch_directory(
+        &self,
+        token: &str,
+        network_slug: &str,
+        sort: &str,
+        query: &str,
+        cursor: Option<&str>,
+    ) -> Result<DirectoryPage, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "directory"]);
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("sort", sort);
+            if !query.is_empty() {
+                pairs.append_pair("q", query);
+            }
+            if let Some(cursor) = cursor {
+                pairs.append_pair("cursor", cursor);
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<DirectoryPage>().await?)
+    }
+
+    /// `POST /networks/:slug/directory/refresh` — asks for a fresh `LIST`
+    /// capture. `202` both when it starts and when one is already running;
+    /// progress then arrives as `directory_*` pushes.
+    pub async fn refresh_directory(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "directory", "refresh"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `DELETE /networks/:slug/notify/:nick`.
     pub async fn remove_notify_nick(
         &self,
@@ -1412,5 +1471,48 @@ mod tests {
             .add_notify_nicks("abc123", "libera", vec!["vjt".to_string()])
             .await
             .expect("add_notify_nicks");
+    }
+    #[tokio::test]
+    async fn fetch_directory_sends_sort_query_and_cursor() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/directory"))
+            .and(query_param("sort", "name"))
+            .and(query_param("q", "rust"))
+            .and(query_param("cursor", "c2"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [{"name": "#rust", "topic": null, "user_count": 9, "featured": false}],
+                "next_cursor": null,
+                "total": 1,
+                "captured_at": null,
+                "status": "loading"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let page = client
+            .fetch_directory("abc123", "libera", "name", "rust", Some("c2"))
+            .await
+            .expect("fetch_directory");
+        assert_eq!(page.entries[0].name, "#rust");
+        assert_eq!(page.status, "loading");
+    }
+
+    #[tokio::test]
+    async fn refresh_directory_accepts_202() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/directory/refresh"))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .refresh_directory("abc123", "libera")
+            .await
+            .expect("refresh_directory");
     }
 }
