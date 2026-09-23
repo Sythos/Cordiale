@@ -123,6 +123,18 @@ radiale (stesso principio angolo/raggio di Cicchetto, disegnato con
 l'elemento nativo Slint `Path`, niente pan/zoom per ora) — dettaglio
 completo in `docs/protocol-notes.md` §4ter.
 
+**Aggiornamento (2026-09-23)**: Cordiale gestisce tutti i 56 kind evento
+del protocollo. Oltre a quanto sopra sono ora implementati, con i
+rispettivi comandi slash: schermata risposte per WHO/WHOIS/WHOWAS/MOTD/
+INFO/VERSION/ADMIN/banlist/LUSERS, directory canali (`/list`, sola
+lettura), archivio con cancellazione dello storico (`/archive`), offerte
+DCC con Accetta/Rifiuta, recupero identità (`/recover`), `/invite`,
+presenza della watchlist per rete, banner di away dei peer, riepilogo
+menzioni al rientro dall'away (`/mentions`) e righe in sola lettura per le
+preferenze e i limiti di upload del server. Restano fuori, tra gli altri:
+join dalla directory (Cordiale non ha `/join`), upload di file e la
+sezione admin degli upload.
+
 ## Voci ancora da chiarire prima di poter classificare
 
 - Guest/visitor: il contratto client non definisce un flusso universale.

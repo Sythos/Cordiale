@@ -1226,8 +1226,9 @@ struct WorkerState {
     /// change once; it names Cicchetto's build, not this app.
     web_bundle: Option<(String, Option<String>)>,
     /// Session-local only: the keyword watchlist has no documented `list`
-    /// reply shape (see `docs/protocol-notes.md` §4quater), so it doesn't
-    /// survive a reconnect/relaunch, unlike everything else in Settings.
+    /// reply shape (see `docs/protocol-notes.md` §4quater). It is cleared on
+    /// disconnect or relaunch; an automatic reconnect keeps it as it was,
+    /// possibly stale.
     watch_patterns: Vec<String>,
     /// Current app theme, kept here too (not just in Slint's `theme`
     /// property) so message-rendering helpers running on this thread can
@@ -3159,13 +3160,11 @@ async fn handle_query_join_reply(
 /// Appends an incoming realtime frame to the channel it belongs to (if any)
 /// and, if that channel is currently open, pushes the update to the UI.
 ///
-/// Kinds Grappa's own `docs/CLIENT_PROTOCOL.md` documents as real but
-/// Cordiale has no use for yet (window-state/administrative pushes) are
-/// dropped without rendering anything, per that doc's own policy on
-/// unrecognized kinds (§4). A kind genuinely unknown to both the doc and
-/// this function still falls back to a raw `event: payload` line — the
-/// mechanism that caught the ones now handled by name below, via real user
-/// screenshots.
+/// Every kind of the protocol's closed set has its own handler (or an
+/// explicit no-op) below; only `message` envelopes reach chat rendering
+/// (`renders_as_chat_line`). A kind unknown to `ClientEventKind` is dropped
+/// silently, per `docs/CLIENT_PROTOCOL.md`'s policy on unrecognized kinds
+/// (§4).
 async fn handle_frame(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,

@@ -2,15 +2,16 @@
 
 Cordiale is a native desktop client for Grappa. It stores credentials via
 the OS-native credential store when available (Windows Credential
-Manager/DPAPI, Linux Secret Service), with an explicitly non-secure
+Manager/DPAPI, macOS Keychain, Linux Secret Service), with an explicitly
+non-secure
 fallback documented in code and never presented as real protection — see
 `crates/cordiale-core/src/credentials.rs`.
 
 ## Supported versions
 
-Cordiale is pre-release (Phase 1 of the roadmap). Until a
-first tagged release exists, only the `main` branch is supported; there are
-no maintained older versions.
+Cordiale is pre-1.0 software (0.1.x releases). Only the `main` branch is
+supported: fixes land there and ship in the next tagged release, and older
+releases are not maintained.
 
 ## Reporting a vulnerability
 
@@ -45,7 +46,7 @@ where applicable, fixed.
 ## Automated scanning
 
 CI runs Clippy, `cargo audit` (RustSec advisory database) and CodeQL for
-Rust on every push to `main`. No dedicated static analysis or security
+Rust on every push to `main` and on every pull request. No dedicated static analysis or security
 scanner exists for Slint `.slint` files today; Slint markup is still
 compiled and type-checked as part of `cargo check`/`cargo build`. A generic
 secret scanner (e.g. `gitleaks`) is under consideration but not yet added.

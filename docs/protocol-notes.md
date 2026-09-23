@@ -259,17 +259,16 @@ screenshot dell'utente) e sul report a monte dell'utente stesso,
 - **Politica esplicita del documento reale** (§4, non riportata altrove in
   questo file): *"treat unknown `kind` values as ignorable"* — un kind non
   riconosciuto va ignorato silenziosamente, non mostrato all'utente. In
-  Cordiale `topic_changed` e `channel_modes_changed` aggiornano stato locale;
-  gli altri kind di questa lista, se ricevuti, vengono scartati senza produrre
-  una riga di chat.
+  Cordiale tutti i kind di questa lista hanno un gestore dedicato (`parted`
+  a parte, che non esiste: vedi §2ter) e nessuno produce una riga di chat.
 
 ### 2ter. Censimento completo dei kind reali (2026-09-20)
 
 Audit diretto sui moduli sorgente Elixir del server (non regex/grep su
 poche righe): `session/wire.ex`'s `@type wire_event_kind` è l'insieme
-chiuso ufficiale (40 kind), più ogni altro `*/wire.ex` non-admin del repo.
-Elenco completo e forma dei payload: costante `IGNORED_KINDS` in
-`crates/cordiale-ui/src/main.rs` — riassunto qui:
+chiuso ufficiale (40 kind), più ogni altro `*/wire.ex` non-admin del repo:
+56 kind top-level in totale, elencati con il loro carrier in
+`crates/cordiale-core/src/wire_event.rs` (`ClientEventKind`). Riassunto:
 
 - **`"parted"` non esiste**: due commenti nel sorgente server
   (`session/server.ex`, `session/window_state.ex`) confermano che
@@ -283,11 +282,15 @@ Elenco completo e forma dei payload: costante `IGNORED_KINDS` in
   `notice`): `action` (CTCP `/me`), `topic` (riga scrollback di cambio
   topic), `kick` (riga scrollback di kick, diversa da `kicked`
   top-level), `server_event` (riga feed server, diversa da `notice`).
-- 45 kind aggiuntivi confermati reali ma senza UI in Cordiale ad oggi
+- **Aggiornamento (2026-09-23)**: Cordiale gestisce tutti i 56 kind
   (ISUPPORT/umode/identità, stato finestra, WHOIS/WHOWAS/LUSERS/banlist,
-  DCC, ricerca directory, lifecycle network, presence MONITOR/WATCH,
-  notify list, impostazioni server) — elenco completo e forma dei payload
-  nella costante `IGNORED_KINDS` citata sopra.
+  DCC, directory canali, archivio, lifecycle network, presence
+  MONITOR/WATCH, notify list, impostazioni server, riepilogo menzioni);
+  il riepilogo per kind è nella sezione "Realtime event coverage" del
+  README. La vecchia costante `IGNORED_KINDS` non esiste più: in
+  `handle_frame` ogni kind ha un gestore dedicato (o un no-op esplicito,
+  come `channel_created`) e solo `message` diventa riga di chat
+  (`renders_as_chat_line`).
 
 ---
 
@@ -346,8 +349,8 @@ segue è ricostruito da frammenti sparsi (marcato dove è inferenza).
 - **archive entry**: `{target, kind, last_activity}`.
 - **presence/status**: `join`/`part`/`quit` per canale (sopprimibili);
   `session_identity_changed` per l'identità ai servizi; reason personalizzati
-  per il subject stesso. Stato "away" dei **peer** non descritto
-  esplicitamente — *punto aperto*, vedi §7.
+  per il subject stesso. Stato "away" dei **peer**: evento `peer_away`
+  `{network, peer, message}` (301 RPL_AWAY fuori da un WHOIS), vedi §6, punto 7.
 - **dcc offer**: `{network, channel, offer_id, from, filename, size}` +
   `resolution` quando risolta.
 - **display_prefs**: 7 chiavi (vedi §1).
@@ -593,11 +596,9 @@ formato che Grappa effettivamente accetta, non confermato riga per riga.
 **Watchlist di presenza** (per-rete, REST) — `POST /networks/:slug/notify
 {nicks: [string]}`, `DELETE /networks/:slug/notify/:nick`. **Nessun
 `GET` self-service**: Cicchetto stesso non ne ha uno, lo stato arriva
-via lo snapshot WS `notify_list`, che Cordiale al momento classifica tra i
-kind ignorati e non applica alla UI. Cordiale traccia le modifiche inviate
-solo lato client per la sessione corrente (non sopravvivono a disconnessione
-esplicita o riavvio); durante una riconnessione automatica lo stato locale
-può restare presente ma non viene riallineato allo snapshot del server.
+via lo snapshot WS `notify_list` (dopo il join e dopo ogni modifica), che
+Cordiale applica per rete sostituendo l'intera lista; la presenza dei nick
+arriva da `presence_snapshot`/`presence_changed`.
 
 **Watchlist per parola chiave** — **non REST**: push WS
 `ch.push("watchlist", {action: "add"|"del"|"list", pattern})` sul
@@ -728,9 +729,11 @@ letto in una spec:
 6. **Schema completo delle entità** — §4 di questo documento è una
    ricostruzione da menzioni sparse, non una trascrizione di uno schema
    pubblicato.
-7. **Stato "away" dei peer** — un componente del client di riferimento
-   suggerisce che esista, ma nessun evento/campo documentato per l'away
-   status di un peer (solo il proprio, via `auto_away_reason_changed`).
+7. **Stato "away" dei peer** — *risolto*: l'evento `peer_away`
+   `{network, peer, message}` sul topic utente porta il 301 RPL_AWAY
+   ricevuto fuori da un WHOIS (dentro un WHOIS resta nel campo
+   `away_message` di `whois_bundle`). Cordiale lo mostra come banner
+   sopra la finestra privata del peer.
 8. **`presence_filter` in `display_prefs`** — non chiaro se collegato
    meccanicamente al join-param `{"presence": false}` (§2) o se siano due
    funzionalità distinte; il documento non li mette mai in relazione
@@ -761,11 +764,10 @@ letto in una spec:
   `GET /boot` + `GET /me` in parallelo → join topic utente WS (che conferma
   di nuovo `protocol_version`).
 - Il parser deve confrontare `protocol_version` con `>=`, mai `==`, e
-  ignorare i campi sconosciuti. Per i kind evento, Cordiale classifica
-  esplicitamente l'inventario upstream attuale: cinque sono gestiti e 51
-  sono ignorati; un kind top-level futuro non ancora censito può però
-  ancora finire nel fallback che mostra `event: payload`, mentre il
-  contratto prescrive di ignorarlo. È un gap di forward-compatibilità noto.
+  ignorare i campi sconosciuti. Per i kind evento, Cordiale gestisce
+  tutti i 56 kind dell'inventario upstream attuale; un kind top-level
+  futuro non ancora censito viene scartato in silenzio
+  (`ClientEventKind::from_payload`), come prescrive il contratto.
 - Una password vuota nel form Connect avvia il tentativo guest osservato
   (`identifier: "guest"`, `password: "guest"`). È una scelta approvata e
   implementata, non una capability garantita dal contratto: il server
