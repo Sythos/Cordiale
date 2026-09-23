@@ -40,6 +40,10 @@ Parked networks collapse their channel and query rows and show an italic
 `/boot` refresh after network removal clears that network and its windows from
 the sidebar and leaves its obsolete realtime subscriptions.
 
+In channel chat, a speaker's nick uses the role prefix currently shown in
+that channel's member list. Changes to the roster or user modes update visible
+lines without rewriting message history; private conversations remain unprefixed.
+
 The known limitations are:
 
 - **Admin panel** implements overview; session listing/disconnect; user

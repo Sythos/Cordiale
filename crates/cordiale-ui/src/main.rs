@@ -2035,6 +2035,7 @@ async fn handle_select_channel(
         == Some(&ChannelWindowState::Joined);
     let can_moderate = is_own_nick_an_op(&members, &identifier);
     let dark_theme = state.theme == Theme::Dark;
+    let casemapping = network_casemapping(state, &network);
 
     let label = format!("{network} — {channel}");
     let ui = ui.clone();
@@ -2048,7 +2049,7 @@ async fn handle_select_channel(
         ui.set_current_query_ready(false);
         ui.set_compose_text(draft.into());
         ui.set_can_moderate_members(can_moderate);
-        let model = chat_lines_model(&lines, dark_theme);
+        let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         let member_rows = members_model(&members, dark_theme);
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
@@ -2508,13 +2509,31 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
         .as_ref()
         .and_then(|key| state.messages.get(key))
         .cloned();
+    let current_roster = state
+        .current_channel
+        .as_ref()
+        .filter(|_| !state.current_query)
+        .map(|key| {
+            (
+                state.members.get(key).cloned().unwrap_or_default(),
+                network_casemapping(state, &key.0),
+            )
+        });
 
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_theme(theme_to_slint(new_theme));
         ui.invoke_apply_color_scheme();
         if let Some(lines) = current_lines {
-            let model = chat_lines_model(&lines, new_theme == Theme::Dark);
+            let model = match current_roster {
+                Some((members, casemapping)) => chat_lines_model_with_roster(
+                    &lines,
+                    new_theme == Theme::Dark,
+                    &members,
+                    casemapping,
+                ),
+                None => chat_lines_model(&lines, new_theme == Theme::Dark),
+            };
             ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         }
     });
@@ -3345,6 +3364,13 @@ async fn handle_frame(
     }
     if payload_kind == "isupport_changed" {
         handle_isupport_changed(state, &frame.topic, &frame.payload);
+        if let Some(key) = state
+            .current_channel
+            .as_ref()
+            .filter(|_| !state.current_query)
+        {
+            push_members_update(state, ui, key);
+        }
         return;
     }
     if payload_kind == "umode_changed" {
@@ -3705,9 +3731,11 @@ async fn handle_frame(
     if state.current_channel.as_ref() == Some(&key) {
         let lines = state.messages[&key].clone();
         let dark_theme = state.theme == Theme::Dark;
+        let members = state.members.get(&key).cloned().unwrap_or_default();
+        let casemapping = network_casemapping(state, &network);
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
-            let model = chat_lines_model(&lines, dark_theme);
+            let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
             ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         });
     }
@@ -4858,17 +4886,24 @@ fn apply_members_seeded(state: &mut WorkerState, payload: &Value) -> Option<(Str
 /// — shared by every member-list mutation path (`members_seeded`,
 /// incremental join/part/nick_change, channel selection).
 fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(String, String)) {
+    if state.current_query {
+        return;
+    }
     let members = state.members.get(key).cloned().unwrap_or_default();
     let can_moderate = state
         .identifier
         .as_deref()
         .is_some_and(|identifier| is_own_nick_an_op(&members, identifier));
     let dark_theme = state.theme == Theme::Dark;
+    let lines = state.messages.get(key).cloned().unwrap_or_default();
+    let casemapping = network_casemapping(state, &key.0);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_can_moderate_members(can_moderate);
         let member_rows = members_model(&members, dark_theme);
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
+        let chat_lines = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
+        ui.set_chat_lines(Rc::new(slint::VecModel::from(chat_lines)).into());
     });
 }
 
@@ -6062,7 +6097,11 @@ fn collapse_if_parked(state: &mut WorkerState, network: &str) -> bool {
 /// `dark_theme`. Maps `cordiale_core::formatting::ColorSegment`'s
 /// abstract `(u8, u8, u8)` into a real `slint::Color` only here — the
 /// core crate stays free of any Slint dependency.
-fn chat_line_from_message(message: &RenderedMessage, dark_theme: bool) -> ChatLine {
+fn chat_line_from_message(
+    message: &RenderedMessage,
+    dark_theme: bool,
+    nick_prefix: &str,
+) -> ChatLine {
     let (nick, nick_color_value) = match &message.nick {
         Some(nick) => {
             let (r, g, b) = nick_color(nick, dark_theme);
@@ -6093,6 +6132,7 @@ fn chat_line_from_message(message: &RenderedMessage, dark_theme: bool) -> ChatLi
         timestamp: message.timestamp.clone().into(),
         timestamp_color: muted_color(dark_theme),
         nick: nick.into(),
+        nick_prefix: nick_prefix.into(),
         nick_color: nick_color_value,
         italic: message.italic,
         segments: Rc::new(slint::VecModel::from(segments)).into(),
@@ -6100,10 +6140,51 @@ fn chat_line_from_message(message: &RenderedMessage, dark_theme: bool) -> ChatLi
 }
 
 fn chat_lines_model(messages: &[RenderedMessage], dark_theme: bool) -> Vec<ChatLine> {
+    chat_lines_model_with_roster(
+        messages,
+        dark_theme,
+        &[],
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+    )
+}
+
+fn member_prefix_for_nick<'a>(
+    members: &'a [MemberEntry],
+    nick: &str,
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> &'a str {
+    members
+        .iter()
+        .find(|(member_nick, _)| casemapping.nick_eq(member_nick, nick))
+        .map(|(_, prefix)| prefix.as_str())
+        .unwrap_or("")
+}
+
+fn chat_lines_model_with_roster(
+    messages: &[RenderedMessage],
+    dark_theme: bool,
+    members: &[MemberEntry],
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> Vec<ChatLine> {
     messages
         .iter()
-        .map(|message| chat_line_from_message(message, dark_theme))
+        .map(|message| {
+            let prefix = message
+                .nick
+                .as_deref()
+                .map(|nick| member_prefix_for_nick(members, nick, casemapping))
+                .unwrap_or("");
+            chat_line_from_message(message, dark_theme, prefix)
+        })
         .collect()
+}
+
+fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isupport::CaseMapping {
+    state
+        .isupport_by_network
+        .get(network)
+        .map(|isupport| isupport.casemapping)
+        .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459)
 }
 
 fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
@@ -13972,6 +14053,33 @@ mod tests {
         assert_eq!(rendered.nick.as_deref(), Some("vjt"));
         assert_eq!(rendered.text, "hello from the real channel");
         assert!(!rendered.italic);
+    }
+
+    #[test]
+    fn chat_nick_prefix_follows_the_current_channel_roster() {
+        use cordiale_core::isupport::CaseMapping;
+
+        let message = render_message(
+            &serde_json::json!({"kind": "privmsg", "sender": "{alice}", "body": "hello"}),
+            None,
+        );
+        let messages = vec![message];
+        let mut members = vec![("[Alice]".to_string(), "@".to_string())];
+        let original_nick = messages[0].nick.clone();
+
+        let op = chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Rfc1459);
+        assert_eq!(op[0].nick.to_string(), "{alice}");
+        assert_eq!(op[0].nick_prefix.to_string(), "@");
+
+        members[0].1 = "+".to_string();
+        let voice = chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Rfc1459);
+        assert_eq!(voice[0].nick_prefix.to_string(), "+");
+        assert_eq!(messages[0].nick, original_nick);
+
+        let ascii = chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Ascii);
+        assert_eq!(ascii[0].nick_prefix.to_string(), "");
+        let query = chat_lines_model(&messages, false);
+        assert_eq!(query[0].nick_prefix.to_string(), "");
     }
 
     #[test]
