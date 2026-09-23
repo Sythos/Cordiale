@@ -16175,7 +16175,10 @@ mod tests {
         assert!(state.channel_entries.is_empty());
         assert!(state.query_windows.is_empty());
         assert!(state.query_ready.is_empty());
-        assert!(state.joined_topics.is_empty());
+        assert_eq!(
+            state.joined_topics,
+            std::collections::HashSet::from([channel_topic("sythos", "libera", "sythos")])
+        );
         let groups = network_groups_data(
             &state.channel_entries,
             &state.query_windows,
