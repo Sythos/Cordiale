@@ -4,5 +4,10 @@
 # rest of the GUI dependency stack) preinstalled for both host and target,
 # avoiding the flaky multiarch apt setup on GitHub-hosted runners — see
 # https://github.com/slint-ui/slint/discussions/1165.
+#
+# The image only publishes a moving `latest` tag, so it is pinned by digest
+# (the multi-arch index `latest` pointed to on 2026-09-23) to keep release
+# builds reproducible. To update it, read the current digest of `latest`
+# from ghcr.io and replace the value below.
 [target.aarch64-unknown-linux-gnu]
-image = "ghcr.io/slint-ui/slint/aarch64-unknown-linux-gnu"
+image = "ghcr.io/slint-ui/slint/aarch64-unknown-linux-gnu@sha256:316c44fda5a9a78d680a4439162cf5c131b4416d21a94d1e05241910d3a49139"
