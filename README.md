@@ -70,7 +70,7 @@ known limitations are:
   stale prefix; broader validation across server configurations is still
   needed.
 - **Realtime event coverage (0.1.5 ALPHA (WIP))**: the current Grappa protocol
-  lists 56 top-level event kinds. Cordiale handles 41 of them:
+  lists 56 top-level event kinds. Cordiale handles 42 of them:
   `links_bundle`,
   `members_seeded`, `names_reply`, `topic_changed`, `channel_modes_changed`,
   `query_windows_list`, `own_nick_changed`, `read_cursor_set`,
@@ -84,7 +84,8 @@ known limitations are:
   `whois_avatar_ready`, `whowas_bundle`, `banlist_bundle`,
   `auto_away_debounce_changed`, `quit_part_reason_changed`,
   `auto_away_reason_changed`, `lusers_bundle`, `invite_ack`,
-  `directory_progress`, and `message`; the remaining 15 kinds are
+  `directory_progress`, `directory_complete`, and `message`; the remaining
+  14 kinds are
   deliberately ignored for this alpha
   release. They won't appear as fake `event: payload` chat messages. Query
   snapshots replace the full query-window map, map network IDs to native
@@ -225,8 +226,9 @@ known limitations are:
   `invite_ack` arrives. `/list [search]` opens a read-only channel directory
   for the active network, paged from Grappa's last `LIST` snapshot
   (`GET /networks/:slug/directory`, sort by users or name, search, load
-  more); Refresh asks for a new capture and `directory_progress` refetches
-  the first page while it streams.
+  more); Refresh asks for a new capture, `directory_progress` refetches the
+  first page while it streams and `directory_complete` once the new
+  snapshot has replaced the old one.
   Settings > General shows a read-only copy of preferences Grappa stores and
   applies itself, updated live from their `*_changed` pushes and hidden until
   announced: `auto_away_debounce_changed` keeps `null` (server default) and
@@ -244,7 +246,7 @@ known limitations are:
     `presence_error`, `presence_snapshot`, `notify_list`,
     `mentions_bundle`.
   - **Transfers and other asynchronous work**: `dcc_offer`,
-    `dcc_offer_resolved`, `directory_complete`,
+    `dcc_offer_resolved`,
     `directory_failed`, `bundle_hash`.
   - Unknown future event kinds are also silently dropped, as Grappa's
     protocol requires. Within message envelopes, `topic`, `kick`, and

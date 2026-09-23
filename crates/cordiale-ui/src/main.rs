@@ -2735,7 +2735,6 @@ const IGNORED_KINDS: &[&str] = &[
     "dcc_offer_resolved",
     "mentions_bundle",
     "peer_away",
-    "directory_complete",
     "directory_failed",
     "presence_changed",
     "presence_error",
@@ -2959,6 +2958,10 @@ async fn handle_frame(
     }
     if payload_kind == "directory_progress" {
         handle_directory_progress(state, ui, &frame.topic, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "directory_complete" {
+        handle_directory_complete(state, ui, &frame.topic, &frame.payload).await;
         return;
     }
     if payload_kind == "invite_ack" {
@@ -7438,21 +7441,24 @@ fn format_directory_captured_at(raw: &str) -> String {
         .unwrap_or_else(|_| raw.to_string())
 }
 
-/// Validates `directory_progress` on the exact user topic: `network` a
-/// non-empty slug and `count` a non-negative integer (checked, not used —
-/// the rows always come from the REST page).
-fn parse_directory_progress(
+/// Validates `directory_progress` (`count`) or `directory_complete`
+/// (`total`) on the exact user topic: `network` a non-empty slug and the
+/// counter a non-negative integer (checked, not used — the rows always come
+/// from the REST page).
+fn parse_directory_count_signal(
     payload: &Value,
     carrier_topic: &str,
     identifier: &str,
+    kind: &str,
+    counter: &str,
 ) -> Option<String> {
     if !is_own_user_topic(carrier_topic, identifier) {
         return None;
     }
-    if payload.get("kind")?.as_str()? != "directory_progress" {
+    if payload.get("kind")?.as_str()? != kind {
         return None;
     }
-    payload.get("count")?.as_u64()?;
+    payload.get(counter)?.as_u64()?;
     let network = payload.get("network")?.as_str()?;
     if network.trim().is_empty() {
         return None;
@@ -7471,8 +7477,38 @@ async fn handle_directory_progress(
     let Some(identifier) = state.identifier.as_deref() else {
         return;
     };
-    let Some(network) = parse_directory_progress(payload, carrier_topic, identifier) else {
+    let Some(network) = parse_directory_count_signal(
+        payload,
+        carrier_topic,
+        identifier,
+        "directory_progress",
+        "count",
+    ) else {
         persistence::log_line("directory_progress rejected: invalid carrier or payload");
+        return;
+    };
+    reload_directory_after_push(state, ui, &network).await;
+}
+
+/// The capture finished (323 RPL_LISTEND) and the server replaced its
+/// snapshot: refetch the first page, replacing the loaded rows.
+async fn handle_directory_complete(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(identifier) = state.identifier.as_deref() else {
+        return;
+    };
+    let Some(network) = parse_directory_count_signal(
+        payload,
+        carrier_topic,
+        identifier,
+        "directory_complete",
+        "total",
+    ) else {
+        persistence::log_line("directory_complete rejected: invalid carrier or payload");
         return;
     };
     reload_directory_after_push(state, ui, &network).await;
@@ -12444,7 +12480,7 @@ mod tests {
 
     #[test]
     fn ignored_kinds_covers_the_ones_this_session_actually_saw() {
-        assert_eq!(IGNORED_KINDS.len(), 15);
+        assert_eq!(IGNORED_KINDS.len(), 14);
         // The kinds caught leaking as raw JSON in chat before being fixed
         // this session — a regression here means one of them is no longer
         // ignored and would start dumping raw JSON again.
@@ -12496,6 +12532,7 @@ mod tests {
         assert!(!IGNORED_KINDS.contains(&"lusers_bundle"));
         assert!(!IGNORED_KINDS.contains(&"invite_ack"));
         assert!(!IGNORED_KINDS.contains(&"directory_progress"));
+        assert!(!IGNORED_KINDS.contains(&"directory_complete"));
         // "parted" is confirmed to never actually be sent by the server
         // — listing it here would be harmless but wrong documentation,
         // so it must stay absent.
@@ -13346,12 +13383,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_directory_progress_checks_count_and_network() {
+    fn parse_directory_count_signal_checks_counter_and_network() {
         let topic = "grappa:user:vjt";
-        let payload =
-            serde_json::json!({"kind": "directory_progress", "network": "libera", "count": 250});
+        let progress = |payload: &Value| {
+            parse_directory_count_signal(payload, topic, "vjt", "directory_progress", "count")
+        };
+        let complete = |payload: &Value| {
+            parse_directory_count_signal(payload, topic, "vjt", "directory_complete", "total")
+        };
         assert_eq!(
-            parse_directory_progress(&payload, topic, "vjt"),
+            progress(
+                &serde_json::json!({"kind": "directory_progress", "network": "libera", "count": 250})
+            ),
+            Some("libera".to_string())
+        );
+        assert_eq!(
+            complete(
+                &serde_json::json!({"kind": "directory_complete", "network": "libera", "total": 0})
+            ),
             Some("libera".to_string())
         );
         for invalid in [
@@ -13360,14 +13409,23 @@ mod tests {
             serde_json::json!({"kind": "directory_progress", "network": "", "count": 1}),
             serde_json::json!({"kind": "directory_complete", "network": "libera", "count": 1}),
         ] {
-            assert_eq!(
-                parse_directory_progress(&invalid, topic, "vjt"),
-                None,
-                "{invalid}"
-            );
+            assert_eq!(progress(&invalid), None, "{invalid}");
         }
+        // `directory_complete` carries `total`, not `count`.
         assert_eq!(
-            parse_directory_progress(&payload, "grappa:user:other", "vjt"),
+            complete(
+                &serde_json::json!({"kind": "directory_complete", "network": "libera", "count": 1})
+            ),
+            None
+        );
+        assert_eq!(
+            parse_directory_count_signal(
+                &serde_json::json!({"kind": "directory_progress", "network": "libera", "count": 1}),
+                "grappa:user:other",
+                "vjt",
+                "directory_progress",
+                "count"
+            ),
             None
         );
     }
