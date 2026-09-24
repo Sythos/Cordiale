@@ -64,8 +64,9 @@ Cordiale still has these user-visible or behavioral gaps:
 - **Settings and watch lists:** the identity editor reads back the nick in
   use on each network, but Grappa no longer reports ident and realname, so
   those start blank; the server's upload limits are shown read-only. Settings >
-  Notifications covers the main push switches, not per-channel lists or
-  mutes.
+  Notifications edits the push switches, the per-channel and per-nick lists,
+  muted conversations (muted from the Actions menu, for an hour, eight hours
+  or for good) and the sound other devices play, also set with `/beep`.
 - **Uploads and attachments:** the paperclip uploads a picked file through
   Grappa (`POST /api/uploads`) and posts its link with the category emoji,
   as Cicchetto does, after checking the file type and the advertised size
@@ -77,7 +78,7 @@ Cordiale still has these user-visible or behavioral gaps:
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb`, and the services shortcuts), but not `/np`, `/beep`, or
+  expansion, `/kb`, and the services shortcuts), but not `/np` or
   the user-mode view of a bare `/umode` (a bare `/topic` or `/mode` shows the
   channel's topic or modes in the status bar).
 - **Chat and roster edge cases:** a message with multiple differently colored
