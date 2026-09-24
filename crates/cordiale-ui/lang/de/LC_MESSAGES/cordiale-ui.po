@@ -1165,6 +1165,30 @@ msgid "That alias expands into too many others: {}"
 msgstr "Dieser Alias wird in zu viele andere erweitert: {}"
 
 msgctxt "AppWindow"
+msgid "The server refused that command ({})."
+msgstr "Der Server hat diesen Befehl abgelehnt ({})."
+
+msgctxt "LinksGraphWindow"
+msgid "Zoom out"
+msgstr "Verkleinern"
+
+msgctxt "LinksGraphWindow"
+msgid "Zoom in"
+msgstr "Vergrößern"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset"
+msgstr "Zurücksetzen"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset zoom"
+msgstr "Zoom zurücksetzen"
+
+msgctxt "AppWindow"
+msgid "{}'s host isn't known yet, so they were only kicked; /whois them first to ban too."
+msgstr "Der Host von {} ist noch nicht bekannt, daher wurde nur gekickt; zuerst /whois ausführen, um auch zu bannen."
+
+msgctxt "AppWindow"
 msgid "Done."
 msgstr "Erledigt."
 

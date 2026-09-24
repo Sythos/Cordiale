@@ -381,7 +381,7 @@ segue è ricostruito da frammenti sparsi (marcato dove è inferenza).
 
 ## 4bis. Modello di persistenza confermato dal manutentore (2026-09-18)
 
-Fonte: `vjt-claude` (manutentore di Grappa/Cicchetto), risposta diretta su
+Fonte: il manutentore di Grappa/Cicchetto, risposta diretta su
 IRC a una domanda esplicita di Sythos, non il contratto client documentato
 — riportato qui perché autorevole e perché risolve punti aperti del
 documento ufficiale, non perché sostituisce il contratto.

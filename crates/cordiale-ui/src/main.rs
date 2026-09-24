@@ -689,6 +689,7 @@ fn main() -> Result<(), slint::PlatformError> {
         window.set_network_label(ui.get_links_network_label());
         window.set_edges_commands(ui.get_links_graph_edges_commands());
         window.set_nodes(ui.get_links_graph_nodes());
+        window.set_canvas_size(ui.get_links_graph_canvas_size());
         let _ = window.show();
     });
 
@@ -1439,6 +1440,8 @@ struct WorkerState {
     admin_events: Vec<String>,
     /// Last `GET /admin/settings`, to tell whether addressing was edited.
     admin_settings: Option<Value>,
+    /// `/kb` requests waiting for their `resolve_userhost` reply, by ref.
+    pending_kickbans: HashMap<String, PendingKickBan>,
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
     /// transitions.
     window_states: HashMap<(String, String), ChannelWindowState>,
@@ -1641,6 +1644,7 @@ impl WorkerState {
             joined_topics: std::collections::HashSet::new(),
             admin_events: Vec::new(),
             admin_settings: None,
+            pending_kickbans: HashMap::new(),
             window_states: HashMap::new(),
             window_failures: HashMap::new(),
             window_kicks: HashMap::new(),
@@ -3519,7 +3523,12 @@ async fn run_slash_command(
             );
             Ok(())
         }
+        SlashCommand::KickBan { nick, reason } if in_channel => {
+            start_kickban(state, &network, channel.clone(), nick, reason);
+            Ok(())
+        }
         SlashCommand::NickModes { .. }
+        | SlashCommand::KickBan { .. }
         | SlashCommand::Kick { .. }
         | SlashCommand::Ban(_)
         | SlashCommand::Unban(_) => {
@@ -3711,6 +3720,91 @@ fn joined_channels(state: &WorkerState, network: &str) -> Vec<String> {
         })
         .map(|(_, channel, _)| channel.clone())
         .collect()
+}
+
+/// A `/kb` waiting for the target's host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingKickBan {
+    network: String,
+    channel: String,
+    nick: String,
+    reason: String,
+}
+
+/// Asks Grappa for the target's `user@host` (from its userhost cache); the
+/// ban and kick follow in `finish_kickban` when the reply arrives.
+fn start_kickban(
+    state: &mut WorkerState,
+    network: &str,
+    channel: String,
+    nick: String,
+    reason: String,
+) {
+    let (Some(session), Some(identifier), Some(&network_id)) = (
+        &state.session,
+        &state.identifier,
+        state.network_ids.get(network),
+    ) else {
+        return;
+    };
+    let message_ref = session.send_tracked_command(
+        format!("grappa:user:{identifier}"),
+        "resolve_userhost",
+        serde_json::json!({ "network_id": network_id, "nick": nick }),
+    );
+    state.pending_kickbans.insert(
+        message_ref,
+        PendingKickBan {
+            network: network.to_string(),
+            channel,
+            nick,
+            reason,
+        },
+    );
+}
+
+/// The `*!*@host` ban mask from a `resolve_userhost` reply, if it has one.
+fn kickban_mask(reply: &Value) -> Option<String> {
+    if reply.get("status").and_then(Value::as_str) != Some("ok") {
+        return None;
+    }
+    let host = reply.get("response")?.get("host")?.as_str()?;
+    (!host.is_empty()).then(|| format!("*!*@{host}"))
+}
+
+/// Bans by host when it was known, then kicks regardless, as Cicchetto
+/// does; an unknown host (`not_cached`) is reported, not fatal.
+fn finish_kickban(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    pending: PendingKickBan,
+    reply: &Value,
+) {
+    match kickban_mask(reply) {
+        Some(mask) => send_user_verb(
+            state,
+            &pending.network,
+            "ban",
+            serde_json::json!({ "channel": pending.channel, "mask": mask }),
+        ),
+        None => {
+            let nick = pending.nick.clone();
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(nick.into());
+                ui.set_status_kind("kickban-host-unknown".into());
+            });
+        }
+    }
+    send_user_verb(
+        state,
+        &pending.network,
+        "kick",
+        serde_json::json!({
+            "channel": pending.channel,
+            "nick": pending.nick,
+            "reason": pending.reason,
+        }),
+    );
 }
 
 /// Posts to `/networks/:slug/channels/:target/messages`.
@@ -5107,6 +5201,18 @@ async fn handle_member_ctcp(
     }
 }
 
+/// Center of the square `/links` canvas: large enough for the outermost
+/// ring plus room for its labels, and never smaller than the default view.
+fn links_canvas_center(nodes: &[cordiale_core::links::LinksGraphNode]) -> f64 {
+    const MIN_CENTER: f64 = 380.0;
+    const LABEL_ROOM: f64 = 160.0;
+    let reach = nodes
+        .iter()
+        .map(|node| node.x.abs().max(node.y.abs()))
+        .fold(0.0, f64::max);
+    (reach + LABEL_ROOM).max(MIN_CENTER)
+}
+
 /// Whether a known event kind is rendered as a chat line. Only `message`
 /// envelopes are: every other kind of the protocol's closed set has its own
 /// handler (or explicit no-op) in `handle_frame`, and any kind that reaches
@@ -5224,6 +5330,29 @@ async fn handle_query_join_reply(
 /// (`renders_as_chat_line`). A kind unknown to `ClientEventKind` is dropped
 /// silently, per `docs/CLIENT_PROTOCOL.md`'s policy on unrecognized kinds
 /// (§4).
+/// The error token of a refused command: a `phx_reply` with status
+/// `error` on the user topic that isn't the reply to its join. Commands are
+/// fire-and-forget pushes, so this is how a rejected `/recover`, `/kick`,
+/// `/mode` and the like gets noticed at all.
+fn command_error_reason(
+    frame: &cordiale_core::phoenix::PhoenixMessage,
+    identifier: &str,
+) -> Option<String> {
+    if frame.topic != format!("grappa:user:{identifier}")
+        || frame.payload.get("status").and_then(Value::as_str) != Some("error")
+        || frame.message_ref.is_none()
+        || frame.message_ref == frame.join_ref
+    {
+        return None;
+    }
+    let response = frame.payload.get("response");
+    let reason = ["error", "reason"]
+        .iter()
+        .find_map(|key| response?.get(*key)?.as_str())
+        .unwrap_or("error");
+    Some(reason.to_string())
+}
+
 async fn handle_frame(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -5249,6 +5378,25 @@ async fn handle_frame(
             ));
         }
         handle_query_join_reply(state, ui, &frame.topic, status).await;
+        if let Some(pending) = frame
+            .message_ref
+            .as_ref()
+            .and_then(|message_ref| state.pending_kickbans.remove(message_ref))
+        {
+            finish_kickban(state, ui, pending, &frame.payload);
+            return;
+        }
+        if let Some(reason) = state
+            .identifier
+            .as_deref()
+            .and_then(|identifier| command_error_reason(&frame, identifier))
+        {
+            persistence::log_line(&format!("command refused: {reason}"));
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(reason.into());
+                ui.set_status_kind("command-refused".into());
+            });
+        }
         return;
     }
 
@@ -7197,29 +7345,31 @@ fn handle_links_bundle(ui: &slint::Weak<AppWindow>, payload: &Value) {
     // Radial layout for the optional graph window ("Show graph" on the
     // list screen) — computed here too so it's ready the moment the user
     // asks for it, rather than recomputed on click.
-    const CANVAS_CENTER: f64 = 380.0;
     const RING_GAP: f64 = 64.0;
     let layout = cordiale_core::links::radial_layout(&tree, RING_GAP);
+    let canvas_center = links_canvas_center(&layout.nodes);
     let edges_commands = cordiale_core::links::links_graph_edges_svg_path(
         &layout.edges,
-        CANVAS_CENTER,
-        CANVAS_CENTER,
+        canvas_center,
+        canvas_center,
     );
     let graph_nodes: Vec<LinksGraphNode> = layout
         .nodes
         .into_iter()
         .map(|node| LinksGraphNode {
             server: node.server.into(),
-            x: (node.x + CANVAS_CENTER).round() as i32,
-            y: (node.y + CANVAS_CENTER).round() as i32,
+            x: (node.x + canvas_center).round() as i32,
+            y: (node.y + canvas_center).round() as i32,
         })
         .collect();
+    let canvas_size = (canvas_center * 2.0).round() as i32;
 
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_links_network_label(network_label.into());
         ui.set_links_rows(Rc::new(slint::VecModel::from(rows)).into());
         ui.set_links_graph_edges_commands(edges_commands.into());
+        ui.set_links_graph_canvas_size(canvas_size);
         ui.set_links_graph_nodes(Rc::new(slint::VecModel::from(graph_nodes)).into());
         ui.set_screen("links".into());
     });
@@ -8193,6 +8343,11 @@ fn push_window_note(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 }
 
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let unread_badge = i32::try_from(state.badge_count).unwrap_or(i32::MAX);
+    {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.set_unread_badge(unread_badge));
+    }
     push_window_note(state, ui);
     let mut data = network_groups_data(
         &state.channel_entries,
@@ -16858,6 +17013,55 @@ mod tests {
     }
 
     #[test]
+    fn only_refused_user_topic_commands_are_reported() {
+        let frame = |topic: &str, message_ref: Option<&str>, payload: Value| {
+            cordiale_core::phoenix::PhoenixMessage {
+                join_ref: Some("1".to_string()),
+                message_ref: message_ref.map(str::to_string),
+                topic: topic.to_string(),
+                event: "phx_reply".to_string(),
+                payload,
+            }
+        };
+        let refused = serde_json::json!({"status": "error", "response": {"error": "no_session"}});
+        assert_eq!(
+            command_error_reason(&frame("grappa:user:vjt", Some("7"), refused.clone()), "vjt"),
+            Some("no_session".to_string())
+        );
+        // The join reply, other topics and successes are not command errors.
+        assert_eq!(
+            command_error_reason(&frame("grappa:user:vjt", Some("1"), refused.clone()), "vjt"),
+            None
+        );
+        assert_eq!(
+            command_error_reason(&frame("grappa:user:other", Some("7"), refused), "vjt"),
+            None
+        );
+        assert_eq!(
+            command_error_reason(
+                &frame(
+                    "grappa:user:vjt",
+                    Some("7"),
+                    serde_json::json!({"status": "ok", "response": {}})
+                ),
+                "vjt"
+            ),
+            None
+        );
+        assert_eq!(
+            command_error_reason(
+                &frame(
+                    "grappa:user:vjt",
+                    Some("8"),
+                    serde_json::json!({"status": "error"})
+                ),
+                "vjt"
+            ),
+            Some("error".to_string())
+        );
+    }
+
+    #[test]
     fn fan_out_reaches_only_joined_channels_of_the_network() {
         let mut state = WorkerState::new();
         state.channel_entries = vec![
@@ -16915,6 +17119,24 @@ mod tests {
         );
         form.sizes[0] = "-1".to_string();
         assert!(admin_settings_body(&form, Some(&loaded)).is_none());
+    }
+
+    #[test]
+    fn kickban_mask_needs_a_resolved_host() {
+        assert_eq!(
+            kickban_mask(&serde_json::json!({
+                "status": "ok",
+                "response": {"user": "~u", "host": "spam.example"}
+            })),
+            Some("*!*@spam.example".to_string())
+        );
+        assert_eq!(
+            kickban_mask(&serde_json::json!({
+                "status": "error",
+                "response": {"error": "not_cached"}
+            })),
+            None
+        );
     }
 
     #[test]
