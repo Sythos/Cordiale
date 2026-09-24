@@ -2,6 +2,9 @@
 //! (`cicchetto/src/lib/slashCommands.ts`). Views Cordiale answers locally
 //! (`/links`, `/list`, `/archive`, ...) and the commands answered on the
 //! reply screen (`/whois`, `/who`, ...) are recognized before this parser.
+//! User aliases are expanded first, by [`expand_aliases`].
+
+use std::collections::HashMap;
 
 /// One parsed slash command. `None` from [`parse`] means the line isn't a
 /// command at all and goes out as a plain message.
@@ -98,6 +101,13 @@ pub enum SlashCommand {
     Ignore { add: bool, mask: String },
     /// `/notify <nick...>`.
     Notify(Vec<String>),
+    /// `/alias <name> <expansion>`: defines or replaces a user alias.
+    AliasDefine { name: String, expansion: String },
+    /// `/unalias <name>`.
+    Unalias(String),
+    /// `/ame <text>` (an action) or `/amsg <text>` in every joined channel
+    /// of the network.
+    FanOut { action: bool, text: String },
     /// A known command with missing or malformed arguments; carries its
     /// syntax for the hint.
     Usage(&'static str),
@@ -177,7 +187,7 @@ fn service_nick(verb: &str) -> Option<&'static str> {
         "ns" => "NickServ",
         "ms" => "MemoServ",
         "os" => "OperServ",
-        "hs" => "HostServ",
+        "hs" => "HelpServ",
         "rs" => "RootServ",
         _ => return None,
     })
@@ -419,6 +429,31 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
                 Notify(nicks)
             }
         }
+        "alias" => {
+            let (name, expansion) = split_word(args);
+            let name = name.trim_start_matches('/').to_ascii_lowercase();
+            let expansion = expansion.trim_start_matches('/');
+            if name.is_empty() || expansion.is_empty() {
+                Usage("/alias <name> <expansion>")
+            } else {
+                AliasDefine {
+                    name,
+                    expansion: expansion.to_string(),
+                }
+            }
+        }
+        "unalias" => match words(args).as_slice() {
+            [name] => Unalias(name.trim_start_matches('/').to_ascii_lowercase()),
+            _ => Usage("/unalias <name>"),
+        },
+        "ame" | "amsg" => match non_empty(args) {
+            Some(text) => FanOut {
+                action: verb == "ame",
+                text,
+            },
+            None if verb == "ame" => Usage("/ame <text>"),
+            None => Usage("/amsg <text>"),
+        },
         other => match service_nick(other) {
             Some(service) if !args.is_empty() => Msg {
                 target: service.to_string(),
@@ -429,6 +464,113 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
         },
     };
     Some(command)
+}
+
+/// How many aliases may expand into one another before the chain is
+/// refused, as in Cicchetto.
+pub const MAX_ALIAS_DEPTH: usize = 5;
+
+/// Expands the user's aliases (`name -> expansion`, names without the
+/// slash) at the head of a slash command, the way Cicchetto does before
+/// dispatching: `$1`..`$9` take one argument (missing ones are empty), `$N-`
+/// the Nth argument and the rest joined by single spaces, `$*` the raw
+/// argument text, and an expansion without placeholders gets the arguments
+/// appended. `/alias` and `/unalias` are never expanded. The short forms
+/// `/w` and `/n` become `/whois` and `/names`. Returns the line to parse, or
+/// the alias chain when it runs deeper than [`MAX_ALIAS_DEPTH`].
+pub fn expand_aliases(input: &str, aliases: &HashMap<String, String>) -> Result<String, String> {
+    let line = input.trim();
+    let Some(stripped) = line.strip_prefix('/') else {
+        return Ok(input.to_string());
+    };
+    if stripped.starts_with('/') {
+        return Ok(input.to_string());
+    }
+    let (first, first_rest) = split_word(stripped);
+    let (mut verb, mut rest) = (first.to_string(), first_rest.to_string());
+    let mut chain = vec![verb.to_ascii_lowercase()];
+    let mut expanded_any = false;
+    for depth in 0.. {
+        let lower = verb.to_ascii_lowercase();
+        if lower == "alias" || lower == "unalias" {
+            break;
+        }
+        let Some(template) = aliases.iter().find_map(|(name, expansion)| {
+            name.trim_start_matches('/')
+                .eq_ignore_ascii_case(&lower)
+                .then_some(expansion)
+        }) else {
+            break;
+        };
+        if depth >= MAX_ALIAS_DEPTH {
+            return Err(chain.join(" → "));
+        }
+        let expanded = substitute_alias(template.trim_start_matches('/'), &rest);
+        let (next_verb, next_rest) = split_word(expanded.trim());
+        verb = next_verb.to_string();
+        rest = next_rest.to_string();
+        chain.push(verb.to_ascii_lowercase());
+        expanded_any = true;
+    }
+    let short_form = match verb.to_ascii_lowercase().as_str() {
+        "w" => Some("whois"),
+        "n" => Some("names"),
+        _ => None,
+    };
+    if !expanded_any && short_form.is_none() {
+        return Ok(input.to_string());
+    }
+    let verb = short_form.map(str::to_string).unwrap_or(verb);
+    Ok(if rest.is_empty() {
+        format!("/{verb}")
+    } else {
+        format!("/{verb} {rest}")
+    })
+}
+
+/// Fills an alias template from the arguments typed after it.
+fn substitute_alias(template: &str, rest: &str) -> String {
+    let args: Vec<&str> = rest.split_whitespace().collect();
+    let bytes = template.as_bytes();
+    let mut out = String::new();
+    let mut substituted = false;
+    let mut index = 0;
+    while index < template.len() {
+        if bytes[index] == b'$' {
+            match bytes.get(index + 1).copied() {
+                Some(b'*') => {
+                    out.push_str(rest);
+                    substituted = true;
+                    index += 2;
+                    continue;
+                }
+                Some(digit @ b'1'..=b'9') => {
+                    let position = usize::from(digit - b'1');
+                    if bytes.get(index + 2) == Some(&b'-') {
+                        let tail = args.get(position..).unwrap_or_default();
+                        out.push_str(&tail.join(" "));
+                        index += 3;
+                    } else {
+                        out.push_str(args.get(position).copied().unwrap_or_default());
+                        index += 2;
+                    }
+                    substituted = true;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        let character = template[index..].chars().next().unwrap_or_default();
+        out.push(character);
+        index += character.len_utf8();
+    }
+    if substituted {
+        out
+    } else if rest.is_empty() {
+        template.to_string()
+    } else {
+        format!("{template} {rest}")
+    }
 }
 
 #[cfg(test)]
@@ -642,6 +784,65 @@ mod tests {
             })
         );
         assert!(matches!(parse("/oper admin"), Some(Usage(_))));
+    }
+
+    #[test]
+    fn aliases_expand_like_cicchetto() {
+        let aliases: HashMap<String, String> = [
+            ("k", "kick $1 $2-"),
+            ("wii", "/whois $1 $1"),
+            ("hi", "msg $1 hello   there"),
+            ("say", "me says $*"),
+            ("j2", "join"),
+            ("loop", "loop"),
+        ]
+        .into_iter()
+        .map(|(name, expansion)| (name.to_string(), expansion.to_string()))
+        .collect();
+        let expand = |line: &str| expand_aliases(line, &aliases);
+        assert_eq!(expand("hello"), Ok("hello".to_string()));
+        assert_eq!(expand("//k x"), Ok("//k x".to_string()));
+        assert_eq!(expand("/me waves"), Ok("/me waves".to_string()));
+        assert_eq!(
+            expand("/k troll go  away"),
+            Ok("/kick troll go away".to_string())
+        );
+        assert_eq!(expand("/WII bob"), Ok("/whois bob bob".to_string()));
+        assert_eq!(expand("/k"), Ok("/kick".to_string()));
+        assert_eq!(expand("/say a  b"), Ok("/me says a  b".to_string()));
+        assert_eq!(expand("/j2 #rust"), Ok("/join #rust".to_string()));
+        assert_eq!(expand("/w alice"), Ok("/whois alice".to_string()));
+        assert_eq!(expand("/n"), Ok("/names".to_string()));
+        assert_eq!(expand("/alias k whois"), Ok("/alias k whois".to_string()));
+        assert!(expand("/loop").is_err());
+    }
+
+    #[test]
+    fn alias_and_fan_out_verbs() {
+        assert_eq!(
+            parse("/alias /K kick $1"),
+            Some(AliasDefine {
+                name: "k".to_string(),
+                expansion: "kick $1".to_string()
+            })
+        );
+        assert!(matches!(parse("/alias k"), Some(Usage(_))));
+        assert_eq!(parse("/unalias K"), Some(Unalias("k".to_string())));
+        assert_eq!(
+            parse("/ame waves"),
+            Some(FanOut {
+                action: true,
+                text: "waves".to_string()
+            })
+        );
+        assert!(matches!(parse("/amsg"), Some(Usage(_))));
+        assert_eq!(
+            parse("/hs help"),
+            Some(Msg {
+                target: "HelpServ".to_string(),
+                text: "help".to_string()
+            })
+        );
     }
 
     #[test]
