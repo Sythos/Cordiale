@@ -1371,3 +1371,47 @@ msgstr "Aún no se conocen modos para {}."
 msgctxt "AppWindow"
 msgid "Avatar of {}"
 msgstr "Avatar de {}"
+
+msgctxt "AppWindow"
+msgid "A credential needs an account, a network and a nickname."
+msgstr "Una credencial necesita una cuenta, una red y un apodo."
+
+msgctxt "AppWindow"
+msgid "Credentials"
+msgstr "Credenciales"
+
+msgctxt "AppWindow"
+msgid "Vhosts"
+msgstr "Vhosts"
+
+msgctxt "AppWindow"
+msgid "Bind"
+msgstr "Vincular"
+
+msgctxt "AppWindow"
+msgid "Unbind"
+msgstr "Desvincular"
+
+msgctxt "AppWindow"
+msgid "In pool"
+msgstr "En el pool"
+
+msgctxt "AppWindow"
+msgid "Add vhost"
+msgstr "Añadir vhost"
+
+msgctxt "AppWindow"
+msgid "For everyone"
+msgstr "Para todos"
+
+msgctxt "AppWindow"
+msgid "Delete vhost {}"
+msgstr "Eliminar el vhost {}"
+
+msgctxt "AppWindow"
+msgid "Grant"
+msgstr "Conceder"
+
+msgctxt "AppWindow"
+msgid "Revoke grant {}"
+msgstr "Revocar la concesión {}"

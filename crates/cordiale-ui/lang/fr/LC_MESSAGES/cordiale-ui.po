@@ -1371,3 +1371,47 @@ msgstr "Aucun mode encore connu pour {}."
 msgctxt "AppWindow"
 msgid "Avatar of {}"
 msgstr "Avatar de {}"
+
+msgctxt "AppWindow"
+msgid "A credential needs an account, a network and a nickname."
+msgstr "Un identifiant doit avoir un compte, un réseau et un pseudo."
+
+msgctxt "AppWindow"
+msgid "Credentials"
+msgstr "Identifiants"
+
+msgctxt "AppWindow"
+msgid "Vhosts"
+msgstr "Vhosts"
+
+msgctxt "AppWindow"
+msgid "Bind"
+msgstr "Lier"
+
+msgctxt "AppWindow"
+msgid "Unbind"
+msgstr "Délier"
+
+msgctxt "AppWindow"
+msgid "In pool"
+msgstr "Dans le pool"
+
+msgctxt "AppWindow"
+msgid "Add vhost"
+msgstr "Ajouter un vhost"
+
+msgctxt "AppWindow"
+msgid "For everyone"
+msgstr "Pour tous"
+
+msgctxt "AppWindow"
+msgid "Delete vhost {}"
+msgstr "Supprimer le vhost {}"
+
+msgctxt "AppWindow"
+msgid "Grant"
+msgstr "Accorder"
+
+msgctxt "AppWindow"
+msgid "Revoke grant {}"
+msgstr "Révoquer l'attribution {}"
