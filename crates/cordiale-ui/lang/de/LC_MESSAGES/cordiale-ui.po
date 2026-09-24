@@ -1255,3 +1255,11 @@ msgstr "Netzwerk {} bearbeiten"
 msgctxt "AppWindow"
 msgid "Delete network {}"
 msgstr "Netzwerk {} löschen"
+
+msgctxt "AppWindow"
+msgid "Events"
+msgstr "Ereignisse"
+
+msgctxt "AppWindow"
+msgid "No admin events yet. They arrive live while this panel is open."
+msgstr "Noch keine Admin-Ereignisse. Sie kommen live, solange dieses Panel offen ist."

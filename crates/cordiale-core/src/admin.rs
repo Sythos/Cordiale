@@ -291,9 +291,63 @@ pub fn admin_session_log_line(entry: &Value) -> String {
     }
 }
 
+/// Phoenix topic of Grappa's live admin feed (admins with a full web
+/// session only): a `snapshot` of recent events on join, then one push per
+/// event, `session_log_event`s and periodic `overview` pushes.
+pub const ADMIN_EVENTS_TOPIC: &str = "grappa:admin:events";
+
+/// One line for an admin audit event (`user_created`, `circuit_open`,
+/// `network_caps_updated`, ...): time, kind, what it's about and who did it.
+pub fn admin_event_line(entry: &Value) -> String {
+    let text = |key: &str| entry.get(key).and_then(Value::as_str);
+    let at = text("at").unwrap_or("");
+    let kind = text("kind").unwrap_or("?");
+    let subject = [
+        "user_name",
+        "network_slug",
+        "visitor_nick",
+        "source_ip",
+        "subject_kind",
+    ]
+    .iter()
+    .find_map(|key| text(key))
+    .unwrap_or("");
+    let mut line = format!("{at} · {kind}");
+    if !subject.is_empty() {
+        line.push_str(" · ");
+        line.push_str(subject);
+    }
+    if let (Some(host), Some(port)) = (text("host"), entry.get("port").and_then(Value::as_i64)) {
+        line.push_str(&format!(" · {host}:{port}"));
+    }
+    if let Some(actor) = text("actor_user_name") {
+        line.push_str(&format!(" · by {actor}"));
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_event_line_names_subject_and_actor() {
+        let line = admin_event_line(&serde_json::json!({
+            "kind": "user_created",
+            "user_name": "ada",
+            "actor_user_name": "vjt",
+            "at": "2026-09-24T10:00:00Z"
+        }));
+        assert_eq!(line, "2026-09-24T10:00:00Z · user_created · ada · by vjt");
+        let line = admin_event_line(&serde_json::json!({
+            "kind": "server_added",
+            "network_slug": "libera",
+            "host": "irc.libera.chat",
+            "port": 6697,
+            "at": "t"
+        }));
+        assert_eq!(line, "t · server_added · libera · irc.libera.chat:6697");
+    }
 
     #[test]
     fn admin_session_label_prefers_subject_label() {

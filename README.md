@@ -57,9 +57,9 @@ Cordiale still has these user-visible or behavioral gaps:
   TOTP/passkey management.
 - **Admin tools:** the panel (which needs a password sign-in; a client
   token is refused on `/admin`) creates accounts, resets passwords and
-  creates, edits and deletes networks, but still lacks per-network servers,
-  vhost grants, credentials, server-wide settings writes and the live admin
-  event stream.
+  creates, edits and deletes networks, and follows the live admin event
+  feed, but still lacks per-network servers, vhost grants, credentials and
+  server-wide settings writes.
 - **Settings and watch lists:** current per-network nick/ident/realname are
   not read back into the identity editor, so its fields start blank.
   Watch-list keywords are session-local rather than reconciled with the
