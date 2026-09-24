@@ -30,3 +30,23 @@ jobs:
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@v4
+
+  # GitHub Actions workflows are code too: CodeQL checks them for things
+  # like script injection and over-broad tokens. Separate job so the Rust
+  # analysis keeps its name and category.
+  analyze-actions:
+    name: Analyze (actions)
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: actions
+          build-mode: none
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
