@@ -1165,6 +1165,30 @@ msgid "That alias expands into too many others: {}"
 msgstr "Questo alias si espande in troppi altri: {}"
 
 msgctxt "AppWindow"
+msgid "The server refused that command ({})."
+msgstr "Il server ha rifiutato il comando ({})."
+
+msgctxt "LinksGraphWindow"
+msgid "Zoom out"
+msgstr "Riduci"
+
+msgctxt "LinksGraphWindow"
+msgid "Zoom in"
+msgstr "Ingrandisci"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset"
+msgstr "Ripristina"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset zoom"
+msgstr "Ripristina lo zoom"
+
+msgctxt "AppWindow"
+msgid "{}'s host isn't known yet, so they were only kicked; /whois them first to ban too."
+msgstr "L'host di {} non è ancora noto, quindi è stato solo espulso; fai prima /whois per bannarlo."
+
+msgctxt "AppWindow"
 msgid "Done."
 msgstr "Fatto."
 

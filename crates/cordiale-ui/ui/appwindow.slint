@@ -466,7 +466,11 @@ component SectionCard inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "Cordiale";
+    // Account-wide unread count (Grappa's `badge_count`). There's no
+    // portable taskbar/dock badge, so it goes in the title, which the
+    // taskbar shows; the "Show event badge" preference turns it off.
+    in property <int> unread-badge: 0;
+    title: pref-show-event-badge && unread-badge > 0 ? "(" + unread-badge + ") Cordiale" : "Cordiale";
     // A color theme (see `palette-active`) paints the window itself and
     // switches the app to a monospace font, irssi-style.
     background: palette-active ? palette-bg : Palette.background;
@@ -733,6 +737,7 @@ export component AppWindow inherits Window {
     in property <[LinksRow]> links-rows: [];
     in property <string> links-graph-edges-commands: "";
     in property <[LinksGraphNode]> links-graph-nodes: [];
+    in property <int> links-graph-canvas-size: 760;
 
     // Settings > Credits: Cordiale's own info only — deliberately not a
     // list of Grappa/Cicchetto contributors.
@@ -1080,8 +1085,12 @@ export component AppWindow inherits Window {
             return @tr("Settings saved.");
         } else if status-kind == "personal-prefs-failed" {
             return @tr("Couldn't save those settings.");
+        } else if status-kind == "command-refused" {
+            return @tr("The server refused that command ({}).", status-command-hint);
         } else if status-kind == "alias-too-deep" {
             return @tr("That alias expands into too many others: {}", status-command-hint);
+        } else if status-kind == "kickban-host-unknown" {
+            return @tr("{}'s host isn't known yet, so they were only kicked; /whois them first to ban too.", status-command-hint);
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
@@ -2678,7 +2687,7 @@ export component AppWindow inherits Window {
                     LineEdit {
                         placeholder-text: @tr("Password");
                         accessible-label: @tr("Password");
-                        input-type: password;
+                        input-type: InputType.password;
                         text <=> admin-new-user-password;
                         horizontal-stretch: 1;
                         min-width: 80px;
@@ -3118,48 +3127,91 @@ export component LinksGraphWindow inherits Window {
     in property <string> network-label: "";
     in property <string> edges-commands: "";
     in property <[LinksGraphNode]> nodes: [];
+    // Side of the square canvas the node coordinates and edges live in.
+    in property <int> canvas-size: 760;
+    in-out property <float> zoom: 1.0;
 
     VerticalBox {
         padding: 12px;
         spacing: 8px;
 
-        Text {
-            text: network-label;
-            font-size: 18px;
+        HorizontalLayout {
+            spacing: 6px;
+
+            Text {
+                text: network-label;
+                font-size: 18px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            CompactButton {
+                text: "−";
+                a11y-label: @tr("Zoom out");
+                enabled: zoom > 0.3;
+                clicked => { zoom = max(0.25, zoom / 1.25); }
+            }
+            Text {
+                text: round(zoom * 100) + "%";
+                vertical-alignment: center;
+                min-width: 44px;
+                horizontal-alignment: center;
+            }
+            CompactButton {
+                text: "+";
+                a11y-label: @tr("Zoom in");
+                enabled: zoom < 4;
+                clicked => { zoom = min(4, zoom * 1.25); }
+            }
+            CompactButton {
+                text: @tr("Reset");
+                a11y-label: @tr("Reset zoom");
+                clicked => { zoom = 1; }
+            }
         }
 
-        Rectangle {
-            // Explicit size: absolutely-positioned children (the nodes
-            // and the Path below) don't contribute a preferred size to
-            // the enclosing VerticalBox, so without this the canvas
-            // could collapse to zero height.
-            width: 100%;
-            height: 560px;
-            background: #1e1e1e;
+        // Drag or scroll to pan; the buttons above zoom.
+        Flickable {
+            vertical-stretch: 1;
+            min-height: 300px;
+            viewport-width: canvas-size * 1px * zoom;
+            viewport-height: canvas-size * 1px * zoom;
 
-            Path {
-                width: 100%;
-                height: 100%;
-                commands: edges-commands;
-                stroke: #888888;
-                stroke-width: 1.5px;
-            }
+            Rectangle {
+                width: canvas-size * 1px * zoom;
+                height: canvas-size * 1px * zoom;
+                background: #1e1e1e;
 
-            for node in nodes : Rectangle {
-                x: node.x * 1px - 5px;
-                y: node.y * 1px - 5px;
-                width: 10px;
-                height: 10px;
-                border-radius: 5px;
-                background: #4a9eff;
-            }
+                // The viewbox pins the edges to the same coordinate space
+                // as the nodes, instead of fitting their bounding box.
+                Path {
+                    width: 100%;
+                    height: 100%;
+                    viewbox-x: 0;
+                    viewbox-y: 0;
+                    viewbox-width: canvas-size;
+                    viewbox-height: canvas-size;
+                    commands: edges-commands;
+                    stroke: #888888;
+                    stroke-width: 1.5px;
+                }
 
-            for node in nodes : Text {
-                x: node.x * 1px + 8px;
-                y: node.y * 1px - 7px;
-                text: node.server;
-                color: white;
-                font-size: 12px;
+                for node in nodes : Rectangle {
+                    x: node.x * 1px * zoom - 5px;
+                    y: node.y * 1px * zoom - 5px;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: #4a9eff;
+                }
+
+                for node in nodes : Text {
+                    x: node.x * 1px * zoom + 8px;
+                    y: node.y * 1px * zoom - 7px;
+                    text: node.server;
+                    color: white;
+                    font-size: 12px;
+                }
             }
         }
     }
