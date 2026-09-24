@@ -733,10 +733,6 @@ msgid "Invited {} to {} on {}."
 msgstr "{} zu {} auf {} eingeladen."
 
 msgctxt "AppWindow"
-msgid "Attachments aren't supported yet."
-msgstr "Anhänge werden noch nicht unterstützt."
-
-msgctxt "AppWindow"
 msgid "Home"
 msgstr "Start"
 
@@ -1007,3 +1003,35 @@ msgstr "Verwenden"
 msgctxt "AppWindow"
 msgid "Use theme {}"
 msgstr "Theme {} verwenden"
+
+msgctxt "AppWindow"
+msgid "Uploading {}…"
+msgstr "{} wird hochgeladen…"
+
+msgctxt "AppWindow"
+msgid "Uploaded {}; its link was posted."
+msgstr "{} hochgeladen; der Link wurde gesendet."
+
+msgctxt "AppWindow"
+msgid "The server doesn't accept this type of file: {}"
+msgstr "Der Server akzeptiert diesen Dateityp nicht: {}"
+
+msgctxt "AppWindow"
+msgid "{} is larger than the server allows for this type of file."
+msgstr "{} ist größer, als der Server für diesen Dateityp erlaubt."
+
+msgctxt "AppWindow"
+msgid "The server has no room left for {}."
+msgstr "Der Server hat keinen Platz mehr für {}."
+
+msgctxt "AppWindow"
+msgid "Couldn't read {}."
+msgstr "{} konnte nicht gelesen werden."
+
+msgctxt "AppWindow"
+msgid "Open a channel or private conversation before attaching a file."
+msgstr "Öffne einen Kanal oder eine private Unterhaltung, bevor du eine Datei anhängst."
+
+msgctxt "AppWindow"
+msgid "Couldn't upload {}."
+msgstr "{} konnte nicht hochgeladen werden."

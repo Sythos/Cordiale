@@ -63,9 +63,11 @@ Cordiale still has these user-visible or behavioral gaps:
   Watch-list keywords are session-local rather than reconciled with the
   server. On-Connect Commands uses one line instead of Cicchetto's multiline
   editor; some server-owned preferences and upload limits are read-only.
-- **Uploads and attachments:** the paperclip reports that upload is
-  unsupported. Cicchetto supports Grappa's upload/media flow and previews;
-  Cordiale does not yet send or render those attachments.
+- **Uploads and attachments:** the paperclip uploads a picked file through
+  Grappa (`POST /api/uploads`) and posts its link with the category emoji,
+  as Cicchetto does, after checking the file type and the advertised size
+  cap. Drag-and-drop and paste, inline previews and the media viewer, and
+  the upload lifetime/confirmation preferences are not implemented yet.
 - **Chat and roster edge cases:** a message with multiple differently colored
   mIRC runs may overflow instead of wrapping as one paragraph. Channel MODE
   parsing does not yet use the advertised ISUPPORT CHANMODES argument rules,
