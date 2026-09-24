@@ -107,6 +107,8 @@ enum WorkerCommand {
     ToggleTheme,
     SelectColorTheme(String),
     SaveDisplayPrefs(DisplayPrefs),
+    LoadNotificationPrefs,
+    SaveNotificationPrefs(NotificationToggles),
     AdminRefresh,
     AdminDisconnectSession(String),
     AdminUserToggleAdmin(String, bool),
@@ -569,6 +571,27 @@ fn main() -> Result<(), slint::PlatformError> {
                 bold_mentions: Some(ui.get_pref_bold_mentions()),
             };
             let _ = tx_for_prefs.send(WorkerCommand::SaveDisplayPrefs(prefs));
+        }
+    });
+
+    let tx_for_notify_load = worker_tx.clone();
+    ui.on_notification_prefs_requested(move || {
+        let _ = tx_for_notify_load.send(WorkerCommand::LoadNotificationPrefs);
+    });
+
+    let tx_for_notify_save = worker_tx.clone();
+    let weak_for_notify = ui.as_weak();
+    ui.on_notification_prefs_changed(move || {
+        if let Some(ui) = weak_for_notify.upgrade() {
+            let _ = tx_for_notify_save.send(WorkerCommand::SaveNotificationPrefs(
+                NotificationToggles {
+                    channel_mentions: ui.get_notify_channel_mentions(),
+                    channel_messages_all: ui.get_notify_channel_all(),
+                    private_messages_all: ui.get_notify_private_all(),
+                    presence_online: ui.get_notify_presence_online(),
+                    presence_offline: ui.get_notify_presence_offline(),
+                },
+            ));
         }
     });
 
@@ -1307,6 +1330,9 @@ struct WorkerState {
     /// Upload limits from the latest `server_settings_changed`, shown read
     /// only in Settings (Cordiale doesn't upload files yet).
     upload_limits: Option<UploadLimits>,
+    /// Last push-notification map read from Grappa; edits overlay the
+    /// toggles Cordiale shows and send the whole map back.
+    notification_prefs: Option<serde_json::Map<String, Value>>,
     /// Last announced web-client bundle `(hash, version)`, only to log a
     /// change once; it names Cicchetto's build, not this app.
     web_bundle: Option<(String, Option<String>)>,
@@ -1385,6 +1411,7 @@ impl WorkerState {
             peer_away: HashMap::new(),
             mentions_bundles: HashMap::new(),
             upload_limits: None,
+            notification_prefs: None,
             web_bundle: None,
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
@@ -1537,6 +1564,12 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SelectColorTheme(key)) => {
                         select_color_theme(&mut state, &ui, &key).await;
+                    }
+                    Some(WorkerCommand::LoadNotificationPrefs) => {
+                        handle_load_notification_prefs(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::SaveNotificationPrefs(toggles)) => {
+                        handle_save_notification_prefs(&mut state, &ui, toggles).await;
                     }
                     Some(WorkerCommand::SaveDisplayPrefs(prefs)) => {
                         handle_save_display_prefs(&state, prefs).await;
@@ -3183,6 +3216,100 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
             ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         }
     });
+}
+
+/// The push-notification switches shown in Settings > Notifications; the
+/// rest of Grappa's map (per-target lists, mutes, sound) is kept as read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotificationToggles {
+    channel_mentions: bool,
+    channel_messages_all: bool,
+    private_messages_all: bool,
+    presence_online: bool,
+    presence_offline: bool,
+}
+
+impl NotificationToggles {
+    fn from_prefs(prefs: &serde_json::Map<String, Value>) -> Self {
+        let flag =
+            |key: &str, default: bool| prefs.get(key).and_then(Value::as_bool).unwrap_or(default);
+        // Defaults are Grappa's own (`default_notification_prefs/0`).
+        Self {
+            channel_mentions: flag("channel_mentions", true),
+            channel_messages_all: flag("channel_messages_all", false),
+            private_messages_all: flag("private_messages_all", true),
+            presence_online: flag("presence_online", false),
+            presence_offline: flag("presence_offline", false),
+        }
+    }
+
+    fn apply_to(self, prefs: &mut serde_json::Map<String, Value>) {
+        for (key, value) in [
+            ("channel_mentions", self.channel_mentions),
+            ("channel_messages_all", self.channel_messages_all),
+            ("private_messages_all", self.private_messages_all),
+            ("presence_online", self.presence_online),
+            ("presence_offline", self.presence_offline),
+        ] {
+            prefs.insert(key.to_string(), Value::Bool(value));
+        }
+    }
+}
+
+fn push_notification_toggles(ui: &slint::Weak<AppWindow>, toggles: NotificationToggles) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_notify_channel_mentions(toggles.channel_mentions);
+        ui.set_notify_channel_all(toggles.channel_messages_all);
+        ui.set_notify_private_all(toggles.private_messages_all);
+        ui.set_notify_presence_online(toggles.presence_online);
+        ui.set_notify_presence_offline(toggles.presence_offline);
+        ui.set_notify_prefs_loaded(true);
+    });
+}
+
+async fn handle_load_notification_prefs(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    match client.fetch_notification_prefs(&token).await {
+        Ok(prefs) => {
+            push_notification_toggles(ui, NotificationToggles::from_prefs(&prefs));
+            state.notification_prefs = Some(prefs);
+        }
+        Err(err) => persistence::log_line(&format!("notification prefs load failed: {err:?}")),
+    }
+}
+
+/// Saves the switches over the last map read. Grappa refuses (422) a map
+/// with no message trigger left on; the switches then go back to the
+/// stored values.
+async fn handle_save_notification_prefs(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    toggles: NotificationToggles,
+) {
+    let (Some(client), Some(token), Some(stored)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.notification_prefs.clone(),
+    ) else {
+        return;
+    };
+    let mut prefs = stored.clone();
+    toggles.apply_to(&mut prefs);
+    match client.set_notification_prefs(&token, &prefs).await {
+        Ok(()) => state.notification_prefs = Some(prefs),
+        Err(err) => {
+            persistence::log_line(&format!("notification prefs save failed: {err:?}"));
+            let kind = if err.status().map(|status| status.as_u16()) == Some(422) {
+                "notify-prefs-invalid"
+            } else {
+                "notify-prefs-failed"
+            };
+            push_notification_toggles(ui, NotificationToggles::from_prefs(&stored));
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_status_kind(kind.into()));
+        }
+    }
 }
 
 /// Rows fetched per "Load older messages" click.
@@ -15397,6 +15524,30 @@ mod tests {
         assert_eq!(upload_ttl_index(Some(43_200)), 2);
         assert_eq!(upload_ttl_index(Some(7)), 0);
         assert_eq!(upload_ttl_index(None), 0);
+    }
+
+    #[test]
+    fn notification_toggles_keep_the_rest_of_the_map() {
+        let mut prefs = serde_json::json!({
+            "channel_mentions": true,
+            "channel_messages_only": ["#rust"],
+            "notification_sound": "chime"
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let toggles = NotificationToggles::from_prefs(&prefs);
+        assert!(toggles.channel_mentions && toggles.private_messages_all);
+        assert!(!toggles.presence_online);
+        NotificationToggles {
+            presence_online: true,
+            ..toggles
+        }
+        .apply_to(&mut prefs);
+        assert_eq!(prefs["presence_online"], serde_json::json!(true));
+        assert_eq!(prefs["private_messages_all"], serde_json::json!(true));
+        assert_eq!(prefs["notification_sound"], serde_json::json!("chime"));
+        assert_eq!(prefs["channel_messages_only"], serde_json::json!(["#rust"]));
     }
 
     #[test]

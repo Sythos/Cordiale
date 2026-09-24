@@ -165,10 +165,6 @@ msgid "Show bottom bar"
 msgstr "Mostrar barra inferior"
 
 msgctxt "AppWindow"
-msgid "Not available yet — this section needs Grappa REST/WS endpoints Cordiale doesn't implement yet."
-msgstr "Aún no disponible: esta sección necesita endpoints REST/WS de Grappa que Cordiale todavía no implementa."
-
-msgctxt "AppWindow"
 msgid "Vhosts, credentials, server-wide settings write, and the live admin event stream aren't built yet."
 msgstr "Los vhosts, las credenciales, la escritura de ajustes del servidor y el flujo de eventos de admin en vivo todavía no están implementados."
 
@@ -1095,3 +1091,39 @@ msgstr "Preguntar antes de subir"
 msgctxt "AppWindow"
 msgid "Load older messages"
 msgstr "Cargar mensajes anteriores"
+
+msgctxt "AppWindow"
+msgid "Keep at least one message notification on."
+msgstr "Deja activada al menos una notificación de mensajes."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the notification settings."
+msgstr "No se pudieron guardar los ajustes de notificaciones."
+
+msgctxt "AppWindow"
+msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
+msgstr "La verificación en dos pasos, las passkeys, los tokens de cliente y la eliminación de la cuenta se gestionan en Cicchetto: Grappa los mantiene fuera del alcance de un token de cliente como el que usa Cordiale."
+
+msgctxt "AppWindow"
+msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
+msgstr "Notificaciones push que Grappa envía a tus dispositivos (como Cicchetto en un teléfono) cuando ninguno está en uso."
+
+msgctxt "AppWindow"
+msgid "Mentions of my nick in channels"
+msgstr "Menciones de mi nick en los canales"
+
+msgctxt "AppWindow"
+msgid "Every channel message"
+msgstr "Cada mensaje de los canales"
+
+msgctxt "AppWindow"
+msgid "Every private message"
+msgstr "Cada mensaje privado"
+
+msgctxt "AppWindow"
+msgid "Watched nicks coming online"
+msgstr "Nicks vigilados que se conectan"
+
+msgctxt "AppWindow"
+msgid "Watched nicks going offline"
+msgstr "Nicks vigilados que se desconectan"
