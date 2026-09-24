@@ -313,10 +313,6 @@ msgid "Expansion"
 msgstr "Extension"
 
 msgctxt "AppWindow"
-msgid "On-connect commands (one per line, semicolon-separated)"
-msgstr "Commandes à la connexion (une par ligne, séparées par des points-virgules)"
-
-msgctxt "AppWindow"
 msgid "Credits"
 msgstr "Crédits"
 
@@ -1415,3 +1411,11 @@ msgstr "Accorder"
 msgctxt "AppWindow"
 msgid "Revoke grant {}"
 msgstr "Révoquer l'attribution {}"
+
+msgctxt "AppWindow"
+msgid "On-connect commands, one IRC command per line"
+msgstr "Commandes à la connexion, une commande IRC par ligne"
+
+msgctxt "AppWindow"
+msgid "On-connect commands"
+msgstr "Commandes à la connexion"

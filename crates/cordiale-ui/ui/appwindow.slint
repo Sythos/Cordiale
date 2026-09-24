@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette } from "std-widgets.slint";
+import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette } from "std-widgets.slint";
 
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
@@ -2612,11 +2612,14 @@ export component AppWindow inherits Window {
                     }
                 }
                 Text {
-                    text: @tr("On-connect commands (one per line, semicolon-separated)");
+                    text: @tr("On-connect commands, one IRC command per line");
                     wrap: word-wrap;
                 }
-                LineEdit {
+                TextEdit {
                     text <=> perform-text;
+                    min-height: 120px;
+                    wrap: no-wrap;
+                    accessible-label: @tr("On-connect commands");
                 }
                 CompactButton {
                     text: "💾  " + @tr("Save");
