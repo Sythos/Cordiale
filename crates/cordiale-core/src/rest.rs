@@ -232,9 +232,62 @@ pub struct UploadResponse {
     pub expires_at: String,
 }
 
+/// One theme of `GET /themes` or `GET /me/theme`. Only the fields Cordiale
+/// uses are read; `payload.colors` is Grappa's closed 27-color map.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ThemeWire {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub built_in: bool,
+    pub payload: ThemePayloadWire,
+}
+
+/// The token payload of a theme; the background image is not used.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ThemePayloadWire {
+    pub colors: HashMap<String, String>,
+    #[serde(default)]
+    pub font_family: String,
+}
+
+/// Response body of `GET /themes`: the public gallery.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ThemeIndex {
+    pub themes: Vec<ThemeWire>,
+}
+
+/// Response body of `GET`/`PUT /me/theme`: the active day/night pair. A
+/// `null` dark slot means the light theme applies in both modes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ActiveThemePair {
+    pub light: Option<ThemeWire>,
+    pub dark: Option<ThemeWire>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_wires_parse_and_ignore_unused_fields() {
+        let json = r##"{"light": {"id": 3, "name": "sux", "author": "vjt", "built_in": true,
+            "published": true, "apply_count": 9, "in_use": 2, "mine": false,
+            "payload": {"colors": {"bg": "#000000"}, "font_family": "mono-default",
+            "background": {"image_id": null}}, "inserted_at": "2026-09-23T10:00:00Z"},
+            "dark": null}"##;
+        let pair: ActiveThemePair = serde_json::from_str(json).expect("deserialize");
+        let light = pair.light.expect("light");
+        assert_eq!(light.id, 3);
+        assert!(light.built_in);
+        assert_eq!(
+            light.payload.colors.get("bg").map(String::as_str),
+            Some("#000000")
+        );
+        assert_eq!(pair.dark, None);
+    }
 
     #[test]
     fn archive_response_parses_entries_in_order() {

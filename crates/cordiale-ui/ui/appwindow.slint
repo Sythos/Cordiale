@@ -345,8 +345,23 @@ component MemberContextMenu {
     }
 }
 
+// One color theme in Settings > Themes: its name, author and a strip of
+// color swatches (background, text, accent, muted, mention, op, voice and
+// the first nick colors), like an irssi theme's color set.
+struct ThemeChoiceRow {
+    key: string,
+    name: string,
+    author: string,
+    selected: bool,
+    swatches: [color],
+}
+
 export component AppWindow inherits Window {
     title: "Cordiale";
+    // A color theme (see `palette-active`) paints the window itself and
+    // switches the app to a monospace font, irssi-style.
+    background: palette-active ? palette-bg : Palette.background;
+    default-font-family: palette-active ? palette-font : "";
     // Winresource only embeds an icon into the .exe file's own Win32
     // resources (Explorer file icon, Alt-Tab before the window exists).
     // The live window's title-bar corner and running taskbar icon come
@@ -544,6 +559,17 @@ export component AppWindow inherits Window {
         members-nick-probe.preferred-width + 40px);
 
     in-out property <string> theme: "light";
+    // Color theme in use (Grappa's gallery or a built-in copy); false is
+    // the classic light/dark look.
+    in property <bool> palette-active: false;
+    in property <color> palette-bg: #000000;
+    in property <color> palette-bg-alt: #000000;
+    in property <color> palette-fg: #ffffff;
+    in property <color> palette-accent: #ffffff;
+    in property <color> palette-muted: #808080;
+    in property <color> palette-border: #808080;
+    in property <string> palette-font: "";
+    in property <[ThemeChoiceRow]> theme-choices: [];
     in property <bool> display-prefs-loaded: false;
     in-out property <bool> pref-colored-nicklist: true;
     in-out property <bool> pref-bold-mentions: true;
@@ -621,6 +647,7 @@ export component AppWindow inherits Window {
     callback window-invite-join-requested(string, string);
     callback kicked-channel-dismiss-requested(string, string);
     callback recover-dismiss-requested();
+    callback color-theme-requested(string); // choice key, "" for classic
     callback peer-away-dismiss-requested();
     callback dcc-offer-accept-requested(string, string); // network, offer id
     callback dcc-offer-refuse-requested(string, string); // network, offer id
@@ -952,6 +979,8 @@ export component AppWindow inherits Window {
             return @tr("Open a channel or private conversation before attaching a file.");
         } else if status-kind == "attach-failed" {
             return @tr("Couldn't upload {}.", status-attach-name);
+        } else if status-kind == "theme-change-failed" {
+            return @tr("Couldn't change the theme on the server.");
         } else {
             return status-message;
         }
@@ -1392,12 +1421,13 @@ export component AppWindow inherits Window {
                 text: current-channel-label;
                 font-size: 14px;
                 font-weight: 700;
+                color: palette-active ? palette-accent : Palette.foreground;
             }
             if has-selected-channel && !current-query : Rectangle {
                 height: 60px;
-                background: theme == "dark" ? #242424 : #f5f5f5;
+                background: palette-active ? palette-bg-alt : (theme == "dark" ? #242424 : #f5f5f5);
                 border-width: 1px;
-                border-color: theme == "dark" ? #5c5c5c : #d0d0d0;
+                border-color: palette-active ? palette-border : (theme == "dark" ? #5c5c5c : #d0d0d0);
                 padding: 3px;
                 Text {
                     text: current-topic == "" ? @tr("No topic set") : current-topic;
@@ -1831,12 +1861,9 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Purely client-side — no Grappa REST/WS endpoint involved,
-            // unlike Security/Notifications above. A server-driven theme
-            // (if/when Grappa exposes one) is a separate, later addition;
-            // this is just the local light/dark switch, same toggle as
-            // the one on General, surfaced here too since that's where
-            // it's discoverable.
+            // Color themes: Grappa's gallery (`GET /themes`, applied through
+            // `PUT /me/theme`) or built-in copies of it, plus the classic
+            // light/dark switch, same toggle as on General.
             if settings-section == "themes" : VerticalBox {
                 spacing: 8px;
 
@@ -1845,12 +1872,50 @@ export component AppWindow inherits Window {
                     font-size: 16px;
                 }
                 Text {
-                    text: @tr("Local only for now — a theme driven by Grappa itself will be a separate option once the server supports one.");
+                    text: @tr("Color themes come from Grappa's gallery (irssi-dark, sux and more) and follow your account; without a connection, built-in copies are offered. The classic look follows the light/dark switch.");
                     wrap: word-wrap;
                 }
-                Button {
-                    text: theme == "light" ? @tr("Switch to dark") : @tr("Switch to light");
-                    clicked => { theme-toggle-requested(); }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: theme == "light" ? @tr("Classic: switch to dark") : @tr("Classic: switch to light");
+                        clicked => { theme-toggle-requested(); }
+                    }
+                    if palette-active : Button {
+                        text: @tr("Back to classic");
+                        clicked => { color-theme-requested(""); }
+                    }
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    for choice in theme-choices : HorizontalLayout {
+                        spacing: 8px;
+                        height: 32px;
+
+                        HorizontalLayout {
+                            spacing: 0px;
+                            for swatch in choice.swatches : Rectangle {
+                                width: 14px;
+                                height: 22px;
+                                background: swatch;
+                                border-width: 1px;
+                                border-color: #80808080;
+                            }
+                        }
+                        Text {
+                            text: choice.author == "" ? choice.name : @tr("{} by {}", choice.name, choice.author);
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            font-weight: choice.selected ? 700 : 400;
+                            wrap: word-wrap;
+                        }
+                        Button {
+                            text: choice.selected ? @tr("In use") : @tr("Use");
+                            enabled: !choice.selected;
+                            accessible-label: @tr("Use theme {}", choice.name);
+                            clicked => { color-theme-requested(choice.key); }
+                        }
+                    }
                 }
             }
 

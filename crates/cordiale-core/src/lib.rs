@@ -48,6 +48,7 @@ pub mod profile;
 pub mod protocol;
 pub mod rest;
 pub mod session;
+pub mod theme;
 pub mod upload;
 pub mod websocket;
 pub mod wire_event;

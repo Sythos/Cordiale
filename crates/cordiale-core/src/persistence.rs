@@ -83,6 +83,11 @@ pub struct Settings {
     /// the next successful sign-in turns it back on.
     #[serde(default = "default_auto_connect")]
     pub auto_connect: bool,
+    /// Color theme in use: `None` for the classic light/dark look,
+    /// `"builtin:<name>"` for a built-in palette, `"server"` to follow the
+    /// account's active theme on Grappa.
+    #[serde(default)]
+    pub color_theme: Option<String>,
 }
 
 fn current_settings_schema_version() -> u32 {
@@ -101,6 +106,7 @@ impl Default for Settings {
             theme: Theme::default(),
             last_channel: None,
             auto_connect: default_auto_connect(),
+            color_theme: None,
         }
     }
 }
@@ -315,6 +321,7 @@ mod tests {
             theme: Theme::Dark,
             last_channel: Some(("libera".to_string(), "#rust".to_string())),
             auto_connect: false,
+            color_theme: Some("builtin:sux".to_string()),
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");
