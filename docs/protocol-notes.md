@@ -130,6 +130,30 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
 `/admin/*`, `/me/totp*`, `/me/passkeys*`, `DELETE /me` — richiedono sessione
 browser piena; nessuno schema dettagliato nel documento.
 
+**Nota per Grappa (2026-09-24) — perché Cordiale non ha la sezione
+Sicurezza.** La schermata Settings → Security di Cordiale resta un
+segnaposto per scelta, non per mancanza di lavoro lato client:
+
+- Con un token per-client (il login consigliato per un client nativo) ogni
+  route di sicurezza risponde `403 client_token_scope`: TOTP, passkey,
+  gestione dei token stessi e cancellazione account sono fuori scope per
+  progetto, e un retry non cambia l'esito.
+- Le passkey sono WebAuthn: l'attestazione è legata all'origine web di
+  Grappa (RP ID) e al browser/autenticatore di piattaforma. Un client
+  nativo non può crearle né usarle senza API di sistema dedicate e senza
+  che Grappa accetti un'origine diversa da quella di Cicchetto.
+- TOTP (attivazione, conferma, codici di recupero) sarebbe tecnicamente
+  fattibile via REST con una sessione password piena, ma il contratto non
+  ne documenta gli schemi e l'effetto di un login con password su un
+  account con secondo fattore attivo va verificato su un server di prova.
+
+Cosa servirebbe da Grappa per chiudere il gap: lo schema documentato di
+`/me/totp*` e `/me/client-tokens` (richieste, risposte, errori), e una
+decisione esplicita su quali di queste route una sessione ottenuta da un
+client nativo con password (più TOTP) possa usare. Fino ad allora la
+gestione della sicurezza dell'account resta in Cicchetto, e Cordiale usa
+il token per-client creato lì.
+
 ---
 
 ## 2. Phoenix Channels / WebSocket
