@@ -245,12 +245,30 @@ pub struct ThemeWire {
     pub payload: ThemePayloadWire,
 }
 
-/// The token payload of a theme; the background image is not used.
+/// The token payload of a theme.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ThemePayloadWire {
     pub colors: HashMap<String, String>,
     #[serde(default)]
     pub font_family: String,
+    #[serde(default)]
+    pub background: Option<ThemeBackgroundWire>,
+}
+
+/// A theme's wallpaper: an uploaded image (`image_id`, served at
+/// `/uploads/<id>`) or a built-in one (`builtin`, served at
+/// `/backgrounds/<key>.webp`), drawn full-bleed (`size: "cover"`) or tiled
+/// (`"repeat"`) at `opacity` (0 to 1).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct ThemeBackgroundWire {
+    #[serde(default)]
+    pub image_id: Option<String>,
+    #[serde(default)]
+    pub builtin: Option<String>,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub opacity: Option<serde_json::Number>,
 }
 
 /// Response body of `GET /themes`: the public gallery.
