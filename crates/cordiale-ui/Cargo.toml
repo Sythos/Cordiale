@@ -10,6 +10,9 @@ cordiale-core = { path = "../cordiale-core" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 serde_json = "1"
 rfd = "0.17"
+# Not used directly: enabling these formats on the `image` crate Slint
+# already decodes with lets `slint::Image` load GIF, WebP and BMP avatars.
+image = { version = "0.25", default-features = false, features = ["gif", "webp", "bmp"] }
 # Slint's defaults minus `system-tray`, which Cordiale doesn't use.
 slint = { version = "1", default-features = false, features = [
     "std",

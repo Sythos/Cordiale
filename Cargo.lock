@@ -932,6 +932,7 @@ version = "0.1.6"
 dependencies = [
  "chrono",
  "cordiale-core",
+ "image",
  "rfd",
  "serde_json",
  "slint",
@@ -2652,6 +2653,9 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",

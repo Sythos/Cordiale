@@ -12185,6 +12185,9 @@ fn avatar_extension(content_type: Option<&str>) -> Option<&'static str> {
     match mime {
         "image/png" => Some("png"),
         "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" | "image/x-ms-bmp" => Some("bmp"),
         _ => None,
     }
 }
@@ -17309,7 +17312,9 @@ mod tests {
             avatar_extension(Some("image/jpeg; charset=binary")),
             Some("jpg")
         );
-        assert_eq!(avatar_extension(Some("image/webp")), None);
+        assert_eq!(avatar_extension(Some("image/webp")), Some("webp"));
+        assert_eq!(avatar_extension(Some("image/gif")), Some("gif"));
+        assert_eq!(avatar_extension(Some("image/svg+xml")), None);
         assert_eq!(avatar_extension(None), None);
     }
 
