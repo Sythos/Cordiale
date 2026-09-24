@@ -120,28 +120,20 @@ struct NetworkGroup {
 
 // One color/weight run within a rendered chat line — mIRC control codes
 // (see `cordiale_core::formatting`) already parsed out on the Rust side.
-struct MessageSegment {
-    text: string,
-    has-color: bool,
-    color: color,
-    bold: bool,
-    italic: bool,
-}
-
-// One line of chat, already split into mIRC color/weight segments.
+// One line of chat; the body is styled text built from its mIRC runs, so
+// several colors still wrap as one paragraph.
 struct ChatLine {
-    // `timestamp`/`nick` are split out from `segments` on purpose: lets
-    // the markup style the timestamp as muted text and wrap just the
-    // nick in its own right-click context-menu area, separate from the
-    // mIRC body `Text` elements around them. Empty `nick` (a
-    // system/event line has none) means no nick to show.
+    // `timestamp`/`nick` are split out from `body` on purpose: lets the
+    // markup style the timestamp as muted text and wrap just the nick in
+    // its own right-click context-menu area, separate from the body. Empty
+    // `nick` (a system/event line has none) means no nick to show.
     timestamp: string,
     timestamp-color: color,
     nick: string,
     nick-prefix: string,
     nick-color: color,
     italic: bool,
-    segments: [MessageSegment],
+    body: styled-text,
 }
 
 // One row in the admin Sessions list.
@@ -1814,14 +1806,10 @@ export component AppWindow inherits Window {
                         query(nick) => { member-query-requested(nick); }
                     }
 
-                    for segment in line.segments : Text {
-                        text: segment.text;
-                        wrap: word-wrap;
-                        font-weight: segment.bold ? 700 : 400;
-                        font-italic: segment.italic;
-                        color: segment.has-color
-                            ? segment.color
-                            : (theme == "dark" ? white : black);
+                    StyledText {
+                        text: line.body;
+                        default-color: theme == "dark" ? white : black;
+                        horizontal-stretch: 1;
                     }
                 }
             }
