@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ListView, Palette } from "std-widgets.slint";
+import { LineEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette } from "std-widgets.slint";
 
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
@@ -679,6 +679,15 @@ export component AppWindow inherits Window {
     in-out property <bool> pref-strip-formatting: false;
     in-out property <bool> pref-show-event-badge: true;
     in-out property <bool> pref-show-bottom-bar: true;
+    // Upload preferences (`/me/settings/upload-*`): the lifetime menu
+    // index (see `UPLOAD_TTL_CHOICES`) and the ask-before-upload switch.
+    in property <bool> upload-prefs-loaded: false;
+    in-out property <int> pref-upload-ttl-index: 0;
+    in-out property <bool> pref-upload-confirm: false;
+    callback upload-prefs-changed();
+    // Texts of the native confirmation shown before an upload.
+    out property <string> upload-confirm-title: @tr("Upload file");
+    out property <string> upload-confirm-text: @tr("Upload this file to the server and post its link in the open window?");
 
     // Admin — Settings > Admin, only meaningful when `is-admin` (see
     // `docs/protocol-notes.md` §4ter): a deliberately small slice of
@@ -1882,6 +1891,39 @@ export component AppWindow inherits Window {
                     CompactButton {
                         text: theme == "light" ? @tr("Switch to dark") : @tr("Switch to light");
                         clicked => { theme-toggle-requested(); }
+                    }
+                }
+
+                if upload-prefs-loaded : SectionCard {
+                    icon: "📎";
+                    title: @tr("Uploads");
+
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: @tr("Keep uploaded files for");
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        ComboBox {
+                            model: [
+                                @tr("Server default"),
+                                @tr("1 hour"),
+                                @tr("12 hours"),
+                                @tr("1 day"),
+                                @tr("3 days")
+                            ];
+                            current-index <=> pref-upload-ttl-index;
+                            horizontal-stretch: 0;
+                            min-width: 140px;
+                            selected => { upload-prefs-changed(); }
+                        }
+                    }
+                    CheckBox {
+                        text: @tr("Ask before uploading");
+                        checked <=> pref-upload-confirm;
+                        toggled => { upload-prefs-changed(); }
                     }
                 }
 

@@ -97,7 +97,12 @@ enum WorkerCommand {
     SendMessage {
         body: String,
     },
-    AttachFile(std::path::PathBuf),
+    /// A picked file and the lifetime to request for it.
+    AttachFile(std::path::PathBuf, Option<i64>),
+    UploadPrefsChanged {
+        ttl: Option<i64>,
+        confirm: bool,
+    },
     ComposeTextChanged(String),
     ToggleTheme,
     SelectColorTheme(String),
@@ -478,11 +483,43 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let tx_for_attach = worker_tx.clone();
+    let weak_for_attach = ui.as_weak();
     ui.on_attach_file_requested(move || {
-        // The native file picker is modal and must run on the UI thread
-        // (a requirement on macOS); the upload itself happens in the worker.
-        if let Some(path) = rfd::FileDialog::new().pick_file() {
-            let _ = tx_for_attach.send(WorkerCommand::AttachFile(path));
+        let Some(ui) = weak_for_attach.upgrade() else {
+            return;
+        };
+        // The native file picker and the confirmation are modal and must run
+        // on the UI thread (a requirement on macOS); the upload itself
+        // happens in the worker.
+        let Some(path) = rfd::FileDialog::new().pick_file() else {
+            return;
+        };
+        if ui.get_pref_upload_confirm() {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let answer = rfd::MessageDialog::new()
+                .set_title(ui.get_upload_confirm_title().as_str())
+                .set_description(format!("{}\n\n{name}", ui.get_upload_confirm_text()))
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show();
+            if !matches!(answer, rfd::MessageDialogResult::Yes) {
+                return;
+            }
+        }
+        let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
+        let _ = tx_for_attach.send(WorkerCommand::AttachFile(path, expire));
+    });
+
+    let tx_for_upload_prefs = worker_tx.clone();
+    let weak_for_upload_prefs = ui.as_weak();
+    ui.on_upload_prefs_changed(move || {
+        if let Some(ui) = weak_for_upload_prefs.upgrade() {
+            let _ = tx_for_upload_prefs.send(WorkerCommand::UploadPrefsChanged {
+                ttl: upload_ttl_for_index(ui.get_pref_upload_ttl_index()),
+                confirm: ui.get_pref_upload_confirm(),
+            });
         }
     });
 
@@ -1454,8 +1491,20 @@ async fn run_worker(
                         *expanded = !*expanded;
                         refresh_network_groups(&state, &ui);
                     }
-                    Some(WorkerCommand::AttachFile(path)) => {
-                        handle_attach_file(&mut state, &ui, path).await;
+                    Some(WorkerCommand::AttachFile(path, expire)) => {
+                        handle_attach_file(&mut state, &ui, path, expire).await;
+                    }
+                    Some(WorkerCommand::UploadPrefsChanged { ttl, confirm }) => {
+                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                            if let Err(err) = client.set_upload_ttl(token, ttl).await {
+                                persistence::log_line(&format!("upload ttl save failed: {err:?}"));
+                            }
+                            if let Err(err) = client.set_upload_confirm(token, confirm).await {
+                                persistence::log_line(&format!(
+                                    "upload confirm save failed: {err:?}"
+                                ));
+                            }
+                        }
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
                         handle_send_message(&mut state, &ui, body).await;
@@ -1976,6 +2025,15 @@ async fn handle_connect(
                 if let Ok(prefs) = prefs_client.fetch_display_prefs(&prefs_token).await {
                     let _ = ui_for_prefs.upgrade_in_event_loop(move |ui| {
                         apply_display_prefs(&ui, &prefs);
+                    });
+                }
+                let ttl = prefs_client.fetch_upload_ttl(&prefs_token).await;
+                let confirm = prefs_client.fetch_upload_confirm(&prefs_token).await;
+                if let (Ok(ttl), Ok(confirm)) = (ttl, confirm) {
+                    let _ = ui_for_prefs.upgrade_in_event_loop(move |ui| {
+                        ui.set_pref_upload_ttl_index(upload_ttl_index(ttl));
+                        ui.set_pref_upload_confirm(confirm);
+                        ui.set_upload_prefs_loaded(true);
                     });
                 }
             });
@@ -2595,6 +2653,7 @@ async fn handle_attach_file(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     path: std::path::PathBuf,
+    expire: Option<i64>,
 ) {
     let filename = path
         .file_name()
@@ -2635,7 +2694,10 @@ async fn handle_attach_file(
         return;
     }
     set_status("attach-uploading", filename.clone());
-    match client.upload_file(&token, &filename, mime, bytes).await {
+    match client
+        .upload_file(&token, &filename, mime, bytes, expire)
+        .await
+    {
         Ok(uploaded) => {
             persistence::log_line(&format!("attachment uploaded: slug={}", uploaded.slug));
             // Set first, so a failed send that follows can replace it.
@@ -2650,6 +2712,29 @@ async fn handle_attach_file(
             );
         }
     }
+}
+
+/// Upload lifetimes offered in Settings, in the order of its menu: the
+/// server's default, then the `expire` values Grappa accepts (1 hour,
+/// 12 hours, 1 day, 3 days).
+const UPLOAD_TTL_CHOICES: [Option<i64>; 5] =
+    [None, Some(3600), Some(43_200), Some(86_400), Some(259_200)];
+
+fn upload_ttl_for_index(index: i32) -> Option<i64> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| UPLOAD_TTL_CHOICES.get(index).copied())
+        .flatten()
+}
+
+/// Menu entry for a stored lifetime; one the menu doesn't offer shows as
+/// the server default.
+fn upload_ttl_index(ttl: Option<i64>) -> i32 {
+    UPLOAD_TTL_CHOICES
+        .iter()
+        .position(|choice| *choice == ttl)
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or(0)
 }
 
 /// The per-file cap Grappa advertises for a category.
@@ -15174,6 +15259,17 @@ mod tests {
         ];
         // "[@] Sythos" is 10 characters and "vjt" 3: the average rounds up to 7.
         assert_eq!(members_average_probe(&rows), "nnnnnnn");
+    }
+
+    #[test]
+    fn upload_ttl_menu_maps_both_ways() {
+        assert_eq!(upload_ttl_for_index(0), None);
+        assert_eq!(upload_ttl_for_index(3), Some(86_400));
+        assert_eq!(upload_ttl_for_index(9), None);
+        assert_eq!(upload_ttl_for_index(-1), None);
+        assert_eq!(upload_ttl_index(Some(43_200)), 2);
+        assert_eq!(upload_ttl_index(Some(7)), 0);
+        assert_eq!(upload_ttl_index(None), 0);
     }
 
     #[test]

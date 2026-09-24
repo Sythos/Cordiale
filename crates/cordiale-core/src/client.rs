@@ -1003,23 +1003,27 @@ impl GrappaClient {
         Ok(response.json::<ActiveThemePair>().await?)
     }
 
-    /// `POST /api/uploads` — uploads one file (multipart field `file`) with
-    /// the server's default lifetime. `mime` must be one of Grappa's
-    /// allowlisted types (else 415); the per-file cap by category gives 413
-    /// and the storage quota 507. Large files get a longer timeout than the
-    /// client default.
+    /// `POST /api/uploads` — uploads one file (multipart field `file`),
+    /// kept for `expire` seconds or the server's default lifetime. `mime`
+    /// must be one of Grappa's allowlisted types (else 415); the per-file
+    /// cap by category gives 413 and the storage quota 507. Large files get
+    /// a longer timeout than the client default.
     pub async fn upload_file(
         &self,
         token: &str,
         filename: &str,
         mime: &str,
         bytes: Vec<u8>,
+        expire: Option<i64>,
     ) -> Result<UploadResponse, GrappaClientError> {
         let url = format!("{}/api/uploads", self.base_url);
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(filename.to_string())
             .mime_str(mime)?;
-        let form = reqwest::multipart::Form::new().part("file", part);
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+        if let Some(expire) = expire {
+            form = form.text("expire", expire.to_string());
+        }
         let response = self
             .http
             .post(url)
@@ -1030,6 +1034,73 @@ impl GrappaClient {
             .await?
             .error_for_status()?;
         Ok(response.json::<UploadResponse>().await?)
+    }
+
+    /// `GET /me/settings/upload-ttl-seconds` — the lifetime given to new
+    /// uploads, `None` for the server's default.
+    pub async fn fetch_upload_ttl(&self, token: &str) -> Result<Option<i64>, GrappaClientError> {
+        let url = format!("{}/me/settings/upload-ttl-seconds", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.json::<Value>().await?;
+        Ok(body.get("upload_ttl_seconds").and_then(Value::as_i64))
+    }
+
+    /// `PUT /me/settings/upload-ttl-seconds`; `None` restores the default.
+    pub async fn set_upload_ttl(
+        &self,
+        token: &str,
+        seconds: Option<i64>,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/me/settings/upload-ttl-seconds", self.base_url);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "upload_ttl_seconds": seconds }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /me/settings/upload-confirm-enabled` — whether to ask before
+    /// each upload (off by default).
+    pub async fn fetch_upload_confirm(&self, token: &str) -> Result<bool, GrappaClientError> {
+        let url = format!("{}/me/settings/upload-confirm-enabled", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.json::<Value>().await?;
+        Ok(body
+            .get("upload_confirm_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    /// `PUT /me/settings/upload-confirm-enabled`.
+    pub async fn set_upload_confirm(
+        &self,
+        token: &str,
+        enabled: bool,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/me/settings/upload-confirm-enabled", self.base_url);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "upload_confirm_enabled": enabled }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     /// `POST /networks/:slug/channels` — joins one channel, or a
@@ -1943,6 +2014,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_prefs_round_trip() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/upload-ttl-seconds"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "upload_ttl_seconds": null })),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/upload-ttl-seconds"))
+            .and(body_json(serde_json::json!({ "upload_ttl_seconds": 3600 })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "upload_ttl_seconds": 3600 })),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/upload-confirm-enabled"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "upload_confirm_enabled": true })),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/upload-confirm-enabled"))
+            .and(body_json(
+                serde_json::json!({ "upload_confirm_enabled": false }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "upload_confirm_enabled": false })),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        assert_eq!(client.fetch_upload_ttl("t").await.expect("ttl"), None);
+        client
+            .set_upload_ttl("t", Some(3600))
+            .await
+            .expect("set ttl");
+        assert!(client.fetch_upload_confirm("t").await.expect("confirm"));
+        client
+            .set_upload_confirm("t", false)
+            .await
+            .expect("set confirm");
+    }
+
+    #[tokio::test]
     async fn upload_file_posts_multipart_to_api_uploads() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1964,12 +2090,18 @@ mod tests {
 
         let client = GrappaClient::new(mock_server.uri());
         let uploaded = client
-            .upload_file("abc123", "cat.png", "image/png", vec![1, 2, 3])
+            .upload_file("abc123", "cat.png", "image/png", vec![1, 2, 3], None)
             .await
             .expect("upload_file");
         assert_eq!(uploaded.url, "https://irc.example/uploads/abcd.png");
         let err = client
-            .upload_file("toolarge", "cat.png", "image/png", vec![1, 2, 3])
+            .upload_file(
+                "toolarge",
+                "cat.png",
+                "image/png",
+                vec![1, 2, 3],
+                Some(3600),
+            )
             .await
             .expect_err("413");
         assert_eq!(err.status(), Some(StatusCode::PAYLOAD_TOO_LARGE));
