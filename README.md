@@ -80,7 +80,8 @@ Cordiale still has these user-visible or behavioral gaps:
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
   expansion, `/kb`, and the services shortcuts), but not `/np`, `/beep`, or
-  the modals opened by a bare `/mode`, `/umode` or `/topic`.
+  the user-mode view of a bare `/umode` (a bare `/topic` or `/mode` shows the
+  channel's topic or modes in the status bar).
 - **Chat and roster edge cases:** a message with multiple differently colored
   mIRC runs may overflow instead of wrapping as one paragraph. Channel MODE
   parsing does not yet use the advertised ISUPPORT CHANMODES argument rules,

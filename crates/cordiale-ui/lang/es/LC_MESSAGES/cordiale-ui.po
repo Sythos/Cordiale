@@ -1353,6 +1353,22 @@ msgid "Static mapping prefix length"
 msgstr "Longitud del prefijo de asignación estática"
 
 msgctxt "AppWindow"
+msgid "Topic of {}"
+msgstr "Tema de {}"
+
+msgctxt "AppWindow"
+msgid "{} has no topic."
+msgstr "{} no tiene tema."
+
+msgctxt "AppWindow"
+msgid "Modes of {}"
+msgstr "Modos de {}"
+
+msgctxt "AppWindow"
+msgid "No modes known for {} yet."
+msgstr "Aún no se conocen modos para {}."
+
+msgctxt "AppWindow"
 msgid "A credential needs an account, a network and a nickname."
 msgstr "Una credencial necesita una cuenta, una red y un apodo."
 
