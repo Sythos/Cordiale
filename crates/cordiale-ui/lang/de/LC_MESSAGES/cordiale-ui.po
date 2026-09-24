@@ -1035,3 +1035,19 @@ msgstr "Öffne einen Kanal oder eine private Unterhaltung, bevor du eine Datei a
 msgctxt "AppWindow"
 msgid "Couldn't upload {}."
 msgstr "{} konnte nicht hochgeladen werden."
+
+msgctxt "AppWindow"
+msgid "Usage: {}"
+msgstr "Verwendung: {}"
+
+msgctxt "AppWindow"
+msgid "Unknown command: {}"
+msgstr "Unbekannter Befehl: {}"
+
+msgctxt "AppWindow"
+msgid "{} only works in a channel window."
+msgstr "{} funktioniert nur in einem Kanalfenster."
+
+msgctxt "AppWindow"
+msgid "{} failed."
+msgstr "{} fehlgeschlagen."
