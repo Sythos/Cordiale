@@ -1263,3 +1263,91 @@ msgstr "Eventi"
 msgctxt "AppWindow"
 msgid "No admin events yet. They arrive live while this panel is open."
 msgstr "Ancora nessun evento di amministrazione. Arrivano in tempo reale mentre questo pannello è aperto."
+
+msgctxt "AppWindow"
+msgid "A server needs a host and a port between 1 and 65535."
+msgstr "Un server richiede un host e una porta tra 1 e 65535."
+
+msgctxt "AppWindow"
+msgid "Sizes and the video length must be positive numbers."
+msgstr "Le dimensioni e la durata dei video devono essere numeri positivi."
+
+msgctxt "AppWindow"
+msgid "IRC servers"
+msgstr "Server IRC"
+
+msgctxt "AppWindow"
+msgid "Remove server {}"
+msgstr "Rimuovi il server {}"
+
+msgctxt "AppWindow"
+msgid "Host"
+msgstr "Host"
+
+msgctxt "AppWindow"
+msgid "Port"
+msgstr "Porta"
+
+msgctxt "AppWindow"
+msgid "Add server"
+msgstr "Aggiungi server"
+
+msgctxt "AppWindow"
+msgid "Upload host"
+msgstr "Host degli upload"
+
+msgctxt "AppWindow"
+msgid "Image, per file (MiB)"
+msgstr "Immagini, per file (MiB)"
+
+msgctxt "AppWindow"
+msgid "Video, per file (MiB)"
+msgstr "Video, per file (MiB)"
+
+msgctxt "AppWindow"
+msgid "Document, per file (MiB)"
+msgstr "Documenti, per file (MiB)"
+
+msgctxt "AppWindow"
+msgid "Audio, per file (MiB)"
+msgstr "Audio, per file (MiB)"
+
+msgctxt "AppWindow"
+msgid "All uploads (MiB)"
+msgstr "Tutti gli upload (MiB)"
+
+msgctxt "AppWindow"
+msgid "Per user (MiB)"
+msgstr "Per utente (MiB)"
+
+msgctxt "AppWindow"
+msgid "Per visitor (MiB)"
+msgstr "Per visitatore (MiB)"
+
+msgctxt "AppWindow"
+msgid "DCC, per transfer (MiB)"
+msgstr "DCC, per trasferimento (MiB)"
+
+msgctxt "AppWindow"
+msgid "DCC, all transfers (MiB)"
+msgstr "DCC, tutti i trasferimenti (MiB)"
+
+msgctxt "AppWindow"
+msgid "Longest video (seconds)"
+msgstr "Video più lungo (secondi)"
+
+msgctxt "AppWindow"
+msgid "Source address mode"
+msgstr "Modalità dell'indirizzo sorgente"
+
+msgctxt "AppWindow"
+msgid "Pool with reservations"
+msgstr "Pool con prenotazioni"
+
+msgctxt "AppWindow"
+msgid "Static mapping with reservations"
+msgstr "Mappatura statica con prenotazioni"
+
+msgctxt "AppWindow"
+msgid "Static mapping prefix length"
+msgstr "Lunghezza del prefisso di mappatura statica"

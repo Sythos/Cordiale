@@ -1263,3 +1263,91 @@ msgstr "Eventos"
 msgctxt "AppWindow"
 msgid "No admin events yet. They arrive live while this panel is open."
 msgstr "Aún no hay eventos de administración. Llegan en directo mientras este panel está abierto."
+
+msgctxt "AppWindow"
+msgid "A server needs a host and a port between 1 and 65535."
+msgstr "Un servidor necesita un host y un puerto entre 1 y 65535."
+
+msgctxt "AppWindow"
+msgid "Sizes and the video length must be positive numbers."
+msgstr "Los tamaños y la duración de los vídeos deben ser números positivos."
+
+msgctxt "AppWindow"
+msgid "IRC servers"
+msgstr "Servidores IRC"
+
+msgctxt "AppWindow"
+msgid "Remove server {}"
+msgstr "Quitar el servidor {}"
+
+msgctxt "AppWindow"
+msgid "Host"
+msgstr "Host"
+
+msgctxt "AppWindow"
+msgid "Port"
+msgstr "Puerto"
+
+msgctxt "AppWindow"
+msgid "Add server"
+msgstr "Añadir servidor"
+
+msgctxt "AppWindow"
+msgid "Upload host"
+msgstr "Host de subidas"
+
+msgctxt "AppWindow"
+msgid "Image, per file (MiB)"
+msgstr "Imágenes, por archivo (MiB)"
+
+msgctxt "AppWindow"
+msgid "Video, per file (MiB)"
+msgstr "Vídeos, por archivo (MiB)"
+
+msgctxt "AppWindow"
+msgid "Document, per file (MiB)"
+msgstr "Documentos, por archivo (MiB)"
+
+msgctxt "AppWindow"
+msgid "Audio, per file (MiB)"
+msgstr "Audio, por archivo (MiB)"
+
+msgctxt "AppWindow"
+msgid "All uploads (MiB)"
+msgstr "Todas las subidas (MiB)"
+
+msgctxt "AppWindow"
+msgid "Per user (MiB)"
+msgstr "Por usuario (MiB)"
+
+msgctxt "AppWindow"
+msgid "Per visitor (MiB)"
+msgstr "Por visitante (MiB)"
+
+msgctxt "AppWindow"
+msgid "DCC, per transfer (MiB)"
+msgstr "DCC, por transferencia (MiB)"
+
+msgctxt "AppWindow"
+msgid "DCC, all transfers (MiB)"
+msgstr "DCC, todas las transferencias (MiB)"
+
+msgctxt "AppWindow"
+msgid "Longest video (seconds)"
+msgstr "Vídeo más largo (segundos)"
+
+msgctxt "AppWindow"
+msgid "Source address mode"
+msgstr "Modo de la dirección de origen"
+
+msgctxt "AppWindow"
+msgid "Pool with reservations"
+msgstr "Pool con reservas"
+
+msgctxt "AppWindow"
+msgid "Static mapping with reservations"
+msgstr "Asignación estática con reservas"
+
+msgctxt "AppWindow"
+msgid "Static mapping prefix length"
+msgstr "Longitud del prefijo de asignación estática"

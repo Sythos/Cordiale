@@ -881,6 +881,115 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `GET /admin/networks/:id/servers` — the network's IRC endpoints, in
+    /// connection priority order.
+    pub async fn fetch_admin_servers(
+        &self,
+        token: &str,
+        network_id: &str,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "networks", network_id, "servers"]);
+        let body = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(body
+            .get("servers")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// `POST /admin/networks/:id/servers {host, port, tls}` — 409 for a
+    /// duplicate endpoint.
+    pub async fn add_admin_server(
+        &self,
+        token: &str,
+        network_id: &str,
+        host: &str,
+        port: u16,
+        tls: bool,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "networks", network_id, "servers"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "host": host, "port": port, "tls": tls }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /admin/networks/:id/servers/:server_id` — live sessions keep
+    /// their connection until they next reconnect.
+    pub async fn delete_admin_server(
+        &self,
+        token: &str,
+        network_id: &str,
+        server_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "networks", network_id, "servers", server_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /admin/settings` — the server-wide `upload`, `dcc` and
+    /// `addressing` settings, as the object under `settings`.
+    pub async fn fetch_admin_settings(&self, token: &str) -> Result<Value, GrappaClientError> {
+        let url = format!("{}/admin/settings", self.base_url);
+        let body = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(body.get("settings").cloned().unwrap_or(Value::Null))
+    }
+
+    /// `PUT /admin/settings` — only the subtrees and keys present change;
+    /// 422 names an invalid key, or refuses an unusable addressing mode.
+    pub async fn update_admin_settings(
+        &self,
+        token: &str,
+        settings: &Value,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/admin/settings", self.base_url);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(settings)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `PATCH /admin/users/:id` — whitelist is just `is_admin` server-side.
     pub async fn set_admin_user_is_admin(
         &self,
@@ -2131,6 +2240,73 @@ mod tests {
             .delete_admin_network("t", "7")
             .await
             .expect("delete network");
+    }
+
+    #[tokio::test]
+    async fn admin_servers_and_settings_use_their_contracts() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/networks/7/servers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "servers": [{"id": 3, "host": "irc.example", "port": 6697, "tls": true}]
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/admin/networks/7/servers"))
+            .and(body_json(
+                serde_json::json!({"host": "irc2.example", "port": 6667, "tls": false}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/networks/7/servers/3"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"network_session_count": 0})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/admin/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "settings": {"dcc": {"max_transfer_bytes": 1024}}
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/admin/settings"))
+            .and(body_json(
+                serde_json::json!({"dcc": {"max_transfer_bytes": 2048}}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let servers = client.fetch_admin_servers("t", "7").await.expect("servers");
+        assert_eq!(servers.len(), 1);
+        client
+            .add_admin_server("t", "7", "irc2.example", 6667, false)
+            .await
+            .expect("add server");
+        client
+            .delete_admin_server("t", "7", "3")
+            .await
+            .expect("delete server");
+        let settings = client.fetch_admin_settings("t").await.expect("settings");
+        assert_eq!(settings["dcc"]["max_transfer_bytes"], 1024);
+        client
+            .update_admin_settings(
+                "t",
+                &serde_json::json!({"dcc": {"max_transfer_bytes": 2048}}),
+            )
+            .await
+            .expect("save settings");
     }
 
     #[tokio::test]
