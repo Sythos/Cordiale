@@ -126,6 +126,32 @@ enum WorkerCommand {
     },
     AdminNetworkCreate(String),
     AdminServersLoad(String),
+    AdminCredentialBind {
+        user_id: String,
+        network_id: String,
+        nick: String,
+        auth_method: String,
+        password: String,
+    },
+    AdminCredentialUnbind {
+        user_id: String,
+        network_id: String,
+    },
+    AdminVhostAdd {
+        address: String,
+        in_pool: bool,
+    },
+    AdminVhostSet {
+        vhost_id: String,
+        field: String,
+        value: bool,
+    },
+    AdminVhostDelete(String),
+    AdminGrantAdd {
+        vhost_id: String,
+        user_id: String,
+    },
+    AdminGrantRevoke(String),
     AdminServerAdd {
         network_id: String,
         host: String,
@@ -741,6 +767,95 @@ fn main() -> Result<(), slint::PlatformError> {
                 server_id: server_id.to_string(),
             });
         }
+    });
+
+    let tx_for_admin_bind = worker_tx.clone();
+    let weak_for_admin_bind = ui.as_weak();
+    ui.on_admin_credential_bind(move || {
+        use slint::Model as _;
+        let Some(ui) = weak_for_admin_bind.upgrade() else {
+            return;
+        };
+        let user = usize::try_from(ui.get_admin_cred_user_index())
+            .ok()
+            .and_then(|index| ui.get_admin_users().row_data(index));
+        let network = usize::try_from(ui.get_admin_cred_network_index())
+            .ok()
+            .and_then(|index| ui.get_admin_networks().row_data(index));
+        let auth_method = usize::try_from(ui.get_admin_cred_auth_index())
+            .ok()
+            .and_then(|index| cordiale_core::admin::CREDENTIAL_AUTH_METHODS.get(index))
+            .copied()
+            .unwrap_or("auto");
+        if let (Some(user), Some(network)) = (user, network) {
+            let _ = tx_for_admin_bind.send(WorkerCommand::AdminCredentialBind {
+                user_id: user.user_id.to_string(),
+                network_id: network.network_id.to_string(),
+                nick: ui.get_admin_cred_nick().trim().to_string(),
+                auth_method: auth_method.to_string(),
+                password: ui.get_admin_cred_password().to_string(),
+            });
+        }
+    });
+
+    let tx_for_admin_unbind = worker_tx.clone();
+    ui.on_admin_credential_unbind(move |user_id, network_id| {
+        let _ = tx_for_admin_unbind.send(WorkerCommand::AdminCredentialUnbind {
+            user_id: user_id.to_string(),
+            network_id: network_id.to_string(),
+        });
+    });
+
+    let tx_for_admin_vhost_add = worker_tx.clone();
+    let weak_for_admin_vhost_add = ui.as_weak();
+    ui.on_admin_vhost_add(move || {
+        if let Some(ui) = weak_for_admin_vhost_add.upgrade() {
+            let _ = tx_for_admin_vhost_add.send(WorkerCommand::AdminVhostAdd {
+                address: ui.get_admin_new_vhost_address().trim().to_string(),
+                in_pool: ui.get_admin_new_vhost_in_pool(),
+            });
+        }
+    });
+
+    let tx_for_admin_vhost_set = worker_tx.clone();
+    ui.on_admin_vhost_set(move |vhost_id, field, value| {
+        let _ = tx_for_admin_vhost_set.send(WorkerCommand::AdminVhostSet {
+            vhost_id: vhost_id.to_string(),
+            field: field.to_string(),
+            value,
+        });
+    });
+
+    let tx_for_admin_vhost_delete = worker_tx.clone();
+    ui.on_admin_vhost_delete(move |vhost_id| {
+        let _ =
+            tx_for_admin_vhost_delete.send(WorkerCommand::AdminVhostDelete(vhost_id.to_string()));
+    });
+
+    let tx_for_admin_grant = worker_tx.clone();
+    let weak_for_admin_grant = ui.as_weak();
+    ui.on_admin_grant_add(move || {
+        use slint::Model as _;
+        let Some(ui) = weak_for_admin_grant.upgrade() else {
+            return;
+        };
+        let vhost = usize::try_from(ui.get_admin_grant_vhost_index())
+            .ok()
+            .and_then(|index| ui.get_admin_vhosts().row_data(index));
+        let user = usize::try_from(ui.get_admin_grant_user_index())
+            .ok()
+            .and_then(|index| ui.get_admin_users().row_data(index));
+        if let (Some(vhost), Some(user)) = (vhost, user) {
+            let _ = tx_for_admin_grant.send(WorkerCommand::AdminGrantAdd {
+                vhost_id: vhost.vhost_id.to_string(),
+                user_id: user.user_id.to_string(),
+            });
+        }
+    });
+
+    let tx_for_admin_revoke = worker_tx.clone();
+    ui.on_admin_grant_revoke(move |grant_id| {
+        let _ = tx_for_admin_revoke.send(WorkerCommand::AdminGrantRevoke(grant_id.to_string()));
     });
 
     let tx_for_admin_settings = worker_tx.clone();
@@ -1797,6 +1912,79 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::AdminNetworkCreate(slug)) => {
                         handle_admin_write(&state, &ui, AdminWrite::CreateNetwork(slug)).await;
+                    }
+                    Some(WorkerCommand::AdminCredentialBind {
+                        user_id,
+                        network_id,
+                        nick,
+                        auth_method,
+                        password,
+                    }) => match network_id.parse::<i64>() {
+                        Ok(network_id) if !nick.is_empty() => {
+                            let mut body = serde_json::json!({
+                                "user_id": user_id,
+                                "network_id": network_id,
+                                "nick": nick,
+                                "auth_method": auth_method,
+                            });
+                            if !password.is_empty() {
+                                body["password"] = Value::from(password);
+                            }
+                            handle_admin_write(&state, &ui, AdminWrite::BindCredential(body)).await;
+                        }
+                        _ => {
+                            let _ = ui.upgrade_in_event_loop(|ui| {
+                                ui.set_status_kind("admin-credential-invalid".into());
+                            });
+                        }
+                    },
+                    Some(WorkerCommand::AdminCredentialUnbind {
+                        user_id,
+                        network_id,
+                    }) => {
+                        handle_admin_write(
+                            &state,
+                            &ui,
+                            AdminWrite::UnbindCredential {
+                                user_id,
+                                network_id,
+                            },
+                        )
+                        .await;
+                    }
+                    Some(WorkerCommand::AdminVhostAdd { address, in_pool }) => {
+                        handle_admin_write(&state, &ui, AdminWrite::AddVhost { address, in_pool })
+                            .await;
+                    }
+                    Some(WorkerCommand::AdminVhostSet {
+                        vhost_id,
+                        field,
+                        value,
+                    }) => {
+                        // Only the two flags the panel toggles are sent.
+                        if field == "in_pool" || field == "generally_available" {
+                            let mut changes = serde_json::Map::new();
+                            changes.insert(field, Value::Bool(value));
+                            handle_admin_write(
+                                &state,
+                                &ui,
+                                AdminWrite::UpdateVhost {
+                                    vhost_id,
+                                    changes: Value::Object(changes),
+                                },
+                            )
+                            .await;
+                        }
+                    }
+                    Some(WorkerCommand::AdminVhostDelete(vhost_id)) => {
+                        handle_admin_write(&state, &ui, AdminWrite::DeleteVhost(vhost_id)).await;
+                    }
+                    Some(WorkerCommand::AdminGrantAdd { vhost_id, user_id }) => {
+                        handle_admin_write(&state, &ui, AdminWrite::GrantVhost { vhost_id, user_id })
+                            .await;
+                    }
+                    Some(WorkerCommand::AdminGrantRevoke(grant_id)) => {
+                        handle_admin_write(&state, &ui, AdminWrite::RevokeGrant(grant_id)).await;
                     }
                     Some(WorkerCommand::AdminServersLoad(network_id)) => {
                         push_admin_servers(&state, &ui, &network_id).await;
@@ -3813,6 +4001,25 @@ enum AdminWrite {
         server_id: String,
     },
     UpdateSettings(Value),
+    BindCredential(Value),
+    UnbindCredential {
+        user_id: String,
+        network_id: String,
+    },
+    AddVhost {
+        address: String,
+        in_pool: bool,
+    },
+    UpdateVhost {
+        vhost_id: String,
+        changes: Value,
+    },
+    DeleteVhost(String),
+    GrantVhost {
+        vhost_id: String,
+        user_id: String,
+    },
+    RevokeGrant(String),
 }
 
 /// Runs an admin write, then refreshes the panel. Success clears the
@@ -3872,6 +4079,34 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
         AdminWrite::UpdateSettings(settings) => {
             (client.update_admin_settings(token, settings).await, "")
         }
+        AdminWrite::BindCredential(credential) => (
+            client.create_admin_credential(token, credential).await,
+            "credential",
+        ),
+        AdminWrite::UnbindCredential {
+            user_id,
+            network_id,
+        } => (
+            client
+                .delete_admin_credential(token, user_id, network_id)
+                .await,
+            "",
+        ),
+        AdminWrite::AddVhost { address, in_pool } => (
+            client.create_admin_vhost(token, address, *in_pool).await,
+            "vhost",
+        ),
+        AdminWrite::UpdateVhost { vhost_id, changes } => (
+            client.update_admin_vhost(token, vhost_id, changes).await,
+            "",
+        ),
+        AdminWrite::DeleteVhost(vhost_id) => (client.delete_admin_vhost(token, vhost_id).await, ""),
+        AdminWrite::GrantVhost { vhost_id, user_id } => {
+            (client.grant_admin_vhost(token, vhost_id, user_id).await, "")
+        }
+        AdminWrite::RevokeGrant(grant_id) => {
+            (client.revoke_admin_vhost_grant(token, grant_id).await, "")
+        }
     };
     match result {
         Ok(()) => {
@@ -3885,6 +4120,11 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
                     "password" => ui.set_admin_new_user_password("".into()),
                     "network" => ui.set_admin_new_network_slug("".into()),
                     "edit" => ui.set_admin_edit_network("".into()),
+                    "credential" => {
+                        ui.set_admin_cred_nick("".into());
+                        ui.set_admin_cred_password("".into());
+                    }
+                    "vhost" => ui.set_admin_new_vhost_address("".into()),
                     "server" => {
                         ui.set_admin_new_server_host("".into());
                         ui.set_admin_new_server_port("6697".into());
@@ -4057,6 +4297,64 @@ async fn handle_admin_settings_load(state: &mut WorkerState, ui: &slint::Weak<Ap
     });
 }
 
+/// Vhost rows `(label, id, in_pool, generally_available)` and grant rows
+/// `(address → account, id)` from `GET /admin/vhosts`.
+#[allow(clippy::type_complexity)]
+fn admin_vhost_rows(view: &Value) -> (Vec<(String, String, bool, bool)>, Vec<(String, String)>) {
+    let id_of = |entry: &Value| {
+        entry
+            .get("id")
+            .and_then(Value::as_i64)
+            .map(|id| id.to_string())
+            .unwrap_or_default()
+    };
+    let list = |key: &str| {
+        view.get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let vhosts = list("vhosts");
+    let address_of = |vhost_id: Option<i64>| {
+        vhosts
+            .iter()
+            .find(|vhost| vhost.get("id").and_then(Value::as_i64) == vhost_id)
+            .and_then(|vhost| vhost.get("address").and_then(Value::as_str))
+            .unwrap_or("?")
+            .to_string()
+    };
+    let vhost_rows = vhosts
+        .iter()
+        .map(|entry| {
+            let flag = |key: &str| entry.get(key).and_then(Value::as_bool) == Some(true);
+            (
+                cordiale_core::admin::admin_vhost_label(entry),
+                id_of(entry),
+                flag("in_pool"),
+                flag("generally_available"),
+            )
+        })
+        .collect();
+    let grant_rows = list("grants")
+        .iter()
+        .map(|grant| {
+            let subject = grant
+                .get("subject_label")
+                .and_then(Value::as_str)
+                .or_else(|| grant.get("subject_id").and_then(Value::as_str))
+                .unwrap_or("?");
+            (
+                format!(
+                    "{} → {subject}",
+                    address_of(grant.get("vhost_id").and_then(Value::as_i64))
+                ),
+                id_of(grant),
+            )
+        })
+        .collect();
+    (vhost_rows, grant_rows)
+}
+
 async fn push_admin_servers(state: &WorkerState, ui: &slint::Weak<AppWindow>, network_id: &str) {
     let (Some(client), Some(token)) = (&state.client, &state.token) else {
         return;
@@ -4172,6 +4470,31 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
     let users = client.fetch_admin_users(token).await.unwrap_or_default();
     let networks = client.fetch_admin_networks(token).await.unwrap_or_default();
     let visitors = client.fetch_admin_visitors(token).await.unwrap_or_default();
+    let credentials = client
+        .fetch_admin_credentials(token)
+        .await
+        .unwrap_or_default();
+    let vhost_view = client.fetch_admin_vhosts(token).await.unwrap_or_default();
+    let (vhost_rows, grant_rows) = admin_vhost_rows(&vhost_view);
+    let credential_rows: Vec<(String, String, String)> = credentials
+        .iter()
+        .map(|entry| {
+            let id = |key: &str| {
+                entry
+                    .get(key)
+                    .map(|value| match value {
+                        Value::String(text) => text.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default()
+            };
+            (
+                cordiale_core::admin::admin_credential_label(entry),
+                id("user_id"),
+                id("network_id"),
+            )
+        })
+        .collect();
     let session_log = client
         .fetch_admin_session_log(token, 50)
         .await
@@ -4244,8 +4567,48 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         ui.set_admin_loading(false);
         ui.set_admin_overview_text(overview_text.unwrap_or_default().into());
         ui.set_admin_sessions(Rc::new(slint::VecModel::from(session_rows)).into());
+        let user_names: Vec<slint::SharedString> =
+            user_rows.iter().map(|row| row.label.clone()).collect();
+        let network_names: Vec<slint::SharedString> =
+            network_rows.iter().map(|row| row.slug.clone()).collect();
+        ui.set_admin_user_names(Rc::new(slint::VecModel::from(user_names)).into());
+        ui.set_admin_network_names(Rc::new(slint::VecModel::from(network_names)).into());
         ui.set_admin_users(Rc::new(slint::VecModel::from(user_rows)).into());
         ui.set_admin_networks(Rc::new(slint::VecModel::from(network_rows)).into());
+        let credential_rows: Vec<AdminCredentialRow> = credential_rows
+            .into_iter()
+            .map(|(label, user_id, network_id)| AdminCredentialRow {
+                label: label.into(),
+                user_id: user_id.into(),
+                network_id: network_id.into(),
+            })
+            .collect();
+        ui.set_admin_credentials(Rc::new(slint::VecModel::from(credential_rows)).into());
+        let vhost_names: Vec<slint::SharedString> = vhost_rows
+            .iter()
+            .map(|(label, _, _, _)| label.clone().into())
+            .collect();
+        ui.set_admin_vhost_names(Rc::new(slint::VecModel::from(vhost_names)).into());
+        let vhost_rows: Vec<AdminVhostRow> = vhost_rows
+            .into_iter()
+            .map(
+                |(label, vhost_id, in_pool, generally_available)| AdminVhostRow {
+                    label: label.into(),
+                    vhost_id: vhost_id.into(),
+                    in_pool,
+                    generally_available,
+                },
+            )
+            .collect();
+        ui.set_admin_vhosts(Rc::new(slint::VecModel::from(vhost_rows)).into());
+        let grant_rows: Vec<AdminGrantRow> = grant_rows
+            .into_iter()
+            .map(|(label, grant_id)| AdminGrantRow {
+                label: label.into(),
+                grant_id: grant_id.into(),
+            })
+            .collect();
+        ui.set_admin_grants(Rc::new(slint::VecModel::from(grant_rows)).into());
         ui.set_admin_visitors(Rc::new(slint::VecModel::from(visitor_rows)).into());
         ui.set_admin_session_log(Rc::new(slint::VecModel::from(session_log_lines)).into());
     });
@@ -16509,6 +16872,22 @@ mod tests {
             );
         }
         assert_eq!(joined_channels(&state, "libera"), vec!["#a".to_string()]);
+    }
+
+    #[test]
+    fn vhost_rows_name_their_grants() {
+        let (vhosts, grants) = admin_vhost_rows(&serde_json::json!({
+            "vhosts": [{"id": 4, "address": "10.0.0.4", "in_pool": true}],
+            "grants": [{"id": 9, "vhost_id": 4, "subject_label": "ada"}]
+        }));
+        assert_eq!(
+            vhosts,
+            vec![("10.0.0.4 · pool".to_string(), "4".to_string(), true, false)]
+        );
+        assert_eq!(
+            grants,
+            vec![("10.0.0.4 → ada".to_string(), "9".to_string())]
+        );
     }
 
     #[test]

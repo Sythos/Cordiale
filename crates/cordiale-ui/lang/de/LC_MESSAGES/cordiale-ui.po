@@ -1327,3 +1327,47 @@ msgstr "Statische Zuordnung mit Reservierungen"
 msgctxt "AppWindow"
 msgid "Static mapping prefix length"
 msgstr "Präfixlänge der statischen Zuordnung"
+
+msgctxt "AppWindow"
+msgid "A credential needs an account, a network and a nickname."
+msgstr "Eine Zugangsdaten-Bindung braucht ein Konto, ein Netzwerk und einen Nicknamen."
+
+msgctxt "AppWindow"
+msgid "Credentials"
+msgstr "Zugangsdaten"
+
+msgctxt "AppWindow"
+msgid "Vhosts"
+msgstr "Vhosts"
+
+msgctxt "AppWindow"
+msgid "Bind"
+msgstr "Binden"
+
+msgctxt "AppWindow"
+msgid "Unbind"
+msgstr "Lösen"
+
+msgctxt "AppWindow"
+msgid "In pool"
+msgstr "Im Pool"
+
+msgctxt "AppWindow"
+msgid "Add vhost"
+msgstr "Vhost hinzufügen"
+
+msgctxt "AppWindow"
+msgid "For everyone"
+msgstr "Für alle"
+
+msgctxt "AppWindow"
+msgid "Delete vhost {}"
+msgstr "Vhost {} löschen"
+
+msgctxt "AppWindow"
+msgid "Grant"
+msgstr "Gewähren"
+
+msgctxt "AppWindow"
+msgid "Revoke grant {}"
+msgstr "Freigabe {} widerrufen"

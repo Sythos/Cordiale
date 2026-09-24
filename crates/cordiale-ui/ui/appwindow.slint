@@ -170,6 +170,27 @@ struct AdminNetworkRow {
     ip-cap: string,
 }
 
+// One bound (account, network) credential in Admin.
+struct AdminCredentialRow {
+    label: string,
+    user-id: string,
+    network-id: string,
+}
+
+// One vhost (source address) in Admin, with its two flags.
+struct AdminVhostRow {
+    label: string,
+    vhost-id: string,
+    in-pool: bool,
+    generally-available: bool,
+}
+
+// One vhost grant to an account.
+struct AdminGrantRow {
+    label: string,
+    grant-id: string,
+}
+
 // One IRC server endpoint of the network being edited in Admin.
 struct AdminServerRow {
     label: string,
@@ -848,6 +869,30 @@ export component AppWindow inherits Window {
     in-out property <int> admin-setting-mode-index: 0;
     in-out property <string> admin-setting-prefix: "";
     callback admin-settings-requested();
+    // Credentials and vhosts. The name lists feed the pickers, in the
+    // same order as `admin-users`, `admin-networks` and `admin-vhosts`.
+    in property <[AdminCredentialRow]> admin-credentials: [];
+    in property <[AdminVhostRow]> admin-vhosts: [];
+    in property <[AdminGrantRow]> admin-grants: [];
+    in property <[string]> admin-user-names: [];
+    in property <[string]> admin-network-names: [];
+    in property <[string]> admin-vhost-names: [];
+    in-out property <int> admin-cred-user-index: 0;
+    in-out property <int> admin-cred-network-index: 0;
+    in-out property <int> admin-cred-auth-index: 0;
+    in-out property <string> admin-cred-nick: "";
+    in-out property <string> admin-cred-password: "";
+    in-out property <string> admin-new-vhost-address: "";
+    in-out property <bool> admin-new-vhost-in-pool: true;
+    in-out property <int> admin-grant-vhost-index: 0;
+    in-out property <int> admin-grant-user-index: 0;
+    callback admin-credential-bind();
+    callback admin-credential-unbind(string, string);
+    callback admin-vhost-add();
+    callback admin-vhost-set(string, string, bool);
+    callback admin-vhost-delete(string);
+    callback admin-grant-add();
+    callback admin-grant-revoke(string);
     callback admin-settings-save();
     callback links-graph-requested();
     callback theme-toggle-requested();
@@ -1139,6 +1184,8 @@ export component AppWindow inherits Window {
             return @tr("Done.");
         } else if status-kind == "admin-action-failed" {
             return @tr("The server refused that admin action ({}).", status-command-hint);
+        } else if status-kind == "admin-credential-invalid" {
+            return @tr("A credential needs an account, a network and a nickname.");
         } else if status-kind == "admin-server-invalid" {
             return @tr("A server needs a host and a port between 1 and 65535.");
         } else if status-kind == "admin-setting-invalid" {
@@ -2643,6 +2690,18 @@ export component AppWindow inherits Window {
                         clicked => { admin-section = "session-log"; }
                     }
                     NavButton {
+                        icon: "🔑";
+                        label: @tr("Credentials");
+                        selected: admin-section == "credentials";
+                        clicked => { admin-section = "credentials"; }
+                    }
+                    NavButton {
+                        icon: "🖧";
+                        label: @tr("Vhosts");
+                        selected: admin-section == "vhosts";
+                        clicked => { admin-section = "vhosts"; }
+                    }
+                    NavButton {
                         icon: "📣";
                         label: @tr("Events");
                         selected: admin-section == "events";
@@ -2957,6 +3016,170 @@ export component AppWindow inherits Window {
                     for line in admin-session-log : Text {
                         text: line;
                         wrap: word-wrap;
+                    }
+                }
+
+                if admin-section == "credentials" : VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        ComboBox {
+                            model: admin-user-names;
+                            current-index <=> admin-cred-user-index;
+                            min-width: 110px;
+                        }
+                        ComboBox {
+                            model: admin-network-names;
+                            current-index <=> admin-cred-network-index;
+                            min-width: 100px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("Nickname");
+                            accessible-label: @tr("Nickname");
+                            text <=> admin-cred-nick;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        ComboBox {
+                            model: ["auto", "sasl", "server_pass", "nickserv_identify", "none"];
+                            current-index <=> admin-cred-auth-index;
+                            min-width: 150px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("Password");
+                            accessible-label: @tr("Password");
+                            input-type: password;
+                            text <=> admin-cred-password;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        CompactButton {
+                            text: "🔗  " + @tr("Bind");
+                            a11y-label: @tr("Bind");
+                            enabled: admin-cred-nick != "" && admin-user-names.length > 0 && admin-network-names.length > 0;
+                            clicked => { admin-credential-bind(); }
+                        }
+                    }
+                }
+                if admin-section == "credentials" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
+                    for row in admin-credentials : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
+                        Text {
+                            text: "🔑  " + row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "⛓  " + @tr("Unbind");
+                            a11y-label: @tr("Unbind");
+                            clicked => { admin-credential-unbind(row.user-id, row.network-id); }
+                        }
+                    }
+                }
+
+                if admin-section == "vhosts" : HorizontalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("Address");
+                        accessible-label: @tr("Address");
+                        text <=> admin-new-vhost-address;
+                        horizontal-stretch: 1;
+                        min-width: 100px;
+                    }
+                    CheckBox {
+                        text: @tr("In pool");
+                        checked <=> admin-new-vhost-in-pool;
+                    }
+                    CompactButton {
+                        text: "➕  " + @tr("Add vhost");
+                        a11y-label: @tr("Add vhost");
+                        enabled: admin-new-vhost-address != "";
+                        clicked => { admin-vhost-add(); }
+                    }
+                }
+                if admin-section == "vhosts" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 100px;
+
+                    for row in admin-vhosts : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
+                        Text {
+                            text: "🖧  " + row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CheckBox {
+                            text: @tr("In pool");
+                            checked: row.in-pool;
+                            toggled => { admin-vhost-set(row.vhost-id, "in_pool", self.checked); }
+                        }
+                        CheckBox {
+                            text: @tr("For everyone");
+                            checked: row.generally-available;
+                            toggled => { admin-vhost-set(row.vhost-id, "generally_available", self.checked); }
+                        }
+                        CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Delete vhost {}", row.label);
+                            clicked => { admin-vhost-delete(row.vhost-id); }
+                        }
+                    }
+                }
+                if admin-section == "vhosts" : HorizontalLayout {
+                    spacing: 6px;
+
+                    ComboBox {
+                        model: admin-vhost-names;
+                        current-index <=> admin-grant-vhost-index;
+                        min-width: 140px;
+                    }
+                    ComboBox {
+                        model: admin-user-names;
+                        current-index <=> admin-grant-user-index;
+                        min-width: 110px;
+                    }
+                    CompactButton {
+                        text: "➕  " + @tr("Grant");
+                        a11y-label: @tr("Grant");
+                        enabled: admin-vhost-names.length > 0 && admin-user-names.length > 0;
+                        clicked => { admin-grant-add(); }
+                    }
+                }
+                if admin-section == "vhosts" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 80px;
+
+                    for row in admin-grants : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
+                        Text {
+                            text: row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Revoke grant {}", row.label);
+                            clicked => { admin-grant-revoke(row.grant-id); }
+                        }
                     }
                 }
 
