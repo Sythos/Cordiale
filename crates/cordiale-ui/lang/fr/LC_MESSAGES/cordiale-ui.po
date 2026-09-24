@@ -1239,3 +1239,91 @@ msgstr "Événements"
 msgctxt "AppWindow"
 msgid "No admin events yet. They arrive live while this panel is open."
 msgstr "Aucun événement d'administration pour l'instant. Ils arrivent en direct tant que ce panneau est ouvert."
+
+msgctxt "AppWindow"
+msgid "A server needs a host and a port between 1 and 65535."
+msgstr "Un serveur doit avoir un hôte et un port entre 1 et 65535."
+
+msgctxt "AppWindow"
+msgid "Sizes and the video length must be positive numbers."
+msgstr "Les tailles et la durée des vidéos doivent être des nombres positifs."
+
+msgctxt "AppWindow"
+msgid "IRC servers"
+msgstr "Serveurs IRC"
+
+msgctxt "AppWindow"
+msgid "Remove server {}"
+msgstr "Retirer le serveur {}"
+
+msgctxt "AppWindow"
+msgid "Host"
+msgstr "Hôte"
+
+msgctxt "AppWindow"
+msgid "Port"
+msgstr "Port"
+
+msgctxt "AppWindow"
+msgid "Add server"
+msgstr "Ajouter un serveur"
+
+msgctxt "AppWindow"
+msgid "Upload host"
+msgstr "Hôte des envois"
+
+msgctxt "AppWindow"
+msgid "Image, per file (MiB)"
+msgstr "Images, par fichier (Mio)"
+
+msgctxt "AppWindow"
+msgid "Video, per file (MiB)"
+msgstr "Vidéos, par fichier (Mio)"
+
+msgctxt "AppWindow"
+msgid "Document, per file (MiB)"
+msgstr "Documents, par fichier (Mio)"
+
+msgctxt "AppWindow"
+msgid "Audio, per file (MiB)"
+msgstr "Audio, par fichier (Mio)"
+
+msgctxt "AppWindow"
+msgid "All uploads (MiB)"
+msgstr "Tous les envois (Mio)"
+
+msgctxt "AppWindow"
+msgid "Per user (MiB)"
+msgstr "Par utilisateur (Mio)"
+
+msgctxt "AppWindow"
+msgid "Per visitor (MiB)"
+msgstr "Par visiteur (Mio)"
+
+msgctxt "AppWindow"
+msgid "DCC, per transfer (MiB)"
+msgstr "DCC, par transfert (Mio)"
+
+msgctxt "AppWindow"
+msgid "DCC, all transfers (MiB)"
+msgstr "DCC, tous les transferts (Mio)"
+
+msgctxt "AppWindow"
+msgid "Longest video (seconds)"
+msgstr "Vidéo la plus longue (secondes)"
+
+msgctxt "AppWindow"
+msgid "Source address mode"
+msgstr "Mode d'adresse source"
+
+msgctxt "AppWindow"
+msgid "Pool with reservations"
+msgstr "Pool avec réservations"
+
+msgctxt "AppWindow"
+msgid "Static mapping with reservations"
+msgstr "Correspondance statique avec réservations"
+
+msgctxt "AppWindow"
+msgid "Static mapping prefix length"
+msgstr "Longueur du préfixe de correspondance statique"

@@ -125,6 +125,19 @@ enum WorkerCommand {
         password: String,
     },
     AdminNetworkCreate(String),
+    AdminServersLoad(String),
+    AdminServerAdd {
+        network_id: String,
+        host: String,
+        port: String,
+        tls: bool,
+    },
+    AdminServerDelete {
+        network_id: String,
+        server_id: String,
+    },
+    AdminSettingsLoad,
+    AdminSettingsSave(AdminSettingsForm),
     AdminNetworkDelete(String),
     AdminNetworkSave {
         slug: String,
@@ -701,6 +714,62 @@ fn main() -> Result<(), slint::PlatformError> {
             .send(WorkerCommand::AdminNetworkCreate(slug.trim().to_string()));
     });
 
+    let tx_for_admin_servers = worker_tx.clone();
+    ui.on_admin_servers_requested(move |network_id| {
+        let _ = tx_for_admin_servers.send(WorkerCommand::AdminServersLoad(network_id.to_string()));
+    });
+
+    let tx_for_admin_server_add = worker_tx.clone();
+    let weak_for_admin_server_add = ui.as_weak();
+    ui.on_admin_server_add(move || {
+        if let Some(ui) = weak_for_admin_server_add.upgrade() {
+            let _ = tx_for_admin_server_add.send(WorkerCommand::AdminServerAdd {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                host: ui.get_admin_new_server_host().trim().to_string(),
+                port: ui.get_admin_new_server_port().trim().to_string(),
+                tls: ui.get_admin_new_server_tls(),
+            });
+        }
+    });
+
+    let tx_for_admin_server_delete = worker_tx.clone();
+    let weak_for_admin_server_delete = ui.as_weak();
+    ui.on_admin_server_delete(move |server_id| {
+        if let Some(ui) = weak_for_admin_server_delete.upgrade() {
+            let _ = tx_for_admin_server_delete.send(WorkerCommand::AdminServerDelete {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                server_id: server_id.to_string(),
+            });
+        }
+    });
+
+    let tx_for_admin_settings = worker_tx.clone();
+    ui.on_admin_settings_requested(move || {
+        let _ = tx_for_admin_settings.send(WorkerCommand::AdminSettingsLoad);
+    });
+
+    let tx_for_admin_settings_save = worker_tx.clone();
+    let weak_for_admin_settings_save = ui.as_weak();
+    ui.on_admin_settings_save(move || {
+        if let Some(ui) = weak_for_admin_settings_save.upgrade() {
+            use slint::Model as _;
+            let sizes = ui
+                .get_admin_setting_sizes()
+                .iter()
+                .map(|size| size.to_string())
+                .collect();
+            let _ = tx_for_admin_settings_save.send(WorkerCommand::AdminSettingsSave(
+                AdminSettingsForm {
+                    host_index: ui.get_admin_setting_host_index(),
+                    sizes,
+                    video_seconds: ui.get_admin_setting_video_seconds().to_string(),
+                    mode_index: ui.get_admin_setting_mode_index(),
+                    prefix: ui.get_admin_setting_prefix().to_string(),
+                },
+            ));
+        }
+    });
+
     let tx_for_admin_network_delete = worker_tx.clone();
     ui.on_admin_network_delete(move |network_id| {
         let _ = tx_for_admin_network_delete
@@ -1253,6 +1322,8 @@ struct WorkerState {
     joined_topics: std::collections::HashSet<String>,
     /// Lines of the live admin feed, newest first (capped).
     admin_events: Vec<String>,
+    /// Last `GET /admin/settings`, to tell whether addressing was edited.
+    admin_settings: Option<Value>,
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
     /// transitions.
     window_states: HashMap<(String, String), ChannelWindowState>,
@@ -1454,6 +1525,7 @@ impl WorkerState {
             session: None,
             joined_topics: std::collections::HashSet::new(),
             admin_events: Vec::new(),
+            admin_settings: None,
             window_states: HashMap::new(),
             window_failures: HashMap::new(),
             window_kicks: HashMap::new(),
@@ -1725,6 +1797,67 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::AdminNetworkCreate(slug)) => {
                         handle_admin_write(&state, &ui, AdminWrite::CreateNetwork(slug)).await;
+                    }
+                    Some(WorkerCommand::AdminServersLoad(network_id)) => {
+                        push_admin_servers(&state, &ui, &network_id).await;
+                    }
+                    Some(WorkerCommand::AdminServerAdd {
+                        network_id,
+                        host,
+                        port,
+                        tls,
+                    }) => match port.parse::<u16>() {
+                        Ok(port) if !host.is_empty() => {
+                            handle_admin_write(
+                                &state,
+                                &ui,
+                                AdminWrite::AddServer {
+                                    network_id: network_id.clone(),
+                                    host,
+                                    port,
+                                    tls,
+                                },
+                            )
+                            .await;
+                            push_admin_servers(&state, &ui, &network_id).await;
+                        }
+                        _ => {
+                            let _ = ui.upgrade_in_event_loop(|ui| {
+                                ui.set_status_kind("admin-server-invalid".into());
+                            });
+                        }
+                    },
+                    Some(WorkerCommand::AdminServerDelete {
+                        network_id,
+                        server_id,
+                    }) => {
+                        handle_admin_write(
+                            &state,
+                            &ui,
+                            AdminWrite::DeleteServer {
+                                network_id: network_id.clone(),
+                                server_id,
+                            },
+                        )
+                        .await;
+                        push_admin_servers(&state, &ui, &network_id).await;
+                    }
+                    Some(WorkerCommand::AdminSettingsLoad) => {
+                        handle_admin_settings_load(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::AdminSettingsSave(form)) => {
+                        match admin_settings_body(&form, state.admin_settings.as_ref()) {
+                            Some(settings) => {
+                                handle_admin_write(&state, &ui, AdminWrite::UpdateSettings(settings))
+                                    .await;
+                                handle_admin_settings_load(&mut state, &ui).await;
+                            }
+                            None => {
+                                let _ = ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_status_kind("admin-setting-invalid".into());
+                                });
+                            }
+                        }
                     }
                     Some(WorkerCommand::AdminNetworkDelete(network_id)) => {
                         handle_admin_write(&state, &ui, AdminWrite::DeleteNetwork(network_id)).await;
@@ -3669,6 +3802,17 @@ enum AdminWrite {
         settings: Value,
     },
     DeleteNetwork(String),
+    AddServer {
+        network_id: String,
+        host: String,
+        port: u16,
+        tls: bool,
+    },
+    DeleteServer {
+        network_id: String,
+        server_id: String,
+    },
+    UpdateSettings(Value),
 }
 
 /// Runs an admin write, then refreshes the panel. Success clears the
@@ -3705,6 +3849,29 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
         AdminWrite::DeleteNetwork(network_id) => {
             (client.delete_admin_network(token, network_id).await, "")
         }
+        AdminWrite::AddServer {
+            network_id,
+            host,
+            port,
+            tls,
+        } => (
+            client
+                .add_admin_server(token, network_id, host, *port, *tls)
+                .await,
+            "server",
+        ),
+        AdminWrite::DeleteServer {
+            network_id,
+            server_id,
+        } => (
+            client
+                .delete_admin_server(token, network_id, server_id)
+                .await,
+            "",
+        ),
+        AdminWrite::UpdateSettings(settings) => {
+            (client.update_admin_settings(token, settings).await, "")
+        }
     };
     match result {
         Ok(()) => {
@@ -3718,6 +3885,10 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
                     "password" => ui.set_admin_new_user_password("".into()),
                     "network" => ui.set_admin_new_network_slug("".into()),
                     "edit" => ui.set_admin_edit_network("".into()),
+                    "server" => {
+                        ui.set_admin_new_server_host("".into());
+                        ui.set_admin_new_server_port("6697".into());
+                    }
                     _ => {}
                 }
                 ui.set_status_kind("admin-action-done".into());
@@ -3736,6 +3907,188 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
         }
     }
     handle_admin_refresh(state, ui).await;
+}
+
+/// The server settings editor's size fields: `(subtree, key)` in the order
+/// of the `admin-setting-sizes` model, all in MiB.
+const ADMIN_SIZE_SETTINGS: [(&str, &str); 9] = [
+    ("upload", "image_per_file_cap_bytes"),
+    ("upload", "video_per_file_cap_bytes"),
+    ("upload", "document_per_file_cap_bytes"),
+    ("upload", "audio_per_file_cap_bytes"),
+    ("upload", "global_cap_bytes"),
+    ("upload", "per_user_cap_bytes"),
+    ("upload", "per_visitor_cap_bytes"),
+    ("dcc", "max_transfer_bytes"),
+    ("dcc", "global_cap_bytes"),
+];
+const UPLOAD_HOSTS: [&str; 2] = ["embedded", "litterbox"];
+const ADDRESSING_MODES: [&str; 2] = ["pool_with_reservations", "static_mapping_with_reservations"];
+
+/// What the server settings editor sends back.
+#[derive(Debug, Clone, PartialEq)]
+struct AdminSettingsForm {
+    host_index: i32,
+    sizes: Vec<String>,
+    video_seconds: String,
+    mode_index: i32,
+    prefix: String,
+}
+
+/// The editor's view of `GET /admin/settings`.
+fn admin_settings_form(settings: &Value) -> AdminSettingsForm {
+    let text = |subtree: &str, key: &str| {
+        settings
+            .get(subtree)
+            .and_then(|tree| tree.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let bytes = |subtree: &str, key: &str| {
+        settings
+            .get(subtree)
+            .and_then(|tree| tree.get(key))
+            .and_then(Value::as_u64)
+    };
+    let index_of = |options: &[&str], value: &str| {
+        options
+            .iter()
+            .position(|option| *option == value)
+            .and_then(|index| i32::try_from(index).ok())
+            .unwrap_or(0)
+    };
+    AdminSettingsForm {
+        host_index: index_of(&UPLOAD_HOSTS, &text("upload", "active_host")),
+        sizes: ADMIN_SIZE_SETTINGS
+            .iter()
+            .map(|(subtree, key)| cordiale_core::admin::bytes_to_mib_text(bytes(subtree, key)))
+            .collect(),
+        video_seconds: bytes("upload", "video_max_duration_seconds")
+            .map(|seconds| seconds.to_string())
+            .unwrap_or_default(),
+        mode_index: index_of(&ADDRESSING_MODES, &text("addressing", "mode")),
+        prefix: text("addressing", "static_mapping_prefix"),
+    }
+}
+
+/// The `PUT /admin/settings` body for an edited form: every filled-in
+/// upload and DCC field, and the addressing subtree only when it changed
+/// (Grappa probes a new mode before accepting it). `None` when a field
+/// isn't a positive number.
+fn admin_settings_body(form: &AdminSettingsForm, loaded: Option<&Value>) -> Option<Value> {
+    let mut upload = serde_json::Map::new();
+    let mut dcc = serde_json::Map::new();
+    let host = usize::try_from(form.host_index)
+        .ok()
+        .and_then(|index| UPLOAD_HOSTS.get(index))?;
+    upload.insert("active_host".to_string(), Value::from(*host));
+    for ((subtree, key), text) in ADMIN_SIZE_SETTINGS.iter().zip(&form.sizes) {
+        if text.trim().is_empty() {
+            continue;
+        }
+        let bytes = cordiale_core::admin::mib_text_to_bytes(text)?;
+        let tree = if *subtree == "upload" {
+            &mut upload
+        } else {
+            &mut dcc
+        };
+        tree.insert((*key).to_string(), Value::from(bytes));
+    }
+    if !form.video_seconds.trim().is_empty() {
+        let seconds: u64 = form
+            .video_seconds
+            .trim()
+            .parse()
+            .ok()
+            .filter(|seconds| *seconds > 0)?;
+        upload.insert(
+            "video_max_duration_seconds".to_string(),
+            Value::from(seconds),
+        );
+    }
+    let mut body = serde_json::Map::new();
+    body.insert("upload".to_string(), Value::Object(upload));
+    if !dcc.is_empty() {
+        body.insert("dcc".to_string(), Value::Object(dcc));
+    }
+    let mode = usize::try_from(form.mode_index)
+        .ok()
+        .and_then(|index| ADDRESSING_MODES.get(index))?;
+    let loaded_form = loaded.map(admin_settings_form);
+    let addressing_changed = loaded_form.as_ref().is_none_or(|loaded| {
+        loaded.mode_index != form.mode_index || loaded.prefix.trim() != form.prefix.trim()
+    });
+    if addressing_changed {
+        let mut addressing = serde_json::Map::new();
+        addressing.insert("mode".to_string(), Value::from(*mode));
+        if !form.prefix.trim().is_empty() {
+            addressing.insert(
+                "static_mapping_prefix".to_string(),
+                Value::from(form.prefix.trim()),
+            );
+        }
+        body.insert("addressing".to_string(), Value::Object(addressing));
+    }
+    Some(Value::Object(body))
+}
+
+async fn handle_admin_settings_load(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let settings = match client.fetch_admin_settings(&token).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            persistence::log_line(&format!("admin settings load failed: {err:?}"));
+            return;
+        }
+    };
+    let form = admin_settings_form(&settings);
+    state.admin_settings = Some(settings);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let sizes: Vec<slint::SharedString> = form.sizes.into_iter().map(Into::into).collect();
+        ui.set_admin_setting_host_index(form.host_index);
+        ui.set_admin_setting_sizes(Rc::new(slint::VecModel::from(sizes)).into());
+        ui.set_admin_setting_video_seconds(form.video_seconds.into());
+        ui.set_admin_setting_mode_index(form.mode_index);
+        ui.set_admin_setting_prefix(form.prefix.into());
+        ui.set_admin_settings_loaded(true);
+    });
+}
+
+async fn push_admin_servers(state: &WorkerState, ui: &slint::Weak<AppWindow>, network_id: &str) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let servers = match client.fetch_admin_servers(token, network_id).await {
+        Ok(servers) => servers,
+        Err(err) => {
+            persistence::log_line(&format!("admin servers load failed: {err:?}"));
+            Vec::new()
+        }
+    };
+    let rows: Vec<(String, String)> = servers
+        .iter()
+        .map(|entry| {
+            let id = entry
+                .get("id")
+                .and_then(Value::as_i64)
+                .map(|id| id.to_string())
+                .unwrap_or_default();
+            (cordiale_core::admin::admin_server_label(entry), id)
+        })
+        .collect();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<AdminServerRow> = rows
+            .into_iter()
+            .map(|(label, server_id)| AdminServerRow {
+                label: label.into(),
+                server_id: server_id.into(),
+            })
+            .collect();
+        ui.set_admin_servers(Rc::new(slint::VecModel::from(rows)).into());
+    });
 }
 
 fn admin_overview_text(overview: &cordiale_core::admin::AdminOverview) -> String {
@@ -16156,6 +16509,33 @@ mod tests {
             );
         }
         assert_eq!(joined_channels(&state, "libera"), vec!["#a".to_string()]);
+    }
+
+    #[test]
+    fn admin_settings_round_trip_and_leave_addressing_alone() {
+        let loaded = serde_json::json!({
+            "upload": {"active_host": "litterbox", "image_per_file_cap_bytes": 10485760},
+            "dcc": {"max_transfer_bytes": 1048576},
+            "addressing": {"mode": "pool_with_reservations", "static_mapping_prefix": null}
+        });
+        let mut form = admin_settings_form(&loaded);
+        assert_eq!(form.host_index, 1);
+        assert_eq!(form.sizes[0], "10");
+        assert_eq!(form.sizes[7], "1");
+        form.sizes[7] = "2".to_string();
+        let body = admin_settings_body(&form, Some(&loaded)).expect("valid");
+        assert_eq!(body["dcc"]["max_transfer_bytes"], 2 * 1024 * 1024);
+        assert_eq!(body["upload"]["active_host"], "litterbox");
+        assert!(body.get("addressing").is_none());
+        form.mode_index = 1;
+        form.prefix = "64".to_string();
+        let body = admin_settings_body(&form, Some(&loaded)).expect("valid");
+        assert_eq!(
+            body["addressing"]["mode"],
+            "static_mapping_with_reservations"
+        );
+        form.sizes[0] = "-1".to_string();
+        assert!(admin_settings_body(&form, Some(&loaded)).is_none());
     }
 
     #[test]

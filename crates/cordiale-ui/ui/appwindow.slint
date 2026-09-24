@@ -170,6 +170,12 @@ struct AdminNetworkRow {
     ip-cap: string,
 }
 
+// One IRC server endpoint of the network being edited in Admin.
+struct AdminServerRow {
+    label: string,
+    server-id: string,
+}
+
 // One row in the admin Visitors list.
 struct AdminVisitorRow {
     label: string,
@@ -824,6 +830,25 @@ export component AppWindow inherits Window {
     callback admin-network-create(string);
     callback admin-network-delete(string);
     callback admin-network-save();
+    // Servers of the network being edited.
+    in-out property <string> admin-edit-network-id: "";
+    in property <[AdminServerRow]> admin-servers: [];
+    in-out property <string> admin-new-server-host: "";
+    in-out property <string> admin-new-server-port: "6697";
+    in-out property <bool> admin-new-server-tls: true;
+    callback admin-servers-requested(string);
+    callback admin-server-add();
+    callback admin-server-delete(string);
+    // Server-wide settings (`/admin/settings`); sizes are MiB, in the order
+    // of `ADMIN_SIZE_SETTINGS`.
+    in property <bool> admin-settings-loaded: false;
+    in-out property <int> admin-setting-host-index: 0;
+    in-out property <[string]> admin-setting-sizes: [];
+    in-out property <string> admin-setting-video-seconds: "";
+    in-out property <int> admin-setting-mode-index: 0;
+    in-out property <string> admin-setting-prefix: "";
+    callback admin-settings-requested();
+    callback admin-settings-save();
     callback links-graph-requested();
     callback theme-toggle-requested();
     callback display-prefs-changed();
@@ -1114,6 +1139,10 @@ export component AppWindow inherits Window {
             return @tr("Done.");
         } else if status-kind == "admin-action-failed" {
             return @tr("The server refused that admin action ({}).", status-command-hint);
+        } else if status-kind == "admin-server-invalid" {
+            return @tr("A server needs a host and a port between 1 and 65535.");
+        } else if status-kind == "admin-setting-invalid" {
+            return @tr("Sizes and the video length must be positive numbers.");
         } else if status-kind == "admin-cap-invalid" {
             return @tr("Caps must be whole numbers, or empty for unlimited.");
         } else if status-kind == "send-failed" {
@@ -2619,6 +2648,15 @@ export component AppWindow inherits Window {
                         selected: admin-section == "events";
                         clicked => { admin-section = "events"; }
                     }
+                    NavButton {
+                        icon: "🧰";
+                        label: @tr("Server");
+                        selected: admin-section == "server";
+                        clicked => {
+                            admin-section = "server";
+                            admin-settings-requested();
+                        }
+                    }
                 }
 
                 HorizontalLayout {
@@ -2800,6 +2838,54 @@ export component AppWindow inherits Window {
                             clicked => { admin-edit-network = ""; }
                         }
                     }
+
+                    Text {
+                        text: "🖧  " + @tr("IRC servers");
+                        font-weight: 600;
+                    }
+                    for server in admin-servers : HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: server.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Remove server {}", server.label);
+                            clicked => { admin-server-delete(server.server-id); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("Host");
+                            accessible-label: @tr("Host");
+                            text <=> admin-new-server-host;
+                            horizontal-stretch: 1;
+                            min-width: 100px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("Port");
+                            accessible-label: @tr("Port");
+                            input-type: number;
+                            text <=> admin-new-server-port;
+                            min-width: 60px;
+                        }
+                        CheckBox {
+                            text: "TLS";
+                            checked <=> admin-new-server-tls;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Add server");
+                            a11y-label: @tr("Add server");
+                            enabled: admin-new-server-host != "";
+                            clicked => { admin-server-add(); }
+                        }
+                    }
                 }
 
                 if admin-section == "networks" : ListView {
@@ -2821,6 +2907,8 @@ export component AppWindow inherits Window {
                             a11y-label: @tr("Edit network {}", row.slug);
                             clicked => {
                                 admin-edit-network = row.slug;
+                                admin-edit-network-id = row.network-id;
+                                admin-servers-requested(row.network-id);
                                 admin-edit-visitor-enabled = row.visitor-enabled;
                                 admin-edit-visitor-cap = row.visitor-cap;
                                 admin-edit-user-cap = row.user-cap;
@@ -2869,6 +2957,106 @@ export component AppWindow inherits Window {
                     for line in admin-session-log : Text {
                         text: line;
                         wrap: word-wrap;
+                    }
+                }
+
+                if admin-section == "server" && !admin-settings-loaded : Text {
+                    text: @tr("Loading…");
+                }
+                if admin-section == "server" && admin-settings-loaded : VerticalLayout {
+                    vertical-stretch: 0;
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        padding: 2px;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+
+                            Text {
+                                text: @tr("Upload host");
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            ComboBox {
+                                model: ["embedded", "litterbox"];
+                                current-index <=> admin-setting-host-index;
+                                min-width: 140px;
+                            }
+                        }
+                        for size[index] in admin-setting-sizes : HorizontalLayout {
+                            spacing: 6px;
+
+                            Text {
+                                text: index == 0 ? @tr("Image, per file (MiB)")
+                                    : index == 1 ? @tr("Video, per file (MiB)")
+                                    : index == 2 ? @tr("Document, per file (MiB)")
+                                    : index == 3 ? @tr("Audio, per file (MiB)")
+                                    : index == 4 ? @tr("All uploads (MiB)")
+                                    : index == 5 ? @tr("Per user (MiB)")
+                                    : index == 6 ? @tr("Per visitor (MiB)")
+                                    : index == 7 ? @tr("DCC, per transfer (MiB)")
+                                    : @tr("DCC, all transfers (MiB)");
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                wrap: word-wrap;
+                            }
+                            LineEdit {
+                                text: size;
+                                input-type: decimal;
+                                min-width: 90px;
+                                horizontal-stretch: 0;
+                                edited(value) => { admin-setting-sizes[index] = value; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+
+                            Text {
+                                text: @tr("Longest video (seconds)");
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            LineEdit {
+                                text <=> admin-setting-video-seconds;
+                                input-type: number;
+                                min-width: 90px;
+                                horizontal-stretch: 0;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+
+                            Text {
+                                text: @tr("Source address mode");
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            ComboBox {
+                                model: [@tr("Pool with reservations"), @tr("Static mapping with reservations")];
+                                current-index <=> admin-setting-mode-index;
+                                min-width: 200px;
+                            }
+                        }
+                        if admin-setting-mode-index == 1 : HorizontalLayout {
+                            spacing: 6px;
+
+                            Text {
+                                text: @tr("Static mapping prefix length");
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                            LineEdit {
+                                text <=> admin-setting-prefix;
+                                min-width: 90px;
+                                horizontal-stretch: 0;
+                            }
+                        }
+                        CompactButton {
+                            text: "💾  " + @tr("Save");
+                            a11y-label: @tr("Save");
+                            clicked => { admin-settings-save(); }
+                        }
                     }
                 }
 
