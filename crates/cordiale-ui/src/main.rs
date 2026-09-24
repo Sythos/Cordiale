@@ -7805,7 +7805,14 @@ fn buffer_pending_own_nick_dm(
         return;
     }
     if state.pending_own_nick_dms.len() >= MAX_PENDING_OWN_NICK_DMS {
-        state.pending_own_nick_dms.pop_front();
+        // The dropped DM is in Grappa's scrollback: if its query opens, the
+        // first history load fetches the full tail instead of only what
+        // follows the buffered messages, so nothing goes missing.
+        if let Some(dropped) = state.pending_own_nick_dms.pop_front() {
+            state
+                .query_full_history_required
+                .insert(query_window_key(&dropped.network, &dropped.sender));
+        }
     }
     state.pending_own_nick_dms.push_back(PendingOwnNickDm {
         network: network.to_string(),
@@ -7823,6 +7830,9 @@ fn drain_pending_own_nick_dms(state: &mut WorkerState) {
             // A valid full snapshot is authoritative: if it didn't open the
             // sender's query, don't invent a client-side window or retain the
             // message until some unrelated later snapshot.
+            state
+                .query_full_history_required
+                .remove(&query_window_key(&dm.network, &dm.sender));
             continue;
         };
         let key = (query.network.clone(), query.target_nick.clone());
@@ -14531,10 +14541,14 @@ mod tests {
             state.pending_own_nick_dms.front().unwrap().payload["id"].as_i64(),
             Some(2)
         );
+        // The overflow is recovered from history if the query opens.
+        let identity = query_window_key("libera", "unlisted");
+        assert!(state.query_full_history_required.contains(&identity));
 
         assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
         drain_pending_own_nick_dms(&mut state);
         assert!(state.pending_own_nick_dms.is_empty());
+        assert!(!state.query_full_history_required.contains(&identity));
         assert!(state.query_windows.is_empty());
         assert!(state.messages.is_empty());
     }
