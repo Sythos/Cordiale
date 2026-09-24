@@ -84,11 +84,7 @@ Cordiale still has these user-visible or behavioral gaps:
   the user-mode toggles), but not `/np` (a bare `/topic` or `/mode` shows
   the channel's topic or modes in the status bar).
 - **Chat and roster edge cases:** a message with multiple differently colored
-  mIRC runs may overflow instead of wrapping as one paragraph. Channel MODE
-  parsing does not yet use the advertised ISUPPORT CHANMODES argument rules,
-  so mixed mode strings can misassign a role prefix. A bounded pre-snapshot
-  DM queue can drop messages if the authoritative query snapshot is absent
-  or late.
+  mIRC runs may overflow instead of wrapping as one paragraph.
 - **Remaining presentation gaps:** WHOIS avatars are drawn when Grappa
   serves them as PNG, JPEG, GIF, WebP or BMP; the account-wide unread count only shows in the
   window title (and so the taskbar), not as an OS badge.
