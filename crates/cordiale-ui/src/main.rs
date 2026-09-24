@@ -1671,6 +1671,9 @@ struct WorkerState {
     /// disconnect or relaunch; an automatic reconnect keeps it as it was,
     /// possibly stale.
     watch_patterns: Vec<String>,
+    /// Ref of the `watchlist` list request whose reply holds the account's
+    /// keyword patterns.
+    pending_watchlist_ref: Option<String>,
     /// Current app theme, kept here too (not just in Slint's `theme`
     /// property) so message-rendering helpers running on this thread can
     /// pick a legible color without an extra hop to the UI thread.
@@ -1748,6 +1751,7 @@ impl WorkerState {
             notification_prefs: None,
             web_bundle: None,
             watch_patterns: Vec::new(),
+            pending_watchlist_ref: None,
             theme: persistence::load_settings().unwrap_or_default().theme,
             theme_choices: builtin_theme_choices(),
         }
@@ -2158,6 +2162,7 @@ async fn run_worker(
                         handle_admin_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::SettingsNetworkSelected(network)) => {
+                        load_identity_nick(&state, &ui, &network).await;
                         state.settings_network = Some(network);
                         handle_settings_network_refresh(&state, &ui).await;
                         push_notify_nicks(&state, &ui);
@@ -2357,6 +2362,7 @@ async fn run_worker(
                             ui.set_status_kind("signed-in".into());
                             ui.set_status_message("".into());
                         });
+                        request_watch_patterns(&mut state);
                     }
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame).await;
@@ -5335,6 +5341,61 @@ fn presence_key(nick: &str) -> String {
 
 /// Pushes the session-local keyword-watchlist patterns to the UI — see
 /// `WorkerState::watch_patterns` for why they are session-local.
+/// Asks Grappa for the account's keyword patterns (`watchlist` with
+/// `action: "list"`), so the list reflects what other clients changed too;
+/// the reply is matched by its ref.
+fn request_watch_patterns(state: &mut WorkerState) {
+    let (Some(session), Some(identifier)) = (&state.session, &state.identifier) else {
+        return;
+    };
+    let message_ref = session.send_tracked_command(
+        format!("grappa:user:{identifier}"),
+        "watchlist",
+        serde_json::json!({ "action": "list" }),
+    );
+    state.pending_watchlist_ref = Some(message_ref);
+}
+
+/// The `patterns` of an `ok` reply to the watchlist list request.
+fn watch_patterns_from_reply(reply: &Value) -> Option<Vec<String>> {
+    if reply.get("status").and_then(Value::as_str) != Some("ok") {
+        return None;
+    }
+    let patterns = reply.get("response")?.get("patterns")?.as_array()?;
+    Some(
+        patterns
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// The account's current nick on `network`, from a `GET /networks` row.
+fn network_nick(networks: &[Value], network: &str) -> Option<String> {
+    networks
+        .iter()
+        .find(|row| row.get("slug").and_then(Value::as_str) == Some(network))?
+        .get("nick")?
+        .as_str()
+        .filter(|nick| !nick.is_empty())
+        .map(str::to_string)
+}
+
+/// Fills the identity editor's nick with the one in use on `network`.
+/// Grappa no longer reports ident and realname, so those stay as typed.
+async fn load_identity_nick(state: &WorkerState, ui: &slint::Weak<AppWindow>, network: &str) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let Ok(networks) = client.fetch_networks(token).await else {
+        return;
+    };
+    if let Some(nick) = network_nick(&networks, network) {
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.set_identity_nick(nick.into()));
+    }
+}
+
 fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let patterns: Vec<slint::SharedString> = state
         .watch_patterns
@@ -5694,6 +5755,14 @@ async fn handle_frame(
             ));
         }
         handle_query_join_reply(state, ui, &frame.topic, status).await;
+        if frame.message_ref.is_some() && frame.message_ref == state.pending_watchlist_ref {
+            state.pending_watchlist_ref = None;
+            if let Some(patterns) = watch_patterns_from_reply(&frame.payload) {
+                state.watch_patterns = patterns;
+                push_watch_patterns(state, ui);
+            }
+            return;
+        }
         if let Some(pending) = frame
             .message_ref
             .as_ref()
@@ -12400,6 +12469,9 @@ fn avatar_extension(content_type: Option<&str>) -> Option<&'static str> {
     match mime {
         "image/png" => Some("png"),
         "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" | "image/x-ms-bmp" => Some("bmp"),
         _ => None,
     }
 }
@@ -17524,7 +17596,9 @@ mod tests {
             avatar_extension(Some("image/jpeg; charset=binary")),
             Some("jpg")
         );
-        assert_eq!(avatar_extension(Some("image/webp")), None);
+        assert_eq!(avatar_extension(Some("image/webp")), Some("webp"));
+        assert_eq!(avatar_extension(Some("image/gif")), Some("gif"));
+        assert_eq!(avatar_extension(Some("image/svg+xml")), None);
         assert_eq!(avatar_extension(None), None);
     }
 
@@ -17576,6 +17650,27 @@ mod tests {
         assert_eq!(prefs["notification_sound"], "chime");
         assert_eq!(prefs["channel_mentions"], true);
         assert_eq!(muted_rows(&prefs)[0].1, "libera #rust");
+    }
+
+    #[test]
+    fn watchlist_reply_and_network_nick() {
+        assert_eq!(
+            watch_patterns_from_reply(&serde_json::json!({
+                "status": "ok", "response": {"patterns": ["rust*", "cordiale"]}
+            })),
+            Some(vec!["rust*".to_string(), "cordiale".to_string()])
+        );
+        assert_eq!(
+            watch_patterns_from_reply(&serde_json::json!({"status": "error"})),
+            None
+        );
+        let networks = vec![
+            serde_json::json!({"slug": "libera", "nick": "ada"}),
+            serde_json::json!({"slug": "oftc", "nick": ""}),
+        ];
+        assert_eq!(network_nick(&networks, "libera"), Some("ada".to_string()));
+        assert_eq!(network_nick(&networks, "oftc"), None);
+        assert_eq!(network_nick(&networks, "efnet"), None);
     }
 
     #[test]

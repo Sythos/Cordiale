@@ -313,10 +313,6 @@ msgid "Expansion"
 msgstr "Espansione"
 
 msgctxt "AppWindow"
-msgid "On-connect commands (one per line, semicolon-separated)"
-msgstr "Comandi alla connessione (uno per riga, separati da punto e virgola)"
-
-msgctxt "AppWindow"
 msgid "Credits"
 msgstr "Crediti"
 
@@ -1415,6 +1411,14 @@ msgstr "Concedi"
 msgctxt "AppWindow"
 msgid "Revoke grant {}"
 msgstr "Revoca la concessione {}"
+
+msgctxt "AppWindow"
+msgid "On-connect commands, one IRC command per line"
+msgstr "Comandi alla connessione, un comando IRC per riga"
+
+msgctxt "AppWindow"
+msgid "On-connect commands"
+msgstr "Comandi alla connessione"
 
 msgctxt "AppWindow"
 msgid "Conversation muted: other devices won't be notified about it."
