@@ -3113,13 +3113,12 @@ fn remove_sidebar_channel_entry(
 }
 
 /// Whether `identifier` appears in `members` with the `@` (op) prefix —
-/// gates `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items. Only
-/// ever as accurate as `members` itself, which doesn't track role
-/// (mode) changes yet — see README's Known gaps.
+/// gates `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items, as
+/// accurate as `members` (snapshots plus live MODE changes).
 fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str) -> bool {
     members
         .iter()
-        .any(|(name, prefix)| name == identifier && prefix == "@")
+        .any(|(name, prefix)| name == identifier && prefix.contains('@'))
 }
 
 async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
@@ -7250,52 +7249,33 @@ fn update_members_from_frame(
         }
         // Real, observed shape (a screenshot caught this leaking as raw
         // JSON before this was handled): `meta.modes` like `"+o"`/`"-o"`,
-        // `meta.args` the targets in order for whichever letters take one.
-        // Cordiale only tracks the three prefix-bearing modes it renders
-        // (`@`/`%`/`+`) — any other letter in the string (ban masks, keys,
-        // limits, ...) is skipped without consuming an `args` entry, since
-        // Cordiale has no ISUPPORT CHANMODES table to know which of those
-        // take one; a combined string mixing a skipped letter with a
-        // prefix letter (e.g. `"+ob"`) would misalign, but no such case
-        // has been observed yet — see README's Known gaps.
+        // `meta.args` the parameters in order. Which letters take one comes
+        // from the network's ISUPPORT PREFIX and CHANMODES, so a mixed
+        // string like `"+bo mask nick"` lines up.
         Some("mode") => {
             let modes = payload
                 .get("meta")
                 .and_then(|meta| meta.get("modes"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let targets = mode_args(payload);
+            let isupport = state.isupport_by_network.get(&key.0);
+            let prefix_changes =
+                cordiale_core::isupport::prefix_mode_changes(modes, &mode_args(payload), isupport);
+            let order = cordiale_core::isupport::prefix_symbol_order(isupport);
+            let casemapping = network_casemapping(state, &key.0);
             let Some(members) = state.members.get_mut(key) else {
                 return false;
             };
-            let mut sign = '+';
-            let mut targets = targets.into_iter();
             let mut changed = false;
-            for ch in modes.chars() {
-                match ch {
-                    '+' | '-' => sign = ch,
-                    'o' | 'h' | 'v' => {
-                        let Some(target) = targets.next() else {
-                            continue;
-                        };
-                        let Some(entry) = members.iter_mut().find(|(name, _)| *name == target)
-                        else {
-                            continue;
-                        };
-                        let symbol = match ch {
-                            'o' => "@",
-                            'h' => "%",
-                            _ => "+",
-                        };
-                        entry.1 = if sign == '+' {
-                            symbol.to_string()
-                        } else {
-                            String::new()
-                        };
-                        changed = true;
-                    }
-                    _ => {}
-                }
+            for (adding, symbol, target) in prefix_changes {
+                let Some(entry) = members
+                    .iter_mut()
+                    .find(|(name, _)| casemapping.nick_eq(name, &target))
+                else {
+                    continue;
+                };
+                entry.1 = update_member_prefix(&entry.1, &symbol, adding, &order);
+                changed = true;
             }
             if changed {
                 sort_members_by_rank(members);
@@ -8037,9 +8017,39 @@ fn topics_from_boot_response(boot: &BootResponse) -> HashMap<(String, String), S
     topics
 }
 
-/// `(name, prefix)` — `prefix` is the single highest-ranked IRC role
-/// marker (`@` op, `%` halfop, `+` voice, empty for a plain member).
+/// `(name, prefix)` — `prefix` holds every IRC role marker the member has
+/// (`@` op, `%` halfop, `+` voice...), highest first, so dropping one
+/// keeps the next; empty for a plain member. Only the first is shown.
 type MemberEntry = (String, String);
+
+/// Adds or drops one role symbol, keeping the member's symbols in `order`
+/// (highest first).
+fn update_member_prefix(prefix: &str, symbol: &str, adding: bool, order: &[String]) -> String {
+    let mut symbols: Vec<String> = prefix
+        .chars()
+        .map(String::from)
+        .filter(|held| held != symbol)
+        .collect();
+    if adding {
+        symbols.push(symbol.to_string());
+    }
+    let rank = |held: &String| {
+        order
+            .iter()
+            .position(|symbol| symbol == held)
+            .unwrap_or(order.len())
+    };
+    symbols.sort_by_key(rank);
+    symbols.concat()
+}
+
+/// The role marker shown for a member: the highest one it holds.
+fn highest_prefix(prefix: &str) -> &str {
+    prefix
+        .char_indices()
+        .nth(1)
+        .map_or(prefix, |(end, _)| &prefix[..end])
+}
 type MembersByChannel = HashMap<(String, String), Vec<MemberEntry>>;
 
 /// Reads `(network, channel) -> members` out of `boot.channels`. The
@@ -8091,11 +8101,9 @@ fn members_from_boot_response(boot: &BootResponse) -> MembersByChannel {
 /// from.
 fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
     if let Some(raw) = entry.as_str() {
-        let prefix_char = raw.chars().next().filter(|c| "@%+&~".contains(*c));
-        return Some(match prefix_char {
-            Some(c) => (raw[c.len_utf8()..].to_string(), c.to_string()),
-            None => (raw.to_string(), String::new()),
-        });
+        let name = raw.trim_start_matches(|c| "@%+&~".contains(c));
+        let prefix = raw[..raw.len() - name.len()].to_string();
+        return Some((name.to_string(), prefix));
     }
 
     let obj = entry.as_object()?;
@@ -8109,16 +8117,14 @@ fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| {
-            obj.get("modes")
-                .and_then(Value::as_array)
-                .and_then(|modes| {
-                    modes.iter().find_map(|mode| match mode.as_str() {
-                        Some("o") => Some("@".to_string()),
-                        Some("h") => Some("%".to_string()),
-                        Some("v") => Some("+".to_string()),
-                        _ => None,
-                    })
-                })
+            obj.get("modes").and_then(Value::as_array).map(|modes| {
+                ["o", "h", "v"]
+                    .iter()
+                    .zip(["@", "%", "+"])
+                    .filter(|(mode, _)| modes.iter().any(|held| held.as_str() == Some(**mode)))
+                    .map(|(_, symbol)| symbol)
+                    .collect::<String>()
+            })
         })
         .unwrap_or_default();
     Some((name, prefix))
@@ -8127,7 +8133,7 @@ fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
 /// Ops first, then halfops, then voice, then everyone else — each group
 /// alphabetical (case-insensitive) within itself.
 fn sort_members_by_rank(members: &mut [MemberEntry]) {
-    const RANK_ORDER: &str = "@%+";
+    const RANK_ORDER: &str = "~&@%+";
     let rank = |prefix: &str| {
         prefix
             .chars()
@@ -8514,7 +8520,7 @@ fn member_prefix_for_nick<'a>(
     members
         .iter()
         .find(|(member_nick, _)| casemapping.nick_eq(member_nick, nick))
-        .map(|(_, prefix)| prefix.as_str())
+        .map(|(_, prefix)| highest_prefix(prefix))
         .unwrap_or("")
 }
 
@@ -8613,7 +8619,7 @@ fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
             let (r, g, b) = nick_color(name, dark_theme);
             MemberRow {
                 name: name.clone().into(),
-                prefix: prefix.clone().into(),
+                prefix: highest_prefix(prefix).into(),
                 color: slint::Color::from_rgb_u8(r, g, b),
             }
         })
@@ -17247,6 +17253,24 @@ mod tests {
         assert_eq!(avatar_extension(Some("image/gif")), Some("gif"));
         assert_eq!(avatar_extension(Some("image/svg+xml")), None);
         assert_eq!(avatar_extension(None), None);
+    }
+
+    #[test]
+    fn member_prefixes_keep_every_role_highest_first() {
+        let order: Vec<String> = ["@", "%", "+"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(update_member_prefix("+", "@", true, &order), "@+");
+        assert_eq!(update_member_prefix("@+", "@", false, &order), "+");
+        assert_eq!(update_member_prefix("@", "@", true, &order), "@");
+        assert_eq!(highest_prefix("@+"), "@");
+        assert_eq!(highest_prefix(""), "");
+        assert_eq!(
+            member_from_entry(&serde_json::json!("@+ada")),
+            Some(("ada".to_string(), "@+".to_string()))
+        );
+        assert_eq!(
+            member_from_entry(&serde_json::json!({"nick": "bob", "modes": ["v", "o"]})),
+            Some(("bob".to_string(), "@+".to_string()))
+        );
     }
 
     #[test]
