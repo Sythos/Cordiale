@@ -1159,3 +1159,7 @@ msgstr "Das Betreten dieses Kanals ist fehlgeschlagen."
 msgctxt "AppWindow"
 msgid "Joining this channel failed: {}"
 msgstr "Das Betreten dieses Kanals ist fehlgeschlagen: {}"
+
+msgctxt "AppWindow"
+msgid "The server refused that command ({})."
+msgstr "Der Server hat diesen Befehl abgelehnt ({})."

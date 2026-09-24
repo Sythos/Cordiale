@@ -1050,6 +1050,8 @@ export component AppWindow inherits Window {
             return @tr("Settings saved.");
         } else if status-kind == "personal-prefs-failed" {
             return @tr("Couldn't save those settings.");
+        } else if status-kind == "command-refused" {
+            return @tr("The server refused that command ({}).", status-command-hint);
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
