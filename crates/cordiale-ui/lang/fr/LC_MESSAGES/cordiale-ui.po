@@ -1135,3 +1135,7 @@ msgstr "Consulter les profils des autres utilisateurs (CTCP USERINFO)"
 msgctxt "AppWindow"
 msgid "Accept DCC files from open private conversations automatically"
 msgstr "Accepter automatiquement les fichiers DCC des conversations privées ouvertes"
+
+msgctxt "AppWindow"
+msgid "That alias expands into too many others: {}"
+msgstr "Cet alias se développe en trop d'autres : {}"
