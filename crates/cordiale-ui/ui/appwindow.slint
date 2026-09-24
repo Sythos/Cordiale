@@ -662,6 +662,8 @@ export component AppWindow inherits Window {
     callback send-chat-message(string);
     callback compose-text-changed(string);
     callback attach-file-requested();
+    // File name shown by the `attach-*` status messages.
+    in property <string> status-attach-name: "";
     callback admin-refresh-requested();
     callback admin-disconnect-session(string);
     callback admin-user-toggle-admin(string, bool);
@@ -961,10 +963,24 @@ export component AppWindow inherits Window {
             return @tr("No away summary for this network yet.");
         } else if status-kind == "invite-sent" {
             return @tr("Invited {} to {} on {}.", status-invite-peer, status-invite-channel, status-invite-network);
+        } else if status-kind == "attach-uploading" {
+            return @tr("Uploading {}…", status-attach-name);
+        } else if status-kind == "attach-sent" {
+            return @tr("Uploaded {}; its link was posted.", status-attach-name);
+        } else if status-kind == "attach-unsupported-type" {
+            return @tr("The server doesn't accept this type of file: {}", status-attach-name);
+        } else if status-kind == "attach-too-large" {
+            return @tr("{} is larger than the server allows for this type of file.", status-attach-name);
+        } else if status-kind == "attach-no-space" {
+            return @tr("The server has no room left for {}.", status-attach-name);
+        } else if status-kind == "attach-read-failed" {
+            return @tr("Couldn't read {}.", status-attach-name);
+        } else if status-kind == "attach-no-window" {
+            return @tr("Open a channel or private conversation before attaching a file.");
+        } else if status-kind == "attach-failed" {
+            return @tr("Couldn't upload {}.", status-attach-name);
         } else if status-kind == "theme-change-failed" {
             return @tr("Couldn't change the theme on the server.");
-        } else if status-kind == "attach-unsupported" {
-            return @tr("Attachments aren't supported yet.");
         } else {
             return status-message;
         }

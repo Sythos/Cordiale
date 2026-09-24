@@ -223,6 +223,15 @@ pub struct ArchiveResponse {
     pub archive: Vec<ArchiveEntry>,
 }
 
+/// Response body of `POST /api/uploads` (201): the public URL carries the
+/// file extension (`/uploads/<slug>.<ext>`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct UploadResponse {
+    pub slug: String,
+    pub url: String,
+    pub expires_at: String,
+}
+
 /// One theme of `GET /themes` or `GET /me/theme`. Only the fields Cordiale
 /// uses are read; `payload.colors` is Grappa's closed 27-color map.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

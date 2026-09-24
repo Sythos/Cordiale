@@ -47,6 +47,7 @@ use cordiale_core::rest::{
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::theme::{font_family_for, ThemePalette, BUILTIN_THEMES};
+use cordiale_core::upload::{attachment_message, mime_for_filename, UploadCategory};
 use cordiale_core::wire_event::ClientEventKind;
 
 /// The default server offered on first launch.
@@ -95,7 +96,7 @@ enum WorkerCommand {
     SendMessage {
         body: String,
     },
-    AttachFile,
+    AttachFile(std::path::PathBuf),
     ComposeTextChanged(String),
     ToggleTheme,
     SelectColorTheme(String),
@@ -477,7 +478,11 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let tx_for_attach = worker_tx.clone();
     ui.on_attach_file_requested(move || {
-        let _ = tx_for_attach.send(WorkerCommand::AttachFile);
+        // The native file picker is modal and must run on the UI thread
+        // (a requirement on macOS); the upload itself happens in the worker.
+        if let Some(path) = rfd::FileDialog::new().pick_file() {
+            let _ = tx_for_attach.send(WorkerCommand::AttachFile(path));
+        }
     });
 
     let tx_for_send = worker_tx.clone();
@@ -1448,17 +1453,8 @@ async fn run_worker(
                         *expanded = !*expanded;
                         refresh_network_groups(&state, &ui);
                     }
-                    Some(WorkerCommand::AttachFile) => {
-                        // No attachment upload path in the Grappa contract
-                        // yet (see `docs/protocol-notes.md` §4's "dcc
-                        // offer" entity — attachments look DCC-based, not
-                        // a plain REST upload) — surfaced as a status
-                        // message rather than silently doing nothing.
-                        persistence::log_line("attach file requested: not yet implemented");
-                        let ui = ui.clone();
-                        let _ = ui.upgrade_in_event_loop(|ui| {
-                            ui.set_status_kind("attach-unsupported".into());
-                        });
+                    Some(WorkerCommand::AttachFile(path)) => {
+                        handle_attach_file(&mut state, &ui, path).await;
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
                         handle_send_message(&mut state, &ui, body).await;
@@ -2572,6 +2568,92 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
         let _ = ui.upgrade_in_event_loop(|ui| {
             ui.set_status_kind("send-failed".into());
         });
+    }
+}
+
+/// Uploads a picked file to Grappa (`POST /api/uploads`) and posts its link
+/// in the open window, as Cicchetto does: attachments stay plain messages,
+/// prefixed by the category emoji (`📸 <url>` for an image). Types the
+/// server would refuse, and files over the advertised per-file cap, are
+/// stopped before uploading.
+async fn handle_attach_file(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    path: std::path::PathBuf,
+) {
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let set_status = |kind: &'static str, name: String| {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_status_attach_name(name.into());
+            ui.set_status_kind(kind.into());
+        });
+    };
+    if state.current_channel.is_none() {
+        set_status("attach-no-window", filename);
+        return;
+    }
+    let Some((mime, category)) = mime_for_filename(&filename) else {
+        set_status("attach-unsupported-type", filename);
+        return;
+    };
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            persistence::log_line(&format!("attachment read failed: {err}"));
+            set_status("attach-read-failed", filename);
+            return;
+        }
+    };
+    let over_cap = state
+        .upload_limits
+        .as_ref()
+        .is_some_and(|limits| bytes.len() as u64 > upload_cap(limits, category));
+    if over_cap {
+        set_status("attach-too-large", filename);
+        return;
+    }
+    set_status("attach-uploading", filename.clone());
+    match client.upload_file(&token, &filename, mime, bytes).await {
+        Ok(uploaded) => {
+            persistence::log_line(&format!("attachment uploaded: slug={}", uploaded.slug));
+            // Set first, so a failed send that follows can replace it.
+            set_status("attach-sent", filename);
+            handle_send_message(state, ui, attachment_message(category, &uploaded.url)).await;
+        }
+        Err(err) => {
+            persistence::log_line(&format!("attachment upload failed: {err:?}"));
+            set_status(
+                attachment_error_status(err.status().map(|status| status.as_u16())),
+                filename,
+            );
+        }
+    }
+}
+
+/// The per-file cap Grappa advertises for a category.
+fn upload_cap(limits: &UploadLimits, category: UploadCategory) -> u64 {
+    match category {
+        UploadCategory::Image => limits.image_bytes,
+        UploadCategory::Video => limits.video_bytes,
+        UploadCategory::Document => limits.document_bytes,
+        UploadCategory::Audio => limits.audio_bytes,
+    }
+}
+
+/// Status-bar key for a failed upload, by `POST /api/uploads` status.
+fn attachment_error_status(status: Option<u16>) -> &'static str {
+    match status {
+        Some(413) => "attach-too-large",
+        Some(415) => "attach-unsupported-type",
+        Some(507) => "attach-no-space",
+        _ => "attach-failed",
     }
 }
 
@@ -14728,6 +14810,29 @@ mod tests {
         ];
         // "[@] Sythos" is 10 characters and "vjt" 3: the average rounds up to 7.
         assert_eq!(members_average_probe(&rows), "nnnnnnn");
+    }
+
+    #[test]
+    fn attachment_caps_and_errors_follow_the_category() {
+        let limits = UploadLimits {
+            host: "embedded".to_string(),
+            image_bytes: 10,
+            video_bytes: 50,
+            video_seconds: None,
+            document_bytes: 20,
+            audio_bytes: 25,
+        };
+        assert_eq!(upload_cap(&limits, UploadCategory::Image), 10);
+        assert_eq!(upload_cap(&limits, UploadCategory::Video), 50);
+        assert_eq!(upload_cap(&limits, UploadCategory::Document), 20);
+        assert_eq!(upload_cap(&limits, UploadCategory::Audio), 25);
+        assert_eq!(attachment_error_status(Some(413)), "attach-too-large");
+        assert_eq!(
+            attachment_error_status(Some(415)),
+            "attach-unsupported-type"
+        );
+        assert_eq!(attachment_error_status(Some(507)), "attach-no-space");
+        assert_eq!(attachment_error_status(None), "attach-failed");
     }
 
     #[test]
