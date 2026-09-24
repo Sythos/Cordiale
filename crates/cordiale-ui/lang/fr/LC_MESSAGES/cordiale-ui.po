@@ -1091,3 +1091,7 @@ msgstr "3 jours"
 msgctxt "AppWindow"
 msgid "Ask before uploading"
 msgstr "Demander avant d'envoyer"
+
+msgctxt "AppWindow"
+msgid "Load older messages"
+msgstr "Charger les messages plus anciens"

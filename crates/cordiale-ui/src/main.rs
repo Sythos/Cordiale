@@ -135,6 +135,7 @@ enum WorkerCommand {
     WatchPatternRemove(String),
     Disconnect,
     GoHome,
+    LoadOlderHistory,
     MemberModeAction {
         verb: String,
         nick: String,
@@ -312,6 +313,11 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_server_pref_auto_away_reason_known(false);
             ui.set_server_upload_limits_known(false);
         }
+    });
+
+    let tx_for_older_history = worker_tx.clone();
+    ui.on_older_history_requested(move || {
+        let _ = tx_for_older_history.send(WorkerCommand::LoadOlderHistory);
     });
 
     let tx_for_home = worker_tx.clone();
@@ -1201,6 +1207,8 @@ struct WorkerState {
     /// fetch; the join-ACK path must load the full tail, not just `after` the
     /// buffered message ID.
     query_full_history_required: std::collections::HashSet<(String, String)>,
+    /// Windows whose history was paged back to its very first message.
+    history_start_reached: std::collections::HashSet<(String, String)>,
     /// Query keys removed/renamed by a later full snapshot. Since Grappa
     /// shares the channel-shaped Phoenix topic for channels and queries,
     /// remember these identities so their late frames are ignored without
@@ -1345,6 +1353,7 @@ impl WorkerState {
             query_joined: std::collections::HashSet::new(),
             query_ready: std::collections::HashSet::new(),
             query_full_history_required: std::collections::HashSet::new(),
+            history_start_reached: std::collections::HashSet::new(),
             stale_query_topics: std::collections::HashSet::new(),
             recent_channels: Vec::new(),
             current_query: false,
@@ -1694,6 +1703,9 @@ async fn run_worker(
                         }
                         session_events = None;
                         state = WorkerState::new();
+                    }
+                    Some(WorkerCommand::LoadOlderHistory) => {
+                        handle_load_older_history(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::GoHome) => {
                         write_back_read_cursor(&mut state);
@@ -2179,6 +2191,7 @@ async fn handle_select_channel(
     let can_moderate = is_own_nick_an_op(&members, &identifier);
     let dark_theme = state.theme == Theme::Dark;
     let casemapping = network_casemapping(state, &network);
+    let history_start = state.history_start_reached.contains(&key);
 
     let label = format!("{network} — {channel}");
     let ui = ui.clone();
@@ -2192,6 +2205,8 @@ async fn handle_select_channel(
         ui.set_current_query_ready(false);
         ui.set_compose_text(draft.into());
         ui.set_can_moderate_members(can_moderate);
+        ui.set_history_start_reached(history_start);
+        ui.set_history_loading(false);
         let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         let member_rows = members_model(&members, dark_theme);
@@ -2341,6 +2356,7 @@ fn show_query_window(
     let draft = state.drafts.get(key).cloned().unwrap_or_default();
     let dark_theme = state.theme == Theme::Dark;
     let query_ready = state.current_query_ready;
+    let history_start = state.history_start_reached.contains(key);
     let label = format!("{} — {}", query.network, query.target_nick);
     push_peer_away_banner(state, ui);
     let ui = ui.clone();
@@ -2354,6 +2370,8 @@ fn show_query_window(
         ui.set_current_query_ready(query_ready);
         ui.set_compose_text(draft.into());
         ui.set_can_moderate_members(false);
+        ui.set_history_start_reached(history_start);
+        ui.set_history_loading(false);
         let model = chat_lines_model(&lines, dark_theme);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
@@ -3164,6 +3182,74 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
             };
             ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         }
+    });
+}
+
+/// Rows fetched per "Load older messages" click.
+const OLDER_HISTORY_PAGE: usize = 100;
+
+/// Pages the open window's history back from its oldest known message
+/// (`?before=`), like Cicchetto's scroll-to-top. A short page means the
+/// first message was reached, which hides the button for that window.
+async fn handle_load_older_history(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token), Some(key)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.current_channel.clone(),
+    ) else {
+        return;
+    };
+    let oldest = state
+        .messages
+        .get(&key)
+        .and_then(|lines| lines.iter().filter_map(|line| line.message_id).min());
+    let Some(oldest) = oldest else {
+        return;
+    };
+    {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_history_loading(true));
+    }
+    let rows = client
+        .fetch_messages_before(&token, &key.0, &key.1, oldest, OLDER_HISTORY_PAGE)
+        .await;
+    let start_reached = match &rows {
+        Ok(rows) => rows.len() < OLDER_HISTORY_PAGE,
+        Err(err) => {
+            persistence::log_line(&format!("older history fetch failed: {err:?}"));
+            false
+        }
+    };
+    if let Ok(rows) = rows {
+        let messages = state.messages.entry(key.clone()).or_default();
+        merge_rendered_messages(messages, rows.iter().map(render_history_entry));
+    }
+    if start_reached {
+        state.history_start_reached.insert(key.clone());
+    }
+    // The user may have switched window while the page was loading.
+    if state.current_channel.as_ref() != Some(&key) {
+        return;
+    }
+    let lines = state.messages.get(&key).cloned().unwrap_or_default();
+    let dark_theme = state.theme == Theme::Dark;
+    let roster = (!state.current_query).then(|| {
+        (
+            state.members.get(&key).cloned().unwrap_or_default(),
+            network_casemapping(state, &key.0),
+        )
+    });
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let model = match roster {
+            Some((members, casemapping)) => {
+                chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping)
+            }
+            None => chat_lines_model(&lines, dark_theme),
+        };
+        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+        ui.set_history_start_reached(start_reached);
+        ui.set_history_loading(false);
     });
 }
 
