@@ -664,6 +664,8 @@ export component AppWindow inherits Window {
     callback attach-file-requested();
     // File name shown by the `attach-*` status messages.
     in property <string> status-attach-name: "";
+    // Command shown by the `command-*` status messages.
+    in property <string> status-command-hint: "";
     callback admin-refresh-requested();
     callback admin-disconnect-session(string);
     callback admin-user-toggle-admin(string, bool);
@@ -911,6 +913,14 @@ export component AppWindow inherits Window {
             return @tr("Wrong username or password/token.");
         } else if status-kind == "reauthentication-required" {
             return @tr("Saved sign-in is unavailable. Enter your password or client token to sign in again.");
+        } else if status-kind == "command-usage-hint" {
+            return @tr("Usage: {}", status-command-hint);
+        } else if status-kind == "command-unknown" {
+            return @tr("Unknown command: {}", status-command-hint);
+        } else if status-kind == "command-needs-channel" {
+            return @tr("{} only works in a channel window.", status-command-hint);
+        } else if status-kind == "command-failed" {
+            return @tr("{} failed.", status-command-hint);
         } else if status-kind == "command-usage" {
             return @tr("That command is missing an argument, for example: /whowas <nick>.");
         } else if status-kind == "session-severed-flood" {

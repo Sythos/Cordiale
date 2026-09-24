@@ -132,8 +132,16 @@ DCC con Accetta/Rifiuta, recupero identità (`/recover`), `/invite`,
 presenza della watchlist per rete, banner di away dei peer, riepilogo
 menzioni al rientro dall'away (`/mentions`) e righe in sola lettura per le
 preferenze e i limiti di upload del server. Restano fuori, tra gli altri:
-join dalla directory (Cordiale non ha `/join`), upload di file e la
-sezione admin degli upload.
+join dalla directory e la sezione admin degli upload.
+
+**Aggiornamento (2026-09-24)**: upload di file (`POST /api/uploads`) e
+parser dei comandi slash (`cordiale_core::slash`) con la grammatica di
+Cicchetto: `/me`, `/msg`, `/notice`, `/query`, `/join`, `/part`, `/cycle`,
+`/topic`, `/nick`, `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode,
+`/names`, `/quote`, `/oper`, `/kill`, `/stats`, `/rehash`,
+`/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
+`/hilight` e le scorciatoie dei servizi. Un comando sconosciuto non viene
+più inviato come testo; `//` invia un messaggio che inizia con `/`.
 
 ## Voci ancora da chiarire prima di poter classificare
 

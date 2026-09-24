@@ -1035,3 +1035,19 @@ msgstr "Ouvrez un canal ou une conversation privée avant de joindre un fichier.
 msgctxt "AppWindow"
 msgid "Couldn't upload {}."
 msgstr "Impossible d'envoyer {}."
+
+msgctxt "AppWindow"
+msgid "Usage: {}"
+msgstr "Utilisation : {}"
+
+msgctxt "AppWindow"
+msgid "Unknown command: {}"
+msgstr "Commande inconnue : {}"
+
+msgctxt "AppWindow"
+msgid "{} only works in a channel window."
+msgstr "{} ne fonctionne que dans une fenêtre de salon."
+
+msgctxt "AppWindow"
+msgid "{} failed."
+msgstr "Échec de {}."

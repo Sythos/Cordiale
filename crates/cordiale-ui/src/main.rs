@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 use cordiale_core::bootstrap::{
     bootstrap, bootstrap_with_bearer, BootstrapError, BootstrapOutcome,
 };
-use cordiale_core::client::{GrappaClient, LoginError};
+use cordiale_core::client::{GrappaClient, GrappaClientError, LoginError};
 use cordiale_core::credentials::{
     resolve_credential_store, CredentialStore, KeyringCredentialStore,
 };
@@ -46,6 +46,7 @@ use cordiale_core::rest::{
     SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
+use cordiale_core::slash::{self, SlashCommand};
 use cordiale_core::theme::{font_family_for, ThemePalette, BUILTIN_THEMES};
 use cordiale_core::upload::{attachment_message, mime_for_filename, UploadCategory};
 use cordiale_core::wire_event::ClientEventKind;
@@ -1392,7 +1393,7 @@ async fn run_worker(
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::PartChannel { network, channel }) => {
-                        handle_part_channel(&mut state, &ui, network, channel).await;
+                        handle_part_channel(&mut state, &ui, network, channel, None).await;
                     }
                     Some(WorkerCommand::SelectQuery { network, nick }) => {
                         handle_select_query(&mut state, &ui, network, nick).await;
@@ -2146,6 +2147,7 @@ async fn handle_part_channel(
     ui: &slint::Weak<AppWindow>,
     network: String,
     channel: String,
+    reason: Option<String>,
 ) {
     let key = window_state_key(&network, &channel);
     if state.window_states.get(&key) != Some(&ChannelWindowState::Joined)
@@ -2166,7 +2168,10 @@ async fn handle_part_channel(
         return;
     };
 
-    if let Err(error) = client.part_channel(&token, &network, &channel, None).await {
+    if let Err(error) = client
+        .part_channel(&token, &network, &channel, reason.as_deref())
+        .await
+    {
         persistence::log_line(&format!("channel part failed: {error:?}"));
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("part-failed".into()));
@@ -2557,6 +2562,16 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
         }
         return;
     }
+    if let Some(command) = slash::parse(&body) {
+        let label = body
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let (network, channel) = (network.clone(), channel.clone());
+        run_slash_command(state, ui, network, channel, command, label).await;
+        return;
+    }
 
     let request = SendMessageRequest::plain(body);
     if client
@@ -2654,6 +2669,355 @@ fn attachment_error_status(status: Option<u16>) -> &'static str {
         Some(415) => "attach-unsupported-type",
         Some(507) => "attach-no-space",
         _ => "attach-failed",
+    }
+}
+
+/// Runs a compose-line slash command (see `cordiale_core::slash`) against
+/// the open window's network. REST calls report failure in the status bar;
+/// WS verbs are fire-and-forget like the member context menu's, their
+/// outcome arriving as server pushes. `label` is the command as typed.
+async fn run_slash_command(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: String,
+    command: SlashCommand,
+    label: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let in_channel = !state.current_query && slash::is_channel(&channel);
+    let open_channel = || in_channel.then(|| channel.clone());
+    let result: Result<(), GrappaClientError> = match command {
+        SlashCommand::Say(text) => {
+            let request = SendMessageRequest::plain(text);
+            post_message(&client, &token, &network, &channel, request).await
+        }
+        SlashCommand::Action(text) => {
+            let request = SendMessageRequest::plain(format!("\u{1}ACTION {text}\u{1}"));
+            post_message(&client, &token, &network, &channel, request).await
+        }
+        SlashCommand::Msg { target, text } => {
+            // Services answer in the window the command was typed in.
+            if !slash::is_service_nick(&target) {
+                send_user_verb(
+                    state,
+                    &network,
+                    "open_query_window",
+                    serde_json::json!({ "target_nick": target }),
+                );
+            }
+            let request = SendMessageRequest::plain(text);
+            post_message(&client, &token, &network, &target, request).await
+        }
+        SlashCommand::Notice { target, text } => {
+            let mut request = SendMessageRequest::plain(text);
+            request.notice_target = Some(target);
+            post_message(&client, &token, &network, &channel, request).await
+        }
+        SlashCommand::Query(Some(nick)) => {
+            send_user_verb(
+                state,
+                &network,
+                "open_query_window",
+                serde_json::json!({ "target_nick": nick }),
+            );
+            Ok(())
+        }
+        SlashCommand::Query(None) if state.current_query => {
+            send_user_verb(
+                state,
+                &network,
+                "close_query_window",
+                serde_json::json!({ "target_nick": channel }),
+            );
+            Ok(())
+        }
+        SlashCommand::Query(None) => {
+            return set_command_status(ui, "command-usage-hint", "/query <nick>".to_string());
+        }
+        SlashCommand::Join { channels, key } => {
+            client
+                .join_channel(&token, &network, &channels, key.as_deref())
+                .await
+        }
+        SlashCommand::Part {
+            channel: target,
+            reason,
+        } => {
+            let Some(target) = target.or_else(open_channel) else {
+                return set_command_status(ui, "command-needs-channel", label);
+            };
+            handle_part_channel(state, ui, network, target, reason).await;
+            return;
+        }
+        SlashCommand::Cycle {
+            channel: target,
+            reason,
+        } => {
+            let Some(target) = target.or_else(open_channel) else {
+                return set_command_status(ui, "command-needs-channel", label);
+            };
+            match client
+                .part_channel(&token, &network, &target, reason.as_deref())
+                .await
+            {
+                Ok(()) => client.join_channel(&token, &network, &target, None).await,
+                Err(err) => Err(err),
+            }
+        }
+        SlashCommand::TopicSet {
+            channel: target,
+            text,
+        } => {
+            let Some(target) = target.or_else(open_channel) else {
+                return set_command_status(ui, "command-needs-channel", label);
+            };
+            client.set_topic(&token, &network, &target, &text).await
+        }
+        SlashCommand::TopicClear { channel: target } => {
+            let Some(target) = target.or_else(open_channel) else {
+                return set_command_status(ui, "command-needs-channel", label);
+            };
+            send_user_verb(
+                state,
+                &network,
+                "topic_clear",
+                serde_json::json!({ "channel": target }),
+            );
+            Ok(())
+        }
+        SlashCommand::Nick(nick) => client.change_nick(&token, &network, &nick).await,
+        // The one user-topic verb addressed by slug rather than `network_id`.
+        SlashCommand::Away(reason) => {
+            let payload = match reason {
+                Some(reason) => {
+                    serde_json::json!({ "action": "set", "network": network, "reason": reason })
+                }
+                None => serde_json::json!({ "action": "unset", "network": network }),
+            };
+            send_user_topic_verb(state, "away", payload);
+            Ok(())
+        }
+        SlashCommand::Ctcp { target, verb, args } if verb == "ACTION" => {
+            let text = args.unwrap_or_default();
+            let request = SendMessageRequest::plain(format!("\u{1}ACTION {text}\u{1}"));
+            post_message(&client, &token, &network, &target, request).await
+        }
+        SlashCommand::Ctcp { target, verb, args } => {
+            let request = SendMessageRequest::ctcp(target, &verb, args.as_deref());
+            post_message(&client, &token, &network, &channel, request).await
+        }
+        SlashCommand::Ping(target) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis())
+                .unwrap_or_default()
+                .to_string();
+            let request = SendMessageRequest::ctcp(target, "PING", Some(&now));
+            post_message(&client, &token, &network, &channel, request).await
+        }
+        SlashCommand::NickModes { verb, nicks } if in_channel => {
+            send_user_verb(
+                state,
+                &network,
+                verb,
+                serde_json::json!({ "channel": channel, "nicks": nicks }),
+            );
+            Ok(())
+        }
+        SlashCommand::Kick { nick, reason } if in_channel => {
+            send_user_verb(
+                state,
+                &network,
+                "kick",
+                serde_json::json!({ "channel": channel, "nick": nick, "reason": reason }),
+            );
+            Ok(())
+        }
+        SlashCommand::Ban(mask) if in_channel => {
+            send_user_verb(
+                state,
+                &network,
+                "ban",
+                serde_json::json!({ "channel": channel, "mask": mask }),
+            );
+            Ok(())
+        }
+        SlashCommand::Unban(mask) if in_channel => {
+            send_user_verb(
+                state,
+                &network,
+                "unban",
+                serde_json::json!({ "channel": channel, "mask": mask }),
+            );
+            Ok(())
+        }
+        SlashCommand::NickModes { .. }
+        | SlashCommand::Kick { .. }
+        | SlashCommand::Ban(_)
+        | SlashCommand::Unban(_) => {
+            return set_command_status(ui, "command-needs-channel", label);
+        }
+        SlashCommand::Mode {
+            target,
+            modes,
+            params,
+        } => {
+            let Some(target) = target.or_else(open_channel) else {
+                return set_command_status(ui, "command-needs-channel", label);
+            };
+            send_user_verb(
+                state,
+                &network,
+                "mode",
+                serde_json::json!({ "target": target, "modes": modes, "params": params }),
+            );
+            Ok(())
+        }
+        SlashCommand::Umode(modes) => {
+            send_user_verb(
+                state,
+                &network,
+                "umode",
+                serde_json::json!({ "modes": modes }),
+            );
+            Ok(())
+        }
+        SlashCommand::Names(target) => {
+            let Some(target) = target.or_else(open_channel) else {
+                return set_command_status(ui, "command-needs-channel", label);
+            };
+            send_user_verb(
+                state,
+                &network,
+                "names",
+                serde_json::json!({ "channel": target }),
+            );
+            Ok(())
+        }
+        SlashCommand::Raw(line) => {
+            send_user_verb(state, &network, "raw", serde_json::json!({ "line": line }));
+            Ok(())
+        }
+        SlashCommand::Oper { name, password } => {
+            send_user_verb(
+                state,
+                &network,
+                "oper",
+                serde_json::json!({ "name": name, "password": password }),
+            );
+            Ok(())
+        }
+        SlashCommand::Connect(target) => {
+            client
+                .set_connection_state(&token, &target, "connected", None)
+                .await
+        }
+        SlashCommand::Disconnect {
+            network: target,
+            reason,
+        } => {
+            let target = target.unwrap_or(network);
+            client
+                .set_connection_state(&token, &target, "parked", reason.as_deref())
+                .await
+        }
+        SlashCommand::Reconnect {
+            network: target,
+            reason,
+        } => {
+            let target = target.unwrap_or(network);
+            match client
+                .set_connection_state(&token, &target, "parked", reason.as_deref())
+                .await
+            {
+                Ok(()) => {
+                    client
+                        .set_connection_state(&token, &target, "connected", None)
+                        .await
+                }
+                Err(err) => Err(err),
+            }
+        }
+        // Parks every network (a failure on one doesn't stop the others,
+        // as in Cicchetto), then signs out like the Disconnect button.
+        SlashCommand::Quit(reason) => {
+            let networks: Vec<String> = state.network_ids.keys().cloned().collect();
+            for target in networks {
+                if let Err(err) = client
+                    .set_connection_state(&token, &target, "parked", reason.as_deref())
+                    .await
+                {
+                    persistence::log_line(&format!("quit: park failed: {err:?}"));
+                }
+            }
+            let _ = ui.upgrade_in_event_loop(|ui| ui.invoke_disconnect_requested());
+            return;
+        }
+        SlashCommand::Highlight { add, pattern } => {
+            let action = if add { "add" } else { "del" };
+            send_user_topic_verb(
+                state,
+                "watchlist",
+                serde_json::json!({ "action": action, "pattern": pattern }),
+            );
+            if !add {
+                state.watch_patterns.retain(|existing| existing != &pattern);
+            } else if !state.watch_patterns.contains(&pattern) {
+                state.watch_patterns.push(pattern);
+            }
+            push_watch_patterns(state, ui);
+            Ok(())
+        }
+        SlashCommand::Ignore { add: true, mask } => {
+            client.add_ignore(&token, &network, &mask).await.map(|_| ())
+        }
+        SlashCommand::Ignore { add: false, mask } => client
+            .remove_ignore(&token, &network, &mask)
+            .await
+            .map(|_| ()),
+        SlashCommand::Notify(nicks) => client.add_notify_nicks(&token, &network, nicks).await,
+        SlashCommand::Usage(hint) => {
+            return set_command_status(ui, "command-usage-hint", hint.to_string());
+        }
+        SlashCommand::Unknown(name) => {
+            return set_command_status(ui, "command-unknown", name);
+        }
+    };
+    if let Err(err) = result {
+        persistence::log_line(&format!("{label} failed: {err:?}"));
+        set_command_status(ui, "command-failed", label);
+    }
+}
+
+/// Posts to `/networks/:slug/channels/:target/messages`.
+async fn post_message(
+    client: &GrappaClient,
+    token: &str,
+    network: &str,
+    target: &str,
+    request: SendMessageRequest,
+) -> Result<(), GrappaClientError> {
+    client
+        .send_message(token, network, target, &request)
+        .await
+        .map(|_| ())
+}
+
+/// Shows a slash-command outcome in the status bar; `hint` fills its `{}`.
+fn set_command_status(ui: &slint::Weak<AppWindow>, kind: &'static str, hint: String) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_command_hint(hint.into());
+        ui.set_status_kind(kind.into());
+    });
+}
+
+/// Pushes `verb` on the user topic with `payload` as is (no `network_id`).
+fn send_user_topic_verb(state: &WorkerState, verb: &str, payload: Value) {
+    if let (Some(session), Some(identifier)) = (&state.session, &state.identifier) {
+        session.send_command(format!("grappa:user:{identifier}"), verb, payload);
     }
 }
 
