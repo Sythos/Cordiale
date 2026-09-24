@@ -1390,12 +1390,14 @@ async fn run_worker(
                         }
                     }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
+                        write_back_read_cursor(&mut state);
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::PartChannel { network, channel }) => {
                         handle_part_channel(&mut state, &ui, network, channel, None).await;
                     }
                     Some(WorkerCommand::SelectQuery { network, nick }) => {
+                        write_back_read_cursor(&mut state);
                         handle_select_query(&mut state, &ui, network, nick).await;
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
@@ -1645,6 +1647,7 @@ async fn run_worker(
                         state = WorkerState::new();
                     }
                     Some(WorkerCommand::GoHome) => {
+                        write_back_read_cursor(&mut state);
                         state.current_channel = None;
                         state.current_query = false;
                         state.current_query_ready = false;
@@ -4860,6 +4863,44 @@ fn parse_read_cursor_set_event(
         last_read_message_id,
         badge_count,
     ))
+}
+
+/// The read cursor to send when leaving the open window: its newest message,
+/// if that is past the known cursor. The local cursor advances at once
+/// (forward-only), as in Cicchetto; the `read_cursor_set` push confirms it.
+fn read_cursor_to_write(state: &mut WorkerState) -> Option<(String, String, i64)> {
+    let (network, target) = state.current_channel.clone()?;
+    let newest = query_high_water_id(state, &(network.clone(), target.clone()))?;
+    let key = window_state_key(&network, &target);
+    if state
+        .read_cursors
+        .get(&key)
+        .is_some_and(|&cursor| cursor >= newest)
+    {
+        return None;
+    }
+    state.read_cursors.insert(key, newest);
+    Some((network, target, newest))
+}
+
+/// Marks the window being left as read on the server (Cicchetto does it on
+/// focus-leave). Fire-and-forget: a failure only leaves the unread count as
+/// the server has it.
+fn write_back_read_cursor(state: &mut WorkerState) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let Some((network, target, message_id)) = read_cursor_to_write(state) else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(err) = client
+            .set_read_cursor(&token, &network, &target, message_id)
+            .await
+        {
+            persistence::log_line(&format!("read cursor write-back failed: {err:?}"));
+        }
+    });
 }
 
 /// Applies a server-authoritative cursor/badge update. A malformed required
@@ -17413,6 +17454,37 @@ mod tests {
         );
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "libera");
+    }
+
+    #[test]
+    fn read_cursor_write_back_is_forward_only() {
+        let mut state = WorkerState::new();
+        let key = ("libera".to_string(), "#Rust".to_string());
+        let line = |id| RenderedMessage {
+            timestamp: "10:00".to_string(),
+            nick: Some("foo".to_string()),
+            text: "hi".to_string(),
+            italic: false,
+            message_id: Some(id),
+            server_time: Some(id),
+        };
+        assert_eq!(read_cursor_to_write(&mut state), None);
+        state.current_channel = Some(key.clone());
+        state.messages.insert(key.clone(), vec![line(7), line(9)]);
+        assert_eq!(
+            read_cursor_to_write(&mut state),
+            Some(("libera".to_string(), "#Rust".to_string(), 9))
+        );
+        assert_eq!(
+            state.read_cursors.get(&window_state_key("libera", "#Rust")),
+            Some(&9)
+        );
+        assert_eq!(read_cursor_to_write(&mut state), None);
+        state.messages.get_mut(&key).unwrap().push(line(12));
+        assert_eq!(
+            read_cursor_to_write(&mut state),
+            Some(("libera".to_string(), "#Rust".to_string(), 12))
+        );
     }
 
     #[test]
