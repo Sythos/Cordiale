@@ -75,18 +75,18 @@ Cordiale still has these user-visible or behavioral gaps:
   `/msg`, `/notice`, `/query`, `/join`, `/part`, `/cycle`, `/topic`, `/nick`,
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
-  `/hilight` and the services shortcuts), but not Cicchetto's alias
-  expansion, `/ame`/`/amsg` fan-out, `/kb` host lookup, `/np`, `/beep`, or
-  the modals opened by a bare `/mode`, `/umode` or `/topic`.
+  `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
+  expansion, and the services shortcuts), but not `/kb` host lookup, `/np`,
+  `/beep`, or the modals opened by a bare `/mode`, `/umode` or `/topic`.
 - **Chat and roster edge cases:** a message with multiple differently colored
   mIRC runs may overflow instead of wrapping as one paragraph. Channel MODE
   parsing does not yet use the advertised ISUPPORT CHANMODES argument rules,
   so mixed mode strings can misassign a role prefix. A bounded pre-snapshot
   DM queue can drop messages if the authoritative query snapshot is absent
   or late.
-- **Remaining presentation gaps:** a WHOIS avatar is reported but not drawn; the account-wide unread count does
-  not set an OS taskbar/dock badge, and a rejected `/recover` command lacks
-  a direct error notice.
+- **Remaining presentation gaps:** a WHOIS avatar is reported but not drawn;
+  the account-wide unread count only shows in the window title (and so the
+  taskbar), not as an OS badge.
 
 ## Download
 

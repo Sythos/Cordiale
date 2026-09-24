@@ -460,7 +460,11 @@ component SectionCard inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "Cordiale";
+    // Account-wide unread count (Grappa's `badge_count`). There's no
+    // portable taskbar/dock badge, so it goes in the title, which the
+    // taskbar shows; the "Show event badge" preference turns it off.
+    in property <int> unread-badge: 0;
+    title: pref-show-event-badge && unread-badge > 0 ? "(" + unread-badge + ") Cordiale" : "Cordiale";
     // A color theme (see `palette-active`) paints the window itself and
     // switches the app to a monospace font, irssi-style.
     background: palette-active ? palette-bg : Palette.background;
@@ -1051,6 +1055,10 @@ export component AppWindow inherits Window {
             return @tr("Settings saved.");
         } else if status-kind == "personal-prefs-failed" {
             return @tr("Couldn't save those settings.");
+        } else if status-kind == "command-refused" {
+            return @tr("The server refused that command ({}).", status-command-hint);
+        } else if status-kind == "alias-too-deep" {
+            return @tr("That alias expands into too many others: {}", status-command-hint);
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {

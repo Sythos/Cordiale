@@ -1233,6 +1233,9 @@ struct WorkerState {
     /// `(network, channel, label)` from the last bootstrap, kept around so
     /// `ToggleNetwork` can rebuild the sidebar model without re-fetching.
     channel_entries: Vec<(String, String, String)>,
+    /// The account's command aliases, read on the first slash command and
+    /// dropped whenever they change so the next one reads them again.
+    aliases: Option<HashMap<String, String>>,
     /// Channel topics owned by the latest authoritative `/boot` snapshot.
     /// This stays separate because `joined_topics` also includes query and
     /// own-nick listeners that may share the same channel-shaped topic.
@@ -1397,6 +1400,7 @@ impl WorkerState {
             members: HashMap::new(),
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
+            aliases: None,
             channel_topics: std::collections::HashSet::new(),
             query_windows: Vec::new(),
             pending_own_nick_dms: VecDeque::new(),
@@ -1706,9 +1710,11 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::AliasAdd { command, expansion }) => {
                         handle_alias_upsert(&state, &ui, Some((command, expansion))).await;
+                        state.aliases = None;
                     }
                     Some(WorkerCommand::AliasRemove(command)) => {
                         handle_alias_remove(&state, &ui, command).await;
+                        state.aliases = None;
                     }
                     Some(WorkerCommand::VhostToggle(address)) => {
                         handle_vhost_toggle(&state, &ui, address).await;
@@ -2661,6 +2667,18 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     if state.current_query && !state.current_query_ready {
         return;
     }
+    let body = if body.trim_start().starts_with('/') {
+        let aliases = user_aliases(state).await;
+        match slash::expand_aliases(&body, &aliases) {
+            Ok(line) => line,
+            Err(chain) => {
+                set_command_status(ui, "alias-too-deep", chain);
+                return;
+            }
+        }
+    } else {
+        body
+    };
     let (Some(client), Some(token), Some((network, channel))) =
         (&state.client, &state.token, &state.current_channel)
     else {
@@ -3171,6 +3189,33 @@ async fn run_slash_command(
             .await
             .map(|_| ()),
         SlashCommand::Notify(nicks) => client.add_notify_nicks(&token, &network, nicks).await,
+        SlashCommand::AliasDefine { name, expansion } => {
+            handle_alias_upsert(state, ui, Some((name, expansion))).await;
+            state.aliases = None;
+            Ok(())
+        }
+        SlashCommand::Unalias(name) => {
+            handle_alias_remove(state, ui, name).await;
+            state.aliases = None;
+            Ok(())
+        }
+        // One message per joined channel; a failure on one doesn't stop the
+        // others, and is reported once.
+        SlashCommand::FanOut { action, text } => {
+            let body = if action {
+                format!("\u{1}ACTION {text}\u{1}")
+            } else {
+                text
+            };
+            let mut result = Ok(());
+            for target in joined_channels(state, &network) {
+                let request = SendMessageRequest::plain(body.clone());
+                if let Err(err) = post_message(&client, &token, &network, &target, request).await {
+                    result = Err(err);
+                }
+            }
+            result
+        }
         SlashCommand::Usage(hint) => {
             return set_command_status(ui, "command-usage-hint", hint.to_string());
         }
@@ -3182,6 +3227,35 @@ async fn run_slash_command(
         persistence::log_line(&format!("{label} failed: {err:?}"));
         set_command_status(ui, "command-failed", label);
     }
+}
+
+/// The account's aliases, fetched once and cached until they change.
+async fn user_aliases(state: &mut WorkerState) -> HashMap<String, String> {
+    if state.aliases.is_none() {
+        if let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) {
+            match client.fetch_aliases(&token).await {
+                Ok(aliases) => state.aliases = Some(aliases),
+                Err(err) => persistence::log_line(&format!("aliases fetch failed: {err:?}")),
+            }
+        }
+    }
+    state.aliases.clone().unwrap_or_default()
+}
+
+/// Joined channels of `network`, for `/ame` and `/amsg`.
+fn joined_channels(state: &WorkerState, network: &str) -> Vec<String> {
+    state
+        .channel_entries
+        .iter()
+        .filter(|(entry_network, channel, _)| {
+            entry_network == network
+                && state
+                    .window_states
+                    .get(&window_state_key(entry_network, channel))
+                    == Some(&ChannelWindowState::Joined)
+        })
+        .map(|(_, channel, _)| channel.clone())
+        .collect()
 }
 
 /// Posts to `/networks/:slug/channels/:target/messages`.
@@ -4159,6 +4233,29 @@ async fn handle_query_join_reply(
 /// (`renders_as_chat_line`). A kind unknown to `ClientEventKind` is dropped
 /// silently, per `docs/CLIENT_PROTOCOL.md`'s policy on unrecognized kinds
 /// (§4).
+/// The error token of a refused command: a `phx_reply` with status
+/// `error` on the user topic that isn't the reply to its join. Commands are
+/// fire-and-forget pushes, so this is how a rejected `/recover`, `/kick`,
+/// `/mode` and the like gets noticed at all.
+fn command_error_reason(
+    frame: &cordiale_core::phoenix::PhoenixMessage,
+    identifier: &str,
+) -> Option<String> {
+    if frame.topic != format!("grappa:user:{identifier}")
+        || frame.payload.get("status").and_then(Value::as_str) != Some("error")
+        || frame.message_ref.is_none()
+        || frame.message_ref == frame.join_ref
+    {
+        return None;
+    }
+    let response = frame.payload.get("response");
+    let reason = ["error", "reason"]
+        .iter()
+        .find_map(|key| response?.get(*key)?.as_str())
+        .unwrap_or("error");
+    Some(reason.to_string())
+}
+
 async fn handle_frame(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -4178,6 +4275,17 @@ async fn handle_frame(
             ));
         }
         handle_query_join_reply(state, ui, &frame.topic, status).await;
+        if let Some(reason) = state
+            .identifier
+            .as_deref()
+            .and_then(|identifier| command_error_reason(&frame, identifier))
+        {
+            persistence::log_line(&format!("command refused: {reason}"));
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(reason.into());
+                ui.set_status_kind("command-refused".into());
+            });
+        }
         return;
     }
 
@@ -7124,6 +7232,11 @@ fn push_window_note(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 }
 
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let unread_badge = i32::try_from(state.badge_count).unwrap_or(i32::MAX);
+    {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.set_unread_badge(unread_badge));
+    }
     push_window_note(state, ui);
     let mut data = network_groups_data(
         &state.channel_entries,
@@ -15786,6 +15899,72 @@ mod tests {
         assert_eq!(prefs["private_messages_all"], serde_json::json!(true));
         assert_eq!(prefs["notification_sound"], serde_json::json!("chime"));
         assert_eq!(prefs["channel_messages_only"], serde_json::json!(["#rust"]));
+    }
+
+    #[test]
+    fn only_refused_user_topic_commands_are_reported() {
+        let frame = |topic: &str, message_ref: Option<&str>, payload: Value| {
+            cordiale_core::phoenix::PhoenixMessage {
+                join_ref: Some("1".to_string()),
+                message_ref: message_ref.map(str::to_string),
+                topic: topic.to_string(),
+                event: "phx_reply".to_string(),
+                payload,
+            }
+        };
+        let refused = serde_json::json!({"status": "error", "response": {"error": "no_session"}});
+        assert_eq!(
+            command_error_reason(&frame("grappa:user:vjt", Some("7"), refused.clone()), "vjt"),
+            Some("no_session".to_string())
+        );
+        // The join reply, other topics and successes are not command errors.
+        assert_eq!(
+            command_error_reason(&frame("grappa:user:vjt", Some("1"), refused.clone()), "vjt"),
+            None
+        );
+        assert_eq!(
+            command_error_reason(&frame("grappa:user:other", Some("7"), refused), "vjt"),
+            None
+        );
+        assert_eq!(
+            command_error_reason(
+                &frame(
+                    "grappa:user:vjt",
+                    Some("7"),
+                    serde_json::json!({"status": "ok", "response": {}})
+                ),
+                "vjt"
+            ),
+            None
+        );
+        assert_eq!(
+            command_error_reason(
+                &frame(
+                    "grappa:user:vjt",
+                    Some("8"),
+                    serde_json::json!({"status": "error"})
+                ),
+                "vjt"
+            ),
+            Some("error".to_string())
+        );
+    }
+
+    #[test]
+    fn fan_out_reaches_only_joined_channels_of_the_network() {
+        let mut state = WorkerState::new();
+        state.channel_entries = vec![
+            ("libera".to_string(), "#a".to_string(), String::new()),
+            ("libera".to_string(), "#b".to_string(), String::new()),
+            ("oftc".to_string(), "#c".to_string(), String::new()),
+        ];
+        for (network, channel) in [("libera", "#a"), ("oftc", "#c")] {
+            state.window_states.insert(
+                window_state_key(network, channel),
+                ChannelWindowState::Joined,
+            );
+        }
+        assert_eq!(joined_channels(&state, "libera"), vec!["#a".to_string()]);
     }
 
     #[test]
