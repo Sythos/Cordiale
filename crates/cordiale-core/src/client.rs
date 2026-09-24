@@ -1158,11 +1158,15 @@ impl GrappaClient {
         token: &str,
         query: &str,
     ) -> Result<Vec<Value>, GrappaClientError> {
-        let url = format!("{}/admin/vhosts/subject_search", self.base_url);
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "vhosts", "subject_search"]);
+        url.query_pairs_mut().append_pair("q", query);
         let response = self
             .http
             .get(url)
-            .query(&[("q", query)])
             .bearer_auth(token)
             .send()
             .await?
