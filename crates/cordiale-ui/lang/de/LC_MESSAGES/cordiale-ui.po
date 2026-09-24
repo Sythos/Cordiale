@@ -1137,5 +1137,29 @@ msgid "Accept DCC files from open private conversations automatically"
 msgstr "DCC-Dateien aus offenen Privatgesprächen automatisch annehmen"
 
 msgctxt "AppWindow"
+msgid "You were kicked from this channel."
+msgstr "Du wurdest aus diesem Kanal gekickt."
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel: {}"
+msgstr "Du wurdest aus diesem Kanal gekickt: {}"
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel."
+msgstr "{} hat dich aus diesem Kanal gekickt."
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel: {}"
+msgstr "{} hat dich aus diesem Kanal gekickt: {}"
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed."
+msgstr "Das Betreten dieses Kanals ist fehlgeschlagen."
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed: {}"
+msgstr "Das Betreten dieses Kanals ist fehlgeschlagen: {}"
+
+msgctxt "AppWindow"
 msgid "That alias expands into too many others: {}"
 msgstr "Dieser Alias wird in zu viele andere erweitert: {}"
