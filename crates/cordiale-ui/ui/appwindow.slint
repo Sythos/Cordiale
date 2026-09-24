@@ -1052,6 +1052,8 @@ export component AppWindow inherits Window {
             return @tr("Couldn't save those settings.");
         } else if status-kind == "command-refused" {
             return @tr("The server refused that command ({}).", status-command-hint);
+        } else if status-kind == "alias-too-deep" {
+            return @tr("That alias expands into too many others: {}", status-command-hint);
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {

@@ -1161,5 +1161,9 @@ msgid "Joining this channel failed: {}"
 msgstr "Impossible de rejoindre ce salon : {}"
 
 msgctxt "AppWindow"
+msgid "That alias expands into too many others: {}"
+msgstr "Cet alias se développe en trop d'autres : {}"
+
+msgctxt "AppWindow"
 msgid "The server refused that command ({})."
 msgstr "Le serveur a refusé cette commande ({})."
