@@ -1697,19 +1697,20 @@ impl GrappaClient {
         Ok(response.json::<ActiveThemePair>().await?)
     }
 
-    /// `PUT /me/theme` with a single pick: `theme_id` becomes the light slot
-    /// and the dark slot is cleared, so it applies in both modes.
+    /// `PUT /me/theme`: `light` is the day theme, and `dark` the night one;
+    /// without a night theme the day one applies in both modes.
     pub async fn set_active_theme(
         &self,
         token: &str,
-        theme_id: i64,
+        light: i64,
+        dark: Option<i64>,
     ) -> Result<ActiveThemePair, GrappaClientError> {
         let url = format!("{}/me/theme", self.base_url);
         let response = self
             .http
             .put(url)
             .bearer_auth(token)
-            .json(&serde_json::json!({ "light": theme_id, "dark": null }))
+            .json(&serde_json::json!({ "light": light, "dark": dark }))
             .send()
             .await?
             .error_for_status()?;
@@ -3024,7 +3025,7 @@ mod tests {
         let themes = client.fetch_themes("abc123").await.expect("fetch_themes");
         assert_eq!(themes[0].name, "irssi-dark");
         let pair = client
-            .set_active_theme("abc123", 7)
+            .set_active_theme("abc123", 7, None)
             .await
             .expect("set_active_theme");
         assert_eq!(pair.light.map(|theme| theme.id), Some(7));

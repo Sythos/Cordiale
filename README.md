@@ -33,7 +33,9 @@ the account's active theme on Grappa (`PUT /me/theme`) and restyles Cordiale:
 window background, monospace font, nick and timestamp colors, channel header
 and topic box. Without server themes, built-in copies (irssi-dark, sux,
 mirc-light, solarized dark/light) are applied locally; the classic look
-follows the light/dark switch.
+follows the light/dark switch. As in Cicchetto, a gallery theme can be paired
+with a night theme, which Cordiale switches to while the operating system is
+in dark mode.
 
 At launch Cordiale signs in automatically with the last remembered profile,
 using its Grappa bearer or the login password kept in the OS keyring if the
@@ -49,8 +51,8 @@ and turns off automatic sign-in until the next successful sign-in.
 Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-irc/tree/main/cicchetto),
 Cordiale still has these user-visible or behavioral gaps:
 
-- **Themes:** Cordiale applies one theme from Grappa's gallery (or a built-in
-  copy), but not Cicchetto's day/night pairing, custom-theme editor, theme
+- **Themes:** Cordiale applies Grappa's gallery themes (or built-in copies)
+  and their day/night pairing, but not Cicchetto's custom-theme editor, theme
   publishing or background images. Buttons and menus keep Slint's own widget
   style in its dark or light variant.
 - **Sign-in and account security:** Cordiale does not expose Cicchetto's

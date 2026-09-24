@@ -1731,3 +1731,27 @@ msgstr "{} (+{})"
 msgctxt "AppWindow"
 msgid "{} (set by the server)"
 msgstr "{} (impostato dal server)"
+
+msgctxt "AppWindow"
+msgid "Pick a night theme too and Cordiale switches to it while your system is in dark mode, like Cicchetto."
+msgstr "Scegli anche un tema notturno: Cordiale lo usa mentre il sistema è in modalità scura, come Cicchetto."
+
+msgctxt "AppWindow"
+msgid "Same theme day and night"
+msgstr "Stesso tema giorno e notte"
+
+msgctxt "AppWindow"
+msgid "By day"
+msgstr "Di giorno"
+
+msgctxt "AppWindow"
+msgid "At night"
+msgstr "Di notte"
+
+msgctxt "AppWindow"
+msgid "Use at night"
+msgstr "Usa di notte"
+
+msgctxt "AppWindow"
+msgid "Use theme {} at night"
+msgstr "Usa il tema {} di notte"
