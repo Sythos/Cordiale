@@ -990,6 +990,185 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `GET /admin/credentials` — every bound (user, network) credential.
+    pub async fn fetch_admin_credentials(
+        &self,
+        token: &str,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let url = format!("{}/admin/credentials", self.base_url);
+        let body = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(body
+            .get("credentials")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// `POST /admin/credentials` — binds an account to a network (`user_id`,
+    /// `network_id`, `nick`, `auth_method` required, `password` optional);
+    /// Grappa starts the session right away.
+    pub async fn create_admin_credential(
+        &self,
+        token: &str,
+        credential: &Value,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/admin/credentials", self.base_url);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(credential)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /admin/credentials/:user_id/:network_id` — unbinds and stops
+    /// the live session.
+    pub async fn delete_admin_credential(
+        &self,
+        token: &str,
+        user_id: &str,
+        network_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "credentials", user_id, network_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /admin/vhosts` — `{vhosts, grants, host_candidates}`.
+    pub async fn fetch_admin_vhosts(&self, token: &str) -> Result<Value, GrappaClientError> {
+        let url = format!("{}/admin/vhosts", self.base_url);
+        Ok(self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?)
+    }
+
+    /// `POST /admin/vhosts {address, in_pool}` — 409 for a known address.
+    pub async fn create_admin_vhost(
+        &self,
+        token: &str,
+        address: &str,
+        in_pool: bool,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/admin/vhosts", self.base_url);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "address": address, "in_pool": in_pool }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `PATCH /admin/vhosts/:id` with `in_pool` and/or `generally_available`.
+    pub async fn update_admin_vhost(
+        &self,
+        token: &str,
+        vhost_id: &str,
+        changes: &Value,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "vhosts", vhost_id]);
+        self.http
+            .patch(url)
+            .bearer_auth(token)
+            .json(changes)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /admin/vhosts/:id` — its grants go with it.
+    pub async fn delete_admin_vhost(
+        &self,
+        token: &str,
+        vhost_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "vhosts", vhost_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `POST /admin/vhosts/:id/grants {subject_type: "user", subject_id}`.
+    pub async fn grant_admin_vhost(
+        &self,
+        token: &str,
+        vhost_id: &str,
+        user_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "vhosts", vhost_id, "grants"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "subject_type": "user", "subject_id": user_id }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /admin/vhosts/grants/:grant_id` — idempotent.
+    pub async fn revoke_admin_vhost_grant(
+        &self,
+        token: &str,
+        grant_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "vhosts", "grants", grant_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `PATCH /admin/users/:id` — whitelist is just `is_admin` server-side.
     pub async fn set_admin_user_is_admin(
         &self,
@@ -2303,6 +2482,72 @@ mod tests {
             )
             .await
             .expect("save settings");
+    }
+
+    #[tokio::test]
+    async fn admin_credentials_and_vhosts_use_their_contracts() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/credentials"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "credentials": [{"user_id": "u-1", "network_id": 7}]
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/credentials/u-1/7"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/admin/vhosts/4"))
+            .and(body_json(serde_json::json!({"in_pool": false})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/admin/vhosts/4/grants"))
+            .and(body_json(
+                serde_json::json!({"subject_type": "user", "subject_id": "u-1"}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/vhosts/grants/9"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        assert_eq!(
+            client
+                .fetch_admin_credentials("t")
+                .await
+                .expect("list")
+                .len(),
+            1
+        );
+        client
+            .delete_admin_credential("t", "u-1", "7")
+            .await
+            .expect("unbind");
+        client
+            .update_admin_vhost("t", "4", &serde_json::json!({"in_pool": false}))
+            .await
+            .expect("toggle");
+        client
+            .grant_admin_vhost("t", "4", "u-1")
+            .await
+            .expect("grant");
+        client
+            .revoke_admin_vhost_grant("t", "9")
+            .await
+            .expect("revoke");
     }
 
     #[tokio::test]

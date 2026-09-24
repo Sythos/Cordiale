@@ -324,6 +324,41 @@ pub fn mib_text_to_bytes(text: &str) -> Option<u64> {
     (bytes >= 1.0 && bytes.is_finite()).then_some(bytes as u64)
 }
 
+/// Auth methods an admin can bind a credential with, in Grappa's order.
+pub const CREDENTIAL_AUTH_METHODS: [&str; 5] =
+    ["auto", "sasl", "server_pass", "nickserv_identify", "none"];
+
+/// One line for a bound credential: account, network, nick, auth method
+/// and connection state.
+pub fn admin_credential_label(entry: &Value) -> String {
+    let text = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or("?");
+    format!(
+        "{} @ {} · {} · {} · {}",
+        text("user_name"),
+        text("network_slug"),
+        text("nick"),
+        text("auth_method"),
+        text("connection_state")
+    )
+}
+
+/// One line for a vhost: its address and pool/availability flags.
+pub fn admin_vhost_label(entry: &Value) -> String {
+    let flag = |key: &str| entry.get(key).and_then(Value::as_bool) == Some(true);
+    let mut label = entry
+        .get("address")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    if flag("in_pool") {
+        label.push_str(" · pool");
+    }
+    if flag("generally_available") {
+        label.push_str(" · all");
+    }
+    label
+}
+
 /// Phoenix topic of Grappa's live admin feed (admins with a full web
 /// session only): a `snapshot` of recent events on join, then one push per
 /// event, `session_log_event`s and periodic `overview` pushes.
@@ -362,6 +397,23 @@ pub fn admin_event_line(entry: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_and_vhost_labels() {
+        assert_eq!(
+            admin_credential_label(&serde_json::json!({
+                "user_name": "ada", "network_slug": "libera", "nick": "ada_",
+                "auth_method": "sasl", "connection_state": "connected"
+            })),
+            "ada @ libera · ada_ · sasl · connected"
+        );
+        assert_eq!(
+            admin_vhost_label(&serde_json::json!({
+                "address": "2001:db8::1", "in_pool": true, "generally_available": false
+            })),
+            "2001:db8::1 · pool"
+        );
+    }
 
     #[test]
     fn server_labels_and_mib_sizes() {
