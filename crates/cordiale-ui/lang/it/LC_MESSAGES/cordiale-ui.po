@@ -1051,3 +1051,7 @@ msgstr "{} funziona solo in una finestra di canale."
 msgctxt "AppWindow"
 msgid "{} failed."
 msgstr "{} non riuscito."
+
+msgctxt "AppWindow"
+msgid "Load older messages"
+msgstr "Carica messaggi più vecchi"

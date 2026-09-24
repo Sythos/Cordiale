@@ -1051,3 +1051,7 @@ msgstr "{} ne fonctionne que dans une fenêtre de salon."
 msgctxt "AppWindow"
 msgid "{} failed."
 msgstr "Échec de {}."
+
+msgctxt "AppWindow"
+msgid "Load older messages"
+msgstr "Charger les messages plus anciens"
