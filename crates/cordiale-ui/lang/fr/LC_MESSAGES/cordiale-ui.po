@@ -845,38 +845,6 @@ msgid "Connection"
 msgstr "Connexion"
 
 msgctxt "AppWindow"
-msgid "Auto-away delay: {}"
-msgstr "Délai d'absence automatique : {}"
-
-msgctxt "AppWindow"
-msgid "server default"
-msgstr "valeur par défaut du serveur"
-
-msgctxt "AppWindow"
-msgid "off"
-msgstr "désactivé"
-
-msgctxt "AppWindow"
-msgid "{} seconds"
-msgstr "{} secondes"
-
-msgctxt "AppWindow"
-msgid "Quit/part message: {}"
-msgstr "Message de départ : {}"
-
-msgctxt "AppWindow"
-msgid "Quit/part message: none (server default)"
-msgstr "Message de départ : aucun (valeur par défaut du serveur)"
-
-msgctxt "AppWindow"
-msgid "Auto-away message: {}"
-msgstr "Message d'absence automatique : {}"
-
-msgctxt "AppWindow"
-msgid "Auto-away message: server default"
-msgstr "Message d'absence automatique : valeur par défaut du serveur"
-
-msgctxt "AppWindow"
 msgid "Server upload limits ({}): images {}, videos {}, documents {}, audio {}."
 msgstr "Limites d'envoi du serveur ({}) : images {}, vidéos {}, documents {}, audio {}."
 
@@ -1127,3 +1095,43 @@ msgstr "Pseudos surveillés qui se connectent"
 msgctxt "AppWindow"
 msgid "Watched nicks going offline"
 msgstr "Pseudos surveillés qui se déconnectent"
+
+msgctxt "AppWindow"
+msgid "The auto-away delay must be a whole number of seconds."
+msgstr "Le délai d'absence automatique doit être un nombre entier de secondes."
+
+msgctxt "AppWindow"
+msgid "Settings saved."
+msgstr "Paramètres enregistrés."
+
+msgctxt "AppWindow"
+msgid "Couldn't save those settings."
+msgstr "Impossible d'enregistrer ces paramètres."
+
+msgctxt "AppWindow"
+msgid "Away and leave messages"
+msgstr "Messages d'absence et de départ"
+
+msgctxt "AppWindow"
+msgid "Leave a field empty to use the server's default."
+msgstr "Laissez un champ vide pour utiliser la valeur par défaut du serveur."
+
+msgctxt "AppWindow"
+msgid "Quit/part message"
+msgstr "Message de départ"
+
+msgctxt "AppWindow"
+msgid "Auto-away message"
+msgstr "Message d'absence automatique"
+
+msgctxt "AppWindow"
+msgid "Auto-away after (seconds, 0 = off)"
+msgstr "Absence automatique après (secondes, 0 = désactivée)"
+
+msgctxt "AppWindow"
+msgid "Look up other users' profiles (CTCP USERINFO)"
+msgstr "Consulter les profils des autres utilisateurs (CTCP USERINFO)"
+
+msgctxt "AppWindow"
+msgid "Accept DCC files from open private conversations automatically"
+msgstr "Accepter automatiquement les fichiers DCC des conversations privées ouvertes"
