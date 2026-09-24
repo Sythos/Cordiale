@@ -1257,6 +1257,14 @@ msgid "Delete network {}"
 msgstr "Supprimer le réseau {}"
 
 msgctxt "AppWindow"
+msgid "Events"
+msgstr "Événements"
+
+msgctxt "AppWindow"
+msgid "No admin events yet. They arrive live while this panel is open."
+msgstr "Aucun événement d'administration pour l'instant. Ils arrivent en direct tant que ce panneau est ouvert."
+
+msgctxt "AppWindow"
 msgid "Topic of {}"
 msgstr "Sujet de {}"
 
