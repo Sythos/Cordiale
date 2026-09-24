@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette } from "std-widgets.slint";
+import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette, Slider } from "std-widgets.slint";
 
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
@@ -416,7 +416,23 @@ struct ThemeChoiceRow {
     selected: bool,
     // In use at night, when the OS is in dark mode.
     night: bool,
+    // A Grappa theme (the built-in copies can't be edited or copied), and
+    // whether the account owns it and has published it.
+    server: bool,
+    mine: bool,
+    published: bool,
     swatches: [color],
+}
+
+// One of the 27 colors in the theme editor: its wire key, the hex being
+// typed, and the last valid color.
+struct EditorColor {
+    key: string,
+    // 0-15 for the nick colors, -1 for the base ones.
+    nick-index: int,
+    value: string,
+    color: color,
+    valid: bool,
 }
 
 // Settings/admin navigation entry: a compact, flat row with an icon naming
@@ -858,6 +874,62 @@ export component AppWindow inherits Window {
     // offered while a gallery theme is in use.
     callback night-theme-requested(string);
     in property <bool> theme-pair-active: false;
+    // Theme editor (Settings > Themes): owned Grappa themes can be edited,
+    // deleted and published, any Grappa theme copied, and a new one made
+    // from the theme in use.
+    in property <bool> theme-editing-available: false;
+    callback theme-edit-requested(string); // key, "" for a new theme
+    callback theme-delete-requested(string, string); // key, name
+    callback theme-publish-requested(string, bool);
+    callback theme-copy-requested(string);
+    out property <string> theme-delete-title: @tr("Delete theme");
+    public pure function theme-delete-text(name: string) -> string {
+        return @tr("Delete the theme {} from Grappa? This cannot be undone.", name);
+    }
+    in-out property <int> editor-theme-id: -1;
+    in-out property <string> editor-name: "";
+    in-out property <int> editor-font-index: 0;
+    in property <[EditorColor]> editor-colors: [];
+    in property <[string]> editor-background-keys: [];
+    in property <[string]> editor-background-names: [];
+    in-out property <int> editor-background-index: 0;
+    in-out property <string> editor-image-id: "";
+    in-out property <bool> editor-tile: false;
+    in-out property <int> editor-opacity: 100;
+    out property <string> editor-no-wallpaper-label: @tr("No wallpaper");
+    out property <string> editor-uploaded-wallpaper-label: @tr("Uploaded image");
+    callback editor-color-edited(int, string);
+    callback editor-font-changed();
+    callback editor-save();
+    callback editor-cancel();
+    callback editor-pick-background();
+
+    function editor-color-label(key: string, nick-index: int) -> string {
+        if key == "bg" {
+            return @tr("Background");
+        } else if key == "bg_alt" {
+            return @tr("Alternate background");
+        } else if key == "fg" {
+            return @tr("Text");
+        } else if key == "accent" {
+            return @tr("Accent");
+        } else if key == "muted" {
+            return @tr("Muted text");
+        } else if key == "border" {
+            return @tr("Borders");
+        } else if key == "mention" {
+            return @tr("Mentions");
+        } else if key == "mode_op" {
+            return @tr("Operators");
+        } else if key == "mode_halfop" {
+            return @tr("Half-operators");
+        } else if key == "mode_voiced" {
+            return @tr("Voiced");
+        } else if key == "mode_plain" {
+            return @tr("Plain members");
+        }
+        return @tr("Nick color {}", nick-index + 1);
+    }
     in property <bool> theme-has-night: false;
     callback peer-away-dismiss-requested();
     callback dcc-offer-accept-requested(string, string); // network, offer id
@@ -1359,6 +1431,18 @@ export component AppWindow inherits Window {
             return @tr("Notification sound set to {}.", status-command-hint);
         } else if status-kind == "beep-unknown" {
             return @tr("Unknown sound. Available: {}", status-command-hint);
+        } else if status-kind == "theme-saved" {
+            return @tr("Theme saved and in use.");
+        } else if status-kind == "theme-invalid" {
+            return @tr("A theme needs a name (up to 60 characters) and 27 valid #rrggbb colors.");
+        } else if status-kind == "theme-refused" {
+            return @tr("Grappa refused the theme: the name may be taken or a value is invalid.");
+        } else if status-kind == "theme-rate-limited" {
+            return @tr("Too many new themes today; try again tomorrow.");
+        } else if status-kind == "theme-action-failed" {
+            return @tr("The theme action failed ({}).", status-command-hint);
+        } else if status-kind == "theme-background-failed" {
+            return @tr("The wallpaper couldn't be uploaded ({}).", status-command-hint);
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
@@ -2684,6 +2768,10 @@ export component AppWindow inherits Window {
                         text: @tr("Back to classic");
                         clicked => { color-theme-requested(""); }
                     }
+                    if theme-editing-available : CompactButton {
+                        text: "➕  " + @tr("New theme");
+                        clicked => { theme-edit-requested(""); }
+                    }
                     if theme-has-night : CompactButton {
                         text: @tr("Same theme day and night");
                         clicked => { night-theme-requested(""); }
@@ -2727,6 +2815,132 @@ export component AppWindow inherits Window {
                             enabled: !choice.night;
                             a11y-label: @tr("Use theme {} at night", choice.name);
                             clicked => { night-theme-requested(choice.key); }
+                        }
+                        if choice.mine : CompactButton {
+                            text: "✎";
+                            a11y-label: @tr("Edit theme {}", choice.name);
+                            clicked => { theme-edit-requested(choice.key); }
+                        }
+                        if choice.mine : CompactButton {
+                            text: choice.published ? @tr("Unpublish") : @tr("Publish");
+                            a11y-label: choice.published ? @tr("Unpublish theme {}", choice.name) : @tr("Publish theme {}", choice.name);
+                            clicked => { theme-publish-requested(choice.key, !choice.published); }
+                        }
+                        if choice.mine : CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Delete theme {}", choice.name);
+                            clicked => { theme-delete-requested(choice.key, choice.name); }
+                        }
+                        if choice.server && !choice.mine : CompactButton {
+                            text: "⧉";
+                            a11y-label: @tr("Copy theme {}", choice.name);
+                            clicked => { theme-copy-requested(choice.key); }
+                        }
+                    }
+                }
+            }
+
+            if settings-section == "theme-editor" : SectionCard {
+                icon: "🖌";
+                title: editor-theme-id >= 0 ? @tr("Edit theme") : @tr("New theme");
+                fill: true;
+
+                HorizontalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("Theme name");
+                        accessible-label: @tr("Theme name");
+                        text <=> editor-name;
+                        horizontal-stretch: 1;
+                    }
+                    ComboBox {
+                        model: [@tr("Default monospace"), "JetBrains Mono", "Fira Code", "Iosevka", "Hack", "Cascadia Code", "Source Code Pro", "IBM Plex Mono"];
+                        current-index <=> editor-font-index;
+                        min-width: 150px;
+                        selected => { editor-font-changed(); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    Text {
+                        text: @tr("Wallpaper");
+                        vertical-alignment: center;
+                    }
+                    ComboBox {
+                        model: editor-background-names;
+                        current-index <=> editor-background-index;
+                        min-width: 150px;
+                    }
+                    CompactButton {
+                        text: "📁  " + @tr("Upload image…");
+                        clicked => { editor-pick-background(); }
+                    }
+                    CheckBox {
+                        text: @tr("Tile");
+                        checked <=> editor-tile;
+                    }
+                    Text {
+                        text: @tr("Opacity {}%", editor-opacity);
+                        vertical-alignment: center;
+                    }
+                    Slider {
+                        minimum: 0;
+                        maximum: 100;
+                        value: editor-opacity;
+                        width: 90px;
+                        released(value) => { editor-opacity = Math.round(value); }
+                    }
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    min-height: 160px;
+
+                    for row[index] in editor-colors : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
+                        Rectangle {
+                            width: 22px;
+                            height: 22px;
+                            background: row.color;
+                            border-width: 1px;
+                            border-color: #80808080;
+                        }
+                        Text {
+                            text: editor-color-label(row.key, row.nick-index);
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        LineEdit {
+                            text: row.value;
+                            accessible-label: editor-color-label(row.key, row.nick-index);
+                            width: 110px;
+                            edited(value) => { editor-color-edited(index, value); }
+                        }
+                        Text {
+                            text: row.valid ? "" : "⚠";
+                            vertical-alignment: center;
+                            width: 16px;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    Button {
+                        text: "💾  " + @tr("Save and use");
+                        enabled: editor-name != "";
+                        clicked => { editor-save(); }
+                    }
+                    Button {
+                        text: @tr("Cancel");
+                        clicked => {
+                            settings-section = "themes";
+                            editor-cancel();
                         }
                     }
                 }

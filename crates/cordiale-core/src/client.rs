@@ -1681,6 +1681,148 @@ impl GrappaClient {
         Ok(response.json::<ThemeIndex>().await?.themes)
     }
 
+    /// `GET /me/themes` — the account's own themes, published or not.
+    pub async fn fetch_my_themes(&self, token: &str) -> Result<Vec<ThemeWire>, GrappaClientError> {
+        let url = format!("{}/me/themes", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ThemeIndex>().await?.themes)
+    }
+
+    /// `POST /themes {name, payload}` (a new theme) or `PATCH /themes/:id`.
+    pub async fn save_theme(
+        &self,
+        token: &str,
+        theme_id: Option<i64>,
+        name: &str,
+        payload: &Value,
+    ) -> Result<ThemeWire, GrappaClientError> {
+        let body = serde_json::json!({ "name": name, "payload": payload });
+        let request = match theme_id {
+            Some(id) => self.http.patch(format!("{}/themes/{id}", self.base_url)),
+            None => self.http.post(format!("{}/themes", self.base_url)),
+        };
+        let response = request
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ThemeWire>().await?)
+    }
+
+    /// `DELETE /themes/:id`.
+    pub async fn delete_theme(&self, token: &str, theme_id: i64) -> Result<(), GrappaClientError> {
+        self.http
+            .delete(format!("{}/themes/{theme_id}", self.base_url))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `POST /themes/:id/publish` or `/unpublish`.
+    pub async fn set_theme_published(
+        &self,
+        token: &str,
+        theme_id: i64,
+        published: bool,
+    ) -> Result<ThemeWire, GrappaClientError> {
+        let verb = if published { "publish" } else { "unpublish" };
+        let response = self
+            .http
+            .post(format!("{}/themes/{theme_id}/{verb}", self.base_url))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ThemeWire>().await?)
+    }
+
+    /// `POST /themes/:id/copy` — an editable copy owned by the account.
+    pub async fn copy_theme(
+        &self,
+        token: &str,
+        theme_id: i64,
+    ) -> Result<ThemeWire, GrappaClientError> {
+        let response = self
+            .http
+            .post(format!("{}/themes/{theme_id}/copy", self.base_url))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ThemeWire>().await?)
+    }
+
+    /// `GET /themes/backgrounds` — Grappa's built-in wallpapers as
+    /// `(key, name)`.
+    pub async fn fetch_theme_backgrounds(
+        &self,
+        token: &str,
+    ) -> Result<Vec<(String, String)>, GrappaClientError> {
+        let response = self
+            .http
+            .get(format!("{}/themes/backgrounds", self.base_url))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.json::<Value>().await?;
+        Ok(body
+            .get("backgrounds")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| {
+                        let key = row.get("key")?.as_str()?.to_string();
+                        let name = row
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&key)
+                            .to_string();
+                        Some((key, name))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// `POST /themes/background` with a picked image (multipart `file`);
+    /// Grappa re-encodes it and returns its `image_id`.
+    pub async fn upload_theme_background(
+        &self,
+        token: &str,
+        filename: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String, GrappaClientError> {
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.to_string())
+            .mime_str(mime)?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let response = self
+            .http
+            .post(format!("{}/themes/background", self.base_url))
+            .bearer_auth(token)
+            .timeout(UPLOAD_TIMEOUT)
+            .multipart(form)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.json::<Value>().await?;
+        body.get("image_id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| GrappaClientError::InvalidUrl("no image_id in the reply".to_string()))
+    }
+
     /// `GET /me/theme` — the account's active theme pair.
     pub async fn fetch_active_theme(
         &self,
