@@ -2277,6 +2277,7 @@ async fn handle_select_channel(
     let casemapping = network_casemapping(state, &network);
     let history_start = state.history_start_reached.contains(&key);
 
+    push_window_note(state, ui);
     let label = format!("{network} — {channel}");
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -7067,7 +7068,48 @@ fn network_groups_model(
 /// Pushes `state.channel_entries` + `state.expanded_networks` to the
 /// sidebar as a fresh `network-groups` model — called after anything that
 /// changes either (a network's expand toggle, a fresh connect).
+/// Why the open channel window is inactive, for the banner above its
+/// chat: `(kind, actor, reason)` with kind `kicked` or `failed`, or all
+/// empty. A failed join falls back to the IRC numeric when there's no
+/// reason text.
+fn window_note(state: &WorkerState) -> (&'static str, String, String) {
+    let Some((network, channel)) = state
+        .current_channel
+        .as_ref()
+        .filter(|_| !state.current_query)
+    else {
+        return ("", String::new(), String::new());
+    };
+    let key = window_state_key(network, channel);
+    if let Some(kick) = state.window_kicks.get(&key) {
+        return (
+            "kicked",
+            kick.by.clone().unwrap_or_default(),
+            kick.reason.clone().unwrap_or_default(),
+        );
+    }
+    if let Some(failure) = state.window_failures.get(&key) {
+        let reason = failure
+            .reason
+            .clone()
+            .or_else(|| failure.numeric.as_ref().map(ToString::to_string))
+            .unwrap_or_default();
+        return ("failed", String::new(), reason);
+    }
+    ("", String::new(), String::new())
+}
+
+fn push_window_note(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (kind, actor, reason) = window_note(state);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_window_note_kind(kind.into());
+        ui.set_window_note_actor(actor.into());
+        ui.set_window_note_reason(reason.into());
+    });
+}
+
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    push_window_note(state, ui);
     let mut data = network_groups_data(
         &state.channel_entries,
         &state.query_windows,
@@ -15673,6 +15715,38 @@ mod tests {
         assert_eq!(upload_ttl_index(Some(43_200)), 2);
         assert_eq!(upload_ttl_index(Some(7)), 0);
         assert_eq!(upload_ttl_index(None), 0);
+    }
+
+    #[test]
+    fn window_note_explains_a_kick_or_a_failed_join() {
+        let mut state = WorkerState::new();
+        assert_eq!(window_note(&state), ("", String::new(), String::new()));
+        state.current_channel = Some(("libera".to_string(), "#Rust".to_string()));
+        state.window_kicks.insert(
+            window_state_key("libera", "#Rust"),
+            WindowKick {
+                by: Some("op".to_string()),
+                reason: None,
+            },
+        );
+        assert_eq!(
+            window_note(&state),
+            ("kicked", "op".to_string(), String::new())
+        );
+        state.window_kicks.clear();
+        state.window_failures.insert(
+            window_state_key("libera", "#rust"),
+            WindowFailure {
+                reason: None,
+                numeric: Some(Number::from(474)),
+            },
+        );
+        assert_eq!(
+            window_note(&state),
+            ("failed", String::new(), "474".to_string())
+        );
+        state.current_query = true;
+        assert_eq!(window_note(&state), ("", String::new(), String::new()));
     }
 
     #[test]

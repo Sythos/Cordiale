@@ -1135,3 +1135,27 @@ msgstr "Consulter les profils des autres utilisateurs (CTCP USERINFO)"
 msgctxt "AppWindow"
 msgid "Accept DCC files from open private conversations automatically"
 msgstr "Accepter automatiquement les fichiers DCC des conversations privées ouvertes"
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel."
+msgstr "Vous avez été expulsé de ce salon."
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel: {}"
+msgstr "Vous avez été expulsé de ce salon : {}"
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel."
+msgstr "{} vous a expulsé de ce salon."
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel: {}"
+msgstr "{} vous a expulsé de ce salon : {}"
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed."
+msgstr "Impossible de rejoindre ce salon."
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed: {}"
+msgstr "Impossible de rejoindre ce salon : {}"
