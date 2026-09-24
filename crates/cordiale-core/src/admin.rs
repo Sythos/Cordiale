@@ -189,6 +189,38 @@ pub fn admin_network_id(entry: &Value) -> Option<String> {
         .or_else(|| id.as_i64().map(|n| n.to_string()))
 }
 
+/// The per-network caps and visitor switch the admin editor shows:
+/// `(visitor_enabled, visitor sessions, user sessions, per IP)`, each cap
+/// as text with `""` for unlimited (`null`).
+pub fn admin_network_settings(entry: &Value) -> (bool, String, String, String) {
+    let cap = |key: &str| {
+        entry
+            .get(key)
+            .and_then(Value::as_i64)
+            .map(|cap| cap.to_string())
+            .unwrap_or_default()
+    };
+    (
+        entry
+            .get("visitor_enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        cap("max_concurrent_visitor_sessions"),
+        cap("max_concurrent_user_sessions"),
+        cap("max_per_ip"),
+    )
+}
+
+/// Parses a cap typed in the admin editor: empty is unlimited (`null`),
+/// otherwise a non-negative whole number. `None` for anything else.
+pub fn parse_admin_cap(text: &str) -> Option<Value> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(Value::Null);
+    }
+    text.parse::<u32>().ok().map(Value::from)
+}
+
 /// Reads a display name out of one opaque `AdminNetwork` entry.
 pub fn admin_network_label(entry: &Value) -> String {
     entry
