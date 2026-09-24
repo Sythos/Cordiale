@@ -1231,3 +1231,11 @@ msgstr "Modifica rete {}"
 msgctxt "AppWindow"
 msgid "Delete network {}"
 msgstr "Elimina rete {}"
+
+msgctxt "AppWindow"
+msgid "Events"
+msgstr "Eventi"
+
+msgctxt "AppWindow"
+msgid "No admin events yet. They arrive live while this panel is open."
+msgstr "Ancora nessun evento di amministrazione. Arrivano in tempo reale mentre questo pannello è aperto."

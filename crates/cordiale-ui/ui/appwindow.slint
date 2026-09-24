@@ -714,6 +714,14 @@ export component AppWindow inherits Window {
     in property <[AdminNetworkRow]> admin-networks: [];
     in property <[AdminVisitorRow]> admin-visitors: [];
     in property <[string]> admin-session-log: [];
+    // Live admin feed (`grappa:admin:events`), newest first.
+    in property <[string]> admin-events: [];
+    // Opening Settings > Admin loads the panel and starts the live feed.
+    changed settings-section => {
+        if settings-section == "admin" {
+            admin-refresh-requested();
+        }
+    }
     in property <bool> admin-loading: false;
 
     // `/links` network-topology view — see `cordiale_core::links` for the
@@ -2605,6 +2613,12 @@ export component AppWindow inherits Window {
                         selected: admin-section == "session-log";
                         clicked => { admin-section = "session-log"; }
                     }
+                    NavButton {
+                        icon: "📣";
+                        label: @tr("Events");
+                        selected: admin-section == "events";
+                        clicked => { admin-section = "events"; }
+                    }
                 }
 
                 HorizontalLayout {
@@ -2853,6 +2867,20 @@ export component AppWindow inherits Window {
                     min-height: 120px;
 
                     for line in admin-session-log : Text {
+                        text: line;
+                        wrap: word-wrap;
+                    }
+                }
+
+                if admin-section == "events" && admin-events.length == 0 : Text {
+                    text: @tr("No admin events yet. They arrive live while this panel is open.");
+                    wrap: word-wrap;
+                }
+                if admin-section == "events" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
+                    for line in admin-events : Text {
                         text: line;
                         wrap: word-wrap;
                     }

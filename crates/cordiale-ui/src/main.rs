@@ -1251,6 +1251,8 @@ struct WorkerState {
     identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
+    /// Lines of the live admin feed, newest first (capped).
+    admin_events: Vec<String>,
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
     /// transitions.
     window_states: HashMap<(String, String), ChannelWindowState>,
@@ -1451,6 +1453,7 @@ impl WorkerState {
             identifier: None,
             session: None,
             joined_topics: std::collections::HashSet::new(),
+            admin_events: Vec::new(),
             window_states: HashMap::new(),
             window_failures: HashMap::new(),
             window_kicks: HashMap::new(),
@@ -1669,6 +1672,14 @@ async fn run_worker(
                         handle_save_display_prefs(&state, prefs).await;
                     }
                     Some(WorkerCommand::AdminRefresh) => {
+                        // The live feed needs a full web session, like the
+                        // rest of /admin; a refused join just leaves it empty.
+                        let topic = cordiale_core::admin::ADMIN_EVENTS_TOPIC.to_string();
+                        if let Some(session) = &state.session {
+                            if state.joined_topics.insert(topic.clone()) {
+                                session.join_topic(topic, false);
+                            }
+                        }
                         handle_admin_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::AdminDisconnectSession(session_id)) => {
@@ -3727,6 +3738,74 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
     handle_admin_refresh(state, ui).await;
 }
 
+fn admin_overview_text(overview: &cordiale_core::admin::AdminOverview) -> String {
+    format!(
+        "{} session(s) · {}/{} visitors live · {} · v{}",
+        overview.sessions,
+        overview.visitors.live,
+        overview.visitors.total,
+        overview.hostname,
+        overview.version
+    )
+}
+
+/// Most admin feed lines kept for the Events tab.
+const ADMIN_EVENTS_CAP: usize = 200;
+
+/// Handles a push on the live admin topic: the join `snapshot` (newest
+/// first), a single audit event, a session-log event, or the periodic
+/// `overview` that keeps the panel's summary line current.
+fn handle_admin_feed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    frame: &cordiale_core::phoenix::PhoenixMessage,
+) {
+    match frame.event.as_str() {
+        "overview" => {
+            if let Ok(overview) =
+                serde_json::from_value::<cordiale_core::admin::AdminOverview>(frame.payload.clone())
+            {
+                let text = admin_overview_text(&overview);
+                let _ = ui.upgrade_in_event_loop(move |ui| {
+                    ui.set_admin_overview_text(text.into());
+                });
+            }
+            return;
+        }
+        "snapshot" => {
+            state.admin_events = frame
+                .payload
+                .get("events")
+                .and_then(Value::as_array)
+                .map(|events| {
+                    events
+                        .iter()
+                        .map(cordiale_core::admin::admin_event_line)
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        "session_log_event" => {
+            let line = format!(
+                "session · {}",
+                cordiale_core::admin::admin_session_log_line(&frame.payload)
+            );
+            state.admin_events.insert(0, line);
+        }
+        _ if frame.payload.get("kind").is_some() => {
+            let line = cordiale_core::admin::admin_event_line(&frame.payload);
+            state.admin_events.insert(0, line);
+        }
+        _ => return,
+    }
+    state.admin_events.truncate(ADMIN_EVENTS_CAP);
+    let lines: Vec<slint::SharedString> =
+        state.admin_events.iter().map(|line| line.into()).collect();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_admin_events(Rc::new(slint::VecModel::from(lines)).into());
+    });
+}
+
 async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token)) = (&state.client, &state.token) else {
         return;
@@ -3745,16 +3824,7 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         .await
         .unwrap_or_default();
 
-    let overview_text = overview.map(|overview| {
-        format!(
-            "{} session(s) · {}/{} visitors live · {} · v{}",
-            overview.sessions,
-            overview.visitors.live,
-            overview.visitors.total,
-            overview.hostname,
-            overview.version
-        )
-    });
+    let overview_text = overview.as_ref().map(admin_overview_text);
 
     let session_rows: Vec<AdminSessionRow> = sessions
         .iter()
@@ -4443,6 +4513,12 @@ async fn handle_frame(
     ui: &slint::Weak<AppWindow>,
     frame: cordiale_core::phoenix::PhoenixMessage,
 ) {
+    if frame.topic == cordiale_core::admin::ADMIN_EVENTS_TOPIC {
+        if frame.event != "phx_reply" {
+            handle_admin_feed(state, ui, &frame);
+        }
+        return;
+    }
     if frame.event == "phx_reply" {
         let status = frame.payload.get("status").and_then(Value::as_str);
         if apply_window_counts_join_reply(state, &frame.topic, &frame.payload, status) {
