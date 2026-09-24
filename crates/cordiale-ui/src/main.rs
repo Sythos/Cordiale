@@ -3269,6 +3269,38 @@ async fn run_slash_command(
             );
             Ok(())
         }
+        // Read from what the client already holds (the topic and the
+        // `channel_modes_changed` snapshot); nothing goes to the server.
+        SlashCommand::TopicShow { channel: target } => {
+            let Some(target) = target.or_else(open_channel) else {
+                return set_command_status(ui, "command-needs-channel", label);
+            };
+            return match state
+                .topics
+                .get(&(network.clone(), target.clone()))
+                .filter(|topic| !topic.is_empty())
+            {
+                Some(topic) => {
+                    set_command_status(ui, "command-topic", format!("{target}: {topic}"))
+                }
+                None => set_command_status(ui, "command-no-topic", target),
+            };
+        }
+        SlashCommand::ModeShow { channel: target } => {
+            let Some(target) = target.or_else(open_channel) else {
+                return set_command_status(ui, "command-needs-channel", label);
+            };
+            let modes = state
+                .channel_modes
+                .get(&(network.clone(), target.clone()))
+                .map(|snapshot| format_channel_modes(&snapshot.modes))
+                .unwrap_or_default();
+            return if modes.is_empty() {
+                set_command_status(ui, "command-no-modes", target)
+            } else {
+                set_command_status(ui, "command-modes", format!("{target} {modes}"))
+            };
+        }
         SlashCommand::Nick(nick) => client.change_nick(&token, &network, &nick).await,
         // The one user-topic verb addressed by slug rather than `network_id`.
         SlashCommand::Away(reason) => {

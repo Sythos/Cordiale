@@ -1116,6 +1116,14 @@ export component AppWindow inherits Window {
             return @tr("That alias expands into too many others: {}", status-command-hint);
         } else if status-kind == "kickban-host-unknown" {
             return @tr("{}'s host isn't known yet, so they were only kicked; /whois them first to ban too.", status-command-hint);
+        } else if status-kind == "command-topic" {
+            return @tr("Topic of {}", status-command-hint);
+        } else if status-kind == "command-no-topic" {
+            return @tr("{} has no topic.", status-command-hint);
+        } else if status-kind == "command-modes" {
+            return @tr("Modes of {}", status-command-hint);
+        } else if status-kind == "command-no-modes" {
+            return @tr("No modes known for {} yet.", status-command-hint);
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {

@@ -43,6 +43,10 @@ pub enum SlashCommand {
     },
     /// `/topic [#chan] -delete`.
     TopicClear { channel: Option<String> },
+    /// `/topic [#chan]` with no text: shows the current topic.
+    TopicShow { channel: Option<String> },
+    /// `/mode [#chan]` with no modes: shows the channel's current modes.
+    ModeShow { channel: Option<String> },
     /// `/nick <nick>`.
     Nick(String),
     /// `/away [reason]`: sets away with a reason, or comes back without.
@@ -278,7 +282,7 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             if text == "-delete" {
                 TopicClear { channel }
             } else if text.is_empty() {
-                Usage("/topic [#channel] <text> | -delete")
+                TopicShow { channel }
             } else {
                 TopicSet {
                     channel,
@@ -365,6 +369,10 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
                     target: Some(target.clone()),
                     modes: modes.clone(),
                     params: params.to_vec(),
+                },
+                [] => ModeShow { channel: None },
+                [channel] if is_channel(channel) => ModeShow {
+                    channel: Some(channel.clone()),
                 },
                 _ => Usage("/mode [target] <modes> [params]"),
             }
@@ -694,7 +702,13 @@ mod tests {
                 text: "#rust rocks".to_string()
             })
         );
-        assert!(matches!(parse("/topic"), Some(Usage(_))));
+        assert_eq!(parse("/topic"), Some(TopicShow { channel: None }));
+        assert_eq!(
+            parse("/topic #rust"),
+            Some(TopicShow {
+                channel: Some("#rust".to_string())
+            })
+        );
     }
 
     #[test]
@@ -785,7 +799,14 @@ mod tests {
                 params: vec!["secret".to_string()]
             })
         );
-        assert!(matches!(parse("/mode #rust"), Some(Usage(_))));
+        assert_eq!(
+            parse("/mode #rust"),
+            Some(ModeShow {
+                channel: Some("#rust".to_string())
+            })
+        );
+        assert_eq!(parse("/mode"), Some(ModeShow { channel: None }));
+        assert!(matches!(parse("/mode alice"), Some(Usage(_))));
         assert_eq!(parse("/umode +i"), Some(Umode("+i".to_string())));
         assert_eq!(parse("/names"), Some(Names(None)));
         assert_eq!(

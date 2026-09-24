@@ -1351,3 +1351,19 @@ msgstr "Mappatura statica con prenotazioni"
 msgctxt "AppWindow"
 msgid "Static mapping prefix length"
 msgstr "Lunghezza del prefisso di mappatura statica"
+
+msgctxt "AppWindow"
+msgid "Topic of {}"
+msgstr "Topic di {}"
+
+msgctxt "AppWindow"
+msgid "{} has no topic."
+msgstr "{} non ha un topic."
+
+msgctxt "AppWindow"
+msgid "Modes of {}"
+msgstr "Modi di {}"
+
+msgctxt "AppWindow"
+msgid "No modes known for {} yet."
+msgstr "Nessun modo ancora noto per {}."
