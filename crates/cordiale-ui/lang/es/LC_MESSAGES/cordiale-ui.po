@@ -1095,3 +1095,27 @@ msgstr "Preguntar antes de subir"
 msgctxt "AppWindow"
 msgid "Load older messages"
 msgstr "Cargar mensajes anteriores"
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel."
+msgstr "Te han expulsado de este canal."
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel: {}"
+msgstr "Te han expulsado de este canal: {}"
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel."
+msgstr "{} te ha expulsado de este canal."
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel: {}"
+msgstr "{} te ha expulsado de este canal: {}"
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed."
+msgstr "No se pudo entrar en este canal."
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed: {}"
+msgstr "No se pudo entrar en este canal: {}"

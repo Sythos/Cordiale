@@ -1095,3 +1095,27 @@ msgstr "Vor dem Hochladen fragen"
 msgctxt "AppWindow"
 msgid "Load older messages"
 msgstr "Ältere Nachrichten laden"
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel."
+msgstr "Du wurdest aus diesem Kanal gekickt."
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel: {}"
+msgstr "Du wurdest aus diesem Kanal gekickt: {}"
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel."
+msgstr "{} hat dich aus diesem Kanal gekickt."
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel: {}"
+msgstr "{} hat dich aus diesem Kanal gekickt: {}"
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed."
+msgstr "Das Betreten dieses Kanals ist fehlgeschlagen."
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed: {}"
+msgstr "Das Betreten dieses Kanals ist fehlgeschlagen: {}"

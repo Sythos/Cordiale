@@ -84,9 +84,8 @@ Cordiale still has these user-visible or behavioral gaps:
   or late.
 - **Remaining presentation gaps:** the `/links` graph has no pan/zoom; a
   WHOIS avatar is reported but not drawn; the account-wide unread count does
-  not set an OS taskbar/dock badge. Join-failure and kick reason metadata
-  are retained but not fully surfaced in their window rows, and a rejected
-  `/recover` command lacks a direct error notice.
+  not set an OS taskbar/dock badge, and a rejected `/recover` command lacks
+  a direct error notice.
 
 ## Download
 

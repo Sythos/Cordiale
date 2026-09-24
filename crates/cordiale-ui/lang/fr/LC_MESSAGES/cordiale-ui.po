@@ -1095,3 +1095,27 @@ msgstr "Demander avant d'envoyer"
 msgctxt "AppWindow"
 msgid "Load older messages"
 msgstr "Charger les messages plus anciens"
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel."
+msgstr "Vous avez été expulsé de ce salon."
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel: {}"
+msgstr "Vous avez été expulsé de ce salon : {}"
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel."
+msgstr "{} vous a expulsé de ce salon."
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel: {}"
+msgstr "{} vous a expulsé de ce salon : {}"
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed."
+msgstr "Impossible de rejoindre ce salon."
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed: {}"
+msgstr "Impossible de rejoindre ce salon : {}"

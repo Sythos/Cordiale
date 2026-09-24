@@ -1095,3 +1095,27 @@ msgstr "Chiedi prima di caricare"
 msgctxt "AppWindow"
 msgid "Load older messages"
 msgstr "Carica messaggi più vecchi"
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel."
+msgstr "Sei stato espulso da questo canale."
+
+msgctxt "AppWindow"
+msgid "You were kicked from this channel: {}"
+msgstr "Sei stato espulso da questo canale: {}"
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel."
+msgstr "{} ti ha espulso da questo canale."
+
+msgctxt "AppWindow"
+msgid "{} kicked you from this channel: {}"
+msgstr "{} ti ha espulso da questo canale: {}"
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed."
+msgstr "L'ingresso in questo canale non è riuscito."
+
+msgctxt "AppWindow"
+msgid "Joining this channel failed: {}"
+msgstr "L'ingresso in questo canale non è riuscito: {}"

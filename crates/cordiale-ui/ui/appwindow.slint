@@ -568,6 +568,11 @@ export component AppWindow inherits Window {
     // `peer-away-message` may be empty when the peer gave no text.
     in property <bool> peer-away-visible: false;
     in property <string> peer-away-peer: "";
+    // Why the open channel is inactive: kind "kicked" or "failed" (or ""),
+    // who kicked, and the server's reason text.
+    in property <string> window-note-kind: "";
+    in property <string> window-note-actor: "";
+    in property <string> window-note-reason: "";
     in property <string> peer-away-message: "";
     // A DM can be selected before its Phoenix topic joins and history load
     // finish. Keep composition disabled until Rust marks it ready.
@@ -1567,6 +1572,32 @@ export component AppWindow inherits Window {
                 text: current-channel-modes;
                 font-size: 12px;
             }
+            if !current-query && window-note-kind != "" : Rectangle {
+                background: theme == "dark" ? #3a2424 : #fde2e2;
+                border-width: 1px;
+                border-color: theme == "dark" ? #b04a4a : #c0392b;
+
+                HorizontalBox {
+                    Text {
+                        text: window-note-kind == "kicked"
+                            ? (window-note-actor == ""
+                                ? (window-note-reason == ""
+                                    ? @tr("You were kicked from this channel.")
+                                    : @tr("You were kicked from this channel: {}", window-note-reason))
+                                : (window-note-reason == ""
+                                    ? @tr("{} kicked you from this channel.", window-note-actor)
+                                    : @tr("{} kicked you from this channel: {}", window-note-actor, window-note-reason)))
+                            : (window-note-reason == ""
+                                ? @tr("Joining this channel failed.")
+                                : @tr("Joining this channel failed: {}", window-note-reason));
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                }
+            }
+
             if current-query && peer-away-visible : Rectangle {
                 background: theme == "dark" ? #3a321f : #fff2bf;
                 border-width: 1px;
