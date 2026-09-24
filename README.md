@@ -61,13 +61,12 @@ Cordiale still has these user-visible or behavioral gaps:
   server-wide upload, DCC and addressing settings, binds and unbinds
   credentials, manages vhosts and their grants to accounts (not to visitors),
   and follows the live admin event feed.
-- **Settings and watch lists:** current per-network nick/ident/realname are
-  not read back into the identity editor, so its fields start blank.
-  Watch-list keywords are session-local rather than reconciled with the
-  server. On-Connect Commands uses one line instead of Cicchetto's multiline
-  editor; the server's upload limits are shown read-only. Settings >
-  Notifications covers the main push switches, not per-channel lists or
-  mutes.
+- **Settings and watch lists:** the identity editor reads back the nick in
+  use on each network, but Grappa no longer reports ident and realname, so
+  those start blank; the server's upload limits are shown read-only. Settings >
+  Notifications edits the push switches, the per-channel and per-nick lists,
+  muted conversations (muted from the Actions menu, for an hour, eight hours
+  or for good) and the sound other devices play, also set with `/beep`.
 - **Uploads and attachments:** the paperclip uploads a picked file through
   Grappa (`POST /api/uploads`) and posts its link with the category emoji,
   as Cicchetto does, after checking the file type and the advertised size
@@ -79,7 +78,7 @@ Cordiale still has these user-visible or behavioral gaps:
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb`, and the services shortcuts), but not `/np`, `/beep`, or
+  expansion, `/kb`, and the services shortcuts), but not `/np` or
   the user-mode view of a bare `/umode` (a bare `/topic` or `/mode` shows the
   channel's topic or modes in the status bar).
 - **Chat and roster edge cases:** a message with multiple differently colored

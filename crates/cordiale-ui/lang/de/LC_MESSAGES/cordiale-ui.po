@@ -313,10 +313,6 @@ msgid "Expansion"
 msgstr "Erweiterung"
 
 msgctxt "AppWindow"
-msgid "On-connect commands (one per line, semicolon-separated)"
-msgstr "Befehle beim Verbinden (einer pro Zeile, durch Semikolon getrennt)"
-
-msgctxt "AppWindow"
 msgid "Credits"
 msgstr "Impressum"
 
@@ -1415,3 +1411,79 @@ msgstr "Gewähren"
 msgctxt "AppWindow"
 msgid "Revoke grant {}"
 msgstr "Freigabe {} widerrufen"
+
+msgctxt "AppWindow"
+msgid "On-connect commands, one IRC command per line"
+msgstr "Befehle beim Verbinden, ein IRC-Befehl pro Zeile"
+
+msgctxt "AppWindow"
+msgid "On-connect commands"
+msgstr "Befehle beim Verbinden"
+
+msgctxt "AppWindow"
+msgid "Conversation muted: other devices won't be notified about it."
+msgstr "Unterhaltung stummgeschaltet: andere Geräte werden nicht benachrichtigt."
+
+msgctxt "AppWindow"
+msgid "Notification sound: {}"
+msgstr "Benachrichtigungston: {}"
+
+msgctxt "AppWindow"
+msgid "Notification sound set to {}."
+msgstr "Benachrichtigungston auf {} gesetzt."
+
+msgctxt "AppWindow"
+msgid "Unknown sound. Available: {}"
+msgstr "Unbekannter Ton. Verfügbar: {}"
+
+msgctxt "AppWindow"
+msgid "Mute this conversation"
+msgstr "Diese Unterhaltung stummschalten"
+
+msgctxt "AppWindow"
+msgid "For 1 hour"
+msgstr "Für 1 Stunde"
+
+msgctxt "AppWindow"
+msgid "For 8 hours"
+msgstr "Für 8 Stunden"
+
+msgctxt "AppWindow"
+msgid "Until I unmute it"
+msgstr "Bis ich sie wieder aktiviere"
+
+msgctxt "AppWindow"
+msgid "With every channel message off, also these channels:"
+msgstr "Bei deaktivierten Kanalnachrichten trotzdem diese Kanäle melden:"
+
+msgctxt "AppWindow"
+msgid "Remove {}"
+msgstr "{} entfernen"
+
+msgctxt "AppWindow"
+msgid "Channel"
+msgstr "Kanal"
+
+msgctxt "AppWindow"
+msgid "With every private message off, also these nicks:"
+msgstr "Bei deaktivierten privaten Nachrichten trotzdem diese Nicks melden:"
+
+msgctxt "AppWindow"
+msgid "Muted conversations"
+msgstr "Stummgeschaltete Unterhaltungen"
+
+msgctxt "AppWindow"
+msgid "None. Mute one from the Actions menu."
+msgstr "Keine. Schalte eine über das Aktionen-Menü stumm."
+
+msgctxt "AppWindow"
+msgid "Unmute"
+msgstr "Stumm aufheben"
+
+msgctxt "AppWindow"
+msgid "Unmute {}"
+msgstr "Stumm aufheben für {}"
+
+msgctxt "AppWindow"
+msgid "Sound on other devices (also /beep)"
+msgstr "Ton auf anderen Geräten (auch /beep)"
