@@ -1187,3 +1187,71 @@ msgstr "Restablecer el zoom"
 msgctxt "AppWindow"
 msgid "{}'s host isn't known yet, so they were only kicked; /whois them first to ban too."
 msgstr "Aún no se conoce el host de {}, así que solo se le expulsó; haz primero /whois para banearlo también."
+
+msgctxt "AppWindow"
+msgid "Done."
+msgstr "Hecho."
+
+msgctxt "AppWindow"
+msgid "The server refused that admin action ({})."
+msgstr "El servidor rechazó esa acción de administración ({})."
+
+msgctxt "AppWindow"
+msgid "Caps must be whole numbers, or empty for unlimited."
+msgstr "Los límites deben ser números enteros, o vacíos para ilimitado."
+
+msgctxt "AppWindow"
+msgid "New user name"
+msgstr "Nombre del nuevo usuario"
+
+msgctxt "AppWindow"
+msgid "Password"
+msgstr "Contraseña"
+
+msgctxt "AppWindow"
+msgid "Create user"
+msgstr "Crear usuario"
+
+msgctxt "AppWindow"
+msgid "To reset a password, type it above and press 🔑 on the account; its sessions are signed out."
+msgstr "Para restablecer una contraseña, escríbela arriba y pulsa 🔑 en la cuenta; se cerrarán sus sesiones."
+
+msgctxt "AppWindow"
+msgid "Set password"
+msgstr "Establecer contraseña"
+
+msgctxt "AppWindow"
+msgid "New network slug"
+msgstr "Slug de la nueva red"
+
+msgctxt "AppWindow"
+msgid "Create network"
+msgstr "Crear red"
+
+msgctxt "AppWindow"
+msgid "Settings of {} (empty cap = unlimited)"
+msgstr "Ajustes de {} (límite vacío = ilimitado)"
+
+msgctxt "AppWindow"
+msgid "Visitor sessions"
+msgstr "Sesiones de visitantes"
+
+msgctxt "AppWindow"
+msgid "User sessions"
+msgstr "Sesiones de usuarios"
+
+msgctxt "AppWindow"
+msgid "Per IP"
+msgstr "Por IP"
+
+msgctxt "AppWindow"
+msgid "Visitors allowed"
+msgstr "Visitantes permitidos"
+
+msgctxt "AppWindow"
+msgid "Edit network {}"
+msgstr "Editar red {}"
+
+msgctxt "AppWindow"
+msgid "Delete network {}"
+msgstr "Eliminar red {}"

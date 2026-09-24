@@ -777,6 +777,110 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `POST /admin/users {name, password, is_admin}` — creates an account.
+    pub async fn create_admin_user(
+        &self,
+        token: &str,
+        name: &str,
+        password: &str,
+        is_admin: bool,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/admin/users", self.base_url);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "name": name, "password": password, "is_admin": is_admin }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `PUT /admin/users/:id/password {password}` — also signs the user out
+    /// everywhere, server-side.
+    pub async fn set_admin_user_password(
+        &self,
+        token: &str,
+        user_id: &str,
+        password: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "users", user_id, "password"]);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "password": password }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `POST /admin/networks {slug}` — 409 when the slug exists.
+    pub async fn create_admin_network(
+        &self,
+        token: &str,
+        slug: &str,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/admin/networks", self.base_url);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "slug": slug }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `PATCH /admin/networks/:slug` with any of `visitor_enabled`,
+    /// `visitor_autoconnect`, `services_flavor` and the three caps (`null`
+    /// for unlimited).
+    pub async fn update_admin_network(
+        &self,
+        token: &str,
+        slug: &str,
+        settings: &Value,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "networks", slug]);
+        self.http
+            .patch(url)
+            .bearer_auth(token)
+            .json(settings)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /admin/networks/:id` — 409 while it still has credentials or
+    /// scrollback.
+    pub async fn delete_admin_network(
+        &self,
+        token: &str,
+        network_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "networks", network_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `PATCH /admin/users/:id` — whitelist is just `is_admin` server-side.
     pub async fn set_admin_user_is_admin(
         &self,
@@ -1954,6 +2058,79 @@ mod tests {
             .set_dcc_auto_accept("t", "libera", true)
             .await
             .expect("dcc");
+    }
+
+    #[tokio::test]
+    async fn admin_account_and_network_writes_use_their_contracts() {
+        // Built at run time: the test only checks the value is passed
+        // through, and a literal would read as a hard-coded credential.
+        let password = format!("pw-{}", std::process::id());
+        let new_password = format!("{password}-new");
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/admin/users"))
+            .and(body_json(
+                serde_json::json!({"name": "ada", "password": password, "is_admin": false}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/admin/users/u-1/password"))
+            .and(body_json(serde_json::json!({"password": new_password})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/admin/networks"))
+            .and(body_json(serde_json::json!({"slug": "oftc"})))
+            .respond_with(ResponseTemplate::new(409))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/admin/networks/libera"))
+            .and(body_json(
+                serde_json::json!({"visitor_enabled": true, "max_per_ip": null}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/networks/7"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .create_admin_user("t", "ada", &password, false)
+            .await
+            .expect("create user");
+        client
+            .set_admin_user_password("t", "u-1", &new_password)
+            .await
+            .expect("password");
+        let err = client
+            .create_admin_network("t", "oftc")
+            .await
+            .expect_err("duplicate");
+        assert_eq!(err.status(), Some(StatusCode::CONFLICT));
+        client
+            .update_admin_network(
+                "t",
+                "libera",
+                &serde_json::json!({"visitor_enabled": true, "max_per_ip": null}),
+            )
+            .await
+            .expect("update network");
+        client
+            .delete_admin_network("t", "7")
+            .await
+            .expect("delete network");
     }
 
     #[tokio::test]
