@@ -615,19 +615,19 @@ export component AppWindow inherits Window {
     in property <bool> directory-refresh-pending: false;
     // `reason` of the last failed capture (raw server token), or "".
     in property <string> directory-failed-reason: "";
-    // Server-stored preferences mirrored from `*_changed` pushes: "" until
-    // announced, then "default" (null), "off" (0) or a number of seconds.
-    in property <string> server-pref-auto-away-debounce: "";
-    // Remembered QUIT/PART text: hidden until announced; `-set` is false
-    // for `null` (no message, the server uses its own fallback).
-    in property <bool> server-pref-leave-message-known: false;
-    in property <bool> server-pref-leave-message-set: false;
-    in property <string> server-pref-leave-message: "";
-    // Auto-away text: hidden until announced; `-set` is false for `null`
-    // (the server keeps its own built-in text).
-    in property <bool> server-pref-auto-away-reason-known: false;
-    in property <bool> server-pref-auto-away-reason-set: false;
-    in property <string> server-pref-auto-away-reason: "";
+    // Account settings Grappa stores (`/me/settings/*`), edited on
+    // Settings > General and kept in sync with its `*_changed` pushes. An
+    // empty text means the server's own default; a delay of 0 turns
+    // auto-away off.
+    in property <bool> personal-prefs-loaded: false;
+    in-out property <string> edit-leave-message: "";
+    in-out property <string> edit-away-message: "";
+    in-out property <string> edit-away-delay: "";
+    in-out property <bool> pref-show-peer-profiles: false;
+    callback personal-prefs-save-requested();
+    // Per-network DCC auto-accept for peers with an open private window.
+    in-out property <bool> pref-dcc-auto-accept: false;
+    callback dcc-auto-accept-toggled(bool);
     // Upload limits from `server_settings_changed`, hidden until announced.
     in property <bool> server-upload-limits-known: false;
     in property <UploadLimitsRow> server-upload-limits;
@@ -1025,6 +1025,12 @@ export component AppWindow inherits Window {
             return @tr("Wrong username or password/token.");
         } else if status-kind == "reauthentication-required" {
             return @tr("Saved sign-in is unavailable. Enter your password or client token to sign in again.");
+        } else if status-kind == "away-delay-invalid" {
+            return @tr("The auto-away delay must be a whole number of seconds.");
+        } else if status-kind == "personal-prefs-saved" {
+            return @tr("Settings saved.");
+        } else if status-kind == "personal-prefs-failed" {
+            return @tr("Couldn't save those settings.");
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
@@ -1894,6 +1900,51 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                if personal-prefs-loaded : SectionCard {
+                    icon: "💤";
+                    title: @tr("Away and leave messages");
+
+                    Text {
+                        text: @tr("Leave a field empty to use the server's default.");
+                        wrap: word-wrap;
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Quit/part message");
+                        accessible-label: @tr("Quit/part message");
+                        text <=> edit-leave-message;
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Auto-away message");
+                        accessible-label: @tr("Auto-away message");
+                        text <=> edit-away-message;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: @tr("Auto-away after (seconds, 0 = off)");
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        LineEdit {
+                            accessible-label: @tr("Auto-away after (seconds, 0 = off)");
+                            text <=> edit-away-delay;
+                            input-type: number;
+                            horizontal-stretch: 0;
+                            min-width: 90px;
+                        }
+                    }
+                    CheckBox {
+                        text: @tr("Look up other users' profiles (CTCP USERINFO)");
+                        checked <=> pref-show-peer-profiles;
+                    }
+                    CompactButton {
+                        text: "💾  " + @tr("Save");
+                        a11y-label: @tr("Save");
+                        clicked => { personal-prefs-save-requested(); }
+                    }
+                }
+
                 if upload-prefs-loaded : SectionCard {
                     icon: "📎";
                     title: @tr("Uploads");
@@ -1937,30 +1988,6 @@ export component AppWindow inherits Window {
                         clicked => { disconnect-requested(); }
                     }
 
-                    // Read-only copies of preferences Grappa stores and
-                    // applies itself; they update live from its `*_changed`
-                    // pushes and stay hidden until the server announced them.
-                    if server-pref-auto-away-debounce != "" : Text {
-                        text: @tr("Auto-away delay: {}",
-                            server-pref-auto-away-debounce == "default"
-                                ? @tr("server default")
-                                : (server-pref-auto-away-debounce == "off"
-                                    ? @tr("off")
-                                    : @tr("{} seconds", server-pref-auto-away-debounce)));
-                        wrap: word-wrap;
-                    }
-                    if server-pref-leave-message-known : Text {
-                        text: server-pref-leave-message-set
-                            ? @tr("Quit/part message: {}", server-pref-leave-message)
-                            : @tr("Quit/part message: none (server default)");
-                        wrap: word-wrap;
-                    }
-                    if server-pref-auto-away-reason-known : Text {
-                        text: server-pref-auto-away-reason-set
-                            ? @tr("Auto-away message: {}", server-pref-auto-away-reason)
-                            : @tr("Auto-away message: server default");
-                        wrap: word-wrap;
-                    }
                     if server-upload-limits-known : Text {
                         text: server-upload-limits.video-seconds == ""
                             ? @tr("Server upload limits ({}): images {}, videos {}, documents {}, audio {}.", server-upload-limits.host, server-upload-limits.image, server-upload-limits.video, server-upload-limits.document, server-upload-limits.audio)
@@ -2001,6 +2028,12 @@ export component AppWindow inherits Window {
                         placeholder-text: @tr("Real name");
                         accessible-label: @tr("Real name");
                         text <=> identity-realname;
+                    }
+                    CheckBox {
+                        text: @tr("Accept DCC files from open private conversations automatically");
+                        checked <=> pref-dcc-auto-accept;
+                        enabled: settings-network != "";
+                        toggled => { dcc-auto-accept-toggled(self.checked); }
                     }
                     CompactButton {
                         text: "💾  " + @tr("Save");
