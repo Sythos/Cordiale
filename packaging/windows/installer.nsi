@@ -42,6 +42,9 @@
 ; installed and uninstallable via uninstall.exe, but invisible to both.
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 
+; Solid LZMA gives a noticeably smaller installer than the default zlib.
+SetCompressor /SOLID lzma
+
 Name "${APP_NAME}"
 OutFile "${OUT_FILE}"
 Icon "${ICON_PATH}"

@@ -60,21 +60,6 @@ impl ServerCompatibility {
     }
 }
 
-/// A parsed but not-yet-interpreted event from the wire (REST echo or
-/// WebSocket push).
-///
-/// `kind` identifies the event; `fields` carries every other field
-/// untouched as JSON. Callers match on `kind` and decode `fields` into a
-/// specific typed payload only for kinds they know about — an unrecognized
-/// `kind`, or unrecognized fields inside a known one, are never a parse
-/// error.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct EventEnvelope {
-    pub kind: String,
-    #[serde(flatten)]
-    pub fields: serde_json::Map<String, serde_json::Value>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,30 +89,5 @@ mod tests {
             min_protocol_version: 0,
         };
         assert!(!compat.supported_by_cordiale());
-    }
-
-    #[test]
-    fn event_envelope_ignores_unknown_fields() {
-        let json = r#"{
-            "kind": "session_identity_changed",
-            "network_id": 3,
-            "identified": true,
-            "account": null,
-            "some_future_field": "should not break parsing"
-        }"#;
-
-        let event: EventEnvelope = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(event.kind, "session_identity_changed");
-        assert_eq!(
-            event.fields.get("identified").and_then(|v| v.as_bool()),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn event_envelope_accepts_a_completely_unknown_kind() {
-        let json = r#"{"kind": "something_cordiale_has_never_heard_of", "whatever": 1}"#;
-        let event: EventEnvelope = serde_json::from_str(json).expect("deserialize");
-        assert_eq!(event.kind, "something_cordiale_has_never_heard_of");
     }
 }

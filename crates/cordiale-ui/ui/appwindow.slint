@@ -470,7 +470,7 @@ export component AppWindow inherits Window {
     // The live window's title-bar corner and running taskbar icon come
     // from the window handle itself, which winit/Slint leaves unset
     // unless this property is set — the two are independent.
-    icon: @image-url("../../../resources/branding/cordiale_icona.png");
+    icon: @image-url("../../../resources/branding/cordiale_icona_256.png");
     // Not `width`/`height`: those pin the window to a fixed size the
     // window manager won't let the user resize or maximize past.
     // `preferred-*` only picks the initial size, same window otherwise
@@ -2385,7 +2385,7 @@ export component AppWindow inherits Window {
                 title: @tr("Credits");
 
                 Image {
-                    source: @image-url("../../../resources/branding/cordiale_icona.png");
+                    source: @image-url("../../../resources/branding/cordiale_icona_256.png");
                     image-fit: contain;
                     height: 96px;
                 }
