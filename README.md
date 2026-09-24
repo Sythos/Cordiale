@@ -84,9 +84,9 @@ Cordiale still has these user-visible or behavioral gaps:
   so mixed mode strings can misassign a role prefix. A bounded pre-snapshot
   DM queue can drop messages if the authoritative query snapshot is absent
   or late.
-- **Remaining presentation gaps:** the `/links` graph has no pan/zoom; a
-  WHOIS avatar is reported but not drawn; the account-wide unread count only
-  shows in the window title (and so the taskbar), not as an OS badge.
+- **Remaining presentation gaps:** a WHOIS avatar is reported but not drawn;
+  the account-wide unread count only shows in the window title (and so the
+  taskbar), not as an OS badge.
 
 ## Download
 
