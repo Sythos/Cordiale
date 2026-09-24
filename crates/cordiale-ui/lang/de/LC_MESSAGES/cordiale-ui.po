@@ -1255,3 +1255,19 @@ msgstr "Netzwerk {} bearbeiten"
 msgctxt "AppWindow"
 msgid "Delete network {}"
 msgstr "Netzwerk {} löschen"
+
+msgctxt "AppWindow"
+msgid "Topic of {}"
+msgstr "Thema von {}"
+
+msgctxt "AppWindow"
+msgid "{} has no topic."
+msgstr "{} hat kein Thema."
+
+msgctxt "AppWindow"
+msgid "Modes of {}"
+msgstr "Modi von {}"
+
+msgctxt "AppWindow"
+msgid "No modes known for {} yet."
+msgstr "Für {} sind noch keine Modi bekannt."
