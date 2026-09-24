@@ -34,6 +34,8 @@
 //! channels, so `cordiale-ui` never has to hold the socket itself.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, watch};
@@ -67,6 +69,9 @@ pub enum SessionCommand {
         topic: String,
         event: String,
         payload: serde_json::Value,
+        /// A ref chosen by the caller to recognise the reply, or `None` for
+        /// the session's own counter.
+        message_ref: Option<String>,
     },
     Shutdown,
 }
@@ -117,6 +122,9 @@ pub struct SessionHandle {
     /// Observed during the reconnect back-off too, where the command queue
     /// isn't read; dropping the handle also stops the session.
     shutdown: watch::Sender<bool>,
+    /// Source of caller-visible refs for `send_tracked_command`; prefixed so
+    /// they never collide with the session's numeric refs.
+    tracked_refs: Arc<AtomicU64>,
 }
 
 impl SessionHandle {
@@ -146,7 +154,27 @@ impl SessionHandle {
             topic: topic.into(),
             event: event.into(),
             payload,
+            message_ref: None,
         });
+    }
+
+    /// Like `send_command`, but returns the ref the push goes out with, so
+    /// the caller can pick its `phx_reply` out of the frame stream (for
+    /// verbs whose reply carries the answer, like `resolve_userhost`).
+    pub fn send_tracked_command(
+        &self,
+        topic: impl Into<String>,
+        event: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> String {
+        let message_ref = tracked_ref(&self.tracked_refs);
+        let _ = self.commands.send(SessionCommand::Send {
+            topic: topic.into(),
+            event: event.into(),
+            payload,
+            message_ref: Some(message_ref.clone()),
+        });
+        message_ref
     }
 
     pub fn shutdown(&self) {
@@ -181,9 +209,15 @@ pub fn spawn_session(
         SessionHandle {
             commands: command_tx,
             shutdown: shutdown_tx,
+            tracked_refs: Arc::new(AtomicU64::new(0)),
         },
         event_rx,
     )
+}
+
+/// The next caller-visible ref: `t1`, `t2`, ...
+fn tracked_ref(counter: &AtomicU64) -> String {
+    format!("t{}", counter.fetch_add(1, Ordering::Relaxed) + 1)
 }
 
 /// Waits out the reconnect delay. Returns `false` when the session was shut
@@ -313,11 +347,11 @@ async fn run_session(
                                 let _ = socket.send(&message).await;
                             }
                         }
-                        Some(SessionCommand::Send { topic, event, payload }) => {
+                        Some(SessionCommand::Send { topic, event, payload, message_ref }) => {
                             if let Some(joined) = joined_topics.get(&topic) {
                                 let message = PhoenixMessage {
                                     join_ref: Some(joined.join_ref.clone()),
-                                    message_ref: Some(refs.next_ref()),
+                                    message_ref: Some(message_ref.unwrap_or_else(|| refs.next_ref())),
                                     topic,
                                     event,
                                     payload,
@@ -454,6 +488,13 @@ mod tests {
             event: "phx_reply".to_string(),
             payload,
         }
+    }
+
+    #[test]
+    fn tracked_refs_are_prefixed_and_distinct() {
+        let counter = AtomicU64::new(0);
+        assert_eq!(tracked_ref(&counter), "t1");
+        assert_eq!(tracked_ref(&counter), "t2");
     }
 
     #[test]
