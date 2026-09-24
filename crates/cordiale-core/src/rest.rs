@@ -223,6 +223,15 @@ pub struct ArchiveResponse {
     pub archive: Vec<ArchiveEntry>,
 }
 
+/// Response body of `POST /api/uploads` (201): the public URL carries the
+/// file extension (`/uploads/<slug>.<ext>`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct UploadResponse {
+    pub slug: String,
+    pub url: String,
+    pub expires_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

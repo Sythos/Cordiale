@@ -723,9 +723,13 @@ letto in una spec:
    documentazione, o cicchetto usa un provisioning lato operatore diverso.
    Da chiarire prima di decidere se Cordiale deve offrire un percorso di
    registrazione.
-5. **Endpoint di upload generico (POST)** — solo `GET /uploads/:slug`
-   citato per analogia col pattern DCC file; nessun endpoint di upload
-   (metodo, campo multipart, limiti) documentato.
+5. **Endpoint di upload generico (POST)** — *chiarito dal sorgente*
+   (non ancora in `CLIENT_PROTOCOL.md`): `POST /api/uploads` multipart con
+   campo `file` (MIME dichiarato dal client, lista chiusa immagini/video/
+   documenti/audio, altrimenti 415) e `expire` opzionale (3600, 43200,
+   86400, 259200 secondi; predefinito 86400); limite per file per categoria
+   (413) e quota di spazio (507); risposta 201 `{slug, url, expires_at}`.
+   Cordiale lo usa dalla graffetta e pubblica il link come Cicchetto.
 6. **Schema completo delle entità** — §4 di questo documento è una
    ricostruzione da menzioni sparse, non una trascrizione di uno schema
    pubblicato.

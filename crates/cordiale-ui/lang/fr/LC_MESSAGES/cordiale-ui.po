@@ -733,10 +733,6 @@ msgid "Invited {} to {} on {}."
 msgstr "{} a été invité à rejoindre {} sur {}."
 
 msgctxt "AppWindow"
-msgid "Attachments aren't supported yet."
-msgstr "Les pièces jointes ne sont pas encore prises en charge."
-
-msgctxt "AppWindow"
 msgid "Home"
 msgstr "Accueil"
 
@@ -975,3 +971,35 @@ msgstr "{} ({} utilisateurs) — {}"
 msgctxt "AppWindow"
 msgid "Load more"
 msgstr "Charger plus"
+
+msgctxt "AppWindow"
+msgid "Uploading {}…"
+msgstr "Envoi de {}…"
+
+msgctxt "AppWindow"
+msgid "Uploaded {}; its link was posted."
+msgstr "{} envoyé ; son lien a été publié."
+
+msgctxt "AppWindow"
+msgid "The server doesn't accept this type of file: {}"
+msgstr "Le serveur n'accepte pas ce type de fichier : {}"
+
+msgctxt "AppWindow"
+msgid "{} is larger than the server allows for this type of file."
+msgstr "{} dépasse la taille autorisée par le serveur pour ce type de fichier."
+
+msgctxt "AppWindow"
+msgid "The server has no room left for {}."
+msgstr "Le serveur n'a plus de place pour {}."
+
+msgctxt "AppWindow"
+msgid "Couldn't read {}."
+msgstr "Impossible de lire {}."
+
+msgctxt "AppWindow"
+msgid "Open a channel or private conversation before attaching a file."
+msgstr "Ouvrez un canal ou une conversation privée avant de joindre un fichier."
+
+msgctxt "AppWindow"
+msgid "Couldn't upload {}."
+msgstr "Impossible d'envoyer {}."

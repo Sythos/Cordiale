@@ -42,7 +42,7 @@ use crate::profile::{
 };
 use crate::rest::{
     ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage, DisplayPrefs,
-    LoginRequest, LoginResponse, MeResponse, SendMessageRequest,
+    LoginRequest, LoginResponse, MeResponse, SendMessageRequest, UploadResponse,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -104,6 +104,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest time for a whole request, so a server that stops answering
 /// can't stall the app's single worker indefinitely.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Longest time for a file upload (up to the server's 50 MiB video cap).
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl GrappaClient {
     pub fn new(base_url: impl Into<String>) -> Self {
@@ -951,6 +953,35 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `POST /api/uploads` — uploads one file (multipart field `file`) with
+    /// the server's default lifetime. `mime` must be one of Grappa's
+    /// allowlisted types (else 415); the per-file cap by category gives 413
+    /// and the storage quota 507. Large files get a longer timeout than the
+    /// client default.
+    pub async fn upload_file(
+        &self,
+        token: &str,
+        filename: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+    ) -> Result<UploadResponse, GrappaClientError> {
+        let url = format!("{}/api/uploads", self.base_url);
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.to_string())
+            .mime_str(mime)?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .timeout(UPLOAD_TIMEOUT)
+            .multipart(form)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<UploadResponse>().await?)
+    }
+
     /// `DELETE /networks/:slug/notify/:nick`.
     pub async fn remove_notify_nick(
         &self,
@@ -1668,6 +1699,39 @@ mod tests {
             .delete_archive_target("abc123", "libera", "#old")
             .await
             .expect("delete_archive_target");
+    }
+
+    #[tokio::test]
+    async fn upload_file_posts_multipart_to_api_uploads() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uploads"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "slug": "abcd",
+                "url": "https://irc.example/uploads/abcd.png",
+                "expires_at": "2026-09-25T10:00:00Z"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/uploads"))
+            .and(header("authorization", "Bearer toolarge"))
+            .respond_with(ResponseTemplate::new(413))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let uploaded = client
+            .upload_file("abc123", "cat.png", "image/png", vec![1, 2, 3])
+            .await
+            .expect("upload_file");
+        assert_eq!(uploaded.url, "https://irc.example/uploads/abcd.png");
+        let err = client
+            .upload_file("toolarge", "cat.png", "image/png", vec![1, 2, 3])
+            .await
+            .expect_err("413");
+        assert_eq!(err.status(), Some(StatusCode::PAYLOAD_TOO_LARGE));
     }
 
     #[tokio::test]
