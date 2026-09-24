@@ -1159,3 +1159,19 @@ msgstr "No se pudo entrar en este canal."
 msgctxt "AppWindow"
 msgid "Joining this channel failed: {}"
 msgstr "No se pudo entrar en este canal: {}"
+
+msgctxt "LinksGraphWindow"
+msgid "Zoom out"
+msgstr "Alejar"
+
+msgctxt "LinksGraphWindow"
+msgid "Zoom in"
+msgstr "Acercar"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset"
+msgstr "Restablecer"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset zoom"
+msgstr "Restablecer el zoom"
