@@ -1421,6 +1421,74 @@ msgid "On-connect commands"
 msgstr "Comandi alla connessione"
 
 msgctxt "AppWindow"
+msgid "Conversation muted: other devices won't be notified about it."
+msgstr "Conversazione silenziata: gli altri dispositivi non riceveranno notifiche."
+
+msgctxt "AppWindow"
+msgid "Notification sound: {}"
+msgstr "Suono delle notifiche: {}"
+
+msgctxt "AppWindow"
+msgid "Notification sound set to {}."
+msgstr "Suono delle notifiche impostato su {}."
+
+msgctxt "AppWindow"
+msgid "Unknown sound. Available: {}"
+msgstr "Suono sconosciuto. Disponibili: {}"
+
+msgctxt "AppWindow"
+msgid "Mute this conversation"
+msgstr "Silenzia questa conversazione"
+
+msgctxt "AppWindow"
+msgid "For 1 hour"
+msgstr "Per 1 ora"
+
+msgctxt "AppWindow"
+msgid "For 8 hours"
+msgstr "Per 8 ore"
+
+msgctxt "AppWindow"
+msgid "Until I unmute it"
+msgstr "Finché non la riattivo"
+
+msgctxt "AppWindow"
+msgid "With every channel message off, also these channels:"
+msgstr "Con i messaggi di canale disattivati, notifica comunque questi canali:"
+
+msgctxt "AppWindow"
+msgid "Remove {}"
+msgstr "Rimuovi {}"
+
+msgctxt "AppWindow"
+msgid "Channel"
+msgstr "Canale"
+
+msgctxt "AppWindow"
+msgid "With every private message off, also these nicks:"
+msgstr "Con i messaggi privati disattivati, notifica comunque questi nick:"
+
+msgctxt "AppWindow"
+msgid "Muted conversations"
+msgstr "Conversazioni silenziate"
+
+msgctxt "AppWindow"
+msgid "None. Mute one from the Actions menu."
+msgstr "Nessuna. Silenziane una dal menu Azioni."
+
+msgctxt "AppWindow"
+msgid "Unmute"
+msgstr "Riattiva"
+
+msgctxt "AppWindow"
+msgid "Unmute {}"
+msgstr "Riattiva {}"
+
+msgctxt "AppWindow"
+msgid "Sound on other devices (also /beep)"
+msgstr "Suono sugli altri dispositivi (anche /beep)"
+
+msgctxt "AppWindow"
 msgid "/np: nothing is playing. Tune a station from the radio first."
 msgstr "/np: non sta suonando nulla. Sintonizza prima una stazione della radio."
 

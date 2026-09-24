@@ -120,6 +120,8 @@ enum WorkerCommand {
     SelectColorTheme(String),
     SaveDisplayPrefs(DisplayPrefs),
     LoadNotificationPrefs,
+    EditNotificationPrefs(NotificationEdit),
+    MuteCurrentWindow(i32),
     SaveNotificationPrefs(NotificationToggles),
     AdminRefresh,
     AdminDisconnectSession(String),
@@ -716,6 +718,50 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_notify_load = worker_tx.clone();
     ui.on_notification_prefs_requested(move || {
         let _ = tx_for_notify_load.send(WorkerCommand::LoadNotificationPrefs);
+    });
+
+    let tx_for_notify_list_add = worker_tx.clone();
+    ui.on_notification_list_add(move |list, value| {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            let _ = tx_for_notify_list_add.send(WorkerCommand::EditNotificationPrefs(
+                NotificationEdit::AddToList(list.to_string(), value),
+            ));
+        }
+    });
+
+    let tx_for_notify_list_remove = worker_tx.clone();
+    ui.on_notification_list_remove(move |list, value| {
+        let _ = tx_for_notify_list_remove.send(WorkerCommand::EditNotificationPrefs(
+            NotificationEdit::RemoveFromList(list.to_string(), value.to_string()),
+        ));
+    });
+
+    let tx_for_notify_unmute = worker_tx.clone();
+    ui.on_notification_unmute(move |key| {
+        let _ = tx_for_notify_unmute.send(WorkerCommand::EditNotificationPrefs(
+            NotificationEdit::Unmute(key.to_string()),
+        ));
+    });
+
+    let tx_for_notify_sound = worker_tx.clone();
+    let weak_for_notify_sound = ui.as_weak();
+    ui.on_notification_sound_changed(move || {
+        if let Some(ui) = weak_for_notify_sound.upgrade() {
+            let sound = usize::try_from(ui.get_notify_sound_index())
+                .ok()
+                .and_then(|index| NOTIFICATION_SOUNDS.get(index))
+                .copied()
+                .unwrap_or("none");
+            let _ = tx_for_notify_sound.send(WorkerCommand::EditNotificationPrefs(
+                NotificationEdit::Sound(sound.to_string()),
+            ));
+        }
+    });
+
+    let tx_for_mute_current = worker_tx.clone();
+    ui.on_mute_current_requested(move |seconds| {
+        let _ = tx_for_mute_current.send(WorkerCommand::MuteCurrentWindow(seconds));
     });
 
     let tx_for_notify_save = worker_tx.clone();
@@ -1969,6 +2015,18 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SelectColorTheme(key)) => {
                         select_color_theme(&mut state, &ui, &key).await;
+                    }
+                    Some(WorkerCommand::EditNotificationPrefs(edit)) => {
+                        handle_notification_edit(&mut state, &ui, edit).await;
+                    }
+                    Some(WorkerCommand::MuteCurrentWindow(seconds)) => {
+                        if let Some((network, target)) = state.current_channel.clone() {
+                            let until = (seconds > 0).then(|| {
+                                chrono::Utc::now().timestamp() + i64::from(seconds)
+                            });
+                            let edit = NotificationEdit::Mute(muted_key(&network, &target), until);
+                            handle_notification_edit(&mut state, &ui, edit).await;
+                        }
                     }
                     Some(WorkerCommand::LoadNotificationPrefs) => {
                         handle_load_notification_prefs(&mut state, &ui).await;
@@ -3816,6 +3874,26 @@ async fn run_slash_command(
             .await
             .map(|_| ()),
         SlashCommand::Notify(nicks) => client.add_notify_nicks(&token, &network, nicks).await,
+        SlashCommand::Beep(None) => {
+            if state.notification_prefs.is_none() {
+                handle_load_notification_prefs(state, ui).await;
+            }
+            let sound = state
+                .notification_prefs
+                .as_ref()
+                .and_then(|prefs| prefs.get("notification_sound"))
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string();
+            return set_command_status(ui, "beep-current", sound);
+        }
+        SlashCommand::Beep(Some(sound)) => {
+            if !NOTIFICATION_SOUNDS.contains(&sound.as_str()) {
+                return set_command_status(ui, "beep-unknown", NOTIFICATION_SOUNDS.join(", "));
+            }
+            handle_notification_edit(state, ui, NotificationEdit::Sound(sound.clone())).await;
+            return set_command_status(ui, "beep-set", sound);
+        }
         SlashCommand::AliasDefine { name, expansion } => {
             handle_alias_upsert(state, ui, Some((name, expansion))).await;
             state.aliases = None;
@@ -4113,6 +4191,7 @@ async fn handle_load_notification_prefs(state: &mut WorkerState, ui: &slint::Wea
     match client.fetch_notification_prefs(&token).await {
         Ok(prefs) => {
             push_notification_toggles(ui, NotificationToggles::from_prefs(&prefs));
+            push_notification_lists(ui, &prefs);
             state.notification_prefs = Some(prefs);
         }
         Err(err) => persistence::log_line(&format!("notification prefs load failed: {err:?}")),
@@ -4463,6 +4542,211 @@ fn push_radio_now(ui: &slint::Weak<AppWindow>, radio_state: &RadioState) {
         ui.set_radio_status(status.into());
         ui.set_radio_error(error.into());
     });
+}
+
+/// Sound presets Grappa accepts for `notification_sound`, in the order of
+/// the Settings menu.
+const NOTIFICATION_SOUNDS: [&str; 10] = [
+    "none",
+    "tone",
+    "chime",
+    "blip",
+    "pop",
+    "icq",
+    "xp_notify",
+    "xp_ding",
+    "xp_balloon",
+    "xp_exclamation",
+];
+
+/// One change to the push-notification map beyond the five switches.
+#[derive(Debug, Clone, PartialEq)]
+enum NotificationEdit {
+    /// `"channel"` or `"private"` list, and the channel or nick to add.
+    AddToList(String, String),
+    RemoveFromList(String, String),
+    /// Mutes a conversation key until a unix time, or for good (`None`).
+    Mute(String, Option<i64>),
+    Unmute(String),
+    Sound(String),
+}
+
+/// Grappa's key for a muted conversation: the network slug and the
+/// channel or peer nick, ASCII-lowercased like Cicchetto's channel key.
+fn muted_key(network: &str, target: &str) -> String {
+    format!("{network} {}", target.to_ascii_lowercase())
+}
+
+fn notification_list_field(list: &str) -> Option<&'static str> {
+    match list {
+        "channel" => Some("channel_messages_only"),
+        "private" => Some("private_messages_only"),
+        _ => None,
+    }
+}
+
+/// Applies an edit to the stored map; `false` when it doesn't apply.
+fn apply_notification_edit(
+    prefs: &mut serde_json::Map<String, Value>,
+    edit: &NotificationEdit,
+) -> bool {
+    match edit {
+        NotificationEdit::AddToList(list, value)
+        | NotificationEdit::RemoveFromList(list, value) => {
+            let Some(field) = notification_list_field(list) else {
+                return false;
+            };
+            let value = value.trim().to_ascii_lowercase();
+            let mut items: Vec<String> = prefs
+                .get(field)
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            items.retain(|item| item != &value);
+            if matches!(edit, NotificationEdit::AddToList(..)) {
+                items.push(value);
+            }
+            prefs.insert(field.to_string(), Value::from(items));
+        }
+        NotificationEdit::Mute(key, until) => {
+            let muted = prefs
+                .entry("muted_targets")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            let Value::Object(muted) = muted else {
+                return false;
+            };
+            muted.insert(key.clone(), serde_json::json!({ "until": until }));
+        }
+        NotificationEdit::Unmute(key) => {
+            if let Some(Value::Object(muted)) = prefs.get_mut("muted_targets") {
+                muted.remove(key);
+            }
+        }
+        NotificationEdit::Sound(sound) => {
+            if !NOTIFICATION_SOUNDS.contains(&sound.as_str()) {
+                return false;
+            }
+            prefs.insert("notification_sound".to_string(), Value::from(sound.clone()));
+        }
+    }
+    true
+}
+
+/// Rows of the muted list: `(label, key)`, with the snooze end when there
+/// is one.
+fn muted_rows(prefs: &serde_json::Map<String, Value>) -> Vec<(String, String)> {
+    let Some(Value::Object(muted)) = prefs.get("muted_targets") else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(String, String)> = muted
+        .iter()
+        .map(|(key, entry)| {
+            let name = key.replacen(' ', " · ", 1);
+            let label = match entry.get("until").and_then(Value::as_i64) {
+                Some(until) => match chrono::DateTime::from_timestamp(until, 0) {
+                    Some(time) => format!(
+                        "{name} → {}",
+                        time.with_timezone(&chrono::Local).format("%d/%m %H:%M")
+                    ),
+                    None => name,
+                },
+                None => format!("{name} → ∞"),
+            };
+            (label, key.clone())
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn push_notification_lists(ui: &slint::Weak<AppWindow>, prefs: &serde_json::Map<String, Value>) {
+    let list = |field: &str| -> Vec<String> {
+        prefs
+            .get(field)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let channels = list("channel_messages_only");
+    let privates = list("private_messages_only");
+    let muted = muted_rows(prefs);
+    let sound = prefs
+        .get("notification_sound")
+        .and_then(Value::as_str)
+        .and_then(|sound| {
+            NOTIFICATION_SOUNDS
+                .iter()
+                .position(|preset| *preset == sound)
+        })
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or(0);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let strings = |items: Vec<String>| -> slint::ModelRc<slint::SharedString> {
+            let items: Vec<slint::SharedString> = items.into_iter().map(Into::into).collect();
+            Rc::new(slint::VecModel::from(items)).into()
+        };
+        ui.set_notify_only_channels(strings(channels));
+        ui.set_notify_only_privates(strings(privates));
+        let muted: Vec<MutedRow> = muted
+            .into_iter()
+            .map(|(label, key)| MutedRow {
+                label: label.into(),
+                key: key.into(),
+            })
+            .collect();
+        ui.set_notify_muted(Rc::new(slint::VecModel::from(muted)).into());
+        ui.set_notify_sound_index(sound);
+    });
+}
+
+/// Applies one notification edit over the stored map (read first when
+/// needed) and saves the whole map, as Grappa's PUT requires.
+async fn handle_notification_edit(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    edit: NotificationEdit,
+) {
+    if state.notification_prefs.is_none() {
+        handle_load_notification_prefs(state, ui).await;
+    }
+    let (Some(client), Some(token), Some(stored)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.notification_prefs.clone(),
+    ) else {
+        return;
+    };
+    let mut prefs = stored.clone();
+    if !apply_notification_edit(&mut prefs, &edit) {
+        return;
+    }
+    match client.set_notification_prefs(&token, &prefs).await {
+        Ok(()) => {
+            push_notification_lists(ui, &prefs);
+            state.notification_prefs = Some(prefs);
+            if matches!(edit, NotificationEdit::Mute(..)) {
+                let _ =
+                    ui.upgrade_in_event_loop(|ui| ui.set_status_kind("conversation-muted".into()));
+            }
+        }
+        Err(err) => {
+            persistence::log_line(&format!("notification prefs save failed: {err:?}"));
+            push_notification_lists(ui, &stored);
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("notify-prefs-failed".into()));
+        }
+    }
 }
 
 /// Rows fetched per "Load older messages" click.
@@ -17755,6 +18039,56 @@ mod tests {
         assert_eq!(avatar_extension(Some("image/gif")), Some("gif"));
         assert_eq!(avatar_extension(Some("image/svg+xml")), None);
         assert_eq!(avatar_extension(None), None);
+    }
+
+    #[test]
+    fn notification_edits_change_only_their_field() {
+        let mut prefs = serde_json::json!({
+            "channel_messages_only": ["#rust"],
+            "muted_targets": {"libera #old": {"until": null}},
+            "notification_sound": "none",
+            "channel_mentions": true
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::AddToList("channel".to_string(), " #Slint ".to_string())
+        ));
+        assert_eq!(
+            prefs["channel_messages_only"],
+            serde_json::json!(["#rust", "#slint"])
+        );
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::RemoveFromList("channel".to_string(), "#rust".to_string())
+        ));
+        assert_eq!(
+            prefs["channel_messages_only"],
+            serde_json::json!(["#slint"])
+        );
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::Mute(muted_key("libera", "#Rust"), Some(100))
+        ));
+        assert_eq!(prefs["muted_targets"]["libera #rust"]["until"], 100);
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::Unmute("libera #old".to_string())
+        ));
+        assert!(prefs["muted_targets"].get("libera #old").is_none());
+        assert!(!apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::Sound("klaxon".to_string())
+        ));
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::Sound("chime".to_string())
+        ));
+        assert_eq!(prefs["notification_sound"], "chime");
+        assert_eq!(prefs["channel_mentions"], true);
+        assert_eq!(muted_rows(&prefs)[0].1, "libera #rust");
     }
 
     #[test]

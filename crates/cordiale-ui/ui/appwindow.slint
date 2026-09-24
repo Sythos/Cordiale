@@ -210,6 +210,12 @@ struct AdminGrantRow {
     grant-id: string,
 }
 
+// One muted conversation: its label and Grappa's key for it.
+struct MutedRow {
+    label: string,
+    key: string,
+}
+
 // One IRC server endpoint of the network being edited in Admin.
 struct AdminServerRow {
     label: string,
@@ -952,6 +958,19 @@ export component AppWindow inherits Window {
     in-out property <bool> notify-presence-online: false;
     in-out property <bool> notify-presence-offline: false;
     callback notification-prefs-requested();
+    // Per-channel/per-conversation lists, mutes and the sound preset.
+    in property <[string]> notify-only-channels: [];
+    in property <[string]> notify-only-privates: [];
+    in property <[MutedRow]> notify-muted: [];
+    in-out property <int> notify-sound-index: 0;
+    in-out property <string> notify-new-channel: "";
+    in-out property <string> notify-new-private: "";
+    callback notification-list-add(string, string);
+    callback notification-list-remove(string, string);
+    callback notification-unmute(string);
+    callback notification-sound-changed();
+    // Mutes the open window for this many seconds, 0 for good.
+    callback mute-current-requested(int);
     callback notification-prefs-changed();
     callback settings-network-selected(string);
     callback identity-save-requested();
@@ -1220,6 +1239,14 @@ export component AppWindow inherits Window {
             return @tr("/np: the last track from {} is over 3 minutes old, so it wasn't sent.", status-command-hint);
         } else if status-kind == "radio-station-invalid" {
             return @tr("A station needs a name and an http:// or https:// stream URL.");
+        } else if status-kind == "conversation-muted" {
+            return @tr("Conversation muted: other devices won't be notified about it.");
+        } else if status-kind == "beep-current" {
+            return @tr("Notification sound: {}", status-command-hint);
+        } else if status-kind == "beep-set" {
+            return @tr("Notification sound set to {}.", status-command-hint);
+        } else if status-kind == "beep-unknown" {
+            return @tr("Unknown sound. Available: {}", status-command-hint);
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
@@ -2022,6 +2049,12 @@ export component AppWindow inherits Window {
                                 settings-section = "admin";
                             }
                         }
+                        Menu {
+                            title: "🔕  " + @tr("Mute this conversation");
+                            MenuItem { title: @tr("For 1 hour"); activated => { mute-current-requested(3600); } }
+                            MenuItem { title: @tr("For 8 hours"); activated => { mute-current-requested(28800); } }
+                            MenuItem { title: @tr("Until I unmute it"); activated => { mute-current-requested(0); } }
+                        }
                         MenuItem { title: "⏏  " + @tr("Disconnect"); activated => { disconnect-requested(); } }
                     }
                 }
@@ -2413,6 +2446,127 @@ export component AppWindow inherits Window {
                         text: @tr("Watched nicks going offline");
                         checked <=> notify-presence-offline;
                         toggled => { notification-prefs-changed(); }
+                    }
+
+                    Text {
+                        text: @tr("With every channel message off, also these channels:");
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    for channel in notify-only-channels : HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: channel;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Remove {}", channel);
+                            clicked => { notification-list-remove("channel", channel); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: "#channel";
+                            accessible-label: @tr("Channel");
+                            text <=> notify-new-channel;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Add");
+                            a11y-label: @tr("Add");
+                            enabled: notify-new-channel != "";
+                            clicked => {
+                                notification-list-add("channel", notify-new-channel);
+                                notify-new-channel = "";
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: @tr("With every private message off, also these nicks:");
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    for nick in notify-only-privates : HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: nick;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Remove {}", nick);
+                            clicked => { notification-list-remove("private", nick); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("Nickname");
+                            accessible-label: @tr("Nickname");
+                            text <=> notify-new-private;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Add");
+                            a11y-label: @tr("Add");
+                            enabled: notify-new-private != "";
+                            clicked => {
+                                notification-list-add("private", notify-new-private);
+                                notify-new-private = "";
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "🔕  " + @tr("Muted conversations");
+                        font-weight: 600;
+                    }
+                    if notify-muted.length == 0 : Text {
+                        text: @tr("None. Mute one from the Actions menu.");
+                        wrap: word-wrap;
+                    }
+                    for row in notify-muted : HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "🔔  " + @tr("Unmute");
+                            a11y-label: @tr("Unmute {}", row.label);
+                            clicked => { notification-unmute(row.key); }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: @tr("Sound on other devices (also /beep)");
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        ComboBox {
+                            model: ["none", "tone", "chime", "blip", "pop", "icq", "xp_notify", "xp_ding", "xp_balloon", "xp_exclamation"];
+                            current-index <=> notify-sound-index;
+                            min-width: 140px;
+                            selected => { notification-sound-changed(); }
+                        }
                     }
                 }
             }

@@ -110,6 +110,9 @@ pub enum SlashCommand {
     NowPlaying,
     /// `/notify <nick...>`.
     Notify(Vec<String>),
+    /// `/beep [sound]`: shows or sets the notification sound other devices
+    /// play.
+    Beep(Option<String>),
     /// `/alias <name> <expansion>`: defines or replaces a user alias.
     AliasDefine { name: String, expansion: String },
     /// `/unalias <name>`.
@@ -446,6 +449,11 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             _ => Usage("/ignore <nick!user@host>"),
         },
         "np" => NowPlaying,
+        "beep" => match words(args).as_slice() {
+            [] => Beep(None),
+            [sound] => Beep(Some(sound.to_ascii_lowercase())),
+            _ => Usage("/beep [sound]"),
+        },
         "notify" | "watch" => {
             let nicks = words(args);
             if nicks.is_empty() {
@@ -889,6 +897,13 @@ mod tests {
                 text: "help".to_string()
             })
         );
+    }
+
+    #[test]
+    fn beep_shows_or_sets_the_sound() {
+        assert_eq!(parse("/beep"), Some(Beep(None)));
+        assert_eq!(parse("/beep Chime"), Some(Beep(Some("chime".to_string()))));
+        assert!(matches!(parse("/beep a b"), Some(Usage(_))));
     }
 
     #[test]
