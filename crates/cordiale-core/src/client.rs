@@ -296,6 +296,42 @@ impl GrappaClient {
         Ok(response.json::<Vec<Value>>().await?)
     }
 
+    /// `GET /networks/:slug/channels/:channel/messages?before=<id>&limit=`
+    /// — the page of history just older than message `before_id`, newest
+    /// first (Grappa caps `limit` at 200). An empty page means the start of
+    /// the history was reached.
+    pub async fn fetch_messages_before(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel_name: &str,
+        before_id: i64,
+        limit: usize,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend([
+                "networks",
+                network_slug,
+                "channels",
+                channel_name,
+                "messages",
+            ]);
+        url.query_pairs_mut()
+            .append_pair("before", &before_id.to_string())
+            .append_pair("limit", &limit.to_string());
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Vec<Value>>().await?)
+    }
+
     /// `DELETE /networks/:network_slug/channels/:channel` — parts from an
     /// IRC channel and removes the joined/pseudo window on the server. A
     /// non-empty optional reason is sent as a query parameter, never a DELETE
@@ -2233,6 +2269,28 @@ mod tests {
             .await
             .expect_err("413");
         assert_eq!(err.status(), Some(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_before_sends_the_cursor() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/%23rust/messages"))
+            .and(query_param("before", "120"))
+            .and(query_param("limit", "100"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{ "id": 119 }])),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let rows = client
+            .fetch_messages_before("t", "libera", "#rust", 120, 100)
+            .await
+            .expect("older page");
+        assert_eq!(rows.len(), 1);
     }
 
     #[tokio::test]

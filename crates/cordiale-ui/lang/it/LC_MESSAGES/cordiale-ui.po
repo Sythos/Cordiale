@@ -1089,6 +1089,10 @@ msgid "Ask before uploading"
 msgstr "Chiedi prima di caricare"
 
 msgctxt "AppWindow"
+msgid "Load older messages"
+msgstr "Carica messaggi più vecchi"
+
+msgctxt "AppWindow"
 msgid "Keep at least one message notification on."
 msgstr "Lascia attiva almeno una notifica dei messaggi."
 
