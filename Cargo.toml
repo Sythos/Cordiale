@@ -4,3 +4,10 @@ members = [
     "crates/cordiale-core",
     "crates/cordiale-ui",
 ]
+
+# Smaller, faster release binaries: whole-program LTO in one codegen unit,
+# with debug symbols stripped.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
