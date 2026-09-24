@@ -1487,3 +1487,247 @@ msgstr "Réactiver {}"
 msgctxt "AppWindow"
 msgid "Sound on other devices (also /beep)"
 msgstr "Son sur les autres appareils (aussi /beep)"
+
+msgctxt "AppWindow"
+msgid "invisible"
+msgstr "invisible"
+
+msgctxt "AppWindow"
+msgid "wallops"
+msgstr "wallops"
+
+msgctxt "AppWindow"
+msgid "server notices"
+msgstr "notices du serveur"
+
+msgctxt "AppWindow"
+msgid "masked host"
+msgstr "hôte masqué"
+
+msgctxt "AppWindow"
+msgid "registered only"
+msgstr "enregistrés seulement"
+
+msgctxt "AppWindow"
+msgid "chatops"
+msgstr "chatops"
+
+msgctxt "AppWindow"
+msgid "client notices"
+msgstr "notices clients"
+
+msgctxt "AppWindow"
+msgid "debug notices"
+msgstr "notices de débogage"
+
+msgctxt "AppWindow"
+msgid "invalid DCC"
+msgstr "DCC invalides"
+
+msgctxt "AppWindow"
+msgid "flood notices"
+msgstr "notices de flood"
+
+msgctxt "AppWindow"
+msgid "globops"
+msgstr "globops"
+
+msgctxt "AppWindow"
+msgid "kill notices"
+msgstr "notices de kill"
+
+msgctxt "AppWindow"
+msgid "U:Line kills"
+msgstr "kills U:Line"
+
+msgctxt "AppWindow"
+msgid "spam notices"
+msgstr "notices de spam"
+
+msgctxt "AppWindow"
+msgid "routing notices"
+msgstr "notices de routage"
+
+msgctxt "AppWindow"
+msgid "command notices"
+msgstr "notices de commandes"
+
+msgctxt "AppWindow"
+msgid "flood immune"
+msgstr "immunisé contre le flood"
+
+msgctxt "AppWindow"
+msgid "hide idle"
+msgstr "masquer l'inactivité"
+
+msgctxt "AppWindow"
+msgid "Java user"
+msgstr "utilisateur Java"
+
+msgctxt "AppWindow"
+msgid "SSL"
+msgstr "SSL"
+
+msgctxt "AppWindow"
+msgid "operator"
+msgstr "opérateur"
+
+msgctxt "AppWindow"
+msgid "local operator"
+msgstr "opérateur local"
+
+msgctxt "AppWindow"
+msgid "registered"
+msgstr "enregistré"
+
+msgctxt "AppWindow"
+msgid "services admin"
+msgstr "admin des services"
+
+msgctxt "AppWindow"
+msgid "server admin"
+msgstr "admin du serveur"
+
+msgctxt "AppWindow"
+msgid "help operator"
+msgstr "opérateur d'aide"
+
+msgctxt "AppWindow"
+msgid "services agent"
+msgstr "agent des services"
+
+msgctxt "AppWindow"
+msgid "mode +{}"
+msgstr "mode +{}"
+
+msgctxt "AppWindow"
+msgid "hidden from WHO and global nick lists"
+msgstr "caché de WHO et des listes globales de pseudos"
+
+msgctxt "AppWindow"
+msgid "receive network WALLOPS broadcasts"
+msgstr "recevoir les diffusions WALLOPS du réseau"
+
+msgctxt "AppWindow"
+msgid "receive server notice broadcasts"
+msgstr "recevoir les notices diffusées par le serveur"
+
+msgctxt "AppWindow"
+msgid "cloak your hostname from other users"
+msgstr "masquer votre nom d'hôte aux autres utilisateurs"
+
+msgctxt "AppWindow"
+msgid "only registered nicks may message you"
+msgstr "seuls les pseudos enregistrés peuvent vous écrire"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive CHATOPS messages"
+msgstr "opérateurs IRC : recevoir les messages CHATOPS"
+
+msgctxt "AppWindow"
+msgid "IRC operators: client connect and disconnect notices"
+msgstr "opérateurs IRC : notices de connexion et déconnexion des clients"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive DEBUG messages"
+msgstr "opérateurs IRC : recevoir les messages DEBUG"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive invalid DCC notices"
+msgstr "opérateurs IRC : recevoir les notices de DCC invalides"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive FLOOD messages"
+msgstr "opérateurs IRC : recevoir les messages FLOOD"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive GLOBOPS messages"
+msgstr "opérateurs IRC : recevoir les messages GLOBOPS"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive KILL notices"
+msgstr "opérateurs IRC : recevoir les notices KILL"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive KILL notices from U:Lines"
+msgstr "opérateurs IRC : recevoir les notices KILL des U:Lines"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive SPAM messages"
+msgstr "opérateurs IRC : recevoir les messages SPAM"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive ROUTING messages"
+msgstr "opérateurs IRC : recevoir les messages ROUTING"
+
+msgctxt "AppWindow"
+msgid "IRC operators: notified of /ADMIN, /LINKS, /WHOIS and similar"
+msgstr "opérateurs IRC : avertis des /ADMIN, /LINKS, /WHOIS et similaires"
+
+msgctxt "AppWindow"
+msgid "IRC operators: immune from flood limits"
+msgstr "opérateurs IRC : exemptés des limites de flood"
+
+msgctxt "AppWindow"
+msgid "IRC operators: idle time hidden in WHOIS"
+msgstr "opérateurs IRC : inactivité masquée dans WHOIS"
+
+msgctxt "AppWindow"
+msgid "chatting from the web via Java"
+msgstr "discussion depuis le web via Java"
+
+msgctxt "AppWindow"
+msgid "connected to the server via SSL"
+msgstr "connecté au serveur via SSL"
+
+msgctxt "AppWindow"
+msgid "IRC operator, granted by the server"
+msgstr "opérateur IRC, accordé par le serveur"
+
+msgctxt "AppWindow"
+msgid "local IRC operator, granted by the server"
+msgstr "opérateur IRC local, accordé par le serveur"
+
+msgctxt "AppWindow"
+msgid "identified to NickServ, set by services"
+msgstr "identifié auprès de NickServ, défini par les services"
+
+msgctxt "AppWindow"
+msgid "services administrator, set by services"
+msgstr "administrateur des services, défini par les services"
+
+msgctxt "AppWindow"
+msgid "server administrator, set by the server"
+msgstr "administrateur du serveur, défini par le serveur"
+
+msgctxt "AppWindow"
+msgid "services help operator"
+msgstr "opérateur d'aide des services"
+
+msgctxt "AppWindow"
+msgid "user mode, no description available"
+msgstr "mode utilisateur, pas de description disponible"
+
+msgctxt "AppWindow"
+msgid "Rooms"
+msgstr "Salons"
+
+msgctxt "AppWindow"
+msgid "Archive"
+msgstr "Archives"
+
+msgctxt "AppWindow"
+msgid "Switch account"
+msgstr "Changer de compte"
+
+msgctxt "AppWindow"
+msgid "User modes on {}"
+msgstr "Modes utilisateur sur {}"
+
+msgctxt "AppWindow"
+msgid "{} (+{})"
+msgstr "{} (+{})"
+
+msgctxt "AppWindow"
+msgid "{} (set by the server)"
+msgstr "{} (défini par le serveur)"

@@ -92,6 +92,9 @@ enum WorkerCommand {
     },
     ArchiveDelete(String),
     ArchiveClose,
+    /// Flips one user mode of the network shown in the user-mode view.
+    UmodeToggle(String),
+    UmodeClose,
     DismissPeerAway,
     ToggleNetwork(String),
     SendMessage {
@@ -542,6 +545,25 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_archive_close = worker_tx.clone();
     ui.on_archive_closed(move || {
         let _ = tx_for_archive_close.send(WorkerCommand::ArchiveClose);
+    });
+
+    let tx_for_umode_toggle = worker_tx.clone();
+    ui.on_umode_toggle_requested(move |letter| {
+        let _ = tx_for_umode_toggle.send(WorkerCommand::UmodeToggle(letter.to_string()));
+    });
+
+    let tx_for_umode_close = worker_tx.clone();
+    ui.on_umode_view_closed(move || {
+        let _ = tx_for_umode_close.send(WorkerCommand::UmodeClose);
+    });
+
+    // Actions menu entries that run a slash command on the open window,
+    // leaving the composer's draft alone.
+    let tx_for_menu_command = worker_tx.clone();
+    ui.on_menu_command(move |body| {
+        let _ = tx_for_menu_command.send(WorkerCommand::SendMessage {
+            body: body.to_string(),
+        });
     });
 
     let tx_for_peer_away_dismiss = worker_tx.clone();
@@ -1639,6 +1661,8 @@ struct WorkerState {
     /// live and replayed `supported_umodes_changed` snapshots replace only
     /// their own network.
     supported_user_modes_by_network: HashMap<String, Vec<String>>,
+    /// Network whose user modes are on screen (bare `/umode`).
+    umode_view_network: Option<String>,
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
@@ -1741,6 +1765,7 @@ impl WorkerState {
             isupport_by_network: HashMap::new(),
             user_modes_by_network: HashMap::new(),
             supported_user_modes_by_network: HashMap::new(),
+            umode_view_network: None,
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
             notify_lists: HashMap::new(),
@@ -1852,6 +1877,12 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
+                    }
+                    Some(WorkerCommand::UmodeToggle(letter)) => {
+                        toggle_user_mode(&state, &letter);
+                    }
+                    Some(WorkerCommand::UmodeClose) => {
+                        state.umode_view_network = None;
                     }
                     Some(WorkerCommand::DismissPeerAway) => {
                         if let Some(key) = current_peer_away_key(&state) {
@@ -3645,6 +3676,11 @@ async fn run_slash_command(
                 serde_json::json!({ "target": target, "modes": modes, "params": params }),
             );
             Ok(())
+        }
+        SlashCommand::UmodeShow => {
+            state.umode_view_network = Some(network.clone());
+            push_umode_view(state, ui, true);
+            return;
         }
         SlashCommand::Umode(modes) => {
             send_user_verb(
@@ -5972,10 +6008,12 @@ async fn handle_frame(
     }
     if payload_kind == "umode_changed" {
         handle_umode_changed(state, &frame.topic, &frame.payload);
+        push_umode_view(state, ui, false);
         return;
     }
     if payload_kind == "supported_umodes_changed" {
         handle_supported_umodes_changed(state, &frame.topic, &frame.payload);
+        push_umode_view(state, ui, false);
         return;
     }
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
@@ -9620,6 +9658,97 @@ fn handle_umode_changed(state: &mut WorkerState, carrier_topic: &str, payload: &
         return;
     };
     state.user_modes_by_network.insert(network, modes);
+}
+
+/// User modes a normal user may flip; every other letter is set by the
+/// server or services and shows read-only, as in Cicchetto.
+const SETTABLE_UMODES: [&str; 5] = ["i", "w", "s", "x", "R"];
+
+/// Letters the user-mode view describes, offered when a network hasn't
+/// advertised its own set (RPL_MYINFO).
+const KNOWN_UMODES: [&str; 27] = [
+    "i", "w", "s", "x", "R", "b", "c", "d", "e", "f", "g", "k", "K", "m", "n", "y", "F", "I", "j",
+    "S", "o", "O", "r", "a", "A", "h", "z",
+];
+
+/// The user-mode view's rows: `(letter, settable, active)`. The server's
+/// advertised set (else the known letters) plus every active mode, settable
+/// ones first.
+fn umode_rows(active: &[String], supported: &[String]) -> Vec<(String, bool, bool)> {
+    let mut letters: Vec<String> = if supported.is_empty() {
+        KNOWN_UMODES
+            .iter()
+            .map(|letter| letter.to_string())
+            .collect()
+    } else {
+        supported.to_vec()
+    };
+    for letter in active {
+        if !letters.contains(letter) {
+            letters.push(letter.clone());
+        }
+    }
+    let mut rows: Vec<(String, bool, bool)> = letters
+        .into_iter()
+        .map(|letter| {
+            let settable = SETTABLE_UMODES.contains(&letter.as_str());
+            let is_active = active.contains(&letter);
+            (letter, settable, is_active)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
+/// Refreshes the user-mode view, switching to it when `open`.
+fn push_umode_view(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
+    let Some(network) = state.umode_view_network.clone() else {
+        return;
+    };
+    let empty = Vec::new();
+    let active = state.user_modes_by_network.get(&network).unwrap_or(&empty);
+    let supported = state
+        .supported_user_modes_by_network
+        .get(&network)
+        .unwrap_or(&empty);
+    let rows = umode_rows(active, supported);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<UmodeToggle> = rows
+            .into_iter()
+            .map(|(letter, settable, active)| UmodeToggle {
+                letter: letter.into(),
+                settable,
+                active,
+            })
+            .collect();
+        ui.set_umode_network(network.into());
+        ui.set_umode_toggles(Rc::new(slint::VecModel::from(rows)).into());
+        if open {
+            ui.set_screen("umodes".into());
+        }
+    });
+}
+
+/// Sends `+x` or `-x` for a settable mode; the view updates when Grappa
+/// pushes the new modes back.
+fn toggle_user_mode(state: &WorkerState, letter: &str) {
+    let Some(network) = state.umode_view_network.as_deref() else {
+        return;
+    };
+    if !SETTABLE_UMODES.contains(&letter) {
+        return;
+    }
+    let active = state
+        .user_modes_by_network
+        .get(network)
+        .is_some_and(|modes| modes.iter().any(|mode| mode == letter));
+    let sign = if active { '-' } else { '+' };
+    send_user_verb(
+        state,
+        network,
+        "umode",
+        serde_json::json!({ "modes": format!("{sign}{letter}") }),
+    );
 }
 
 fn parse_supported_umodes_changed(
@@ -17600,6 +17729,26 @@ mod tests {
         assert_eq!(avatar_extension(Some("image/gif")), Some("gif"));
         assert_eq!(avatar_extension(Some("image/svg+xml")), None);
         assert_eq!(avatar_extension(None), None);
+    }
+
+    #[test]
+    fn umode_rows_follow_the_advertised_set() {
+        let strings = |letters: &[&str]| -> Vec<String> {
+            letters.iter().map(|letter| letter.to_string()).collect()
+        };
+        let rows = umode_rows(&strings(&["r", "i"]), &strings(&["o", "i", "w"]));
+        assert_eq!(
+            rows,
+            vec![
+                ("i".to_string(), true, true),
+                ("w".to_string(), true, false),
+                ("o".to_string(), false, false),
+                ("r".to_string(), false, true),
+            ]
+        );
+        let fallback = umode_rows(&[], &[]);
+        assert_eq!(fallback.len(), KNOWN_UMODES.len());
+        assert!(fallback[..SETTABLE_UMODES.len()].iter().all(|row| row.1));
     }
 
     #[test]
