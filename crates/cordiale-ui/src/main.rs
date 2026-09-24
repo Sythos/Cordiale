@@ -149,8 +149,10 @@ enum WorkerCommand {
     AdminVhostDelete(String),
     AdminGrantAdd {
         vhost_id: String,
-        user_id: String,
+        subject_type: String,
+        subject_id: String,
     },
+    AdminSubjectSearch(String),
     AdminGrantRevoke(String),
     AdminServerAdd {
         network_id: String,
@@ -849,8 +851,36 @@ fn main() -> Result<(), slint::PlatformError> {
         if let (Some(vhost), Some(user)) = (vhost, user) {
             let _ = tx_for_admin_grant.send(WorkerCommand::AdminGrantAdd {
                 vhost_id: vhost.vhost_id.to_string(),
-                user_id: user.user_id.to_string(),
+                subject_type: "user".to_string(),
+                subject_id: user.user_id.to_string(),
             });
+        }
+    });
+
+    let tx_for_subject_grant = worker_tx.clone();
+    let weak_for_subject_grant = ui.as_weak();
+    ui.on_admin_subject_grant(move |subject_type, subject_id| {
+        use slint::Model as _;
+        let Some(ui) = weak_for_subject_grant.upgrade() else {
+            return;
+        };
+        let vhost = usize::try_from(ui.get_admin_grant_vhost_index())
+            .ok()
+            .and_then(|index| ui.get_admin_vhosts().row_data(index));
+        if let Some(vhost) = vhost {
+            let _ = tx_for_subject_grant.send(WorkerCommand::AdminGrantAdd {
+                vhost_id: vhost.vhost_id.to_string(),
+                subject_type: subject_type.to_string(),
+                subject_id: subject_id.to_string(),
+            });
+        }
+    });
+
+    let tx_for_subject_search = worker_tx.clone();
+    ui.on_admin_subject_search(move |query| {
+        let query = query.trim().to_string();
+        if !query.is_empty() {
+            let _ = tx_for_subject_search.send(WorkerCommand::AdminSubjectSearch(query));
         }
     });
 
@@ -1987,9 +2017,20 @@ async fn run_worker(
                     Some(WorkerCommand::AdminVhostDelete(vhost_id)) => {
                         handle_admin_write(&state, &ui, AdminWrite::DeleteVhost(vhost_id)).await;
                     }
-                    Some(WorkerCommand::AdminGrantAdd { vhost_id, user_id }) => {
-                        handle_admin_write(&state, &ui, AdminWrite::GrantVhost { vhost_id, user_id })
-                            .await;
+                    Some(WorkerCommand::AdminGrantAdd {
+                        vhost_id,
+                        subject_type,
+                        subject_id,
+                    }) => {
+                        let write = AdminWrite::GrantVhost {
+                            vhost_id,
+                            subject_type,
+                            subject_id,
+                        };
+                        handle_admin_write(&state, &ui, write).await;
+                    }
+                    Some(WorkerCommand::AdminSubjectSearch(query)) => {
+                        handle_admin_subject_search(&state, &ui, &query).await;
                     }
                     Some(WorkerCommand::AdminGrantRevoke(grant_id)) => {
                         handle_admin_write(&state, &ui, AdminWrite::RevokeGrant(grant_id)).await;
@@ -4149,9 +4190,65 @@ enum AdminWrite {
     DeleteVhost(String),
     GrantVhost {
         vhost_id: String,
-        user_id: String,
+        subject_type: String,
+        subject_id: String,
     },
     RevokeGrant(String),
+}
+
+/// One `subject_search` row: `(type, id, network, nick)`, `network` empty
+/// for an account.
+fn admin_subject_row(row: &Value) -> Option<(String, String, String, String)> {
+    let text = |field: &str| row.get(field).and_then(Value::as_str);
+    let kind = text("type").filter(|kind| matches!(*kind, "user" | "visitor"))?;
+    Some((
+        kind.to_string(),
+        text("id")?.to_string(),
+        text("network").unwrap_or_default().to_string(),
+        text("nick")?.to_string(),
+    ))
+}
+
+/// Finds accounts and visitors for a vhost grant, like Cicchetto's
+/// autocomplete.
+async fn handle_admin_subject_search(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    query: &str,
+) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    match client.search_admin_subjects(token, query).await {
+        Ok(rows) => {
+            let rows: Vec<(String, String, String, String)> =
+                rows.iter().filter_map(admin_subject_row).collect();
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let rows: Vec<AdminSubjectRow> = rows
+                    .into_iter()
+                    .map(|(kind, id, network, nick)| AdminSubjectRow {
+                        kind: kind.into(),
+                        subject_id: id.into(),
+                        network: network.into(),
+                        nick: nick.into(),
+                    })
+                    .collect();
+                ui.set_admin_subject_searched(true);
+                ui.set_admin_subject_results(Rc::new(slint::VecModel::from(rows)).into());
+            });
+        }
+        Err(err) => {
+            let status = err
+                .status()
+                .map(|status| status.as_u16().to_string())
+                .unwrap_or_else(|| "network error".to_string());
+            persistence::log_line(&format!("admin subject search failed: {status}"));
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(status.into());
+                ui.set_status_kind("admin-action-failed".into());
+            });
+        }
+    }
 }
 
 /// Runs an admin write, then refreshes the panel. Success clears the
@@ -4233,9 +4330,16 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
             "",
         ),
         AdminWrite::DeleteVhost(vhost_id) => (client.delete_admin_vhost(token, vhost_id).await, ""),
-        AdminWrite::GrantVhost { vhost_id, user_id } => {
-            (client.grant_admin_vhost(token, vhost_id, user_id).await, "")
-        }
+        AdminWrite::GrantVhost {
+            vhost_id,
+            subject_type,
+            subject_id,
+        } => (
+            client
+                .grant_admin_vhost(token, vhost_id, subject_type, subject_id)
+                .await,
+            "",
+        ),
         AdminWrite::RevokeGrant(grant_id) => {
             (client.revoke_admin_vhost_grant(token, grant_id).await, "")
         }
@@ -17337,6 +17441,32 @@ mod tests {
         assert_eq!(network_nick(&networks, "libera"), Some("ada".to_string()));
         assert_eq!(network_nick(&networks, "oftc"), None);
         assert_eq!(network_nick(&networks, "efnet"), None);
+    }
+
+    #[test]
+    fn admin_subject_rows_keep_accounts_and_visitors() {
+        assert_eq!(
+            admin_subject_row(&serde_json::json!({
+                "type": "visitor", "id": "v-1", "network": "libera", "nick": "guest7"
+            })),
+            Some((
+                "visitor".to_string(),
+                "v-1".to_string(),
+                "libera".to_string(),
+                "guest7".to_string()
+            ))
+        );
+        assert_eq!(
+            admin_subject_row(&serde_json::json!({
+                "type": "user", "id": "u-1", "network": null, "nick": "ada"
+            }))
+            .map(|row| row.2),
+            Some(String::new())
+        );
+        assert_eq!(
+            admin_subject_row(&serde_json::json!({"type": "bot", "id": "x", "nick": "y"})),
+            None
+        );
     }
 
     #[test]

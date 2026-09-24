@@ -1419,3 +1419,31 @@ msgstr "Comandi alla connessione, un comando IRC per riga"
 msgctxt "AppWindow"
 msgid "On-connect commands"
 msgstr "Comandi alla connessione"
+
+msgctxt "AppWindow"
+msgid "Find a visitor or account by nick"
+msgstr "Cerca un visitatore o un account per nick"
+
+msgctxt "AppWindow"
+msgid "Search"
+msgstr "Cerca"
+
+msgctxt "AppWindow"
+msgid "Nobody matches."
+msgstr "Nessun risultato."
+
+msgctxt "AppWindow"
+msgid "{} on {} (visitor)"
+msgstr "{} su {} (visitatore)"
+
+msgctxt "AppWindow"
+msgid "{} (account)"
+msgstr "{} (account)"
+
+msgctxt "AppWindow"
+msgid "Grant the vhost above"
+msgstr "Concedi il vhost sopra"
+
+msgctxt "AppWindow"
+msgid "Grant the selected vhost to {}"
+msgstr "Concedi il vhost selezionato a {}"

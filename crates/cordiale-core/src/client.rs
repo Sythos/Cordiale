@@ -1127,12 +1127,14 @@ impl GrappaClient {
         Ok(())
     }
 
-    /// `POST /admin/vhosts/:id/grants {subject_type: "user", subject_id}`.
+    /// `POST /admin/vhosts/:id/grants {subject_type, subject_id}`, where the
+    /// subject is a `"user"` or a `"visitor"`.
     pub async fn grant_admin_vhost(
         &self,
         token: &str,
         vhost_id: &str,
-        user_id: &str,
+        subject_type: &str,
+        subject_id: &str,
     ) -> Result<(), GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
@@ -1142,11 +1144,35 @@ impl GrappaClient {
         self.http
             .post(url)
             .bearer_auth(token)
-            .json(&serde_json::json!({ "subject_type": "user", "subject_id": user_id }))
+            .json(&serde_json::json!({ "subject_type": subject_type, "subject_id": subject_id }))
             .send()
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    /// `GET /admin/vhosts/subject_search?q=` — accounts and visitors whose
+    /// name matches, as `{type, id, network, nick}` rows for a grant.
+    pub async fn search_admin_subjects(
+        &self,
+        token: &str,
+        query: &str,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let url = format!("{}/admin/vhosts/subject_search", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .query(&[("q", query)])
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        Ok(body
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
     }
 
     /// `DELETE /admin/vhosts/grants/:grant_id` — idempotent.
@@ -2577,7 +2603,7 @@ mod tests {
             .await
             .expect("toggle");
         client
-            .grant_admin_vhost("t", "4", "u-1")
+            .grant_admin_vhost("t", "4", "user", "u-1")
             .await
             .expect("grant");
         client

@@ -59,7 +59,7 @@ Cordiale still has these user-visible or behavioral gaps:
   token is refused on `/admin`) creates accounts, resets passwords and
   creates, edits and deletes networks and their IRC servers, edits the
   server-wide upload, DCC and addressing settings, binds and unbinds
-  credentials, manages vhosts and their grants to accounts (not to visitors),
+  credentials, manages vhosts and their grants to accounts and visitors,
   and follows the live admin event feed.
 - **Settings and watch lists:** the identity editor reads back the nick in
   use on each network, but Grappa no longer reports ident and realname, so

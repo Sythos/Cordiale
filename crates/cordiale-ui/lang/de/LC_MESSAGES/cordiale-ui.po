@@ -1419,3 +1419,31 @@ msgstr "Befehle beim Verbinden, ein IRC-Befehl pro Zeile"
 msgctxt "AppWindow"
 msgid "On-connect commands"
 msgstr "Befehle beim Verbinden"
+
+msgctxt "AppWindow"
+msgid "Find a visitor or account by nick"
+msgstr "Besucher oder Konto nach Nick suchen"
+
+msgctxt "AppWindow"
+msgid "Search"
+msgstr "Suchen"
+
+msgctxt "AppWindow"
+msgid "Nobody matches."
+msgstr "Keine Treffer."
+
+msgctxt "AppWindow"
+msgid "{} on {} (visitor)"
+msgstr "{} auf {} (Besucher)"
+
+msgctxt "AppWindow"
+msgid "{} (account)"
+msgstr "{} (Konto)"
+
+msgctxt "AppWindow"
+msgid "Grant the vhost above"
+msgstr "Obigen Vhost gewähren"
+
+msgctxt "AppWindow"
+msgid "Grant the selected vhost to {}"
+msgstr "Ausgewählten Vhost an {} gewähren"

@@ -191,6 +191,15 @@ struct AdminGrantRow {
     grant-id: string,
 }
 
+// One vhost grant candidate from the admin subject search: an account
+// (`kind` "user", no network) or a visitor on one network.
+struct AdminSubjectRow {
+    kind: string,
+    subject-id: string,
+    network: string,
+    nick: string,
+}
+
 // One IRC server endpoint of the network being edited in Admin.
 struct AdminServerRow {
     label: string,
@@ -901,6 +910,12 @@ export component AppWindow inherits Window {
     callback admin-vhost-delete(string);
     callback admin-grant-add();
     callback admin-grant-revoke(string);
+    // Grants to visitors (and accounts) found by name.
+    in-out property <string> admin-subject-query: "";
+    in property <[AdminSubjectRow]> admin-subject-results: [];
+    in property <bool> admin-subject-searched: false;
+    callback admin-subject-search(string);
+    callback admin-subject-grant(string, string); // kind, subject id
     callback admin-settings-save();
     callback links-graph-requested();
     callback theme-toggle-requested();
@@ -3182,6 +3197,48 @@ export component AppWindow inherits Window {
                         a11y-label: @tr("Grant");
                         enabled: admin-vhost-names.length > 0 && admin-user-names.length > 0;
                         clicked => { admin-grant-add(); }
+                    }
+                }
+                if admin-section == "vhosts" : HorizontalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("Find a visitor or account by nick");
+                        accessible-label: @tr("Find a visitor or account by nick");
+                        text <=> admin-subject-query;
+                        horizontal-stretch: 1;
+                        accepted => { admin-subject-search(admin-subject-query); }
+                    }
+                    CompactButton {
+                        text: "🔍  " + @tr("Search");
+                        a11y-label: @tr("Search");
+                        enabled: admin-subject-query != "";
+                        clicked => { admin-subject-search(admin-subject-query); }
+                    }
+                }
+                if admin-section == "vhosts" && admin-subject-searched && admin-subject-results.length == 0 : Text {
+                    text: @tr("Nobody matches.");
+                }
+                if admin-section == "vhosts" : VerticalLayout {
+                    spacing: 2px;
+
+                    for subject in admin-subject-results : HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: subject.kind == "visitor"
+                                ? @tr("{} on {} (visitor)", subject.nick, subject.network)
+                                : @tr("{} (account)", subject.nick);
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Grant the vhost above");
+                            a11y-label: @tr("Grant the selected vhost to {}", subject.nick);
+                            enabled: admin-vhost-names.length > 0;
+                            clicked => { admin-subject-grant(subject.kind, subject.subject-id); }
+                        }
                     }
                 }
                 if admin-section == "vhosts" : ListView {
