@@ -1163,3 +1163,7 @@ msgstr "Das Betreten dieses Kanals ist fehlgeschlagen: {}"
 msgctxt "AppWindow"
 msgid "That alias expands into too many others: {}"
 msgstr "Dieser Alias wird in zu viele andere erweitert: {}"
+
+msgctxt "AppWindow"
+msgid "The server refused that command ({})."
+msgstr "Der Server hat diesen Befehl abgelehnt ({})."

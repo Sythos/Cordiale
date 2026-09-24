@@ -4220,6 +4220,29 @@ async fn handle_query_join_reply(
 /// (`renders_as_chat_line`). A kind unknown to `ClientEventKind` is dropped
 /// silently, per `docs/CLIENT_PROTOCOL.md`'s policy on unrecognized kinds
 /// (§4).
+/// The error token of a refused command: a `phx_reply` with status
+/// `error` on the user topic that isn't the reply to its join. Commands are
+/// fire-and-forget pushes, so this is how a rejected `/recover`, `/kick`,
+/// `/mode` and the like gets noticed at all.
+fn command_error_reason(
+    frame: &cordiale_core::phoenix::PhoenixMessage,
+    identifier: &str,
+) -> Option<String> {
+    if frame.topic != format!("grappa:user:{identifier}")
+        || frame.payload.get("status").and_then(Value::as_str) != Some("error")
+        || frame.message_ref.is_none()
+        || frame.message_ref == frame.join_ref
+    {
+        return None;
+    }
+    let response = frame.payload.get("response");
+    let reason = ["error", "reason"]
+        .iter()
+        .find_map(|key| response?.get(*key)?.as_str())
+        .unwrap_or("error");
+    Some(reason.to_string())
+}
+
 async fn handle_frame(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -4239,6 +4262,17 @@ async fn handle_frame(
             ));
         }
         handle_query_join_reply(state, ui, &frame.topic, status).await;
+        if let Some(reason) = state
+            .identifier
+            .as_deref()
+            .and_then(|identifier| command_error_reason(&frame, identifier))
+        {
+            persistence::log_line(&format!("command refused: {reason}"));
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(reason.into());
+                ui.set_status_kind("command-refused".into());
+            });
+        }
         return;
     }
 
@@ -15845,6 +15879,55 @@ mod tests {
         assert_eq!(prefs["private_messages_all"], serde_json::json!(true));
         assert_eq!(prefs["notification_sound"], serde_json::json!("chime"));
         assert_eq!(prefs["channel_messages_only"], serde_json::json!(["#rust"]));
+    }
+
+    #[test]
+    fn only_refused_user_topic_commands_are_reported() {
+        let frame = |topic: &str, message_ref: Option<&str>, payload: Value| {
+            cordiale_core::phoenix::PhoenixMessage {
+                join_ref: Some("1".to_string()),
+                message_ref: message_ref.map(str::to_string),
+                topic: topic.to_string(),
+                event: "phx_reply".to_string(),
+                payload,
+            }
+        };
+        let refused = serde_json::json!({"status": "error", "response": {"error": "no_session"}});
+        assert_eq!(
+            command_error_reason(&frame("grappa:user:vjt", Some("7"), refused.clone()), "vjt"),
+            Some("no_session".to_string())
+        );
+        // The join reply, other topics and successes are not command errors.
+        assert_eq!(
+            command_error_reason(&frame("grappa:user:vjt", Some("1"), refused.clone()), "vjt"),
+            None
+        );
+        assert_eq!(
+            command_error_reason(&frame("grappa:user:other", Some("7"), refused), "vjt"),
+            None
+        );
+        assert_eq!(
+            command_error_reason(
+                &frame(
+                    "grappa:user:vjt",
+                    Some("7"),
+                    serde_json::json!({"status": "ok", "response": {}})
+                ),
+                "vjt"
+            ),
+            None
+        );
+        assert_eq!(
+            command_error_reason(
+                &frame(
+                    "grappa:user:vjt",
+                    Some("8"),
+                    serde_json::json!({"status": "error"})
+                ),
+                "vjt"
+            ),
+            Some("error".to_string())
+        );
     }
 
     #[test]
