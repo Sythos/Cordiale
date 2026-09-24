@@ -1205,6 +1205,37 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `POST /networks/:slug/channels/:channel/read-cursor` — marks the
+    /// window read up to `message_id` (a query window uses the peer's nick
+    /// as `channel`). Grappa answers with the stored cursor and broadcasts
+    /// `read_cursor_set` on the window's topic.
+    pub async fn set_read_cursor(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel: &str,
+        message_id: i64,
+    ) -> Result<i64, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "channels", channel, "read-cursor"]);
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "message_id": message_id }))
+            .send()
+            .await?
+            .error_for_status()?;
+        let body = response.json::<Value>().await?;
+        Ok(body
+            .get("last_read_message_id")
+            .and_then(Value::as_i64)
+            .unwrap_or(message_id))
+    }
+
     /// `DELETE /networks/:slug/notify/:nick`.
     pub async fn remove_notify_nick(
         &self,
@@ -2066,6 +2097,28 @@ mod tests {
             .set_upload_confirm("t", false)
             .await
             .expect("set confirm");
+    }
+
+    #[tokio::test]
+    async fn set_read_cursor_posts_the_message_id() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels/%23rust/read-cursor"))
+            .and(body_json(serde_json::json!({ "message_id": 42 })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "last_read_message_id": 42 })),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let cursor = client
+            .set_read_cursor("t", "libera", "#rust", 42)
+            .await
+            .expect("read cursor");
+        assert_eq!(cursor, 42);
     }
 
     #[tokio::test]
