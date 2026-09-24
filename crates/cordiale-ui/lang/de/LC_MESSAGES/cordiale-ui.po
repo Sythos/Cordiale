@@ -1051,3 +1051,43 @@ msgstr "{} funktioniert nur in einem Kanalfenster."
 msgctxt "AppWindow"
 msgid "{} failed."
 msgstr "{} fehlgeschlagen."
+
+msgctxt "AppWindow"
+msgid "Upload file"
+msgstr "Datei hochladen"
+
+msgctxt "AppWindow"
+msgid "Upload this file to the server and post its link in the open window?"
+msgstr "Diese Datei auf den Server hochladen und ihren Link im offenen Fenster posten?"
+
+msgctxt "AppWindow"
+msgid "Uploads"
+msgstr "Uploads"
+
+msgctxt "AppWindow"
+msgid "Keep uploaded files for"
+msgstr "Hochgeladene Dateien behalten für"
+
+msgctxt "AppWindow"
+msgid "Server default"
+msgstr "Server-Standard"
+
+msgctxt "AppWindow"
+msgid "1 hour"
+msgstr "1 Stunde"
+
+msgctxt "AppWindow"
+msgid "12 hours"
+msgstr "12 Stunden"
+
+msgctxt "AppWindow"
+msgid "1 day"
+msgstr "1 Tag"
+
+msgctxt "AppWindow"
+msgid "3 days"
+msgstr "3 Tage"
+
+msgctxt "AppWindow"
+msgid "Ask before uploading"
+msgstr "Vor dem Hochladen fragen"
