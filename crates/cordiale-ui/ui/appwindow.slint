@@ -460,7 +460,11 @@ component SectionCard inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "Cordiale";
+    // Account-wide unread count (Grappa's `badge_count`). There's no
+    // portable taskbar/dock badge, so it goes in the title, which the
+    // taskbar shows; the "Show event badge" preference turns it off.
+    in property <int> unread-badge: 0;
+    title: pref-show-event-badge && unread-badge > 0 ? "(" + unread-badge + ") Cordiale" : "Cordiale";
     // A color theme (see `palette-active`) paints the window itself and
     // switches the app to a monospace font, irssi-style.
     background: palette-active ? palette-bg : Palette.background;

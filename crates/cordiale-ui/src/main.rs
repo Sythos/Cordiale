@@ -7109,6 +7109,11 @@ fn push_window_note(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 }
 
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let unread_badge = i32::try_from(state.badge_count).unwrap_or(i32::MAX);
+    {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.set_unread_badge(unread_badge));
+    }
     push_window_note(state, ui);
     let mut data = network_groups_data(
         &state.channel_entries,

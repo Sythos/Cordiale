@@ -85,8 +85,8 @@ Cordiale still has these user-visible or behavioral gaps:
   DM queue can drop messages if the authoritative query snapshot is absent
   or late.
 - **Remaining presentation gaps:** the `/links` graph has no pan/zoom; a
-  WHOIS avatar is reported but not drawn; the account-wide unread count does
-  not set an OS taskbar/dock badge, and a rejected `/recover` command lacks
+  WHOIS avatar is reported but not drawn; the account-wide unread count only
+  shows in the window title (and so the taskbar), not as an OS badge, and a rejected `/recover` command lacks
   a direct error notice.
 
 ## Download
