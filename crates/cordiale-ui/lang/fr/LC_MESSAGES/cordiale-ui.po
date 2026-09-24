@@ -1163,3 +1163,71 @@ msgstr "Impossible de rejoindre ce salon : {}"
 msgctxt "AppWindow"
 msgid "That alias expands into too many others: {}"
 msgstr "Cet alias se développe en trop d'autres : {}"
+
+msgctxt "AppWindow"
+msgid "Done."
+msgstr "Terminé."
+
+msgctxt "AppWindow"
+msgid "The server refused that admin action ({})."
+msgstr "Le serveur a refusé cette action d'administration ({})."
+
+msgctxt "AppWindow"
+msgid "Caps must be whole numbers, or empty for unlimited."
+msgstr "Les limites doivent être des nombres entiers, ou vides pour illimité."
+
+msgctxt "AppWindow"
+msgid "New user name"
+msgstr "Nom du nouvel utilisateur"
+
+msgctxt "AppWindow"
+msgid "Password"
+msgstr "Mot de passe"
+
+msgctxt "AppWindow"
+msgid "Create user"
+msgstr "Créer l'utilisateur"
+
+msgctxt "AppWindow"
+msgid "To reset a password, type it above and press 🔑 on the account; its sessions are signed out."
+msgstr "Pour réinitialiser un mot de passe, saisissez-le ci-dessus et appuyez sur 🔑 sur le compte ; ses sessions seront fermées."
+
+msgctxt "AppWindow"
+msgid "Set password"
+msgstr "Définir le mot de passe"
+
+msgctxt "AppWindow"
+msgid "New network slug"
+msgstr "Slug du nouveau réseau"
+
+msgctxt "AppWindow"
+msgid "Create network"
+msgstr "Créer le réseau"
+
+msgctxt "AppWindow"
+msgid "Settings of {} (empty cap = unlimited)"
+msgstr "Paramètres de {} (limite vide = illimité)"
+
+msgctxt "AppWindow"
+msgid "Visitor sessions"
+msgstr "Sessions visiteurs"
+
+msgctxt "AppWindow"
+msgid "User sessions"
+msgstr "Sessions utilisateurs"
+
+msgctxt "AppWindow"
+msgid "Per IP"
+msgstr "Par IP"
+
+msgctxt "AppWindow"
+msgid "Visitors allowed"
+msgstr "Visiteurs autorisés"
+
+msgctxt "AppWindow"
+msgid "Edit network {}"
+msgstr "Modifier le réseau {}"
+
+msgctxt "AppWindow"
+msgid "Delete network {}"
+msgstr "Supprimer le réseau {}"

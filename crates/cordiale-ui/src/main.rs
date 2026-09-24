@@ -115,6 +115,24 @@ enum WorkerCommand {
     AdminUserDelete(String),
     AdminVisitorDelete(String),
     AdminNetworkResetCircuit(String),
+    AdminUserCreate {
+        name: String,
+        password: String,
+        is_admin: bool,
+    },
+    AdminUserSetPassword {
+        user_id: String,
+        password: String,
+    },
+    AdminNetworkCreate(String),
+    AdminNetworkDelete(String),
+    AdminNetworkSave {
+        slug: String,
+        visitor_enabled: bool,
+        visitor_cap: String,
+        user_cap: String,
+        ip_cap: String,
+    },
     AdminReaperRun,
     SettingsNetworkSelected(String),
     IdentitySave {
@@ -652,6 +670,55 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_admin_visitor_delete(move |visitor_id| {
         let _ =
             tx_for_visitor_delete.send(WorkerCommand::AdminVisitorDelete(visitor_id.to_string()));
+    });
+
+    let tx_for_admin_user_create = worker_tx.clone();
+    let weak_for_admin_user_create = ui.as_weak();
+    ui.on_admin_user_create(move || {
+        if let Some(ui) = weak_for_admin_user_create.upgrade() {
+            let _ = tx_for_admin_user_create.send(WorkerCommand::AdminUserCreate {
+                name: ui.get_admin_new_user_name().trim().to_string(),
+                password: ui.get_admin_new_user_password().to_string(),
+                is_admin: ui.get_admin_new_user_is_admin(),
+            });
+        }
+    });
+
+    let tx_for_admin_password = worker_tx.clone();
+    let weak_for_admin_password = ui.as_weak();
+    ui.on_admin_user_set_password(move |user_id| {
+        if let Some(ui) = weak_for_admin_password.upgrade() {
+            let _ = tx_for_admin_password.send(WorkerCommand::AdminUserSetPassword {
+                user_id: user_id.to_string(),
+                password: ui.get_admin_new_user_password().to_string(),
+            });
+        }
+    });
+
+    let tx_for_admin_network_create = worker_tx.clone();
+    ui.on_admin_network_create(move |slug| {
+        let _ = tx_for_admin_network_create
+            .send(WorkerCommand::AdminNetworkCreate(slug.trim().to_string()));
+    });
+
+    let tx_for_admin_network_delete = worker_tx.clone();
+    ui.on_admin_network_delete(move |network_id| {
+        let _ = tx_for_admin_network_delete
+            .send(WorkerCommand::AdminNetworkDelete(network_id.to_string()));
+    });
+
+    let tx_for_admin_network_save = worker_tx.clone();
+    let weak_for_admin_network_save = ui.as_weak();
+    ui.on_admin_network_save(move || {
+        if let Some(ui) = weak_for_admin_network_save.upgrade() {
+            let _ = tx_for_admin_network_save.send(WorkerCommand::AdminNetworkSave {
+                slug: ui.get_admin_edit_network().to_string(),
+                visitor_enabled: ui.get_admin_edit_visitor_enabled(),
+                visitor_cap: ui.get_admin_edit_visitor_cap().to_string(),
+                user_cap: ui.get_admin_edit_user_cap().to_string(),
+                ip_cap: ui.get_admin_edit_ip_cap().to_string(),
+            });
+        }
     });
 
     let tx_for_circuit_reset = worker_tx.clone();
@@ -1632,6 +1699,63 @@ async fn run_worker(
                             let _ = client.reset_admin_circuit(token, &network_id).await;
                         }
                         handle_admin_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::AdminUserCreate {
+                        name,
+                        password,
+                        is_admin,
+                    }) => {
+                        handle_admin_write(&state, &ui, AdminWrite::CreateUser { name, password, is_admin })
+                            .await;
+                    }
+                    Some(WorkerCommand::AdminUserSetPassword { user_id, password }) => {
+                        handle_admin_write(&state, &ui, AdminWrite::SetPassword { user_id, password })
+                            .await;
+                    }
+                    Some(WorkerCommand::AdminNetworkCreate(slug)) => {
+                        handle_admin_write(&state, &ui, AdminWrite::CreateNetwork(slug)).await;
+                    }
+                    Some(WorkerCommand::AdminNetworkDelete(network_id)) => {
+                        handle_admin_write(&state, &ui, AdminWrite::DeleteNetwork(network_id)).await;
+                    }
+                    Some(WorkerCommand::AdminNetworkSave {
+                        slug,
+                        visitor_enabled,
+                        visitor_cap,
+                        user_cap,
+                        ip_cap,
+                    }) => {
+                        let caps = [
+                            ("max_concurrent_visitor_sessions", visitor_cap),
+                            ("max_concurrent_user_sessions", user_cap),
+                            ("max_per_ip", ip_cap),
+                        ];
+                        let mut settings = serde_json::Map::new();
+                        settings.insert("visitor_enabled".to_string(), Value::Bool(visitor_enabled));
+                        let mut valid = true;
+                        for (key, text) in caps {
+                            match cordiale_core::admin::parse_admin_cap(&text) {
+                                Some(value) => {
+                                    settings.insert(key.to_string(), value);
+                                }
+                                None => valid = false,
+                            }
+                        }
+                        if valid {
+                            handle_admin_write(
+                                &state,
+                                &ui,
+                                AdminWrite::UpdateNetwork {
+                                    slug,
+                                    settings: Value::Object(settings),
+                                },
+                            )
+                            .await;
+                        } else {
+                            let _ = ui.upgrade_in_event_loop(|ui| {
+                                ui.set_status_kind("admin-cap-invalid".into());
+                            });
+                        }
                     }
                     Some(WorkerCommand::AdminReaperRun) => {
                         if let (Some(client), Some(token)) = (&state.client, &state.token) {
@@ -3516,6 +3640,93 @@ async fn handle_save_display_prefs(state: &WorkerState, prefs: DisplayPrefs) {
 /// UI. Only meaningful for an `is_admin` account with a full web session —
 /// a per-client token gets `403` here, surfaced as an empty refresh
 /// (see `docs/protocol-notes.md` §4ter).
+/// One admin write from the Users or Networks tab. Passwords are never
+/// logged.
+enum AdminWrite {
+    CreateUser {
+        name: String,
+        password: String,
+        is_admin: bool,
+    },
+    SetPassword {
+        user_id: String,
+        password: String,
+    },
+    CreateNetwork(String),
+    UpdateNetwork {
+        slug: String,
+        settings: Value,
+    },
+    DeleteNetwork(String),
+}
+
+/// Runs an admin write, then refreshes the panel. Success clears the
+/// form it came from; a refusal shows the HTTP status (409 for a duplicate
+/// or a network still in use, 422 for invalid values).
+async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, write: AdminWrite) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let (result, clears) = match &write {
+        AdminWrite::CreateUser {
+            name,
+            password,
+            is_admin,
+        } => (
+            client
+                .create_admin_user(token, name, password, *is_admin)
+                .await,
+            "user",
+        ),
+        AdminWrite::SetPassword { user_id, password } => (
+            client
+                .set_admin_user_password(token, user_id, password)
+                .await,
+            "password",
+        ),
+        AdminWrite::CreateNetwork(slug) => {
+            (client.create_admin_network(token, slug).await, "network")
+        }
+        AdminWrite::UpdateNetwork { slug, settings } => (
+            client.update_admin_network(token, slug, settings).await,
+            "edit",
+        ),
+        AdminWrite::DeleteNetwork(network_id) => {
+            (client.delete_admin_network(token, network_id).await, "")
+        }
+    };
+    match result {
+        Ok(()) => {
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                match clears {
+                    "user" => {
+                        ui.set_admin_new_user_name("".into());
+                        ui.set_admin_new_user_password("".into());
+                        ui.set_admin_new_user_is_admin(false);
+                    }
+                    "password" => ui.set_admin_new_user_password("".into()),
+                    "network" => ui.set_admin_new_network_slug("".into()),
+                    "edit" => ui.set_admin_edit_network("".into()),
+                    _ => {}
+                }
+                ui.set_status_kind("admin-action-done".into());
+            });
+        }
+        Err(err) => {
+            let status = err
+                .status()
+                .map(|status| status.as_u16().to_string())
+                .unwrap_or_else(|| "network error".to_string());
+            persistence::log_line(&format!("admin write failed: {status}"));
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(status.into());
+                ui.set_status_kind("admin-action-failed".into());
+            });
+        }
+    }
+    handle_admin_refresh(state, ui).await;
+}
+
 async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token)) = (&state.client, &state.token) else {
         return;
@@ -3576,9 +3787,16 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
                 cordiale_core::admin::admin_network_status(entry)
             );
             let network_id = cordiale_core::admin::admin_network_id(entry).unwrap_or_default();
+            let (visitor_enabled, visitor_cap, user_cap, ip_cap) =
+                cordiale_core::admin::admin_network_settings(entry);
             AdminNetworkRow {
                 label: label.into(),
                 network_id: network_id.into(),
+                slug: cordiale_core::admin::admin_network_label(entry).into(),
+                visitor_enabled,
+                visitor_cap: visitor_cap.into(),
+                user_cap: user_cap.into(),
+                ip_cap: ip_cap.into(),
             }
         })
         .collect();

@@ -55,9 +55,11 @@ Cordiale still has these user-visible or behavioral gaps:
   style in its dark or light variant.
 - **Sign-in and account security:** Cordiale does not expose Cicchetto's
   TOTP/passkey management.
-- **Admin tools:** the panel lacks vhost grants, credentials, server-wide
-  settings writes, network creation/editing/deletion, user creation/password
-  changes, and the live admin event stream.
+- **Admin tools:** the panel (which needs a password sign-in; a client
+  token is refused on `/admin`) creates accounts, resets passwords and
+  creates, edits and deletes networks, but still lacks per-network servers,
+  vhost grants, credentials, server-wide settings writes and the live admin
+  event stream.
 - **Settings and watch lists:** current per-network nick/ident/realname are
   not read back into the identity editor, so its fields start blank.
   Watch-list keywords are session-local rather than reconciled with the

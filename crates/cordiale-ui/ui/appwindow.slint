@@ -162,6 +162,12 @@ struct AdminUserRow {
 struct AdminNetworkRow {
     label: string,
     network-id: string,
+    slug: string,
+    visitor-enabled: bool,
+    // Caps as typed in the editor: "" means unlimited.
+    visitor-cap: string,
+    user-cap: string,
+    ip-cap: string,
 }
 
 // One row in the admin Visitors list.
@@ -794,6 +800,22 @@ export component AppWindow inherits Window {
     callback admin-visitor-delete(string);
     callback admin-network-reset-circuit(string);
     callback admin-reaper-run();
+    // Admin writes: new accounts, password resets, network create/edit/delete.
+    in-out property <string> admin-new-user-name: "";
+    in-out property <string> admin-new-user-password: "";
+    in-out property <bool> admin-new-user-is-admin: false;
+    in-out property <string> admin-new-network-slug: "";
+    // Slug of the network whose settings are being edited, or "".
+    in-out property <string> admin-edit-network: "";
+    in-out property <bool> admin-edit-visitor-enabled: false;
+    in-out property <string> admin-edit-visitor-cap: "";
+    in-out property <string> admin-edit-user-cap: "";
+    in-out property <string> admin-edit-ip-cap: "";
+    callback admin-user-create();
+    callback admin-user-set-password(string);
+    callback admin-network-create(string);
+    callback admin-network-delete(string);
+    callback admin-network-save();
     callback links-graph-requested();
     callback theme-toggle-requested();
     callback display-prefs-changed();
@@ -1080,6 +1102,12 @@ export component AppWindow inherits Window {
             return @tr("Keep at least one message notification on.");
         } else if status-kind == "notify-prefs-failed" {
             return @tr("Couldn't save the notification settings.");
+        } else if status-kind == "admin-action-done" {
+            return @tr("Done.");
+        } else if status-kind == "admin-action-failed" {
+            return @tr("The server refused that admin action ({}).", status-command-hint);
+        } else if status-kind == "admin-cap-invalid" {
+            return @tr("Caps must be whole numbers, or empty for unlimited.");
         } else if status-kind == "send-failed" {
             return @tr("Couldn't send that message.");
         } else if status-kind == "part-failed" {
@@ -2623,6 +2651,40 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                if admin-section == "users" : HorizontalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("New user name");
+                        accessible-label: @tr("New user name");
+                        text <=> admin-new-user-name;
+                        horizontal-stretch: 1;
+                        min-width: 80px;
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Password");
+                        accessible-label: @tr("Password");
+                        input-type: password;
+                        text <=> admin-new-user-password;
+                        horizontal-stretch: 1;
+                        min-width: 80px;
+                    }
+                    CheckBox {
+                        text: @tr("Admin");
+                        checked <=> admin-new-user-is-admin;
+                    }
+                    CompactButton {
+                        text: "➕  " + @tr("Create user");
+                        a11y-label: @tr("Create user");
+                        enabled: admin-new-user-name != "" && admin-new-user-password != "";
+                        clicked => { admin-user-create(); }
+                    }
+                }
+                if admin-section == "users" : Text {
+                    text: @tr("To reset a password, type it above and press 🔑 on the account; its sessions are signed out.");
+                    wrap: word-wrap;
+                }
+
                 if admin-section == "users" : ListView {
                     vertical-stretch: 1;
                     min-height: 120px;
@@ -2642,9 +2704,86 @@ export component AppWindow inherits Window {
                             clicked => { admin-user-toggle-admin(row.user-id, !row.is-admin); }
                         }
                         CompactButton {
+                            text: "🔑";
+                            a11y-label: @tr("Set password");
+                            enabled: admin-new-user-password != "";
+                            clicked => { admin-user-set-password(row.user-id); }
+                        }
+                        CompactButton {
                             text: "🗑  " + @tr("Delete");
                             a11y-label: @tr("Delete");
                             clicked => { admin-user-delete(row.user-id); }
+                        }
+                    }
+                }
+
+                if admin-section == "networks" : HorizontalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("New network slug");
+                        accessible-label: @tr("New network slug");
+                        text <=> admin-new-network-slug;
+                        horizontal-stretch: 1;
+                        min-width: 80px;
+                    }
+                    CompactButton {
+                        text: "➕  " + @tr("Create network");
+                        a11y-label: @tr("Create network");
+                        enabled: admin-new-network-slug != "";
+                        clicked => { admin-network-create(admin-new-network-slug); }
+                    }
+                }
+
+                if admin-section == "networks" && admin-edit-network != "" : VerticalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: "✏  " + @tr("Settings of {} (empty cap = unlimited)", admin-edit-network);
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("Visitor sessions");
+                            accessible-label: @tr("Visitor sessions");
+                            input-type: number;
+                            text <=> admin-edit-visitor-cap;
+                            min-width: 60px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("User sessions");
+                            accessible-label: @tr("User sessions");
+                            input-type: number;
+                            text <=> admin-edit-user-cap;
+                            min-width: 60px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("Per IP");
+                            accessible-label: @tr("Per IP");
+                            input-type: number;
+                            text <=> admin-edit-ip-cap;
+                            min-width: 60px;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+
+                        CheckBox {
+                            text: @tr("Visitors allowed");
+                            checked <=> admin-edit-visitor-enabled;
+                        }
+                        CompactButton {
+                            text: "💾  " + @tr("Save");
+                            a11y-label: @tr("Save");
+                            clicked => { admin-network-save(); }
+                        }
+                        CompactButton {
+                            text: @tr("Cancel");
+                            clicked => { admin-edit-network = ""; }
                         }
                     }
                 }
@@ -2664,9 +2803,25 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                         }
                         CompactButton {
+                            text: "✏";
+                            a11y-label: @tr("Edit network {}", row.slug);
+                            clicked => {
+                                admin-edit-network = row.slug;
+                                admin-edit-visitor-enabled = row.visitor-enabled;
+                                admin-edit-visitor-cap = row.visitor-cap;
+                                admin-edit-user-cap = row.user-cap;
+                                admin-edit-ip-cap = row.ip-cap;
+                            }
+                        }
+                        CompactButton {
                             text: "⟲  " + @tr("Reset circuit");
                             a11y-label: @tr("Reset circuit");
                             clicked => { admin-network-reset-circuit(row.network-id); }
+                        }
+                        CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Delete network {}", row.slug);
+                            clicked => { admin-network-delete(row.network-id); }
                         }
                     }
                 }
