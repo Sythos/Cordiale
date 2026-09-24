@@ -549,6 +549,10 @@ export component AppWindow inherits Window {
     // joined-channels list and expand/collapse state (default expanded).
     in property <[NetworkGroup]> network-groups: [];
     in property <[ChatLine]> chat-lines: [];
+    // Paging back through the open window's history (`?before=`).
+    in property <bool> history-loading: false;
+    in property <bool> history-start-reached: false;
+    callback older-history-requested();
     in-out property <string> compose-text: "";
     in property <string> current-channel-label: "";
     // RPL_TOPIC-equivalent for the selected channel, shown above the chat
@@ -1583,6 +1587,17 @@ export component AppWindow inherits Window {
                         accessible-label: @tr("Dismiss away message");
                         clicked => { peer-away-dismiss-requested(); }
                     }
+                }
+            }
+
+            if chat-lines.length > 0 && !history-start-reached : HorizontalLayout {
+                alignment: center;
+
+                CompactButton {
+                    text: history-loading ? @tr("Loading…") : "⤒  " + @tr("Load older messages");
+                    a11y-label: @tr("Load older messages");
+                    enabled: !history-loading;
+                    clicked => { older-history-requested(); }
                 }
             }
 
