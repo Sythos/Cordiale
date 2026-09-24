@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette } from "std-widgets.slint";
+import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette } from "std-widgets.slint";
 
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
@@ -62,6 +62,14 @@ struct DccOfferRow {
     from: string,
     filename: string,
     size: string,
+}
+
+// One user mode in the `/umode` view; `settable` modes can be flipped,
+// the others are set by the server or services.
+struct UmodeToggle {
+    letter: string,
+    settable: bool,
+    active: bool,
 }
 
 // One archived window (`/archive`): `kind` is the wire token (channel or
@@ -189,6 +197,12 @@ struct AdminVhostRow {
 struct AdminGrantRow {
     label: string,
     grant-id: string,
+}
+
+// One muted conversation: its label and Grappa's key for it.
+struct MutedRow {
+    label: string,
+    key: string,
 }
 
 // One IRC server endpoint of the network being edited in Admin.
@@ -835,6 +849,131 @@ export component AppWindow inherits Window {
     callback directory-closed();
     callback archive-delete-requested(string);
     callback archive-closed();
+    // User-mode view (bare `/umode`).
+    in property <string> umode-network: "";
+    in property <[UmodeToggle]> umode-toggles: [];
+    callback umode-toggle-requested(string);
+    callback umode-view-closed();
+    // Runs a slash command on the open window without touching the draft.
+    callback menu-command(string);
+
+    function umode-label(letter: string) -> string {
+        if letter == "i" {
+            return @tr("invisible");
+        } else if letter == "w" {
+            return @tr("wallops");
+        } else if letter == "s" {
+            return @tr("server notices");
+        } else if letter == "x" {
+            return @tr("masked host");
+        } else if letter == "R" {
+            return @tr("registered only");
+        } else if letter == "b" {
+            return @tr("chatops");
+        } else if letter == "c" {
+            return @tr("client notices");
+        } else if letter == "d" {
+            return @tr("debug notices");
+        } else if letter == "e" {
+            return @tr("invalid DCC");
+        } else if letter == "f" {
+            return @tr("flood notices");
+        } else if letter == "g" {
+            return @tr("globops");
+        } else if letter == "k" {
+            return @tr("kill notices");
+        } else if letter == "K" {
+            return @tr("U:Line kills");
+        } else if letter == "m" {
+            return @tr("spam notices");
+        } else if letter == "n" {
+            return @tr("routing notices");
+        } else if letter == "y" {
+            return @tr("command notices");
+        } else if letter == "F" {
+            return @tr("flood immune");
+        } else if letter == "I" {
+            return @tr("hide idle");
+        } else if letter == "j" {
+            return @tr("Java user");
+        } else if letter == "S" {
+            return @tr("SSL");
+        } else if letter == "o" {
+            return @tr("operator");
+        } else if letter == "O" {
+            return @tr("local operator");
+        } else if letter == "r" {
+            return @tr("registered");
+        } else if letter == "a" {
+            return @tr("services admin");
+        } else if letter == "A" {
+            return @tr("server admin");
+        } else if letter == "h" {
+            return @tr("help operator");
+        } else if letter == "z" {
+            return @tr("services agent");
+        }
+        return @tr("mode +{}", letter);
+    }
+
+    function umode-description(letter: string) -> string {
+        if letter == "i" {
+            return @tr("hidden from WHO and global nick lists");
+        } else if letter == "w" {
+            return @tr("receive network WALLOPS broadcasts");
+        } else if letter == "s" {
+            return @tr("receive server notice broadcasts");
+        } else if letter == "x" {
+            return @tr("cloak your hostname from other users");
+        } else if letter == "R" {
+            return @tr("only registered nicks may message you");
+        } else if letter == "b" {
+            return @tr("IRC operators: receive CHATOPS messages");
+        } else if letter == "c" {
+            return @tr("IRC operators: client connect and disconnect notices");
+        } else if letter == "d" {
+            return @tr("IRC operators: receive DEBUG messages");
+        } else if letter == "e" {
+            return @tr("IRC operators: receive invalid DCC notices");
+        } else if letter == "f" {
+            return @tr("IRC operators: receive FLOOD messages");
+        } else if letter == "g" {
+            return @tr("IRC operators: receive GLOBOPS messages");
+        } else if letter == "k" {
+            return @tr("IRC operators: receive KILL notices");
+        } else if letter == "K" {
+            return @tr("IRC operators: receive KILL notices from U:Lines");
+        } else if letter == "m" {
+            return @tr("IRC operators: receive SPAM messages");
+        } else if letter == "n" {
+            return @tr("IRC operators: receive ROUTING messages");
+        } else if letter == "y" {
+            return @tr("IRC operators: notified of /ADMIN, /LINKS, /WHOIS and similar");
+        } else if letter == "F" {
+            return @tr("IRC operators: immune from flood limits");
+        } else if letter == "I" {
+            return @tr("IRC operators: idle time hidden in WHOIS");
+        } else if letter == "j" {
+            return @tr("chatting from the web via Java");
+        } else if letter == "S" {
+            return @tr("connected to the server via SSL");
+        } else if letter == "o" {
+            return @tr("IRC operator, granted by the server");
+        } else if letter == "O" {
+            return @tr("local IRC operator, granted by the server");
+        } else if letter == "r" {
+            return @tr("identified to NickServ, set by services");
+        } else if letter == "a" {
+            return @tr("services administrator, set by services");
+        } else if letter == "A" {
+            return @tr("server administrator, set by the server");
+        } else if letter == "h" {
+            return @tr("services help operator");
+        } else if letter == "z" {
+            return @tr("services agent");
+        }
+        return @tr("user mode, no description available");
+    }
     callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
@@ -921,6 +1060,19 @@ export component AppWindow inherits Window {
     in-out property <bool> notify-presence-online: false;
     in-out property <bool> notify-presence-offline: false;
     callback notification-prefs-requested();
+    // Per-channel/per-conversation lists, mutes and the sound preset.
+    in property <[string]> notify-only-channels: [];
+    in property <[string]> notify-only-privates: [];
+    in property <[MutedRow]> notify-muted: [];
+    in-out property <int> notify-sound-index: 0;
+    in-out property <string> notify-new-channel: "";
+    in-out property <string> notify-new-private: "";
+    callback notification-list-add(string, string);
+    callback notification-list-remove(string, string);
+    callback notification-unmute(string);
+    callback notification-sound-changed();
+    // Mutes the open window for this many seconds, 0 for good.
+    callback mute-current-requested(int);
     callback notification-prefs-changed();
     callback settings-network-selected(string);
     callback identity-save-requested();
@@ -1179,6 +1331,14 @@ export component AppWindow inherits Window {
             return @tr("Modes of {}", status-command-hint);
         } else if status-kind == "command-no-modes" {
             return @tr("No modes known for {} yet.", status-command-hint);
+        } else if status-kind == "conversation-muted" {
+            return @tr("Conversation muted: other devices won't be notified about it.");
+        } else if status-kind == "beep-current" {
+            return @tr("Notification sound: {}", status-command-hint);
+        } else if status-kind == "beep-set" {
+            return @tr("Notification sound set to {}.", status-command-hint);
+        } else if status-kind == "beep-unknown" {
+            return @tr("Unknown sound. Available: {}", status-command-hint);
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
@@ -1915,7 +2075,7 @@ export component AppWindow inherits Window {
             // — confirmed against its real source and the user's own
             // screenshot: a global nav/utility menu, not a per-member one.
             // Only lists what Cordiale actually has; Cicchetto's version
-            // also has rooms/radio/archive/mute/switch-account.
+            // also has the radio.
             HorizontalLayout {
                 alignment: start;
 
@@ -1927,6 +2087,9 @@ export component AppWindow inherits Window {
                 actions-menu-area := ContextMenuArea {
                     Menu {
                         MenuItem { title: "🏠  " + @tr("Home"); activated => { home-requested(); } }
+                        MenuItem { title: "🚪  " + @tr("Rooms"); activated => { menu-command("/list"); } }
+                        MenuItem { title: "📂  " + @tr("Archive"); activated => { menu-command("/archive"); } }
+                        MenuItem { title: "👤  " + @tr("User modes"); activated => { menu-command("/umode"); } }
                         MenuItem { title: "⚙  " + @tr("Settings"); activated => { screen = "settings"; } }
                         MenuItem {
                             title: "🎨  " + @tr("Themes");
@@ -1942,7 +2105,13 @@ export component AppWindow inherits Window {
                                 settings-section = "admin";
                             }
                         }
-                        MenuItem { title: "⏏  " + @tr("Disconnect"); activated => { disconnect-requested(); } }
+                        Menu {
+                            title: "🔕  " + @tr("Mute this conversation");
+                            MenuItem { title: @tr("For 1 hour"); activated => { mute-current-requested(3600); } }
+                            MenuItem { title: @tr("For 8 hours"); activated => { mute-current-requested(28800); } }
+                            MenuItem { title: @tr("Until I unmute it"); activated => { mute-current-requested(0); } }
+                        }
+                        MenuItem { title: "🔁  " + @tr("Switch account"); activated => { disconnect-requested(); } }
                     }
                 }
             }
@@ -2328,6 +2497,127 @@ export component AppWindow inherits Window {
                         checked <=> notify-presence-offline;
                         toggled => { notification-prefs-changed(); }
                     }
+
+                    Text {
+                        text: @tr("With every channel message off, also these channels:");
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    for channel in notify-only-channels : HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: channel;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Remove {}", channel);
+                            clicked => { notification-list-remove("channel", channel); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: "#channel";
+                            accessible-label: @tr("Channel");
+                            text <=> notify-new-channel;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Add");
+                            a11y-label: @tr("Add");
+                            enabled: notify-new-channel != "";
+                            clicked => {
+                                notification-list-add("channel", notify-new-channel);
+                                notify-new-channel = "";
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: @tr("With every private message off, also these nicks:");
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    for nick in notify-only-privates : HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: nick;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Remove {}", nick);
+                            clicked => { notification-list-remove("private", nick); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("Nickname");
+                            accessible-label: @tr("Nickname");
+                            text <=> notify-new-private;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Add");
+                            a11y-label: @tr("Add");
+                            enabled: notify-new-private != "";
+                            clicked => {
+                                notification-list-add("private", notify-new-private);
+                                notify-new-private = "";
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "🔕  " + @tr("Muted conversations");
+                        font-weight: 600;
+                    }
+                    if notify-muted.length == 0 : Text {
+                        text: @tr("None. Mute one from the Actions menu.");
+                        wrap: word-wrap;
+                    }
+                    for row in notify-muted : HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "🔔  " + @tr("Unmute");
+                            a11y-label: @tr("Unmute {}", row.label);
+                            clicked => { notification-unmute(row.key); }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: @tr("Sound on other devices (also /beep)");
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        ComboBox {
+                            model: ["none", "tone", "chime", "blip", "pop", "icq", "xp_notify", "xp_ding", "xp_balloon", "xp_exclamation"];
+                            current-index <=> notify-sound-index;
+                            min-width: 140px;
+                            selected => { notification-sound-changed(); }
+                        }
+                    }
                 }
             }
 
@@ -2633,11 +2923,14 @@ export component AppWindow inherits Window {
                     }
                 }
                 Text {
-                    text: @tr("On-connect commands (one per line, semicolon-separated)");
+                    text: @tr("On-connect commands, one IRC command per line");
                     wrap: word-wrap;
                 }
-                LineEdit {
+                TextEdit {
                     text <=> perform-text;
+                    min-height: 120px;
+                    wrap: no-wrap;
+                    accessible-label: @tr("On-connect commands");
                 }
                 CompactButton {
                     text: "💾  " + @tr("Save");
@@ -3384,6 +3677,61 @@ export component AppWindow inherits Window {
         Button {
             text: @tr("Back");
             clicked => { screen = "connected"; }
+        }
+    }
+
+    if screen == "umodes" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: @tr("User modes on {}", umode-network);
+            font-size: 18px;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        ListView {
+            vertical-stretch: 1;
+
+            for row in umode-toggles : HorizontalLayout {
+                spacing: 8px;
+                padding-bottom: 6px;
+
+                CheckBox {
+                    text: "+" + row.letter;
+                    checked: row.active;
+                    enabled: row.settable;
+                    accessible-label: @tr("{} (+{})", umode-label(row.letter), row.letter);
+                    toggled => {
+                        // The box follows Grappa's push, not the click.
+                        self.checked = row.active;
+                        umode-toggle-requested(row.letter);
+                    }
+                }
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: row.settable ? umode-label(row.letter) : @tr("{} (set by the server)", umode-label(row.letter));
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: umode-description(row.letter);
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        Button {
+            text: @tr("Back");
+            clicked => {
+                screen = "connected";
+                umode-view-closed();
+            }
         }
     }
 
