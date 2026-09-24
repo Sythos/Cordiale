@@ -1487,3 +1487,11 @@ msgstr "Riattiva {}"
 msgctxt "AppWindow"
 msgid "Sound on other devices (also /beep)"
 msgstr "Suono sugli altri dispositivi (anche /beep)"
+
+msgctxt "AppWindow"
+msgid "Paste as a file"
+msgstr "Incolla come file"
+
+msgctxt "AppWindow"
+msgid "The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?"
+msgstr "Gli appunti contengono {} righe. Caricarle come paste.txt e inviarne il link invece di incollarle in un unico messaggio?"

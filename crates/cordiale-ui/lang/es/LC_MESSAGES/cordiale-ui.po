@@ -1487,3 +1487,11 @@ msgstr "Reactivar {}"
 msgctxt "AppWindow"
 msgid "Sound on other devices (also /beep)"
 msgstr "Sonido en otros dispositivos (también /beep)"
+
+msgctxt "AppWindow"
+msgid "Paste as a file"
+msgstr "Pegar como archivo"
+
+msgctxt "AppWindow"
+msgid "The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?"
+msgstr "El portapapeles contiene {} líneas. ¿Subirlas como paste.txt y enviar su enlace en lugar de pegarlas en un solo mensaje?"

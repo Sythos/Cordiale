@@ -743,6 +743,14 @@ export component AppWindow inherits Window {
     // Texts of the native confirmation shown before an upload.
     out property <string> upload-confirm-title: @tr("Upload file");
     out property <string> upload-confirm-text: @tr("Upload this file to the server and post its link in the open window?");
+    // Offered when pasting text of several lines into the one-line compose
+    // box.
+    out property <string> paste-upload-title: @tr("Paste as a file");
+    public pure function paste-upload-text(lines: int) -> string {
+        return @tr("The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?", lines);
+    }
+    // True when the paste went up as a file, so the compose box skips it.
+    callback paste-requested() -> bool;
 
     // Admin — Settings > Admin, only meaningful when `is-admin` (see
     // `docs/protocol-notes.md` §4ter): a deliberately small slice of
@@ -1868,13 +1876,26 @@ export component AppWindow inherits Window {
                     clicked => { attach-file-requested(); }
                 }
 
-                LineEdit {
-                    placeholder-text: @tr("Message");
-                    accessible-label: @tr("Message");
-                    text <=> compose-text;
-                    enabled: !current-query || current-query-ready;
-                    accepted => { send-chat-message(compose-text); }
-                    edited(new-text) => { compose-text-changed(new-text); }
+                FocusScope {
+                    horizontal-stretch: 1;
+                    capture-key-pressed(event) => {
+                        if (event.modifiers.control || event.modifiers.meta) && (event.text == "v" || event.text == "V") && !event.modifiers.shift {
+                            return paste-requested() ? EventResult.accept : EventResult.reject;
+                        }
+                        return EventResult.reject;
+                    }
+
+                    // A layout, so the scope takes the field's size.
+                    HorizontalLayout {
+                        LineEdit {
+                            placeholder-text: @tr("Message");
+                            accessible-label: @tr("Message");
+                            text <=> compose-text;
+                            enabled: !current-query || current-query-ready;
+                            accepted => { send-chat-message(compose-text); }
+                            edited(new-text) => { compose-text-changed(new-text); }
+                        }
+                    }
                 }
 
                 Button {

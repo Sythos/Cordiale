@@ -1487,3 +1487,11 @@ msgstr "Stumm aufheben für {}"
 msgctxt "AppWindow"
 msgid "Sound on other devices (also /beep)"
 msgstr "Ton auf anderen Geräten (auch /beep)"
+
+msgctxt "AppWindow"
+msgid "Paste as a file"
+msgstr "Als Datei einfügen"
+
+msgctxt "AppWindow"
+msgid "The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?"
+msgstr "Die Zwischenablage enthält {} Zeilen. Als paste.txt hochladen und den Link senden, statt sie in eine Nachricht einzufügen?"
