@@ -386,6 +386,8 @@ struct ThemeChoiceRow {
     name: string,
     author: string,
     selected: bool,
+    // In use at night, when the OS is in dark mode.
+    night: bool,
     swatches: [color],
 }
 
@@ -818,6 +820,11 @@ export component AppWindow inherits Window {
     callback kicked-channel-dismiss-requested(string, string);
     callback recover-dismiss-requested();
     callback color-theme-requested(string); // choice key, "" for classic
+    // Night theme of Grappa's pair ("" for the day theme at all hours);
+    // offered while a gallery theme is in use.
+    callback night-theme-requested(string);
+    in property <bool> theme-pair-active: false;
+    in property <bool> theme-has-night: false;
     callback peer-away-dismiss-requested();
     callback dcc-offer-accept-requested(string, string); // network, offer id
     callback dcc-offer-refuse-requested(string, string); // network, offer id
@@ -2336,6 +2343,10 @@ export component AppWindow inherits Window {
                     text: @tr("Color themes come from Grappa's gallery (irssi-dark, sux and more) and follow your account; without a connection, built-in copies are offered. The classic look follows the light/dark switch.");
                     wrap: word-wrap;
                 }
+                if theme-pair-active : Text {
+                    text: @tr("Pick a night theme too and Cordiale switches to it while your system is in dark mode, like Cicchetto.");
+                    wrap: word-wrap;
+                }
                 HorizontalLayout {
                     spacing: 6px;
                     alignment: start;
@@ -2347,6 +2358,10 @@ export component AppWindow inherits Window {
                     if palette-active : CompactButton {
                         text: @tr("Back to classic");
                         clicked => { color-theme-requested(""); }
+                    }
+                    if theme-has-night : CompactButton {
+                        text: @tr("Same theme day and night");
+                        clicked => { night-theme-requested(""); }
                     }
                 }
                 ListView {
@@ -2377,10 +2392,16 @@ export component AppWindow inherits Window {
                             overflow: elide;
                         }
                         CompactButton {
-                            text: choice.selected ? @tr("In use") : @tr("Use");
+                            text: choice.selected ? (theme-has-night ? "☀  " + @tr("By day") : @tr("In use")) : @tr("Use");
                             enabled: !choice.selected;
                             a11y-label: @tr("Use theme {}", choice.name);
                             clicked => { color-theme-requested(choice.key); }
+                        }
+                        if theme-pair-active && !choice.selected : CompactButton {
+                            text: choice.night ? "🌙  " + @tr("At night") : "🌙  " + @tr("Use at night");
+                            enabled: !choice.night;
+                            a11y-label: @tr("Use theme {} at night", choice.name);
+                            clicked => { night-theme-requested(choice.key); }
                         }
                     }
                 }

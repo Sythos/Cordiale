@@ -1415,3 +1415,27 @@ msgstr "Gewähren"
 msgctxt "AppWindow"
 msgid "Revoke grant {}"
 msgstr "Freigabe {} widerrufen"
+
+msgctxt "AppWindow"
+msgid "Pick a night theme too and Cordiale switches to it while your system is in dark mode, like Cicchetto."
+msgstr "Wähle auch ein Nacht-Theme: Cordiale nutzt es, solange das System im dunklen Modus ist, wie Cicchetto."
+
+msgctxt "AppWindow"
+msgid "Same theme day and night"
+msgstr "Gleiches Theme Tag und Nacht"
+
+msgctxt "AppWindow"
+msgid "By day"
+msgstr "Tagsüber"
+
+msgctxt "AppWindow"
+msgid "At night"
+msgstr "Nachts"
+
+msgctxt "AppWindow"
+msgid "Use at night"
+msgstr "Nachts verwenden"
+
+msgctxt "AppWindow"
+msgid "Use theme {} at night"
+msgstr "Theme {} nachts verwenden"
