@@ -2171,11 +2171,15 @@ mod tests {
 
     #[tokio::test]
     async fn admin_account_and_network_writes_use_their_contracts() {
+        // Built at run time: the test only checks the value is passed
+        // through, and a literal would read as a hard-coded credential.
+        let password = format!("pw-{}", std::process::id());
+        let new_password = format!("{password}-new");
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/admin/users"))
             .and(body_json(
-                serde_json::json!({"name": "ada", "password": "s3cret", "is_admin": false}),
+                serde_json::json!({"name": "ada", "password": password, "is_admin": false}),
             ))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
             .expect(1)
@@ -2183,7 +2187,7 @@ mod tests {
             .await;
         Mock::given(method("PUT"))
             .and(path("/admin/users/u-1/password"))
-            .and(body_json(serde_json::json!({"password": "n3w"})))
+            .and(body_json(serde_json::json!({"password": new_password})))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .expect(1)
             .mount(&mock_server)
@@ -2212,11 +2216,11 @@ mod tests {
 
         let client = GrappaClient::new(mock_server.uri());
         client
-            .create_admin_user("t", "ada", "s3cret", false)
+            .create_admin_user("t", "ada", &password, false)
             .await
             .expect("create user");
         client
-            .set_admin_user_password("t", "u-1", "n3w")
+            .set_admin_user_password("t", "u-1", &new_password)
             .await
             .expect("password");
         let err = client
