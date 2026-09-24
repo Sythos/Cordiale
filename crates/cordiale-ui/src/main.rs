@@ -35,7 +35,9 @@ use cordiale_core::bootstrap::{
     bootstrap, bootstrap_with_bearer, BootstrapError, BootstrapOutcome,
 };
 use cordiale_core::client::{GrappaClient, LoginError};
-use cordiale_core::credentials::resolve_credential_store;
+use cordiale_core::credentials::{
+    resolve_credential_store, CredentialStore, KeyringCredentialStore,
+};
 use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
@@ -168,6 +170,7 @@ fn main() -> Result<(), slint::PlatformError> {
     prefill_remembered_profile(&ui, &remembered_server_url);
 
     let settings = persistence::load_settings().unwrap_or_default();
+    let auto_connect = settings.auto_connect && settings.language.is_some();
     ui.set_next_screen(if settings.language.is_none() {
         "language".into()
     } else {
@@ -255,6 +258,20 @@ fn main() -> Result<(), slint::PlatformError> {
             credential: ConnectCredential::SavedProfile,
         });
     });
+
+    // Sign in at launch with the remembered profile (its bearer, or the
+    // login password kept in the OS keyring), unless the last session ended
+    // with a manual disconnect.
+    if auto_connect {
+        if let Some(identifier) = auto_connect_identifier(&remembered_server_url) {
+            ui.set_connecting(true);
+            let _ = worker_tx.send(WorkerCommand::Connect {
+                server_url: remembered_server_url.clone(),
+                identifier,
+                credential: ConnectCredential::SavedProfile,
+            });
+        }
+    }
 
     let tx_for_disconnect = worker_tx.clone();
     let weak_for_disconnect = ui.as_weak();
@@ -1621,6 +1638,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::Disconnect) => {
                         persistence::log_line("disconnect requested");
+                        // A manual disconnect is how the user switches
+                        // accounts: don't sign back in at the next launch.
+                        set_auto_connect(false);
                         if let Some(handle) = state.session.take() {
                             handle.shutdown();
                         }
@@ -1738,6 +1758,13 @@ async fn handle_connect(
 
     let client = GrappaClient::new(server_url.clone());
     let is_guest_attempt = credential.is_guest_attempt();
+    // The typed password (or client token) of a successful sign-in is kept
+    // in the OS keyring for the next launch.
+    let typed_password = match &credential {
+        ConnectCredential::FormValue(password) if !password.is_empty() => Some(password.clone()),
+        _ => None,
+    };
+    let mut used_remembered_password = false;
     let result = match credential {
         ConnectCredential::FormValue(password) => {
             // Older releases stored the entered password/client token in
@@ -1763,32 +1790,52 @@ async fn handle_connect(
             bootstrap(&client, &request).await
         }
         ConnectCredential::SavedProfile => {
-            let bearer = match remembered_profile_credential(&server_url, &identifier) {
-                RememberedProfileCredential::Bearer(bearer) => bearer,
-                RememberedProfileCredential::None
-                | RememberedProfileCredential::NeedsReauthentication => {
+            let with_bearer = match remembered_profile_credential(&server_url, &identifier) {
+                RememberedProfileCredential::Bearer(bearer) => {
                     persistence::log_line(&format!(
-                        "saved profile unavailable: server={server_url} identifier={identifier}"
+                        "connect attempt: server={server_url} identifier={identifier} \
+                         guest=false auth=saved_bearer"
                     ));
-                    show_reauthentication_required(ui);
-                    return;
+                    let result = bootstrap_with_bearer(&client, &bearer).await;
+                    if matches!(&result, Err(BootstrapError::BearerRejected)) {
+                        forget_remembered_bearer(&server_url, &identifier);
+                        persistence::log_line(&format!(
+                            "saved bearer rejected: server={server_url} identifier={identifier}"
+                        ));
+                        None
+                    } else {
+                        Some(result)
+                    }
                 }
+                RememberedProfileCredential::None
+                | RememberedProfileCredential::NeedsReauthentication => None,
             };
-
-            persistence::log_line(&format!(
-                "connect attempt: server={server_url} identifier={identifier} \
-                 guest=false auth=saved_bearer"
-            ));
-            let result = bootstrap_with_bearer(&client, &bearer).await;
-            if matches!(&result, Err(BootstrapError::BearerRejected)) {
-                forget_remembered_bearer(&server_url, &identifier);
-                persistence::log_line(&format!(
-                    "saved bearer rejected: server={server_url} identifier={identifier}"
-                ));
-                show_reauthentication_required(ui);
-                return;
+            match with_bearer {
+                Some(result) => result,
+                // No usable bearer: sign in again with the password kept in
+                // the OS keyring, if there is one.
+                None => match remembered_login_password(&server_url, &identifier) {
+                    Some(password) => {
+                        persistence::log_line(&format!(
+                            "connect attempt: server={server_url} identifier={identifier} \
+                             guest=false auth=remembered_password"
+                        ));
+                        used_remembered_password = true;
+                        let request = LoginRequest {
+                            identifier: identifier.clone(),
+                            password,
+                        };
+                        bootstrap(&client, &request).await
+                    }
+                    None => {
+                        persistence::log_line(&format!(
+                            "saved profile unavailable: server={server_url} identifier={identifier}"
+                        ));
+                        show_reauthentication_required(ui);
+                        return;
+                    }
+                },
             }
-            result
         }
     };
 
@@ -1809,6 +1856,10 @@ async fn handle_connect(
             }
             if !is_guest_attempt {
                 remember_profile(&server_url, &identifier, &outcome.token);
+                if let Some(password) = typed_password.as_deref() {
+                    remember_login_password(&server_url, &identifier, password);
+                }
+                set_auto_connect(true);
             }
             let saved_profile = if is_guest_attempt {
                 // Guest sign-in does not alter any remembered profile.
@@ -1986,6 +2037,7 @@ async fn handle_connect(
                     window_mentions,
                     window_messages,
                 );
+                ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
                 ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
             });
 
@@ -2006,6 +2058,13 @@ async fn handle_connect(
         }
         Err(err) => {
             persistence::log_line(&format!("connect failed: server={server_url} {err:?}"));
+            // A kept password the server now refuses (changed elsewhere) is
+            // dropped, so the next launch asks for it instead of retrying.
+            if used_remembered_password
+                && matches!(err, BootstrapError::Login(LoginError::InvalidCredentials))
+            {
+                forget_login_password(&server_url, &identifier);
+            }
             let ui = ui.clone();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
@@ -2078,6 +2137,7 @@ async fn handle_select_channel(
         let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
         let member_rows = members_model(&members, dark_theme);
+        ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
 }
@@ -4933,6 +4993,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_can_moderate_members(can_moderate);
         let member_rows = members_model(&members, dark_theme);
+        ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
         let chat_lines = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
         ui.set_chat_lines(Rc::new(slint::VecModel::from(chat_lines)).into());
@@ -6096,6 +6157,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let groups = network_groups_model(data, window_states, window_mentions, window_messages);
+        ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
         ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
     });
 }
@@ -6243,6 +6305,67 @@ fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isu
         .get(network)
         .map(|isupport| isupport.casemapping)
         .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459)
+}
+
+/// The longest sidebar row label, as displayed, measured by the Slint probe
+/// that sets the sidebar's minimum width. Lengths are compared in
+/// characters; the probe then measures the real text.
+fn widest_sidebar_label(groups: &[NetworkGroup]) -> String {
+    use slint::Model as _;
+
+    fn keep_longer(widest: &mut String, candidate: String) {
+        if candidate.chars().count() > widest.chars().count() {
+            *widest = candidate;
+        }
+    }
+
+    let mut widest = String::new();
+    for group in groups {
+        let network_row = if group.parked {
+            format!("▸ {} [PARKED]", group.network)
+        } else if group.connection_label.is_empty() {
+            format!("▾ 🔌 {}", group.network)
+        } else {
+            format!("▾ 🔌 {} · {}", group.network, group.connection_label)
+        };
+        keep_longer(&mut widest, network_row);
+        for entry in group.channels.iter() {
+            let invited = if entry.invited { "🔔 " } else { "" };
+            keep_longer(
+                &mut widest,
+                format!("{invited}{}{}", entry.label, entry.mention_badge),
+            );
+        }
+        for query in group.queries.iter() {
+            keep_longer(
+                &mut widest,
+                format!("↳ {}{}", query.label, query.mention_badge),
+            );
+        }
+    }
+    widest
+}
+
+/// A run of `n` characters as long as the average member label as shown in
+/// the member column (`[@] nick` when the member has a role), rounded up;
+/// empty without members. The Slint probe measures it for the column's
+/// minimum width.
+fn members_average_probe(rows: &[MemberRow]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let total: usize = rows
+        .iter()
+        .map(|row| {
+            let name = row.name.chars().count();
+            if row.prefix.is_empty() {
+                name
+            } else {
+                name + row.prefix.chars().count() + 3
+            }
+        })
+        .sum();
+    "n".repeat(total.div_ceil(rows.len()))
 }
 
 fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
@@ -10714,9 +10837,10 @@ fn remember_server_url(server_url: &str) {
     let _ = persistence::save_servers_file(&file);
 }
 
-/// Called only after a successful non-guest bootstrap. The entered password
-/// or per-client token is never persisted: only Grappa's returned bearer is
-/// written to the CredentialStore, while `servers.json` records its kind.
+/// Called only after a successful non-guest bootstrap. Grappa's returned
+/// bearer is written to the CredentialStore under the server URL, while
+/// `servers.json` records its kind. The typed password is kept separately
+/// and only in the OS keyring (`remember_login_password`).
 fn remember_profile(server_url: &str, identifier: &str, bearer: &str) {
     if let Ok(store) = resolve_credential_store() {
         let _ = store.set_secret(server_url, identifier, bearer);
@@ -10766,10 +10890,10 @@ fn known_servers_model() -> slint::ModelRc<slint::SharedString> {
     Rc::new(slint::VecModel::from(urls)).into()
 }
 
-/// Pre-fills only the identifier for the last remembered profile on
-/// `server_url`. Credentials are never copied into the password field; a
-/// returned bearer is loaded privately only when the user explicitly chooses
-/// the saved-profile sign-in action.
+/// Pre-fills the identifier for the last remembered profile on `server_url`,
+/// and the password field from the login password kept in the OS keyring.
+/// The stored bearer is never shown; it is used by the saved-profile
+/// sign-in and by the automatic sign-in at launch.
 fn prefill_remembered_profile(ui: &AppWindow, server_url: &str) {
     ui.set_saved_profile_identifier("".into());
     ui.set_saved_profile_server_url("".into());
@@ -10783,6 +10907,11 @@ fn prefill_remembered_profile(ui: &AppWindow, server_url: &str) {
     };
 
     ui.set_identifier(profile.identifier.clone().into());
+    // The kept login password fills the (masked) field, so Connect works
+    // without typing it again; a blank field would mean guest sign-in.
+    if let Some(password) = remembered_login_password(server_url, &profile.identifier) {
+        ui.set_password(password.into());
+    }
     if matches!(
         remembered_profile_credential(server_url, &profile.identifier),
         RememberedProfileCredential::Bearer(_)
@@ -10868,6 +10997,71 @@ fn forget_remembered_bearer(server_url: &str, identifier: &str) {
         if let Ok(store) = resolve_credential_store() {
             let _ = store.delete_secret(server_url, identifier);
         }
+    }
+}
+
+/// Keyring service for a profile's login password (or client token), kept
+/// apart from the bearer stored under the bare server URL.
+fn login_password_service(server_url: &str) -> String {
+    format!("{server_url}#login-password")
+}
+
+/// Keeps the password typed for a successful sign-in, only in the OS
+/// keyring: the obfuscated file fallback is not safe enough for it, so
+/// without a keyring nothing is stored.
+fn remember_login_password(server_url: &str, identifier: &str, password: &str) {
+    if identifier.is_empty() || password.is_empty() || !KeyringCredentialStore::is_available() {
+        return;
+    }
+    let _ = KeyringCredentialStore.set_secret(
+        &login_password_service(server_url),
+        identifier,
+        password,
+    );
+}
+
+/// The login password kept for a profile, if the OS keyring has one.
+fn remembered_login_password(server_url: &str, identifier: &str) -> Option<String> {
+    if identifier.is_empty() || !KeyringCredentialStore::is_available() {
+        return None;
+    }
+    KeyringCredentialStore
+        .get_secret(&login_password_service(server_url), identifier)
+        .ok()
+        .flatten()
+        .filter(|password| !password.is_empty())
+}
+
+/// Drops a kept login password Grappa no longer accepts.
+fn forget_login_password(server_url: &str, identifier: &str) {
+    if identifier.is_empty() || !KeyringCredentialStore::is_available() {
+        return;
+    }
+    let _ = KeyringCredentialStore.delete_secret(&login_password_service(server_url), identifier);
+}
+
+/// The remembered profile to sign in with at launch on `server_url`: one
+/// with a stored bearer or a kept login password.
+fn auto_connect_identifier(server_url: &str) -> Option<String> {
+    let file = persistence::load_servers_file().unwrap_or_default();
+    let profile = file.profiles.iter().find(|profile| {
+        profile.server_base_url == server_url
+            && profile.remembered
+            && file.selected_profile_identifier.as_deref() == Some(profile.identifier.as_str())
+    })?;
+    let has_bearer = matches!(
+        remembered_profile_credential(server_url, &profile.identifier),
+        RememberedProfileCredential::Bearer(_)
+    );
+    (has_bearer || remembered_login_password(server_url, &profile.identifier).is_some())
+        .then(|| profile.identifier.clone())
+}
+
+fn set_auto_connect(enabled: bool) {
+    let mut settings = persistence::load_settings().unwrap_or_default();
+    if settings.auto_connect != enabled {
+        settings.auto_connect = enabled;
+        let _ = persistence::save_settings(&settings);
     }
 }
 
@@ -14487,6 +14681,53 @@ mod tests {
 
         theme.payload.colors.remove("bg");
         assert!(server_theme_choice(&theme).is_none());
+    }
+
+    #[test]
+    fn widest_sidebar_label_picks_the_longest_row() {
+        let channels = vec![
+            ChannelEntry {
+                label: "#rust".into(),
+                ..Default::default()
+            },
+            ChannelEntry {
+                label: "#a-much-longer-channel".into(),
+                mention_badge: " (2)".into(),
+                ..Default::default()
+            },
+        ];
+        let groups = vec![
+            NetworkGroup {
+                network: "libera".into(),
+                channels: Rc::new(slint::VecModel::from(channels)).into(),
+                ..Default::default()
+            },
+            NetworkGroup {
+                network: "azzurra".into(),
+                parked: true,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(widest_sidebar_label(&groups), "#a-much-longer-channel (2)");
+        assert_eq!(widest_sidebar_label(&[]), "");
+    }
+
+    #[test]
+    fn members_average_probe_counts_the_bracketed_prefix() {
+        assert_eq!(members_average_probe(&[]), "");
+        let rows = vec![
+            MemberRow {
+                name: "Sythos".into(),
+                prefix: "@".into(),
+                ..Default::default()
+            },
+            MemberRow {
+                name: "vjt".into(),
+                ..Default::default()
+            },
+        ];
+        // "[@] Sythos" is 10 characters and "vjt" 3: the average rounds up to 7.
+        assert_eq!(members_average_probe(&rows), "nnnnnnn");
     }
 
     #[test]
