@@ -165,10 +165,6 @@ msgid "Show bottom bar"
 msgstr "Mostra barra inferiore"
 
 msgctxt "AppWindow"
-msgid "Not available yet — this section needs Grappa REST/WS endpoints Cordiale doesn't implement yet."
-msgstr "Non ancora disponibile: questa sezione richiede endpoint REST/WS di Grappa che Cordiale non implementa ancora."
-
-msgctxt "AppWindow"
 msgid "Vhosts, credentials, server-wide settings write, and the live admin event stream aren't built yet."
 msgstr "Vhost, credenziali, scrittura impostazioni server e flusso eventi admin live non sono ancora implementati."
 
@@ -849,38 +845,6 @@ msgid "Connection"
 msgstr "Connessione"
 
 msgctxt "AppWindow"
-msgid "Auto-away delay: {}"
-msgstr "Ritardo assenza automatica: {}"
-
-msgctxt "AppWindow"
-msgid "server default"
-msgstr "predefinito del server"
-
-msgctxt "AppWindow"
-msgid "off"
-msgstr "disattivato"
-
-msgctxt "AppWindow"
-msgid "{} seconds"
-msgstr "{} secondi"
-
-msgctxt "AppWindow"
-msgid "Quit/part message: {}"
-msgstr "Messaggio di uscita/abbandono: {}"
-
-msgctxt "AppWindow"
-msgid "Quit/part message: none (server default)"
-msgstr "Messaggio di uscita/abbandono: nessuno (predefinito del server)"
-
-msgctxt "AppWindow"
-msgid "Auto-away message: {}"
-msgstr "Messaggio di assenza automatica: {}"
-
-msgctxt "AppWindow"
-msgid "Auto-away message: server default"
-msgstr "Messaggio di assenza automatica: predefinito del server"
-
-msgctxt "AppWindow"
 msgid "Server upload limits ({}): images {}, videos {}, documents {}, audio {}."
 msgstr "Limiti di upload del server ({}): immagini {}, video {}, documenti {}, audio {}."
 
@@ -1095,6 +1059,82 @@ msgstr "Chiedi prima di caricare"
 msgctxt "AppWindow"
 msgid "Load older messages"
 msgstr "Carica messaggi più vecchi"
+
+msgctxt "AppWindow"
+msgid "Keep at least one message notification on."
+msgstr "Lascia attiva almeno una notifica dei messaggi."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the notification settings."
+msgstr "Impossibile salvare le impostazioni delle notifiche."
+
+msgctxt "AppWindow"
+msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
+msgstr "Autenticazione a due fattori, passkey, token dei client ed eliminazione dell'account si gestiscono in Cicchetto: Grappa li tiene fuori dalla portata di un token client come quello con cui accede Cordiale."
+
+msgctxt "AppWindow"
+msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
+msgstr "Notifiche push che Grappa invia ai tuoi dispositivi (ad esempio Cicchetto sul telefono) quando nessuno di essi è in uso."
+
+msgctxt "AppWindow"
+msgid "Mentions of my nick in channels"
+msgstr "Menzioni del mio nick nei canali"
+
+msgctxt "AppWindow"
+msgid "Every channel message"
+msgstr "Ogni messaggio nei canali"
+
+msgctxt "AppWindow"
+msgid "Every private message"
+msgstr "Ogni messaggio privato"
+
+msgctxt "AppWindow"
+msgid "Watched nicks coming online"
+msgstr "Nick osservati che si collegano"
+
+msgctxt "AppWindow"
+msgid "Watched nicks going offline"
+msgstr "Nick osservati che si scollegano"
+
+msgctxt "AppWindow"
+msgid "The auto-away delay must be a whole number of seconds."
+msgstr "Il ritardo dell'assenza automatica deve essere un numero intero di secondi."
+
+msgctxt "AppWindow"
+msgid "Settings saved."
+msgstr "Impostazioni salvate."
+
+msgctxt "AppWindow"
+msgid "Couldn't save those settings."
+msgstr "Impossibile salvare queste impostazioni."
+
+msgctxt "AppWindow"
+msgid "Away and leave messages"
+msgstr "Messaggi di assenza e di uscita"
+
+msgctxt "AppWindow"
+msgid "Leave a field empty to use the server's default."
+msgstr "Lascia un campo vuoto per usare il valore predefinito del server."
+
+msgctxt "AppWindow"
+msgid "Quit/part message"
+msgstr "Messaggio di uscita/abbandono"
+
+msgctxt "AppWindow"
+msgid "Auto-away message"
+msgstr "Messaggio di assenza automatica"
+
+msgctxt "AppWindow"
+msgid "Auto-away after (seconds, 0 = off)"
+msgstr "Assenza automatica dopo (secondi, 0 = disattivata)"
+
+msgctxt "AppWindow"
+msgid "Look up other users' profiles (CTCP USERINFO)"
+msgstr "Consulta i profili degli altri utenti (CTCP USERINFO)"
+
+msgctxt "AppWindow"
+msgid "Accept DCC files from open private conversations automatically"
+msgstr "Accetta automaticamente i file DCC dalle conversazioni private aperte"
 
 msgctxt "AppWindow"
 msgid "You were kicked from this channel."

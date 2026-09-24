@@ -107,6 +107,8 @@ enum WorkerCommand {
     ToggleTheme,
     SelectColorTheme(String),
     SaveDisplayPrefs(DisplayPrefs),
+    LoadNotificationPrefs,
+    SaveNotificationPrefs(NotificationToggles),
     AdminRefresh,
     AdminDisconnectSession(String),
     AdminUserToggleAdmin(String, bool),
@@ -123,6 +125,13 @@ enum WorkerCommand {
     IgnoreAdd(String),
     IgnoreRemove(String),
     PerformSave(String),
+    PersonalPrefsSave {
+        leave_message: String,
+        away_message: String,
+        away_delay: String,
+        show_peer_profiles: bool,
+    },
+    DccAutoAcceptToggle(bool),
     AliasAdd {
         command: String,
         expansion: String,
@@ -308,9 +317,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_window_invite_inviter("".into());
             ui.set_recover_visible(false);
             ui.set_dcc_offers(slint::ModelRc::default());
-            ui.set_server_pref_auto_away_debounce("".into());
-            ui.set_server_pref_leave_message_known(false);
-            ui.set_server_pref_auto_away_reason_known(false);
+            ui.set_personal_prefs_loaded(false);
             ui.set_server_upload_limits_known(false);
         }
     });
@@ -572,6 +579,27 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    let tx_for_notify_load = worker_tx.clone();
+    ui.on_notification_prefs_requested(move || {
+        let _ = tx_for_notify_load.send(WorkerCommand::LoadNotificationPrefs);
+    });
+
+    let tx_for_notify_save = worker_tx.clone();
+    let weak_for_notify = ui.as_weak();
+    ui.on_notification_prefs_changed(move || {
+        if let Some(ui) = weak_for_notify.upgrade() {
+            let _ = tx_for_notify_save.send(WorkerCommand::SaveNotificationPrefs(
+                NotificationToggles {
+                    channel_mentions: ui.get_notify_channel_mentions(),
+                    channel_messages_all: ui.get_notify_channel_all(),
+                    private_messages_all: ui.get_notify_private_all(),
+                    presence_online: ui.get_notify_presence_online(),
+                    presence_offline: ui.get_notify_presence_offline(),
+                },
+            ));
+        }
+    });
+
     let tx_for_admin_refresh = worker_tx.clone();
     ui.on_admin_refresh_requested(move || {
         let _ = tx_for_admin_refresh.send(WorkerCommand::AdminRefresh);
@@ -654,6 +682,24 @@ fn main() -> Result<(), slint::PlatformError> {
                 realname: ui.get_identity_realname().to_string(),
             });
         }
+    });
+
+    let tx_for_personal = worker_tx.clone();
+    let weak_for_personal = ui.as_weak();
+    ui.on_personal_prefs_save_requested(move || {
+        if let Some(ui) = weak_for_personal.upgrade() {
+            let _ = tx_for_personal.send(WorkerCommand::PersonalPrefsSave {
+                leave_message: ui.get_edit_leave_message().to_string(),
+                away_message: ui.get_edit_away_message().to_string(),
+                away_delay: ui.get_edit_away_delay().to_string(),
+                show_peer_profiles: ui.get_pref_show_peer_profiles(),
+            });
+        }
+    });
+
+    let tx_for_dcc_auto = worker_tx.clone();
+    ui.on_dcc_auto_accept_toggled(move |enabled| {
+        let _ = tx_for_dcc_auto.send(WorkerCommand::DccAutoAcceptToggle(enabled));
     });
 
     let tx_for_ignore_add = worker_tx.clone();
@@ -980,11 +1026,11 @@ enum AutoAwayDebounce {
 }
 
 impl AutoAwayDebounce {
-    /// The token the Settings screen translates: `default`, `off`, or seconds.
-    fn display_token(self) -> String {
+    /// The delay as typed in Settings: empty, `0` (off), or seconds.
+    fn edit_text(self) -> String {
         match self {
-            Self::ServerDefault => "default".to_string(),
-            Self::Disabled => "off".to_string(),
+            Self::ServerDefault => String::new(),
+            Self::Disabled => "0".to_string(),
             Self::Seconds(seconds) => seconds.to_string(),
         }
     }
@@ -1307,6 +1353,9 @@ struct WorkerState {
     /// Upload limits from the latest `server_settings_changed`, shown read
     /// only in Settings (Cordiale doesn't upload files yet).
     upload_limits: Option<UploadLimits>,
+    /// Last push-notification map read from Grappa; edits overlay the
+    /// toggles Cordiale shows and send the whole map back.
+    notification_prefs: Option<serde_json::Map<String, Value>>,
     /// Last announced web-client bundle `(hash, version)`, only to log a
     /// change once; it names Cicchetto's build, not this app.
     web_bundle: Option<(String, Option<String>)>,
@@ -1385,6 +1434,7 @@ impl WorkerState {
             peer_away: HashMap::new(),
             mentions_bundles: HashMap::new(),
             upload_limits: None,
+            notification_prefs: None,
             web_bundle: None,
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
@@ -1538,6 +1588,12 @@ async fn run_worker(
                     Some(WorkerCommand::SelectColorTheme(key)) => {
                         select_color_theme(&mut state, &ui, &key).await;
                     }
+                    Some(WorkerCommand::LoadNotificationPrefs) => {
+                        handle_load_notification_prefs(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::SaveNotificationPrefs(toggles)) => {
+                        handle_save_notification_prefs(&mut state, &ui, toggles).await;
+                    }
                     Some(WorkerCommand::SaveDisplayPrefs(prefs)) => {
                         handle_save_display_prefs(&state, prefs).await;
                     }
@@ -1590,6 +1646,35 @@ async fn run_worker(
                         realname,
                     }) => {
                         handle_identity_save(&state, nick, ident, realname).await;
+                    }
+                    Some(WorkerCommand::PersonalPrefsSave {
+                        leave_message,
+                        away_message,
+                        away_delay,
+                        show_peer_profiles,
+                    }) => {
+                        handle_personal_prefs_save(
+                            &state,
+                            &ui,
+                            leave_message,
+                            away_message,
+                            away_delay,
+                            show_peer_profiles,
+                        )
+                        .await;
+                    }
+                    Some(WorkerCommand::DccAutoAcceptToggle(enabled)) => {
+                        if let (Some(client), Some(token), Some(network)) =
+                            (&state.client, &state.token, &state.settings_network)
+                        {
+                            if let Err(err) =
+                                client.set_dcc_auto_accept(token, network, enabled).await
+                            {
+                                persistence::log_line(&format!(
+                                    "dcc auto-accept save failed: {err:?}"
+                                ));
+                            }
+                        }
                     }
                     Some(WorkerCommand::IgnoreAdd(mask)) => {
                         if let (Some(client), Some(token), Some(network)) =
@@ -2042,6 +2127,7 @@ async fn handle_connect(
                         apply_display_prefs(&ui, &prefs);
                     });
                 }
+                load_personal_prefs(&prefs_client, &prefs_token, &ui_for_prefs).await;
                 let ttl = prefs_client.fetch_upload_ttl(&prefs_token).await;
                 let confirm = prefs_client.fetch_upload_confirm(&prefs_token).await;
                 if let (Ok(ttl), Ok(confirm)) = (ttl, confirm) {
@@ -2092,9 +2178,7 @@ async fn handle_connect(
                 ui.set_window_invite_inviter("".into());
                 ui.set_recover_visible(false);
                 ui.set_dcc_offers(slint::ModelRc::default());
-                ui.set_server_pref_auto_away_debounce("".into());
-                ui.set_server_pref_leave_message_known(false);
-                ui.set_server_pref_auto_away_reason_known(false);
+                ui.set_personal_prefs_loaded(false);
                 ui.set_server_upload_limits_known(false);
                 ui.set_current_query(false);
                 ui.set_current_query_ready(false);
@@ -3186,6 +3270,100 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     });
 }
 
+/// The push-notification switches shown in Settings > Notifications; the
+/// rest of Grappa's map (per-target lists, mutes, sound) is kept as read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotificationToggles {
+    channel_mentions: bool,
+    channel_messages_all: bool,
+    private_messages_all: bool,
+    presence_online: bool,
+    presence_offline: bool,
+}
+
+impl NotificationToggles {
+    fn from_prefs(prefs: &serde_json::Map<String, Value>) -> Self {
+        let flag =
+            |key: &str, default: bool| prefs.get(key).and_then(Value::as_bool).unwrap_or(default);
+        // Defaults are Grappa's own (`default_notification_prefs/0`).
+        Self {
+            channel_mentions: flag("channel_mentions", true),
+            channel_messages_all: flag("channel_messages_all", false),
+            private_messages_all: flag("private_messages_all", true),
+            presence_online: flag("presence_online", false),
+            presence_offline: flag("presence_offline", false),
+        }
+    }
+
+    fn apply_to(self, prefs: &mut serde_json::Map<String, Value>) {
+        for (key, value) in [
+            ("channel_mentions", self.channel_mentions),
+            ("channel_messages_all", self.channel_messages_all),
+            ("private_messages_all", self.private_messages_all),
+            ("presence_online", self.presence_online),
+            ("presence_offline", self.presence_offline),
+        ] {
+            prefs.insert(key.to_string(), Value::Bool(value));
+        }
+    }
+}
+
+fn push_notification_toggles(ui: &slint::Weak<AppWindow>, toggles: NotificationToggles) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_notify_channel_mentions(toggles.channel_mentions);
+        ui.set_notify_channel_all(toggles.channel_messages_all);
+        ui.set_notify_private_all(toggles.private_messages_all);
+        ui.set_notify_presence_online(toggles.presence_online);
+        ui.set_notify_presence_offline(toggles.presence_offline);
+        ui.set_notify_prefs_loaded(true);
+    });
+}
+
+async fn handle_load_notification_prefs(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    match client.fetch_notification_prefs(&token).await {
+        Ok(prefs) => {
+            push_notification_toggles(ui, NotificationToggles::from_prefs(&prefs));
+            state.notification_prefs = Some(prefs);
+        }
+        Err(err) => persistence::log_line(&format!("notification prefs load failed: {err:?}")),
+    }
+}
+
+/// Saves the switches over the last map read. Grappa refuses (422) a map
+/// with no message trigger left on; the switches then go back to the
+/// stored values.
+async fn handle_save_notification_prefs(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    toggles: NotificationToggles,
+) {
+    let (Some(client), Some(token), Some(stored)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.notification_prefs.clone(),
+    ) else {
+        return;
+    };
+    let mut prefs = stored.clone();
+    toggles.apply_to(&mut prefs);
+    match client.set_notification_prefs(&token, &prefs).await {
+        Ok(()) => state.notification_prefs = Some(prefs),
+        Err(err) => {
+            persistence::log_line(&format!("notification prefs save failed: {err:?}"));
+            let kind = if err.status().map(|status| status.as_u16()) == Some(422) {
+                "notify-prefs-invalid"
+            } else {
+                "notify-prefs-failed"
+            };
+            push_notification_toggles(ui, NotificationToggles::from_prefs(&stored));
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_status_kind(kind.into()));
+        }
+    }
+}
+
 /// Rows fetched per "Load older messages" click.
 const OLDER_HISTORY_PAGE: usize = 100;
 
@@ -3395,6 +3573,13 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
     };
     let aliases = client.fetch_aliases(token).await.unwrap_or_default();
     let vhost = client.fetch_vhost_settings(token).await.ok();
+    let dcc_auto_accept = match &state.settings_network {
+        Some(network) => client
+            .fetch_dcc_auto_accept(token, network)
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
 
     let alias_rows: Vec<AliasRow> = aliases
         .into_iter()
@@ -3433,7 +3618,89 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
         ui.set_perform_text(perform_text.into());
         ui.set_settings_aliases(Rc::new(slint::VecModel::from(alias_rows)).into());
         ui.set_settings_vhost_options(Rc::new(slint::VecModel::from(vhost_rows)).into());
+        ui.set_pref_dcc_auto_accept(dcc_auto_accept);
     });
+}
+
+/// Loads the account's away/leave messages, auto-away delay and
+/// peer-profile opt-in into the Settings editors.
+async fn load_personal_prefs(client: &GrappaClient, token: &str, ui: &slint::Weak<AppWindow>) {
+    let leave = client.fetch_quit_part_reason(token).await;
+    let away = client.fetch_auto_away_reason(token).await;
+    let delay = client.fetch_auto_away_debounce(token).await;
+    let peers = client.fetch_show_peer_profiles(token).await;
+    let (Ok(leave), Ok(away), Ok(delay), Ok(peers)) = (leave, away, delay, peers) else {
+        persistence::log_line("personal settings load failed");
+        return;
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_edit_leave_message(leave.unwrap_or_default().into());
+        ui.set_edit_away_message(away.unwrap_or_default().into());
+        ui.set_edit_away_delay(away_delay_text(delay).into());
+        ui.set_pref_show_peer_profiles(peers);
+        ui.set_personal_prefs_loaded(true);
+    });
+}
+
+/// The auto-away delay as typed in Settings: empty for the server default,
+/// `0` for off, otherwise seconds.
+fn away_delay_text(seconds: Option<i64>) -> String {
+    seconds
+        .map(|seconds| seconds.to_string())
+        .unwrap_or_default()
+}
+
+/// Parses the typed auto-away delay back: `Ok(None)` when empty, `Err` for
+/// anything but a non-negative whole number.
+fn parse_away_delay(text: &str) -> Result<Option<i64>, ()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    match text.parse::<i64>() {
+        Ok(seconds) if seconds >= 0 => Ok(Some(seconds)),
+        _ => Err(()),
+    }
+}
+
+async fn handle_personal_prefs_save(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    leave_message: String,
+    away_message: String,
+    away_delay: String,
+    show_peer_profiles: bool,
+) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let set_status = |kind: &'static str| {
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.set_status_kind(kind.into()));
+    };
+    let Ok(delay) = parse_away_delay(&away_delay) else {
+        set_status("away-delay-invalid");
+        return;
+    };
+    let leave = leave_message.trim();
+    let away = away_message.trim();
+    let results = [
+        client
+            .set_quit_part_reason(token, (!leave.is_empty()).then_some(leave))
+            .await,
+        client
+            .set_auto_away_reason(token, (!away.is_empty()).then_some(away))
+            .await,
+        client.set_auto_away_debounce(token, delay).await,
+        client
+            .set_show_peer_profiles(token, show_peer_profiles)
+            .await,
+    ];
+    if let Some(Err(err)) = results.into_iter().find(Result::is_err) {
+        persistence::log_line(&format!("personal settings save failed: {err:?}"));
+        set_status("personal-prefs-failed");
+    } else {
+        set_status("personal-prefs-saved");
+    }
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -8629,10 +8896,10 @@ fn handle_auto_away_debounce_changed(
         return;
     }
     state.auto_away_debounce = Some(debounce);
-    let token = debounce.display_token();
+    let text = debounce.edit_text();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        ui.set_server_pref_auto_away_debounce(token.into());
+        ui.set_edit_away_delay(text.into());
     });
 }
 
@@ -8655,8 +8922,8 @@ fn parse_nullable_setting_echo(
     parse_nullable_wire_string(payload.get(key)?)
 }
 
-/// Mirrors the server's remembered QUIT/PART text into Settings as a
-/// read-only display copy; Grappa stays the owner of the value.
+/// Mirrors the server's remembered QUIT/PART text into its Settings
+/// editor; Grappa stays the owner of the value.
 fn handle_quit_part_reason_changed(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -8682,14 +8949,12 @@ fn handle_quit_part_reason_changed(
     state.quit_part_reason = Some(reason.clone());
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        ui.set_server_pref_leave_message_set(reason.is_some());
-        ui.set_server_pref_leave_message(reason.unwrap_or_default().into());
-        ui.set_server_pref_leave_message_known(true);
+        ui.set_edit_leave_message(reason.unwrap_or_default().into());
     });
 }
 
-/// Mirrors the server's auto-away text into Settings as a read-only display
-/// copy; `null` means Grappa keeps its own built-in text, never substituted.
+/// Mirrors the server's auto-away text into its Settings editor; `null`
+/// (Grappa keeps its own built-in text) shows as an empty field.
 fn handle_auto_away_reason_changed(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -8715,9 +8980,7 @@ fn handle_auto_away_reason_changed(
     state.auto_away_reason = Some(reason.clone());
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        ui.set_server_pref_auto_away_reason_set(reason.is_some());
-        ui.set_server_pref_auto_away_reason(reason.unwrap_or_default().into());
-        ui.set_server_pref_auto_away_reason_known(true);
+        ui.set_edit_away_message(reason.unwrap_or_default().into());
     });
 }
 
@@ -15431,6 +15694,19 @@ mod tests {
     }
 
     #[test]
+    fn away_delay_text_round_trips() {
+        assert_eq!(away_delay_text(None), "");
+        assert_eq!(away_delay_text(Some(0)), "0");
+        assert_eq!(parse_away_delay(" "), Ok(None));
+        assert_eq!(parse_away_delay("300"), Ok(Some(300)));
+        assert_eq!(parse_away_delay("0"), Ok(Some(0)));
+        assert_eq!(parse_away_delay("-5"), Err(()));
+        assert_eq!(parse_away_delay("soon"), Err(()));
+        assert_eq!(AutoAwayDebounce::Disabled.edit_text(), "0");
+        assert_eq!(AutoAwayDebounce::ServerDefault.edit_text(), "");
+    }
+
+    #[test]
     fn upload_ttl_menu_maps_both_ways() {
         assert_eq!(upload_ttl_for_index(0), None);
         assert_eq!(upload_ttl_for_index(3), Some(86_400));
@@ -15471,6 +15747,30 @@ mod tests {
         );
         state.current_query = true;
         assert_eq!(window_note(&state), ("", String::new(), String::new()));
+    }
+
+    #[test]
+    fn notification_toggles_keep_the_rest_of_the_map() {
+        let mut prefs = serde_json::json!({
+            "channel_mentions": true,
+            "channel_messages_only": ["#rust"],
+            "notification_sound": "chime"
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let toggles = NotificationToggles::from_prefs(&prefs);
+        assert!(toggles.channel_mentions && toggles.private_messages_all);
+        assert!(!toggles.presence_online);
+        NotificationToggles {
+            presence_online: true,
+            ..toggles
+        }
+        .apply_to(&mut prefs);
+        assert_eq!(prefs["presence_online"], serde_json::json!(true));
+        assert_eq!(prefs["private_messages_all"], serde_json::json!(true));
+        assert_eq!(prefs["notification_sound"], serde_json::json!("chime"));
+        assert_eq!(prefs["channel_messages_only"], serde_json::json!(["#rust"]));
     }
 
     #[test]
@@ -16341,9 +16641,7 @@ mod tests {
             parse_auto_away_debounce_changed(&payload(serde_json::json!(300)), topic, "vjt"),
             Some(AutoAwayDebounce::Seconds(300))
         );
-        assert_eq!(AutoAwayDebounce::ServerDefault.display_token(), "default");
-        assert_eq!(AutoAwayDebounce::Disabled.display_token(), "off");
-        assert_eq!(AutoAwayDebounce::Seconds(300).display_token(), "300");
+        assert_eq!(AutoAwayDebounce::Seconds(300).edit_text(), "300");
 
         for invalid in [
             payload(serde_json::json!(-1)),

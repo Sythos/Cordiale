@@ -62,7 +62,9 @@ Cordiale still has these user-visible or behavioral gaps:
   not read back into the identity editor, so its fields start blank.
   Watch-list keywords are session-local rather than reconciled with the
   server. On-Connect Commands uses one line instead of Cicchetto's multiline
-  editor; some server-owned preferences and upload limits are read-only.
+  editor; the server's upload limits are shown read-only. Settings >
+  Notifications covers the main push switches, not per-channel lists or
+  mutes.
 - **Uploads and attachments:** the paperclip uploads a picked file through
   Grappa (`POST /api/uploads`) and posts its link with the category emoji,
   as Cicchetto does, after checking the file type and the advertised size

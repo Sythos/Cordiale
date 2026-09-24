@@ -376,7 +376,10 @@ impl GrappaClient {
             .send()
             .await?
             .error_for_status()?;
-        Ok(response.json::<DisplayPrefs>().await?)
+        // Grappa wraps the prefs: `{"display_prefs": {...}, "persisted": bool}`.
+        let body = response.json::<Value>().await?;
+        let prefs = body.get("display_prefs").cloned().unwrap_or(body);
+        Ok(serde_json::from_value(prefs).unwrap_or_default())
     }
 
     /// `PUT /me/settings/display-prefs` — only the fields set on `prefs` are
@@ -388,10 +391,218 @@ impl GrappaClient {
         prefs: &DisplayPrefs,
     ) -> Result<(), GrappaClientError> {
         let url = format!("{}/me/settings/display-prefs", self.base_url);
+        // The PUT replaces the whole stored map (wrapped under
+        // `display_prefs`), so the keys Cordiale doesn't edit (time format,
+        // presence filter, ...) are read back first and sent unchanged.
+        let current = self
+            .http
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        let mut merged = match current.get("display_prefs") {
+            Some(Value::Object(map)) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+        if let Ok(Value::Object(changes)) = serde_json::to_value(prefs) {
+            merged.extend(changes);
+        }
         self.http
             .put(url)
             .bearer_auth(token)
-            .json(prefs)
+            .json(&serde_json::json!({ "display_prefs": merged }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /me/settings/<key>` for a single-value setting; the response is
+    /// `{"<field>": value}`.
+    async fn fetch_setting(
+        &self,
+        token: &str,
+        key: &str,
+        field: &str,
+    ) -> Result<Value, GrappaClientError> {
+        let url = format!("{}/me/settings/{key}", self.base_url);
+        let body = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(body.get(field).cloned().unwrap_or(Value::Null))
+    }
+
+    /// `PUT /me/settings/<key>` with `{"<field>": value}`.
+    async fn put_setting(
+        &self,
+        token: &str,
+        key: &str,
+        field: &str,
+        value: Value,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/me/settings/{key}", self.base_url);
+        let mut body = serde_json::Map::new();
+        body.insert(field.to_string(), value);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// The remembered QUIT/PART message (`None`: the server's own).
+    pub async fn fetch_quit_part_reason(
+        &self,
+        token: &str,
+    ) -> Result<Option<String>, GrappaClientError> {
+        let value = self
+            .fetch_setting(token, "quit-part-reason", "quit_part_reason")
+            .await?;
+        Ok(value.as_str().map(str::to_string))
+    }
+
+    /// Stores the QUIT/PART message; `None` clears it.
+    pub async fn set_quit_part_reason(
+        &self,
+        token: &str,
+        reason: Option<&str>,
+    ) -> Result<(), GrappaClientError> {
+        self.put_setting(token, "quit-part-reason", "quit_part_reason", reason.into())
+            .await
+    }
+
+    /// The text sent when the bouncer marks the user away (`None`: the
+    /// server's own).
+    pub async fn fetch_auto_away_reason(
+        &self,
+        token: &str,
+    ) -> Result<Option<String>, GrappaClientError> {
+        let value = self
+            .fetch_setting(token, "auto-away-reason", "auto_away_reason")
+            .await?;
+        Ok(value.as_str().map(str::to_string))
+    }
+
+    /// Stores the auto-away text; `None` clears it. Live sessions already
+    /// away pick it up at once.
+    pub async fn set_auto_away_reason(
+        &self,
+        token: &str,
+        reason: Option<&str>,
+    ) -> Result<(), GrappaClientError> {
+        self.put_setting(token, "auto-away-reason", "auto_away_reason", reason.into())
+            .await
+    }
+
+    /// The auto-away delay: `None` for the server default, `Some(0)` when
+    /// auto-away is off, otherwise seconds.
+    pub async fn fetch_auto_away_debounce(
+        &self,
+        token: &str,
+    ) -> Result<Option<i64>, GrappaClientError> {
+        let value = self
+            .fetch_setting(
+                token,
+                "auto-away-debounce-seconds",
+                "auto_away_debounce_seconds",
+            )
+            .await?;
+        Ok(value.as_i64())
+    }
+
+    /// Stores the auto-away delay, with the same `None`/`0` meanings.
+    pub async fn set_auto_away_debounce(
+        &self,
+        token: &str,
+        seconds: Option<i64>,
+    ) -> Result<(), GrappaClientError> {
+        self.put_setting(
+            token,
+            "auto-away-debounce-seconds",
+            "auto_away_debounce_seconds",
+            seconds.into(),
+        )
+        .await
+    }
+
+    /// Whether Grappa looks up other users' CTCP USERINFO profiles.
+    pub async fn fetch_show_peer_profiles(&self, token: &str) -> Result<bool, GrappaClientError> {
+        let value = self
+            .fetch_setting(token, "show-peer-profiles", "show_peer_profiles")
+            .await?;
+        Ok(value.as_bool().unwrap_or(false))
+    }
+
+    /// Stores the peer-profile opt-in; it applies from the next session.
+    pub async fn set_show_peer_profiles(
+        &self,
+        token: &str,
+        enabled: bool,
+    ) -> Result<(), GrappaClientError> {
+        self.put_setting(
+            token,
+            "show-peer-profiles",
+            "show_peer_profiles",
+            enabled.into(),
+        )
+        .await
+    }
+
+    /// `GET /networks/:slug/dcc-auto-accept` — whether DCC files from peers
+    /// with an open private window are accepted without asking.
+    pub async fn fetch_dcc_auto_accept(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<bool, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "dcc-auto-accept"]);
+        let body = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(body
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false))
+    }
+
+    /// `PUT /networks/:slug/dcc-auto-accept {enabled}`.
+    pub async fn set_dcc_auto_accept(
+        &self,
+        token: &str,
+        network_slug: &str,
+        enabled: bool,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "dcc-auto-accept"]);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "enabled": enabled }))
             .send()
             .await?
             .error_for_status()?;
@@ -984,6 +1195,48 @@ impl GrappaClient {
         self.http
             .delete(url)
             .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /me/settings/notification-prefs` — the full push-notification
+    /// map (the server fills in its defaults), as the object under
+    /// `notification_prefs`.
+    pub async fn fetch_notification_prefs(
+        &self,
+        token: &str,
+    ) -> Result<serde_json::Map<String, Value>, GrappaClientError> {
+        let url = format!("{}/me/settings/notification-prefs", self.base_url);
+        let body = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(match body.get("notification_prefs") {
+            Some(Value::Object(prefs)) => prefs.clone(),
+            _ => serde_json::Map::new(),
+        })
+    }
+
+    /// `PUT /me/settings/notification-prefs` — the full map, NOT wrapped.
+    /// Every boolean must be present, and at least one message trigger
+    /// must stay on, else 422.
+    pub async fn set_notification_prefs(
+        &self,
+        token: &str,
+        prefs: &serde_json::Map<String, Value>,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/me/settings/notification-prefs", self.base_url);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(prefs)
             .send()
             .await?
             .error_for_status()?;
@@ -1604,10 +1857,10 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/me/settings/display-prefs"))
             .and(header("authorization", "Bearer abc123"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"colored_nicklist": false})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "display_prefs": {"colored_nicklist": false},
+                "persisted": true
+            })))
             .mount(&mock_server)
             .await;
 
@@ -1622,13 +1875,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_display_prefs_sends_only_the_set_fields() {
+    async fn update_display_prefs_keeps_the_keys_it_does_not_edit() {
         let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "display_prefs": {"time_format": "24h", "bold_mentions": false},
+                "persisted": true
+            })))
+            .mount(&mock_server)
+            .await;
         Mock::given(method("PUT"))
             .and(path("/me/settings/display-prefs"))
             .and(header("authorization", "Bearer abc123"))
-            .and(body_json(serde_json::json!({"bold_mentions": true})))
+            .and(body_json(serde_json::json!({
+                "display_prefs": {"time_format": "24h", "bold_mentions": true}
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
             .mount(&mock_server)
             .await;
 
@@ -1641,6 +1905,55 @@ mod tests {
             .update_display_prefs("abc123", &prefs)
             .await
             .expect("update_display_prefs");
+    }
+
+    #[tokio::test]
+    async fn personal_settings_use_their_wire_keys() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/auto-away-debounce-seconds"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "auto_away_debounce_seconds": 0 })),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/quit-part-reason"))
+            .and(body_json(serde_json::json!({ "quit_part_reason": null })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "quit_part_reason": null })),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/networks/libera/dcc-auto-accept"))
+            .and(body_json(serde_json::json!({ "enabled": true })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "enabled": true })),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        assert_eq!(
+            client
+                .fetch_auto_away_debounce("t")
+                .await
+                .expect("debounce"),
+            Some(0)
+        );
+        client
+            .set_quit_part_reason("t", None)
+            .await
+            .expect("quit reason");
+        client
+            .set_dcc_auto_accept("t", "libera", true)
+            .await
+            .expect("dcc");
     }
 
     #[tokio::test]
@@ -1989,6 +2302,39 @@ mod tests {
             .delete_archive_target("abc123", "libera", "#old")
             .await
             .expect("delete_archive_target");
+    }
+
+    #[tokio::test]
+    async fn notification_prefs_read_wrapped_and_write_bare() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/notification-prefs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "notification_prefs": {"channel_mentions": true, "muted_targets": {}}
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/notification-prefs"))
+            .and(body_json(
+                serde_json::json!({"channel_mentions": false, "muted_targets": {}}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let mut prefs = client
+            .fetch_notification_prefs("t")
+            .await
+            .expect("notification prefs");
+        assert_eq!(prefs["channel_mentions"], serde_json::json!(true));
+        prefs.insert("channel_mentions".to_string(), Value::Bool(false));
+        client
+            .set_notification_prefs("t", &prefs)
+            .await
+            .expect("save");
     }
 
     #[tokio::test]
