@@ -41,8 +41,8 @@ bearer is rejected. It restores the last selected channel when that channel
 is still joined. The login password stays in the native keyring (Windows
 Credential Manager, macOS Keychain, or Linux Secret Service), never in
 Cordiale's own files; without a keyring it is not stored. The eject button
-at the top of the sidebar, or Disconnect in the Actions menu, signs out and
-turns off automatic sign-in until the next successful sign-in.
+at the top of the sidebar, or Switch account in the Actions menu, signs out
+and turns off automatic sign-in until the next successful sign-in.
 
 ## Known gaps
 
@@ -79,9 +79,9 @@ Cordiale still has these user-visible or behavioral gaps:
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb`, and the services shortcuts), but not `/np`, `/beep`, or
-  the user-mode view of a bare `/umode` (a bare `/topic` or `/mode` shows the
-  channel's topic or modes in the status bar).
+  expansion, `/kb`, the services shortcuts, and a bare `/umode` that opens
+  the user-mode toggles), but not `/np` or `/beep` (a bare `/topic` or
+  `/mode` shows the channel's topic or modes in the status bar).
 - **Chat and roster edge cases:** a message with multiple differently colored
   mIRC runs may overflow instead of wrapping as one paragraph. Channel MODE
   parsing does not yet use the advertised ISUPPORT CHANMODES argument rules,
