@@ -1061,8 +1061,12 @@ msgid "Ask before uploading"
 msgstr "Chiedi prima di caricare"
 
 msgctxt "AppWindow"
+msgid "Load older messages"
+msgstr "Carica messaggi più vecchi"
+
+msgctxt "AppWindow"
 msgid "The auto-away delay must be a whole number of seconds."
-msgstr "Il ritardo di auto-away deve essere un numero intero di secondi."
+msgstr "Il ritardo dell'assenza automatica deve essere un numero intero di secondi."
 
 msgctxt "AppWindow"
 msgid "Settings saved."
@@ -1082,15 +1086,15 @@ msgstr "Lascia un campo vuoto per usare il valore predefinito del server."
 
 msgctxt "AppWindow"
 msgid "Quit/part message"
-msgstr "Messaggio di quit/part"
+msgstr "Messaggio di uscita/abbandono"
 
 msgctxt "AppWindow"
 msgid "Auto-away message"
-msgstr "Messaggio di auto-away"
+msgstr "Messaggio di assenza automatica"
 
 msgctxt "AppWindow"
 msgid "Auto-away after (seconds, 0 = off)"
-msgstr "Auto-away dopo (secondi, 0 = disattivato)"
+msgstr "Assenza automatica dopo (secondi, 0 = disattivata)"
 
 msgctxt "AppWindow"
 msgid "Look up other users' profiles (CTCP USERINFO)"
