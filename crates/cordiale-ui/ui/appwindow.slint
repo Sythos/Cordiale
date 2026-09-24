@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette } from "std-widgets.slint";
+import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette, Slider } from "std-widgets.slint";
 
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
@@ -62,6 +62,24 @@ struct DccOfferRow {
     from: string,
     filename: string,
     size: string,
+}
+
+// One station of the radio screen: Cicchetto's list, then the custom
+// ones. `key` is `builtin:<id>` or `custom:<index>`.
+struct RadioRow {
+    key: string,
+    title: string,
+    detail: string,
+    description: string,
+    custom: bool,
+}
+
+// One custom station in Settings > Radio; `codec-index` 0 is MP3, 1 Ogg
+// Vorbis.
+struct CustomRadioRow {
+    name: string,
+    url: string,
+    codec-index: int,
 }
 
 // One archived window (`/archive`): `kind` is the wire token (channel or
@@ -828,6 +846,25 @@ export component AppWindow inherits Window {
     callback directory-closed();
     callback archive-delete-requested(string);
     callback archive-closed();
+    // The integrated radio. `radio-status` is "", "connecting", "playing",
+    // "failed" or "ended"; the custom stations live in Settings > Radio.
+    in property <[RadioRow]> radio-stations: [];
+    in property <[CustomRadioRow]> radio-custom-stations: [];
+    in property <string> radio-tuned-key: "";
+    in property <string> radio-station: "";
+    in property <string> radio-track: "";
+    in property <string> radio-status: "";
+    in property <string> radio-error: "";
+    in-out property <int> radio-volume: 80;
+    in-out property <int> radio-edit-index: -1;
+    in-out property <string> radio-form-name: "";
+    in-out property <string> radio-form-url: "";
+    in-out property <int> radio-form-codec: 0;
+    callback radio-tune(string);
+    callback radio-stop();
+    callback radio-volume-changed(int);
+    callback radio-station-save(int, string, string, int); // index (-1 new), name, url, codec
+    callback radio-station-delete(int);
     callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
@@ -1172,6 +1209,16 @@ export component AppWindow inherits Window {
             return @tr("Modes of {}", status-command-hint);
         } else if status-kind == "command-no-modes" {
             return @tr("No modes known for {} yet.", status-command-hint);
+        } else if status-kind == "np-idle" {
+            return @tr("/np: nothing is playing. Tune a station from the radio first.");
+        } else if status-kind == "np-unsupported" {
+            return @tr("/np: {} publishes no track information.", status-command-hint);
+        } else if status-kind == "np-unanswered" {
+            return @tr("/np: no track from {} yet; its feed hasn't answered.", status-command-hint);
+        } else if status-kind == "np-stale" {
+            return @tr("/np: the last track from {} is over 3 minutes old, so it wasn't sent.", status-command-hint);
+        } else if status-kind == "radio-station-invalid" {
+            return @tr("A station needs a name and an http:// or https:// stream URL.");
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
@@ -1826,6 +1873,44 @@ export component AppWindow inherits Window {
                 }
             }
 
+            // The radio on air, docked above the compose bar like
+            // Cicchetto's mini-player.
+            if radio-status != "" : HorizontalLayout {
+                spacing: 8px;
+                padding-left: 6px;
+                padding-right: 6px;
+
+                Text {
+                    text: radio-status == "connecting"
+                        ? "📻  " + @tr("{}: connecting…", radio-station)
+                        : radio-status == "failed"
+                        ? "📻  " + @tr("{}: the stream failed ({})", radio-station, radio-error)
+                        : radio-status == "ended"
+                        ? "📻  " + @tr("{}: the station ended the stream", radio-station)
+                        : radio-track == ""
+                        ? "📻  " + radio-station
+                        : "📻  " + radio-station + " — " + radio-track;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Slider {
+                    minimum: 0;
+                    maximum: 100;
+                    value: radio-volume;
+                    width: 100px;
+                    released(value) => {
+                        radio-volume = Math.round(value);
+                        radio-volume-changed(radio-volume);
+                    }
+                }
+                CompactButton {
+                    text: "⏹";
+                    a11y-label: @tr("Stop the radio");
+                    clicked => { radio-stop(); }
+                }
+            }
+
             // Small compose bar, never more than one line tall: paperclip
             // to attach a file (left, like Cicchetto), text field, send
             // icon (right).
@@ -1928,6 +2013,7 @@ export component AppWindow inherits Window {
                                 settings-section = "themes";
                             }
                         }
+                        MenuItem { title: "📻  " + @tr("Radio"); activated => { screen = "radio"; } }
                         if is-admin : MenuItem {
                             title: "🛡  " + @tr("Admin");
                             activated => {
@@ -1983,6 +2069,12 @@ export component AppWindow inherits Window {
                 label: @tr("Themes");
                 selected: settings-section == "themes";
                 clicked => { settings-section = "themes"; }
+            }
+            NavButton {
+                icon: "📻";
+                label: @tr("Radio");
+                selected: settings-section == "radio";
+                clicked => { settings-section = "radio"; }
             }
             NavButton {
                 icon: "🔔";
@@ -2381,6 +2473,81 @@ export component AppWindow inherits Window {
                             enabled: !choice.selected;
                             a11y-label: @tr("Use theme {}", choice.name);
                             clicked => { color-theme-requested(choice.key); }
+                        }
+                    }
+                }
+            }
+
+            if settings-section == "radio" : SectionCard {
+                icon: "📻";
+                title: @tr("Radio stations");
+                fill: true;
+
+                Text {
+                    text: @tr("Add your own MP3 or Ogg Vorbis stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen.");
+                    wrap: word-wrap;
+                }
+                for station[index] in radio-custom-stations : HorizontalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: station.name + "  (" + (station.codec-index == 1 ? "Ogg Vorbis" : "MP3") + ")\n" + station.url;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    CompactButton {
+                        text: "✎";
+                        a11y-label: @tr("Edit {}", station.name);
+                        clicked => {
+                            radio-edit-index = index;
+                            radio-form-name = station.name;
+                            radio-form-url = station.url;
+                            radio-form-codec = station.codec-index;
+                        }
+                    }
+                    CompactButton {
+                        text: "🗑";
+                        a11y-label: @tr("Delete {}", station.name);
+                        clicked => { radio-station-delete(index); }
+                    }
+                }
+                Text {
+                    text: radio-edit-index >= 0 ? @tr("Edit station") : @tr("New station");
+                    font-weight: 600;
+                }
+                LineEdit {
+                    placeholder-text: @tr("Name");
+                    accessible-label: @tr("Name");
+                    text <=> radio-form-name;
+                }
+                LineEdit {
+                    placeholder-text: "https://…";
+                    accessible-label: @tr("Stream URL");
+                    text <=> radio-form-url;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    ComboBox {
+                        model: ["MP3", "Ogg Vorbis"];
+                        current-index <=> radio-form-codec;
+                        min-width: 120px;
+                    }
+                    CompactButton {
+                        text: radio-edit-index >= 0 ? "💾  " + @tr("Save") : "➕  " + @tr("Add");
+                        a11y-label: radio-edit-index >= 0 ? @tr("Save") : @tr("Add");
+                        enabled: radio-form-name != "" && radio-form-url != "";
+                        clicked => { radio-station-save(radio-edit-index, radio-form-name, radio-form-url, radio-form-codec); }
+                    }
+                    if radio-edit-index >= 0 : CompactButton {
+                        text: @tr("Cancel");
+                        clicked => {
+                            radio-edit-index = -1;
+                            radio-form-name = "";
+                            radio-form-url = "";
+                            radio-form-codec = 0;
                         }
                     }
                 }
@@ -3366,6 +3533,73 @@ export component AppWindow inherits Window {
         Button {
             text: @tr("Back");
             clicked => { screen = "connected"; }
+        }
+    }
+
+    if screen == "radio" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: "📻  " + @tr("Radio");
+            font-size: 18px;
+            accessible-role: AccessibleRole.text;
+        }
+
+        ListView {
+            vertical-stretch: 1;
+
+            for station in radio-stations : HorizontalLayout {
+                spacing: 8px;
+                padding-bottom: 8px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: station.title;
+                        font-weight: station.key == radio-tuned-key ? 700 : 600;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: station.detail;
+                        wrap: word-wrap;
+                        opacity: 0.75;
+                    }
+                    Text {
+                        text: station.description;
+                        wrap: word-wrap;
+                    }
+                }
+                CompactButton {
+                    text: station.key == radio-tuned-key ? "⏹  " + @tr("Stop") : "▶  " + @tr("Play");
+                    a11y-label: station.key == radio-tuned-key ? @tr("Stop {}", station.title) : @tr("Play {}", station.title);
+                    clicked => {
+                        if station.key == radio-tuned-key {
+                            radio-stop();
+                        } else {
+                            radio-tune(station.key);
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            Button {
+                text: @tr("Back");
+                clicked => { screen = "connected"; }
+            }
+            Button {
+                text: "⚙  " + @tr("Custom stations");
+                clicked => {
+                    screen = "settings";
+                    settings-section = "radio";
+                }
+            }
         }
     }
 

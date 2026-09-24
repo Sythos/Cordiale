@@ -88,6 +88,27 @@ pub struct Settings {
     /// account's active theme on Grappa.
     #[serde(default)]
     pub color_theme: Option<String>,
+    /// Radio stations the user added, next to the built-in ones. Kept on
+    /// this device only, never sent to Grappa.
+    #[serde(default)]
+    pub radio_stations: Vec<CustomRadioStation>,
+    /// Radio volume, 0 to 100.
+    #[serde(default = "default_radio_volume")]
+    pub radio_volume: u8,
+}
+
+/// A radio station added in Settings > Radio.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomRadioStation {
+    pub name: String,
+    /// The stream (or `.pls`/`.m3u` playlist) URL.
+    pub url: String,
+    /// `"mp3"` or `"vorbis"`.
+    pub codec: String,
+}
+
+fn default_radio_volume() -> u8 {
+    80
 }
 
 fn current_settings_schema_version() -> u32 {
@@ -107,6 +128,8 @@ impl Default for Settings {
             last_channel: None,
             auto_connect: default_auto_connect(),
             color_theme: None,
+            radio_stations: Vec::new(),
+            radio_volume: default_radio_volume(),
         }
     }
 }
@@ -322,6 +345,12 @@ mod tests {
             last_channel: Some(("libera".to_string(), "#rust".to_string())),
             auto_connect: false,
             color_theme: Some("builtin:sux".to_string()),
+            radio_stations: vec![CustomRadioStation {
+                name: "Local".to_string(),
+                url: "https://radio.example/stream.ogg".to_string(),
+                codec: "vorbis".to_string(),
+            }],
+            radio_volume: 55,
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");

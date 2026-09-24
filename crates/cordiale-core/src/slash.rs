@@ -106,6 +106,8 @@ pub enum SlashCommand {
     Highlight { add: bool, pattern: String },
     /// `/ignore <mask>` or `/unignore <mask>`.
     Ignore { add: bool, mask: String },
+    /// `/np`: shares the radio's current track as an action.
+    NowPlaying,
     /// `/notify <nick...>`.
     Notify(Vec<String>),
     /// `/alias <name> <expansion>`: defines or replaces a user alias.
@@ -443,6 +445,7 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             },
             _ => Usage("/ignore <nick!user@host>"),
         },
+        "np" => NowPlaying,
         "notify" | "watch" => {
             let nicks = words(args);
             if nicks.is_empty() {

@@ -23,6 +23,9 @@ slint = { version = "1", default-features = false, features = [
     "compat-1-2",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+# The radio player: MP3 and Ogg Vorbis streams, decoded the same way on
+# every platform (ALSA on Linux, WASAPI on Windows, CoreAudio on macOS).
+rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "vorbis"] }
 
 [build-dependencies]
 slint-build = "1"

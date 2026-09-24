@@ -27,6 +27,13 @@ minimum widths. Channel rows sit directly below their network row, member
 roles appear in brackets (for example, `[@] Sythos`), and the member list's
 Actions menu includes a shortcut to the Themes settings.
 
+The Actions menu opens the radio: Cicchetto's stations (SomaFM and a few
+other Icecast streams) play in Cordiale itself, MP3 or Ogg Vorbis, with the
+same player on every platform, a volume control and the current track read
+from the station's feed or the stream's own titles; `/np` shares it in the
+open window. Settings > Radio adds, edits and removes your own stations
+(stream or `.pls`/`.m3u` URLs), kept on this device only.
+
 Settings > Themes lists Grappa's theme gallery, including the irssi-derived
 `irssi-dark` and `sux`, each shown with its color set. Picking one makes it
 the account's active theme on Grappa (`PUT /me/theme`) and restyles Cordiale:
@@ -77,9 +84,9 @@ Cordiale still has these user-visible or behavioral gaps:
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb`, and the services shortcuts), but not `/np`, `/beep`, or
-  the user-mode view of a bare `/umode` (a bare `/topic` or `/mode` shows the
-  channel's topic or modes in the status bar).
+  expansion, `/kb`, the services shortcuts, and `/np` for the radio), but
+  not `/beep` or the user-mode view of a bare `/umode` (a bare `/topic` or
+  `/mode` shows the channel's topic or modes in the status bar).
 - **Chat and roster edge cases:** a message with multiple differently colored
   mIRC runs may overflow instead of wrapping as one paragraph. Channel MODE
   parsing does not yet use the advertised ISUPPORT CHANMODES argument rules,
