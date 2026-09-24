@@ -287,41 +287,41 @@ component MemberContextMenu {
     ContextMenuArea {
         Menu {
             MenuItem {
-                title: @tr("Op");
+                title: "⬆  " + @tr("Op");
                 enabled: can-moderate;
                 activated => { mode-action("op", target-nick); }
             }
             MenuItem {
-                title: @tr("Deop");
+                title: "⬇  " + @tr("Deop");
                 enabled: can-moderate;
                 activated => { mode-action("deop", target-nick); }
             }
             MenuItem {
-                title: @tr("Voice");
+                title: "🔊  " + @tr("Voice");
                 enabled: can-moderate;
                 activated => { mode-action("voice", target-nick); }
             }
             MenuItem {
-                title: @tr("Devoice");
+                title: "🔇  " + @tr("Devoice");
                 enabled: can-moderate;
                 activated => { mode-action("devoice", target-nick); }
             }
             MenuItem {
-                title: @tr("Kick");
+                title: "👢  " + @tr("Kick");
                 enabled: can-moderate;
                 activated => { kick(target-nick); }
             }
             MenuItem {
-                title: @tr("Ban");
+                title: "⛔  " + @tr("Ban");
                 enabled: can-moderate;
                 activated => { ban(target-nick); }
             }
             MenuItem {
-                title: @tr("WHOIS");
+                title: "🔍  " + @tr("WHOIS");
                 activated => { whois(target-nick); }
             }
             Menu {
-                title: @tr("CTCP");
+                title: "📡  " + @tr("CTCP");
                 MenuItem { title: "VERSION"; activated => { ctcp(target-nick, "VERSION"); } }
                 MenuItem { title: "TIME"; activated => { ctcp(target-nick, "TIME"); } }
                 MenuItem { title: "PING"; activated => { ctcp(target-nick, "PING"); } }
@@ -330,7 +330,7 @@ component MemberContextMenu {
                 MenuItem { title: "SOURCE"; activated => { ctcp(target-nick, "SOURCE"); } }
             }
             MenuItem {
-                title: @tr("Query");
+                title: "💬  " + @tr("Query");
                 activated => { query(target-nick); }
             }
         }
@@ -354,6 +354,109 @@ struct ThemeChoiceRow {
     author: string,
     selected: bool,
     swatches: [color],
+}
+
+// Settings/admin navigation entry: a compact, flat row with an icon naming
+// the section's purpose, highlighted while its section is open.
+component NavButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> selected: false;
+    callback clicked();
+
+    min-height: 30px;
+    border-radius: 5px;
+    border-width: selected ? 1px : 0px;
+    border-color: #8080807f;
+    background: selected ? #80808040 : (touch.has-hover ? #80808022 : transparent);
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => { clicked(); }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+
+        Text {
+            text: icon;
+            width: 20px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Text {
+            text: label;
+            vertical-alignment: center;
+            overflow: elide;
+            font-weight: selected ? 600 : 400;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A button only as wide as its label, so a row or column never stretches
+// it across the screen.
+component CompactButton {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <string> a11y-label: "";
+    callback clicked();
+
+    horizontal-stretch: 0;
+
+    HorizontalLayout {
+        alignment: start;
+
+        Button {
+            text: root.text;
+            enabled: root.enabled;
+            accessible-label: root.a11y-label == "" ? root.text : root.a11y-label;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// A bordered settings/admin panel with an icon and a title. `fill` lets a
+// panel holding a list take the remaining height.
+component SectionCard inherits Rectangle {
+    in property <string> icon;
+    in property <string> title;
+    in property <bool> fill: false;
+
+    vertical-stretch: fill ? 1 : 0;
+    border-width: 1px;
+    border-radius: 8px;
+    border-color: #8080806a;
+    background: #8080800d;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+
+        if title != "" : HorizontalLayout {
+            spacing: 8px;
+
+            Text {
+                text: icon;
+                font-size: 16px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: title;
+                font-size: 16px;
+                font-weight: 600;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                wrap: word-wrap;
+            }
+        }
+
+        @children
+    }
 }
 
 export component AppWindow inherits Window {
@@ -1581,205 +1684,241 @@ export component AppWindow inherits Window {
 
                 actions-menu-area := ContextMenuArea {
                     Menu {
-                        MenuItem { title: @tr("Home"); activated => { home-requested(); } }
-                        MenuItem { title: @tr("Settings"); activated => { screen = "settings"; } }
+                        MenuItem { title: "🏠  " + @tr("Home"); activated => { home-requested(); } }
+                        MenuItem { title: "⚙  " + @tr("Settings"); activated => { screen = "settings"; } }
                         MenuItem {
-                            title: @tr("Themes");
+                            title: "🎨  " + @tr("Themes");
                             activated => {
                                 screen = "settings";
                                 settings-section = "themes";
                             }
                         }
                         if is-admin : MenuItem {
-                            title: @tr("Admin");
+                            title: "🛡  " + @tr("Admin");
                             activated => {
                                 screen = "settings";
                                 settings-section = "admin";
                             }
                         }
-                        MenuItem { title: @tr("Disconnect"); activated => { disconnect-requested(); } }
+                        MenuItem { title: "⏏  " + @tr("Disconnect"); activated => { disconnect-requested(); } }
                     }
                 }
             }
         }
     }
 
-    if screen == "settings" : HorizontalBox {
+    if screen == "settings" : HorizontalLayout {
         padding: 16px;
         spacing: 16px;
 
-        VerticalBox {
-            width: 200px;
-            spacing: 4px;
+        // Section navigation, in Cicchetto's Settings drawer order. Each
+        // entry carries an icon matching what the section is for.
+        VerticalLayout {
+            width: 210px;
+            spacing: 2px;
+            alignment: start;
 
             Text {
                 text: @tr("Settings");
                 font-size: 18px;
+                font-weight: 600;
             }
+            Rectangle { height: 6px; }
 
-            // Section list mirrors Cicchetto's Settings drawer order — see
-            // docs/feature-matrix.md. Only General/Display are backed by
-            // real Cordiale functionality today; the rest are placeholders
-            // naming what's missing rather than pretending to work.
-            Button {
-                text: @tr("General");
+            NavButton {
+                icon: "⚙";
+                label: @tr("General");
+                selected: settings-section == "general";
                 clicked => { settings-section = "general"; }
             }
-            Button {
-                text: @tr("Display");
+            NavButton {
+                icon: "🖥";
+                label: @tr("Display");
+                selected: settings-section == "display";
                 clicked => { settings-section = "display"; }
             }
-            Button {
-                text: @tr("Security");
+            NavButton {
+                icon: "🔒";
+                label: @tr("Security");
+                selected: settings-section == "security";
                 clicked => { settings-section = "security"; }
             }
-            Button {
-                text: @tr("Themes");
+            NavButton {
+                icon: "🎨";
+                label: @tr("Themes");
+                selected: settings-section == "themes";
                 clicked => { settings-section = "themes"; }
             }
-            Button {
-                text: @tr("Notifications");
+            NavButton {
+                icon: "🔔";
+                label: @tr("Notifications");
+                selected: settings-section == "push";
                 clicked => { settings-section = "push"; }
             }
-            Button {
-                text: @tr("Watch Lists");
+            NavButton {
+                icon: "👁";
+                label: @tr("Watch Lists");
+                selected: settings-section == "watchlists";
                 clicked => { settings-section = "watchlists"; }
             }
-            Button {
-                text: @tr("Ignore List");
+            NavButton {
+                icon: "🚫";
+                label: @tr("Ignore List");
+                selected: settings-section == "ignores";
                 clicked => { settings-section = "ignores"; }
             }
-            Button {
-                text: @tr("Aliases");
+            NavButton {
+                icon: "↪";
+                label: @tr("Aliases");
+                selected: settings-section == "aliases";
                 clicked => { settings-section = "aliases"; }
             }
-            Button {
-                text: @tr("On-Connect Commands");
+            NavButton {
+                icon: "▶";
+                label: @tr("On-Connect Commands");
+                selected: settings-section == "perform";
                 clicked => { settings-section = "perform"; }
             }
-            Button {
-                text: @tr("Source Address");
+            NavButton {
+                icon: "🌐";
+                label: @tr("Source Address");
+                selected: settings-section == "vhost";
                 clicked => { settings-section = "vhost"; }
             }
-            if is-admin : Button {
-                text: @tr("Admin");
+            if is-admin : NavButton {
+                icon: "🛡";
+                label: @tr("Admin");
+                selected: settings-section == "admin";
                 clicked => { settings-section = "admin"; }
             }
-            Button {
-                text: @tr("Credits");
+            NavButton {
+                icon: "ℹ";
+                label: @tr("Credits");
+                selected: settings-section == "credits";
                 clicked => { settings-section = "credits"; }
             }
-
-            Button {
-                text: @tr("Back");
+            Rectangle { height: 10px; }
+            NavButton {
+                icon: "←";
+                label: @tr("Back");
                 clicked => { screen = "connected"; }
             }
         }
 
-        VerticalBox {
+        Rectangle {
+            width: 1px;
+            background: #8080804d;
+        }
+
+        VerticalLayout {
             spacing: 12px;
+            horizontal-stretch: 1;
 
-            if settings-section == "general" : VerticalBox {
-                spacing: 8px;
+            if settings-section == "general" : VerticalLayout {
+                spacing: 12px;
+                vertical-stretch: 0;
 
-                Text {
-                    text: @tr("Language");
-                    font-size: 16px;
-                }
-                Button {
-                    text: "English";
-                    clicked => { language-selected("en"); }
-                }
-                Button {
-                    text: "Italiano";
-                    clicked => { language-selected("it"); }
-                }
-                Button {
-                    text: "Français";
-                    clicked => { language-selected("fr"); }
-                }
-                Button {
-                    text: "Deutsch";
-                    clicked => { language-selected("de"); }
-                }
-                Button {
-                    text: "Español";
-                    clicked => { language-selected("es"); }
-                }
+                SectionCard {
+                    icon: "🗣";
+                    title: @tr("Language");
 
-                Text {
-                    text: @tr("Theme");
-                    font-size: 16px;
-                }
-                Button {
-                    text: theme == "light" ? @tr("Switch to dark") : @tr("Switch to light");
-                    clicked => { theme-toggle-requested(); }
-                }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
 
-                Text {
-                    text: @tr("Connection");
-                    font-size: 16px;
-                }
-                Button {
-                    text: @tr("Disconnect");
-                    clicked => { disconnect-requested(); }
+                        CompactButton {
+                            text: "English";
+                            clicked => { language-selected("en"); }
+                        }
+                        CompactButton {
+                            text: "Italiano";
+                            clicked => { language-selected("it"); }
+                        }
+                        CompactButton {
+                            text: "Français";
+                            clicked => { language-selected("fr"); }
+                        }
+                        CompactButton {
+                            text: "Deutsch";
+                            clicked => { language-selected("de"); }
+                        }
+                        CompactButton {
+                            text: "Español";
+                            clicked => { language-selected("es"); }
+                        }
+                    }
                 }
 
-                // Read-only copies of preferences Grappa stores and applies
-                // itself; they update live from its `*_changed` pushes and
-                // stay hidden until the server has announced them.
-                if server-pref-auto-away-debounce != "" : Text {
-                    text: @tr("Auto-away delay: {}",
-                        server-pref-auto-away-debounce == "default"
-                            ? @tr("server default")
-                            : (server-pref-auto-away-debounce == "off"
-                                ? @tr("off")
-                                : @tr("{} seconds", server-pref-auto-away-debounce)));
-                    wrap: word-wrap;
-                }
-                if server-pref-leave-message-known : Text {
-                    text: server-pref-leave-message-set
-                        ? @tr("Quit/part message: {}", server-pref-leave-message)
-                        : @tr("Quit/part message: none (server default)");
-                    wrap: word-wrap;
-                }
-                if server-pref-auto-away-reason-known : Text {
-                    text: server-pref-auto-away-reason-set
-                        ? @tr("Auto-away message: {}", server-pref-auto-away-reason)
-                        : @tr("Auto-away message: server default");
-                    wrap: word-wrap;
-                }
-                if server-upload-limits-known : Text {
-                    text: server-upload-limits.video-seconds == ""
-                        ? @tr("Server upload limits ({}): images {}, videos {}, documents {}, audio {}.", server-upload-limits.host, server-upload-limits.image, server-upload-limits.video, server-upload-limits.document, server-upload-limits.audio)
-                        : @tr("Server upload limits ({}): images {}, videos {} (up to {} s), documents {}, audio {}.", server-upload-limits.host, server-upload-limits.image, server-upload-limits.video, server-upload-limits.video-seconds, server-upload-limits.document, server-upload-limits.audio);
-                    wrap: word-wrap;
+                SectionCard {
+                    icon: "🌓";
+                    title: @tr("Theme");
+
+                    CompactButton {
+                        text: theme == "light" ? @tr("Switch to dark") : @tr("Switch to light");
+                        clicked => { theme-toggle-requested(); }
+                    }
                 }
 
-                if known-networks.length > 0 : VerticalBox {
-                    padding-top: 8px;
-                    spacing: 4px;
+                SectionCard {
+                    icon: "🔌";
+                    title: @tr("Connection");
 
-                    Text {
-                        text: @tr("Network identity");
-                        font-size: 16px;
+                    CompactButton {
+                        text: "⏏  " + @tr("Disconnect");
+                        a11y-label: @tr("Disconnect");
+                        clicked => { disconnect-requested(); }
                     }
 
-                    HorizontalBox {
-                        for network in known-networks : Button {
-                            text: network;
+                    // Read-only copies of preferences Grappa stores and
+                    // applies itself; they update live from its `*_changed`
+                    // pushes and stay hidden until the server announced them.
+                    if server-pref-auto-away-debounce != "" : Text {
+                        text: @tr("Auto-away delay: {}",
+                            server-pref-auto-away-debounce == "default"
+                                ? @tr("server default")
+                                : (server-pref-auto-away-debounce == "off"
+                                    ? @tr("off")
+                                    : @tr("{} seconds", server-pref-auto-away-debounce)));
+                        wrap: word-wrap;
+                    }
+                    if server-pref-leave-message-known : Text {
+                        text: server-pref-leave-message-set
+                            ? @tr("Quit/part message: {}", server-pref-leave-message)
+                            : @tr("Quit/part message: none (server default)");
+                        wrap: word-wrap;
+                    }
+                    if server-pref-auto-away-reason-known : Text {
+                        text: server-pref-auto-away-reason-set
+                            ? @tr("Auto-away message: {}", server-pref-auto-away-reason)
+                            : @tr("Auto-away message: server default");
+                        wrap: word-wrap;
+                    }
+                    if server-upload-limits-known : Text {
+                        text: server-upload-limits.video-seconds == ""
+                            ? @tr("Server upload limits ({}): images {}, videos {}, documents {}, audio {}.", server-upload-limits.host, server-upload-limits.image, server-upload-limits.video, server-upload-limits.document, server-upload-limits.audio)
+                            : @tr("Server upload limits ({}): images {}, videos {} (up to {} s), documents {}, audio {}.", server-upload-limits.host, server-upload-limits.image, server-upload-limits.video, server-upload-limits.video-seconds, server-upload-limits.document, server-upload-limits.audio);
+                        wrap: word-wrap;
+                    }
+                }
+
+                if known-networks.length > 0 : SectionCard {
+                    icon: "🪪";
+                    title: @tr("Network identity");
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: start;
+
+                        for network in known-networks : NavButton {
+                            icon: "🌐";
+                            label: network;
+                            selected: settings-network == network;
                             clicked => {
                                 settings-network = network;
                                 settings-network-selected(network);
                             }
                         }
                     }
-
-                    Text {
-                        text: settings-network;
-                        font-size: 12px;
-                    }
-
                     LineEdit {
                         placeholder-text: @tr("Nickname");
                         accessible-label: @tr("Nickname");
@@ -1795,21 +1934,18 @@ export component AppWindow inherits Window {
                         accessible-label: @tr("Real name");
                         text <=> identity-realname;
                     }
-                    Button {
-                        text: @tr("Save");
+                    CompactButton {
+                        text: "💾  " + @tr("Save");
+                        a11y-label: @tr("Save");
                         enabled: settings-network != "";
                         clicked => { identity-save-requested(); }
                     }
                 }
             }
 
-            if settings-section == "display" : VerticalBox {
-                spacing: 8px;
-
-                Text {
-                    text: display-prefs-loaded ? @tr("Display preferences") : @tr("Loading…");
-                    font-size: 16px;
-                }
+            if settings-section == "display" : SectionCard {
+                icon: "🖥";
+                title: display-prefs-loaded ? @tr("Display preferences") : @tr("Loading…");
 
                 CheckBox {
                     text: @tr("Colored nicklist");
@@ -1838,7 +1974,10 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if settings-section == "security" || settings-section == "push" : VerticalBox {
+            if settings-section == "security" || settings-section == "push" : SectionCard {
+                icon: settings-section == "security" ? "🔒" : "🔔";
+                title: settings-section == "security" ? @tr("Security") : @tr("Notifications");
+
                 Text {
                     text: @tr("Not available yet — this section needs Grappa REST/WS endpoints Cordiale doesn't implement yet.");
                     wrap: word-wrap;
@@ -1848,36 +1987,40 @@ export component AppWindow inherits Window {
             // Color themes: Grappa's gallery (`GET /themes`, applied through
             // `PUT /me/theme`) or built-in copies of it, plus the classic
             // light/dark switch, same toggle as on General.
-            if settings-section == "themes" : VerticalBox {
-                spacing: 8px;
+            if settings-section == "themes" : SectionCard {
+                icon: "🎨";
+                title: @tr("Theme");
+                fill: true;
 
-                Text {
-                    text: @tr("Theme");
-                    font-size: 16px;
-                }
                 Text {
                     text: @tr("Color themes come from Grappa's gallery (irssi-dark, sux and more) and follow your account; without a connection, built-in copies are offered. The classic look follows the light/dark switch.");
                     wrap: word-wrap;
                 }
                 HorizontalLayout {
-                    spacing: 8px;
-                    Button {
+                    spacing: 6px;
+                    alignment: start;
+
+                    CompactButton {
                         text: theme == "light" ? @tr("Classic: switch to dark") : @tr("Classic: switch to light");
                         clicked => { theme-toggle-requested(); }
                     }
-                    if palette-active : Button {
+                    if palette-active : CompactButton {
                         text: @tr("Back to classic");
                         clicked => { color-theme-requested(""); }
                     }
                 }
                 ListView {
                     vertical-stretch: 1;
+                    min-height: 160px;
+
                     for choice in theme-choices : HorizontalLayout {
                         spacing: 8px;
-                        height: 32px;
+                        padding: 2px;
+                        height: 34px;
 
                         HorizontalLayout {
                             spacing: 0px;
+
                             for swatch in choice.swatches : Rectangle {
                                 width: 14px;
                                 height: 22px;
@@ -1891,119 +2034,163 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                             font-weight: choice.selected ? 700 : 400;
-                            wrap: word-wrap;
+                            overflow: elide;
                         }
-                        Button {
+                        CompactButton {
                             text: choice.selected ? @tr("In use") : @tr("Use");
                             enabled: !choice.selected;
-                            accessible-label: @tr("Use theme {}", choice.name);
+                            a11y-label: @tr("Use theme {}", choice.name);
                             clicked => { color-theme-requested(choice.key); }
                         }
                     }
                 }
             }
 
-            if settings-section == "watchlists" : VerticalBox {
-                spacing: 8px;
+            if settings-section == "watchlists" : VerticalLayout {
+                spacing: 12px;
+                vertical-stretch: 0;
 
-                Text {
-                    text: @tr("Presence (per network)");
-                    font-size: 16px;
-                }
-                HorizontalBox {
-                    for network in known-networks : Button {
-                        text: network;
-                        clicked => {
-                            settings-network = network;
-                            settings-network-selected(network);
+                SectionCard {
+                    icon: "👁";
+                    title: @tr("Presence (per network)");
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: start;
+
+                        for network in known-networks : NavButton {
+                            icon: "🌐";
+                            label: network;
+                            selected: settings-network == network;
+                            clicked => {
+                                settings-network = network;
+                                settings-network-selected(network);
+                            }
+                        }
+                    }
+                    for row in settings-notify-nicks : HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: row.presence == "online"
+                                ? @tr("{} (online)", row.nick)
+                                : (row.presence == "offline" ? @tr("{} (offline)", row.nick) : row.nick);
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "🗑  " + @tr("Delete");
+                            a11y-label: @tr("Delete");
+                            clicked => { notify-remove-requested(row.nick); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("Nickname");
+                            text <=> new-notify-nick;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Add");
+                            a11y-label: @tr("Add");
+                            enabled: settings-network != "";
+                            clicked => {
+                                notify-add-requested(new-notify-nick);
+                                new-notify-nick = "";
+                            }
                         }
                     }
                 }
-                for row in settings-notify-nicks : HorizontalBox {
-                    Text {
-                        text: row.presence == "online"
-                            ? @tr("{} (online)", row.nick)
-                            : (row.presence == "offline" ? @tr("{} (offline)", row.nick) : row.nick);
-                        wrap: word-wrap;
-                    }
-                    Button {
-                        text: @tr("Delete");
-                        clicked => { notify-remove-requested(row.nick); }
-                    }
-                }
-                HorizontalBox {
-                    LineEdit {
-                        placeholder-text: @tr("Nickname");
-                        text <=> new-notify-nick;
-                    }
-                    Button {
-                        text: @tr("Add");
-                        enabled: settings-network != "";
-                        clicked => {
-                            notify-add-requested(new-notify-nick);
-                            new-notify-nick = "";
+
+                SectionCard {
+                    icon: "✨";
+                    title: @tr("Keyword highlights");
+
+                    for pattern in settings-watch-patterns : HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: pattern;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "🗑  " + @tr("Delete");
+                            a11y-label: @tr("Delete");
+                            clicked => { watch-pattern-remove-requested(pattern); }
                         }
                     }
-                }
+                    HorizontalLayout {
+                        spacing: 6px;
 
-                Text {
-                    text: @tr("Keyword highlights");
-                    font-size: 16px;
-                }
-                for pattern in settings-watch-patterns : HorizontalBox {
-                    Text {
-                        text: pattern;
-                        wrap: word-wrap;
-                    }
-                    Button {
-                        text: @tr("Delete");
-                        clicked => { watch-pattern-remove-requested(pattern); }
-                    }
-                }
-                HorizontalBox {
-                    LineEdit {
-                        placeholder-text: @tr("Pattern");
-                        text <=> new-watch-pattern;
-                    }
-                    Button {
-                        text: @tr("Add");
-                        clicked => {
-                            watch-pattern-add-requested(new-watch-pattern);
-                            new-watch-pattern = "";
+                        LineEdit {
+                            placeholder-text: @tr("Pattern");
+                            text <=> new-watch-pattern;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Add");
+                            a11y-label: @tr("Add");
+                            clicked => {
+                                watch-pattern-add-requested(new-watch-pattern);
+                                new-watch-pattern = "";
+                            }
                         }
                     }
                 }
             }
 
-            if settings-section == "ignores" : VerticalBox {
-                spacing: 8px;
+            if settings-section == "ignores" : SectionCard {
+                icon: "🚫";
+                title: @tr("Ignore List");
 
-                HorizontalBox {
-                    for network in known-networks : Button {
-                        text: network;
+                HorizontalLayout {
+                    spacing: 4px;
+                    alignment: start;
+
+                    for network in known-networks : NavButton {
+                        icon: "🌐";
+                        label: network;
+                        selected: settings-network == network;
                         clicked => {
                             settings-network = network;
                             settings-network-selected(network);
                         }
                     }
                 }
-                for mask in settings-ignores : HorizontalBox {
+                for mask in settings-ignores : HorizontalLayout {
+                    spacing: 8px;
+
                     Text {
                         text: mask;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
                         wrap: word-wrap;
                     }
-                    Button {
-                        text: @tr("Delete");
+                    CompactButton {
+                        text: "🗑  " + @tr("Delete");
+                        a11y-label: @tr("Delete");
                         clicked => { ignore-remove-requested(mask); }
                     }
                 }
-                HorizontalBox {
+                HorizontalLayout {
+                    spacing: 6px;
+
                     LineEdit {
                         placeholder-text: @tr("Mask (nick!user@host)");
                         text <=> new-ignore-mask;
+                        horizontal-stretch: 1;
+                        min-width: 80px;
                     }
-                    Button {
-                        text: @tr("Add");
+                    CompactButton {
+                        text: "➕  " + @tr("Add");
+                        a11y-label: @tr("Add");
                         enabled: settings-network != "";
                         clicked => {
                             ignore-add-requested(new-ignore-mask);
@@ -2013,34 +2200,50 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if settings-section == "aliases" : VerticalBox {
-                spacing: 8px;
+            if settings-section == "aliases" : SectionCard {
+                icon: "↪";
+                title: @tr("Aliases");
 
-                for row in settings-aliases : HorizontalBox {
+                for row in settings-aliases : HorizontalLayout {
+                    spacing: 8px;
+
                     Text {
                         text: row.command;
-                        wrap: word-wrap;
+                        vertical-alignment: center;
+                        font-weight: 600;
+                        min-width: 80px;
+                        overflow: elide;
                     }
                     Text {
                         text: row.expansion;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
                         wrap: word-wrap;
                     }
-                    Button {
-                        text: @tr("Delete");
+                    CompactButton {
+                        text: "🗑  " + @tr("Delete");
+                        a11y-label: @tr("Delete");
                         clicked => { alias-remove-requested(row.command); }
                     }
                 }
-                HorizontalBox {
+                HorizontalLayout {
+                    spacing: 6px;
+
                     LineEdit {
                         placeholder-text: @tr("Command");
                         text <=> new-alias-command;
+                        horizontal-stretch: 1;
+                        min-width: 60px;
                     }
                     LineEdit {
                         placeholder-text: @tr("Expansion");
                         text <=> new-alias-expansion;
+                        horizontal-stretch: 2;
+                        min-width: 80px;
                     }
-                    Button {
-                        text: @tr("Add");
+                    CompactButton {
+                        text: "➕  " + @tr("Add");
+                        a11y-label: @tr("Add");
                         clicked => {
                             alias-add-requested(new-alias-command, new-alias-expansion);
                             new-alias-command = "";
@@ -2050,12 +2253,18 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if settings-section == "perform" : VerticalBox {
-                spacing: 8px;
+            if settings-section == "perform" : SectionCard {
+                icon: "▶";
+                title: @tr("On-Connect Commands");
 
-                HorizontalBox {
-                    for network in known-networks : Button {
-                        text: network;
+                HorizontalLayout {
+                    spacing: 4px;
+                    alignment: start;
+
+                    for network in known-networks : NavButton {
+                        icon: "🌐";
+                        label: network;
+                        selected: settings-network == network;
                         clicked => {
                             settings-network = network;
                             settings-network-selected(network);
@@ -2069,15 +2278,17 @@ export component AppWindow inherits Window {
                 LineEdit {
                     text <=> perform-text;
                 }
-                Button {
-                    text: @tr("Save");
+                CompactButton {
+                    text: "💾  " + @tr("Save");
+                    a11y-label: @tr("Save");
                     enabled: settings-network != "";
                     clicked => { perform-save-requested(perform-text); }
                 }
             }
 
-            if settings-section == "vhost" : VerticalBox {
-                spacing: 8px;
+            if settings-section == "vhost" : SectionCard {
+                icon: "🌐";
+                title: @tr("Source Address");
 
                 for option in settings-vhost-options : CheckBox {
                     text: option.label;
@@ -2086,76 +2297,92 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if settings-section == "credits" : VerticalBox {
-                spacing: 8px;
-                alignment: start;
+            if settings-section == "credits" : SectionCard {
+                icon: "ℹ";
+                title: @tr("Credits");
 
                 Image {
                     source: @image-url("../../../resources/branding/cordiale_icona.png");
                     image-fit: contain;
                     height: 96px;
                 }
-
                 Text {
                     text: "Cordiale";
                     font-size: 20px;
                     horizontal-alignment: center;
                 }
-
                 Text {
                     text: "Sythos";
                     horizontal-alignment: center;
                 }
-
                 Text {
                     text: credits-copyright-text;
                     horizontal-alignment: center;
                 }
-
                 Text {
                     text: app-version;
                     horizontal-alignment: center;
                 }
             }
 
-            if settings-section == "admin" : VerticalBox {
-                spacing: 8px;
+            if settings-section == "admin" : SectionCard {
+                icon: "🛡";
+                title: @tr("Admin");
+                fill: true;
 
                 Text {
                     text: @tr("Vhosts, credentials, server-wide settings write, and the live admin event stream aren't built yet.");
                     wrap: word-wrap;
                 }
 
-                HorizontalBox {
-                    Button {
-                        text: @tr("Sessions");
+                HorizontalLayout {
+                    spacing: 4px;
+                    alignment: start;
+
+                    NavButton {
+                        icon: "🔌";
+                        label: @tr("Sessions");
+                        selected: admin-section == "sessions";
                         clicked => { admin-section = "sessions"; }
                     }
-                    Button {
-                        text: @tr("Users");
+                    NavButton {
+                        icon: "👤";
+                        label: @tr("Users");
+                        selected: admin-section == "users";
                         clicked => { admin-section = "users"; }
                     }
-                    Button {
-                        text: @tr("Networks");
+                    NavButton {
+                        icon: "🌍";
+                        label: @tr("Networks");
+                        selected: admin-section == "networks";
                         clicked => { admin-section = "networks"; }
                     }
-                    Button {
-                        text: @tr("Visitors");
+                    NavButton {
+                        icon: "🧳";
+                        label: @tr("Visitors");
+                        selected: admin-section == "visitors";
                         clicked => { admin-section = "visitors"; }
                     }
-                    Button {
-                        text: @tr("Session Log");
+                    NavButton {
+                        icon: "📜";
+                        label: @tr("Session Log");
+                        selected: admin-section == "session-log";
                         clicked => { admin-section = "session-log"; }
                     }
                 }
 
-                HorizontalBox {
-                    Button {
-                        text: @tr("Refresh");
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    CompactButton {
+                        text: "⟳  " + @tr("Refresh");
+                        a11y-label: @tr("Refresh");
                         clicked => { admin-refresh-requested(); }
                     }
-                    Button {
-                        text: @tr("Run reaper sweep");
+                    CompactButton {
+                        text: "🧹  " + @tr("Run reaper sweep");
+                        a11y-label: @tr("Run reaper sweep");
                         clicked => { admin-reaper-run(); }
                     }
                 }
@@ -2165,69 +2392,113 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                 }
 
-                if admin-section == "sessions" : VerticalBox {
-                    for row in admin-sessions : HorizontalBox {
+                if admin-section == "sessions" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
+                    for row in admin-sessions : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
                         Text {
-                            text: row.label;
+                            text: (row.alive ? "🟢  " : "⚪  ") + row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                             wrap: word-wrap;
                         }
-                        Button {
-                            text: @tr("Disconnect");
+                        CompactButton {
+                            text: "⏏  " + @tr("Disconnect");
+                            a11y-label: @tr("Disconnect");
                             enabled: row.alive;
                             clicked => { admin-disconnect-session(row.session-id); }
                         }
                     }
                 }
 
-                if admin-section == "users" : VerticalBox {
-                    for row in admin-users : HorizontalBox {
+                if admin-section == "users" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
+                    for row in admin-users : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
                         Text {
-                            text: row.label;
+                            text: (row.is-admin ? "🛡  " : "👤  ") + row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                             wrap: word-wrap;
                         }
-                        Button {
+                        CompactButton {
                             text: row.is-admin ? @tr("Revoke admin") : @tr("Make admin");
                             clicked => { admin-user-toggle-admin(row.user-id, !row.is-admin); }
                         }
-                        Button {
-                            text: @tr("Delete");
+                        CompactButton {
+                            text: "🗑  " + @tr("Delete");
+                            a11y-label: @tr("Delete");
                             clicked => { admin-user-delete(row.user-id); }
                         }
                     }
                 }
 
-                if admin-section == "networks" : VerticalBox {
-                    for row in admin-networks : HorizontalBox {
+                if admin-section == "networks" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
+                    for row in admin-networks : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
                         Text {
-                            text: row.label;
+                            text: "🌍  " + row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                             wrap: word-wrap;
                         }
-                        Button {
-                            text: @tr("Reset circuit");
+                        CompactButton {
+                            text: "⟲  " + @tr("Reset circuit");
+                            a11y-label: @tr("Reset circuit");
                             clicked => { admin-network-reset-circuit(row.network-id); }
                         }
                     }
                 }
 
-                if admin-section == "visitors" : VerticalBox {
-                    for row in admin-visitors : HorizontalBox {
+                if admin-section == "visitors" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
+                    for row in admin-visitors : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
                         Text {
-                            text: row.label;
+                            text: "🧳  " + row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
                             wrap: word-wrap;
                         }
-                        Button {
-                            text: @tr("Delete");
+                        CompactButton {
+                            text: "🗑  " + @tr("Delete");
+                            a11y-label: @tr("Delete");
                             clicked => { admin-visitor-delete(row.visitor-id); }
                         }
                     }
                 }
 
-                if admin-section == "session-log" : VerticalBox {
+                if admin-section == "session-log" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
                     for line in admin-session-log : Text {
                         text: line;
                         wrap: word-wrap;
                     }
                 }
+            }
+
+            // Keeps short panels at the top; list panels fill instead.
+            if settings-section != "themes" && settings-section != "admin" : Rectangle {
+                vertical-stretch: 1;
             }
         }
     }
