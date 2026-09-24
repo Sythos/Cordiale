@@ -87,8 +87,9 @@ Cordiale still has these user-visible or behavioral gaps:
   DM queue can drop messages if the authoritative query snapshot is absent
   or late.
 - **Remaining presentation gaps:** WHOIS avatars are drawn when Grappa
-  serves them as PNG, JPEG, GIF, WebP or BMP; the account-wide unread count only shows in the
-  window title (and so the taskbar), not as an OS badge.
+  serves them as PNG, JPEG, GIF, WebP or BMP. The account-wide unread count
+  shows in the window title and, on Windows, as a badge on the taskbar
+  button; macOS and Linux have no badge.
 
 ## Download
 

@@ -1419,3 +1419,7 @@ msgstr "Comandi alla connessione, un comando IRC per riga"
 msgctxt "AppWindow"
 msgid "On-connect commands"
 msgstr "Comandi alla connessione"
+
+msgctxt "AppWindow"
+msgid "{} unread"
+msgstr "{} non letti"

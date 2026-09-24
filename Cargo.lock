@@ -933,11 +933,13 @@ dependencies = [
  "chrono",
  "cordiale-core",
  "image",
+ "raw-window-handle",
  "rfd",
  "serde_json",
  "slint",
  "slint-build",
  "tokio",
+ "windows",
  "winresource",
 ]
 
@@ -4938,6 +4940,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",

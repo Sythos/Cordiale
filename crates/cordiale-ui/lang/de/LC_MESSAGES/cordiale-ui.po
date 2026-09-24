@@ -1419,3 +1419,7 @@ msgstr "Befehle beim Verbinden, ein IRC-Befehl pro Zeile"
 msgctxt "AppWindow"
 msgid "On-connect commands"
 msgstr "Befehle beim Verbinden"
+
+msgctxt "AppWindow"
+msgid "{} unread"
+msgstr "{} ungelesen"
