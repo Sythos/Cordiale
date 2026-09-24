@@ -32,7 +32,11 @@ use serde_json::Value;
 pub enum RadioCodec {
     Mp3,
     Vorbis,
+    Flac,
 }
+
+/// The codecs a custom station can declare, in the Settings menu's order.
+pub const RADIO_CODECS: [RadioCodec; 3] = [RadioCodec::Mp3, RadioCodec::Vorbis, RadioCodec::Flac];
 
 impl RadioCodec {
     /// The file extension hint the decoder is given.
@@ -40,13 +44,32 @@ impl RadioCodec {
         match self {
             Self::Mp3 => "mp3",
             Self::Vorbis => "ogg",
+            Self::Flac => "flac",
         }
+    }
+
+    /// How a custom station stores it in the settings file.
+    pub fn setting_key(self) -> &'static str {
+        match self {
+            Self::Mp3 => "mp3",
+            Self::Vorbis => "vorbis",
+            Self::Flac => "flac",
+        }
+    }
+
+    /// The codec of a stored custom station; MP3 for anything unknown.
+    pub fn from_setting_key(key: &str) -> Self {
+        RADIO_CODECS
+            .into_iter()
+            .find(|codec| codec.setting_key() == key)
+            .unwrap_or(Self::Mp3)
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Mp3 => "MP3",
             Self::Vorbis => "Ogg Vorbis",
+            Self::Flac => "FLAC",
         }
     }
 }
@@ -78,7 +101,8 @@ pub struct RadioStation {
 }
 
 /// The stations Cicchetto offers, in its order: SomaFM channels plus a few
-/// other Icecast stations, as direct MP3 or Ogg Vorbis streams.
+/// other Icecast stations, as direct MP3 or Ogg Vorbis streams (the
+/// player decodes FLAC too, for custom stations).
 pub const RADIO_STATIONS: &[RadioStation] = &[
     RadioStation {
         id: "groovesalad",
@@ -666,6 +690,10 @@ mod tests {
         assert!(RADIO_STATIONS
             .iter()
             .any(|station| station.codec == RadioCodec::Vorbis));
+        for codec in RADIO_CODECS {
+            assert_eq!(RadioCodec::from_setting_key(codec.setting_key()), codec);
+        }
+        assert_eq!(RadioCodec::from_setting_key("aac"), RadioCodec::Mp3);
         assert!(RADIO_STATIONS
             .iter()
             .all(|station| station.stream_url.starts_with("https://")));

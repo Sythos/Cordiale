@@ -103,7 +103,7 @@ pub struct CustomRadioStation {
     pub name: String,
     /// The stream (or `.pls`/`.m3u` playlist) URL.
     pub url: String,
-    /// `"mp3"` or `"vorbis"`.
+    /// `"mp3"`, `"vorbis"` or `"flac"`.
     pub codec: String,
 }
 

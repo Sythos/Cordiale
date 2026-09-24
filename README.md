@@ -28,11 +28,12 @@ roles appear in brackets (for example, `[@] Sythos`), and the member list's
 Actions menu includes a shortcut to the Themes settings.
 
 The Actions menu opens the radio: Cicchetto's stations (SomaFM and a few
-other Icecast streams) play in Cordiale itself, MP3 or Ogg Vorbis, with the
-same player on every platform, a volume control and the current track read
-from the station's feed or the stream's own titles; `/np` shares it in the
-open window. Settings > Radio adds, edits and removes your own stations
-(stream or `.pls`/`.m3u` URLs), kept on this device only.
+other Icecast streams) play in Cordiale itself, with the same player on
+every platform for MP3, Ogg Vorbis and FLAC streams, a volume control and
+the current track read from the station's feed or the stream's own titles;
+`/np` shares it in the open window. Settings > Radio adds, edits and
+removes your own stations (stream or `.pls`/`.m3u` URLs), kept on this
+device only.
 
 Settings > Themes lists Grappa's theme gallery, including the irssi-derived
 `irssi-dark` and `sux`, each shown with its color set. Picking one makes it

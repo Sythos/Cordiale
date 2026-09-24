@@ -4178,11 +4178,7 @@ fn tunable_station(key: &str) -> Option<TunableStation> {
         .radio_stations
         .into_iter()
         .nth(index)?;
-    let codec = if station.codec == "vorbis" {
-        RadioCodec::Vorbis
-    } else {
-        RadioCodec::Mp3
-    };
+    let codec = RadioCodec::from_setting_key(&station.codec);
     Some(TunableStation {
         title: station.name,
         url: station.url,
@@ -4192,7 +4188,7 @@ fn tunable_station(key: &str) -> Option<TunableStation> {
 }
 
 /// A custom station from the Settings form; `None` without a name or an
-/// http(s) URL. `codec_index` follows the form's menu: MP3, Ogg Vorbis.
+/// http(s) URL. `codec_index` follows the form's menu (`RADIO_CODECS`).
 fn custom_radio_station(
     name: &str,
     url: &str,
@@ -4207,7 +4203,13 @@ fn custom_radio_station(
     Some(persistence::CustomRadioStation {
         name: name.to_string(),
         url: url.to_string(),
-        codec: if codec_index == 1 { "vorbis" } else { "mp3" }.to_string(),
+        codec: usize::try_from(codec_index)
+            .ok()
+            .and_then(|index| cordiale_core::radio::RADIO_CODECS.get(index))
+            .copied()
+            .unwrap_or(cordiale_core::radio::RadioCodec::Mp3)
+            .setting_key()
+            .to_string(),
     })
 }
 
@@ -4225,7 +4227,7 @@ fn is_http_url(url: &str) -> bool {
 /// Mirrors the station list (Cicchetto's, then the custom ones) and the
 /// custom list of Settings > Radio.
 fn push_radio_stations(ui: &AppWindow, custom: &[persistence::CustomRadioStation]) {
-    use cordiale_core::radio::RADIO_STATIONS;
+    use cordiale_core::radio::{RadioCodec, RADIO_CODECS, RADIO_STATIONS};
     let mut rows: Vec<RadioRow> = RADIO_STATIONS
         .iter()
         .map(|station| {
@@ -4247,15 +4249,16 @@ fn push_radio_stations(ui: &AppWindow, custom: &[persistence::CustomRadioStation
         .map(|station| CustomRadioRow {
             name: station.name.clone().into(),
             url: station.url.clone().into(),
-            codec_index: i32::from(station.codec == "vorbis"),
+            codec_index: RADIO_CODECS
+                .iter()
+                .position(|codec| codec.setting_key() == station.codec)
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or(0),
+            codec_label: RadioCodec::from_setting_key(&station.codec).label().into(),
         })
         .collect();
     rows.extend(custom.iter().enumerate().map(|(index, station)| {
-        let codec = if station.codec == "vorbis" {
-            "Ogg Vorbis"
-        } else {
-            "MP3"
-        };
+        let codec = RadioCodec::from_setting_key(&station.codec).label();
         RadioRow {
             key: format!("custom:{index}").into(),
             title: station.name.clone().into(),
@@ -17833,6 +17836,11 @@ mod tests {
             .expect("valid station");
         assert_eq!(station.name, "Local");
         assert_eq!(station.codec, "vorbis");
+        assert_eq!(
+            custom_radio_station("x", "https://radio.example/s.flac", 2)
+                .map(|station| station.codec),
+            Some("flac".to_string())
+        );
         assert!(custom_radio_station("", "https://radio.example/", 0).is_none());
         assert!(custom_radio_station("x", "ftp://radio.example/", 0).is_none());
         assert!(custom_radio_station("x", "https://", 0).is_none());

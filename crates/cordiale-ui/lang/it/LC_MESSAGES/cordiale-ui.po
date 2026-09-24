@@ -1465,10 +1465,6 @@ msgid "Radio stations"
 msgstr "Stazioni radio"
 
 msgctxt "AppWindow"
-msgid "Add your own MP3 or Ogg Vorbis stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen."
-msgstr "Aggiungi le tue stazioni MP3 o Ogg Vorbis (URL di uno stream o di una playlist .pls/.m3u). Restano solo su questo dispositivo, accanto alle stazioni di Cicchetto nella schermata Radio."
-
-msgctxt "AppWindow"
 msgid "Edit {}"
 msgstr "Modifica {}"
 
@@ -1511,3 +1507,7 @@ msgstr "Riproduci {}"
 msgctxt "AppWindow"
 msgid "Custom stations"
 msgstr "Stazioni personalizzate"
+
+msgctxt "AppWindow"
+msgid "Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen."
+msgstr "Aggiungi le tue stazioni MP3, Ogg Vorbis o FLAC (URL di uno stream o di una playlist .pls/.m3u). Restano solo su questo dispositivo, accanto alle stazioni di Cicchetto nella schermata Radio."

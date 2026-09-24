@@ -74,12 +74,13 @@ struct RadioRow {
     custom: bool,
 }
 
-// One custom station in Settings > Radio; `codec-index` 0 is MP3, 1 Ogg
-// Vorbis.
+// One custom station in Settings > Radio; `codec-index` follows the
+// form's menu (MP3, Ogg Vorbis, FLAC).
 struct CustomRadioRow {
     name: string,
     url: string,
     codec-index: int,
+    codec-label: string,
 }
 
 // One archived window (`/archive`): `kind` is the wire token (channel or
@@ -2484,14 +2485,14 @@ export component AppWindow inherits Window {
                 fill: true;
 
                 Text {
-                    text: @tr("Add your own MP3 or Ogg Vorbis stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen.");
+                    text: @tr("Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen.");
                     wrap: word-wrap;
                 }
                 for station[index] in radio-custom-stations : HorizontalLayout {
                     spacing: 6px;
 
                     Text {
-                        text: station.name + "  (" + (station.codec-index == 1 ? "Ogg Vorbis" : "MP3") + ")\n" + station.url;
+                        text: station.name + "  (" + station.codec-label + ")\n" + station.url;
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                         wrap: word-wrap;
@@ -2531,7 +2532,7 @@ export component AppWindow inherits Window {
                     alignment: start;
 
                     ComboBox {
-                        model: ["MP3", "Ogg Vorbis"];
+                        model: ["MP3", "Ogg Vorbis", "FLAC"];
                         current-index <=> radio-form-codec;
                         min-width: 120px;
                     }
