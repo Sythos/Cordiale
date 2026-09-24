@@ -291,6 +291,39 @@ pub fn admin_session_log_line(entry: &Value) -> String {
     }
 }
 
+/// One line for a network's IRC server endpoint (`GET
+/// /admin/networks/:id/servers`): `host:port`, TLS and disabled markers.
+pub fn admin_server_label(entry: &Value) -> String {
+    let host = entry.get("host").and_then(Value::as_str).unwrap_or("?");
+    let port = entry.get("port").and_then(Value::as_i64).unwrap_or(0);
+    let mut label = format!("{host}:{port}");
+    if entry.get("tls").and_then(Value::as_bool) == Some(true) {
+        label.push_str(" · TLS");
+    }
+    if entry.get("enabled").and_then(Value::as_bool) == Some(false) {
+        label.push_str(" · off");
+    }
+    label
+}
+
+/// The byte sizes of Grappa's server settings, as MiB text for the
+/// editor: whole numbers when exact, else two decimals.
+pub fn bytes_to_mib_text(bytes: Option<u64>) -> String {
+    const MIB: u64 = 1024 * 1024;
+    match bytes {
+        None => String::new(),
+        Some(bytes) if bytes % MIB == 0 => (bytes / MIB).to_string(),
+        Some(bytes) => format!("{:.2}", bytes as f64 / MIB as f64),
+    }
+}
+
+/// Parses a MiB size typed in the editor back into a positive byte count.
+pub fn mib_text_to_bytes(text: &str) -> Option<u64> {
+    let mib: f64 = text.trim().parse().ok()?;
+    let bytes = (mib * 1024.0 * 1024.0).round();
+    (bytes >= 1.0 && bytes.is_finite()).then_some(bytes as u64)
+}
+
 /// Phoenix topic of Grappa's live admin feed (admins with a full web
 /// session only): a `snapshot` of recent events on join, then one push per
 /// event, `session_log_event`s and periodic `overview` pushes.
@@ -329,6 +362,22 @@ pub fn admin_event_line(entry: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_labels_and_mib_sizes() {
+        assert_eq!(
+            admin_server_label(&serde_json::json!({
+                "host": "irc.libera.chat", "port": 6697, "tls": true, "enabled": false
+            })),
+            "irc.libera.chat:6697 · TLS · off"
+        );
+        assert_eq!(bytes_to_mib_text(Some(10 * 1024 * 1024)), "10");
+        assert_eq!(bytes_to_mib_text(Some(1536 * 1024)), "1.50");
+        assert_eq!(bytes_to_mib_text(None), "");
+        assert_eq!(mib_text_to_bytes("1.5"), Some(1536 * 1024));
+        assert_eq!(mib_text_to_bytes("0"), None);
+        assert_eq!(mib_text_to_bytes("lots"), None);
+    }
 
     #[test]
     fn admin_event_line_names_subject_and_actor() {
