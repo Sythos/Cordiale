@@ -1165,6 +1165,26 @@ msgid "That alias expands into too many others: {}"
 msgstr "Este alias se expande en demasiados otros: {}"
 
 msgctxt "AppWindow"
+msgid "The server refused that command ({})."
+msgstr "El servidor rechazó ese comando ({})."
+
+msgctxt "LinksGraphWindow"
+msgid "Zoom out"
+msgstr "Alejar"
+
+msgctxt "LinksGraphWindow"
+msgid "Zoom in"
+msgstr "Acercar"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset"
+msgstr "Restablecer"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset zoom"
+msgstr "Restablecer el zoom"
+
+msgctxt "AppWindow"
 msgid "Done."
 msgstr "Hecho."
 
