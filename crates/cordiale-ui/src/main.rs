@@ -46,6 +46,7 @@ use cordiale_core::rest::{
     SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
+use cordiale_core::theme::{font_family_for, ThemePalette, BUILTIN_THEMES};
 use cordiale_core::wire_event::ClientEventKind;
 
 /// The default server offered on first launch.
@@ -97,6 +98,7 @@ enum WorkerCommand {
     AttachFile,
     ComposeTextChanged(String),
     ToggleTheme,
+    SelectColorTheme(String),
     SaveDisplayPrefs(DisplayPrefs),
     AdminRefresh,
     AdminDisconnectSession(String),
@@ -179,6 +181,16 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     ui.set_theme(theme_to_slint(settings.theme));
     ui.invoke_apply_color_scheme();
+    // A built-in color theme applies from the first screen; a Grappa one
+    // needs the session and is applied after sign-in.
+    if let Some(choice) = settings
+        .color_theme
+        .as_deref()
+        .and_then(|key| builtin_theme_choices().into_iter().find(|c| c.key == key))
+    {
+        set_active_palette(Some(choice.palette.clone()));
+        push_palette(&ui, Some(&choice));
+    }
     ui.set_known_servers(known_servers_model());
 
     let (worker_tx, worker_rx) = mpsc::unbounded_channel::<WorkerCommand>();
@@ -489,6 +501,11 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_theme = worker_tx.clone();
     ui.on_theme_toggle_requested(move || {
         let _ = tx_for_theme.send(WorkerCommand::ToggleTheme);
+    });
+
+    let tx_for_color_theme = worker_tx.clone();
+    ui.on_color_theme_requested(move |key| {
+        let _ = tx_for_color_theme.send(WorkerCommand::SelectColorTheme(key.to_string()));
     });
 
     let tx_for_prefs = worker_tx.clone();
@@ -1251,6 +1268,9 @@ struct WorkerState {
     /// property) so message-rendering helpers running on this thread can
     /// pick a legible color without an extra hop to the UI thread.
     theme: Theme,
+    /// Color themes offered in Settings > Themes: Grappa's gallery when the
+    /// server has one, the built-in copies otherwise.
+    theme_choices: Vec<ThemeChoice>,
 }
 
 impl WorkerState {
@@ -1316,6 +1336,7 @@ impl WorkerState {
             web_bundle: None,
             watch_patterns: Vec::new(),
             theme: persistence::load_settings().unwrap_or_default().theme,
+            theme_choices: builtin_theme_choices(),
         }
     }
 }
@@ -1456,6 +1477,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ToggleTheme) => {
                         handle_toggle_theme(&mut state, &ui);
+                    }
+                    Some(WorkerCommand::SelectColorTheme(key)) => {
+                        select_color_theme(&mut state, &ui, &key).await;
                     }
                     Some(WorkerCommand::SaveDisplayPrefs(prefs)) => {
                         handle_save_display_prefs(&state, prefs).await;
@@ -2027,6 +2051,7 @@ async fn handle_connect(
                 .filter(|(network, channel)| {
                     entries.iter().any(|(n, c, _)| n == network && c == channel)
                 });
+            load_color_themes(state, &ui).await;
             if let Some((network, channel)) = restore_channel {
                 handle_select_channel(state, &ui, network, channel).await;
             }
@@ -2556,7 +2581,15 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
         Theme::Light => Theme::Dark,
         Theme::Dark => Theme::Light,
     };
+    // The light/dark switch is the classic look: it leaves any color theme.
+    settings.color_theme = None;
     let _ = persistence::save_settings(&settings);
+    set_active_palette(None);
+    push_theme_choices(state, ui, None);
+    {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(|ui| push_palette(&ui, None));
+    }
 
     let new_theme = settings.theme;
     state.theme = new_theme;
@@ -6349,9 +6382,272 @@ fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
         .collect()
 }
 
+/// A color theme offered in Settings > Themes. `key` is `server:<id>` for a
+/// Grappa theme or `builtin:<name>` for a built-in copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThemeChoice {
+    key: String,
+    name: String,
+    author: String,
+    palette: ThemePalette,
+    font_family: String,
+}
+
+/// The built-in color themes (copies of Grappa's irssi-derived gallery).
+fn builtin_theme_choices() -> Vec<ThemeChoice> {
+    BUILTIN_THEMES
+        .iter()
+        .map(|theme| ThemeChoice {
+            key: format!("builtin:{}", theme.name),
+            name: theme.name.to_string(),
+            author: String::new(),
+            palette: theme.palette(),
+            font_family: "mono-default".to_string(),
+        })
+        .collect()
+}
+
+/// A Grappa theme as a choice, when its palette is complete.
+fn server_theme_choice(theme: &cordiale_core::rest::ThemeWire) -> Option<ThemeChoice> {
+    Some(ThemeChoice {
+        key: format!("server:{}", theme.id),
+        name: theme.name.clone(),
+        author: theme.author.clone(),
+        palette: ThemePalette::from_colors(&theme.payload.colors)?,
+        font_family: theme.payload.font_family.clone(),
+    })
+}
+
+/// Palette of the color theme in use, read by the nick and timestamp color
+/// helpers so every chat and member row follows it. `None` is the classic
+/// light/dark look.
+static ACTIVE_PALETTE: std::sync::RwLock<Option<ThemePalette>> = std::sync::RwLock::new(None);
+
+fn active_palette() -> Option<ThemePalette> {
+    ACTIVE_PALETTE
+        .read()
+        .ok()
+        .and_then(|palette| palette.clone())
+}
+
+fn set_active_palette(palette: Option<ThemePalette>) {
+    if let Ok(mut active) = ACTIVE_PALETTE.write() {
+        *active = palette;
+    }
+}
+
+fn slint_color((r, g, b): (u8, u8, u8)) -> slint::Color {
+    slint::Color::from_rgb_u8(r, g, b)
+}
+
+/// Mirrors a color theme (or the classic look, for `None`) into the window:
+/// background, panel colors, color scheme and monospace font.
+fn push_palette(ui: &AppWindow, choice: Option<&ThemeChoice>) {
+    match choice {
+        Some(choice) => {
+            let palette = &choice.palette;
+            ui.set_palette_bg(slint_color(palette.bg));
+            ui.set_palette_bg_alt(slint_color(palette.bg_alt));
+            ui.set_palette_fg(slint_color(palette.fg));
+            ui.set_palette_accent(slint_color(palette.accent));
+            ui.set_palette_muted(slint_color(palette.muted));
+            ui.set_palette_border(slint_color(palette.border));
+            ui.set_palette_font(font_family_for(&choice.font_family).into());
+            ui.set_palette_active(true);
+            let scheme = if palette.is_dark() { "dark" } else { "light" };
+            ui.set_theme(scheme.into());
+        }
+        None => {
+            ui.set_palette_active(false);
+            let theme = persistence::load_settings().unwrap_or_default().theme;
+            ui.set_theme(theme_to_slint(theme));
+        }
+    }
+    ui.invoke_apply_color_scheme();
+}
+
+/// Mirrors the available color themes into Settings > Themes, marking
+/// `selected` (a choice key) as in use.
+fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected: Option<&str>) {
+    let rows: Vec<(String, String, String, bool, ThemePalette)> = state
+        .theme_choices
+        .iter()
+        .map(|choice| {
+            (
+                choice.key.clone(),
+                choice.name.clone(),
+                choice.author.clone(),
+                selected == Some(choice.key.as_str()),
+                choice.palette.clone(),
+            )
+        })
+        .collect();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<ThemeChoiceRow> = rows
+            .into_iter()
+            .map(|(key, name, author, selected, palette)| {
+                let swatches: Vec<slint::Color> = [
+                    palette.bg,
+                    palette.fg,
+                    palette.accent,
+                    palette.muted,
+                    palette.mention,
+                    palette.mode_op,
+                    palette.mode_voiced,
+                ]
+                .into_iter()
+                .chain(palette.nicks.iter().copied().take(8))
+                .map(slint_color)
+                .collect();
+                ThemeChoiceRow {
+                    key: key.into(),
+                    name: name.into(),
+                    author: author.into(),
+                    selected,
+                    swatches: Rc::new(slint::VecModel::from(swatches)).into(),
+                }
+            })
+            .collect();
+        ui.set_theme_choices(Rc::new(slint::VecModel::from(rows)).into());
+    });
+}
+
+/// After sign-in: loads Grappa's theme gallery (falling back to the
+/// built-in copies) and re-applies the saved color theme choice.
+async fn load_color_themes(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let server_choices: Vec<ThemeChoice> = match client.fetch_themes(&token).await {
+        Ok(themes) => themes.iter().filter_map(server_theme_choice).collect(),
+        Err(err) => {
+            persistence::log_line(&format!("theme gallery unavailable: {err:?}"));
+            Vec::new()
+        }
+    };
+    state.theme_choices = if server_choices.is_empty() {
+        builtin_theme_choices()
+    } else {
+        server_choices
+    };
+
+    let saved = persistence::load_settings().unwrap_or_default().color_theme;
+    let active = match saved.as_deref() {
+        Some("server") => match client.fetch_active_theme(&token).await {
+            Ok(pair) => pair.light.as_ref().and_then(server_theme_choice),
+            Err(err) => {
+                persistence::log_line(&format!("active theme unavailable: {err:?}"));
+                None
+            }
+        },
+        Some(key) => builtin_theme_choices()
+            .into_iter()
+            .find(|choice| choice.key == key),
+        None => None,
+    };
+    apply_color_theme(state, ui, active);
+}
+
+/// Settings > Themes pick. An empty key returns to the classic look; a
+/// `server:<id>` key sets the account's active theme on Grappa.
+async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, key: &str) {
+    let mut settings = persistence::load_settings().unwrap_or_default();
+    let choice = if key.is_empty() {
+        settings.color_theme = None;
+        None
+    } else if let Some(id) = key.strip_prefix("server:") {
+        let (Some(client), Some(token), Ok(id)) =
+            (state.client.clone(), state.token.clone(), id.parse::<i64>())
+        else {
+            return;
+        };
+        match client.set_active_theme(&token, id).await {
+            Ok(pair) => {
+                settings.color_theme = Some("server".to_string());
+                pair.light.as_ref().and_then(server_theme_choice)
+            }
+            Err(err) => {
+                persistence::log_line(&format!("theme change failed: {err:?}"));
+                let ui = ui.clone();
+                let _ = ui.upgrade_in_event_loop(|ui| {
+                    ui.set_status_kind("theme-change-failed".into());
+                });
+                return;
+            }
+        }
+    } else {
+        let choice = state
+            .theme_choices
+            .iter()
+            .chain(builtin_theme_choices().iter())
+            .find(|choice| choice.key == key)
+            .cloned();
+        if choice.is_some() {
+            settings.color_theme = Some(key.to_string());
+        }
+        choice
+    };
+    let _ = persistence::save_settings(&settings);
+    apply_color_theme(state, ui, choice);
+}
+
+/// Makes `choice` (or the classic look) the theme in use: palette for the
+/// color helpers, dark/light for legibility, window colors, and a redraw of
+/// the open chat and member list.
+fn apply_color_theme(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    choice: Option<ThemeChoice>,
+) {
+    set_active_palette(choice.as_ref().map(|choice| choice.palette.clone()));
+    state.theme = match &choice {
+        Some(choice) if choice.palette.is_dark() => Theme::Dark,
+        Some(_) => Theme::Light,
+        None => persistence::load_settings().unwrap_or_default().theme,
+    };
+    push_theme_choices(state, ui, choice.as_ref().map(|choice| choice.key.as_str()));
+    let current_lines = state
+        .current_channel
+        .as_ref()
+        .and_then(|key| state.messages.get(key))
+        .cloned();
+    let current_roster = state
+        .current_channel
+        .as_ref()
+        .filter(|_| !state.current_query)
+        .map(|key| {
+            (
+                state.members.get(key).cloned().unwrap_or_default(),
+                network_casemapping(state, &key.0),
+            )
+        });
+    let dark_theme = state.theme == Theme::Dark;
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        push_palette(&ui, choice.as_ref());
+        if let Some(lines) = current_lines {
+            let model = match &current_roster {
+                Some((members, casemapping)) => {
+                    chat_lines_model_with_roster(&lines, dark_theme, members, *casemapping)
+                }
+                None => chat_lines_model(&lines, dark_theme),
+            };
+            ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+        }
+        if let Some((members, _)) = current_roster {
+            let rows = members_model(&members, dark_theme);
+            ui.set_channel_members(Rc::new(slint::VecModel::from(rows)).into());
+        }
+    });
+}
+
 /// Timestamp-prefix color: readable but visually secondary against either
 /// theme's default text color.
 fn muted_color(dark_theme: bool) -> slint::Color {
+    if let Some(palette) = active_palette() {
+        return slint_color(palette.muted);
+    }
     if dark_theme {
         slint::Color::from_rgb_u8(150, 150, 150)
     } else {
@@ -6364,6 +6660,9 @@ fn muted_color(dark_theme: bool) -> slint::Color {
 /// needing any per-server nick metadata. Saturation/lightness are
 /// theme-tuned so every hue stays legible on that theme's background.
 fn nick_color(nick: &str, dark_theme: bool) -> (u8, u8, u8) {
+    if let Some(palette) = active_palette() {
+        return palette.nick_color(fnv1a_hash(nick.as_bytes()));
+    }
     let hue = (fnv1a_hash(nick.as_bytes()) % 360) as f32;
     let (saturation, lightness) = if dark_theme {
         (0.65, 0.68)
@@ -14351,6 +14650,37 @@ mod tests {
         assert_eq!(ascii[0].nick_prefix.to_string(), "");
         let query = chat_lines_model(&messages, false);
         assert_eq!(query[0].nick_prefix.to_string(), "");
+    }
+
+    #[test]
+    fn theme_choices_need_a_complete_palette() {
+        let builtins = builtin_theme_choices();
+        assert_eq!(builtins[0].key, "builtin:irssi-dark");
+        assert!(builtins.iter().any(|choice| choice.key == "builtin:sux"));
+
+        let mut colors: HashMap<String, String> = HashMap::new();
+        for (index, key) in cordiale_core::theme::BASE_COLOR_KEYS.iter().enumerate() {
+            colors.insert(key.to_string(), format!("#{:02x}0000", index));
+        }
+        for index in 0..16 {
+            colors.insert(format!("nick_{index}"), "#00ff00".to_string());
+        }
+        let mut theme = cordiale_core::rest::ThemeWire {
+            id: 12,
+            name: "custom".to_string(),
+            author: "vjt".to_string(),
+            built_in: false,
+            payload: cordiale_core::rest::ThemePayloadWire {
+                colors,
+                font_family: "hack".to_string(),
+            },
+        };
+        let choice = server_theme_choice(&theme).expect("complete palette");
+        assert_eq!(choice.key, "server:12");
+        assert_eq!(choice.font_family, "hack");
+
+        theme.payload.colors.remove("bg");
+        assert!(server_theme_choice(&theme).is_none());
     }
 
     #[test]

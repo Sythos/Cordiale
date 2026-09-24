@@ -893,10 +893,6 @@ msgid "Server upload limits ({}): images {}, videos {} (up to {} s), documents {
 msgstr "Server-Upload-Limits ({}): Bilder {}, Videos {} (bis zu {} s), Dokumente {}, Audio {}."
 
 msgctxt "AppWindow"
-msgid "Local only for now — a theme driven by Grappa itself will be a separate option once the server supports one."
-msgstr "Vorerst nur lokal — ein von Grappa selbst gesteuertes Design wird eine eigene Option sein, sobald der Server eines unterstützt."
-
-msgctxt "AppWindow"
 msgid "{} (online)"
 msgstr "{} (online)"
 
@@ -975,3 +971,39 @@ msgstr "{} ({} Benutzer) — {}"
 msgctxt "AppWindow"
 msgid "Load more"
 msgstr "Mehr laden"
+
+msgctxt "AppWindow"
+msgid "Couldn't change the theme on the server."
+msgstr "Das Theme konnte auf dem Server nicht geändert werden."
+
+msgctxt "AppWindow"
+msgid "Color themes come from Grappa's gallery (irssi-dark, sux and more) and follow your account; without a connection, built-in copies are offered. The classic look follows the light/dark switch."
+msgstr "Farbthemes stammen aus der Galerie von Grappa (irssi-dark, sux und weitere) und folgen deinem Konto; ohne Verbindung werden eingebaute Kopien angeboten. Das klassische Aussehen folgt dem Hell/Dunkel-Schalter."
+
+msgctxt "AppWindow"
+msgid "Classic: switch to dark"
+msgstr "Klassisch: zu Dunkel wechseln"
+
+msgctxt "AppWindow"
+msgid "Classic: switch to light"
+msgstr "Klassisch: zu Hell wechseln"
+
+msgctxt "AppWindow"
+msgid "Back to classic"
+msgstr "Zurück zu Klassisch"
+
+msgctxt "AppWindow"
+msgid "{} by {}"
+msgstr "{} von {}"
+
+msgctxt "AppWindow"
+msgid "In use"
+msgstr "Aktiv"
+
+msgctxt "AppWindow"
+msgid "Use"
+msgstr "Verwenden"
+
+msgctxt "AppWindow"
+msgid "Use theme {}"
+msgstr "Theme {} verwenden"

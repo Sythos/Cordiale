@@ -25,7 +25,15 @@ Each of the above has its own maintainer(s) and its own issue tracker — if som
 The channel sidebar and member list have resizable columns with content-based
 minimum widths. Channel rows sit directly below their network row, member
 roles appear in brackets (for example, `[@] Sythos`), and the member list's
-Actions menu includes a shortcut to the local Themes settings.
+Actions menu includes a shortcut to the Themes settings.
+
+Settings > Themes lists Grappa's theme gallery, including the irssi-derived
+`irssi-dark` and `sux`, each shown with its color set. Picking one makes it
+the account's active theme on Grappa (`PUT /me/theme`) and restyles Cordiale:
+window background, monospace font, nick and timestamp colors, channel header
+and topic box. Without server themes, built-in copies (irssi-dark, sux,
+mirc-light, solarized dark/light) are applied locally; the classic look
+follows the light/dark switch.
 
 At launch Cordiale signs in automatically with the last remembered profile,
 using its Grappa bearer or the login password kept in the OS keyring if the
@@ -41,9 +49,10 @@ turns off automatic sign-in until the next successful sign-in.
 Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-irc/tree/main/cicchetto),
 Cordiale still has these user-visible or behavioral gaps:
 
-- **Themes:** Cordiale has local Light/Dark styling, but not Cicchetto's
-  server-backed theme gallery, day/night pairing, custom-theme editor, or
-  theme synchronization. The Themes menu entry opens only local controls.
+- **Themes:** Cordiale applies one theme from Grappa's gallery (or a built-in
+  copy), but not Cicchetto's day/night pairing, custom-theme editor, theme
+  publishing or background images. Buttons and menus keep Slint's own widget
+  style in its dark or light variant.
 - **Sign-in and account security:** Cordiale does not expose Cicchetto's
   TOTP/passkey management.
 - **Admin tools:** the panel lacks vhost grants, credentials, server-wide

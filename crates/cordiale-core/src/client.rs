@@ -41,8 +41,9 @@ use crate::profile::{
     NotifyAddRequest, PerformUpdateRequest, PerformView, VhostSelectionRequest, VhostSettingsView,
 };
 use crate::rest::{
-    ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage, DisplayPrefs,
-    LoginRequest, LoginResponse, MeResponse, SendMessageRequest,
+    ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
+    DisplayPrefs, LoginRequest, LoginResponse, MeResponse, SendMessageRequest, ThemeIndex,
+    ThemeWire,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -951,6 +952,55 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `GET /themes` — the public theme gallery (published themes and
+    /// Grappa's built-ins, which include irssi-derived color sets).
+    pub async fn fetch_themes(&self, token: &str) -> Result<Vec<ThemeWire>, GrappaClientError> {
+        let url = format!("{}/themes", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ThemeIndex>().await?.themes)
+    }
+
+    /// `GET /me/theme` — the account's active theme pair.
+    pub async fn fetch_active_theme(
+        &self,
+        token: &str,
+    ) -> Result<ActiveThemePair, GrappaClientError> {
+        let url = format!("{}/me/theme", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ActiveThemePair>().await?)
+    }
+
+    /// `PUT /me/theme` with a single pick: `theme_id` becomes the light slot
+    /// and the dark slot is cleared, so it applies in both modes.
+    pub async fn set_active_theme(
+        &self,
+        token: &str,
+        theme_id: i64,
+    ) -> Result<ActiveThemePair, GrappaClientError> {
+        let url = format!("{}/me/theme", self.base_url);
+        let response = self
+            .http
+            .put(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "light": theme_id, "dark": null }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<ActiveThemePair>().await?)
+    }
+
     /// `DELETE /networks/:slug/notify/:nick`.
     pub async fn remove_notify_nick(
         &self,
@@ -1668,6 +1718,40 @@ mod tests {
             .delete_archive_target("abc123", "libera", "#old")
             .await
             .expect("delete_archive_target");
+    }
+
+    #[tokio::test]
+    async fn theme_endpoints_use_the_documented_paths() {
+        let mock_server = MockServer::start().await;
+        let theme = serde_json::json!({
+            "id": 7, "name": "irssi-dark", "author": "system", "built_in": true,
+            "payload": {"colors": {}, "font_family": "mono-default"}
+        });
+        Mock::given(method("GET"))
+            .and(path("/themes"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"themes": [theme]})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/theme"))
+            .and(body_json(serde_json::json!({"light": 7, "dark": null})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"light": theme, "dark": null})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let themes = client.fetch_themes("abc123").await.expect("fetch_themes");
+        assert_eq!(themes[0].name, "irssi-dark");
+        let pair = client
+            .set_active_theme("abc123", 7)
+            .await
+            .expect("set_active_theme");
+        assert_eq!(pair.light.map(|theme| theme.id), Some(7));
     }
 
     #[tokio::test]
