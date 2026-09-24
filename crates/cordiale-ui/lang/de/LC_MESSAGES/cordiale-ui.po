@@ -1265,6 +1265,94 @@ msgid "No admin events yet. They arrive live while this panel is open."
 msgstr "Noch keine Admin-Ereignisse. Sie kommen live, solange dieses Panel offen ist."
 
 msgctxt "AppWindow"
+msgid "A server needs a host and a port between 1 and 65535."
+msgstr "Ein Server braucht einen Host und einen Port zwischen 1 und 65535."
+
+msgctxt "AppWindow"
+msgid "Sizes and the video length must be positive numbers."
+msgstr "Größen und Videolänge müssen positive Zahlen sein."
+
+msgctxt "AppWindow"
+msgid "IRC servers"
+msgstr "IRC-Server"
+
+msgctxt "AppWindow"
+msgid "Remove server {}"
+msgstr "Server {} entfernen"
+
+msgctxt "AppWindow"
+msgid "Host"
+msgstr "Host"
+
+msgctxt "AppWindow"
+msgid "Port"
+msgstr "Port"
+
+msgctxt "AppWindow"
+msgid "Add server"
+msgstr "Server hinzufügen"
+
+msgctxt "AppWindow"
+msgid "Upload host"
+msgstr "Upload-Host"
+
+msgctxt "AppWindow"
+msgid "Image, per file (MiB)"
+msgstr "Bilder, pro Datei (MiB)"
+
+msgctxt "AppWindow"
+msgid "Video, per file (MiB)"
+msgstr "Videos, pro Datei (MiB)"
+
+msgctxt "AppWindow"
+msgid "Document, per file (MiB)"
+msgstr "Dokumente, pro Datei (MiB)"
+
+msgctxt "AppWindow"
+msgid "Audio, per file (MiB)"
+msgstr "Audio, pro Datei (MiB)"
+
+msgctxt "AppWindow"
+msgid "All uploads (MiB)"
+msgstr "Alle Uploads (MiB)"
+
+msgctxt "AppWindow"
+msgid "Per user (MiB)"
+msgstr "Pro Benutzer (MiB)"
+
+msgctxt "AppWindow"
+msgid "Per visitor (MiB)"
+msgstr "Pro Besucher (MiB)"
+
+msgctxt "AppWindow"
+msgid "DCC, per transfer (MiB)"
+msgstr "DCC, pro Übertragung (MiB)"
+
+msgctxt "AppWindow"
+msgid "DCC, all transfers (MiB)"
+msgstr "DCC, alle Übertragungen (MiB)"
+
+msgctxt "AppWindow"
+msgid "Longest video (seconds)"
+msgstr "Längstes Video (Sekunden)"
+
+msgctxt "AppWindow"
+msgid "Source address mode"
+msgstr "Modus der Quelladresse"
+
+msgctxt "AppWindow"
+msgid "Pool with reservations"
+msgstr "Pool mit Reservierungen"
+
+msgctxt "AppWindow"
+msgid "Static mapping with reservations"
+msgstr "Statische Zuordnung mit Reservierungen"
+
+msgctxt "AppWindow"
+msgid "Static mapping prefix length"
+msgstr "Präfixlänge der statischen Zuordnung"
+
+msgctxt "AppWindow"
 msgid "Topic of {}"
 msgstr "Thema von {}"
 
