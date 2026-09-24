@@ -44,6 +44,16 @@ In channel chat, a speaker's nick uses the role prefix currently shown in
 that channel's member list. Changes to the roster or user modes update visible
 lines without rewriting message history; private conversations remain unprefixed.
 
+Settings > Themes (also in the Actions menu) lists Grappa's theme gallery,
+including the irssi-derived `irssi-dark` and `sux`, each shown with its color
+set. Picking one makes it the account's active theme on Grappa
+(`PUT /me/theme`) and restyles Cordiale irssi-style: window background,
+monospace font, nick and timestamp colors, channel header and topic box.
+Without server themes, built-in copies (irssi-dark, sux, mirc-light,
+solarized dark/light) are applied locally; the classic look follows the
+light/dark switch. Buttons and menus keep Slint's own widget style in its
+dark or light variant.
+
 The known limitations are:
 
 - **Admin panel** implements overview; session listing/disconnect; user
