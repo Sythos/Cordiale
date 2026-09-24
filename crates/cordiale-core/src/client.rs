@@ -1032,6 +1032,108 @@ impl GrappaClient {
         Ok(response.json::<UploadResponse>().await?)
     }
 
+    /// `POST /networks/:slug/channels` — joins one channel, or a
+    /// comma-separated list, with an optional key. Grappa answers 202 and
+    /// the join itself arrives as channel events.
+    pub async fn join_channel(
+        &self,
+        token: &str,
+        network_slug: &str,
+        name: &str,
+        key: Option<&str>,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "channels"]);
+        let mut body = serde_json::json!({ "name": name });
+        if let Some(key) = key.filter(|key| !key.is_empty()) {
+            body["key"] = Value::from(key);
+        }
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `POST /networks/:slug/channels/:channel/topic` — sets the topic.
+    pub async fn set_topic(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel: &str,
+        topic: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "channels", channel, "topic"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "body": topic }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `POST /networks/:slug/nick` — asks the network for a new nick.
+    pub async fn change_nick(
+        &self,
+        token: &str,
+        network_slug: &str,
+        nick: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "nick"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "nick": nick }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `PATCH /networks/:slug` with `connection_state` `"parked"` or
+    /// `"connected"`; a reason goes with a park only.
+    pub async fn set_connection_state(
+        &self,
+        token: &str,
+        network_slug: &str,
+        connection_state: &str,
+        reason: Option<&str>,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug]);
+        let mut body = serde_json::json!({ "connection_state": connection_state });
+        if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
+            body["reason"] = Value::from(reason);
+        }
+        self.http
+            .patch(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `DELETE /networks/:slug/notify/:nick`.
     pub async fn remove_notify_nick(
         &self,
@@ -1783,6 +1885,61 @@ mod tests {
             .await
             .expect("set_active_theme");
         assert_eq!(pair.light.map(|theme| theme.id), Some(7));
+    }
+
+    #[tokio::test]
+    async fn slash_command_endpoints_send_the_documented_bodies() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels"))
+            .and(body_json(
+                serde_json::json!({ "name": "#a,#b", "key": "k" }),
+            ))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels/%23rust/topic"))
+            .and(body_json(serde_json::json!({ "body": "new topic" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/nick"))
+            .and(body_json(serde_json::json!({ "nick": "neo" })))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/networks/libera"))
+            .and(body_json(
+                serde_json::json!({ "connection_state": "parked", "reason": "bye" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .join_channel("t", "libera", "#a,#b", Some("k"))
+            .await
+            .expect("join");
+        client
+            .set_topic("t", "libera", "#rust", "new topic")
+            .await
+            .expect("topic");
+        client
+            .change_nick("t", "libera", "neo")
+            .await
+            .expect("nick");
+        client
+            .set_connection_state("t", "libera", "parked", Some("bye"))
+            .await
+            .expect("park");
     }
 
     #[tokio::test]
