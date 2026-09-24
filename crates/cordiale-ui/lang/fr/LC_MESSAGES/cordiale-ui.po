@@ -1367,3 +1367,7 @@ msgstr "Modes de {}"
 msgctxt "AppWindow"
 msgid "No modes known for {} yet."
 msgstr "Aucun mode encore connu pour {}."
+
+msgctxt "AppWindow"
+msgid "Avatar of {}"
+msgstr "Avatar de {}"
