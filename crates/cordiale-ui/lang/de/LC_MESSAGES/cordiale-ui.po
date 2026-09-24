@@ -1369,6 +1369,10 @@ msgid "No modes known for {} yet."
 msgstr "Für {} sind noch keine Modi bekannt."
 
 msgctxt "AppWindow"
+msgid "Avatar of {}"
+msgstr "Avatar von {}"
+
+msgctxt "AppWindow"
 msgid "A credential needs an account, a network and a nickname."
 msgstr "Eine Zugangsdaten-Bindung braucht ein Konto, ein Netzwerk und einen Nicknamen."
 

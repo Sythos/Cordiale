@@ -638,6 +638,9 @@ export component AppWindow inherits Window {
     in property <string> reply-kind: "";
     in property <string> reply-subject: "";
     in property <string> reply-network: "";
+    // The WHOIS avatar, once downloaded from Grappa.
+    in property <image> reply-avatar;
+    in property <bool> reply-avatar-visible: false;
     in property <[ReplyRow]> reply-rows: [];
     // Archive of one network (`/archive`). `archive-confirm-target` is the
     // row awaiting delete confirmation, set and cleared by the screen itself.
@@ -3326,11 +3329,24 @@ export component AppWindow inherits Window {
         padding: 16px;
         spacing: 8px;
 
-        Text {
-            text: reply-title-text();
-            font-size: 18px;
-            wrap: word-wrap;
-            accessible-role: AccessibleRole.text;
+        HorizontalLayout {
+            spacing: 12px;
+
+            if reply-avatar-visible : Image {
+                source: reply-avatar;
+                width: 64px;
+                height: 64px;
+                image-fit: contain;
+                accessible-label: @tr("Avatar of {}", reply-subject);
+            }
+            Text {
+                text: reply-title-text();
+                font-size: 18px;
+                wrap: word-wrap;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                accessible-role: AccessibleRole.text;
+            }
         }
 
         ListView {

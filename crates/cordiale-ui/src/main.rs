@@ -10403,6 +10403,9 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
             })
             .collect();
         ui.set_reply_rows(Rc::new(slint::VecModel::from(rows)).into());
+        // A WHOIS avatar arrives after the card; any new view starts
+        // without the previous one's picture.
+        ui.set_reply_avatar_visible(false);
         ui.set_reply_kind(kind.into());
         ui.set_reply_subject(subject.into());
         ui.set_reply_network(network.into());
@@ -12098,8 +12101,63 @@ fn handle_whois_bundle(
         return;
     };
     let view = whois_bundle_view(&bundle);
+    let avatar_url = bundle.avatar_url.clone();
     state.whois_card = Some(bundle);
     show_reply_view(state, ui, view);
+    if let Some(avatar_url) = avatar_url {
+        load_whois_avatar(state, ui, avatar_url);
+    }
+}
+
+/// File extension Slint's image loader needs, from the avatar's
+/// `Content-Type`; `None` for formats it can't decode.
+fn avatar_extension(content_type: Option<&str>) -> Option<&'static str> {
+    let mime = content_type?.split(';').next()?.trim();
+    match mime {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        _ => None,
+    }
+}
+
+/// Downloads the WHOIS avatar from Grappa and shows it on the reply
+/// screen. Slint loads images from files, so it's written to the temp
+/// directory first; a failure just leaves the card without a picture.
+fn load_whois_avatar(state: &WorkerState, ui: &slint::Weak<AppWindow>, avatar_url: String) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let ui = ui.clone();
+    tokio::spawn(async move {
+        let (bytes, content_type) = match client.fetch_server_file(&token, &avatar_url).await {
+            Ok(file) => file,
+            Err(err) => {
+                persistence::log_line(&format!("whois avatar fetch failed: {err:?}"));
+                return;
+            }
+        };
+        let Some(extension) = avatar_extension(content_type.as_deref()) else {
+            return;
+        };
+        // One file per avatar URL: Slint caches images by path.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            avatar_url.hash(&mut hasher);
+            hasher.finish()
+        };
+        let path = std::env::temp_dir().join(format!("cordiale-avatar-{key:x}.{extension}"));
+        if let Err(err) = std::fs::write(&path, bytes) {
+            persistence::log_line(&format!("whois avatar write failed: {err}"));
+            return;
+        }
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            if let Ok(image) = slint::Image::load_from_path(&path) {
+                ui.set_reply_avatar(image);
+                ui.set_reply_avatar_visible(true);
+            }
+        });
+    });
 }
 
 /// Validates `whowas_bundle`: every key is required, the history fields are
@@ -12457,8 +12515,12 @@ fn handle_whois_avatar_ready(
     });
     if shown {
         let view = whois_bundle_view(card);
+        let avatar_url = card.avatar_url.clone();
         push_reply_view(ui, &view, false);
         state.reply_view = Some(view);
+        if let Some(avatar_url) = avatar_url {
+            load_whois_avatar(state, ui, avatar_url);
+        }
     }
 }
 
@@ -17169,6 +17231,17 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn avatar_extension_follows_the_content_type() {
+        assert_eq!(avatar_extension(Some("image/png")), Some("png"));
+        assert_eq!(
+            avatar_extension(Some("image/jpeg; charset=binary")),
+            Some("jpg")
+        );
+        assert_eq!(avatar_extension(Some("image/webp")), None);
+        assert_eq!(avatar_extension(None), None);
     }
 
     #[test]

@@ -1635,6 +1635,38 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// Downloads a file Grappa serves behind authentication (a cached WHOIS
+    /// avatar): `path_or_url` is a server path (`/…`) or a URL on the same
+    /// server. The bearer token is never sent anywhere else, so any other
+    /// URL is refused. Returns the bytes and the `Content-Type`, if any.
+    pub async fn fetch_server_file(
+        &self,
+        token: &str,
+        path_or_url: &str,
+    ) -> Result<(Vec<u8>, Option<String>), GrappaClientError> {
+        let base = self.base_url.trim_end_matches('/');
+        let url = if path_or_url.starts_with('/') {
+            format!("{base}{path_or_url}")
+        } else if path_or_url.starts_with(&format!("{base}/")) {
+            path_or_url.to_string()
+        } else {
+            return Err(GrappaClientError::InvalidUrl(path_or_url.to_string()));
+        };
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        Ok((response.bytes().await?.to_vec(), content_type))
+    }
+
     /// `GET /themes` — the public theme gallery (published themes and
     /// Grappa's built-ins, which include irssi-derived color sets).
     pub async fn fetch_themes(&self, token: &str) -> Result<Vec<ThemeWire>, GrappaClientError> {
@@ -2933,6 +2965,35 @@ mod tests {
             .set_notification_prefs("t", &prefs)
             .await
             .expect("save");
+    }
+
+    #[tokio::test]
+    async fn server_files_stay_on_the_server() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/avatars/bob.png"))
+            .and(header("authorization", "Bearer t"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![1, 2, 3]),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let (bytes, content_type) = client
+            .fetch_server_file("t", "/avatars/bob.png")
+            .await
+            .expect("path");
+        assert_eq!(bytes, vec![1, 2, 3]);
+        assert_eq!(content_type.as_deref(), Some("image/png"));
+        let same_server = format!("{}/avatars/bob.png", mock_server.uri());
+        assert!(client.fetch_server_file("t", &same_server).await.is_ok());
+        assert!(client
+            .fetch_server_file("t", "https://elsewhere.example/a.png")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
