@@ -1185,6 +1185,10 @@ msgid "Reset zoom"
 msgstr "Ripristina lo zoom"
 
 msgctxt "AppWindow"
+msgid "{}'s host isn't known yet, so they were only kicked; /whois them first to ban too."
+msgstr "L'host di {} non è ancora noto, quindi è stato solo espulso; fai prima /whois per bannarlo."
+
+msgctxt "AppWindow"
 msgid "Done."
 msgstr "Fatto."
 

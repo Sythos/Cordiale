@@ -1081,6 +1081,8 @@ export component AppWindow inherits Window {
             return @tr("The server refused that command ({}).", status-command-hint);
         } else if status-kind == "alias-too-deep" {
             return @tr("That alias expands into too many others: {}", status-command-hint);
+        } else if status-kind == "kickban-host-unknown" {
+            return @tr("{}'s host isn't known yet, so they were only kicked; /whois them first to ban too.", status-command-hint);
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
