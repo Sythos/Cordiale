@@ -470,7 +470,7 @@ export component AppWindow inherits Window {
     // The live window's title-bar corner and running taskbar icon come
     // from the window handle itself, which winit/Slint leaves unset
     // unless this property is set — the two are independent.
-    icon: @image-url("../../../resources/branding/cordiale_icona.png");
+    icon: @image-url("../../../resources/branding/cordiale_icona_256.png");
     // Not `width`/`height`: those pin the window to a fixed size the
     // window manager won't let the user resize or maximize past.
     // `preferred-*` only picks the initial size, same window otherwise
@@ -792,6 +792,16 @@ export component AppWindow inherits Window {
     callback links-graph-requested();
     callback theme-toggle-requested();
     callback display-prefs-changed();
+    // Grappa's push notifications (`/me/settings/notification-prefs`),
+    // read when Settings > Notifications opens.
+    in property <bool> notify-prefs-loaded: false;
+    in-out property <bool> notify-channel-mentions: true;
+    in-out property <bool> notify-channel-all: false;
+    in-out property <bool> notify-private-all: true;
+    in-out property <bool> notify-presence-online: false;
+    in-out property <bool> notify-presence-offline: false;
+    callback notification-prefs-requested();
+    callback notification-prefs-changed();
     callback settings-network-selected(string);
     callback identity-save-requested();
     callback ignore-add-requested(string);
@@ -1059,6 +1069,10 @@ export component AppWindow inherits Window {
             return @tr("Couldn't reach the server. Check the URL and try again.");
         } else if status-kind == "protocol-too-old" {
             return @tr("This server's protocol version ({}) is too old for Cordiale.", status-protocol-version);
+        } else if status-kind == "notify-prefs-invalid" {
+            return @tr("Keep at least one message notification on.");
+        } else if status-kind == "notify-prefs-failed" {
+            return @tr("Couldn't save the notification settings.");
         } else if status-kind == "send-failed" {
             return @tr("Couldn't send that message.");
         } else if status-kind == "part-failed" {
@@ -1809,7 +1823,10 @@ export component AppWindow inherits Window {
                 icon: "🔔";
                 label: @tr("Notifications");
                 selected: settings-section == "push";
-                clicked => { settings-section = "push"; }
+                clicked => {
+                    settings-section = "push";
+                    notification-prefs-requested();
+                }
             }
             NavButton {
                 icon: "👁";
@@ -2090,13 +2107,55 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if settings-section == "security" || settings-section == "push" : SectionCard {
-                icon: settings-section == "security" ? "🔒" : "🔔";
-                title: settings-section == "security" ? @tr("Security") : @tr("Notifications");
+            if settings-section == "security" : SectionCard {
+                icon: "🔒";
+                title: @tr("Security");
 
                 Text {
-                    text: @tr("Not available yet — this section needs Grappa REST/WS endpoints Cordiale doesn't implement yet.");
+                    text: @tr("Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with.");
                     wrap: word-wrap;
+                }
+            }
+
+            if settings-section == "push" : SectionCard {
+                icon: "🔔";
+                title: @tr("Notifications");
+
+                Text {
+                    text: @tr("Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use.");
+                    wrap: word-wrap;
+                }
+                if !notify-prefs-loaded : Text {
+                    text: @tr("Loading…");
+                }
+                if notify-prefs-loaded : VerticalLayout {
+                    spacing: 6px;
+
+                    CheckBox {
+                        text: @tr("Mentions of my nick in channels");
+                        checked <=> notify-channel-mentions;
+                        toggled => { notification-prefs-changed(); }
+                    }
+                    CheckBox {
+                        text: @tr("Every channel message");
+                        checked <=> notify-channel-all;
+                        toggled => { notification-prefs-changed(); }
+                    }
+                    CheckBox {
+                        text: @tr("Every private message");
+                        checked <=> notify-private-all;
+                        toggled => { notification-prefs-changed(); }
+                    }
+                    CheckBox {
+                        text: @tr("Watched nicks coming online");
+                        checked <=> notify-presence-online;
+                        toggled => { notification-prefs-changed(); }
+                    }
+                    CheckBox {
+                        text: @tr("Watched nicks going offline");
+                        checked <=> notify-presence-offline;
+                        toggled => { notification-prefs-changed(); }
+                    }
                 }
             }
 
@@ -2418,7 +2477,7 @@ export component AppWindow inherits Window {
                 title: @tr("Credits");
 
                 Image {
-                    source: @image-url("../../../resources/branding/cordiale_icona.png");
+                    source: @image-url("../../../resources/branding/cordiale_icona_256.png");
                     image-fit: contain;
                     height: 96px;
                 }

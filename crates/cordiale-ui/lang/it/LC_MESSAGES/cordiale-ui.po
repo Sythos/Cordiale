@@ -165,10 +165,6 @@ msgid "Show bottom bar"
 msgstr "Mostra barra inferiore"
 
 msgctxt "AppWindow"
-msgid "Not available yet — this section needs Grappa REST/WS endpoints Cordiale doesn't implement yet."
-msgstr "Non ancora disponibile: questa sezione richiede endpoint REST/WS di Grappa che Cordiale non implementa ancora."
-
-msgctxt "AppWindow"
 msgid "Vhosts, credentials, server-wide settings write, and the live admin event stream aren't built yet."
 msgstr "Vhost, credenziali, scrittura impostazioni server e flusso eventi admin live non sono ancora implementati."
 
@@ -1063,6 +1059,42 @@ msgstr "Chiedi prima di caricare"
 msgctxt "AppWindow"
 msgid "Load older messages"
 msgstr "Carica messaggi più vecchi"
+
+msgctxt "AppWindow"
+msgid "Keep at least one message notification on."
+msgstr "Lascia attiva almeno una notifica dei messaggi."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the notification settings."
+msgstr "Impossibile salvare le impostazioni delle notifiche."
+
+msgctxt "AppWindow"
+msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
+msgstr "Autenticazione a due fattori, passkey, token dei client ed eliminazione dell'account si gestiscono in Cicchetto: Grappa li tiene fuori dalla portata di un token client come quello con cui accede Cordiale."
+
+msgctxt "AppWindow"
+msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
+msgstr "Notifiche push che Grappa invia ai tuoi dispositivi (ad esempio Cicchetto sul telefono) quando nessuno di essi è in uso."
+
+msgctxt "AppWindow"
+msgid "Mentions of my nick in channels"
+msgstr "Menzioni del mio nick nei canali"
+
+msgctxt "AppWindow"
+msgid "Every channel message"
+msgstr "Ogni messaggio nei canali"
+
+msgctxt "AppWindow"
+msgid "Every private message"
+msgstr "Ogni messaggio privato"
+
+msgctxt "AppWindow"
+msgid "Watched nicks coming online"
+msgstr "Nick osservati che si collegano"
+
+msgctxt "AppWindow"
+msgid "Watched nicks going offline"
+msgstr "Nick osservati che si scollegano"
 
 msgctxt "AppWindow"
 msgid "The auto-away delay must be a whole number of seconds."
