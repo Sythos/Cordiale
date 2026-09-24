@@ -97,7 +97,12 @@ enum WorkerCommand {
     SendMessage {
         body: String,
     },
-    AttachFile(std::path::PathBuf),
+    /// A picked file and the lifetime to request for it.
+    AttachFile(std::path::PathBuf, Option<i64>),
+    UploadPrefsChanged {
+        ttl: Option<i64>,
+        confirm: bool,
+    },
     ComposeTextChanged(String),
     ToggleTheme,
     SelectColorTheme(String),
@@ -484,11 +489,43 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let tx_for_attach = worker_tx.clone();
+    let weak_for_attach = ui.as_weak();
     ui.on_attach_file_requested(move || {
-        // The native file picker is modal and must run on the UI thread
-        // (a requirement on macOS); the upload itself happens in the worker.
-        if let Some(path) = rfd::FileDialog::new().pick_file() {
-            let _ = tx_for_attach.send(WorkerCommand::AttachFile(path));
+        let Some(ui) = weak_for_attach.upgrade() else {
+            return;
+        };
+        // The native file picker and the confirmation are modal and must run
+        // on the UI thread (a requirement on macOS); the upload itself
+        // happens in the worker.
+        let Some(path) = rfd::FileDialog::new().pick_file() else {
+            return;
+        };
+        if ui.get_pref_upload_confirm() {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let answer = rfd::MessageDialog::new()
+                .set_title(ui.get_upload_confirm_title().as_str())
+                .set_description(format!("{}\n\n{name}", ui.get_upload_confirm_text()))
+                .set_buttons(rfd::MessageButtons::YesNo)
+                .show();
+            if !matches!(answer, rfd::MessageDialogResult::Yes) {
+                return;
+            }
+        }
+        let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
+        let _ = tx_for_attach.send(WorkerCommand::AttachFile(path, expire));
+    });
+
+    let tx_for_upload_prefs = worker_tx.clone();
+    let weak_for_upload_prefs = ui.as_weak();
+    ui.on_upload_prefs_changed(move || {
+        if let Some(ui) = weak_for_upload_prefs.upgrade() {
+            let _ = tx_for_upload_prefs.send(WorkerCommand::UploadPrefsChanged {
+                ttl: upload_ttl_for_index(ui.get_pref_upload_ttl_index()),
+                confirm: ui.get_pref_upload_confirm(),
+            });
         }
     });
 
@@ -1399,12 +1436,14 @@ async fn run_worker(
                         }
                     }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
+                        write_back_read_cursor(&mut state);
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::PartChannel { network, channel }) => {
                         handle_part_channel(&mut state, &ui, network, channel, None).await;
                     }
                     Some(WorkerCommand::SelectQuery { network, nick }) => {
+                        write_back_read_cursor(&mut state);
                         handle_select_query(&mut state, &ui, network, nick).await;
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
@@ -1463,8 +1502,20 @@ async fn run_worker(
                         *expanded = !*expanded;
                         refresh_network_groups(&state, &ui);
                     }
-                    Some(WorkerCommand::AttachFile(path)) => {
-                        handle_attach_file(&mut state, &ui, path).await;
+                    Some(WorkerCommand::AttachFile(path, expire)) => {
+                        handle_attach_file(&mut state, &ui, path, expire).await;
+                    }
+                    Some(WorkerCommand::UploadPrefsChanged { ttl, confirm }) => {
+                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                            if let Err(err) = client.set_upload_ttl(token, ttl).await {
+                                persistence::log_line(&format!("upload ttl save failed: {err:?}"));
+                            }
+                            if let Err(err) = client.set_upload_confirm(token, confirm).await {
+                                persistence::log_line(&format!(
+                                    "upload confirm save failed: {err:?}"
+                                ));
+                            }
+                        }
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
                         handle_send_message(&mut state, &ui, body).await;
@@ -1657,6 +1708,7 @@ async fn run_worker(
                         handle_load_older_history(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::GoHome) => {
+                        write_back_read_cursor(&mut state);
                         state.current_channel = None;
                         state.current_query = false;
                         state.current_query_ready = false;
@@ -1988,6 +2040,15 @@ async fn handle_connect(
                 if let Ok(prefs) = prefs_client.fetch_display_prefs(&prefs_token).await {
                     let _ = ui_for_prefs.upgrade_in_event_loop(move |ui| {
                         apply_display_prefs(&ui, &prefs);
+                    });
+                }
+                let ttl = prefs_client.fetch_upload_ttl(&prefs_token).await;
+                let confirm = prefs_client.fetch_upload_confirm(&prefs_token).await;
+                if let (Ok(ttl), Ok(confirm)) = (ttl, confirm) {
+                    let _ = ui_for_prefs.upgrade_in_event_loop(move |ui| {
+                        ui.set_pref_upload_ttl_index(upload_ttl_index(ttl));
+                        ui.set_pref_upload_confirm(confirm);
+                        ui.set_upload_prefs_loaded(true);
                     });
                 }
             });
@@ -2613,6 +2674,7 @@ async fn handle_attach_file(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     path: std::path::PathBuf,
+    expire: Option<i64>,
 ) {
     let filename = path
         .file_name()
@@ -2653,7 +2715,10 @@ async fn handle_attach_file(
         return;
     }
     set_status("attach-uploading", filename.clone());
-    match client.upload_file(&token, &filename, mime, bytes).await {
+    match client
+        .upload_file(&token, &filename, mime, bytes, expire)
+        .await
+    {
         Ok(uploaded) => {
             persistence::log_line(&format!("attachment uploaded: slug={}", uploaded.slug));
             // Set first, so a failed send that follows can replace it.
@@ -2668,6 +2733,29 @@ async fn handle_attach_file(
             );
         }
     }
+}
+
+/// Upload lifetimes offered in Settings, in the order of its menu: the
+/// server's default, then the `expire` values Grappa accepts (1 hour,
+/// 12 hours, 1 day, 3 days).
+const UPLOAD_TTL_CHOICES: [Option<i64>; 5] =
+    [None, Some(3600), Some(43_200), Some(86_400), Some(259_200)];
+
+fn upload_ttl_for_index(index: i32) -> Option<i64> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| UPLOAD_TTL_CHOICES.get(index).copied())
+        .flatten()
+}
+
+/// Menu entry for a stored lifetime; one the menu doesn't offer shows as
+/// the server default.
+fn upload_ttl_index(ttl: Option<i64>) -> i32 {
+    UPLOAD_TTL_CHOICES
+        .iter()
+        .position(|choice| *choice == ttl)
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or(0)
 }
 
 /// The per-file cap Grappa advertises for a category.
@@ -4946,6 +5034,44 @@ fn parse_read_cursor_set_event(
         last_read_message_id,
         badge_count,
     ))
+}
+
+/// The read cursor to send when leaving the open window: its newest message,
+/// if that is past the known cursor. The local cursor advances at once
+/// (forward-only), as in Cicchetto; the `read_cursor_set` push confirms it.
+fn read_cursor_to_write(state: &mut WorkerState) -> Option<(String, String, i64)> {
+    let (network, target) = state.current_channel.clone()?;
+    let newest = query_high_water_id(state, &(network.clone(), target.clone()))?;
+    let key = window_state_key(&network, &target);
+    if state
+        .read_cursors
+        .get(&key)
+        .is_some_and(|&cursor| cursor >= newest)
+    {
+        return None;
+    }
+    state.read_cursors.insert(key, newest);
+    Some((network, target, newest))
+}
+
+/// Marks the window being left as read on the server (Cicchetto does it on
+/// focus-leave). Fire-and-forget: a failure only leaves the unread count as
+/// the server has it.
+fn write_back_read_cursor(state: &mut WorkerState) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let Some((network, target, message_id)) = read_cursor_to_write(state) else {
+        return;
+    };
+    tokio::spawn(async move {
+        if let Err(err) = client
+            .set_read_cursor(&token, &network, &target, message_id)
+            .await
+        {
+            persistence::log_line(&format!("read cursor write-back failed: {err:?}"));
+        }
+    });
 }
 
 /// Applies a server-authoritative cursor/badge update. A malformed required
@@ -15263,6 +15389,17 @@ mod tests {
     }
 
     #[test]
+    fn upload_ttl_menu_maps_both_ways() {
+        assert_eq!(upload_ttl_for_index(0), None);
+        assert_eq!(upload_ttl_for_index(3), Some(86_400));
+        assert_eq!(upload_ttl_for_index(9), None);
+        assert_eq!(upload_ttl_for_index(-1), None);
+        assert_eq!(upload_ttl_index(Some(43_200)), 2);
+        assert_eq!(upload_ttl_index(Some(7)), 0);
+        assert_eq!(upload_ttl_index(None), 0);
+    }
+
+    #[test]
     fn attachment_caps_and_errors_follow_the_category() {
         let limits = UploadLimits {
             host: "embedded".to_string(),
@@ -17499,6 +17636,37 @@ mod tests {
         );
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, "libera");
+    }
+
+    #[test]
+    fn read_cursor_write_back_is_forward_only() {
+        let mut state = WorkerState::new();
+        let key = ("libera".to_string(), "#Rust".to_string());
+        let line = |id| RenderedMessage {
+            timestamp: "10:00".to_string(),
+            nick: Some("foo".to_string()),
+            text: "hi".to_string(),
+            italic: false,
+            message_id: Some(id),
+            server_time: Some(id),
+        };
+        assert_eq!(read_cursor_to_write(&mut state), None);
+        state.current_channel = Some(key.clone());
+        state.messages.insert(key.clone(), vec![line(7), line(9)]);
+        assert_eq!(
+            read_cursor_to_write(&mut state),
+            Some(("libera".to_string(), "#Rust".to_string(), 9))
+        );
+        assert_eq!(
+            state.read_cursors.get(&window_state_key("libera", "#Rust")),
+            Some(&9)
+        );
+        assert_eq!(read_cursor_to_write(&mut state), None);
+        state.messages.get_mut(&key).unwrap().push(line(12));
+        assert_eq!(
+            read_cursor_to_write(&mut state),
+            Some(("libera".to_string(), "#Rust".to_string(), 12))
+        );
     }
 
     #[test]

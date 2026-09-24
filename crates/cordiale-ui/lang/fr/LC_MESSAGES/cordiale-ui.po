@@ -1053,5 +1053,45 @@ msgid "{} failed."
 msgstr "Échec de {}."
 
 msgctxt "AppWindow"
+msgid "Upload file"
+msgstr "Envoyer un fichier"
+
+msgctxt "AppWindow"
+msgid "Upload this file to the server and post its link in the open window?"
+msgstr "Envoyer ce fichier sur le serveur et publier son lien dans la fenêtre ouverte ?"
+
+msgctxt "AppWindow"
+msgid "Uploads"
+msgstr "Envois"
+
+msgctxt "AppWindow"
+msgid "Keep uploaded files for"
+msgstr "Conserver les fichiers envoyés pendant"
+
+msgctxt "AppWindow"
+msgid "Server default"
+msgstr "Valeur par défaut du serveur"
+
+msgctxt "AppWindow"
+msgid "1 hour"
+msgstr "1 heure"
+
+msgctxt "AppWindow"
+msgid "12 hours"
+msgstr "12 heures"
+
+msgctxt "AppWindow"
+msgid "1 day"
+msgstr "1 jour"
+
+msgctxt "AppWindow"
+msgid "3 days"
+msgstr "3 jours"
+
+msgctxt "AppWindow"
+msgid "Ask before uploading"
+msgstr "Demander avant d'envoyer"
+
+msgctxt "AppWindow"
 msgid "Load older messages"
 msgstr "Charger les messages plus anciens"
