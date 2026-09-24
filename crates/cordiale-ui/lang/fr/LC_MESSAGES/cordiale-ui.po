@@ -313,10 +313,6 @@ msgid "Expansion"
 msgstr "Extension"
 
 msgctxt "AppWindow"
-msgid "On-connect commands (one per line, semicolon-separated)"
-msgstr "Commandes à la connexion (une par ligne, séparées par des points-virgules)"
-
-msgctxt "AppWindow"
 msgid "Credits"
 msgstr "Crédits"
 
@@ -1415,6 +1411,82 @@ msgstr "Accorder"
 msgctxt "AppWindow"
 msgid "Revoke grant {}"
 msgstr "Révoquer l'attribution {}"
+
+msgctxt "AppWindow"
+msgid "On-connect commands, one IRC command per line"
+msgstr "Commandes à la connexion, une commande IRC par ligne"
+
+msgctxt "AppWindow"
+msgid "On-connect commands"
+msgstr "Commandes à la connexion"
+
+msgctxt "AppWindow"
+msgid "Conversation muted: other devices won't be notified about it."
+msgstr "Conversation en sourdine : les autres appareils ne seront pas notifiés."
+
+msgctxt "AppWindow"
+msgid "Notification sound: {}"
+msgstr "Son des notifications : {}"
+
+msgctxt "AppWindow"
+msgid "Notification sound set to {}."
+msgstr "Son des notifications réglé sur {}."
+
+msgctxt "AppWindow"
+msgid "Unknown sound. Available: {}"
+msgstr "Son inconnu. Disponibles : {}"
+
+msgctxt "AppWindow"
+msgid "Mute this conversation"
+msgstr "Mettre cette conversation en sourdine"
+
+msgctxt "AppWindow"
+msgid "For 1 hour"
+msgstr "Pendant 1 heure"
+
+msgctxt "AppWindow"
+msgid "For 8 hours"
+msgstr "Pendant 8 heures"
+
+msgctxt "AppWindow"
+msgid "Until I unmute it"
+msgstr "Jusqu'à ce que je la réactive"
+
+msgctxt "AppWindow"
+msgid "With every channel message off, also these channels:"
+msgstr "Messages de salon désactivés, notifier quand même ces salons :"
+
+msgctxt "AppWindow"
+msgid "Remove {}"
+msgstr "Retirer {}"
+
+msgctxt "AppWindow"
+msgid "Channel"
+msgstr "Salon"
+
+msgctxt "AppWindow"
+msgid "With every private message off, also these nicks:"
+msgstr "Messages privés désactivés, notifier quand même ces pseudos :"
+
+msgctxt "AppWindow"
+msgid "Muted conversations"
+msgstr "Conversations en sourdine"
+
+msgctxt "AppWindow"
+msgid "None. Mute one from the Actions menu."
+msgstr "Aucune. Mettez-en une en sourdine depuis le menu Actions."
+
+msgctxt "AppWindow"
+msgid "Unmute"
+msgstr "Réactiver"
+
+msgctxt "AppWindow"
+msgid "Unmute {}"
+msgstr "Réactiver {}"
+
+msgctxt "AppWindow"
+msgid "Sound on other devices (also /beep)"
+msgstr "Son sur les autres appareils (aussi /beep)"
 
 msgctxt "AppWindow"
 msgid "invisible"
