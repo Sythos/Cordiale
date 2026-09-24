@@ -1167,3 +1167,7 @@ msgstr "Dieser Alias wird in zu viele andere erweitert: {}"
 msgctxt "AppWindow"
 msgid "The server refused that command ({})."
 msgstr "Der Server hat diesen Befehl abgelehnt ({})."
+
+msgctxt "AppWindow"
+msgid "{}'s host isn't known yet, so they were only kicked; /whois them first to ban too."
+msgstr "Der Host von {} ist noch nicht bekannt, daher wurde nur gekickt; zuerst /whois ausführen, um auch zu bannen."

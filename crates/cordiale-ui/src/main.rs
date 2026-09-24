@@ -1184,6 +1184,8 @@ struct WorkerState {
     identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
+    /// `/kb` requests waiting for their `resolve_userhost` reply, by ref.
+    pending_kickbans: HashMap<String, PendingKickBan>,
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
     /// transitions.
     window_states: HashMap<(String, String), ChannelWindowState>,
@@ -1384,6 +1386,7 @@ impl WorkerState {
             identifier: None,
             session: None,
             joined_topics: std::collections::HashSet::new(),
+            pending_kickbans: HashMap::new(),
             window_states: HashMap::new(),
             window_failures: HashMap::new(),
             window_kicks: HashMap::new(),
@@ -3063,7 +3066,12 @@ async fn run_slash_command(
             );
             Ok(())
         }
+        SlashCommand::KickBan { nick, reason } if in_channel => {
+            start_kickban(state, &network, channel.clone(), nick, reason);
+            Ok(())
+        }
         SlashCommand::NickModes { .. }
+        | SlashCommand::KickBan { .. }
         | SlashCommand::Kick { .. }
         | SlashCommand::Ban(_)
         | SlashCommand::Unban(_) => {
@@ -3255,6 +3263,91 @@ fn joined_channels(state: &WorkerState, network: &str) -> Vec<String> {
         })
         .map(|(_, channel, _)| channel.clone())
         .collect()
+}
+
+/// A `/kb` waiting for the target's host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingKickBan {
+    network: String,
+    channel: String,
+    nick: String,
+    reason: String,
+}
+
+/// Asks Grappa for the target's `user@host` (from its userhost cache); the
+/// ban and kick follow in `finish_kickban` when the reply arrives.
+fn start_kickban(
+    state: &mut WorkerState,
+    network: &str,
+    channel: String,
+    nick: String,
+    reason: String,
+) {
+    let (Some(session), Some(identifier), Some(&network_id)) = (
+        &state.session,
+        &state.identifier,
+        state.network_ids.get(network),
+    ) else {
+        return;
+    };
+    let message_ref = session.send_tracked_command(
+        format!("grappa:user:{identifier}"),
+        "resolve_userhost",
+        serde_json::json!({ "network_id": network_id, "nick": nick }),
+    );
+    state.pending_kickbans.insert(
+        message_ref,
+        PendingKickBan {
+            network: network.to_string(),
+            channel,
+            nick,
+            reason,
+        },
+    );
+}
+
+/// The `*!*@host` ban mask from a `resolve_userhost` reply, if it has one.
+fn kickban_mask(reply: &Value) -> Option<String> {
+    if reply.get("status").and_then(Value::as_str) != Some("ok") {
+        return None;
+    }
+    let host = reply.get("response")?.get("host")?.as_str()?;
+    (!host.is_empty()).then(|| format!("*!*@{host}"))
+}
+
+/// Bans by host when it was known, then kicks regardless, as Cicchetto
+/// does; an unknown host (`not_cached`) is reported, not fatal.
+fn finish_kickban(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    pending: PendingKickBan,
+    reply: &Value,
+) {
+    match kickban_mask(reply) {
+        Some(mask) => send_user_verb(
+            state,
+            &pending.network,
+            "ban",
+            serde_json::json!({ "channel": pending.channel, "mask": mask }),
+        ),
+        None => {
+            let nick = pending.nick.clone();
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(nick.into());
+                ui.set_status_kind("kickban-host-unknown".into());
+            });
+        }
+    }
+    send_user_verb(
+        state,
+        &pending.network,
+        "kick",
+        serde_json::json!({
+            "channel": pending.channel,
+            "nick": pending.nick,
+            "reason": pending.reason,
+        }),
+    );
 }
 
 /// Posts to `/networks/:slug/channels/:target/messages`.
@@ -4262,6 +4355,14 @@ async fn handle_frame(
             ));
         }
         handle_query_join_reply(state, ui, &frame.topic, status).await;
+        if let Some(pending) = frame
+            .message_ref
+            .as_ref()
+            .and_then(|message_ref| state.pending_kickbans.remove(message_ref))
+        {
+            finish_kickban(state, ui, pending, &frame.payload);
+            return;
+        }
         if let Some(reason) = state
             .identifier
             .as_deref()
@@ -15945,6 +16046,24 @@ mod tests {
             );
         }
         assert_eq!(joined_channels(&state, "libera"), vec!["#a".to_string()]);
+    }
+
+    #[test]
+    fn kickban_mask_needs_a_resolved_host() {
+        assert_eq!(
+            kickban_mask(&serde_json::json!({
+                "status": "ok",
+                "response": {"user": "~u", "host": "spam.example"}
+            })),
+            Some("*!*@spam.example".to_string())
+        );
+        assert_eq!(
+            kickban_mask(&serde_json::json!({
+                "status": "error",
+                "response": {"error": "not_cached"}
+            })),
+            None
+        );
     }
 
     #[test]

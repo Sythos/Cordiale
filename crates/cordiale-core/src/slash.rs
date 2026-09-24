@@ -62,6 +62,9 @@ pub enum SlashCommand {
     },
     /// `/kick <nick> [reason]`.
     Kick { nick: String, reason: String },
+    /// `/kb <nick> [reason]` (`/kickban`): bans `*!*@host` when the host is
+    /// known, and kicks either way.
+    KickBan { nick: String, reason: String },
     /// `/ban <mask-or-nick>`.
     Ban(String),
     /// `/unban <mask>`.
@@ -328,6 +331,17 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
                 Usage("/kick <nick> [reason]")
             } else {
                 Kick {
+                    nick: nick.to_string(),
+                    reason: reason.to_string(),
+                }
+            }
+        }
+        "kb" | "kickban" => {
+            let (nick, reason) = split_word(args);
+            if nick.is_empty() {
+                Usage("/kb <nick> [reason]")
+            } else {
+                KickBan {
                     nick: nick.to_string(),
                     reason: reason.to_string(),
                 }
@@ -742,6 +756,14 @@ mod tests {
                 reason: "go away".to_string()
             })
         );
+        assert_eq!(
+            parse("/kickban troll bye"),
+            Some(KickBan {
+                nick: "troll".to_string(),
+                reason: "bye".to_string()
+            })
+        );
+        assert!(matches!(parse("/kb"), Some(Usage(_))));
         assert_eq!(parse("/ban *!*@spam"), Some(Ban("*!*@spam".to_string())));
         assert_eq!(
             parse("/unban *!*@spam"),
