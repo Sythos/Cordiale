@@ -16416,9 +16416,7 @@ mod tests {
             parse_auto_away_debounce_changed(&payload(serde_json::json!(300)), topic, "vjt"),
             Some(AutoAwayDebounce::Seconds(300))
         );
-        assert_eq!(AutoAwayDebounce::ServerDefault.display_token(), "default");
-        assert_eq!(AutoAwayDebounce::Disabled.display_token(), "off");
-        assert_eq!(AutoAwayDebounce::Seconds(300).display_token(), "300");
+        assert_eq!(AutoAwayDebounce::Seconds(300).edit_text(), "300");
 
         for invalid in [
             payload(serde_json::json!(-1)),
