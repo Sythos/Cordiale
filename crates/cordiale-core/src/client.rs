@@ -954,6 +954,48 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `GET /me/settings/notification-prefs` — the full push-notification
+    /// map (the server fills in its defaults), as the object under
+    /// `notification_prefs`.
+    pub async fn fetch_notification_prefs(
+        &self,
+        token: &str,
+    ) -> Result<serde_json::Map<String, Value>, GrappaClientError> {
+        let url = format!("{}/me/settings/notification-prefs", self.base_url);
+        let body = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(match body.get("notification_prefs") {
+            Some(Value::Object(prefs)) => prefs.clone(),
+            _ => serde_json::Map::new(),
+        })
+    }
+
+    /// `PUT /me/settings/notification-prefs` — the full map, NOT wrapped.
+    /// Every boolean must be present, and at least one message trigger
+    /// must stay on, else 422.
+    pub async fn set_notification_prefs(
+        &self,
+        token: &str,
+        prefs: &serde_json::Map<String, Value>,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/me/settings/notification-prefs", self.base_url);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(prefs)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `GET /themes` — the public theme gallery (published themes and
     /// Grappa's built-ins, which include irssi-derived color sets).
     pub async fn fetch_themes(&self, token: &str) -> Result<Vec<ThemeWire>, GrappaClientError> {
@@ -1953,6 +1995,39 @@ mod tests {
             .delete_archive_target("abc123", "libera", "#old")
             .await
             .expect("delete_archive_target");
+    }
+
+    #[tokio::test]
+    async fn notification_prefs_read_wrapped_and_write_bare() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/notification-prefs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "notification_prefs": {"channel_mentions": true, "muted_targets": {}}
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/notification-prefs"))
+            .and(body_json(
+                serde_json::json!({"channel_mentions": false, "muted_targets": {}}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let mut prefs = client
+            .fetch_notification_prefs("t")
+            .await
+            .expect("notification prefs");
+        assert_eq!(prefs["channel_mentions"], serde_json::json!(true));
+        prefs.insert("channel_mentions".to_string(), Value::Bool(false));
+        client
+            .set_notification_prefs("t", &prefs)
+            .await
+            .expect("save");
     }
 
     #[tokio::test]
