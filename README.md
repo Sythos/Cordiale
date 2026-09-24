@@ -33,7 +33,9 @@ the account's active theme on Grappa (`PUT /me/theme`) and restyles Cordiale:
 window background, monospace font, nick and timestamp colors, channel header
 and topic box. Without server themes, built-in copies (irssi-dark, sux,
 mirc-light, solarized dark/light) are applied locally; the classic look
-follows the light/dark switch.
+follows the light/dark switch. As in Cicchetto, a gallery theme can be paired
+with a night theme, which Cordiale switches to while the operating system is
+in dark mode.
 
 At launch Cordiale signs in automatically with the last remembered profile,
 using its Grappa bearer or the login password kept in the OS keyring if the
@@ -41,16 +43,16 @@ bearer is rejected. It restores the last selected channel when that channel
 is still joined. The login password stays in the native keyring (Windows
 Credential Manager, macOS Keychain, or Linux Secret Service), never in
 Cordiale's own files; without a keyring it is not stored. The eject button
-at the top of the sidebar, or Disconnect in the Actions menu, signs out and
-turns off automatic sign-in until the next successful sign-in.
+at the top of the sidebar, or Switch account in the Actions menu, signs out
+and turns off automatic sign-in until the next successful sign-in.
 
 ## Known gaps
 
 Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-irc/tree/main/cicchetto),
 Cordiale still has these user-visible or behavioral gaps:
 
-- **Themes:** Cordiale applies one theme from Grappa's gallery (or a built-in
-  copy), but not Cicchetto's day/night pairing, custom-theme editor, theme
+- **Themes:** Cordiale applies Grappa's gallery themes (or built-in copies)
+  and their day/night pairing, but not Cicchetto's custom-theme editor, theme
   publishing or background images. Buttons and menus keep Slint's own widget
   style in its dark or light variant.
 - **Sign-in and account security:** Cordiale does not expose Cicchetto's
@@ -78,9 +80,9 @@ Cordiale still has these user-visible or behavioral gaps:
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb`, and the services shortcuts), but not `/np` or
-  the user-mode view of a bare `/umode` (a bare `/topic` or `/mode` shows the
-  channel's topic or modes in the status bar).
+  expansion, `/kb`, the services shortcuts, and a bare `/umode` that opens
+  the user-mode toggles), but not `/np` (a bare `/topic` or `/mode` shows
+  the channel's topic or modes in the status bar).
 - **Chat and roster edge cases:** a message with multiple differently colored
   mIRC runs may overflow instead of wrapping as one paragraph.
 - **Remaining presentation gaps:** WHOIS avatars are drawn when Grappa

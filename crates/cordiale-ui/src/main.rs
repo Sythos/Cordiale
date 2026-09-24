@@ -42,8 +42,8 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::rest::{
-    ArchiveEntry, BootResponse, DirectoryPage, DisplayPrefs, LoginRequest, MeResponse,
-    SendMessageRequest,
+    ActiveThemePair, ArchiveEntry, BootResponse, DirectoryPage, DisplayPrefs, LoginRequest,
+    MeResponse, SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::slash::{self, SlashCommand};
@@ -92,6 +92,9 @@ enum WorkerCommand {
     },
     ArchiveDelete(String),
     ArchiveClose,
+    /// Flips one user mode of the network shown in the user-mode view.
+    UmodeToggle(String),
+    UmodeClose,
     DismissPeerAway,
     ToggleNetwork(String),
     SendMessage {
@@ -106,6 +109,10 @@ enum WorkerCommand {
     ComposeTextChanged(String),
     ToggleTheme,
     SelectColorTheme(String),
+    /// Night slot of the account's theme pair; "" goes back to one theme.
+    SelectNightTheme(String),
+    /// The OS switched between light (`false`) and dark (`true`).
+    SystemScheme(bool),
     SaveDisplayPrefs(DisplayPrefs),
     LoadNotificationPrefs,
     EditNotificationPrefs(NotificationEdit),
@@ -544,6 +551,25 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_archive_close.send(WorkerCommand::ArchiveClose);
     });
 
+    let tx_for_umode_toggle = worker_tx.clone();
+    ui.on_umode_toggle_requested(move |letter| {
+        let _ = tx_for_umode_toggle.send(WorkerCommand::UmodeToggle(letter.to_string()));
+    });
+
+    let tx_for_umode_close = worker_tx.clone();
+    ui.on_umode_view_closed(move || {
+        let _ = tx_for_umode_close.send(WorkerCommand::UmodeClose);
+    });
+
+    // Actions menu entries that run a slash command on the open window,
+    // leaving the composer's draft alone.
+    let tx_for_menu_command = worker_tx.clone();
+    ui.on_menu_command(move |body| {
+        let _ = tx_for_menu_command.send(WorkerCommand::SendMessage {
+            body: body.to_string(),
+        });
+    });
+
     let tx_for_peer_away_dismiss = worker_tx.clone();
     ui.on_peer_away_dismiss_requested(move || {
         let _ = tx_for_peer_away_dismiss.send(WorkerCommand::DismissPeerAway);
@@ -622,6 +648,13 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_color_theme_requested(move |key| {
         let _ = tx_for_color_theme.send(WorkerCommand::SelectColorTheme(key.to_string()));
     });
+
+    let tx_for_night_theme = worker_tx.clone();
+    ui.on_night_theme_requested(move |key| {
+        let _ = tx_for_night_theme.send(WorkerCommand::SelectNightTheme(key.to_string()));
+    });
+
+    watch_system_scheme(worker_tx.clone());
 
     let tx_for_prefs = worker_tx.clone();
     let weak_for_prefs = ui.as_weak();
@@ -1639,6 +1672,8 @@ struct WorkerState {
     /// live and replayed `supported_umodes_changed` snapshots replace only
     /// their own network.
     supported_user_modes_by_network: HashMap<String, Vec<String>>,
+    /// Network whose user modes are on screen (bare `/umode`).
+    umode_view_network: Option<String>,
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
@@ -1681,6 +1716,10 @@ struct WorkerState {
     /// Color themes offered in Settings > Themes: Grappa's gallery when the
     /// server has one, the built-in copies otherwise.
     theme_choices: Vec<ThemeChoice>,
+    /// The account's day and night themes on Grappa, when one is in use.
+    theme_pair: Option<(ThemeChoice, Option<ThemeChoice>)>,
+    /// Whether the OS is in dark mode, which picks the night theme.
+    system_dark: bool,
 }
 
 impl WorkerState {
@@ -1741,6 +1780,7 @@ impl WorkerState {
             isupport_by_network: HashMap::new(),
             user_modes_by_network: HashMap::new(),
             supported_user_modes_by_network: HashMap::new(),
+            umode_view_network: None,
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
             notify_lists: HashMap::new(),
@@ -1754,6 +1794,8 @@ impl WorkerState {
             pending_watchlist_ref: None,
             theme: persistence::load_settings().unwrap_or_default().theme,
             theme_choices: builtin_theme_choices(),
+            theme_pair: None,
+            system_dark: false,
         }
     }
 }
@@ -1853,6 +1895,12 @@ async fn run_worker(
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
                     }
+                    Some(WorkerCommand::UmodeToggle(letter)) => {
+                        toggle_user_mode(&state, &letter);
+                    }
+                    Some(WorkerCommand::UmodeClose) => {
+                        state.umode_view_network = None;
+                    }
                     Some(WorkerCommand::DismissPeerAway) => {
                         if let Some(key) = current_peer_away_key(&state) {
                             state.peer_away.remove(&key);
@@ -1902,6 +1950,16 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SelectColorTheme(key)) => {
                         select_color_theme(&mut state, &ui, &key).await;
+                    }
+                    Some(WorkerCommand::SelectNightTheme(key)) => {
+                        select_night_theme(&mut state, &ui, &key).await;
+                    }
+                    Some(WorkerCommand::SystemScheme(dark)) => {
+                        let changed = state.system_dark != dark;
+                        state.system_dark = dark;
+                        if changed && state.theme_pair.as_ref().is_some_and(|pair| pair.1.is_some()) {
+                            apply_theme_pair(&mut state, &ui);
+                        }
                     }
                     Some(WorkerCommand::EditNotificationPrefs(edit)) => {
                         handle_notification_edit(&mut state, &ui, edit).await;
@@ -2316,7 +2374,10 @@ async fn run_worker(
                             handle.shutdown();
                         }
                         session_events = None;
+                        // The OS scheme outlives the account.
+                        let system_dark = state.system_dark;
                         state = WorkerState::new();
+                        state.system_dark = system_dark;
                     }
                     Some(WorkerCommand::LoadOlderHistory) => {
                         handle_load_older_history(&mut state, &ui).await;
@@ -3644,6 +3705,11 @@ async fn run_slash_command(
                 serde_json::json!({ "target": target, "modes": modes, "params": params }),
             );
             Ok(())
+        }
+        SlashCommand::UmodeShow => {
+            state.umode_view_network = Some(network.clone());
+            push_umode_view(state, ui, true);
+            return;
         }
         SlashCommand::Umode(modes) => {
             send_user_verb(
@@ -5971,10 +6037,12 @@ async fn handle_frame(
     }
     if payload_kind == "umode_changed" {
         handle_umode_changed(state, &frame.topic, &frame.payload);
+        push_umode_view(state, ui, false);
         return;
     }
     if payload_kind == "supported_umodes_changed" {
         handle_supported_umodes_changed(state, &frame.topic, &frame.payload);
+        push_umode_view(state, ui, false);
         return;
     }
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
@@ -9076,7 +9144,14 @@ fn push_palette(ui: &AppWindow, choice: Option<&ThemeChoice>) {
 /// Mirrors the available color themes into Settings > Themes, marking
 /// `selected` (a choice key) as in use.
 fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected: Option<&str>) {
-    let rows: Vec<(String, String, String, bool, ThemePalette)> = state
+    let (day, night) = match &state.theme_pair {
+        Some((day, night)) => (
+            Some(day.key.as_str()),
+            night.as_ref().map(|night| night.key.as_str()),
+        ),
+        None => (selected, None),
+    };
+    let rows: Vec<(String, String, String, bool, bool, ThemePalette)> = state
         .theme_choices
         .iter()
         .map(|choice| {
@@ -9084,16 +9159,21 @@ fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected
                 choice.key.clone(),
                 choice.name.clone(),
                 choice.author.clone(),
-                selected == Some(choice.key.as_str()),
+                day == Some(choice.key.as_str()),
+                night == Some(choice.key.as_str()),
                 choice.palette.clone(),
             )
         })
         .collect();
+    let pair_active = state.theme_pair.is_some();
+    let has_night = night.is_some();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_theme_pair_active(pair_active);
+        ui.set_theme_has_night(has_night);
         let rows: Vec<ThemeChoiceRow> = rows
             .into_iter()
-            .map(|(key, name, author, selected, palette)| {
+            .map(|(key, name, author, selected, night, palette)| {
                 let swatches: Vec<slint::Color> = [
                     palette.bg,
                     palette.fg,
@@ -9112,6 +9192,7 @@ fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected
                     name: name.into(),
                     author: author.into(),
                     selected,
+                    night,
                     swatches: Rc::new(slint::VecModel::from(swatches)).into(),
                 }
             })
@@ -9140,9 +9221,13 @@ async fn load_color_themes(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
     };
 
     let saved = persistence::load_settings().unwrap_or_default().color_theme;
+    state.theme_pair = None;
     let active = match saved.as_deref() {
         Some("server") => match client.fetch_active_theme(&token).await {
-            Ok(pair) => pair.light.as_ref().and_then(server_theme_choice),
+            Ok(pair) => {
+                state.theme_pair = theme_pair_choices(&pair);
+                return apply_theme_pair(state, ui);
+            }
             Err(err) => {
                 persistence::log_line(&format!("active theme unavailable: {err:?}"));
                 None
@@ -9154,6 +9239,93 @@ async fn load_color_themes(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
         None => None,
     };
     apply_color_theme(state, ui, active);
+}
+
+/// Day and night choices of Grappa's active pair; `None` without a day
+/// theme.
+fn theme_pair_choices(pair: &ActiveThemePair) -> Option<(ThemeChoice, Option<ThemeChoice>)> {
+    let light = pair.light.as_ref().and_then(server_theme_choice)?;
+    let dark = pair.dark.as_ref().and_then(server_theme_choice);
+    Some((light, dark))
+}
+
+/// The theme of the pair the OS scheme calls for: the night one in dark
+/// mode when there is one, else the day one.
+fn pair_theme_for(pair: &(ThemeChoice, Option<ThemeChoice>), system_dark: bool) -> &ThemeChoice {
+    match &pair.1 {
+        Some(night) if system_dark => night,
+        _ => &pair.0,
+    }
+}
+
+fn apply_theme_pair(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let choice = state
+        .theme_pair
+        .as_ref()
+        .map(|pair| pair_theme_for(pair, state.system_dark).clone());
+    apply_color_theme(state, ui, choice);
+}
+
+/// Follows the OS light/dark setting on a thread of its own: the current
+/// mode first, then every change.
+fn watch_system_scheme(tx: mpsc::UnboundedSender<WorkerCommand>) {
+    thread::spawn(move || {
+        let is_dark = |mode: dark_light::Mode| mode == dark_light::Mode::Dark;
+        if let Ok(mode) = dark_light::detect() {
+            let _ = tx.send(WorkerCommand::SystemScheme(is_dark(mode)));
+        }
+        let watcher = match dark_light::subscribe() {
+            Ok(watcher) => watcher,
+            Err(err) => {
+                persistence::log_line(&format!("system color scheme not watched: {err}"));
+                return;
+            }
+        };
+        for mode in watcher.iter() {
+            if tx.send(WorkerCommand::SystemScheme(is_dark(mode))).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Settings > Themes night pick: `server:<id>` becomes the night theme next
+/// to the day one in use, "" goes back to the day theme at all hours.
+async fn select_night_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, key: &str) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let Some(light) = state
+        .theme_pair
+        .as_ref()
+        .and_then(|pair| pair.0.key.strip_prefix("server:"))
+        .and_then(|id| id.parse::<i64>().ok())
+    else {
+        return;
+    };
+    let dark = if key.is_empty() {
+        None
+    } else {
+        match key
+            .strip_prefix("server:")
+            .and_then(|id| id.parse::<i64>().ok())
+        {
+            Some(id) => Some(id),
+            None => return,
+        }
+    };
+    match client.set_active_theme(&token, light, dark).await {
+        Ok(pair) => {
+            state.theme_pair = theme_pair_choices(&pair);
+            apply_theme_pair(state, ui);
+        }
+        Err(err) => {
+            persistence::log_line(&format!("night theme change failed: {err:?}"));
+            let _ = ui.upgrade_in_event_loop(|ui| {
+                ui.set_status_kind("theme-change-failed".into());
+            });
+        }
+    }
 }
 
 /// Settings > Themes pick. An empty key returns to the classic look; a
@@ -9169,10 +9341,19 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         else {
             return;
         };
-        match client.set_active_theme(&token, id).await {
+        let night = state
+            .theme_pair
+            .as_ref()
+            .and_then(|pair| pair.1.as_ref())
+            .and_then(|night| night.key.strip_prefix("server:"))
+            .and_then(|night| night.parse::<i64>().ok())
+            .filter(|night| *night != id);
+        match client.set_active_theme(&token, id, night).await {
             Ok(pair) => {
                 settings.color_theme = Some("server".to_string());
-                pair.light.as_ref().and_then(server_theme_choice)
+                let _ = persistence::save_settings(&settings);
+                state.theme_pair = theme_pair_choices(&pair);
+                return apply_theme_pair(state, ui);
             }
             Err(err) => {
                 persistence::log_line(&format!("theme change failed: {err:?}"));
@@ -9196,6 +9377,7 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         choice
     };
     let _ = persistence::save_settings(&settings);
+    state.theme_pair = None;
     apply_color_theme(state, ui, choice);
 }
 
@@ -9636,6 +9818,97 @@ fn handle_umode_changed(state: &mut WorkerState, carrier_topic: &str, payload: &
         return;
     };
     state.user_modes_by_network.insert(network, modes);
+}
+
+/// User modes a normal user may flip; every other letter is set by the
+/// server or services and shows read-only, as in Cicchetto.
+const SETTABLE_UMODES: [&str; 5] = ["i", "w", "s", "x", "R"];
+
+/// Letters the user-mode view describes, offered when a network hasn't
+/// advertised its own set (RPL_MYINFO).
+const KNOWN_UMODES: [&str; 27] = [
+    "i", "w", "s", "x", "R", "b", "c", "d", "e", "f", "g", "k", "K", "m", "n", "y", "F", "I", "j",
+    "S", "o", "O", "r", "a", "A", "h", "z",
+];
+
+/// The user-mode view's rows: `(letter, settable, active)`. The server's
+/// advertised set (else the known letters) plus every active mode, settable
+/// ones first.
+fn umode_rows(active: &[String], supported: &[String]) -> Vec<(String, bool, bool)> {
+    let mut letters: Vec<String> = if supported.is_empty() {
+        KNOWN_UMODES
+            .iter()
+            .map(|letter| letter.to_string())
+            .collect()
+    } else {
+        supported.to_vec()
+    };
+    for letter in active {
+        if !letters.contains(letter) {
+            letters.push(letter.clone());
+        }
+    }
+    let mut rows: Vec<(String, bool, bool)> = letters
+        .into_iter()
+        .map(|letter| {
+            let settable = SETTABLE_UMODES.contains(&letter.as_str());
+            let is_active = active.contains(&letter);
+            (letter, settable, is_active)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
+/// Refreshes the user-mode view, switching to it when `open`.
+fn push_umode_view(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
+    let Some(network) = state.umode_view_network.clone() else {
+        return;
+    };
+    let empty = Vec::new();
+    let active = state.user_modes_by_network.get(&network).unwrap_or(&empty);
+    let supported = state
+        .supported_user_modes_by_network
+        .get(&network)
+        .unwrap_or(&empty);
+    let rows = umode_rows(active, supported);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<UmodeToggle> = rows
+            .into_iter()
+            .map(|(letter, settable, active)| UmodeToggle {
+                letter: letter.into(),
+                settable,
+                active,
+            })
+            .collect();
+        ui.set_umode_network(network.into());
+        ui.set_umode_toggles(Rc::new(slint::VecModel::from(rows)).into());
+        if open {
+            ui.set_screen("umodes".into());
+        }
+    });
+}
+
+/// Sends `+x` or `-x` for a settable mode; the view updates when Grappa
+/// pushes the new modes back.
+fn toggle_user_mode(state: &WorkerState, letter: &str) {
+    let Some(network) = state.umode_view_network.as_deref() else {
+        return;
+    };
+    if !SETTABLE_UMODES.contains(&letter) {
+        return;
+    }
+    let active = state
+        .user_modes_by_network
+        .get(network)
+        .is_some_and(|modes| modes.iter().any(|mode| mode == letter));
+    let sign = if active { '-' } else { '+' };
+    send_user_verb(
+        state,
+        network,
+        "umode",
+        serde_json::json!({ "modes": format!("{sign}{letter}") }),
+    );
 }
 
 fn parse_supported_umodes_changed(
@@ -17638,6 +17911,38 @@ mod tests {
             member_from_entry(&serde_json::json!({"nick": "bob", "modes": ["v", "o"]})),
             Some(("bob".to_string(), "@+".to_string()))
         );
+    }
+
+    #[test]
+    fn theme_pair_follows_the_system_scheme() {
+        let mut themes = builtin_theme_choices().into_iter();
+        let day = themes.next().expect("a built-in theme");
+        let night = themes.next().expect("a second built-in theme");
+        let single = (day.clone(), None);
+        assert_eq!(pair_theme_for(&single, true).key, day.key);
+        let pair = (day.clone(), Some(night.clone()));
+        assert_eq!(pair_theme_for(&pair, false).key, day.key);
+        assert_eq!(pair_theme_for(&pair, true).key, night.key);
+    }
+
+    #[test]
+    fn umode_rows_follow_the_advertised_set() {
+        let strings = |letters: &[&str]| -> Vec<String> {
+            letters.iter().map(|letter| letter.to_string()).collect()
+        };
+        let rows = umode_rows(&strings(&["r", "i"]), &strings(&["o", "i", "w"]));
+        assert_eq!(
+            rows,
+            vec![
+                ("i".to_string(), true, true),
+                ("w".to_string(), true, false),
+                ("o".to_string(), false, false),
+                ("r".to_string(), false, true),
+            ]
+        );
+        let fallback = umode_rows(&[], &[]);
+        assert_eq!(fallback.len(), KNOWN_UMODES.len());
+        assert!(fallback[..SETTABLE_UMODES.len()].iter().all(|row| row.1));
     }
 
     #[test]
