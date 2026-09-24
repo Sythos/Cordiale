@@ -632,6 +632,7 @@ fn main() -> Result<(), slint::PlatformError> {
         window.set_network_label(ui.get_links_network_label());
         window.set_edges_commands(ui.get_links_graph_edges_commands());
         window.set_nodes(ui.get_links_graph_nodes());
+        window.set_canvas_size(ui.get_links_graph_canvas_size());
         let _ = window.show();
     });
 
@@ -4196,6 +4197,18 @@ async fn handle_member_ctcp(
     }
 }
 
+/// Center of the square `/links` canvas: large enough for the outermost
+/// ring plus room for its labels, and never smaller than the default view.
+fn links_canvas_center(nodes: &[cordiale_core::links::LinksGraphNode]) -> f64 {
+    const MIN_CENTER: f64 = 380.0;
+    const LABEL_ROOM: f64 = 160.0;
+    let reach = nodes
+        .iter()
+        .map(|node| node.x.abs().max(node.y.abs()))
+        .fold(0.0, f64::max);
+    (reach + LABEL_ROOM).max(MIN_CENTER)
+}
+
 /// Whether a known event kind is rendered as a chat line. Only `message`
 /// envelopes are: every other kind of the protocol's closed set has its own
 /// handler (or explicit no-op) in `handle_frame`, and any kind that reaches
@@ -6322,29 +6335,31 @@ fn handle_links_bundle(ui: &slint::Weak<AppWindow>, payload: &Value) {
     // Radial layout for the optional graph window ("Show graph" on the
     // list screen) — computed here too so it's ready the moment the user
     // asks for it, rather than recomputed on click.
-    const CANVAS_CENTER: f64 = 380.0;
     const RING_GAP: f64 = 64.0;
     let layout = cordiale_core::links::radial_layout(&tree, RING_GAP);
+    let canvas_center = links_canvas_center(&layout.nodes);
     let edges_commands = cordiale_core::links::links_graph_edges_svg_path(
         &layout.edges,
-        CANVAS_CENTER,
-        CANVAS_CENTER,
+        canvas_center,
+        canvas_center,
     );
     let graph_nodes: Vec<LinksGraphNode> = layout
         .nodes
         .into_iter()
         .map(|node| LinksGraphNode {
             server: node.server.into(),
-            x: (node.x + CANVAS_CENTER).round() as i32,
-            y: (node.y + CANVAS_CENTER).round() as i32,
+            x: (node.x + canvas_center).round() as i32,
+            y: (node.y + canvas_center).round() as i32,
         })
         .collect();
+    let canvas_size = (canvas_center * 2.0).round() as i32;
 
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_links_network_label(network_label.into());
         ui.set_links_rows(Rc::new(slint::VecModel::from(rows)).into());
         ui.set_links_graph_edges_commands(edges_commands.into());
+        ui.set_links_graph_canvas_size(canvas_size);
         ui.set_links_graph_nodes(Rc::new(slint::VecModel::from(graph_nodes)).into());
         ui.set_screen("links".into());
     });
@@ -7318,6 +7333,11 @@ fn push_window_note(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 }
 
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let unread_badge = i32::try_from(state.badge_count).unwrap_or(i32::MAX);
+    {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.set_unread_badge(unread_badge));
+    }
     push_window_note(state, ui);
     let mut data = network_groups_data(
         &state.channel_entries,

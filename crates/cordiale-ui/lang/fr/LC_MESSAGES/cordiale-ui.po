@@ -1168,6 +1168,22 @@ msgctxt "AppWindow"
 msgid "The server refused that command ({})."
 msgstr "Le serveur a refusé cette commande ({})."
 
+msgctxt "LinksGraphWindow"
+msgid "Zoom out"
+msgstr "Dézoomer"
+
+msgctxt "LinksGraphWindow"
+msgid "Zoom in"
+msgstr "Zoomer"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset"
+msgstr "Réinitialiser"
+
+msgctxt "LinksGraphWindow"
+msgid "Reset zoom"
+msgstr "Réinitialiser le zoom"
+
 msgctxt "AppWindow"
 msgid "{}'s host isn't known yet, so they were only kicked; /whois them first to ban too."
 msgstr "L'hôte de {} n'est pas encore connu : il a seulement été expulsé ; faites d'abord /whois pour le bannir aussi."
