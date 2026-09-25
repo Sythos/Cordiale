@@ -772,6 +772,39 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_draft.send(WorkerCommand::ComposeTextChanged(text.to_string()));
     });
 
+    // Tab-completion cycle state (see `NickCompletionCycle`): UI-thread only,
+    // reset by any compose-box edit that doesn't come from this same
+    // callback, so a plain `RefCell` local to this closure is enough — no
+    // worker involvement needed to decide what the next Tab press does.
+    let tx_for_nick_complete = worker_tx.clone();
+    let weak_for_nick_complete = ui.as_weak();
+    let nick_completion_cycle: RefCell<Option<NickCompletionCycle>> = RefCell::new(None);
+    ui.on_nick_complete_requested(move |forward| {
+        let Some(ui) = weak_for_nick_complete.upgrade() else {
+            return slint::SharedString::default();
+        };
+        let text = ui.get_compose_text();
+        let candidates = nick_completion_candidates(&ui);
+        let mut cycle = nick_completion_cycle.borrow_mut();
+        match complete_nick(text.as_str(), &candidates, forward, cycle.as_ref()) {
+            Some((new_text, new_cycle)) => {
+                *cycle = Some(new_cycle);
+                // Setting `compose-text` from Rust doesn't fire the
+                // LineEdit's `edited` callback (that only fires on direct
+                // user input), so the draft has to be saved explicitly here
+                // — same command `compose-text-changed` sends for a typed
+                // edit.
+                let _ =
+                    tx_for_nick_complete.send(WorkerCommand::ComposeTextChanged(new_text.clone()));
+                new_text.into()
+            }
+            None => {
+                *cycle = None;
+                text
+            }
+        }
+    });
+
     let tx_for_theme = worker_tx.clone();
     ui.on_theme_toggle_requested(move || {
         let _ = tx_for_theme.send(WorkerCommand::ToggleTheme);
@@ -2901,16 +2934,18 @@ async fn handle_connect(
             // returned by a successful login may be persisted now.
             discard_legacy_profile_secret(&server_url, &identifier);
 
-            let (login_identifier, login_password) = if is_guest_attempt {
-                // A blank Connect action is unconditionally guest, even if
-                // the username field is prefilled with a remembered profile.
-                ("guest".to_string(), "guest".to_string())
+            // A blank password is a guest sign-in under the typed nickname,
+            // sent without a `password` field, as Cicchetto does. Grappa
+            // keys visitors by nick, so a shared fixed name would make every
+            // guest after the first collide with it (#88).
+            let (login_identifier, login_password, auth) = if is_guest_attempt {
+                (identifier.trim().to_string(), String::new(), "guest")
             } else {
-                (identifier.clone(), password)
+                (identifier.clone(), password, "typed")
             };
             persistence::log_line(&format!(
                 "connect attempt: server={server_url} identifier={login_identifier} \
-                 guest={is_guest_attempt} auth=password_or_guest"
+                 guest={is_guest_attempt} auth={auth}"
             ));
             let request = LoginRequest {
                 identifier: login_identifier,
@@ -3432,6 +3467,7 @@ fn show_query_window(
     let query_ready = state.current_query_ready;
     let history_start = state.history_start_reached.contains(key);
     let label = format!("{} — {}", query.network, query.target_nick);
+    let peer_nick = query.target_nick.clone();
     push_peer_away_banner(state, ui);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -3442,6 +3478,7 @@ fn show_query_window(
         ui.set_has_selected_channel(true);
         ui.set_current_query(true);
         ui.set_current_query_ready(query_ready);
+        ui.set_current_query_peer_nick(peer_nick.into());
         ui.set_compose_text(draft.into());
         ui.set_can_moderate_members(false);
         ui.set_history_start_reached(history_start);
@@ -8525,7 +8562,12 @@ fn apply_members_seeded(state: &mut WorkerState, payload: &Value) -> Option<(Str
     let network = payload.get("network").and_then(Value::as_str)?.to_string();
     let channel = payload.get("channel").and_then(Value::as_str)?.to_string();
     let list = payload.get("members").and_then(Value::as_array)?;
-    let mut members: Vec<MemberEntry> = list.iter().filter_map(member_from_entry).collect();
+    let order =
+        cordiale_core::isupport::prefix_symbol_order(state.isupport_by_network.get(&network));
+    let mut members: Vec<MemberEntry> = list
+        .iter()
+        .filter_map(|entry| member_from_entry(entry, &order))
+        .collect();
     sort_members_by_rank(&mut members);
     let key = (network, channel);
     state.members.insert(key.clone(), members);
@@ -9408,9 +9450,14 @@ type MembersByChannel = HashMap<(String, String), Vec<MemberEntry>>;
 /// Parses one member list entry: either a plain string with an optional
 /// leading role-prefix character (`"@nick"`, `"+nick"`, `"nick"`), or an
 /// object carrying a `nick`/`name` field plus either an explicit `prefix`
-/// string or a `modes` array of mode letters (`o`/`h`/`v`) to derive one
-/// from.
-fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
+/// string or a `modes` array. Grappa's real wire shape (`members_seeded`,
+/// `names_reply`) puts role sigils (`~`/`&`/`@`/`%`/`+`, taken from the
+/// network's ISUPPORT PREFIX) directly in `modes`, not mode letters —
+/// letters (`q`/`a`/`o`/`h`/`v`) are still accepted for backwards
+/// compatibility. `order` ranks the symbols highest first (see
+/// `prefix_symbol_order`), so a member holding several roles ends up
+/// stored with its highest one leading.
+fn member_from_entry(entry: &Value, order: &[String]) -> Option<MemberEntry> {
     if let Some(raw) = entry.as_str() {
         let name = raw.trim_start_matches(|c| "@%+&~".contains(c));
         let prefix = raw[..raw.len() - name.len()].to_string();
@@ -9429,12 +9476,26 @@ fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
         .map(str::to_string)
         .or_else(|| {
             obj.get("modes").and_then(Value::as_array).map(|modes| {
-                ["o", "h", "v"]
+                let mut symbols: Vec<&str> = modes
                     .iter()
-                    .zip(["@", "%", "+"])
-                    .filter(|(mode, _)| modes.iter().any(|held| held.as_str() == Some(**mode)))
-                    .map(|(_, symbol)| symbol)
-                    .collect::<String>()
+                    .filter_map(Value::as_str)
+                    .filter_map(|held| match held {
+                        "~" | "&" | "@" | "%" | "+" => Some(held),
+                        "q" => Some("~"),
+                        "a" => Some("&"),
+                        "o" => Some("@"),
+                        "h" => Some("%"),
+                        "v" => Some("+"),
+                        _ => None,
+                    })
+                    .collect();
+                symbols.sort_by_key(|symbol| {
+                    order
+                        .iter()
+                        .position(|held| held.as_str() == *symbol)
+                        .unwrap_or(order.len())
+                });
+                symbols.concat()
             })
         })
         .unwrap_or_default();
@@ -10300,6 +10361,167 @@ fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
                 color: slint::Color::from_rgb_u8(r, g, b),
             }
         })
+        .collect()
+}
+
+/// State kept across repeated Tab presses on the compose box so they cycle
+/// through the other matches instead of repeating the first one. Lives on
+/// the UI thread only (see `main`); there's nothing to persist across
+/// restarts or send to the worker.
+#[derive(Clone, Debug, PartialEq)]
+struct NickCompletionCycle {
+    /// Text before the completed word, kept byte-for-byte as typed (any
+    /// leading whitespace included) and put back ahead of whichever entry
+    /// is shown.
+    prefix: String,
+    /// The word exactly as the user typed it, before any Tab press.
+    original: String,
+    /// Matching nicks that produced this cycle, in member-list order.
+    matches: Vec<String>,
+    /// Index into `matches` currently shown, or `matches.len()` for "the
+    /// original text, uncompleted" — the last stop before the cycle wraps.
+    index: usize,
+    /// The exact compose-box text this cycle last produced. Continuing the
+    /// cycle on the next Tab press requires the box to still hold exactly
+    /// this text; anything else means a manual edit happened in between and
+    /// the cycle restarts from scratch.
+    last_text: String,
+}
+
+/// Moves `index` one step forward or backward through `len` slots, wrapping
+/// at either end.
+fn step_cycle_index(index: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        (index + 1) % len
+    } else {
+        (index + len - 1) % len
+    }
+}
+
+/// Renders one stop of the cycle: `index == matches.len()` restores the
+/// original typed text verbatim (no suffix — it was never a completion);
+/// any other index is `prefix` + that match + the addressing suffix.
+fn render_nick_completion(
+    prefix: &str,
+    original: &str,
+    matches: &[String],
+    index: usize,
+) -> String {
+    if index == matches.len() {
+        format!("{prefix}{original}")
+    } else {
+        // ": " only when the completed word opens the line (nothing before
+        // it to address), a plain space mid-sentence — matches Cicchetto.
+        let suffix = if prefix.is_empty() { ": " } else { " " };
+        format!("{prefix}{}{suffix}", matches[index])
+    }
+}
+
+/// Tab-completes the word before the caret in the compose box against
+/// `candidates` (already in the order Tab-completion should prefer, i.e.
+/// the channel member list's on-screen order — see `members_model`).
+///
+/// The compose `LineEdit` (Slint 1.18's std-widgets) exposes no way to read
+/// the caret position — `LineEditInterface` only has a setter
+/// (`set-selection-offsets`), confirmed against the widget's `.slint`
+/// source. So this always treats the caret as being at the very end of
+/// `text` and completes its last whitespace-delimited word; the caller
+/// places the real caret at the end after applying the result, which is
+/// exactly where this function assumed it to be.
+///
+/// Returns `None` when there's nothing to complete (empty trailing word, or
+/// no candidate matches it) — the caller leaves the text untouched. Matches
+/// candidates case-insensitively on an ASCII fold (nicks are compared
+/// byte-for-byte otherwise; the worker's own casemapping fold isn't
+/// reachable from the UI thread without a lot of new plumbing for a rarely
+/// relevant edge case — non-ASCII nick characters that only differ by
+/// case).
+fn complete_nick(
+    text: &str,
+    candidates: &[String],
+    forward: bool,
+    cycle: Option<&NickCompletionCycle>,
+) -> Option<(String, NickCompletionCycle)> {
+    if let Some(cycle) = cycle {
+        if cycle.last_text == text {
+            let slots = cycle.matches.len() + 1;
+            let index = step_cycle_index(cycle.index, slots, forward);
+            let new_text =
+                render_nick_completion(&cycle.prefix, &cycle.original, &cycle.matches, index);
+            return Some((
+                new_text.clone(),
+                NickCompletionCycle {
+                    index,
+                    last_text: new_text,
+                    ..cycle.clone()
+                },
+            ));
+        }
+    }
+
+    // Fresh completion: find the word right before the (assumed) end
+    // caret, i.e. everything after the last whitespace run.
+    let word_start = text
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(idx, c)| idx + c.len_utf8())
+        .unwrap_or(0);
+    let prefix = &text[..word_start];
+    let word = &text[word_start..];
+    if word.is_empty() {
+        return None;
+    }
+
+    let folded_word = word.to_ascii_lowercase();
+    let matches: Vec<String> = candidates
+        .iter()
+        .filter(|nick| nick.to_ascii_lowercase().starts_with(&folded_word))
+        .cloned()
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+
+    // The top-of-member-list match always wins the first Tab press,
+    // regardless of direction — cycling only kicks in on the next press.
+    let new_text = render_nick_completion(prefix, word, &matches, 0);
+    Some((
+        new_text.clone(),
+        NickCompletionCycle {
+            prefix: prefix.to_string(),
+            original: word.to_string(),
+            matches,
+            index: 0,
+            last_text: new_text,
+        },
+    ))
+}
+
+/// Tab-completion candidates for the currently open window, in the order
+/// completion should prefer them: the open channel's member list as shown
+/// in the member column (`channel-members`, already in `state.members[key]`
+/// order), or — in a private query window, which carries no member list of
+/// its own — the peer's nick as the sole candidate. That's a deliberate
+/// choice beyond what's strictly required: Cicchetto (the reference web
+/// client) has no candidates at all in a query window and Tab silently does
+/// nothing there, but completing to the one nick you can possibly be
+/// addressing is more useful and no more surprising.
+fn nick_completion_candidates(ui: &AppWindow) -> Vec<String> {
+    use slint::Model as _;
+
+    if ui.get_current_query() {
+        let peer = ui.get_current_query_peer_nick();
+        return if peer.is_empty() {
+            Vec::new()
+        } else {
+            vec![peer.to_string()]
+        };
+    }
+
+    ui.get_channel_members()
+        .iter()
+        .map(|row| row.name.to_string())
         .collect()
 }
 
@@ -15755,6 +15977,19 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
         BootstrapError::Login(LoginError::TooManyAttempts) => {
             ui.set_status_kind("too-many-attempts".into());
         }
+        BootstrapError::Login(LoginError::Refused {
+            code: Some(code),
+            retry_after,
+            ..
+        }) if login_refusal_kind(code).is_some() => {
+            ui.set_status_message(
+                retry_after
+                    .map(|secs| secs.to_string())
+                    .unwrap_or_default()
+                    .into(),
+            );
+            ui.set_status_kind(login_refusal_kind(code).unwrap_or("login-failed").into());
+        }
         BootstrapError::Login(_) => {
             ui.set_status_kind("login-failed".into());
         }
@@ -15767,9 +16002,39 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
     }
 }
 
+/// The status key for a login refusal Grappa names in its `error` field,
+/// for the codes a guest sign-in can run into.
+fn login_refusal_kind(code: &str) -> Option<&'static str> {
+    match code {
+        "anon_collision" => Some("guest-nick-taken"),
+        "nick_in_use" => Some("guest-nick-in-use"),
+        "malformed_nick" => Some("guest-nick-invalid"),
+        "captcha_required" => Some("guest-captcha-required"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_login_refusals_get_their_own_status() {
+        assert_eq!(
+            login_refusal_kind("anon_collision"),
+            Some("guest-nick-taken")
+        );
+        assert_eq!(login_refusal_kind("nick_in_use"), Some("guest-nick-in-use"));
+        assert_eq!(
+            login_refusal_kind("malformed_nick"),
+            Some("guest-nick-invalid")
+        );
+        assert_eq!(
+            login_refusal_kind("captcha_required"),
+            Some("guest-captcha-required")
+        );
+        assert_eq!(login_refusal_kind("internal"), None);
+    }
 
     #[test]
     fn blank_connect_form_is_guest_but_saved_profile_is_explicit() {
@@ -19669,13 +19934,61 @@ mod tests {
         assert_eq!(highest_prefix("@+"), "@");
         assert_eq!(highest_prefix(""), "");
         assert_eq!(
-            member_from_entry(&serde_json::json!("@+ada")),
+            member_from_entry(&serde_json::json!("@+ada"), &order),
             Some(("ada".to_string(), "@+".to_string()))
         );
+    }
+
+    #[test]
+    fn member_from_entry_reads_sigils_from_modes() {
+        // Real wire shape: `modes` holds role sigils (`~&@%+`), not mode
+        // letters — see Grappa's `Session.Wire.member/1`. Fall back to the
+        // default `~&@%+` order, same as before any ISUPPORT snapshot.
+        let order = cordiale_core::isupport::prefix_symbol_order(None);
         assert_eq!(
-            member_from_entry(&serde_json::json!({"nick": "bob", "modes": ["v", "o"]})),
+            member_from_entry(
+                &serde_json::json!({"nick": "bob", "modes": ["+", "@"]}),
+                &order
+            ),
             Some(("bob".to_string(), "@+".to_string()))
         );
+        assert_eq!(
+            member_from_entry(&serde_json::json!({"nick": "ann", "modes": []}), &order),
+            Some(("ann".to_string(), String::new()))
+        );
+        assert_eq!(
+            member_from_entry(&serde_json::json!({"nick": "eve", "modes": ["~"]}), &order),
+            Some(("eve".to_string(), "~".to_string()))
+        );
+        // Mode letters are still accepted for backwards compatibility.
+        assert_eq!(
+            member_from_entry(
+                &serde_json::json!({"nick": "cy", "modes": ["v", "o"]}),
+                &order
+            ),
+            Some(("cy".to_string(), "@+".to_string()))
+        );
+        // Unknown entries in `modes` are ignored rather than kept verbatim.
+        assert_eq!(
+            member_from_entry(&serde_json::json!({"nick": "gus", "modes": ["x"]}), &order),
+            Some(("gus".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn sort_members_by_rank_groups_by_role_then_alphabetically() {
+        let mut members: Vec<MemberEntry> = vec![
+            ("bob".to_string(), String::new()),
+            ("Zoe".to_string(), "@".to_string()),
+            ("ada".to_string(), "@".to_string()),
+            ("cy".to_string(), "+".to_string()),
+            ("Hal".to_string(), "%".to_string()),
+            ("root".to_string(), "~".to_string()),
+            ("Amy".to_string(), String::new()),
+        ];
+        sort_members_by_rank(&mut members);
+        let names: Vec<&str> = members.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["root", "ada", "Zoe", "Hal", "cy", "Amy", "bob"]);
     }
 
     #[test]
@@ -22368,5 +22681,105 @@ mod tests {
             to_ws_url("http://localhost:4000"),
             "ws://localhost:4000/socket/websocket?vsn=2.0.0"
         );
+    }
+
+    fn nick_list(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn complete_nick_matches_prefix_case_insensitively_with_real_capitalisation() {
+        let candidates = nick_list(&["Sythos", "sythe", "Somebody"]);
+        let (text, _) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(text, "Sythos: ");
+    }
+
+    #[test]
+    fn complete_nick_breaks_ties_by_member_list_order_not_alphabetical() {
+        // "sythe" sorts after "Sythos" alphabetically but comes first in
+        // the member list here — the list order must win.
+        let candidates = nick_list(&["sythe", "Sythos"]);
+        let (text, _) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(text, "sythe: ");
+    }
+
+    #[test]
+    fn complete_nick_appends_colon_space_only_at_the_start_of_the_line() {
+        let candidates = nick_list(&["Sythos"]);
+        let (start_of_line, _) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(start_of_line, "Sythos: ");
+
+        let (mid_sentence, _) = complete_nick("hello syt", &candidates, true, None).unwrap();
+        assert_eq!(mid_sentence, "hello Sythos ");
+    }
+
+    #[test]
+    fn complete_nick_cycles_forward_then_restores_the_original_then_wraps() {
+        let candidates = nick_list(&["Sythos", "sythe"]);
+
+        let (first, cycle1) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(first, "Sythos: ");
+
+        let (second, cycle2) = complete_nick(&first, &candidates, true, Some(&cycle1)).unwrap();
+        assert_eq!(second, "sythe: ");
+
+        let (third, cycle3) = complete_nick(&second, &candidates, true, Some(&cycle2)).unwrap();
+        assert_eq!(
+            third, "syt",
+            "the last step in the cycle restores the typed text"
+        );
+
+        let (fourth, _) = complete_nick(&third, &candidates, true, Some(&cycle3)).unwrap();
+        assert_eq!(
+            fourth, "Sythos: ",
+            "one more Tab wraps back to the first match"
+        );
+    }
+
+    #[test]
+    fn complete_nick_shift_tab_cycles_backward() {
+        let candidates = nick_list(&["Sythos", "sythe"]);
+        let (first, cycle1) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(first, "Sythos: ");
+
+        // Backward from the first match skips straight to the original
+        // text, the step immediately behind it in the cycle.
+        let (back, _) = complete_nick(&first, &candidates, false, Some(&cycle1)).unwrap();
+        assert_eq!(back, "syt");
+    }
+
+    #[test]
+    fn complete_nick_returns_none_when_nothing_matches() {
+        let candidates = nick_list(&["Alice", "Bob"]);
+        assert_eq!(complete_nick("zzz", &candidates, true, None), None);
+    }
+
+    #[test]
+    fn complete_nick_returns_none_for_an_empty_trailing_word() {
+        let candidates = nick_list(&["Alice"]);
+        assert_eq!(complete_nick("hello ", &candidates, true, None), None);
+        assert_eq!(complete_nick("", &candidates, true, None), None);
+    }
+
+    #[test]
+    fn complete_nick_ignores_a_stale_cycle_after_a_manual_edit() {
+        let candidates = nick_list(&["Sythos", "sythe"]);
+        let (first, cycle1) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(first, "Sythos: ");
+
+        // The user kept typing instead of pressing Tab again: the compose
+        // text no longer matches what the cycle last produced, so this is
+        // treated as a brand-new completion request (starting over at the
+        // first match) rather than a cycle step.
+        let edited = "hi syt";
+        let (restarted, _) = complete_nick(edited, &candidates, true, Some(&cycle1)).unwrap();
+        assert_eq!(restarted, "hi Sythos ");
+    }
+
+    #[test]
+    fn complete_nick_keeps_a_multi_byte_prefix_intact_and_does_not_panic() {
+        let candidates = nick_list(&["Test"]);
+        let (text, _) = complete_nick("café tes", &candidates, true, None).unwrap();
+        assert_eq!(text, "café Test ");
     }
 }

@@ -2091,3 +2091,23 @@ msgstr "Probleme mit Grappa selbst (grappa-irc) gehören in dessen eigenes Repos
 msgctxt "AppWindow"
 msgid "Grappa refused the realtime session ({}). Sign out and in again; if it keeps happening, please report it."
 msgstr "Grappa hat die Echtzeitsitzung abgelehnt ({}). Melde dich ab und wieder an; wenn es wieder passiert, melde es bitte."
+
+msgctxt "AppWindow"
+msgid "That nickname is taken on this server right now. Pick another one or try again later."
+msgstr "Dieser Nickname ist auf diesem Server gerade vergeben. Wähle einen anderen oder versuche es später noch einmal."
+
+msgctxt "AppWindow"
+msgid "That nickname is taken on this server right now. Pick another one or try again in {} seconds."
+msgstr "Dieser Nickname ist auf diesem Server gerade vergeben. Wähle einen anderen oder versuche es in {} Sekunden noch einmal."
+
+msgctxt "AppWindow"
+msgid "That nickname is already in use on the network. Pick another one."
+msgstr "Dieser Nickname wird im Netzwerk bereits verwendet. Wähle einen anderen."
+
+msgctxt "AppWindow"
+msgid "That isn't a valid IRC nickname. Enter one in the name field."
+msgstr "Das ist kein gültiger IRC-Nickname. Gib einen im Namensfeld ein."
+
+msgctxt "AppWindow"
+msgid "This server asks guests to solve a CAPTCHA, which needs a browser. Sign in from a browser instead."
+msgstr "Dieser Server verlangt von Gästen ein CAPTCHA, das einen Browser erfordert. Melde dich stattdessen im Browser an."

@@ -677,6 +677,10 @@ export component AppWindow inherits Window {
     in property <string> current-channel-modes: "";
     in property <bool> has-selected-channel: false;
     in property <bool> current-query: false;
+    // The peer's nick for the open private window — set together with
+    // `current-query`, so it's always valid whenever `current-query` is
+    // true. Tab-completion's only candidate in a query window.
+    in property <string> current-query-peer-nick: "";
     // Away message of the open private window's peer (a standalone 301);
     // `peer-away-message` may be empty when the peer gave no text.
     in property <bool> peer-away-visible: false;
@@ -1145,6 +1149,12 @@ export component AppWindow inherits Window {
     callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
+    // Tab-completes the word before the (assumed end-of-text) caret against
+    // the open channel's member nicks, or the query peer's nick in a
+    // private window; `true` cycles forward (Tab), `false` backward
+    // (Shift+Tab). Returns the replacement text for `compose-text` —
+    // unchanged when there's nothing to complete.
+    callback nick-complete-requested(bool) -> string;
     callback attach-file-requested();
     // File name shown by the `attach-*` status messages.
     in property <string> status-attach-name: "";
@@ -1553,6 +1563,16 @@ export component AppWindow inherits Window {
             return @tr("Too many attempts. Wait a bit before trying again.");
         } else if status-kind == "login-failed" {
             return @tr("Login failed.");
+        } else if status-kind == "guest-nick-taken" {
+            return status-message == ""
+                ? @tr("That nickname is taken on this server right now. Pick another one or try again later.")
+                : @tr("That nickname is taken on this server right now. Pick another one or try again in {} seconds.", status-message);
+        } else if status-kind == "guest-nick-in-use" {
+            return @tr("That nickname is already in use on the network. Pick another one.");
+        } else if status-kind == "guest-nick-invalid" {
+            return @tr("That isn't a valid IRC nickname. Enter one in the name field.");
+        } else if status-kind == "guest-captcha-required" {
+            return @tr("This server asks guests to solve a CAPTCHA, which needs a browser. Sign in from a browser instead.");
         } else if status-kind == "boot-me-failed" {
             return @tr("Signed in, but couldn't load account data.");
         } else if status-kind == "unreachable" {
@@ -2334,12 +2354,36 @@ export component AppWindow inherits Window {
                         if (event.modifiers.control || event.modifiers.meta) && (event.text == "v" || event.text == "V") && !event.modifiers.shift {
                             return paste-requested() ? EventResult.accept : EventResult.reject;
                         }
+                        // Nick completion instead of the default
+                        // focus-traversal behaviour of Tab. Most backends
+                        // report Shift+Tab as `Key.Tab` with the shift
+                        // modifier set, but some (e.g. X11/xkb) send the
+                        // dedicated `Key.Backtab` instead — handle both.
+                        // Always accepted (even with nothing to complete) so
+                        // Tab never kicks focus out of the compose box.
+                        if event.text == Key.Tab || event.text == Key.Backtab {
+                            let forward = event.text == Key.Tab && !event.modifiers.shift;
+                            let completed = nick-complete-requested(forward);
+                            if completed != compose-text {
+                                compose-text = completed;
+                                // The LineEdit interface has no caret getter
+                                // (confirmed against Slint 1.18's
+                                // LineEditInterface), so completion is only
+                                // ever done against the last word of the
+                                // text as if the caret were at the end; put
+                                // it there for real once the text changes.
+                                // Byte offsets past the end are clamped by
+                                // TextInput, not an out-of-bounds panic.
+                                compose-line-edit.set-selection-offsets(2147483647, 2147483647);
+                            }
+                            return EventResult.accept;
+                        }
                         return EventResult.reject;
                     }
 
                     // A layout, so the scope takes the field's size.
                     HorizontalLayout {
-                        LineEdit {
+                        compose-line-edit := LineEdit {
                             placeholder-text: @tr("Message");
                             accessible-label: @tr("Message");
                             text <=> compose-text;
