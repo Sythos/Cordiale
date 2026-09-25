@@ -1755,3 +1755,31 @@ msgstr "Usar de noche"
 msgctxt "AppWindow"
 msgid "Use theme {} at night"
 msgstr "Usar el tema {} de noche"
+
+msgctxt "AppWindow"
+msgid "Find a visitor or account by nick"
+msgstr "Buscar un visitante o una cuenta por nick"
+
+msgctxt "AppWindow"
+msgid "Search"
+msgstr "Buscar"
+
+msgctxt "AppWindow"
+msgid "Nobody matches."
+msgstr "Sin resultados."
+
+msgctxt "AppWindow"
+msgid "{} on {} (visitor)"
+msgstr "{} en {} (visitante)"
+
+msgctxt "AppWindow"
+msgid "{} (account)"
+msgstr "{} (cuenta)"
+
+msgctxt "AppWindow"
+msgid "Grant the vhost above"
+msgstr "Conceder el vhost de arriba"
+
+msgctxt "AppWindow"
+msgid "Grant the selected vhost to {}"
+msgstr "Conceder el vhost seleccionado a {}"
