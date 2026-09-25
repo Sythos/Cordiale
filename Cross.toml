@@ -11,3 +11,8 @@
 # from ghcr.io and replace the value below.
 [target.aarch64-unknown-linux-gnu]
 image = "ghcr.io/slint-ui/slint/aarch64-unknown-linux-gnu@sha256:316c44fda5a9a78d680a4439162cf5c131b4416d21a94d1e05241910d3a49139"
+# The radio player's audio output (ALSA) isn't in that image.
+pre-build = [
+    "dpkg --add-architecture $CROSS_DEB_ARCH",
+    "apt-get update && apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH",
+]

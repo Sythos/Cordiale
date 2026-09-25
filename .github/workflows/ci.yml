@@ -6,6 +6,12 @@ on:
       - main
   pull_request:
 
+# A newer push to the same pull request supersedes the run in progress;
+# every commit on main (and each scheduled scan) is still checked.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -37,6 +43,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes \
+            libasound2-dev \
             libfontconfig1-dev \
             libgl1-mesa-dev \
             libxcb1-dev \

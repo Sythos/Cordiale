@@ -22,6 +22,9 @@
 
 slint::include_modules!();
 
+mod player;
+mod taskbar;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -91,6 +94,16 @@ enum WorkerCommand {
         accept: bool,
     },
     ArchiveDelete(String),
+    /// Tunes a station: `builtin:<id>` or `custom:<index>`.
+    RadioTune(String),
+    RadioStop,
+    /// Volume from 0 to 100.
+    RadioVolume(i32),
+    RadioEvent(u64, player::PlayerEvent),
+    RadioTrack {
+        generation: u64,
+        track: Option<cordiale_core::radio::Track>,
+    },
     ArchiveClose,
     /// Flips one user mode of the network shown in the user-mode view.
     UmodeToggle(String),
@@ -172,8 +185,10 @@ enum WorkerCommand {
     AdminVhostDelete(String),
     AdminGrantAdd {
         vhost_id: String,
-        user_id: String,
+        subject_type: String,
+        subject_id: String,
     },
+    AdminSubjectSearch(String),
     AdminGrantRevoke(String),
     AdminServerAdd {
         network_id: String,
@@ -290,11 +305,76 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     ui.set_known_servers(known_servers_model());
 
+    ui.set_radio_volume(i32::from(settings.radio_volume));
+    push_radio_stations(&ui, &settings.radio_stations);
+
     let (worker_tx, worker_rx) = mpsc::unbounded_channel::<WorkerCommand>();
     let ui_weak = ui.as_weak();
+    let worker_self = worker_tx.clone();
     thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().expect("failed to start network runtime");
-        runtime.block_on(run_worker(worker_rx, ui_weak));
+        runtime.block_on(run_worker(worker_rx, worker_self, ui_weak));
+    });
+
+    let tx_for_radio_tune = worker_tx.clone();
+    ui.on_radio_tune(move |key| {
+        let _ = tx_for_radio_tune.send(WorkerCommand::RadioTune(key.to_string()));
+    });
+
+    let tx_for_radio_stop = worker_tx.clone();
+    ui.on_radio_stop(move || {
+        let _ = tx_for_radio_stop.send(WorkerCommand::RadioStop);
+    });
+
+    let tx_for_radio_volume = worker_tx.clone();
+    ui.on_radio_volume_changed(move |volume| {
+        let volume = volume.clamp(0, 100);
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.radio_volume = u8::try_from(volume).unwrap_or(100);
+        let _ = persistence::save_settings(&settings);
+        let _ = tx_for_radio_volume.send(WorkerCommand::RadioVolume(volume));
+    });
+
+    let weak_for_radio_save = ui.as_weak();
+    ui.on_radio_station_save(move |index, name, url, codec_index| {
+        let Some(ui) = weak_for_radio_save.upgrade() else {
+            return;
+        };
+        let Some(station) = custom_radio_station(&name, &url, codec_index) else {
+            ui.set_status_kind("radio-station-invalid".into());
+            return;
+        };
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        match usize::try_from(index)
+            .ok()
+            .filter(|index| *index < settings.radio_stations.len())
+        {
+            Some(index) => settings.radio_stations[index] = station,
+            None => settings.radio_stations.push(station),
+        }
+        let _ = persistence::save_settings(&settings);
+        push_radio_stations(&ui, &settings.radio_stations);
+        ui.set_radio_edit_index(-1);
+        ui.set_radio_form_name("".into());
+        ui.set_radio_form_url("".into());
+        ui.set_radio_form_codec(0);
+    });
+
+    let weak_for_radio_delete = ui.as_weak();
+    ui.on_radio_station_delete(move |index| {
+        let Some(ui) = weak_for_radio_delete.upgrade() else {
+            return;
+        };
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        if let Some(index) = usize::try_from(index)
+            .ok()
+            .filter(|index| *index < settings.radio_stations.len())
+        {
+            settings.radio_stations.remove(index);
+            let _ = persistence::save_settings(&settings);
+        }
+        push_radio_stations(&ui, &settings.radio_stations);
+        ui.set_radio_edit_index(-1);
     });
 
     let weak_for_language = ui.as_weak();
@@ -606,22 +686,47 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(path) = rfd::FileDialog::new().pick_file() else {
             return;
         };
-        if ui.get_pref_upload_confirm() {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let answer = rfd::MessageDialog::new()
-                .set_title(ui.get_upload_confirm_title().as_str())
-                .set_description(format!("{}\n\n{name}", ui.get_upload_confirm_text()))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show();
-            if !matches!(answer, rfd::MessageDialogResult::Yes) {
-                return;
-            }
-        }
-        let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
-        let _ = tx_for_attach.send(WorkerCommand::AttachFile(path, expire));
+        confirm_and_attach(&ui, &tx_for_attach, path);
+    });
+
+    // Files dropped on the window go through the paperclip's flow, like
+    // Cicchetto's drop zone. Winit reports them (Windows, macOS, X11);
+    // the confirmation runs once the event has been handled.
+    {
+        use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
+        let tx_for_drop = worker_tx.clone();
+        let weak_for_drop = ui.as_weak();
+        ui.window().on_winit_window_event(move |_, event| {
+            let WindowEvent::DroppedFile(path) = event else {
+                return EventResult::Propagate;
+            };
+            let path = path.clone();
+            let tx = tx_for_drop.clone();
+            let weak = weak_for_drop.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                if let Some(ui) = weak.upgrade() {
+                    confirm_and_attach(&ui, &tx, path);
+                }
+            });
+            EventResult::PreventDefault
+        });
+    }
+
+    // Ctrl+V (Cmd+V) in the compose box: an image on the clipboard is
+    // uploaded like a picked file, and a multi-line text can go up as a .txt
+    // instead of being flattened into one message. Plain text pastes as
+    // usual.
+    let tx_for_paste = worker_tx.clone();
+    let weak_for_paste = ui.as_weak();
+    ui.on_paste_requested(move || {
+        let Some(ui) = weak_for_paste.upgrade() else {
+            return false;
+        };
+        let Some(path) = clipboard_upload(&ui) else {
+            return false;
+        };
+        confirm_and_attach(&ui, &tx_for_paste, path);
+        true
     });
 
     let tx_for_upload_prefs = worker_tx.clone();
@@ -656,6 +761,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_theme = worker_tx.clone();
     ui.on_theme_toggle_requested(move || {
         let _ = tx_for_theme.send(WorkerCommand::ToggleTheme);
+    });
+
+    let weak_for_badge = ui.as_weak();
+    ui.on_taskbar_badge_changed(move |count, description| {
+        if let Some(ui) = weak_for_badge.upgrade() {
+            taskbar::set_badge(ui.window(), count, &description);
+        }
     });
 
     let tx_for_color_theme = worker_tx.clone();
@@ -1046,8 +1158,36 @@ fn main() -> Result<(), slint::PlatformError> {
         if let (Some(vhost), Some(user)) = (vhost, user) {
             let _ = tx_for_admin_grant.send(WorkerCommand::AdminGrantAdd {
                 vhost_id: vhost.vhost_id.to_string(),
-                user_id: user.user_id.to_string(),
+                subject_type: "user".to_string(),
+                subject_id: user.user_id.to_string(),
             });
+        }
+    });
+
+    let tx_for_subject_grant = worker_tx.clone();
+    let weak_for_subject_grant = ui.as_weak();
+    ui.on_admin_subject_grant(move |subject_type, subject_id| {
+        use slint::Model as _;
+        let Some(ui) = weak_for_subject_grant.upgrade() else {
+            return;
+        };
+        let vhost = usize::try_from(ui.get_admin_grant_vhost_index())
+            .ok()
+            .and_then(|index| ui.get_admin_vhosts().row_data(index));
+        if let Some(vhost) = vhost {
+            let _ = tx_for_subject_grant.send(WorkerCommand::AdminGrantAdd {
+                vhost_id: vhost.vhost_id.to_string(),
+                subject_type: subject_type.to_string(),
+                subject_id: subject_id.to_string(),
+            });
+        }
+    });
+
+    let tx_for_subject_search = worker_tx.clone();
+    ui.on_admin_subject_search(move |query| {
+        let query = query.trim().to_string();
+        if !query.is_empty() {
+            let _ = tx_for_subject_search.send(WorkerCommand::AdminSubjectSearch(query));
         }
     });
 
@@ -1925,9 +2065,19 @@ impl WorkerState {
 /// never fires.
 async fn run_worker(
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
+    worker_self: mpsc::UnboundedSender<WorkerCommand>,
     ui: slint::Weak<AppWindow>,
 ) {
     let mut state = WorkerState::new();
+    let radio_events = worker_self.clone();
+    let radio = player::RadioPlayer::spawn(move |generation, event| {
+        let _ = radio_events.send(WorkerCommand::RadioEvent(generation, event));
+    });
+    let volume = persistence::load_settings()
+        .unwrap_or_default()
+        .radio_volume;
+    radio.set_volume(f32::from(volume) / 100.0);
+    let mut radio_state = RadioState::default();
     let mut session_events: Option<mpsc::UnboundedReceiver<SessionEvent>> = None;
 
     loop {
@@ -2009,6 +2159,32 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ArchiveDelete(target)) => {
                         delete_archive_target(&mut state, &ui, &target).await;
+                    }
+                    Some(WorkerCommand::RadioTune(key)) => {
+                        tune_radio(&mut radio_state, &radio, &worker_self, &ui, &key);
+                    }
+                    Some(WorkerCommand::RadioStop) => {
+                        radio.stop();
+                        radio_state.stop();
+                        push_radio_now(&ui, &radio_state);
+                    }
+                    Some(WorkerCommand::RadioVolume(volume)) => {
+                        radio.set_volume(volume.clamp(0, 100) as f32 / 100.0);
+                    }
+                    Some(WorkerCommand::RadioEvent(generation, event)) => {
+                        handle_radio_event(&mut radio_state, &ui, generation, event);
+                    }
+                    Some(WorkerCommand::RadioTrack { generation, track }) => {
+                        if let Some(tuned) = radio_state
+                            .tuned
+                            .as_mut()
+                            .filter(|_| radio_state.generation == generation)
+                        {
+                            if let Some(track) = track {
+                                tuned.track = Some((track, std::time::Instant::now()));
+                            }
+                            push_radio_now(&ui, &radio_state);
+                        }
                     }
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
@@ -2263,9 +2439,20 @@ async fn run_worker(
                     Some(WorkerCommand::AdminVhostDelete(vhost_id)) => {
                         handle_admin_write(&state, &ui, AdminWrite::DeleteVhost(vhost_id)).await;
                     }
-                    Some(WorkerCommand::AdminGrantAdd { vhost_id, user_id }) => {
-                        handle_admin_write(&state, &ui, AdminWrite::GrantVhost { vhost_id, user_id })
-                            .await;
+                    Some(WorkerCommand::AdminGrantAdd {
+                        vhost_id,
+                        subject_type,
+                        subject_id,
+                    }) => {
+                        let write = AdminWrite::GrantVhost {
+                            vhost_id,
+                            subject_type,
+                            subject_id,
+                        };
+                        handle_admin_write(&state, &ui, write).await;
+                    }
+                    Some(WorkerCommand::AdminSubjectSearch(query)) => {
+                        handle_admin_subject_search(&state, &ui, &query).await;
                     }
                     Some(WorkerCommand::AdminGrantRevoke(grant_id)) => {
                         handle_admin_write(&state, &ui, AdminWrite::RevokeGrant(grant_id)).await;
@@ -2538,6 +2725,10 @@ async fn run_worker(
                         let system_dark = state.system_dark;
                         state = WorkerState::new();
                         state.system_dark = system_dark;
+                        // Like Cicchetto, signing out stops the radio.
+                        radio.stop();
+                        radio_state.stop();
+                        push_radio_now(&ui, &radio_state);
                     }
                     Some(WorkerCommand::LoadOlderHistory) => {
                         handle_load_older_history(&mut state, &ui).await;
@@ -3398,13 +3589,12 @@ fn remove_sidebar_channel_entry(
 }
 
 /// Whether `identifier` appears in `members` with the `@` (op) prefix —
-/// gates `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items. Only
-/// ever as accurate as `members` itself, which doesn't track role
-/// (mode) changes yet — see README's Known gaps.
+/// gates `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items, as
+/// accurate as `members` (snapshots plus live MODE changes).
 fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str) -> bool {
     members
         .iter()
-        .any(|(name, prefix)| name == identifier && prefix == "@")
+        .any(|(name, prefix)| name == identifier && prefix.contains('@'))
 }
 
 async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
@@ -3581,6 +3771,80 @@ async fn handle_attach_file(
             );
         }
     }
+}
+
+/// Asks for the upload when Settings says so, then hands `path` to the
+/// worker with the chosen lifetime: the paperclip, a dropped file and a
+/// paste all end here, as in Cicchetto.
+fn confirm_and_attach(
+    ui: &AppWindow,
+    tx: &mpsc::UnboundedSender<WorkerCommand>,
+    path: std::path::PathBuf,
+) {
+    if ui.get_pref_upload_confirm() {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let answer = rfd::MessageDialog::new()
+            .set_title(ui.get_upload_confirm_title().as_str())
+            .set_description(format!("{}\n\n{name}", ui.get_upload_confirm_text()))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if !matches!(answer, rfd::MessageDialogResult::Yes) {
+            return;
+        }
+    }
+    let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
+    let _ = tx.send(WorkerCommand::AttachFile(path, expire));
+}
+
+/// Lines of pasted text above which Cordiale offers a .txt upload.
+const PASTE_UPLOAD_LINES: usize = 2;
+
+/// What the clipboard holds that should go up as a file: an image (saved
+/// as PNG), or, when the user agrees, a multi-line text (saved as
+/// `paste.txt`). `None` lets the compose box paste as usual.
+fn clipboard_upload(ui: &AppWindow) -> Option<std::path::PathBuf> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let folder = std::env::temp_dir()
+        .join("cordiale-paste")
+        .join(stamp.to_string());
+    if let Ok(image) = clipboard.get_image() {
+        let width = u32::try_from(image.width).ok()?;
+        let height = u32::try_from(image.height).ok()?;
+        let pixels = image::RgbaImage::from_raw(width, height, image.bytes.into_owned())?;
+        std::fs::create_dir_all(&folder).ok()?;
+        let path = folder.join("image.png");
+        if let Err(err) = pixels.save_with_format(&path, image::ImageFormat::Png) {
+            persistence::log_line(&format!("pasted image not saved: {err}"));
+            return None;
+        }
+        return Some(path);
+    }
+    let text = clipboard.get_text().ok()?;
+    if text.lines().count() < PASTE_UPLOAD_LINES {
+        return None;
+    }
+    let answer = rfd::MessageDialog::new()
+        .set_title(ui.get_paste_upload_title().as_str())
+        .set_description(
+            ui.invoke_paste_upload_text(i32::try_from(text.lines().count()).unwrap_or(i32::MAX))
+                .as_str(),
+        )
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show();
+    if !matches!(answer, rfd::MessageDialogResult::Yes) {
+        return None;
+    }
+    std::fs::create_dir_all(&folder).ok()?;
+    let path = folder.join("paste.txt");
+    std::fs::write(&path, text).ok()?;
+    Some(path)
 }
 
 /// Upload lifetimes offered in Settings, in the order of its menu: the
@@ -3866,6 +4130,14 @@ async fn run_slash_command(
                 serde_json::json!({ "target": target, "modes": modes, "params": params }),
             );
             Ok(())
+        }
+        SlashCommand::NowPlaying => {
+            let line = match now_playing_text(&radio_now_playing(), std::time::Instant::now()) {
+                Ok(line) => line,
+                Err((kind, station)) => return set_command_status(ui, kind, station),
+            };
+            let request = SendMessageRequest::plain(format!("\u{1}ACTION {line}\u{1}"));
+            post_message(&client, &token, &network, &channel, request).await
         }
         SlashCommand::UmodeShow => {
             state.umode_view_network = Some(network.clone());
@@ -4331,6 +4603,320 @@ async fn handle_save_notification_prefs(
     }
 }
 
+/// A station ready to tune: its name, stream URL, decoder hint and
+/// now-playing feed.
+struct TunableStation {
+    title: String,
+    url: String,
+    hint: &'static str,
+    source: Option<cordiale_core::radio::NowPlayingSource>,
+}
+
+/// `builtin:<id>` from Cicchetto's list, or `custom:<index>` from Settings.
+fn tunable_station(key: &str) -> Option<TunableStation> {
+    use cordiale_core::radio::{RadioCodec, RADIO_STATIONS};
+    if let Some(id) = key.strip_prefix("builtin:") {
+        let station = RADIO_STATIONS.iter().find(|station| station.id == id)?;
+        return Some(TunableStation {
+            title: station.title.to_string(),
+            url: station.stream_url.to_string(),
+            hint: station.codec.extension(),
+            source: station.now_playing,
+        });
+    }
+    let index: usize = key.strip_prefix("custom:")?.parse().ok()?;
+    let station = persistence::load_settings()
+        .ok()?
+        .radio_stations
+        .into_iter()
+        .nth(index)?;
+    let codec = RadioCodec::from_setting_key(&station.codec);
+    Some(TunableStation {
+        title: station.name,
+        url: station.url,
+        hint: codec.extension(),
+        source: None,
+    })
+}
+
+/// A custom station from the Settings form; `None` without a name or an
+/// http(s) URL. `codec_index` follows the form's menu (`RADIO_CODECS`).
+fn custom_radio_station(
+    name: &str,
+    url: &str,
+    codec_index: i32,
+) -> Option<persistence::CustomRadioStation> {
+    let name = name.trim();
+    let url = url.trim();
+    let valid_url = is_http_url(url);
+    if name.is_empty() || !valid_url {
+        return None;
+    }
+    Some(persistence::CustomRadioStation {
+        name: name.to_string(),
+        url: url.to_string(),
+        codec: usize::try_from(codec_index)
+            .ok()
+            .and_then(|index| cordiale_core::radio::RADIO_CODECS.get(index))
+            .copied()
+            .unwrap_or(cordiale_core::radio::RadioCodec::Mp3)
+            .setting_key()
+            .to_string(),
+    })
+}
+
+/// An `http://` or `https://` URL with a host and no spaces.
+fn is_http_url(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    rest.is_some_and(|rest| {
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        !host.is_empty() && !url.chars().any(char::is_whitespace)
+    })
+}
+
+/// Mirrors the station list (Cicchetto's, then the custom ones) and the
+/// custom list of Settings > Radio.
+fn push_radio_stations(ui: &AppWindow, custom: &[persistence::CustomRadioStation]) {
+    use cordiale_core::radio::{RadioCodec, RADIO_CODECS, RADIO_STATIONS};
+    let mut rows: Vec<RadioRow> = RADIO_STATIONS
+        .iter()
+        .map(|station| {
+            let format = match station.bitrate {
+                Some(bitrate) => format!("{} {bitrate}k", station.codec.label()),
+                None => station.codec.label().to_string(),
+            };
+            RadioRow {
+                key: format!("builtin:{}", station.id).into(),
+                title: station.title.into(),
+                detail: format!("{} · {format}", station.genres.join(", ")).into(),
+                description: station.description.into(),
+                custom: false,
+            }
+        })
+        .collect();
+    let custom_rows: Vec<CustomRadioRow> = custom
+        .iter()
+        .map(|station| CustomRadioRow {
+            name: station.name.clone().into(),
+            url: station.url.clone().into(),
+            codec_index: RADIO_CODECS
+                .iter()
+                .position(|codec| codec.setting_key() == station.codec)
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or(0),
+            codec_label: RadioCodec::from_setting_key(&station.codec).label().into(),
+        })
+        .collect();
+    rows.extend(custom.iter().enumerate().map(|(index, station)| {
+        let codec = RadioCodec::from_setting_key(&station.codec).label();
+        RadioRow {
+            key: format!("custom:{index}").into(),
+            title: station.name.clone().into(),
+            detail: codec.into(),
+            description: station.url.clone().into(),
+            custom: true,
+        }
+    }));
+    ui.set_radio_stations(Rc::new(slint::VecModel::from(rows)).into());
+    ui.set_radio_custom_stations(Rc::new(slint::VecModel::from(custom_rows)).into());
+}
+
+/// The station on air, as the worker tracks it.
+struct TunedRadio {
+    key: String,
+    title: String,
+    source: Option<cordiale_core::radio::NowPlayingSource>,
+    /// Last track the feed gave, and when.
+    track: Option<(cordiale_core::radio::Track, std::time::Instant)>,
+    /// Last title the stream itself carried (ICY), for stations without a
+    /// feed.
+    stream_title: Option<String>,
+    /// "connecting", "playing", "failed" or "ended".
+    status: &'static str,
+    error: String,
+}
+
+#[derive(Default)]
+struct RadioState {
+    generation: u64,
+    tuned: Option<TunedRadio>,
+    poll: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RadioState {
+    fn stop(&mut self) {
+        self.generation += 1;
+        self.tuned = None;
+        if let Some(poll) = self.poll.take() {
+            poll.abort();
+        }
+    }
+}
+
+impl Drop for RadioState {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// What `/np` reads, shared with the slash command handler.
+#[derive(Clone, Default)]
+struct RadioNowPlaying {
+    station: Option<String>,
+    has_feed: bool,
+    track: Option<(cordiale_core::radio::Track, std::time::Instant)>,
+    stream_title: Option<String>,
+}
+
+static RADIO_NOW_PLAYING: std::sync::Mutex<Option<RadioNowPlaying>> = std::sync::Mutex::new(None);
+
+fn radio_now_playing() -> RadioNowPlaying {
+    RADIO_NOW_PLAYING
+        .lock()
+        .ok()
+        .and_then(|now| now.clone())
+        .unwrap_or_default()
+}
+
+/// The `/np` action text, or the status explaining why there's none (as
+/// Cicchetto: idle, a station without track information, a feed that
+/// hasn't answered, a track over three minutes old). Stations without a
+/// feed fall back to the title in the stream itself.
+fn now_playing_text(
+    now: &RadioNowPlaying,
+    at: std::time::Instant,
+) -> Result<String, (&'static str, String)> {
+    use cordiale_core::radio::{now_playing_line, Track, NOW_PLAYING_STALE_SECS};
+    let Some(station) = now.station.clone() else {
+        return Err(("np-idle", String::new()));
+    };
+    if let Some((track, read_at)) = &now.track {
+        if at.duration_since(*read_at).as_secs() > NOW_PLAYING_STALE_SECS {
+            return Err(("np-stale", station));
+        }
+        return Ok(now_playing_line(track, &station));
+    }
+    if let Some(title) = &now.stream_title {
+        let track = Track {
+            artist: None,
+            title: title.clone(),
+        };
+        return Ok(now_playing_line(&track, &station));
+    }
+    Err(if now.has_feed {
+        ("np-unanswered", station)
+    } else {
+        ("np-unsupported", station)
+    })
+}
+
+fn tune_radio(
+    radio_state: &mut RadioState,
+    radio: &player::RadioPlayer,
+    worker_self: &mpsc::UnboundedSender<WorkerCommand>,
+    ui: &slint::Weak<AppWindow>,
+    key: &str,
+) {
+    let Some(station) = tunable_station(key) else {
+        return;
+    };
+    radio_state.stop();
+    let generation = radio_state.generation;
+    radio.play(&station.url, station.hint, generation);
+    if let Some(source) = station.source {
+        let tx = worker_self.clone();
+        radio_state.poll = Some(tokio::spawn(async move {
+            loop {
+                let track = cordiale_core::radio::fetch_now_playing(source).await;
+                if tx
+                    .send(WorkerCommand::RadioTrack { generation, track })
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    cordiale_core::radio::NOW_PLAYING_POLL_SECS,
+                ))
+                .await;
+            }
+        }));
+    }
+    radio_state.tuned = Some(TunedRadio {
+        key: key.to_string(),
+        title: station.title,
+        source: station.source,
+        track: None,
+        stream_title: None,
+        status: "connecting",
+        error: String::new(),
+    });
+    push_radio_now(ui, radio_state);
+}
+
+fn handle_radio_event(
+    radio_state: &mut RadioState,
+    ui: &slint::Weak<AppWindow>,
+    generation: u64,
+    event: player::PlayerEvent,
+) {
+    if radio_state.generation != generation {
+        return;
+    }
+    let Some(tuned) = radio_state.tuned.as_mut() else {
+        return;
+    };
+    match event {
+        player::PlayerEvent::Playing => tuned.status = "playing",
+        player::PlayerEvent::Title(title) => tuned.stream_title = Some(title),
+        player::PlayerEvent::Failed(error) => {
+            persistence::log_line(&format!("radio stream failed: {error}"));
+            tuned.status = "failed";
+            tuned.error = error;
+        }
+        player::PlayerEvent::Ended => tuned.status = "ended",
+    }
+    push_radio_now(ui, radio_state);
+}
+
+/// Mirrors the station on air into the player bar and `/np`.
+fn push_radio_now(ui: &slint::Weak<AppWindow>, radio_state: &RadioState) {
+    let now = radio_state.tuned.as_ref().map(|tuned| RadioNowPlaying {
+        station: Some(tuned.title.clone()),
+        has_feed: tuned.source.is_some(),
+        track: tuned.track.clone(),
+        stream_title: tuned.stream_title.clone(),
+    });
+    let label = now
+        .as_ref()
+        .and_then(|now| match (&now.track, &now.stream_title) {
+            (Some((track, _)), _) => Some(track.label()),
+            (None, Some(title)) => Some(title.clone()),
+            (None, None) => None,
+        })
+        .unwrap_or_default();
+    if let Ok(mut shared) = RADIO_NOW_PLAYING.lock() {
+        *shared = now;
+    }
+    let (key, title, status, error) = match &radio_state.tuned {
+        Some(tuned) => (
+            tuned.key.clone(),
+            tuned.title.clone(),
+            tuned.status,
+            tuned.error.clone(),
+        ),
+        None => (String::new(), String::new(), "", String::new()),
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_radio_tuned_key(key.into());
+        ui.set_radio_station(title.into());
+        ui.set_radio_track(label.into());
+        ui.set_radio_status(status.into());
+        ui.set_radio_error(error.into());
+    });
+}
+
 /// Sound presets Grappa accepts for `notification_sound`, in the order of
 /// the Settings menu.
 const NOTIFICATION_SOUNDS: [&str; 10] = [
@@ -4659,9 +5245,65 @@ enum AdminWrite {
     DeleteVhost(String),
     GrantVhost {
         vhost_id: String,
-        user_id: String,
+        subject_type: String,
+        subject_id: String,
     },
     RevokeGrant(String),
+}
+
+/// One `subject_search` row: `(type, id, network, nick)`, `network` empty
+/// for an account.
+fn admin_subject_row(row: &Value) -> Option<(String, String, String, String)> {
+    let text = |field: &str| row.get(field).and_then(Value::as_str);
+    let kind = text("type").filter(|kind| matches!(*kind, "user" | "visitor"))?;
+    Some((
+        kind.to_string(),
+        text("id")?.to_string(),
+        text("network").unwrap_or_default().to_string(),
+        text("nick")?.to_string(),
+    ))
+}
+
+/// Finds accounts and visitors for a vhost grant, like Cicchetto's
+/// autocomplete.
+async fn handle_admin_subject_search(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    query: &str,
+) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    match client.search_admin_subjects(token, query).await {
+        Ok(rows) => {
+            let rows: Vec<(String, String, String, String)> =
+                rows.iter().filter_map(admin_subject_row).collect();
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let rows: Vec<AdminSubjectRow> = rows
+                    .into_iter()
+                    .map(|(kind, id, network, nick)| AdminSubjectRow {
+                        kind: kind.into(),
+                        subject_id: id.into(),
+                        network: network.into(),
+                        nick: nick.into(),
+                    })
+                    .collect();
+                ui.set_admin_subject_searched(true);
+                ui.set_admin_subject_results(Rc::new(slint::VecModel::from(rows)).into());
+            });
+        }
+        Err(err) => {
+            let status = err
+                .status()
+                .map(|status| status.as_u16().to_string())
+                .unwrap_or_else(|| "network error".to_string());
+            persistence::log_line(&format!("admin subject search failed: {status}"));
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(status.into());
+                ui.set_status_kind("admin-action-failed".into());
+            });
+        }
+    }
 }
 
 /// Runs an admin write, then refreshes the panel. Success clears the
@@ -4743,9 +5385,16 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
             "",
         ),
         AdminWrite::DeleteVhost(vhost_id) => (client.delete_admin_vhost(token, vhost_id).await, ""),
-        AdminWrite::GrantVhost { vhost_id, user_id } => {
-            (client.grant_admin_vhost(token, vhost_id, user_id).await, "")
-        }
+        AdminWrite::GrantVhost {
+            vhost_id,
+            subject_type,
+            subject_id,
+        } => (
+            client
+                .grant_admin_vhost(token, vhost_id, subject_type, subject_id)
+                .await,
+            "",
+        ),
         AdminWrite::RevokeGrant(grant_id) => {
             (client.revoke_admin_vhost_grant(token, grant_id).await, "")
         }
@@ -7831,52 +8480,33 @@ fn update_members_from_frame(
         }
         // Real, observed shape (a screenshot caught this leaking as raw
         // JSON before this was handled): `meta.modes` like `"+o"`/`"-o"`,
-        // `meta.args` the targets in order for whichever letters take one.
-        // Cordiale only tracks the three prefix-bearing modes it renders
-        // (`@`/`%`/`+`) — any other letter in the string (ban masks, keys,
-        // limits, ...) is skipped without consuming an `args` entry, since
-        // Cordiale has no ISUPPORT CHANMODES table to know which of those
-        // take one; a combined string mixing a skipped letter with a
-        // prefix letter (e.g. `"+ob"`) would misalign, but no such case
-        // has been observed yet — see README's Known gaps.
+        // `meta.args` the parameters in order. Which letters take one comes
+        // from the network's ISUPPORT PREFIX and CHANMODES, so a mixed
+        // string like `"+bo mask nick"` lines up.
         Some("mode") => {
             let modes = payload
                 .get("meta")
                 .and_then(|meta| meta.get("modes"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let targets = mode_args(payload);
+            let isupport = state.isupport_by_network.get(&key.0);
+            let prefix_changes =
+                cordiale_core::isupport::prefix_mode_changes(modes, &mode_args(payload), isupport);
+            let order = cordiale_core::isupport::prefix_symbol_order(isupport);
+            let casemapping = network_casemapping(state, &key.0);
             let Some(members) = state.members.get_mut(key) else {
                 return false;
             };
-            let mut sign = '+';
-            let mut targets = targets.into_iter();
             let mut changed = false;
-            for ch in modes.chars() {
-                match ch {
-                    '+' | '-' => sign = ch,
-                    'o' | 'h' | 'v' => {
-                        let Some(target) = targets.next() else {
-                            continue;
-                        };
-                        let Some(entry) = members.iter_mut().find(|(name, _)| *name == target)
-                        else {
-                            continue;
-                        };
-                        let symbol = match ch {
-                            'o' => "@",
-                            'h' => "%",
-                            _ => "+",
-                        };
-                        entry.1 = if sign == '+' {
-                            symbol.to_string()
-                        } else {
-                            String::new()
-                        };
-                        changed = true;
-                    }
-                    _ => {}
-                }
+            for (adding, symbol, target) in prefix_changes {
+                let Some(entry) = members
+                    .iter_mut()
+                    .find(|(name, _)| casemapping.nick_eq(name, &target))
+                else {
+                    continue;
+                };
+                entry.1 = update_member_prefix(&entry.1, &symbol, adding, &order);
+                changed = true;
             }
             if changed {
                 sort_members_by_rank(members);
@@ -8406,7 +9036,14 @@ fn buffer_pending_own_nick_dm(
         return;
     }
     if state.pending_own_nick_dms.len() >= MAX_PENDING_OWN_NICK_DMS {
-        state.pending_own_nick_dms.pop_front();
+        // The dropped DM is in Grappa's scrollback: if its query opens, the
+        // first history load fetches the full tail instead of only what
+        // follows the buffered messages, so nothing goes missing.
+        if let Some(dropped) = state.pending_own_nick_dms.pop_front() {
+            state
+                .query_full_history_required
+                .insert(query_window_key(&dropped.network, &dropped.sender));
+        }
     }
     state.pending_own_nick_dms.push_back(PendingOwnNickDm {
         network: network.to_string(),
@@ -8424,6 +9061,9 @@ fn drain_pending_own_nick_dms(state: &mut WorkerState) {
             // A valid full snapshot is authoritative: if it didn't open the
             // sender's query, don't invent a client-side window or retain the
             // message until some unrelated later snapshot.
+            state
+                .query_full_history_required
+                .remove(&query_window_key(&dm.network, &dm.sender));
             continue;
         };
         let key = (query.network.clone(), query.target_nick.clone());
@@ -8618,9 +9258,39 @@ fn topics_from_boot_response(boot: &BootResponse) -> HashMap<(String, String), S
     topics
 }
 
-/// `(name, prefix)` — `prefix` is the single highest-ranked IRC role
-/// marker (`@` op, `%` halfop, `+` voice, empty for a plain member).
+/// `(name, prefix)` — `prefix` holds every IRC role marker the member has
+/// (`@` op, `%` halfop, `+` voice...), highest first, so dropping one
+/// keeps the next; empty for a plain member. Only the first is shown.
 type MemberEntry = (String, String);
+
+/// Adds or drops one role symbol, keeping the member's symbols in `order`
+/// (highest first).
+fn update_member_prefix(prefix: &str, symbol: &str, adding: bool, order: &[String]) -> String {
+    let mut symbols: Vec<String> = prefix
+        .chars()
+        .map(String::from)
+        .filter(|held| held != symbol)
+        .collect();
+    if adding {
+        symbols.push(symbol.to_string());
+    }
+    let rank = |held: &String| {
+        order
+            .iter()
+            .position(|symbol| symbol == held)
+            .unwrap_or(order.len())
+    };
+    symbols.sort_by_key(rank);
+    symbols.concat()
+}
+
+/// The role marker shown for a member: the highest one it holds.
+fn highest_prefix(prefix: &str) -> &str {
+    prefix
+        .char_indices()
+        .nth(1)
+        .map_or(prefix, |(end, _)| &prefix[..end])
+}
 type MembersByChannel = HashMap<(String, String), Vec<MemberEntry>>;
 
 /// Reads `(network, channel) -> members` out of `boot.channels`. The
@@ -8672,11 +9342,9 @@ fn members_from_boot_response(boot: &BootResponse) -> MembersByChannel {
 /// from.
 fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
     if let Some(raw) = entry.as_str() {
-        let prefix_char = raw.chars().next().filter(|c| "@%+&~".contains(*c));
-        return Some(match prefix_char {
-            Some(c) => (raw[c.len_utf8()..].to_string(), c.to_string()),
-            None => (raw.to_string(), String::new()),
-        });
+        let name = raw.trim_start_matches(|c| "@%+&~".contains(c));
+        let prefix = raw[..raw.len() - name.len()].to_string();
+        return Some((name.to_string(), prefix));
     }
 
     let obj = entry.as_object()?;
@@ -8690,16 +9358,14 @@ fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| {
-            obj.get("modes")
-                .and_then(Value::as_array)
-                .and_then(|modes| {
-                    modes.iter().find_map(|mode| match mode.as_str() {
-                        Some("o") => Some("@".to_string()),
-                        Some("h") => Some("%".to_string()),
-                        Some("v") => Some("+".to_string()),
-                        _ => None,
-                    })
-                })
+            obj.get("modes").and_then(Value::as_array).map(|modes| {
+                ["o", "h", "v"]
+                    .iter()
+                    .zip(["@", "%", "+"])
+                    .filter(|(mode, _)| modes.iter().any(|held| held.as_str() == Some(**mode)))
+                    .map(|(_, symbol)| symbol)
+                    .collect::<String>()
+            })
         })
         .unwrap_or_default();
     Some((name, prefix))
@@ -8708,7 +9374,7 @@ fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
 /// Ops first, then halfops, then voice, then everyone else — each group
 /// alphabetical (case-insensitive) within itself.
 fn sort_members_by_rank(members: &mut [MemberEntry]) {
-    const RANK_ORDER: &str = "@%+";
+    const RANK_ORDER: &str = "~&@%+";
     let rank = |prefix: &str| {
         prefix
             .chars()
@@ -9049,23 +9715,26 @@ fn chat_line_from_message(
         None => (String::new(), slint::Color::from_rgb_u8(0, 0, 0)),
     };
 
-    let mut segments = Vec::new();
-    for segment in cordiale_core::formatting::parse_mirc_text(&message.text) {
-        let (has_color, color) = match segment.color {
-            Some(rgb) => {
-                let (r, g, b) = ensure_legible(rgb, dark_theme);
-                (true, slint::Color::from_rgb_u8(r, g, b))
-            }
-            None => (false, slint::Color::from_rgb_u8(0, 0, 0)),
-        };
-        segments.push(MessageSegment {
-            text: segment.text.into(),
-            has_color,
-            color,
-            bold: segment.bold,
-            italic: message.italic,
+    let default_color = if dark_theme {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    };
+    let runs: Vec<(String, (u8, u8, u8), bool)> =
+        cordiale_core::formatting::parse_mirc_text(&message.text)
+            .into_iter()
+            .map(|segment| {
+                let color = segment
+                    .color
+                    .map_or(default_color, |rgb| ensure_legible(rgb, dark_theme));
+                (segment.text, color, segment.bold)
+            })
+            .collect();
+    let body = slint::StyledText::from_markdown(&message_markdown(&runs, message.italic))
+        .unwrap_or_else(|_| {
+            let plain: String = runs.iter().map(|run| run.0.as_str()).collect();
+            slint::StyledText::from_plain_text(&plain)
         });
-    }
 
     ChatLine {
         timestamp: message.timestamp.clone().into(),
@@ -9074,8 +9743,68 @@ fn chat_line_from_message(
         nick_prefix: nick_prefix.into(),
         nick_color: nick_color_value,
         italic: message.italic,
-        segments: Rc::new(slint::VecModel::from(segments)).into(),
+        body,
     }
+}
+
+/// A message's mIRC runs as Slint styled-text markup, so a line with
+/// several colors wraps as one paragraph. Every run gets an explicit
+/// `<font color>` (the default color too): emphasis markers then always sit
+/// next to a tag bracket, where CommonMark reliably opens and closes them.
+/// Text is backslash-escaped, so nothing a user typed becomes markup.
+fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> String {
+    let mut markdown = String::new();
+    for (text, (r, g, b), bold) in runs {
+        let text: String = text
+            .chars()
+            .filter(|ch| *ch != slint_markdown_placeholder())
+            .collect();
+        if text.is_empty() {
+            continue;
+        }
+        let core = text.trim();
+        let leading = &text[..text.len() - text.trim_start().len()];
+        let trailing = &text[text.trim_end().len()..];
+        let marker = match (*bold, italic) {
+            (true, true) => "***",
+            (true, false) => "**",
+            (false, true) => "*",
+            (false, false) => "",
+        };
+        markdown.push_str(&format!("<font color=\"#{r:02x}{g:02x}{b:02x}\">"));
+        markdown.push_str(&escape_markdown(leading));
+        if !core.is_empty() {
+            markdown.push_str(marker);
+            markdown.push_str(&escape_markdown(core));
+            markdown.push_str(marker);
+        }
+        markdown.push_str(&escape_markdown(trailing));
+        markdown.push_str("</font>");
+    }
+    markdown
+}
+
+/// Slint's `@markdown` interpolation placeholder, never valid in chat text.
+fn slint_markdown_placeholder() -> char {
+    '\u{e541}'
+}
+
+/// Escapes every ASCII punctuation character (CommonMark allows a
+/// backslash before any of them). IRC lines have no line breaks; a stray
+/// one becomes a space so the body stays one paragraph.
+fn escape_markdown(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch == '\n' || ch == '\r' {
+            escaped.push(' ');
+            continue;
+        }
+        if ch.is_ascii_punctuation() {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 fn chat_lines_model(messages: &[RenderedMessage], dark_theme: bool) -> Vec<ChatLine> {
@@ -9095,7 +9824,7 @@ fn member_prefix_for_nick<'a>(
     members
         .iter()
         .find(|(member_nick, _)| casemapping.nick_eq(member_nick, nick))
-        .map(|(_, prefix)| prefix.as_str())
+        .map(|(_, prefix)| highest_prefix(prefix))
         .unwrap_or("")
 }
 
@@ -9207,7 +9936,7 @@ fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
             MemberRow {
                 prefix_color: role_color(prefix, (r, g, b)),
                 name: name.clone().into(),
-                prefix: prefix.clone().into(),
+                prefix: highest_prefix(prefix).into(),
                 color: slint::Color::from_rgb_u8(r, g, b),
             }
         })
@@ -15743,10 +16472,14 @@ mod tests {
             state.pending_own_nick_dms.front().unwrap().payload["id"].as_i64(),
             Some(2)
         );
+        // The overflow is recovered from history if the query opens.
+        let identity = query_window_key("libera", "unlisted");
+        assert!(state.query_full_history_required.contains(&identity));
 
         assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
         drain_pending_own_nick_dms(&mut state);
         assert!(state.pending_own_nick_dms.is_empty());
+        assert!(!state.query_full_history_required.contains(&identity));
         assert!(state.query_windows.is_empty());
         assert!(state.messages.is_empty());
     }
@@ -18504,6 +19237,48 @@ mod tests {
     }
 
     #[test]
+    fn message_markdown_escapes_text_and_keeps_every_run() {
+        let runs = vec![
+            (
+                "# 1. *not* <b>markup</b> & [x](y) ".to_string(),
+                (255, 0, 0),
+                false,
+            ),
+            ("bold!".to_string(), (0, 0, 0), true),
+            ("   ".to_string(), (0, 0, 0), false),
+            ("- tail_\u{e541}".to_string(), (0, 128, 0), false),
+        ];
+        let markdown = message_markdown(&runs, false);
+        assert!(markdown.starts_with("<font color=\"#ff0000\">\\# 1\\. \\*not\\*"));
+        assert!(markdown.contains("<font color=\"#000000\">**bold\\!**</font>"));
+        assert!(!markdown.contains('\u{e541}'));
+        assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+        let italic = message_markdown(&runs, true);
+        assert!(italic.contains("***bold\\!***"));
+        assert!(slint::StyledText::from_markdown(&italic).is_ok());
+        let multiline = message_markdown(&[("a\n    b".to_string(), (0, 0, 0), false)], false);
+        assert!(slint::StyledText::from_markdown(&multiline).is_ok());
+    }
+
+    #[test]
+    fn member_prefixes_keep_every_role_highest_first() {
+        let order: Vec<String> = ["@", "%", "+"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(update_member_prefix("+", "@", true, &order), "@+");
+        assert_eq!(update_member_prefix("@+", "@", false, &order), "+");
+        assert_eq!(update_member_prefix("@", "@", true, &order), "@");
+        assert_eq!(highest_prefix("@+"), "@");
+        assert_eq!(highest_prefix(""), "");
+        assert_eq!(
+            member_from_entry(&serde_json::json!("@+ada")),
+            Some(("ada".to_string(), "@+".to_string()))
+        );
+        assert_eq!(
+            member_from_entry(&serde_json::json!({"nick": "bob", "modes": ["v", "o"]})),
+            Some(("bob".to_string(), "@+".to_string()))
+        );
+    }
+
+    #[test]
     fn theme_pair_follows_the_system_scheme() {
         let mut themes = builtin_theme_choices().into_iter();
         let day = themes.next().expect("a built-in theme");
@@ -18604,6 +19379,105 @@ mod tests {
         assert_eq!(network_nick(&networks, "libera"), Some("ada".to_string()));
         assert_eq!(network_nick(&networks, "oftc"), None);
         assert_eq!(network_nick(&networks, "efnet"), None);
+    }
+
+    #[test]
+    fn now_playing_text_follows_cicchetto_states() {
+        use cordiale_core::radio::Track;
+        let at = std::time::Instant::now();
+        assert_eq!(
+            now_playing_text(&RadioNowPlaying::default(), at),
+            Err(("np-idle", String::new()))
+        );
+        let mut now = RadioNowPlaying {
+            station: Some("Kohina".to_string()),
+            has_feed: true,
+            ..RadioNowPlaying::default()
+        };
+        assert_eq!(
+            now_playing_text(&now, at),
+            Err(("np-unanswered", "Kohina".to_string()))
+        );
+        now.track = Some((
+            Track {
+                artist: Some("Hubbard".to_string()),
+                title: "Commando".to_string(),
+            },
+            at,
+        ));
+        assert_eq!(
+            now_playing_text(&now, at).as_deref(),
+            Ok("is now playing: Hubbard — Commando [Kohina]")
+        );
+        let later = at + std::time::Duration::from_secs(181);
+        assert_eq!(
+            now_playing_text(&now, later),
+            Err(("np-stale", "Kohina".to_string()))
+        );
+        let icy = RadioNowPlaying {
+            station: Some("KNAC".to_string()),
+            stream_title: Some("Band - Song".to_string()),
+            ..RadioNowPlaying::default()
+        };
+        assert_eq!(
+            now_playing_text(&icy, at).as_deref(),
+            Ok("is now playing: Band - Song [KNAC]")
+        );
+        let silent = RadioNowPlaying {
+            station: Some("KNAC".to_string()),
+            ..RadioNowPlaying::default()
+        };
+        assert_eq!(
+            now_playing_text(&silent, at),
+            Err(("np-unsupported", "KNAC".to_string()))
+        );
+    }
+
+    #[test]
+    fn custom_stations_need_a_name_and_an_http_url() {
+        let station = custom_radio_station(" Local ", "https://radio.example/live.ogg", 1)
+            .expect("valid station");
+        assert_eq!(station.name, "Local");
+        assert_eq!(station.codec, "vorbis");
+        assert_eq!(
+            custom_radio_station("x", "https://radio.example/s.flac", 2)
+                .map(|station| station.codec),
+            Some("flac".to_string())
+        );
+        assert!(custom_radio_station("", "https://radio.example/", 0).is_none());
+        assert!(custom_radio_station("x", "ftp://radio.example/", 0).is_none());
+        assert!(custom_radio_station("x", "https://", 0).is_none());
+        assert!(custom_radio_station("x", "https://a b/", 0).is_none());
+        assert_eq!(
+            custom_radio_station("x", "http://radio.example/s", 0).map(|station| station.codec),
+            Some("mp3".to_string())
+        );
+    }
+
+    #[test]
+    fn admin_subject_rows_keep_accounts_and_visitors() {
+        assert_eq!(
+            admin_subject_row(&serde_json::json!({
+                "type": "visitor", "id": "v-1", "network": "libera", "nick": "guest7"
+            })),
+            Some((
+                "visitor".to_string(),
+                "v-1".to_string(),
+                "libera".to_string(),
+                "guest7".to_string()
+            ))
+        );
+        assert_eq!(
+            admin_subject_row(&serde_json::json!({
+                "type": "user", "id": "u-1", "network": null, "nick": "ada"
+            }))
+            .map(|row| row.2),
+            Some(String::new())
+        );
+        assert_eq!(
+            admin_subject_row(&serde_json::json!({"type": "bot", "id": "x", "nick": "y"})),
+            None
+        );
     }
 
     #[test]
