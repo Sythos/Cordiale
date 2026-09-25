@@ -1824,8 +1824,8 @@ struct WorkerState {
     /// Grappa/Cicchetto maintainer) so switching channels doesn't lose or
     /// leak what's half-typed.
     drafts: HashMap<(String, String), String>,
-    /// Keyed by `(network, channel)`; the channel topic, if the server sent
-    /// one — see `topics_from_boot` and `handle_frame`.
+    /// Keyed by `(network, channel)`; the channel topic, as pushed on the
+    /// channel's Phoenix topic — see `handle_frame`.
     topics: HashMap<(String, String), String>,
     /// Keyed by `(network, channel)`; the last complete channel-mode
     /// snapshot received on the Phoenix channel topic.
@@ -1836,10 +1836,9 @@ struct WorkerState {
     read_cursors: HashMap<(String, String), i64>,
     /// Account-wide unread badge from `/me` or the latest read-cursor push.
     badge_count: u64,
-    /// Keyed by `(network, channel)`; the member list from `boot`, if any
-    /// was found — see `members_from_boot`. Snapshot only: unlike
-    /// messages/topic, this doesn't update live on join/part yet (a known
-    /// gap, see README).
+    /// Keyed by `(network, channel)`; the member list seeded by
+    /// `members_seeded` on the channel's Phoenix topic, then kept current
+    /// from join/part/quit/nick frames.
     members: MembersByChannel,
     /// Network slug -> whether its channel list is expanded in the sidebar.
     /// Missing entries default to expanded (see `network_groups_data`).
@@ -3020,7 +3019,7 @@ async fn handle_connect(
             state.window_mentions = window_mentions_from_me(&outcome.me.unread_counts);
             state.window_messages = window_messages_from_me(&outcome.me.unread_counts);
             state.recent_channels.clear();
-            state.topics = topics_from_boot(&outcome);
+            state.topics.clear();
             // Mode snapshots are replayed on each subscribed channel topic,
             // not included in `/boot`; never carry them across identities.
             state.channel_modes.clear();
@@ -3029,7 +3028,7 @@ async fn handle_connect(
             // opening the new Phoenix session.
             state.read_cursors = read_cursors_from_me(&outcome.me.read_cursors);
             state.badge_count = normalize_badge_count(Some(&outcome.me.badge_count));
-            state.members = members_from_boot(&outcome);
+            state.members.clear();
             state.messages = messages_from_boot(&outcome);
             state.network_ids = network_ids_from_boot(&outcome);
             state.network_connection_states = connection_states;
@@ -8547,10 +8546,8 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
     });
 }
 
-/// Maintains `state.members` from live join/part/quit/nick_change frames
-/// — the boot-time snapshot (`members_from_boot`) may come back empty if
-/// its field-name guesses don't match this server, so this is the only
-/// reliable way members ever show up in practice. Returns whether the
+/// Maintains `state.members` from live join/part/quit/nick_change frames,
+/// on top of the `members_seeded` snapshot. Returns whether the
 /// member list for `key` actually changed (callers use this to decide
 /// whether to push an update to the UI).
 fn update_members_from_frame(
@@ -9360,34 +9357,6 @@ fn joined_window_states_from_boot_channels(
     window_states
 }
 
-/// Reads `(network, channel) -> topic` out of `boot.channels`, for entries
-/// that actually carry a non-empty `topic` field — inferred, not confirmed
-/// by `docs/protocol-notes.md` §4 ("Ha: membri, topic, modes, ..."; no
-/// JSON schema given). Channels without one are simply absent from the
-/// map; the UI falls back to the plain channel label in that case.
-fn topics_from_boot(outcome: &BootstrapOutcome) -> HashMap<(String, String), String> {
-    topics_from_boot_response(&outcome.boot)
-}
-
-fn topics_from_boot_response(boot: &BootResponse) -> HashMap<(String, String), String> {
-    let mut topics = HashMap::new();
-    for (network, channels) in &boot.channels {
-        for value in channels {
-            let channel = value
-                .get("name")
-                .or_else(|| value.get("channel"))
-                .and_then(|field| field.as_str());
-            let topic = value.get("topic").and_then(|field| field.as_str());
-            if let (Some(channel), Some(topic)) = (channel, topic) {
-                if !topic.is_empty() {
-                    topics.insert((network.clone(), channel.to_string()), topic.to_string());
-                }
-            }
-        }
-    }
-    topics
-}
-
 /// `(name, prefix)` — `prefix` holds every IRC role marker the member has
 /// (`@` op, `%` halfop, `+` voice...), highest first, so dropping one
 /// keeps the next; empty for a plain member. Only the first is shown.
@@ -9422,48 +9391,6 @@ fn highest_prefix(prefix: &str) -> &str {
         .map_or(prefix, |(end, _)| &prefix[..end])
 }
 type MembersByChannel = HashMap<(String, String), Vec<MemberEntry>>;
-
-/// Reads `(network, channel) -> members` out of `boot.channels`. The
-/// exact field/shape isn't confirmed by `docs/protocol-notes.md` (only
-/// "channel... ha: membri" is mentioned, no schema) — tries the plausible
-/// field names and both a flat `["@nick", "+other", "plain"]` shape and an
-/// object-per-member shape (`{"nick"/"name", "prefix"}` or `{"modes":
-/// [...]}`) defensively. An unrecognized shape just yields no members for
-/// that channel rather than guessing further; see README's Known gaps.
-fn members_from_boot(outcome: &BootstrapOutcome) -> MembersByChannel {
-    members_from_boot_response(&outcome.boot)
-}
-
-fn members_from_boot_response(boot: &BootResponse) -> MembersByChannel {
-    const FIELD_NAMES: &[&str] = &["members", "nicks", "names", "userlist", "who"];
-
-    let mut members_by_channel = HashMap::new();
-    for (network, channels) in &boot.channels {
-        for value in channels {
-            let channel = value
-                .get("name")
-                .or_else(|| value.get("channel"))
-                .and_then(Value::as_str);
-            let Some(channel) = channel else { continue };
-
-            let Some(list) = FIELD_NAMES
-                .iter()
-                .find_map(|field| value.get(field))
-                .and_then(Value::as_array)
-            else {
-                continue;
-            };
-
-            let mut members: Vec<MemberEntry> = list.iter().filter_map(member_from_entry).collect();
-            if members.is_empty() {
-                continue;
-            }
-            sort_members_by_rank(&mut members);
-            members_by_channel.insert((network.clone(), channel.to_string()), members);
-        }
-    }
-    members_by_channel
-}
 
 /// Parses one member list entry: either a plain string with an optional
 /// leading role-prefix character (`"@nick"`, `"+nick"`, `"nick"`), or an
@@ -11994,8 +11921,10 @@ fn apply_network_rest_refresh(
     state.invited_by.clear();
     state.window_mentions = window_mentions_from_me(&me.unread_counts);
     state.window_messages = window_messages_from_me(&me.unread_counts);
-    state.topics = topics_from_boot_response(boot);
-    state.members = members_from_boot_response(boot);
+    // `/boot` carries neither topics nor rosters: both are re-seeded on
+    // each channel's Phoenix topic.
+    state.topics.clear();
+    state.members.clear();
     state.messages = messages_from_boot_response(boot);
     state.read_cursors = read_cursors_from_me(&me.read_cursors);
     state.badge_count = normalize_badge_count(Some(&me.badge_count));
@@ -22014,9 +21943,7 @@ mod tests {
                 "libera".to_string(),
                 vec![serde_json::json!({
                     "name": "#rust",
-                    "joined": true,
-                    "topic": "Rust chat",
-                    "members": ["@alice", "+bob"]
+                    "joined": true
                 })],
             )]),
             heads: HashMap::from([(
