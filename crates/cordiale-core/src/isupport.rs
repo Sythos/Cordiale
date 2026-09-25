@@ -76,6 +76,76 @@ pub struct IsupportState {
     pub frame_budget_base: u64,
 }
 
+/// Member prefixes assumed before a network's ISUPPORT snapshot arrives.
+const DEFAULT_PREFIXES: [(&str, &str); 3] = [("o", "@"), ("h", "%"), ("v", "+")];
+
+/// Member-prefix changes in a channel MODE, as `(adding, symbol, nick)`.
+/// Parameters are lined up per ISUPPORT: prefix, list (CHANMODES A) and
+/// always-parameter (B) modes take one, set-only (C) modes only when set,
+/// flags (D) and unknown letters none. Without a snapshot, RFC 1459-style
+/// defaults apply (`ohv` prefixes, `beI` lists, `k`, `l`).
+pub fn prefix_mode_changes(
+    modes: &str,
+    args: &[String],
+    isupport: Option<&IsupportState>,
+) -> Vec<(bool, String, String)> {
+    let mut args = args.iter();
+    let mut adding = true;
+    let mut changes = Vec::new();
+    for ch in modes.chars() {
+        match ch {
+            '+' => adding = true,
+            '-' => adding = false,
+            _ => {
+                let letter = ch.to_string();
+                let symbol = match isupport {
+                    Some(state) => state.prefix.get(&letter).cloned(),
+                    None => DEFAULT_PREFIXES
+                        .iter()
+                        .find(|(mode, _)| *mode == letter)
+                        .map(|(_, symbol)| symbol.to_string()),
+                };
+                if let Some(symbol) = symbol {
+                    if let Some(nick) = args.next() {
+                        changes.push((adding, symbol, nick.clone()));
+                    }
+                } else if mode_takes_param(isupport, &letter, adding) {
+                    args.next();
+                }
+            }
+        }
+    }
+    changes
+}
+
+fn mode_takes_param(isupport: Option<&IsupportState>, letter: &str, adding: bool) -> bool {
+    match isupport {
+        Some(state) => {
+            let listed = |modes: &[String]| modes.iter().any(|mode| mode == letter);
+            listed(&state.chanmodes_a)
+                || listed(&state.chanmodes_b)
+                || (adding && listed(&state.chanmodes_c))
+        }
+        None => matches!(letter, "b" | "e" | "I" | "k") || (adding && letter == "l"),
+    }
+}
+
+/// Member prefix symbols, highest first: the network's PREFIX order, or
+/// the usual `~&@%+` before its snapshot.
+pub fn prefix_symbol_order(isupport: Option<&IsupportState>) -> Vec<String> {
+    match isupport {
+        Some(state) if !state.prefix_order.is_empty() => state
+            .prefix_order
+            .iter()
+            .filter_map(|mode| state.prefix.get(mode).cloned())
+            .collect(),
+        _ => ["~", "&", "@", "%", "+"]
+            .iter()
+            .map(|symbol| symbol.to_string())
+            .collect(),
+    }
+}
+
 /// A validated `isupport_changed` envelope.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IsupportChanged {
@@ -194,6 +264,40 @@ mod tests {
             "frame_budget_base": 4096,
             "future_field": {"is_ignored": true}
         })
+    }
+
+    #[test]
+    fn prefix_mode_changes_line_up_params_with_chanmodes() {
+        let state = parse_isupport_changed(&valid_payload())
+            .expect("valid snapshot")
+            .state;
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|a| a.to_string()).collect() };
+        // `b` and `k` take a parameter, `l` only when set, `m` never.
+        assert_eq!(
+            prefix_mode_changes(
+                "+bomlv",
+                &args(&["*!*@x", "ada", "10", "bob"]),
+                Some(&state)
+            ),
+            vec![
+                (true, "@".to_string(), "ada".to_string()),
+                (true, "+".to_string(), "bob".to_string()),
+            ]
+        );
+        assert_eq!(
+            prefix_mode_changes("-lko+v", &args(&["key", "ada", "bob"]), Some(&state)),
+            vec![
+                (false, "@".to_string(), "ada".to_string()),
+                (true, "+".to_string(), "bob".to_string()),
+            ]
+        );
+        // Before the snapshot: RFC 1459-style defaults.
+        assert_eq!(
+            prefix_mode_changes("+eh", &args(&["*!*@y", "cy"]), None),
+            vec![(true, "%".to_string(), "cy".to_string())]
+        );
+        assert_eq!(prefix_symbol_order(Some(&state)), vec!["@", "+"]);
+        assert_eq!(prefix_symbol_order(None), vec!["~", "&", "@", "%", "+"]);
     }
 
     #[test]
