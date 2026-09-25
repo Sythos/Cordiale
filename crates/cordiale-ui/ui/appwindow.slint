@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette } from "std-widgets.slint";
+import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette, Slider } from "std-widgets.slint";
 
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
@@ -70,6 +70,25 @@ struct UmodeToggle {
     letter: string,
     settable: bool,
     active: bool,
+}
+
+// One station of the radio screen: Cicchetto's list, then the custom
+// ones. `key` is `builtin:<id>` or `custom:<index>`.
+struct RadioRow {
+    key: string,
+    title: string,
+    detail: string,
+    description: string,
+    custom: bool,
+}
+
+// One custom station in Settings > Radio; `codec-index` follows the
+// form's menu (MP3, Ogg Vorbis, FLAC).
+struct CustomRadioRow {
+    name: string,
+    url: string,
+    codec-index: int,
+    codec-label: string,
 }
 
 // One archived window (`/archive`): `kind` is the wire token (channel or
@@ -194,6 +213,15 @@ struct AdminGrantRow {
     grant-id: string,
 }
 
+// One vhost grant candidate from the admin subject search: an account
+// (`kind` "user", no network) or a visitor on one network.
+struct AdminSubjectRow {
+    kind: string,
+    subject-id: string,
+    network: string,
+    nick: string,
+}
+
 // One muted conversation: its label and Grappa's key for it.
 struct MutedRow {
     label: string,
@@ -253,6 +281,8 @@ struct LinksRow {
 struct MemberRow {
     name: string,
     prefix: string,
+    // The theme's op/halfop/voice color for the role marker.
+    prefix-color: color,
     // Same hash-derived per-nick color chat lines use (`nick_color` in
     // Rust) — nicknames stay colored everywhere, not just in the chat
     // body.
@@ -317,6 +347,9 @@ component MemberContextMenu {
     in property <bool> can-moderate;
     in property <string> display-text;
     in property <color> text-color;
+    // An optional role marker drawn before the text in its own color.
+    in property <string> prefix-text: "";
+    in property <color> prefix-color;
     in property <bool> text-bold: false;
     in property <bool> text-italic: false;
     callback mode-action(string, string); // verb, nick
@@ -377,12 +410,21 @@ component MemberContextMenu {
             }
         }
 
-        Text {
-            text: display-text;
-            wrap: no-wrap;
-            font-weight: text-bold ? 700 : 400;
-            font-italic: text-italic;
-            color: text-color;
+        HorizontalLayout {
+            if prefix-text != "" : Text {
+                text: prefix-text;
+                wrap: no-wrap;
+                font-weight: text-bold ? 700 : 400;
+                font-italic: text-italic;
+                color: prefix-color;
+            }
+            Text {
+                text: display-text;
+                wrap: no-wrap;
+                font-weight: text-bold ? 700 : 400;
+                font-italic: text-italic;
+                color: text-color;
+            }
         }
     }
 }
@@ -504,11 +546,18 @@ component SectionCard inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    // Account-wide unread count (Grappa's `badge_count`). There's no
-    // portable taskbar/dock badge, so it goes in the title, which the
-    // taskbar shows; the "Show event badge" preference turns it off.
+    // Account-wide unread count (Grappa's `badge_count`). It goes in the
+    // title, which every taskbar shows, and on Windows also in a taskbar
+    // badge; the "Show event badge" preference turns both off.
     in property <int> unread-badge: 0;
     title: pref-show-event-badge && unread-badge > 0 ? "(" + unread-badge + ") Cordiale" : "Cordiale";
+    // The same count as a native badge on the Windows taskbar button; 0
+    // clears it. Other platforms ignore the callback.
+    property <int> taskbar-badge: pref-show-event-badge ? unread-badge : 0;
+    callback taskbar-badge-changed(int, string);
+    changed taskbar-badge => {
+        taskbar-badge-changed(taskbar-badge, @tr("{} unread", taskbar-badge));
+    }
     // A color theme (see `palette-active`) paints the window itself and
     // switches the app to a monospace font, irssi-style.
     background: palette-active ? palette-bg : Palette.background;
@@ -734,6 +783,12 @@ export component AppWindow inherits Window {
     in property <color> palette-muted: #808080;
     in property <color> palette-border: #808080;
     in property <string> palette-font: "";
+    // The theme's wallpaper, drawn behind every screen while a color theme
+    // is in use: full-bleed, or tiled at its own size.
+    in property <image> palette-background;
+    in property <bool> palette-background-set: false;
+    in property <bool> palette-background-tile: false;
+    in property <float> palette-background-opacity: 1;
     in property <[ThemeChoiceRow]> theme-choices: [];
     in property <bool> display-prefs-loaded: false;
     in-out property <bool> pref-colored-nicklist: true;
@@ -750,6 +805,14 @@ export component AppWindow inherits Window {
     // Texts of the native confirmation shown before an upload.
     out property <string> upload-confirm-title: @tr("Upload file");
     out property <string> upload-confirm-text: @tr("Upload this file to the server and post its link in the open window?");
+    // Offered when pasting text of several lines into the one-line compose
+    // box.
+    out property <string> paste-upload-title: @tr("Paste as a file");
+    public pure function paste-upload-text(lines: int) -> string {
+        return @tr("The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?", lines);
+    }
+    // True when the paste went up as a file, so the compose box skips it.
+    callback paste-requested() -> bool;
 
     // Admin — Settings > Admin, only meaningful when `is-admin` (see
     // `docs/protocol-notes.md` §4ter): a deliberately small slice of
@@ -846,6 +909,25 @@ export component AppWindow inherits Window {
     callback directory-closed();
     callback archive-delete-requested(string);
     callback archive-closed();
+    // The integrated radio. `radio-status` is "", "connecting", "playing",
+    // "failed" or "ended"; the custom stations live in Settings > Radio.
+    in property <[RadioRow]> radio-stations: [];
+    in property <[CustomRadioRow]> radio-custom-stations: [];
+    in property <string> radio-tuned-key: "";
+    in property <string> radio-station: "";
+    in property <string> radio-track: "";
+    in property <string> radio-status: "";
+    in property <string> radio-error: "";
+    in-out property <int> radio-volume: 80;
+    in-out property <int> radio-edit-index: -1;
+    in-out property <string> radio-form-name: "";
+    in-out property <string> radio-form-url: "";
+    in-out property <int> radio-form-codec: 0;
+    callback radio-tune(string);
+    callback radio-stop();
+    callback radio-volume-changed(int);
+    callback radio-station-save(int, string, string, int); // index (-1 new), name, url, codec
+    callback radio-station-delete(int);
     // User-mode view (bare `/umode`).
     in property <string> umode-network: "";
     in property <[UmodeToggle]> umode-toggles: [];
@@ -1044,6 +1126,12 @@ export component AppWindow inherits Window {
     callback admin-vhost-delete(string);
     callback admin-grant-add();
     callback admin-grant-revoke(string);
+    // Grants to visitors (and accounts) found by name.
+    in-out property <string> admin-subject-query: "";
+    in property <[AdminSubjectRow]> admin-subject-results: [];
+    in property <bool> admin-subject-searched: false;
+    callback admin-subject-search(string);
+    callback admin-subject-grant(string, string); // kind, subject id
     callback admin-settings-save();
     callback links-graph-requested();
     callback theme-toggle-requested();
@@ -1336,6 +1424,16 @@ export component AppWindow inherits Window {
             return @tr("Notification sound set to {}.", status-command-hint);
         } else if status-kind == "beep-unknown" {
             return @tr("Unknown sound. Available: {}", status-command-hint);
+        } else if status-kind == "np-idle" {
+            return @tr("/np: nothing is playing. Tune a station from the radio first.");
+        } else if status-kind == "np-unsupported" {
+            return @tr("/np: {} publishes no track information.", status-command-hint);
+        } else if status-kind == "np-unanswered" {
+            return @tr("/np: no track from {} yet; its feed hasn't answered.", status-command-hint);
+        } else if status-kind == "np-stale" {
+            return @tr("/np: the last track from {} is over 3 minutes old, so it wasn't sent.", status-command-hint);
+        } else if status-kind == "radio-station-invalid" {
+            return @tr("A station needs a name and an http:// or https:// stream URL.");
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
@@ -1449,6 +1547,19 @@ export component AppWindow inherits Window {
         text: "☰ " + @tr("Actions") + " ▾";
         visible: false;
         enabled: false;
+    }
+
+    if palette-active && palette-background-set : Image {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        source: palette-background;
+        image-fit: palette-background-tile ? ImageFit.preserve : ImageFit.cover;
+        horizontal-tiling: palette-background-tile ? ImageTiling.repeat : ImageTiling.none;
+        vertical-tiling: palette-background-tile ? ImageTiling.repeat : ImageTiling.none;
+        opacity: palette-background-opacity;
+        accessible-role: AccessibleRole.none;
     }
 
     if screen == "splash" : VerticalBox {
@@ -1995,6 +2106,44 @@ export component AppWindow inherits Window {
                 }
             }
 
+            // The radio on air, docked above the compose bar like
+            // Cicchetto's mini-player.
+            if radio-status != "" : HorizontalLayout {
+                spacing: 8px;
+                padding-left: 6px;
+                padding-right: 6px;
+
+                Text {
+                    text: radio-status == "connecting"
+                        ? "📻  " + @tr("{}: connecting…", radio-station)
+                        : radio-status == "failed"
+                        ? "📻  " + @tr("{}: the stream failed ({})", radio-station, radio-error)
+                        : radio-status == "ended"
+                        ? "📻  " + @tr("{}: the station ended the stream", radio-station)
+                        : radio-track == ""
+                        ? "📻  " + radio-station
+                        : "📻  " + radio-station + " — " + radio-track;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Slider {
+                    minimum: 0;
+                    maximum: 100;
+                    value: radio-volume;
+                    width: 100px;
+                    released(value) => {
+                        radio-volume = Math.round(value);
+                        radio-volume-changed(radio-volume);
+                    }
+                }
+                CompactButton {
+                    text: "⏹";
+                    a11y-label: @tr("Stop the radio");
+                    clicked => { radio-stop(); }
+                }
+            }
+
             // Small compose bar, never more than one line tall: paperclip
             // to attach a file (left, like Cicchetto), text field, send
             // icon (right).
@@ -2010,13 +2159,26 @@ export component AppWindow inherits Window {
                     clicked => { attach-file-requested(); }
                 }
 
-                LineEdit {
-                    placeholder-text: @tr("Message");
-                    accessible-label: @tr("Message");
-                    text <=> compose-text;
-                    enabled: !current-query || current-query-ready;
-                    accepted => { send-chat-message(compose-text); }
-                    edited(new-text) => { compose-text-changed(new-text); }
+                FocusScope {
+                    horizontal-stretch: 1;
+                    capture-key-pressed(event) => {
+                        if (event.modifiers.control || event.modifiers.meta) && (event.text == "v" || event.text == "V") && !event.modifiers.shift {
+                            return paste-requested() ? EventResult.accept : EventResult.reject;
+                        }
+                        return EventResult.reject;
+                    }
+
+                    // A layout, so the scope takes the field's size.
+                    HorizontalLayout {
+                        LineEdit {
+                            placeholder-text: @tr("Message");
+                            accessible-label: @tr("Message");
+                            text <=> compose-text;
+                            enabled: !current-query || current-query-ready;
+                            accepted => { send-chat-message(compose-text); }
+                            edited(new-text) => { compose-text-changed(new-text); }
+                        }
+                    }
                 }
 
                 Button {
@@ -2054,7 +2216,9 @@ export component AppWindow inherits Window {
                 for member in channel-members : MemberContextMenu {
                     target-nick: member.name;
                     can-moderate: can-moderate-members;
-                    display-text: member.prefix == "" ? member.name : "[" + member.prefix + "] " + member.name;
+                    prefix-text: member.prefix == "" ? "" : "[" + member.prefix + "] ";
+                    prefix-color: member.prefix-color;
+                    display-text: member.name;
                     text-color: member.color;
                     mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
                     kick(nick) => { member-kick-requested(nick); }
@@ -2100,6 +2264,7 @@ export component AppWindow inherits Window {
                                 settings-section = "themes";
                             }
                         }
+                        MenuItem { title: "📻  " + @tr("Radio"); activated => { screen = "radio"; } }
                         if is-admin : MenuItem {
                             title: "🛡  " + @tr("Admin");
                             activated => {
@@ -2161,6 +2326,12 @@ export component AppWindow inherits Window {
                 label: @tr("Themes");
                 selected: settings-section == "themes";
                 clicked => { settings-section = "themes"; }
+            }
+            NavButton {
+                icon: "📻";
+                label: @tr("Radio");
+                selected: settings-section == "radio";
+                clicked => { settings-section = "radio"; }
             }
             NavButton {
                 icon: "🔔";
@@ -2694,6 +2865,81 @@ export component AppWindow inherits Window {
                             enabled: !choice.night;
                             a11y-label: @tr("Use theme {} at night", choice.name);
                             clicked => { night-theme-requested(choice.key); }
+                        }
+                    }
+                }
+            }
+
+            if settings-section == "radio" : SectionCard {
+                icon: "📻";
+                title: @tr("Radio stations");
+                fill: true;
+
+                Text {
+                    text: @tr("Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen.");
+                    wrap: word-wrap;
+                }
+                for station[index] in radio-custom-stations : HorizontalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: station.name + "  (" + station.codec-label + ")\n" + station.url;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    CompactButton {
+                        text: "✎";
+                        a11y-label: @tr("Edit {}", station.name);
+                        clicked => {
+                            radio-edit-index = index;
+                            radio-form-name = station.name;
+                            radio-form-url = station.url;
+                            radio-form-codec = station.codec-index;
+                        }
+                    }
+                    CompactButton {
+                        text: "🗑";
+                        a11y-label: @tr("Delete {}", station.name);
+                        clicked => { radio-station-delete(index); }
+                    }
+                }
+                Text {
+                    text: radio-edit-index >= 0 ? @tr("Edit station") : @tr("New station");
+                    font-weight: 600;
+                }
+                LineEdit {
+                    placeholder-text: @tr("Name");
+                    accessible-label: @tr("Name");
+                    text <=> radio-form-name;
+                }
+                LineEdit {
+                    placeholder-text: "https://…";
+                    accessible-label: @tr("Stream URL");
+                    text <=> radio-form-url;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    ComboBox {
+                        model: ["MP3", "Ogg Vorbis", "FLAC"];
+                        current-index <=> radio-form-codec;
+                        min-width: 120px;
+                    }
+                    CompactButton {
+                        text: radio-edit-index >= 0 ? "💾  " + @tr("Save") : "➕  " + @tr("Add");
+                        a11y-label: radio-edit-index >= 0 ? @tr("Save") : @tr("Add");
+                        enabled: radio-form-name != "" && radio-form-url != "";
+                        clicked => { radio-station-save(radio-edit-index, radio-form-name, radio-form-url, radio-form-codec); }
+                    }
+                    if radio-edit-index >= 0 : CompactButton {
+                        text: @tr("Cancel");
+                        clicked => {
+                            radio-edit-index = -1;
+                            radio-form-name = "";
+                            radio-form-url = "";
+                            radio-form-codec = 0;
                         }
                     }
                 }
@@ -3497,6 +3743,48 @@ export component AppWindow inherits Window {
                         clicked => { admin-grant-add(); }
                     }
                 }
+                if admin-section == "vhosts" : HorizontalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("Find a visitor or account by nick");
+                        accessible-label: @tr("Find a visitor or account by nick");
+                        text <=> admin-subject-query;
+                        horizontal-stretch: 1;
+                        accepted => { admin-subject-search(admin-subject-query); }
+                    }
+                    CompactButton {
+                        text: "🔍  " + @tr("Search");
+                        a11y-label: @tr("Search");
+                        enabled: admin-subject-query != "";
+                        clicked => { admin-subject-search(admin-subject-query); }
+                    }
+                }
+                if admin-section == "vhosts" && admin-subject-searched && admin-subject-results.length == 0 : Text {
+                    text: @tr("Nobody matches.");
+                }
+                if admin-section == "vhosts" : VerticalLayout {
+                    spacing: 2px;
+
+                    for subject in admin-subject-results : HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: subject.kind == "visitor"
+                                ? @tr("{} on {} (visitor)", subject.nick, subject.network)
+                                : @tr("{} (account)", subject.nick);
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Grant the vhost above");
+                            a11y-label: @tr("Grant the selected vhost to {}", subject.nick);
+                            enabled: admin-vhost-names.length > 0;
+                            clicked => { admin-subject-grant(subject.kind, subject.subject-id); }
+                        }
+                    }
+                }
                 if admin-section == "vhosts" : ListView {
                     vertical-stretch: 1;
                     min-height: 80px;
@@ -3733,6 +4021,73 @@ export component AppWindow inherits Window {
             clicked => {
                 screen = "connected";
                 umode-view-closed();
+            }
+        }
+    }
+
+    if screen == "radio" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: "📻  " + @tr("Radio");
+            font-size: 18px;
+            accessible-role: AccessibleRole.text;
+        }
+
+        ListView {
+            vertical-stretch: 1;
+
+            for station in radio-stations : HorizontalLayout {
+                spacing: 8px;
+                padding-bottom: 8px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: station.title;
+                        font-weight: station.key == radio-tuned-key ? 700 : 600;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: station.detail;
+                        wrap: word-wrap;
+                        opacity: 0.75;
+                    }
+                    Text {
+                        text: station.description;
+                        wrap: word-wrap;
+                    }
+                }
+                CompactButton {
+                    text: station.key == radio-tuned-key ? "⏹  " + @tr("Stop") : "▶  " + @tr("Play");
+                    a11y-label: station.key == radio-tuned-key ? @tr("Stop {}", station.title) : @tr("Play {}", station.title);
+                    clicked => {
+                        if station.key == radio-tuned-key {
+                            radio-stop();
+                        } else {
+                            radio-tune(station.key);
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            Button {
+                text: @tr("Back");
+                clicked => { screen = "connected"; }
+            }
+            Button {
+                text: "⚙  " + @tr("Custom stations");
+                clicked => {
+                    screen = "settings";
+                    settings-section = "radio";
+                }
             }
         }
     }

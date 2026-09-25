@@ -1755,3 +1755,135 @@ msgstr "Usar de noche"
 msgctxt "AppWindow"
 msgid "Use theme {} at night"
 msgstr "Usar el tema {} de noche"
+
+msgctxt "AppWindow"
+msgid "Find a visitor or account by nick"
+msgstr "Buscar un visitante o una cuenta por nick"
+
+msgctxt "AppWindow"
+msgid "Search"
+msgstr "Buscar"
+
+msgctxt "AppWindow"
+msgid "Nobody matches."
+msgstr "Sin resultados."
+
+msgctxt "AppWindow"
+msgid "{} on {} (visitor)"
+msgstr "{} en {} (visitante)"
+
+msgctxt "AppWindow"
+msgid "{} (account)"
+msgstr "{} (cuenta)"
+
+msgctxt "AppWindow"
+msgid "Grant the vhost above"
+msgstr "Conceder el vhost de arriba"
+
+msgctxt "AppWindow"
+msgid "Grant the selected vhost to {}"
+msgstr "Conceder el vhost seleccionado a {}"
+
+msgctxt "AppWindow"
+msgid "{} unread"
+msgstr "{} sin leer"
+
+msgctxt "AppWindow"
+msgid "/np: nothing is playing. Tune a station from the radio first."
+msgstr "/np: no suena nada. Sintoniza primero una emisora de la radio."
+
+msgctxt "AppWindow"
+msgid "/np: {} publishes no track information."
+msgstr "/np: {} no publica información de las canciones."
+
+msgctxt "AppWindow"
+msgid "/np: no track from {} yet; its feed hasn't answered."
+msgstr "/np: todavía no hay canción de {}; su feed no ha respondido."
+
+msgctxt "AppWindow"
+msgid "/np: the last track from {} is over 3 minutes old, so it wasn't sent."
+msgstr "/np: la última canción de {} tiene más de 3 minutos, así que no se envió."
+
+msgctxt "AppWindow"
+msgid "A station needs a name and an http:// or https:// stream URL."
+msgstr "Una emisora necesita un nombre y una URL de stream http:// o https://."
+
+msgctxt "AppWindow"
+msgid "{}: connecting…"
+msgstr "{}: conectando…"
+
+msgctxt "AppWindow"
+msgid "{}: the stream failed ({})"
+msgstr "{}: el stream ha fallado ({})"
+
+msgctxt "AppWindow"
+msgid "{}: the station ended the stream"
+msgstr "{}: la emisora ha terminado el stream"
+
+msgctxt "AppWindow"
+msgid "Stop the radio"
+msgstr "Detener la radio"
+
+msgctxt "AppWindow"
+msgid "Radio"
+msgstr "Radio"
+
+msgctxt "AppWindow"
+msgid "Radio stations"
+msgstr "Emisoras de radio"
+
+msgctxt "AppWindow"
+msgid "Edit {}"
+msgstr "Editar {}"
+
+msgctxt "AppWindow"
+msgid "Delete {}"
+msgstr "Eliminar {}"
+
+msgctxt "AppWindow"
+msgid "Edit station"
+msgstr "Editar emisora"
+
+msgctxt "AppWindow"
+msgid "New station"
+msgstr "Nueva emisora"
+
+msgctxt "AppWindow"
+msgid "Name"
+msgstr "Nombre"
+
+msgctxt "AppWindow"
+msgid "Stream URL"
+msgstr "URL del stream"
+
+msgctxt "AppWindow"
+msgid "Stop"
+msgstr "Detener"
+
+msgctxt "AppWindow"
+msgid "Play"
+msgstr "Reproducir"
+
+msgctxt "AppWindow"
+msgid "Stop {}"
+msgstr "Detener {}"
+
+msgctxt "AppWindow"
+msgid "Play {}"
+msgstr "Reproducir {}"
+
+msgctxt "AppWindow"
+msgid "Custom stations"
+msgstr "Emisoras personalizadas"
+
+msgctxt "AppWindow"
+msgid "Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen."
+msgstr "Añade tus propias emisoras MP3, Ogg Vorbis o FLAC (URL de un stream o de una lista .pls/.m3u). Se guardan solo en este dispositivo, junto a las emisoras de Cicchetto en la pantalla Radio."
+
+msgctxt "AppWindow"
+msgid "Paste as a file"
+msgstr "Pegar como archivo"
+
+msgctxt "AppWindow"
+msgid "The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?"
+msgstr "El portapapeles contiene {} líneas. ¿Subirlas como paste.txt y enviar su enlace en lugar de pegarlas en un solo mensaje?"
