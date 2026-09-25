@@ -2336,7 +2336,13 @@ async fn run_worker(
                         handle_save_notification_prefs(&mut state, &ui, toggles).await;
                     }
                     Some(WorkerCommand::SaveDisplayPrefs(prefs)) => {
+                        if let Some(bold) = prefs.bold_mentions {
+                            BOLD_MENTIONS.store(bold, std::sync::atomic::Ordering::Relaxed);
+                        }
                         handle_save_display_prefs(&state, prefs).await;
+                        if let Some(key) = state.current_channel.clone() {
+                            push_members_update(&state, &ui, &key);
+                        }
                     }
                     Some(WorkerCommand::AdminRefresh) => {
                         // The live feed needs a full web session, like the
@@ -3236,6 +3242,7 @@ async fn handle_select_channel(
         == Some(&ChannelWindowState::Joined);
     let can_moderate = is_own_nick_an_op(&members, &identifier);
     let dark_theme = state.theme == Theme::Dark;
+    refresh_mention_context(state);
     let casemapping = network_casemapping(state, &network);
     let history_start = state.history_start_reached.contains(&key);
 
@@ -3402,6 +3409,7 @@ fn show_query_window(
     let lines = state.messages.get(key).cloned().unwrap_or_default();
     let draft = state.drafts.get(key).cloned().unwrap_or_default();
     let dark_theme = state.theme == Theme::Dark;
+    refresh_mention_context(state);
     let query_ready = state.current_query_ready;
     let history_start = state.history_start_reached.contains(key);
     let label = format!("{} — {}", query.network, query.target_nick);
@@ -4509,6 +4517,7 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
             )
         });
 
+    refresh_mention_context(state);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_theme(theme_to_slint(new_theme));
@@ -5248,6 +5257,7 @@ async fn handle_load_older_history(state: &mut WorkerState, ui: &slint::Weak<App
     }
     let lines = state.messages.get(&key).cloned().unwrap_or_default();
     let dark_theme = state.theme == Theme::Dark;
+    refresh_mention_context(state);
     let roster = (!state.current_query).then(|| {
         (
             state.members.get(&key).cloned().unwrap_or_default(),
@@ -7042,6 +7052,7 @@ async fn handle_frame(
                 {
                     let lines = state.messages[&key].clone();
                     let dark_theme = state.theme == Theme::Dark;
+                    refresh_mention_context(state);
                     let ui = ui.clone();
                     let _ = ui.upgrade_in_event_loop(move |ui| {
                         let model = chat_lines_model(&lines, dark_theme);
@@ -7249,6 +7260,7 @@ async fn handle_frame(
                 if state.current_query && state.current_channel.as_ref() == Some(&key) {
                     let lines = state.messages[&key].clone();
                     let dark_theme = state.theme == Theme::Dark;
+                    refresh_mention_context(state);
                     let ui = ui.clone();
                     let _ = ui.upgrade_in_event_loop(move |ui| {
                         let model = chat_lines_model(&lines, dark_theme);
@@ -7283,6 +7295,7 @@ async fn handle_frame(
     if state.current_channel.as_ref() == Some(&key) {
         let lines = state.messages[&key].clone();
         let dark_theme = state.theme == Theme::Dark;
+        refresh_mention_context(state);
         let members = state.members.get(&key).cloned().unwrap_or_default();
         let casemapping = network_casemapping(state, &network);
         let ui = ui.clone();
@@ -8485,6 +8498,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
         .as_deref()
         .is_some_and(|identifier| is_own_nick_an_op(&members, identifier));
     let dark_theme = state.theme == Theme::Dark;
+    refresh_mention_context(state);
     let lines = state.messages.get(key).cloned().unwrap_or_default();
     let casemapping = network_casemapping(state, &key.0);
     let ui = ui.clone();
@@ -9013,6 +9027,9 @@ fn local_timestamp(payload: &Value) -> String {
 }
 
 fn apply_display_prefs(ui: &AppWindow, prefs: &DisplayPrefs) {
+    if let Some(bold) = prefs.bold_mentions {
+        BOLD_MENTIONS.store(bold, std::sync::atomic::Ordering::Relaxed);
+    }
     ui.set_display_prefs_loaded(true);
     if let Some(value) = prefs.colored_nicklist {
         ui.set_pref_colored_nicklist(value);
@@ -9780,11 +9797,87 @@ fn collapse_if_parked(state: &mut WorkerState, network: &str) -> bool {
 /// `dark_theme`. Maps `cordiale_core::formatting::ColorSegment`'s
 /// abstract `(u8, u8, u8)` into a real `slint::Color` only here — the
 /// core crate stays free of any Slint dependency.
+/// What a chat line is checked against to count as a mention: the own
+/// nick on the open window's network and the /hilight patterns, plus
+/// whether mentions are bold (Settings > Display). Read by the line
+/// builder like the theme palette.
+#[derive(Clone, Default)]
+struct MentionContext {
+    own_nick: Option<String>,
+    patterns: Vec<String>,
+}
+
+static MENTION_CONTEXT: std::sync::RwLock<Option<MentionContext>> = std::sync::RwLock::new(None);
+static BOLD_MENTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Points the mention check at the open window's network.
+fn refresh_mention_context(state: &WorkerState) {
+    let own_nick = state
+        .current_channel
+        .as_ref()
+        .and_then(|(network, _)| state.own_nicks.get(network))
+        .cloned();
+    if let Ok(mut context) = MENTION_CONTEXT.write() {
+        *context = Some(MentionContext {
+            own_nick,
+            patterns: state.watch_patterns.clone(),
+        });
+    }
+}
+
+fn mention_context() -> MentionContext {
+    MENTION_CONTEXT
+        .read()
+        .ok()
+        .and_then(|context| context.clone())
+        .unwrap_or_default()
+}
+
+/// Cicchetto's mention rule: a line someone else wrote that contains the
+/// own nick or a /hilight pattern as a whole word (ASCII word boundaries,
+/// case-insensitive), with mIRC formatting ignored.
+fn is_mention(text: &str, sender: Option<&str>, context: &MentionContext) -> bool {
+    let Some(own) = context.own_nick.as_deref().filter(|own| !own.is_empty()) else {
+        return false;
+    };
+    if sender.is_some_and(|sender| sender.eq_ignore_ascii_case(own)) {
+        return false;
+    }
+    let plain: String = cordiale_core::formatting::parse_mirc_text(text)
+        .into_iter()
+        .map(|segment| segment.text)
+        .collect();
+    std::iter::once(own)
+        .chain(context.patterns.iter().map(String::as_str))
+        .any(|term| contains_word(&plain, term))
+}
+
+/// Whether `term` occurs in `body` with no ASCII word character right
+/// before or after it.
+fn contains_word(body: &str, term: &str) -> bool {
+    let term = term.trim();
+    if term.is_empty() {
+        return false;
+    }
+    let body_lower = body.to_ascii_lowercase();
+    let term_lower = term.to_ascii_lowercase();
+    let word = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+    body_lower.match_indices(&term_lower).any(|(start, found)| {
+        let before = body_lower[..start].chars().next_back();
+        let after = body_lower[start + found.len()..].chars().next();
+        !before.is_some_and(word) && !after.is_some_and(word)
+    })
+}
+
 fn chat_line_from_message(
     message: &RenderedMessage,
     dark_theme: bool,
     nick_prefix: &str,
 ) -> ChatLine {
+    // Event lines (joins, parts, notices...) are italic and never count as
+    // mentions, like Cicchetto's privmsg-only rule.
+    let mention =
+        !message.italic && is_mention(&message.text, message.nick.as_deref(), &mention_context());
     let (nick, nick_color_value) = match &message.nick {
         Some(nick) => {
             let (r, g, b) = nick_color(nick, dark_theme);
@@ -9808,6 +9901,11 @@ fn chat_line_from_message(
                 (segment.text, color, segment.bold)
             })
             .collect();
+    let bold_mention = mention && BOLD_MENTIONS.load(std::sync::atomic::Ordering::Relaxed);
+    let runs: Vec<(String, (u8, u8, u8), bool)> = runs
+        .into_iter()
+        .map(|(text, color, bold)| (text, color, bold || bold_mention))
+        .collect();
     let body = slint::StyledText::from_markdown(&message_markdown(&runs, message.italic))
         .unwrap_or_else(|_| {
             let plain: String = runs.iter().map(|run| run.0.as_str()).collect();
@@ -9822,6 +9920,7 @@ fn chat_line_from_message(
         nick_color: nick_color_value,
         italic: message.italic,
         body,
+        mention,
     }
 }
 
@@ -10357,6 +10456,7 @@ fn push_palette(ui: &AppWindow, choice: Option<&ThemeChoice>) {
         Some(choice) => {
             let palette = &choice.palette;
             ui.set_palette_bg(slint_color(palette.bg));
+            ui.set_palette_mention(slint_color(palette.mention));
             ui.set_palette_bg_alt(slint_color(palette.bg_alt));
             ui.set_palette_fg(slint_color(palette.fg));
             ui.set_palette_accent(slint_color(palette.accent));
@@ -10956,6 +11056,7 @@ fn apply_color_theme(
             )
         });
     let dark_theme = state.theme == Theme::Dark;
+    refresh_mention_context(state);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         push_palette(&ui, choice.as_ref());
@@ -19427,6 +19528,27 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn mentions_follow_cicchettos_word_rule() {
+        let context = MentionContext {
+            own_nick: Some("Sythos".to_string()),
+            patterns: vec!["cordiale".to_string(), "c++".to_string()],
+        };
+        assert!(is_mention("hey sythos, ping", Some("ada"), &context));
+        assert!(is_mention("\u{2}Sythos\u{2}: look", Some("ada"), &context));
+        assert!(!is_mention("sythosian ideas", Some("ada"), &context));
+        assert!(!is_mention("sythos said hi", Some("SYTHOS"), &context));
+        assert!(is_mention("the Cordiale client", None, &context));
+        assert!(is_mention("I like c++.", Some("ada"), &context));
+        assert!(!is_mention(
+            "anything",
+            Some("ada"),
+            &MentionContext::default()
+        ));
+        assert!(contains_word("a_b sythos", "sythos"));
+        assert!(!contains_word("a_sythos", "sythos"));
     }
 
     #[test]
