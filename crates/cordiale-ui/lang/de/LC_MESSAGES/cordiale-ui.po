@@ -2039,3 +2039,39 @@ msgstr "Deckkraft {} %"
 msgctxt "AppWindow"
 msgid "Save and use"
 msgstr "Speichern und verwenden"
+
+msgctxt "AppWindow"
+msgid "Fit"
+msgstr "Einpassen"
+
+msgctxt "AppWindow"
+msgid "Fit to the window"
+msgstr "An das Fenster anpassen"
+
+msgctxt "AppWindow"
+msgid "Actual size"
+msgstr "Originalgröße"
+
+msgctxt "AppWindow"
+msgid "Open in browser"
+msgstr "Im Browser öffnen"
+
+msgctxt "AppWindow"
+msgid "Close"
+msgstr "Schließen"
+
+msgctxt "AppWindow"
+msgid "This file is no longer on the server."
+msgstr "Diese Datei ist nicht mehr auf dem Server."
+
+msgctxt "AppWindow"
+msgid "The file couldn't be shown ({})."
+msgstr "Die Datei konnte nicht angezeigt werden ({})."
+
+msgctxt "AppWindow"
+msgid "Copy"
+msgstr "Kopieren"
+
+msgctxt "AppWindow"
+msgid "Only the first megabyte is shown."
+msgstr "Nur das erste Megabyte wird angezeigt."

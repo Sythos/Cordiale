@@ -2039,3 +2039,39 @@ msgstr "Opacidad {} %"
 msgctxt "AppWindow"
 msgid "Save and use"
 msgstr "Guardar y usar"
+
+msgctxt "AppWindow"
+msgid "Fit"
+msgstr "Ajustar"
+
+msgctxt "AppWindow"
+msgid "Fit to the window"
+msgstr "Ajustar a la ventana"
+
+msgctxt "AppWindow"
+msgid "Actual size"
+msgstr "Tamaño real"
+
+msgctxt "AppWindow"
+msgid "Open in browser"
+msgstr "Abrir en el navegador"
+
+msgctxt "AppWindow"
+msgid "Close"
+msgstr "Cerrar"
+
+msgctxt "AppWindow"
+msgid "This file is no longer on the server."
+msgstr "Este archivo ya no está en el servidor."
+
+msgctxt "AppWindow"
+msgid "The file couldn't be shown ({})."
+msgstr "No se pudo mostrar el archivo ({})."
+
+msgctxt "AppWindow"
+msgid "Copy"
+msgstr "Copiar"
+
+msgctxt "AppWindow"
+msgid "Only the first megabyte is shown."
+msgstr "Solo se muestra el primer megabyte."

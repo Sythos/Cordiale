@@ -976,6 +976,19 @@ export component AppWindow inherits Window {
     callback directory-closed();
     callback archive-delete-requested(string);
     callback archive-closed();
+    // Chat links and the media viewer (images and text uploads, https
+    // images elsewhere). `media-kind` is "loading", "image", "text",
+    // "gone" or "failed".
+    callback chat-link-clicked(string);
+    callback media-open-in-browser();
+    in property <string> media-url: "";
+    in property <string> media-title: "";
+    in property <string> media-kind: "";
+    in property <string> media-error: "";
+    in property <image> media-image;
+    in property <string> media-text: "";
+    in property <bool> media-truncated: false;
+    in-out property <bool> media-zoom: false;
     // The integrated radio. `radio-status` is "", "connecting", "playing",
     // "failed" or "ended"; the custom stations live in Settings > Radio.
     in property <[RadioRow]> radio-stations: [];
@@ -2171,7 +2184,9 @@ export component AppWindow inherits Window {
                     StyledText {
                         text: line.body;
                         default-color: theme == "dark" ? white : black;
+                        link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
                         horizontal-stretch: 1;
+                        link-clicked(href) => { chat-link-clicked(href); }
                     }
                 }
             }
@@ -4288,6 +4303,93 @@ export component AppWindow inherits Window {
                     screen = "settings";
                     settings-section = "radio";
                 }
+            }
+        }
+    }
+
+    if screen == "media" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 6px;
+
+            Text {
+                text: media-title;
+                font-size: 16px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            if media-kind == "image" : CompactButton {
+                text: media-zoom ? @tr("Fit") : "1:1";
+                a11y-label: media-zoom ? @tr("Fit to the window") : @tr("Actual size");
+                clicked => { media-zoom = !media-zoom; }
+            }
+            if media-kind != "gone" : CompactButton {
+                text: "🌐  " + @tr("Open in browser");
+                clicked => { media-open-in-browser(); }
+            }
+            CompactButton {
+                text: "✕  " + @tr("Close");
+                clicked => { screen = "connected"; }
+            }
+        }
+
+        if media-kind == "loading" : Text {
+            text: @tr("Loading…");
+        }
+        if media-kind == "gone" : Text {
+            text: @tr("This file is no longer on the server.");
+            wrap: word-wrap;
+        }
+        if media-kind == "failed" : Text {
+            text: @tr("The file couldn't be shown ({}).", media-error);
+            wrap: word-wrap;
+        }
+        if media-kind == "image" && !media-zoom : Image {
+            source: media-image;
+            image-fit: contain;
+            vertical-stretch: 1;
+            accessible-role: AccessibleRole.image;
+            accessible-label: media-title;
+        }
+        if media-kind == "image" && media-zoom : Flickable {
+            vertical-stretch: 1;
+            viewport-width: media-image.width * 1px;
+            viewport-height: media-image.height * 1px;
+
+            Image {
+                source: media-image;
+                width: media-image.width * 1px;
+                height: media-image.height * 1px;
+            }
+        }
+        if media-kind == "text" : VerticalLayout {
+            spacing: 6px;
+            vertical-stretch: 1;
+
+            HorizontalLayout {
+                spacing: 6px;
+                alignment: start;
+
+                CompactButton {
+                    text: "📋  " + @tr("Copy");
+                    clicked => {
+                        media-text-view.select-all();
+                        media-text-view.copy();
+                    }
+                }
+                if media-truncated : Text {
+                    text: @tr("Only the first megabyte is shown.");
+                    vertical-alignment: center;
+                }
+            }
+            media-text-view := TextEdit {
+                text: media-text;
+                read-only: true;
+                wrap: no-wrap;
+                vertical-stretch: 1;
             }
         }
     }
