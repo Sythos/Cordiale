@@ -10,9 +10,11 @@ cordiale-core = { path = "../cordiale-core" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 serde_json = "1"
 rfd = "0.17"
-# Not used directly: enabling these formats on the `image` crate Slint
-# already decodes with lets `slint::Image` load GIF, WebP and BMP avatars.
-image = { version = "0.25", default-features = false, features = ["gif", "webp", "bmp"] }
+# GIF, WebP and BMP let `slint::Image` (which decodes with this crate) load
+# those avatars; PNG encodes images pasted from the clipboard.
+image = { version = "0.25", default-features = false, features = ["gif", "webp", "bmp", "png"] }
+# Images and text on the system clipboard, for pasting uploads.
+arboard = "3"
 # The OS light/dark setting and its changes, to pick the day or night theme.
 dark-light = { version = "3", default-features = false }
 # Slint's defaults minus `system-tray`, which Cordiale doesn't use.
@@ -23,8 +25,26 @@ slint = { version = "1", default-features = false, features = [
     "renderer-software",
     "accessibility",
     "compat-1-2",
+    "raw-window-handle-06",
+    # Files dropped on the window (`WindowEvent::DroppedFile`), which Slint
+    # itself doesn't handle yet.
+    "unstable-winit-030",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+# The radio player: MP3, Ogg Vorbis and FLAC streams, decoded the same way
+# on every platform (ALSA on Linux, WASAPI on Windows, CoreAudio on macOS).
+rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "vorbis", "flac"] }
+
+# The taskbar overlay badge: the window handle and ITaskbarList3.
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 slint-build = "1"

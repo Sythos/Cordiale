@@ -108,6 +108,8 @@ pub enum SlashCommand {
     Highlight { add: bool, pattern: String },
     /// `/ignore <mask>` or `/unignore <mask>`.
     Ignore { add: bool, mask: String },
+    /// `/np`: shares the radio's current track as an action.
+    NowPlaying,
     /// `/notify <nick...>`.
     Notify(Vec<String>),
     /// `/beep [sound]`: shows or sets the notification sound other devices
@@ -449,6 +451,7 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             },
             _ => Usage("/ignore <nick!user@host>"),
         },
+        "np" => NowPlaying,
         "beep" => match words(args).as_slice() {
             [] => Beep(None),
             [sound] => Beep(Some(sound.to_ascii_lowercase())),
