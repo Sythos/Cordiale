@@ -1563,6 +1563,16 @@ export component AppWindow inherits Window {
             return @tr("Too many attempts. Wait a bit before trying again.");
         } else if status-kind == "login-failed" {
             return @tr("Login failed.");
+        } else if status-kind == "guest-nick-taken" {
+            return status-message == ""
+                ? @tr("That nickname is taken on this server right now. Pick another one or try again later.")
+                : @tr("That nickname is taken on this server right now. Pick another one or try again in {} seconds.", status-message);
+        } else if status-kind == "guest-nick-in-use" {
+            return @tr("That nickname is already in use on the network. Pick another one.");
+        } else if status-kind == "guest-nick-invalid" {
+            return @tr("That isn't a valid IRC nickname. Enter one in the name field.");
+        } else if status-kind == "guest-captcha-required" {
+            return @tr("This server asks guests to solve a CAPTCHA, which needs a browser. Sign in from a browser instead.");
         } else if status-kind == "boot-me-failed" {
             return @tr("Signed in, but couldn't load account data.");
         } else if status-kind == "unreachable" {
