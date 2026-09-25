@@ -54,9 +54,10 @@ No installer, no package manager integration — just the binary. Requires
 fontconfig, Mesa/OpenGL, XCB and xkbcommon to already be on the system
 (present on effectively any desktop Linux install).
 
-## macOS (Apple Silicon only — no Intel build)
+## macOS (Apple Silicon and Intel)
 
-Download `Cordiale_macOS_arm64.dmg`, open it, drag `Cordiale.app` to
+Download `Cordiale_macOS_arm64.dmg` on an Apple Silicon Mac (M1 and later)
+or `Cordiale_macOS_x64.dmg` on an Intel Mac, open it, drag `Cordiale.app` to
 `Applications`. Since the app is unsigned and not notarized, the first
 launch will be blocked by Gatekeeper. To allow it: try opening the app,
 then go to **System Settings → Privacy & Security**, scroll down, click
@@ -65,8 +66,9 @@ dialog that reappears. Right-click (or Control-click) the app and choose
 **Open** is the older equivalent, also still offered on most macOS
 versions.
 
-Prefer a plain binary? Grab `cordiale-macos-arm64-<version>.tar.gz`
-instead and run `./cordiale-ui` from a terminal.
+Prefer a plain binary? Grab `cordiale-macos-arm64-<version>.tar.gz` (or
+`cordiale-macos-x64-<version>.tar.gz` on Intel) instead and run
+`./cordiale-ui` from a terminal.
 
 ## Building from source
 

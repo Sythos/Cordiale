@@ -981,6 +981,8 @@ export component AppWindow inherits Window {
     callback directory-closed();
     callback archive-delete-requested(string);
     callback archive-closed();
+    // A link in the Credits page, opened in the browser.
+    callback credits-link-clicked(string);
     // Chat links and the media viewer (images and text uploads, https
     // images elsewhere). `media-kind` is "loading", "image", "text",
     // "gone" or "failed".
@@ -3451,6 +3453,42 @@ export component AppWindow inherits Window {
                     horizontal-alignment: center;
                 }
                 Text {
+                    text: @tr("A client for grappa-irc by vjt");
+                    horizontal-alignment: center;
+                }
+                StyledText {
+                    text: @markdown("[github.com/vjt/grappa-irc](https://github.com/vjt/grappa-irc)");
+                    horizontal-alignment: center;
+                    default-color: theme == "dark" ? white : black;
+                    link-color: theme == "dark" ? #8ab4f8 : #1a5fb4;
+                    link-clicked(href) => { credits-link-clicked(href); }
+                }
+                Rectangle { height: 14px; }
+                Text {
+                    text: @tr("Report Cordiale issues at:");
+                    horizontal-alignment: center;
+                }
+                StyledText {
+                    text: @markdown("[github.com/Sythos/Cordiale/issues](https://github.com/Sythos/Cordiale/issues)");
+                    horizontal-alignment: center;
+                    default-color: theme == "dark" ? white : black;
+                    link-color: theme == "dark" ? #8ab4f8 : #1a5fb4;
+                    link-clicked(href) => { credits-link-clicked(href); }
+                }
+                Text {
+                    text: @tr("Issues with Grappa itself (grappa-irc) go to its own repository:");
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                StyledText {
+                    text: @markdown("[github.com/vjt/grappa-irc/issues](https://github.com/vjt/grappa-irc/issues)");
+                    horizontal-alignment: center;
+                    default-color: theme == "dark" ? white : black;
+                    link-color: theme == "dark" ? #8ab4f8 : #1a5fb4;
+                    link-clicked(href) => { credits-link-clicked(href); }
+                }
+                Rectangle { height: 14px; }
+                Text {
                     text: credits-copyright-text;
                     horizontal-alignment: center;
                 }
@@ -3464,11 +3502,6 @@ export component AppWindow inherits Window {
                 icon: "🛡";
                 title: @tr("Admin");
                 fill: true;
-
-                Text {
-                    text: @tr("Vhosts, credentials, server-wide settings write, and the live admin event stream aren't built yet.");
-                    wrap: word-wrap;
-                }
 
                 HorizontalLayout {
                     spacing: 4px;

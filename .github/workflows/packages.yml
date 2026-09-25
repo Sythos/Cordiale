@@ -127,6 +127,13 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-latest
             artifact: macos-arm64
+            mac_arch: arm64
+          # Intel Macs: cross-built on the Apple Silicon runner, whose
+          # toolchain targets both architectures.
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            artifact: macos-x64
+            mac_arch: x64
 
     steps:
       - name: Checkout client
@@ -304,12 +311,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          tar -czf "dist/cordiale-macos-arm64-${PACKAGE_VERSION}.tar.gz" \
-            -C target/aarch64-apple-darwin/release cordiale-ui
+          MAC_ARCH="${{ matrix.mac_arch }}"
+          tar -czf "dist/cordiale-macos-${MAC_ARCH}-${PACKAGE_VERSION}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" cordiale-ui
 
           APP_DIR="macos-app-stage/Cordiale.app"
           mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-          cp target/aarch64-apple-darwin/release/cordiale-ui "$APP_DIR/Contents/MacOS/cordiale-ui"
+          cp "target/${{ matrix.target }}/release/cordiale-ui" "$APP_DIR/Contents/MacOS/cordiale-ui"
           chmod +x "$APP_DIR/Contents/MacOS/cordiale-ui"
 
           ICONSET="Cordiale.iconset"
@@ -359,7 +367,7 @@ jobs:
           PLIST
 
           hdiutil create -volname "Cordiale" -srcfolder "macos-app-stage" \
-            -ov -format UDZO "dist/Cordiale_macOS_arm64.dmg"
+            -ov -format UDZO "dist/Cordiale_macOS_${MAC_ARCH}.dmg"
 
       - name: Generate checksums (Linux)
         if: runner.os == 'Linux'
