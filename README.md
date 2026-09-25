@@ -66,8 +66,8 @@ Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-
 Cordiale still has these user-visible or behavioral gaps:
 
 - **Themes:** Cordiale applies Grappa's gallery themes (or built-in copies)
-  with their day/night pairing and wallpapers, but not Cicchetto's
-  custom-theme editor or theme publishing. Buttons and menus keep Slint's own widget
+  with their day/night pairing and wallpapers, and edits, copies, deletes and
+  publishes the account's own themes. Buttons and menus keep Slint's own widget
   style in its dark or light variant.
 - **Sign-in and account security:** Cordiale does not expose Cicchetto's
   TOTP/passkey management.
@@ -90,8 +90,10 @@ Cordiale still has these user-visible or behavioral gaps:
   before each one. Files dropped on the window (Windows, macOS and X11; not
   on Wayland) and images pasted into the compose box go through the same
   flow, and pasting several lines of text offers to upload them as
-  `paste.txt`. The media viewer is not implemented yet; like Cicchetto,
-  Cordiale shows no inline previews.
+  `paste.txt`. Links in messages are clickable, as in Cicchetto: image and text
+  uploads on Grappa, and https images elsewhere, open in the media viewer
+  (fit or actual size; text read-only, with Copy), the rest in the browser.
+  Like Cicchetto, Cordiale shows no inline previews.
 - **Slash commands:** Cordiale handles the everyday IRC verbs (`/me`,
   `/msg`, `/notice`, `/query`, `/join`, `/part`, `/cycle`, `/topic`, `/nick`,
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
