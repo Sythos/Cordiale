@@ -2086,18 +2086,25 @@ export component AppWindow inherits Window {
                 font-weight: 700;
                 color: palette-active ? palette-accent : Palette.foreground;
             }
+            // The layout gives the topic the box's width, so it wraps at word
+            // boundaries and the box grows to fit every line.
             if has-selected-channel && !current-query : Rectangle {
-                height: 60px;
                 background: palette-active ? palette-bg-alt : (theme == "dark" ? #242424 : #f5f5f5);
                 border-width: 1px;
                 border-color: palette-active ? palette-border : (theme == "dark" ? #5c5c5c : #d0d0d0);
-                padding: 3px;
-                Text {
-                    text: current-topic == "" ? @tr("No topic set") : current-topic;
-                    font-size: 14px;
-                    wrap: word-wrap;
-                    max-height: 54px;
-                    vertical-alignment: top;
+                clip: true;
+                vertical-stretch: 0;
+
+                VerticalLayout {
+                    padding: 6px;
+                    Text {
+                        text: current-topic == "" ? @tr("No topic set") : current-topic;
+                        font-size: 14px;
+                        wrap: word-wrap;
+                        horizontal-alignment: left;
+                        vertical-alignment: top;
+                        horizontal-stretch: 1;
+                    }
                 }
             }
             if current-channel-modes != "" : Text {
