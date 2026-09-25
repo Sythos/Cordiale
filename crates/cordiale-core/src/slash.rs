@@ -81,6 +81,8 @@ pub enum SlashCommand {
     },
     /// `/umode <modes>`.
     Umode(String),
+    /// Bare `/umode`: opens the user-mode view of the active network.
+    UmodeShow,
     /// `/names [#chan]`.
     Names(Option<String>),
     /// A raw IRC line: `/quote`, and the operator verbs built on it
@@ -108,6 +110,9 @@ pub enum SlashCommand {
     Ignore { add: bool, mask: String },
     /// `/notify <nick...>`.
     Notify(Vec<String>),
+    /// `/beep [sound]`: shows or sets the notification sound other devices
+    /// play.
+    Beep(Option<String>),
     /// `/alias <name> <expansion>`: defines or replaces a user alias.
     AliasDefine { name: String, expansion: String },
     /// `/unalias <name>`.
@@ -378,8 +383,9 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             }
         }
         "umode" => match words(args).as_slice() {
+            [] => UmodeShow,
             [modes] => Umode(modes.clone()),
-            _ => Usage("/umode <modes>"),
+            _ => Usage("/umode [modes]"),
         },
         "names" => match words(args).as_slice() {
             [] => Names(None),
@@ -442,6 +448,11 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
                 mask: mask.clone(),
             },
             _ => Usage("/ignore <nick!user@host>"),
+        },
+        "beep" => match words(args).as_slice() {
+            [] => Beep(None),
+            [sound] => Beep(Some(sound.to_ascii_lowercase())),
+            _ => Usage("/beep [sound]"),
         },
         "notify" | "watch" => {
             let nicks = words(args);
@@ -808,6 +819,7 @@ mod tests {
         assert_eq!(parse("/mode"), Some(ModeShow { channel: None }));
         assert!(matches!(parse("/mode alice"), Some(Usage(_))));
         assert_eq!(parse("/umode +i"), Some(Umode("+i".to_string())));
+        assert_eq!(parse("/umode"), Some(UmodeShow));
         assert_eq!(parse("/names"), Some(Names(None)));
         assert_eq!(
             parse("/quote PRIVMSG x :y"),
@@ -886,6 +898,13 @@ mod tests {
                 text: "help".to_string()
             })
         );
+    }
+
+    #[test]
+    fn beep_shows_or_sets_the_sound() {
+        assert_eq!(parse("/beep"), Some(Beep(None)));
+        assert_eq!(parse("/beep Chime"), Some(Beep(Some("chime".to_string()))));
+        assert!(matches!(parse("/beep a b"), Some(Usage(_))));
     }
 
     #[test]

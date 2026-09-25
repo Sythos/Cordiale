@@ -42,8 +42,8 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::rest::{
-    ArchiveEntry, BootResponse, DirectoryPage, DisplayPrefs, LoginRequest, MeResponse,
-    SendMessageRequest,
+    ActiveThemePair, ArchiveEntry, BootResponse, DirectoryPage, DisplayPrefs, LoginRequest,
+    MeResponse, SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::slash::{self, SlashCommand};
@@ -92,6 +92,9 @@ enum WorkerCommand {
     },
     ArchiveDelete(String),
     ArchiveClose,
+    /// Flips one user mode of the network shown in the user-mode view.
+    UmodeToggle(String),
+    UmodeClose,
     DismissPeerAway,
     ToggleNetwork(String),
     SendMessage {
@@ -106,8 +109,14 @@ enum WorkerCommand {
     ComposeTextChanged(String),
     ToggleTheme,
     SelectColorTheme(String),
+    /// Night slot of the account's theme pair; "" goes back to one theme.
+    SelectNightTheme(String),
+    /// The OS switched between light (`false`) and dark (`true`).
+    SystemScheme(bool),
     SaveDisplayPrefs(DisplayPrefs),
     LoadNotificationPrefs,
+    EditNotificationPrefs(NotificationEdit),
+    MuteCurrentWindow(i32),
     SaveNotificationPrefs(NotificationToggles),
     AdminRefresh,
     AdminDisconnectSession(String),
@@ -542,6 +551,25 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_archive_close.send(WorkerCommand::ArchiveClose);
     });
 
+    let tx_for_umode_toggle = worker_tx.clone();
+    ui.on_umode_toggle_requested(move |letter| {
+        let _ = tx_for_umode_toggle.send(WorkerCommand::UmodeToggle(letter.to_string()));
+    });
+
+    let tx_for_umode_close = worker_tx.clone();
+    ui.on_umode_view_closed(move || {
+        let _ = tx_for_umode_close.send(WorkerCommand::UmodeClose);
+    });
+
+    // Actions menu entries that run a slash command on the open window,
+    // leaving the composer's draft alone.
+    let tx_for_menu_command = worker_tx.clone();
+    ui.on_menu_command(move |body| {
+        let _ = tx_for_menu_command.send(WorkerCommand::SendMessage {
+            body: body.to_string(),
+        });
+    });
+
     let tx_for_peer_away_dismiss = worker_tx.clone();
     ui.on_peer_away_dismiss_requested(move || {
         let _ = tx_for_peer_away_dismiss.send(WorkerCommand::DismissPeerAway);
@@ -621,6 +649,13 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_color_theme.send(WorkerCommand::SelectColorTheme(key.to_string()));
     });
 
+    let tx_for_night_theme = worker_tx.clone();
+    ui.on_night_theme_requested(move |key| {
+        let _ = tx_for_night_theme.send(WorkerCommand::SelectNightTheme(key.to_string()));
+    });
+
+    watch_system_scheme(worker_tx.clone());
+
     let tx_for_prefs = worker_tx.clone();
     let weak_for_prefs = ui.as_weak();
     ui.on_display_prefs_changed(move || {
@@ -639,6 +674,50 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_notify_load = worker_tx.clone();
     ui.on_notification_prefs_requested(move || {
         let _ = tx_for_notify_load.send(WorkerCommand::LoadNotificationPrefs);
+    });
+
+    let tx_for_notify_list_add = worker_tx.clone();
+    ui.on_notification_list_add(move |list, value| {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            let _ = tx_for_notify_list_add.send(WorkerCommand::EditNotificationPrefs(
+                NotificationEdit::AddToList(list.to_string(), value),
+            ));
+        }
+    });
+
+    let tx_for_notify_list_remove = worker_tx.clone();
+    ui.on_notification_list_remove(move |list, value| {
+        let _ = tx_for_notify_list_remove.send(WorkerCommand::EditNotificationPrefs(
+            NotificationEdit::RemoveFromList(list.to_string(), value.to_string()),
+        ));
+    });
+
+    let tx_for_notify_unmute = worker_tx.clone();
+    ui.on_notification_unmute(move |key| {
+        let _ = tx_for_notify_unmute.send(WorkerCommand::EditNotificationPrefs(
+            NotificationEdit::Unmute(key.to_string()),
+        ));
+    });
+
+    let tx_for_notify_sound = worker_tx.clone();
+    let weak_for_notify_sound = ui.as_weak();
+    ui.on_notification_sound_changed(move || {
+        if let Some(ui) = weak_for_notify_sound.upgrade() {
+            let sound = usize::try_from(ui.get_notify_sound_index())
+                .ok()
+                .and_then(|index| NOTIFICATION_SOUNDS.get(index))
+                .copied()
+                .unwrap_or("none");
+            let _ = tx_for_notify_sound.send(WorkerCommand::EditNotificationPrefs(
+                NotificationEdit::Sound(sound.to_string()),
+            ));
+        }
+    });
+
+    let tx_for_mute_current = worker_tx.clone();
+    ui.on_mute_current_requested(move |seconds| {
+        let _ = tx_for_mute_current.send(WorkerCommand::MuteCurrentWindow(seconds));
     });
 
     let tx_for_notify_save = worker_tx.clone();
@@ -1593,6 +1672,8 @@ struct WorkerState {
     /// live and replayed `supported_umodes_changed` snapshots replace only
     /// their own network.
     supported_user_modes_by_network: HashMap<String, Vec<String>>,
+    /// Network whose user modes are on screen (bare `/umode`).
+    umode_view_network: Option<String>,
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
@@ -1625,6 +1706,9 @@ struct WorkerState {
     /// disconnect or relaunch; an automatic reconnect keeps it as it was,
     /// possibly stale.
     watch_patterns: Vec<String>,
+    /// Ref of the `watchlist` list request whose reply holds the account's
+    /// keyword patterns.
+    pending_watchlist_ref: Option<String>,
     /// Current app theme, kept here too (not just in Slint's `theme`
     /// property) so message-rendering helpers running on this thread can
     /// pick a legible color without an extra hop to the UI thread.
@@ -1632,6 +1716,10 @@ struct WorkerState {
     /// Color themes offered in Settings > Themes: Grappa's gallery when the
     /// server has one, the built-in copies otherwise.
     theme_choices: Vec<ThemeChoice>,
+    /// The account's day and night themes on Grappa, when one is in use.
+    theme_pair: Option<(ThemeChoice, Option<ThemeChoice>)>,
+    /// Whether the OS is in dark mode, which picks the night theme.
+    system_dark: bool,
 }
 
 impl WorkerState {
@@ -1692,6 +1780,7 @@ impl WorkerState {
             isupport_by_network: HashMap::new(),
             user_modes_by_network: HashMap::new(),
             supported_user_modes_by_network: HashMap::new(),
+            umode_view_network: None,
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
             notify_lists: HashMap::new(),
@@ -1702,8 +1791,11 @@ impl WorkerState {
             notification_prefs: None,
             web_bundle: None,
             watch_patterns: Vec::new(),
+            pending_watchlist_ref: None,
             theme: persistence::load_settings().unwrap_or_default().theme,
             theme_choices: builtin_theme_choices(),
+            theme_pair: None,
+            system_dark: false,
         }
     }
 }
@@ -1803,6 +1895,12 @@ async fn run_worker(
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
                     }
+                    Some(WorkerCommand::UmodeToggle(letter)) => {
+                        toggle_user_mode(&state, &letter);
+                    }
+                    Some(WorkerCommand::UmodeClose) => {
+                        state.umode_view_network = None;
+                    }
                     Some(WorkerCommand::DismissPeerAway) => {
                         if let Some(key) = current_peer_away_key(&state) {
                             state.peer_away.remove(&key);
@@ -1852,6 +1950,28 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SelectColorTheme(key)) => {
                         select_color_theme(&mut state, &ui, &key).await;
+                    }
+                    Some(WorkerCommand::SelectNightTheme(key)) => {
+                        select_night_theme(&mut state, &ui, &key).await;
+                    }
+                    Some(WorkerCommand::SystemScheme(dark)) => {
+                        let changed = state.system_dark != dark;
+                        state.system_dark = dark;
+                        if changed && state.theme_pair.as_ref().is_some_and(|pair| pair.1.is_some()) {
+                            apply_theme_pair(&mut state, &ui);
+                        }
+                    }
+                    Some(WorkerCommand::EditNotificationPrefs(edit)) => {
+                        handle_notification_edit(&mut state, &ui, edit).await;
+                    }
+                    Some(WorkerCommand::MuteCurrentWindow(seconds)) => {
+                        if let Some((network, target)) = state.current_channel.clone() {
+                            let until = (seconds > 0).then(|| {
+                                chrono::Utc::now().timestamp() + i64::from(seconds)
+                            });
+                            let edit = NotificationEdit::Mute(muted_key(&network, &target), until);
+                            handle_notification_edit(&mut state, &ui, edit).await;
+                        }
                     }
                     Some(WorkerCommand::LoadNotificationPrefs) => {
                         handle_load_notification_prefs(&mut state, &ui).await;
@@ -2100,6 +2220,7 @@ async fn run_worker(
                         handle_admin_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::SettingsNetworkSelected(network)) => {
+                        load_identity_nick(&state, &ui, &network).await;
                         state.settings_network = Some(network);
                         handle_settings_network_refresh(&state, &ui).await;
                         push_notify_nicks(&state, &ui);
@@ -2253,7 +2374,10 @@ async fn run_worker(
                             handle.shutdown();
                         }
                         session_events = None;
+                        // The OS scheme outlives the account.
+                        let system_dark = state.system_dark;
                         state = WorkerState::new();
+                        state.system_dark = system_dark;
                     }
                     Some(WorkerCommand::LoadOlderHistory) => {
                         handle_load_older_history(&mut state, &ui).await;
@@ -2299,6 +2423,7 @@ async fn run_worker(
                             ui.set_status_kind("signed-in".into());
                             ui.set_status_message("".into());
                         });
+                        request_watch_patterns(&mut state);
                     }
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame).await;
@@ -3113,13 +3238,12 @@ fn remove_sidebar_channel_entry(
 }
 
 /// Whether `identifier` appears in `members` with the `@` (op) prefix —
-/// gates `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items. Only
-/// ever as accurate as `members` itself, which doesn't track role
-/// (mode) changes yet — see README's Known gaps.
+/// gates `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items, as
+/// accurate as `members` (snapshots plus live MODE changes).
 fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str) -> bool {
     members
         .iter()
-        .any(|(name, prefix)| name == identifier && prefix == "@")
+        .any(|(name, prefix)| name == identifier && prefix.contains('@'))
 }
 
 async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
@@ -3582,6 +3706,11 @@ async fn run_slash_command(
             );
             Ok(())
         }
+        SlashCommand::UmodeShow => {
+            state.umode_view_network = Some(network.clone());
+            push_umode_view(state, ui, true);
+            return;
+        }
         SlashCommand::Umode(modes) => {
             send_user_verb(
                 state,
@@ -3685,6 +3814,26 @@ async fn run_slash_command(
             .await
             .map(|_| ()),
         SlashCommand::Notify(nicks) => client.add_notify_nicks(&token, &network, nicks).await,
+        SlashCommand::Beep(None) => {
+            if state.notification_prefs.is_none() {
+                handle_load_notification_prefs(state, ui).await;
+            }
+            let sound = state
+                .notification_prefs
+                .as_ref()
+                .and_then(|prefs| prefs.get("notification_sound"))
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string();
+            return set_command_status(ui, "beep-current", sound);
+        }
+        SlashCommand::Beep(Some(sound)) => {
+            if !NOTIFICATION_SOUNDS.contains(&sound.as_str()) {
+                return set_command_status(ui, "beep-unknown", NOTIFICATION_SOUNDS.join(", "));
+            }
+            handle_notification_edit(state, ui, NotificationEdit::Sound(sound.clone())).await;
+            return set_command_status(ui, "beep-set", sound);
+        }
         SlashCommand::AliasDefine { name, expansion } => {
             handle_alias_upsert(state, ui, Some((name, expansion))).await;
             state.aliases = None;
@@ -3982,6 +4131,7 @@ async fn handle_load_notification_prefs(state: &mut WorkerState, ui: &slint::Wea
     match client.fetch_notification_prefs(&token).await {
         Ok(prefs) => {
             push_notification_toggles(ui, NotificationToggles::from_prefs(&prefs));
+            push_notification_lists(ui, &prefs);
             state.notification_prefs = Some(prefs);
         }
         Err(err) => persistence::log_line(&format!("notification prefs load failed: {err:?}")),
@@ -4016,6 +4166,211 @@ async fn handle_save_notification_prefs(
             };
             push_notification_toggles(ui, NotificationToggles::from_prefs(&stored));
             let _ = ui.upgrade_in_event_loop(move |ui| ui.set_status_kind(kind.into()));
+        }
+    }
+}
+
+/// Sound presets Grappa accepts for `notification_sound`, in the order of
+/// the Settings menu.
+const NOTIFICATION_SOUNDS: [&str; 10] = [
+    "none",
+    "tone",
+    "chime",
+    "blip",
+    "pop",
+    "icq",
+    "xp_notify",
+    "xp_ding",
+    "xp_balloon",
+    "xp_exclamation",
+];
+
+/// One change to the push-notification map beyond the five switches.
+#[derive(Debug, Clone, PartialEq)]
+enum NotificationEdit {
+    /// `"channel"` or `"private"` list, and the channel or nick to add.
+    AddToList(String, String),
+    RemoveFromList(String, String),
+    /// Mutes a conversation key until a unix time, or for good (`None`).
+    Mute(String, Option<i64>),
+    Unmute(String),
+    Sound(String),
+}
+
+/// Grappa's key for a muted conversation: the network slug and the
+/// channel or peer nick, ASCII-lowercased like Cicchetto's channel key.
+fn muted_key(network: &str, target: &str) -> String {
+    format!("{network} {}", target.to_ascii_lowercase())
+}
+
+fn notification_list_field(list: &str) -> Option<&'static str> {
+    match list {
+        "channel" => Some("channel_messages_only"),
+        "private" => Some("private_messages_only"),
+        _ => None,
+    }
+}
+
+/// Applies an edit to the stored map; `false` when it doesn't apply.
+fn apply_notification_edit(
+    prefs: &mut serde_json::Map<String, Value>,
+    edit: &NotificationEdit,
+) -> bool {
+    match edit {
+        NotificationEdit::AddToList(list, value)
+        | NotificationEdit::RemoveFromList(list, value) => {
+            let Some(field) = notification_list_field(list) else {
+                return false;
+            };
+            let value = value.trim().to_ascii_lowercase();
+            let mut items: Vec<String> = prefs
+                .get(field)
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            items.retain(|item| item != &value);
+            if matches!(edit, NotificationEdit::AddToList(..)) {
+                items.push(value);
+            }
+            prefs.insert(field.to_string(), Value::from(items));
+        }
+        NotificationEdit::Mute(key, until) => {
+            let muted = prefs
+                .entry("muted_targets")
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            let Value::Object(muted) = muted else {
+                return false;
+            };
+            muted.insert(key.clone(), serde_json::json!({ "until": until }));
+        }
+        NotificationEdit::Unmute(key) => {
+            if let Some(Value::Object(muted)) = prefs.get_mut("muted_targets") {
+                muted.remove(key);
+            }
+        }
+        NotificationEdit::Sound(sound) => {
+            if !NOTIFICATION_SOUNDS.contains(&sound.as_str()) {
+                return false;
+            }
+            prefs.insert("notification_sound".to_string(), Value::from(sound.clone()));
+        }
+    }
+    true
+}
+
+/// Rows of the muted list: `(label, key)`, with the snooze end when there
+/// is one.
+fn muted_rows(prefs: &serde_json::Map<String, Value>) -> Vec<(String, String)> {
+    let Some(Value::Object(muted)) = prefs.get("muted_targets") else {
+        return Vec::new();
+    };
+    let mut rows: Vec<(String, String)> = muted
+        .iter()
+        .map(|(key, entry)| {
+            let name = key.replacen(' ', " · ", 1);
+            let label = match entry.get("until").and_then(Value::as_i64) {
+                Some(until) => match chrono::DateTime::from_timestamp(until, 0) {
+                    Some(time) => format!(
+                        "{name} → {}",
+                        time.with_timezone(&chrono::Local).format("%d/%m %H:%M")
+                    ),
+                    None => name,
+                },
+                None => format!("{name} → ∞"),
+            };
+            (label, key.clone())
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+fn push_notification_lists(ui: &slint::Weak<AppWindow>, prefs: &serde_json::Map<String, Value>) {
+    let list = |field: &str| -> Vec<String> {
+        prefs
+            .get(field)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let channels = list("channel_messages_only");
+    let privates = list("private_messages_only");
+    let muted = muted_rows(prefs);
+    let sound = prefs
+        .get("notification_sound")
+        .and_then(Value::as_str)
+        .and_then(|sound| {
+            NOTIFICATION_SOUNDS
+                .iter()
+                .position(|preset| *preset == sound)
+        })
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or(0);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let strings = |items: Vec<String>| -> slint::ModelRc<slint::SharedString> {
+            let items: Vec<slint::SharedString> = items.into_iter().map(Into::into).collect();
+            Rc::new(slint::VecModel::from(items)).into()
+        };
+        ui.set_notify_only_channels(strings(channels));
+        ui.set_notify_only_privates(strings(privates));
+        let muted: Vec<MutedRow> = muted
+            .into_iter()
+            .map(|(label, key)| MutedRow {
+                label: label.into(),
+                key: key.into(),
+            })
+            .collect();
+        ui.set_notify_muted(Rc::new(slint::VecModel::from(muted)).into());
+        ui.set_notify_sound_index(sound);
+    });
+}
+
+/// Applies one notification edit over the stored map (read first when
+/// needed) and saves the whole map, as Grappa's PUT requires.
+async fn handle_notification_edit(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    edit: NotificationEdit,
+) {
+    if state.notification_prefs.is_none() {
+        handle_load_notification_prefs(state, ui).await;
+    }
+    let (Some(client), Some(token), Some(stored)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.notification_prefs.clone(),
+    ) else {
+        return;
+    };
+    let mut prefs = stored.clone();
+    if !apply_notification_edit(&mut prefs, &edit) {
+        return;
+    }
+    match client.set_notification_prefs(&token, &prefs).await {
+        Ok(()) => {
+            push_notification_lists(ui, &prefs);
+            state.notification_prefs = Some(prefs);
+            if matches!(edit, NotificationEdit::Mute(..)) {
+                let _ =
+                    ui.upgrade_in_event_loop(|ui| ui.set_status_kind("conversation-muted".into()));
+            }
+        }
+        Err(err) => {
+            persistence::log_line(&format!("notification prefs save failed: {err:?}"));
+            push_notification_lists(ui, &stored);
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("notify-prefs-failed".into()));
         }
     }
 }
@@ -5051,6 +5406,61 @@ fn presence_key(nick: &str) -> String {
 
 /// Pushes the session-local keyword-watchlist patterns to the UI — see
 /// `WorkerState::watch_patterns` for why they are session-local.
+/// Asks Grappa for the account's keyword patterns (`watchlist` with
+/// `action: "list"`), so the list reflects what other clients changed too;
+/// the reply is matched by its ref.
+fn request_watch_patterns(state: &mut WorkerState) {
+    let (Some(session), Some(identifier)) = (&state.session, &state.identifier) else {
+        return;
+    };
+    let message_ref = session.send_tracked_command(
+        format!("grappa:user:{identifier}"),
+        "watchlist",
+        serde_json::json!({ "action": "list" }),
+    );
+    state.pending_watchlist_ref = Some(message_ref);
+}
+
+/// The `patterns` of an `ok` reply to the watchlist list request.
+fn watch_patterns_from_reply(reply: &Value) -> Option<Vec<String>> {
+    if reply.get("status").and_then(Value::as_str) != Some("ok") {
+        return None;
+    }
+    let patterns = reply.get("response")?.get("patterns")?.as_array()?;
+    Some(
+        patterns
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// The account's current nick on `network`, from a `GET /networks` row.
+fn network_nick(networks: &[Value], network: &str) -> Option<String> {
+    networks
+        .iter()
+        .find(|row| row.get("slug").and_then(Value::as_str) == Some(network))?
+        .get("nick")?
+        .as_str()
+        .filter(|nick| !nick.is_empty())
+        .map(str::to_string)
+}
+
+/// Fills the identity editor's nick with the one in use on `network`.
+/// Grappa no longer reports ident and realname, so those stay as typed.
+async fn load_identity_nick(state: &WorkerState, ui: &slint::Weak<AppWindow>, network: &str) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let Ok(networks) = client.fetch_networks(token).await else {
+        return;
+    };
+    if let Some(nick) = network_nick(&networks, network) {
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.set_identity_nick(nick.into()));
+    }
+}
+
 fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let patterns: Vec<slint::SharedString> = state
         .watch_patterns
@@ -5410,6 +5820,14 @@ async fn handle_frame(
             ));
         }
         handle_query_join_reply(state, ui, &frame.topic, status).await;
+        if frame.message_ref.is_some() && frame.message_ref == state.pending_watchlist_ref {
+            state.pending_watchlist_ref = None;
+            if let Some(patterns) = watch_patterns_from_reply(&frame.payload) {
+                state.watch_patterns = patterns;
+                push_watch_patterns(state, ui);
+            }
+            return;
+        }
         if let Some(pending) = frame
             .message_ref
             .as_ref()
@@ -5619,10 +6037,12 @@ async fn handle_frame(
     }
     if payload_kind == "umode_changed" {
         handle_umode_changed(state, &frame.topic, &frame.payload);
+        push_umode_view(state, ui, false);
         return;
     }
     if payload_kind == "supported_umodes_changed" {
         handle_supported_umodes_changed(state, &frame.topic, &frame.payload);
+        push_umode_view(state, ui, false);
         return;
     }
     if frame.event == "links_bundle" || payload_kind == "links_bundle" {
@@ -7250,52 +7670,33 @@ fn update_members_from_frame(
         }
         // Real, observed shape (a screenshot caught this leaking as raw
         // JSON before this was handled): `meta.modes` like `"+o"`/`"-o"`,
-        // `meta.args` the targets in order for whichever letters take one.
-        // Cordiale only tracks the three prefix-bearing modes it renders
-        // (`@`/`%`/`+`) — any other letter in the string (ban masks, keys,
-        // limits, ...) is skipped without consuming an `args` entry, since
-        // Cordiale has no ISUPPORT CHANMODES table to know which of those
-        // take one; a combined string mixing a skipped letter with a
-        // prefix letter (e.g. `"+ob"`) would misalign, but no such case
-        // has been observed yet — see README's Known gaps.
+        // `meta.args` the parameters in order. Which letters take one comes
+        // from the network's ISUPPORT PREFIX and CHANMODES, so a mixed
+        // string like `"+bo mask nick"` lines up.
         Some("mode") => {
             let modes = payload
                 .get("meta")
                 .and_then(|meta| meta.get("modes"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let targets = mode_args(payload);
+            let isupport = state.isupport_by_network.get(&key.0);
+            let prefix_changes =
+                cordiale_core::isupport::prefix_mode_changes(modes, &mode_args(payload), isupport);
+            let order = cordiale_core::isupport::prefix_symbol_order(isupport);
+            let casemapping = network_casemapping(state, &key.0);
             let Some(members) = state.members.get_mut(key) else {
                 return false;
             };
-            let mut sign = '+';
-            let mut targets = targets.into_iter();
             let mut changed = false;
-            for ch in modes.chars() {
-                match ch {
-                    '+' | '-' => sign = ch,
-                    'o' | 'h' | 'v' => {
-                        let Some(target) = targets.next() else {
-                            continue;
-                        };
-                        let Some(entry) = members.iter_mut().find(|(name, _)| *name == target)
-                        else {
-                            continue;
-                        };
-                        let symbol = match ch {
-                            'o' => "@",
-                            'h' => "%",
-                            _ => "+",
-                        };
-                        entry.1 = if sign == '+' {
-                            symbol.to_string()
-                        } else {
-                            String::new()
-                        };
-                        changed = true;
-                    }
-                    _ => {}
-                }
+            for (adding, symbol, target) in prefix_changes {
+                let Some(entry) = members
+                    .iter_mut()
+                    .find(|(name, _)| casemapping.nick_eq(name, &target))
+                else {
+                    continue;
+                };
+                entry.1 = update_member_prefix(&entry.1, &symbol, adding, &order);
+                changed = true;
             }
             if changed {
                 sort_members_by_rank(members);
@@ -7825,7 +8226,14 @@ fn buffer_pending_own_nick_dm(
         return;
     }
     if state.pending_own_nick_dms.len() >= MAX_PENDING_OWN_NICK_DMS {
-        state.pending_own_nick_dms.pop_front();
+        // The dropped DM is in Grappa's scrollback: if its query opens, the
+        // first history load fetches the full tail instead of only what
+        // follows the buffered messages, so nothing goes missing.
+        if let Some(dropped) = state.pending_own_nick_dms.pop_front() {
+            state
+                .query_full_history_required
+                .insert(query_window_key(&dropped.network, &dropped.sender));
+        }
     }
     state.pending_own_nick_dms.push_back(PendingOwnNickDm {
         network: network.to_string(),
@@ -7843,6 +8251,9 @@ fn drain_pending_own_nick_dms(state: &mut WorkerState) {
             // A valid full snapshot is authoritative: if it didn't open the
             // sender's query, don't invent a client-side window or retain the
             // message until some unrelated later snapshot.
+            state
+                .query_full_history_required
+                .remove(&query_window_key(&dm.network, &dm.sender));
             continue;
         };
         let key = (query.network.clone(), query.target_nick.clone());
@@ -8037,9 +8448,39 @@ fn topics_from_boot_response(boot: &BootResponse) -> HashMap<(String, String), S
     topics
 }
 
-/// `(name, prefix)` — `prefix` is the single highest-ranked IRC role
-/// marker (`@` op, `%` halfop, `+` voice, empty for a plain member).
+/// `(name, prefix)` — `prefix` holds every IRC role marker the member has
+/// (`@` op, `%` halfop, `+` voice...), highest first, so dropping one
+/// keeps the next; empty for a plain member. Only the first is shown.
 type MemberEntry = (String, String);
+
+/// Adds or drops one role symbol, keeping the member's symbols in `order`
+/// (highest first).
+fn update_member_prefix(prefix: &str, symbol: &str, adding: bool, order: &[String]) -> String {
+    let mut symbols: Vec<String> = prefix
+        .chars()
+        .map(String::from)
+        .filter(|held| held != symbol)
+        .collect();
+    if adding {
+        symbols.push(symbol.to_string());
+    }
+    let rank = |held: &String| {
+        order
+            .iter()
+            .position(|symbol| symbol == held)
+            .unwrap_or(order.len())
+    };
+    symbols.sort_by_key(rank);
+    symbols.concat()
+}
+
+/// The role marker shown for a member: the highest one it holds.
+fn highest_prefix(prefix: &str) -> &str {
+    prefix
+        .char_indices()
+        .nth(1)
+        .map_or(prefix, |(end, _)| &prefix[..end])
+}
 type MembersByChannel = HashMap<(String, String), Vec<MemberEntry>>;
 
 /// Reads `(network, channel) -> members` out of `boot.channels`. The
@@ -8091,11 +8532,9 @@ fn members_from_boot_response(boot: &BootResponse) -> MembersByChannel {
 /// from.
 fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
     if let Some(raw) = entry.as_str() {
-        let prefix_char = raw.chars().next().filter(|c| "@%+&~".contains(*c));
-        return Some(match prefix_char {
-            Some(c) => (raw[c.len_utf8()..].to_string(), c.to_string()),
-            None => (raw.to_string(), String::new()),
-        });
+        let name = raw.trim_start_matches(|c| "@%+&~".contains(c));
+        let prefix = raw[..raw.len() - name.len()].to_string();
+        return Some((name.to_string(), prefix));
     }
 
     let obj = entry.as_object()?;
@@ -8109,16 +8548,14 @@ fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .or_else(|| {
-            obj.get("modes")
-                .and_then(Value::as_array)
-                .and_then(|modes| {
-                    modes.iter().find_map(|mode| match mode.as_str() {
-                        Some("o") => Some("@".to_string()),
-                        Some("h") => Some("%".to_string()),
-                        Some("v") => Some("+".to_string()),
-                        _ => None,
-                    })
-                })
+            obj.get("modes").and_then(Value::as_array).map(|modes| {
+                ["o", "h", "v"]
+                    .iter()
+                    .zip(["@", "%", "+"])
+                    .filter(|(mode, _)| modes.iter().any(|held| held.as_str() == Some(**mode)))
+                    .map(|(_, symbol)| symbol)
+                    .collect::<String>()
+            })
         })
         .unwrap_or_default();
     Some((name, prefix))
@@ -8127,7 +8564,7 @@ fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
 /// Ops first, then halfops, then voice, then everyone else — each group
 /// alphabetical (case-insensitive) within itself.
 fn sort_members_by_rank(members: &mut [MemberEntry]) {
-    const RANK_ORDER: &str = "@%+";
+    const RANK_ORDER: &str = "~&@%+";
     let rank = |prefix: &str| {
         prefix
             .chars()
@@ -8577,7 +9014,7 @@ fn member_prefix_for_nick<'a>(
     members
         .iter()
         .find(|(member_nick, _)| casemapping.nick_eq(member_nick, nick))
-        .map(|(_, prefix)| prefix.as_str())
+        .map(|(_, prefix)| highest_prefix(prefix))
         .unwrap_or("")
 }
 
@@ -8676,7 +9113,7 @@ fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
             let (r, g, b) = nick_color(name, dark_theme);
             MemberRow {
                 name: name.clone().into(),
-                prefix: prefix.clone().into(),
+                prefix: highest_prefix(prefix).into(),
                 color: slint::Color::from_rgb_u8(r, g, b),
             }
         })
@@ -8770,7 +9207,14 @@ fn push_palette(ui: &AppWindow, choice: Option<&ThemeChoice>) {
 /// Mirrors the available color themes into Settings > Themes, marking
 /// `selected` (a choice key) as in use.
 fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected: Option<&str>) {
-    let rows: Vec<(String, String, String, bool, ThemePalette)> = state
+    let (day, night) = match &state.theme_pair {
+        Some((day, night)) => (
+            Some(day.key.as_str()),
+            night.as_ref().map(|night| night.key.as_str()),
+        ),
+        None => (selected, None),
+    };
+    let rows: Vec<(String, String, String, bool, bool, ThemePalette)> = state
         .theme_choices
         .iter()
         .map(|choice| {
@@ -8778,16 +9222,21 @@ fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected
                 choice.key.clone(),
                 choice.name.clone(),
                 choice.author.clone(),
-                selected == Some(choice.key.as_str()),
+                day == Some(choice.key.as_str()),
+                night == Some(choice.key.as_str()),
                 choice.palette.clone(),
             )
         })
         .collect();
+    let pair_active = state.theme_pair.is_some();
+    let has_night = night.is_some();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_theme_pair_active(pair_active);
+        ui.set_theme_has_night(has_night);
         let rows: Vec<ThemeChoiceRow> = rows
             .into_iter()
-            .map(|(key, name, author, selected, palette)| {
+            .map(|(key, name, author, selected, night, palette)| {
                 let swatches: Vec<slint::Color> = [
                     palette.bg,
                     palette.fg,
@@ -8806,6 +9255,7 @@ fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected
                     name: name.into(),
                     author: author.into(),
                     selected,
+                    night,
                     swatches: Rc::new(slint::VecModel::from(swatches)).into(),
                 }
             })
@@ -8834,9 +9284,13 @@ async fn load_color_themes(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
     };
 
     let saved = persistence::load_settings().unwrap_or_default().color_theme;
+    state.theme_pair = None;
     let active = match saved.as_deref() {
         Some("server") => match client.fetch_active_theme(&token).await {
-            Ok(pair) => pair.light.as_ref().and_then(server_theme_choice),
+            Ok(pair) => {
+                state.theme_pair = theme_pair_choices(&pair);
+                return apply_theme_pair(state, ui);
+            }
             Err(err) => {
                 persistence::log_line(&format!("active theme unavailable: {err:?}"));
                 None
@@ -8848,6 +9302,93 @@ async fn load_color_themes(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
         None => None,
     };
     apply_color_theme(state, ui, active);
+}
+
+/// Day and night choices of Grappa's active pair; `None` without a day
+/// theme.
+fn theme_pair_choices(pair: &ActiveThemePair) -> Option<(ThemeChoice, Option<ThemeChoice>)> {
+    let light = pair.light.as_ref().and_then(server_theme_choice)?;
+    let dark = pair.dark.as_ref().and_then(server_theme_choice);
+    Some((light, dark))
+}
+
+/// The theme of the pair the OS scheme calls for: the night one in dark
+/// mode when there is one, else the day one.
+fn pair_theme_for(pair: &(ThemeChoice, Option<ThemeChoice>), system_dark: bool) -> &ThemeChoice {
+    match &pair.1 {
+        Some(night) if system_dark => night,
+        _ => &pair.0,
+    }
+}
+
+fn apply_theme_pair(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let choice = state
+        .theme_pair
+        .as_ref()
+        .map(|pair| pair_theme_for(pair, state.system_dark).clone());
+    apply_color_theme(state, ui, choice);
+}
+
+/// Follows the OS light/dark setting on a thread of its own: the current
+/// mode first, then every change.
+fn watch_system_scheme(tx: mpsc::UnboundedSender<WorkerCommand>) {
+    thread::spawn(move || {
+        let is_dark = |mode: dark_light::Mode| mode == dark_light::Mode::Dark;
+        if let Ok(mode) = dark_light::detect() {
+            let _ = tx.send(WorkerCommand::SystemScheme(is_dark(mode)));
+        }
+        let watcher = match dark_light::subscribe() {
+            Ok(watcher) => watcher,
+            Err(err) => {
+                persistence::log_line(&format!("system color scheme not watched: {err}"));
+                return;
+            }
+        };
+        for mode in watcher.iter() {
+            if tx.send(WorkerCommand::SystemScheme(is_dark(mode))).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Settings > Themes night pick: `server:<id>` becomes the night theme next
+/// to the day one in use, "" goes back to the day theme at all hours.
+async fn select_night_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, key: &str) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let Some(light) = state
+        .theme_pair
+        .as_ref()
+        .and_then(|pair| pair.0.key.strip_prefix("server:"))
+        .and_then(|id| id.parse::<i64>().ok())
+    else {
+        return;
+    };
+    let dark = if key.is_empty() {
+        None
+    } else {
+        match key
+            .strip_prefix("server:")
+            .and_then(|id| id.parse::<i64>().ok())
+        {
+            Some(id) => Some(id),
+            None => return,
+        }
+    };
+    match client.set_active_theme(&token, light, dark).await {
+        Ok(pair) => {
+            state.theme_pair = theme_pair_choices(&pair);
+            apply_theme_pair(state, ui);
+        }
+        Err(err) => {
+            persistence::log_line(&format!("night theme change failed: {err:?}"));
+            let _ = ui.upgrade_in_event_loop(|ui| {
+                ui.set_status_kind("theme-change-failed".into());
+            });
+        }
+    }
 }
 
 /// Settings > Themes pick. An empty key returns to the classic look; a
@@ -8863,10 +9404,19 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         else {
             return;
         };
-        match client.set_active_theme(&token, id).await {
+        let night = state
+            .theme_pair
+            .as_ref()
+            .and_then(|pair| pair.1.as_ref())
+            .and_then(|night| night.key.strip_prefix("server:"))
+            .and_then(|night| night.parse::<i64>().ok())
+            .filter(|night| *night != id);
+        match client.set_active_theme(&token, id, night).await {
             Ok(pair) => {
                 settings.color_theme = Some("server".to_string());
-                pair.light.as_ref().and_then(server_theme_choice)
+                let _ = persistence::save_settings(&settings);
+                state.theme_pair = theme_pair_choices(&pair);
+                return apply_theme_pair(state, ui);
             }
             Err(err) => {
                 persistence::log_line(&format!("theme change failed: {err:?}"));
@@ -8890,6 +9440,7 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         choice
     };
     let _ = persistence::save_settings(&settings);
+    state.theme_pair = None;
     apply_color_theme(state, ui, choice);
 }
 
@@ -9330,6 +9881,97 @@ fn handle_umode_changed(state: &mut WorkerState, carrier_topic: &str, payload: &
         return;
     };
     state.user_modes_by_network.insert(network, modes);
+}
+
+/// User modes a normal user may flip; every other letter is set by the
+/// server or services and shows read-only, as in Cicchetto.
+const SETTABLE_UMODES: [&str; 5] = ["i", "w", "s", "x", "R"];
+
+/// Letters the user-mode view describes, offered when a network hasn't
+/// advertised its own set (RPL_MYINFO).
+const KNOWN_UMODES: [&str; 27] = [
+    "i", "w", "s", "x", "R", "b", "c", "d", "e", "f", "g", "k", "K", "m", "n", "y", "F", "I", "j",
+    "S", "o", "O", "r", "a", "A", "h", "z",
+];
+
+/// The user-mode view's rows: `(letter, settable, active)`. The server's
+/// advertised set (else the known letters) plus every active mode, settable
+/// ones first.
+fn umode_rows(active: &[String], supported: &[String]) -> Vec<(String, bool, bool)> {
+    let mut letters: Vec<String> = if supported.is_empty() {
+        KNOWN_UMODES
+            .iter()
+            .map(|letter| letter.to_string())
+            .collect()
+    } else {
+        supported.to_vec()
+    };
+    for letter in active {
+        if !letters.contains(letter) {
+            letters.push(letter.clone());
+        }
+    }
+    let mut rows: Vec<(String, bool, bool)> = letters
+        .into_iter()
+        .map(|letter| {
+            let settable = SETTABLE_UMODES.contains(&letter.as_str());
+            let is_active = active.contains(&letter);
+            (letter, settable, is_active)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
+/// Refreshes the user-mode view, switching to it when `open`.
+fn push_umode_view(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
+    let Some(network) = state.umode_view_network.clone() else {
+        return;
+    };
+    let empty = Vec::new();
+    let active = state.user_modes_by_network.get(&network).unwrap_or(&empty);
+    let supported = state
+        .supported_user_modes_by_network
+        .get(&network)
+        .unwrap_or(&empty);
+    let rows = umode_rows(active, supported);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<UmodeToggle> = rows
+            .into_iter()
+            .map(|(letter, settable, active)| UmodeToggle {
+                letter: letter.into(),
+                settable,
+                active,
+            })
+            .collect();
+        ui.set_umode_network(network.into());
+        ui.set_umode_toggles(Rc::new(slint::VecModel::from(rows)).into());
+        if open {
+            ui.set_screen("umodes".into());
+        }
+    });
+}
+
+/// Sends `+x` or `-x` for a settable mode; the view updates when Grappa
+/// pushes the new modes back.
+fn toggle_user_mode(state: &WorkerState, letter: &str) {
+    let Some(network) = state.umode_view_network.as_deref() else {
+        return;
+    };
+    if !SETTABLE_UMODES.contains(&letter) {
+        return;
+    }
+    let active = state
+        .user_modes_by_network
+        .get(network)
+        .is_some_and(|modes| modes.iter().any(|mode| mode == letter));
+    let sign = if active { '-' } else { '+' };
+    send_user_verb(
+        state,
+        network,
+        "umode",
+        serde_json::json!({ "modes": format!("{sign}{letter}") }),
+    );
 }
 
 fn parse_supported_umodes_changed(
@@ -14588,10 +15230,14 @@ mod tests {
             state.pending_own_nick_dms.front().unwrap().payload["id"].as_i64(),
             Some(2)
         );
+        // The overflow is recovered from history if the query opens.
+        let identity = query_window_key("libera", "unlisted");
+        assert!(state.query_full_history_required.contains(&identity));
 
         assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
         drain_pending_own_nick_dms(&mut state);
         assert!(state.pending_own_nick_dms.is_empty());
+        assert!(!state.query_full_history_required.contains(&identity));
         assert!(state.query_windows.is_empty());
         assert!(state.messages.is_empty());
     }
@@ -17334,6 +17980,127 @@ mod tests {
         assert!(slint::StyledText::from_markdown(&italic).is_ok());
         let multiline = message_markdown(&[("a\n    b".to_string(), (0, 0, 0), false)], false);
         assert!(slint::StyledText::from_markdown(&multiline).is_ok());
+    }
+
+    #[test]
+    fn member_prefixes_keep_every_role_highest_first() {
+        let order: Vec<String> = ["@", "%", "+"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(update_member_prefix("+", "@", true, &order), "@+");
+        assert_eq!(update_member_prefix("@+", "@", false, &order), "+");
+        assert_eq!(update_member_prefix("@", "@", true, &order), "@");
+        assert_eq!(highest_prefix("@+"), "@");
+        assert_eq!(highest_prefix(""), "");
+        assert_eq!(
+            member_from_entry(&serde_json::json!("@+ada")),
+            Some(("ada".to_string(), "@+".to_string()))
+        );
+        assert_eq!(
+            member_from_entry(&serde_json::json!({"nick": "bob", "modes": ["v", "o"]})),
+            Some(("bob".to_string(), "@+".to_string()))
+        );
+    }
+
+    #[test]
+    fn theme_pair_follows_the_system_scheme() {
+        let mut themes = builtin_theme_choices().into_iter();
+        let day = themes.next().expect("a built-in theme");
+        let night = themes.next().expect("a second built-in theme");
+        let single = (day.clone(), None);
+        assert_eq!(pair_theme_for(&single, true).key, day.key);
+        let pair = (day.clone(), Some(night.clone()));
+        assert_eq!(pair_theme_for(&pair, false).key, day.key);
+        assert_eq!(pair_theme_for(&pair, true).key, night.key);
+    }
+
+    #[test]
+    fn umode_rows_follow_the_advertised_set() {
+        let strings = |letters: &[&str]| -> Vec<String> {
+            letters.iter().map(|letter| letter.to_string()).collect()
+        };
+        let rows = umode_rows(&strings(&["r", "i"]), &strings(&["o", "i", "w"]));
+        assert_eq!(
+            rows,
+            vec![
+                ("i".to_string(), true, true),
+                ("w".to_string(), true, false),
+                ("o".to_string(), false, false),
+                ("r".to_string(), false, true),
+            ]
+        );
+        let fallback = umode_rows(&[], &[]);
+        assert_eq!(fallback.len(), KNOWN_UMODES.len());
+        assert!(fallback[..SETTABLE_UMODES.len()].iter().all(|row| row.1));
+    }
+
+    #[test]
+    fn notification_edits_change_only_their_field() {
+        let mut prefs = serde_json::json!({
+            "channel_messages_only": ["#rust"],
+            "muted_targets": {"libera #old": {"until": null}},
+            "notification_sound": "none",
+            "channel_mentions": true
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::AddToList("channel".to_string(), " #Slint ".to_string())
+        ));
+        assert_eq!(
+            prefs["channel_messages_only"],
+            serde_json::json!(["#rust", "#slint"])
+        );
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::RemoveFromList("channel".to_string(), "#rust".to_string())
+        ));
+        assert_eq!(
+            prefs["channel_messages_only"],
+            serde_json::json!(["#slint"])
+        );
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::Mute(muted_key("libera", "#Rust"), Some(100))
+        ));
+        assert_eq!(prefs["muted_targets"]["libera #rust"]["until"], 100);
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::Unmute("libera #old".to_string())
+        ));
+        assert!(prefs["muted_targets"].get("libera #old").is_none());
+        assert!(!apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::Sound("klaxon".to_string())
+        ));
+        assert!(apply_notification_edit(
+            &mut prefs,
+            &NotificationEdit::Sound("chime".to_string())
+        ));
+        assert_eq!(prefs["notification_sound"], "chime");
+        assert_eq!(prefs["channel_mentions"], true);
+        assert_eq!(muted_rows(&prefs)[0].1, "libera #rust");
+    }
+
+    #[test]
+    fn watchlist_reply_and_network_nick() {
+        assert_eq!(
+            watch_patterns_from_reply(&serde_json::json!({
+                "status": "ok", "response": {"patterns": ["rust*", "cordiale"]}
+            })),
+            Some(vec!["rust*".to_string(), "cordiale".to_string()])
+        );
+        assert_eq!(
+            watch_patterns_from_reply(&serde_json::json!({"status": "error"})),
+            None
+        );
+        let networks = vec![
+            serde_json::json!({"slug": "libera", "nick": "ada"}),
+            serde_json::json!({"slug": "oftc", "nick": ""}),
+        ];
+        assert_eq!(network_nick(&networks, "libera"), Some("ada".to_string()));
+        assert_eq!(network_nick(&networks, "oftc"), None);
+        assert_eq!(network_nick(&networks, "efnet"), None);
     }
 
     #[test]

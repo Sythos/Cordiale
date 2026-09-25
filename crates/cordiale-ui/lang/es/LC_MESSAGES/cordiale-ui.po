@@ -313,10 +313,6 @@ msgid "Expansion"
 msgstr "Expansión"
 
 msgctxt "AppWindow"
-msgid "On-connect commands (one per line, semicolon-separated)"
-msgstr "Comandos al conectar (uno por línea, separados por punto y coma)"
-
-msgctxt "AppWindow"
 msgid "Credits"
 msgstr "Créditos"
 
@@ -1415,3 +1411,347 @@ msgstr "Conceder"
 msgctxt "AppWindow"
 msgid "Revoke grant {}"
 msgstr "Revocar la concesión {}"
+
+msgctxt "AppWindow"
+msgid "On-connect commands, one IRC command per line"
+msgstr "Comandos al conectar, un comando IRC por línea"
+
+msgctxt "AppWindow"
+msgid "On-connect commands"
+msgstr "Comandos al conectar"
+
+msgctxt "AppWindow"
+msgid "Conversation muted: other devices won't be notified about it."
+msgstr "Conversación silenciada: los demás dispositivos no recibirán avisos."
+
+msgctxt "AppWindow"
+msgid "Notification sound: {}"
+msgstr "Sonido de notificación: {}"
+
+msgctxt "AppWindow"
+msgid "Notification sound set to {}."
+msgstr "Sonido de notificación establecido en {}."
+
+msgctxt "AppWindow"
+msgid "Unknown sound. Available: {}"
+msgstr "Sonido desconocido. Disponibles: {}"
+
+msgctxt "AppWindow"
+msgid "Mute this conversation"
+msgstr "Silenciar esta conversación"
+
+msgctxt "AppWindow"
+msgid "For 1 hour"
+msgstr "Durante 1 hora"
+
+msgctxt "AppWindow"
+msgid "For 8 hours"
+msgstr "Durante 8 horas"
+
+msgctxt "AppWindow"
+msgid "Until I unmute it"
+msgstr "Hasta que la reactive"
+
+msgctxt "AppWindow"
+msgid "With every channel message off, also these channels:"
+msgstr "Con los mensajes de canal desactivados, avisar igualmente de estos canales:"
+
+msgctxt "AppWindow"
+msgid "Remove {}"
+msgstr "Quitar {}"
+
+msgctxt "AppWindow"
+msgid "Channel"
+msgstr "Canal"
+
+msgctxt "AppWindow"
+msgid "With every private message off, also these nicks:"
+msgstr "Con los mensajes privados desactivados, avisar igualmente de estos nicks:"
+
+msgctxt "AppWindow"
+msgid "Muted conversations"
+msgstr "Conversaciones silenciadas"
+
+msgctxt "AppWindow"
+msgid "None. Mute one from the Actions menu."
+msgstr "Ninguna. Silencia una desde el menú Acciones."
+
+msgctxt "AppWindow"
+msgid "Unmute"
+msgstr "Reactivar"
+
+msgctxt "AppWindow"
+msgid "Unmute {}"
+msgstr "Reactivar {}"
+
+msgctxt "AppWindow"
+msgid "Sound on other devices (also /beep)"
+msgstr "Sonido en otros dispositivos (también /beep)"
+
+msgctxt "AppWindow"
+msgid "invisible"
+msgstr "invisible"
+
+msgctxt "AppWindow"
+msgid "wallops"
+msgstr "wallops"
+
+msgctxt "AppWindow"
+msgid "server notices"
+msgstr "avisos del servidor"
+
+msgctxt "AppWindow"
+msgid "masked host"
+msgstr "host enmascarado"
+
+msgctxt "AppWindow"
+msgid "registered only"
+msgstr "solo registrados"
+
+msgctxt "AppWindow"
+msgid "chatops"
+msgstr "chatops"
+
+msgctxt "AppWindow"
+msgid "client notices"
+msgstr "avisos de clientes"
+
+msgctxt "AppWindow"
+msgid "debug notices"
+msgstr "avisos de depuración"
+
+msgctxt "AppWindow"
+msgid "invalid DCC"
+msgstr "DCC no válidos"
+
+msgctxt "AppWindow"
+msgid "flood notices"
+msgstr "avisos de flood"
+
+msgctxt "AppWindow"
+msgid "globops"
+msgstr "globops"
+
+msgctxt "AppWindow"
+msgid "kill notices"
+msgstr "avisos de kill"
+
+msgctxt "AppWindow"
+msgid "U:Line kills"
+msgstr "kills de U:Line"
+
+msgctxt "AppWindow"
+msgid "spam notices"
+msgstr "avisos de spam"
+
+msgctxt "AppWindow"
+msgid "routing notices"
+msgstr "avisos de enrutamiento"
+
+msgctxt "AppWindow"
+msgid "command notices"
+msgstr "avisos de comandos"
+
+msgctxt "AppWindow"
+msgid "flood immune"
+msgstr "inmune al flood"
+
+msgctxt "AppWindow"
+msgid "hide idle"
+msgstr "ocultar inactividad"
+
+msgctxt "AppWindow"
+msgid "Java user"
+msgstr "usuario Java"
+
+msgctxt "AppWindow"
+msgid "SSL"
+msgstr "SSL"
+
+msgctxt "AppWindow"
+msgid "operator"
+msgstr "operador"
+
+msgctxt "AppWindow"
+msgid "local operator"
+msgstr "operador local"
+
+msgctxt "AppWindow"
+msgid "registered"
+msgstr "registrado"
+
+msgctxt "AppWindow"
+msgid "services admin"
+msgstr "admin de servicios"
+
+msgctxt "AppWindow"
+msgid "server admin"
+msgstr "admin del servidor"
+
+msgctxt "AppWindow"
+msgid "help operator"
+msgstr "operador de ayuda"
+
+msgctxt "AppWindow"
+msgid "services agent"
+msgstr "agente de servicios"
+
+msgctxt "AppWindow"
+msgid "mode +{}"
+msgstr "modo +{}"
+
+msgctxt "AppWindow"
+msgid "hidden from WHO and global nick lists"
+msgstr "oculto en WHO y en las listas globales de nicks"
+
+msgctxt "AppWindow"
+msgid "receive network WALLOPS broadcasts"
+msgstr "recibir los mensajes WALLOPS de la red"
+
+msgctxt "AppWindow"
+msgid "receive server notice broadcasts"
+msgstr "recibir los avisos difundidos por el servidor"
+
+msgctxt "AppWindow"
+msgid "cloak your hostname from other users"
+msgstr "ocultar tu nombre de host a otros usuarios"
+
+msgctxt "AppWindow"
+msgid "only registered nicks may message you"
+msgstr "solo los nicks registrados pueden escribirte"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive CHATOPS messages"
+msgstr "operadores IRC: recibir mensajes CHATOPS"
+
+msgctxt "AppWindow"
+msgid "IRC operators: client connect and disconnect notices"
+msgstr "operadores IRC: avisos de conexión y desconexión de clientes"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive DEBUG messages"
+msgstr "operadores IRC: recibir mensajes DEBUG"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive invalid DCC notices"
+msgstr "operadores IRC: recibir avisos de DCC no válidos"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive FLOOD messages"
+msgstr "operadores IRC: recibir mensajes FLOOD"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive GLOBOPS messages"
+msgstr "operadores IRC: recibir mensajes GLOBOPS"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive KILL notices"
+msgstr "operadores IRC: recibir avisos KILL"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive KILL notices from U:Lines"
+msgstr "operadores IRC: recibir avisos KILL de las U:Lines"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive SPAM messages"
+msgstr "operadores IRC: recibir mensajes SPAM"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive ROUTING messages"
+msgstr "operadores IRC: recibir mensajes ROUTING"
+
+msgctxt "AppWindow"
+msgid "IRC operators: notified of /ADMIN, /LINKS, /WHOIS and similar"
+msgstr "operadores IRC: avisados de /ADMIN, /LINKS, /WHOIS y similares"
+
+msgctxt "AppWindow"
+msgid "IRC operators: immune from flood limits"
+msgstr "operadores IRC: exentos de los límites de flood"
+
+msgctxt "AppWindow"
+msgid "IRC operators: idle time hidden in WHOIS"
+msgstr "operadores IRC: tiempo de inactividad oculto en WHOIS"
+
+msgctxt "AppWindow"
+msgid "chatting from the web via Java"
+msgstr "chateando desde la web mediante Java"
+
+msgctxt "AppWindow"
+msgid "connected to the server via SSL"
+msgstr "conectado al servidor mediante SSL"
+
+msgctxt "AppWindow"
+msgid "IRC operator, granted by the server"
+msgstr "operador IRC, concedido por el servidor"
+
+msgctxt "AppWindow"
+msgid "local IRC operator, granted by the server"
+msgstr "operador IRC local, concedido por el servidor"
+
+msgctxt "AppWindow"
+msgid "identified to NickServ, set by services"
+msgstr "identificado ante NickServ, fijado por los servicios"
+
+msgctxt "AppWindow"
+msgid "services administrator, set by services"
+msgstr "administrador de servicios, fijado por los servicios"
+
+msgctxt "AppWindow"
+msgid "server administrator, set by the server"
+msgstr "administrador del servidor, fijado por el servidor"
+
+msgctxt "AppWindow"
+msgid "services help operator"
+msgstr "operador de ayuda de los servicios"
+
+msgctxt "AppWindow"
+msgid "user mode, no description available"
+msgstr "modo de usuario, sin descripción disponible"
+
+msgctxt "AppWindow"
+msgid "Rooms"
+msgstr "Salas"
+
+msgctxt "AppWindow"
+msgid "Archive"
+msgstr "Archivo"
+
+msgctxt "AppWindow"
+msgid "Switch account"
+msgstr "Cambiar de cuenta"
+
+msgctxt "AppWindow"
+msgid "User modes on {}"
+msgstr "Modos de usuario en {}"
+
+msgctxt "AppWindow"
+msgid "{} (+{})"
+msgstr "{} (+{})"
+
+msgctxt "AppWindow"
+msgid "{} (set by the server)"
+msgstr "{} (fijado por el servidor)"
+
+msgctxt "AppWindow"
+msgid "Pick a night theme too and Cordiale switches to it while your system is in dark mode, like Cicchetto."
+msgstr "Elige también un tema nocturno: Cordiale lo usa mientras el sistema está en modo oscuro, como Cicchetto."
+
+msgctxt "AppWindow"
+msgid "Same theme day and night"
+msgstr "Mismo tema de día y de noche"
+
+msgctxt "AppWindow"
+msgid "By day"
+msgstr "De día"
+
+msgctxt "AppWindow"
+msgid "At night"
+msgstr "De noche"
+
+msgctxt "AppWindow"
+msgid "Use at night"
+msgstr "Usar de noche"
+
+msgctxt "AppWindow"
+msgid "Use theme {} at night"
+msgstr "Usar el tema {} de noche"
