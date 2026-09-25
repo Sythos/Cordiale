@@ -275,14 +275,12 @@ fn decoder_thread(
     let mut block = Vec::with_capacity(block_len);
     for sample in decoder {
         block.push(sample);
-        if block.len() == block_len {
-            if cancelled.load(Ordering::Relaxed)
-                || samples_tx
-                    .send(std::mem::replace(&mut block, Vec::with_capacity(block_len)))
-                    .is_err()
-            {
-                return;
-            }
+        if block.len() < block_len {
+            continue;
+        }
+        let full = std::mem::replace(&mut block, Vec::with_capacity(block_len));
+        if cancelled.load(Ordering::Relaxed) || samples_tx.send(full).is_err() {
+            return;
         }
     }
     let _ = samples_tx.send(block);
@@ -428,7 +426,7 @@ mod tests {
         let mut all = Vec::new();
         reader.read_to_end(&mut all).unwrap();
         assert_eq!(all, b"OggS");
-        assert_eq!(reader.seek(SeekFrom::Current(0)).unwrap(), 4);
+        assert_eq!(reader.stream_position().unwrap(), 4);
         assert!(reader.seek(SeekFrom::Start(0)).is_err());
     }
 
