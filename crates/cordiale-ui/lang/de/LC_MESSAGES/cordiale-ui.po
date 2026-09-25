@@ -1887,3 +1887,155 @@ msgstr "Als Datei einfügen"
 msgctxt "AppWindow"
 msgid "The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?"
 msgstr "Die Zwischenablage enthält {} Zeilen. Als paste.txt hochladen und den Link senden, statt sie in eine Nachricht einzufügen?"
+
+msgctxt "AppWindow"
+msgid "Delete theme"
+msgstr "Theme löschen"
+
+msgctxt "AppWindow"
+msgid "Delete the theme {} from Grappa? This cannot be undone."
+msgstr "Das Theme {} aus Grappa löschen? Das kann nicht rückgängig gemacht werden."
+
+msgctxt "AppWindow"
+msgid "No wallpaper"
+msgstr "Kein Hintergrundbild"
+
+msgctxt "AppWindow"
+msgid "Uploaded image"
+msgstr "Hochgeladenes Bild"
+
+msgctxt "AppWindow"
+msgid "Background"
+msgstr "Hintergrund"
+
+msgctxt "AppWindow"
+msgid "Alternate background"
+msgstr "Alternativer Hintergrund"
+
+msgctxt "AppWindow"
+msgid "Text"
+msgstr "Text"
+
+msgctxt "AppWindow"
+msgid "Accent"
+msgstr "Akzent"
+
+msgctxt "AppWindow"
+msgid "Muted text"
+msgstr "Gedämpfter Text"
+
+msgctxt "AppWindow"
+msgid "Borders"
+msgstr "Rahmen"
+
+msgctxt "AppWindow"
+msgid "Mentions"
+msgstr "Erwähnungen"
+
+msgctxt "AppWindow"
+msgid "Operators"
+msgstr "Operatoren"
+
+msgctxt "AppWindow"
+msgid "Half-operators"
+msgstr "Halb-Operatoren"
+
+msgctxt "AppWindow"
+msgid "Voiced"
+msgstr "Mit Voice"
+
+msgctxt "AppWindow"
+msgid "Plain members"
+msgstr "Normale Mitglieder"
+
+msgctxt "AppWindow"
+msgid "Nick color {}"
+msgstr "Nick-Farbe {}"
+
+msgctxt "AppWindow"
+msgid "Theme saved and in use."
+msgstr "Theme gespeichert und in Verwendung."
+
+msgctxt "AppWindow"
+msgid "A theme needs a name (up to 60 characters) and 27 valid #rrggbb colors."
+msgstr "Ein Theme braucht einen Namen (bis zu 60 Zeichen) und 27 gültige #rrggbb-Farben."
+
+msgctxt "AppWindow"
+msgid "Grappa refused the theme: the name may be taken or a value is invalid."
+msgstr "Grappa hat das Theme abgelehnt: Der Name ist vielleicht vergeben oder ein Wert ungültig."
+
+msgctxt "AppWindow"
+msgid "Too many new themes today; try again tomorrow."
+msgstr "Heute zu viele neue Themes; versuche es morgen erneut."
+
+msgctxt "AppWindow"
+msgid "The theme action failed ({})."
+msgstr "Die Theme-Aktion ist fehlgeschlagen ({})."
+
+msgctxt "AppWindow"
+msgid "The wallpaper couldn't be uploaded ({})."
+msgstr "Das Hintergrundbild konnte nicht hochgeladen werden ({})."
+
+msgctxt "AppWindow"
+msgid "New theme"
+msgstr "Neues Theme"
+
+msgctxt "AppWindow"
+msgid "Edit theme {}"
+msgstr "Theme {} bearbeiten"
+
+msgctxt "AppWindow"
+msgid "Unpublish"
+msgstr "Zurückziehen"
+
+msgctxt "AppWindow"
+msgid "Publish"
+msgstr "Veröffentlichen"
+
+msgctxt "AppWindow"
+msgid "Unpublish theme {}"
+msgstr "Theme {} zurückziehen"
+
+msgctxt "AppWindow"
+msgid "Publish theme {}"
+msgstr "Theme {} veröffentlichen"
+
+msgctxt "AppWindow"
+msgid "Delete theme {}"
+msgstr "Theme {} löschen"
+
+msgctxt "AppWindow"
+msgid "Copy theme {}"
+msgstr "Theme {} kopieren"
+
+msgctxt "AppWindow"
+msgid "Edit theme"
+msgstr "Theme bearbeiten"
+
+msgctxt "AppWindow"
+msgid "Theme name"
+msgstr "Theme-Name"
+
+msgctxt "AppWindow"
+msgid "Default monospace"
+msgstr "Standard-Monospace"
+
+msgctxt "AppWindow"
+msgid "Wallpaper"
+msgstr "Hintergrundbild"
+
+msgctxt "AppWindow"
+msgid "Upload image…"
+msgstr "Bild hochladen…"
+
+msgctxt "AppWindow"
+msgid "Tile"
+msgstr "Kacheln"
+
+msgctxt "AppWindow"
+msgid "Opacity {}%"
+msgstr "Deckkraft {} %"
+
+msgctxt "AppWindow"
+msgid "Save and use"
+msgstr "Speichern und verwenden"
