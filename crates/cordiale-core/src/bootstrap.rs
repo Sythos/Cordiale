@@ -89,10 +89,20 @@ pub async fn bootstrap(
     client: &GrappaClient,
     login_request: &LoginRequest,
 ) -> Result<BootstrapOutcome, BootstrapError> {
+    bootstrap_with_login_bearer(client, login_request, None).await
+}
+
+/// Bootstrap a returning anonymous visitor. The previous bearer is sent to
+/// `/auth/login`, where Grappa verifies the nickname and rotates the token.
+pub async fn bootstrap_with_login_bearer(
+    client: &GrappaClient,
+    login_request: &LoginRequest,
+    previous_bearer: Option<&str>,
+) -> Result<BootstrapOutcome, BootstrapError> {
     let compatibility = check_server_compatibility(client).await?;
 
     let login = client
-        .login(login_request)
+        .login_with_bearer(login_request, previous_bearer)
         .await
         .map_err(BootstrapError::Login)?;
 
@@ -246,6 +256,50 @@ mod tests {
         assert_eq!(outcome.token, "saved-bearer");
         assert_eq!(outcome.subject, None);
         assert!(outcome.boot.networks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn returning_guest_bootstrap_uses_the_rotated_bearer_for_rest() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .and(header("authorization", "Bearer previous-bearer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "rotated-bearer",
+                "subject": {"kind": "visitor"}
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        for endpoint in ["/boot", "/me"] {
+            let body = if endpoint == "/boot" {
+                serde_json::json!({"networks": []})
+            } else {
+                serde_json::json!({"badge_count": 0})
+            };
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .and(header("authorization", "Bearer rotated-bearer"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+        }
+
+        let client = GrappaClient::new(mock_server.uri());
+        let request = LoginRequest {
+            identifier: "guest_nick".to_string(),
+            password: String::new(),
+        };
+        let outcome = bootstrap_with_login_bearer(&client, &request, Some("previous-bearer"))
+            .await
+            .expect("returning guest bootstrap");
+        assert_eq!(outcome.token, "rotated-bearer");
     }
 
     #[tokio::test]

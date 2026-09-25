@@ -146,8 +146,22 @@ impl GrappaClient {
     /// `POST /auth/login` — `request.password` may hold either a real
     /// password or a per-client token (see `crate::domain::AuthMethod`).
     pub async fn login(&self, request: &LoginRequest) -> Result<LoginResponse, LoginError> {
+        self.login_with_bearer(request, None).await
+    }
+
+    /// A returning anonymous visitor must prove ownership of the nickname
+    /// with its previous bearer. Grappa rotates that bearer on success.
+    pub async fn login_with_bearer(
+        &self,
+        request: &LoginRequest,
+        previous_bearer: Option<&str>,
+    ) -> Result<LoginResponse, LoginError> {
         let url = format!("{}/auth/login", self.base_url);
-        let response = self.http.post(url).json(request).send().await?;
+        let mut request_builder = self.http.post(url).json(request);
+        if let Some(bearer) = previous_bearer {
+            request_builder = request_builder.bearer_auth(bearer);
+        }
+        let response = request_builder.send().await?;
 
         match response.status() {
             StatusCode::OK => Ok(response.json::<LoginResponse>().await?),
@@ -174,6 +188,19 @@ impl GrappaClient {
                 })
             }
         }
+    }
+
+    /// Revoke the current bearer. An anonymous visitor's server-side
+    /// session is also stopped and its nickname released by Grappa.
+    pub async fn logout(&self, token: &str) -> Result<(), GrappaClientError> {
+        let url = format!("{}/auth/logout", self.base_url);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     /// `GET /boot` — authenticated cold-start aggregate. Call `GET /me` in
@@ -2216,6 +2243,66 @@ mod tests {
         let response = client.login(&request).await.expect("login");
 
         assert_eq!(response.token, "abc123");
+    }
+
+    #[tokio::test]
+    async fn returning_guest_login_proves_the_nickname_with_its_bearer() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .and(header("authorization", "Bearer previous-bearer"))
+            .and(body_json(serde_json::json!({"identifier": "guest_nick"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "rotated-bearer",
+                "subject": {"kind": "visitor"}
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let request = LoginRequest {
+            identifier: "guest_nick".to_string(),
+            password: String::new(),
+        };
+        let response = client
+            .login_with_bearer(&request, Some("previous-bearer"))
+            .await
+            .expect("returning guest login");
+        assert_eq!(response.token, "rotated-bearer");
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_the_current_bearer() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/auth/logout"))
+            .and(header("authorization", "Bearer guest-bearer"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .logout("guest-bearer")
+            .await
+            .expect("guest logout");
+    }
+
+    #[tokio::test]
+    async fn failed_logout_keeps_the_server_error_visible_to_the_caller() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/auth/logout"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&mock_server)
+            .await;
+
+        let error = GrappaClient::new(mock_server.uri())
+            .logout("guest-bearer")
+            .await
+            .expect_err("server did not confirm logout");
+        assert_eq!(error.status(), Some(StatusCode::SERVICE_UNAVAILABLE));
     }
 
     #[tokio::test]
