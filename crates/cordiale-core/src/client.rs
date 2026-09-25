@@ -91,7 +91,14 @@ pub enum LoginError {
     /// `429 too_many_attempts`: throttled, don't retry immediately.
     TooManyAttempts,
     Http(reqwest::Error),
-    UnexpectedStatus(StatusCode),
+    /// Any other refusal. `code` is Grappa's `error` field when the body
+    /// has one (`anon_collision`, `nick_in_use`, `malformed_nick`...), and
+    /// `retry_after` its `Retry-After` header in seconds.
+    Refused {
+        status: StatusCode,
+        code: Option<String>,
+        retry_after: Option<u64>,
+    },
 }
 
 impl From<reqwest::Error> for LoginError {
@@ -147,7 +154,25 @@ impl GrappaClient {
             StatusCode::ACCEPTED => Err(LoginError::TwoFactorRequired),
             StatusCode::UNAUTHORIZED => Err(LoginError::InvalidCredentials),
             StatusCode::TOO_MANY_REQUESTS => Err(LoginError::TooManyAttempts),
-            other => Err(LoginError::UnexpectedStatus(other)),
+            status => {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.trim().parse().ok());
+                // A body that isn't Grappa's JSON (a proxy's error page,
+                // say) just leaves the code empty.
+                let code = response
+                    .json::<Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| body.get("error")?.as_str().map(str::to_string));
+                Err(LoginError::Refused {
+                    status,
+                    code,
+                    retry_after,
+                })
+            }
         }
     }
 
@@ -2248,6 +2273,71 @@ mod tests {
         let error = client.login(&request).await.expect_err("should fail");
 
         assert!(matches!(error, LoginError::TooManyAttempts));
+    }
+
+    #[tokio::test]
+    async fn login_reads_the_refusal_code_and_retry_after() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .and(body_json(serde_json::json!({"identifier": "ada_guest"})))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .insert_header("retry-after", "42")
+                    .set_body_json(serde_json::json!({"error": "anon_collision"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let request = LoginRequest {
+            identifier: "ada_guest".to_string(),
+            password: String::new(),
+        };
+        let error = client.login(&request).await.expect_err("should fail");
+
+        match error {
+            LoginError::Refused {
+                status,
+                code,
+                retry_after,
+            } => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(code.as_deref(), Some("anon_collision"));
+                assert_eq!(retry_after, Some(42));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_refusal_without_a_json_body_has_no_code() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .respond_with(ResponseTemplate::new(502).set_body_string("<html>bad gateway</html>"))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let request = LoginRequest {
+            identifier: "vjt".to_string(),
+            password: "s3cr3t".to_string(),
+        };
+        let error = client.login(&request).await.expect_err("should fail");
+
+        match error {
+            LoginError::Refused {
+                status,
+                code,
+                retry_after,
+            } => {
+                assert_eq!(status, StatusCode::BAD_GATEWAY);
+                assert_eq!(code, None);
+                assert_eq!(retry_after, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]
