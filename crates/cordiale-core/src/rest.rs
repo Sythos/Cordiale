@@ -109,6 +109,36 @@ pub struct MeResponse {
     pub badge_count: Value,
     #[serde(default)]
     pub is_admin: bool,
+    /// `"user"` or `"visitor"`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The subject id: a visitor's is the stable key of its topics.
+    #[serde(default)]
+    pub id: Option<Value>,
+    /// The account name, for a user subject.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl MeResponse {
+    /// The label Grappa builds the subject's realtime topics from
+    /// (`grappa:user:<label>/...`, `Grappa.Subject.label/1`): the account
+    /// name as stored for a user, `visitor:<id>` for a visitor. `None`
+    /// when `/me` doesn't say.
+    pub fn topic_label(&self) -> Option<String> {
+        match self.kind.as_deref()? {
+            "user" => self.name.clone().filter(|name| !name.is_empty()),
+            "visitor" => {
+                let id = match self.id.as_ref()? {
+                    Value::String(id) => id.clone(),
+                    Value::Number(id) => id.to_string(),
+                    _ => return None,
+                };
+                (!id.is_empty()).then(|| format!("visitor:{id}"))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Request body of `POST /networks/:network_id/channels/:channel_id/messages`.

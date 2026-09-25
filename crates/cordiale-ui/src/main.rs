@@ -1786,7 +1786,11 @@ struct NetworkConnectionTransition {
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
+    /// The subject label of the realtime topics (`grappa:user:<label>`):
+    /// the account name, or `visitor:<id>` for a guest.
     identifier: Option<String>,
+    /// The name typed at sign-in, which keys the remembered profile.
+    login_identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
     /// Lines of the live admin feed, newest first (capped).
@@ -2002,6 +2006,7 @@ impl WorkerState {
             client: None,
             token: None,
             identifier: None,
+            login_identifier: None,
             session: None,
             joined_topics: std::collections::HashSet::new(),
             admin_events: Vec::new(),
@@ -2846,6 +2851,17 @@ async fn run_worker(
                             ui.set_current_query_ready(false);
                         });
                     }
+                    Some(SessionEvent::JoinRefused { reason }) => {
+                        // Stopped for good: retrying the same topics can't work.
+                        persistence::log_line(&format!("session join refused: {reason}"));
+                        state.session = None;
+                        session_events = None;
+                        let _ = ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_status_kind("session-refused".into());
+                            ui.set_status_message(reason.into());
+                            ui.set_current_query_ready(false);
+                        });
+                    }
                     Some(SessionEvent::AuthRejected { reason }) => {
                         // The session task has already stopped retrying; a
                         // lost `web_session_severed` push ends up here too.
@@ -3049,14 +3065,17 @@ async fn handle_connect(
             // response, where it is a top-level field.
             let is_admin = outcome.me.is_admin;
             let token = outcome.token.clone();
-            // Guest login always sends the fixed server-confirmed identifier
-            // "guest"; never derive its user-topic name from arbitrary text
-            // left in the username field.
-            let session_identifier = if is_guest_attempt {
-                "guest".to_string()
-            } else {
-                identifier.clone()
-            };
+            // Realtime topics use Grappa's own subject label from `/me`: the
+            // account name as stored (the login matched it case-insensitively)
+            // or `visitor:<id>` for a guest, never the typed text, which the
+            // topic check compares exactly (issue #82).
+            let session_identifier =
+                realtime_identifier(&outcome.me, is_guest_attempt, &identifier);
+            persistence::log_line(&format!(
+                "realtime topics: {} label from /me: {}",
+                outcome.me.kind.as_deref().unwrap_or("unknown"),
+                outcome.me.topic_label().is_some()
+            ));
 
             let ws_url = to_ws_url(&server_url);
             let (handle, events) = spawn_session(ws_url, token.clone(), session_identifier.clone());
@@ -3074,6 +3093,7 @@ async fn handle_connect(
             state.client = Some(client);
             state.token = Some(token.clone());
             state.identifier = Some(session_identifier.clone());
+            state.login_identifier = Some(identifier.clone());
             state.session = Some(handle);
             state.joined_topics = entries
                 .iter()
@@ -3621,6 +3641,19 @@ fn remove_sidebar_channel_entry(
 /// Whether `identifier` appears in `members` with the `@` (op) prefix —
 /// gates `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items, as
 /// accurate as `members` (snapshots plus live MODE changes).
+/// The subject label for the realtime topics: `/me`'s label when it gives
+/// one, otherwise `guest` for a guest sign-in and the typed name for an
+/// account (older servers).
+fn realtime_identifier(me: &MeResponse, guest: bool, typed: &str) -> String {
+    me.topic_label().unwrap_or_else(|| {
+        if guest {
+            "guest".to_string()
+        } else {
+            typed.to_string()
+        }
+    })
+}
+
 fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str) -> bool {
     members
         .iter()
@@ -12394,7 +12427,9 @@ fn end_revoked_session(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, flo
     if let Some(handle) = state.session.take() {
         handle.shutdown();
     }
-    if let (Some(client), Some(identifier)) = (state.client.as_ref(), state.identifier.as_deref()) {
+    if let (Some(client), Some(identifier)) =
+        (state.client.as_ref(), state.login_identifier.as_deref())
+    {
         forget_remembered_bearer(client.base_url(), identifier);
     }
     state.token = None;
@@ -19858,6 +19893,25 @@ mod tests {
     }
 
     #[test]
+    fn realtime_identifier_follows_grappas_subject_label() {
+        let me = |value: serde_json::Value| -> MeResponse {
+            serde_json::from_value(value).expect("a /me body")
+        };
+        let visitor = me(serde_json::json!({
+            "kind": "visitor", "id": "0b9c2f3e-1d2a-4c5b-9e8f-7a6b5c4d3e2f"
+        }));
+        assert_eq!(
+            realtime_identifier(&visitor, true, "guest"),
+            "visitor:0b9c2f3e-1d2a-4c5b-9e8f-7a6b5c4d3e2f"
+        );
+        let user = me(serde_json::json!({"kind": "user", "id": 3, "name": "Sythos"}));
+        assert_eq!(realtime_identifier(&user, false, "sythos"), "Sythos");
+        let silent = me(serde_json::json!({}));
+        assert_eq!(realtime_identifier(&silent, true, "whatever"), "guest");
+        assert_eq!(realtime_identifier(&silent, false, "ada"), "ada");
+    }
+
+    #[test]
     fn attachment_caps_and_errors_follow_the_category() {
         let limits = UploadLimits {
             host: "embedded".to_string(),
@@ -21986,6 +22040,9 @@ mod tests {
             }),
             badge_count: serde_json::json!(2),
             is_admin: false,
+            kind: None,
+            id: None,
+            name: None,
         };
 
         let mut state = WorkerState::new();
@@ -22068,6 +22125,9 @@ mod tests {
             unread_counts: serde_json::json!({}),
             badge_count: serde_json::json!(0),
             is_admin: false,
+            kind: None,
+            id: None,
+            name: None,
         };
         let actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
         assert_eq!(actions.len(), 2);
