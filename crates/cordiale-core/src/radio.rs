@@ -424,7 +424,7 @@ pub async fn fetch_now_playing(source: NowPlayingSource) -> Option<Track> {
         NowPlayingSource::IcecastStatus { url, .. } => url,
     };
     let http = reqwest::Client::builder()
-        .user_agent(concat!("Cordiale/", env!("CARGO_PKG_VERSION")))
+        .user_agent(crate::EXTERNAL_USER_AGENT)
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .ok()?;
@@ -591,7 +591,7 @@ impl RadioStream {
     /// followed to its first stream.
     pub async fn open(url: &str) -> Result<Self, RadioError> {
         let http = reqwest::Client::builder()
-            .user_agent(concat!("Cordiale/", env!("CARGO_PKG_VERSION")))
+            .user_agent(crate::EXTERNAL_USER_AGENT)
             .build()?;
         let mut response = Self::get(&http, url).await?;
         if is_playlist(url, response.headers().get(CONTENT_TYPE)) {

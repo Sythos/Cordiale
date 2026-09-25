@@ -31,6 +31,24 @@
 /// Initial client version, distinct from the Grappa protocol version.
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Build ID baked in by `build.rs` from the packaging workflows' `BUILD_ID`
+/// (the GitHub Actions run ID), `"0"` for builds made outside them.
+pub const BUILD_ID: &str = env!("CORDIALE_BUILD_ID");
+
+/// User-Agent for every request to Grappa (REST and the WebSocket
+/// handshake), so the bouncer can tell which client and exact build opened
+/// a session: `Cordiale/<major.minor.patch>.<build ID>` (issue #102).
+pub const GRAPPA_USER_AGENT: &str = concat!(
+    "Cordiale/",
+    env!("CARGO_PKG_VERSION"),
+    ".",
+    env!("CORDIALE_BUILD_ID")
+);
+
+/// User-Agent for requests to third-party hosts (radio feeds, link
+/// previews): the plain version, without the build ID Grappa gets.
+pub const EXTERNAL_USER_AGENT: &str = concat!("Cordiale/", env!("CARGO_PKG_VERSION"));
+
 pub mod admin;
 pub mod bootstrap;
 pub mod client;
@@ -52,3 +70,27 @@ pub mod theme;
 pub mod upload;
 pub mod websocket;
 pub mod wire_event;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grappa_user_agent_carries_the_version_and_a_numeric_build_id() {
+        let version = GRAPPA_USER_AGENT
+            .strip_prefix("Cordiale/")
+            .expect("Cordiale/ prefix");
+        let parts: Vec<&str> = version.split('.').collect();
+        assert_eq!(parts.len(), 4, "{GRAPPA_USER_AGENT}");
+        assert!(parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())));
+        assert_eq!(parts[..3].join("."), APP_VERSION);
+        assert_eq!(parts[3], BUILD_ID);
+    }
+
+    #[test]
+    fn external_user_agent_omits_the_build_id() {
+        assert_eq!(EXTERNAL_USER_AGENT, format!("Cordiale/{APP_VERSION}"));
+    }
+}

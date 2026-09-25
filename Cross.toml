@@ -16,3 +16,10 @@ pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update && apt-get install --assume-yes libasound2-dev:$CROSS_DEB_ARCH",
 ]
+
+# cross runs cargo inside a container that only sees the environment
+# variables listed here: BUILD_ID must reach cordiale-core's build.rs so the
+# aarch64 build reports the same Grappa User-Agent as the native ones
+# (issue #102).
+[build.env]
+passthrough = ["BUILD_ID"]

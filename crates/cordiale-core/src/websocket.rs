@@ -38,11 +38,13 @@ use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::USER_AGENT;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use crate::phoenix::PhoenixMessage;
+use crate::GRAPPA_USER_AGENT;
 
 #[derive(Debug)]
 pub enum PhoenixSocketError {
@@ -131,6 +133,12 @@ impl PhoenixSocket {
                 .map_err(|err| PhoenixSocketError::InvalidRequest(err.to_string()))?,
         );
 
+        // Same identification as the REST client (issue #102): tungstenite
+        // sends no User-Agent of its own.
+        request
+            .headers_mut()
+            .insert(USER_AGENT, HeaderValue::from_static(GRAPPA_USER_AGENT));
+
         let (stream, _response) = connect_async(request)
             .await
             .map_err(PhoenixSocketError::Connect)?;
@@ -170,6 +178,37 @@ impl PhoenixSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn handshake_identifies_the_client_build_to_grappa() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let url = format!("ws://{}/socket/websocket", listener.local_addr().unwrap());
+        // Reads only the handshake request, then drops the socket: the
+        // client's connect fails, which is fine since only what it sent
+        // matters here.
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                socket.readable().await.expect("readable");
+                match socket.try_read(&mut buf) {
+                    Ok(0) => panic!("connection closed before the headers ended"),
+                    Ok(read) => request.extend_from_slice(&buf[..read]),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    Err(err) => panic!("read: {err}"),
+                }
+            }
+            String::from_utf8(request).expect("utf-8 request")
+        });
+
+        let _ = PhoenixSocket::connect(&url, "token").await;
+        let request = server.await.expect("server task").to_ascii_lowercase();
+        let expected = format!("user-agent: {GRAPPA_USER_AGENT}\r\n").to_ascii_lowercase();
+        assert!(request.contains(&expected), "{request}");
+    }
 
     #[test]
     fn only_401_and_403_are_terminal_auth_rejections() {
