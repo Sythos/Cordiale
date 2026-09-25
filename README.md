@@ -27,6 +27,14 @@ minimum widths. Channel rows sit directly below their network row, member
 roles appear in brackets (for example, `[@] Sythos`), and the member list's
 Actions menu includes a shortcut to the Themes settings.
 
+The Actions menu opens the radio: Cicchetto's stations (SomaFM and a few
+other Icecast streams) play in Cordiale itself, with the same player on
+every platform for MP3, Ogg Vorbis and FLAC streams, a volume control and
+the current track read from the station's feed or the stream's own titles;
+`/np` shares it in the open window. Settings > Radio adds, edits and
+removes your own stations (stream or `.pls`/`.m3u` URLs), kept on this
+device only.
+
 Settings > Themes lists Grappa's theme gallery, including the irssi-derived
 `irssi-dark` and `sux`, each shown with its color set. Picking one makes it
 the account's active theme on Grappa (`PUT /me/theme`) and restyles Cordiale:
@@ -35,7 +43,10 @@ and topic box. Without server themes, built-in copies (irssi-dark, sux,
 mirc-light, solarized dark/light) are applied locally; the classic look
 follows the light/dark switch. As in Cicchetto, a gallery theme can be paired
 with a night theme, which Cordiale switches to while the operating system is
-in dark mode.
+in dark mode. A theme's wallpaper (uploaded or one of Grappa's built-in ones)
+is drawn behind the window, full-bleed or tiled at the theme's opacity, and
+the member list colors op, halfop and voice markers with the theme's role
+colors.
 
 At launch Cordiale signs in automatically with the last remembered profile,
 using its Grappa bearer or the login password kept in the OS keyring if the
@@ -52,8 +63,8 @@ Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-
 Cordiale still has these user-visible or behavioral gaps:
 
 - **Themes:** Cordiale applies Grappa's gallery themes (or built-in copies)
-  and their day/night pairing, but not Cicchetto's custom-theme editor, theme
-  publishing or background images. Buttons and menus keep Slint's own widget
+  with their day/night pairing and wallpapers, but not Cicchetto's
+  custom-theme editor or theme publishing. Buttons and menus keep Slint's own widget
   style in its dark or light variant.
 - **Sign-in and account security:** Cordiale does not expose Cicchetto's
   TOTP/passkey management.
@@ -61,7 +72,7 @@ Cordiale still has these user-visible or behavioral gaps:
   token is refused on `/admin`) creates accounts, resets passwords and
   creates, edits and deletes networks and their IRC servers, edits the
   server-wide upload, DCC and addressing settings, binds and unbinds
-  credentials, manages vhosts and their grants to accounts (not to visitors),
+  credentials, manages vhosts and their grants to accounts and visitors,
   and follows the live admin event feed.
 - **Settings and watch lists:** the identity editor reads back the nick in
   use on each network, but Grappa no longer reports ident and realname, so
@@ -73,22 +84,25 @@ Cordiale still has these user-visible or behavioral gaps:
   Grappa (`POST /api/uploads`) and posts its link with the category emoji,
   as Cicchetto does, after checking the file type and the advertised size
   cap. Settings > General sets how long uploads are kept and whether to ask
-  before each one. Links in messages are clickable, as in Cicchetto: image
-  and text uploads on Grappa, and https images elsewhere, open in the media
-  viewer (fit or actual size; text read-only, with Copy), the rest in the
-  browser. Like Cicchetto, Cordiale shows no inline previews. Drag-and-drop
-  and paste are not implemented yet.
+  before each one. Files dropped on the window (Windows, macOS and X11; not
+  on Wayland) and images pasted into the compose box go through the same
+  flow, and pasting several lines of text offers to upload them as
+  `paste.txt`. Links in messages are clickable, as in Cicchetto: image and text
+  uploads on Grappa, and https images elsewhere, open in the media viewer
+  (fit or actual size; text read-only, with Copy), the rest in the browser.
+  Like Cicchetto, Cordiale shows no inline previews.
 - **Slash commands:** Cordiale handles the everyday IRC verbs (`/me`,
   `/msg`, `/notice`, `/query`, `/join`, `/part`, `/cycle`, `/topic`, `/nick`,
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb`, the services shortcuts, and a bare `/umode` that opens
-  the user-mode toggles), but not `/np` (a bare `/topic` or `/mode` shows
-  the channel's topic or modes in the status bar).
+  expansion, `/kb`, the services shortcuts, `/np` for the radio, and a bare
+  `/umode` that opens the user-mode toggles; a bare `/topic` or `/mode`
+  shows the channel's topic or modes in the status bar).
 - **Remaining presentation gaps:** WHOIS avatars are drawn when Grappa
-  serves them as PNG, JPEG, GIF, WebP or BMP; the account-wide unread count only shows in the
-  window title (and so the taskbar), not as an OS badge.
+  serves them as PNG, JPEG, GIF, WebP or BMP. The account-wide unread count
+  shows in the window title and, on Windows, as a badge on the taskbar
+  button; macOS and Linux have no badge.
 
 ## Download
 

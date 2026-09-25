@@ -1757,6 +1757,138 @@ msgid "Use theme {} at night"
 msgstr "Usa il tema {} di notte"
 
 msgctxt "AppWindow"
+msgid "Find a visitor or account by nick"
+msgstr "Cerca un visitatore o un account per nick"
+
+msgctxt "AppWindow"
+msgid "Search"
+msgstr "Cerca"
+
+msgctxt "AppWindow"
+msgid "Nobody matches."
+msgstr "Nessun risultato."
+
+msgctxt "AppWindow"
+msgid "{} on {} (visitor)"
+msgstr "{} su {} (visitatore)"
+
+msgctxt "AppWindow"
+msgid "{} (account)"
+msgstr "{} (account)"
+
+msgctxt "AppWindow"
+msgid "Grant the vhost above"
+msgstr "Concedi il vhost sopra"
+
+msgctxt "AppWindow"
+msgid "Grant the selected vhost to {}"
+msgstr "Concedi il vhost selezionato a {}"
+
+msgctxt "AppWindow"
+msgid "{} unread"
+msgstr "{} non letti"
+
+msgctxt "AppWindow"
+msgid "/np: nothing is playing. Tune a station from the radio first."
+msgstr "/np: non sta suonando nulla. Sintonizza prima una stazione della radio."
+
+msgctxt "AppWindow"
+msgid "/np: {} publishes no track information."
+msgstr "/np: {} non pubblica informazioni sui brani."
+
+msgctxt "AppWindow"
+msgid "/np: no track from {} yet; its feed hasn't answered."
+msgstr "/np: ancora nessun brano da {}; il suo feed non ha risposto."
+
+msgctxt "AppWindow"
+msgid "/np: the last track from {} is over 3 minutes old, so it wasn't sent."
+msgstr "/np: l'ultimo brano di {} è vecchio di oltre 3 minuti, quindi non è stato inviato."
+
+msgctxt "AppWindow"
+msgid "A station needs a name and an http:// or https:// stream URL."
+msgstr "Una stazione richiede un nome e un URL dello stream http:// o https://."
+
+msgctxt "AppWindow"
+msgid "{}: connecting…"
+msgstr "{}: connessione…"
+
+msgctxt "AppWindow"
+msgid "{}: the stream failed ({})"
+msgstr "{}: lo stream si è interrotto ({})"
+
+msgctxt "AppWindow"
+msgid "{}: the station ended the stream"
+msgstr "{}: la stazione ha chiuso lo stream"
+
+msgctxt "AppWindow"
+msgid "Stop the radio"
+msgstr "Ferma la radio"
+
+msgctxt "AppWindow"
+msgid "Radio"
+msgstr "Radio"
+
+msgctxt "AppWindow"
+msgid "Radio stations"
+msgstr "Stazioni radio"
+
+msgctxt "AppWindow"
+msgid "Edit {}"
+msgstr "Modifica {}"
+
+msgctxt "AppWindow"
+msgid "Delete {}"
+msgstr "Elimina {}"
+
+msgctxt "AppWindow"
+msgid "Edit station"
+msgstr "Modifica stazione"
+
+msgctxt "AppWindow"
+msgid "New station"
+msgstr "Nuova stazione"
+
+msgctxt "AppWindow"
+msgid "Name"
+msgstr "Nome"
+
+msgctxt "AppWindow"
+msgid "Stream URL"
+msgstr "URL dello stream"
+
+msgctxt "AppWindow"
+msgid "Stop"
+msgstr "Ferma"
+
+msgctxt "AppWindow"
+msgid "Play"
+msgstr "Riproduci"
+
+msgctxt "AppWindow"
+msgid "Stop {}"
+msgstr "Ferma {}"
+
+msgctxt "AppWindow"
+msgid "Play {}"
+msgstr "Riproduci {}"
+
+msgctxt "AppWindow"
+msgid "Custom stations"
+msgstr "Stazioni personalizzate"
+
+msgctxt "AppWindow"
+msgid "Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen."
+msgstr "Aggiungi le tue stazioni MP3, Ogg Vorbis o FLAC (URL di uno stream o di una playlist .pls/.m3u). Restano solo su questo dispositivo, accanto alle stazioni di Cicchetto nella schermata Radio."
+
+msgctxt "AppWindow"
+msgid "Paste as a file"
+msgstr "Incolla come file"
+
+msgctxt "AppWindow"
+msgid "The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?"
+msgstr "Gli appunti contengono {} righe. Caricarle come paste.txt e inviarne il link invece di incollarle in un unico messaggio?"
+
+msgctxt "AppWindow"
 msgid "Fit"
 msgstr "Adatta"
 

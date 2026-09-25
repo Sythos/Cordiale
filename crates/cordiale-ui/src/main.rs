@@ -22,6 +22,9 @@
 
 slint::include_modules!();
 
+mod player;
+mod taskbar;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -93,6 +96,16 @@ enum WorkerCommand {
     ArchiveDelete(String),
     /// A link clicked in the chat: the viewer or the browser opens it.
     OpenLink(String),
+    /// Tunes a station: `builtin:<id>` or `custom:<index>`.
+    RadioTune(String),
+    RadioStop,
+    /// Volume from 0 to 100.
+    RadioVolume(i32),
+    RadioEvent(u64, player::PlayerEvent),
+    RadioTrack {
+        generation: u64,
+        track: Option<cordiale_core::radio::Track>,
+    },
     ArchiveClose,
     /// Flips one user mode of the network shown in the user-mode view.
     UmodeToggle(String),
@@ -160,8 +173,10 @@ enum WorkerCommand {
     AdminVhostDelete(String),
     AdminGrantAdd {
         vhost_id: String,
-        user_id: String,
+        subject_type: String,
+        subject_id: String,
     },
+    AdminSubjectSearch(String),
     AdminGrantRevoke(String),
     AdminServerAdd {
         network_id: String,
@@ -278,11 +293,76 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     ui.set_known_servers(known_servers_model());
 
+    ui.set_radio_volume(i32::from(settings.radio_volume));
+    push_radio_stations(&ui, &settings.radio_stations);
+
     let (worker_tx, worker_rx) = mpsc::unbounded_channel::<WorkerCommand>();
     let ui_weak = ui.as_weak();
+    let worker_self = worker_tx.clone();
     thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().expect("failed to start network runtime");
-        runtime.block_on(run_worker(worker_rx, ui_weak));
+        runtime.block_on(run_worker(worker_rx, worker_self, ui_weak));
+    });
+
+    let tx_for_radio_tune = worker_tx.clone();
+    ui.on_radio_tune(move |key| {
+        let _ = tx_for_radio_tune.send(WorkerCommand::RadioTune(key.to_string()));
+    });
+
+    let tx_for_radio_stop = worker_tx.clone();
+    ui.on_radio_stop(move || {
+        let _ = tx_for_radio_stop.send(WorkerCommand::RadioStop);
+    });
+
+    let tx_for_radio_volume = worker_tx.clone();
+    ui.on_radio_volume_changed(move |volume| {
+        let volume = volume.clamp(0, 100);
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.radio_volume = u8::try_from(volume).unwrap_or(100);
+        let _ = persistence::save_settings(&settings);
+        let _ = tx_for_radio_volume.send(WorkerCommand::RadioVolume(volume));
+    });
+
+    let weak_for_radio_save = ui.as_weak();
+    ui.on_radio_station_save(move |index, name, url, codec_index| {
+        let Some(ui) = weak_for_radio_save.upgrade() else {
+            return;
+        };
+        let Some(station) = custom_radio_station(&name, &url, codec_index) else {
+            ui.set_status_kind("radio-station-invalid".into());
+            return;
+        };
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        match usize::try_from(index)
+            .ok()
+            .filter(|index| *index < settings.radio_stations.len())
+        {
+            Some(index) => settings.radio_stations[index] = station,
+            None => settings.radio_stations.push(station),
+        }
+        let _ = persistence::save_settings(&settings);
+        push_radio_stations(&ui, &settings.radio_stations);
+        ui.set_radio_edit_index(-1);
+        ui.set_radio_form_name("".into());
+        ui.set_radio_form_url("".into());
+        ui.set_radio_form_codec(0);
+    });
+
+    let weak_for_radio_delete = ui.as_weak();
+    ui.on_radio_station_delete(move |index| {
+        let Some(ui) = weak_for_radio_delete.upgrade() else {
+            return;
+        };
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        if let Some(index) = usize::try_from(index)
+            .ok()
+            .filter(|index| *index < settings.radio_stations.len())
+        {
+            settings.radio_stations.remove(index);
+            let _ = persistence::save_settings(&settings);
+        }
+        push_radio_stations(&ui, &settings.radio_stations);
+        ui.set_radio_edit_index(-1);
     });
 
     let weak_for_language = ui.as_weak();
@@ -606,22 +686,47 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(path) = rfd::FileDialog::new().pick_file() else {
             return;
         };
-        if ui.get_pref_upload_confirm() {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let answer = rfd::MessageDialog::new()
-                .set_title(ui.get_upload_confirm_title().as_str())
-                .set_description(format!("{}\n\n{name}", ui.get_upload_confirm_text()))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show();
-            if !matches!(answer, rfd::MessageDialogResult::Yes) {
-                return;
-            }
-        }
-        let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
-        let _ = tx_for_attach.send(WorkerCommand::AttachFile(path, expire));
+        confirm_and_attach(&ui, &tx_for_attach, path);
+    });
+
+    // Files dropped on the window go through the paperclip's flow, like
+    // Cicchetto's drop zone. Winit reports them (Windows, macOS, X11);
+    // the confirmation runs once the event has been handled.
+    {
+        use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
+        let tx_for_drop = worker_tx.clone();
+        let weak_for_drop = ui.as_weak();
+        ui.window().on_winit_window_event(move |_, event| {
+            let WindowEvent::DroppedFile(path) = event else {
+                return EventResult::Propagate;
+            };
+            let path = path.clone();
+            let tx = tx_for_drop.clone();
+            let weak = weak_for_drop.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                if let Some(ui) = weak.upgrade() {
+                    confirm_and_attach(&ui, &tx, path);
+                }
+            });
+            EventResult::PreventDefault
+        });
+    }
+
+    // Ctrl+V (Cmd+V) in the compose box: an image on the clipboard is
+    // uploaded like a picked file, and a multi-line text can go up as a .txt
+    // instead of being flattened into one message. Plain text pastes as
+    // usual.
+    let tx_for_paste = worker_tx.clone();
+    let weak_for_paste = ui.as_weak();
+    ui.on_paste_requested(move || {
+        let Some(ui) = weak_for_paste.upgrade() else {
+            return false;
+        };
+        let Some(path) = clipboard_upload(&ui) else {
+            return false;
+        };
+        confirm_and_attach(&ui, &tx_for_paste, path);
+        true
     });
 
     let tx_for_upload_prefs = worker_tx.clone();
@@ -656,6 +761,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_theme = worker_tx.clone();
     ui.on_theme_toggle_requested(move || {
         let _ = tx_for_theme.send(WorkerCommand::ToggleTheme);
+    });
+
+    let weak_for_badge = ui.as_weak();
+    ui.on_taskbar_badge_changed(move |count, description| {
+        if let Some(ui) = weak_for_badge.upgrade() {
+            taskbar::set_badge(ui.window(), count, &description);
+        }
     });
 
     let tx_for_color_theme = worker_tx.clone();
@@ -942,8 +1054,36 @@ fn main() -> Result<(), slint::PlatformError> {
         if let (Some(vhost), Some(user)) = (vhost, user) {
             let _ = tx_for_admin_grant.send(WorkerCommand::AdminGrantAdd {
                 vhost_id: vhost.vhost_id.to_string(),
-                user_id: user.user_id.to_string(),
+                subject_type: "user".to_string(),
+                subject_id: user.user_id.to_string(),
             });
+        }
+    });
+
+    let tx_for_subject_grant = worker_tx.clone();
+    let weak_for_subject_grant = ui.as_weak();
+    ui.on_admin_subject_grant(move |subject_type, subject_id| {
+        use slint::Model as _;
+        let Some(ui) = weak_for_subject_grant.upgrade() else {
+            return;
+        };
+        let vhost = usize::try_from(ui.get_admin_grant_vhost_index())
+            .ok()
+            .and_then(|index| ui.get_admin_vhosts().row_data(index));
+        if let Some(vhost) = vhost {
+            let _ = tx_for_subject_grant.send(WorkerCommand::AdminGrantAdd {
+                vhost_id: vhost.vhost_id.to_string(),
+                subject_type: subject_type.to_string(),
+                subject_id: subject_id.to_string(),
+            });
+        }
+    });
+
+    let tx_for_subject_search = worker_tx.clone();
+    ui.on_admin_subject_search(move |query| {
+        let query = query.trim().to_string();
+        if !query.is_empty() {
+            let _ = tx_for_subject_search.send(WorkerCommand::AdminSubjectSearch(query));
         }
     });
 
@@ -1821,9 +1961,19 @@ impl WorkerState {
 /// never fires.
 async fn run_worker(
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
+    worker_self: mpsc::UnboundedSender<WorkerCommand>,
     ui: slint::Weak<AppWindow>,
 ) {
     let mut state = WorkerState::new();
+    let radio_events = worker_self.clone();
+    let radio = player::RadioPlayer::spawn(move |generation, event| {
+        let _ = radio_events.send(WorkerCommand::RadioEvent(generation, event));
+    });
+    let volume = persistence::load_settings()
+        .unwrap_or_default()
+        .radio_volume;
+    radio.set_volume(f32::from(volume) / 100.0);
+    let mut radio_state = RadioState::default();
     let mut session_events: Option<mpsc::UnboundedReceiver<SessionEvent>> = None;
 
     loop {
@@ -1908,6 +2058,32 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::OpenLink(href)) => {
                         open_link(&state, &ui, href);
+                    }
+                    Some(WorkerCommand::RadioTune(key)) => {
+                        tune_radio(&mut radio_state, &radio, &worker_self, &ui, &key);
+                    }
+                    Some(WorkerCommand::RadioStop) => {
+                        radio.stop();
+                        radio_state.stop();
+                        push_radio_now(&ui, &radio_state);
+                    }
+                    Some(WorkerCommand::RadioVolume(volume)) => {
+                        radio.set_volume(volume.clamp(0, 100) as f32 / 100.0);
+                    }
+                    Some(WorkerCommand::RadioEvent(generation, event)) => {
+                        handle_radio_event(&mut radio_state, &ui, generation, event);
+                    }
+                    Some(WorkerCommand::RadioTrack { generation, track }) => {
+                        if let Some(tuned) = radio_state
+                            .tuned
+                            .as_mut()
+                            .filter(|_| radio_state.generation == generation)
+                        {
+                            if let Some(track) = track {
+                                tuned.track = Some((track, std::time::Instant::now()));
+                            }
+                            push_radio_now(&ui, &radio_state);
+                        }
                     }
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
@@ -2120,9 +2296,20 @@ async fn run_worker(
                     Some(WorkerCommand::AdminVhostDelete(vhost_id)) => {
                         handle_admin_write(&state, &ui, AdminWrite::DeleteVhost(vhost_id)).await;
                     }
-                    Some(WorkerCommand::AdminGrantAdd { vhost_id, user_id }) => {
-                        handle_admin_write(&state, &ui, AdminWrite::GrantVhost { vhost_id, user_id })
-                            .await;
+                    Some(WorkerCommand::AdminGrantAdd {
+                        vhost_id,
+                        subject_type,
+                        subject_id,
+                    }) => {
+                        let write = AdminWrite::GrantVhost {
+                            vhost_id,
+                            subject_type,
+                            subject_id,
+                        };
+                        handle_admin_write(&state, &ui, write).await;
+                    }
+                    Some(WorkerCommand::AdminSubjectSearch(query)) => {
+                        handle_admin_subject_search(&state, &ui, &query).await;
                     }
                     Some(WorkerCommand::AdminGrantRevoke(grant_id)) => {
                         handle_admin_write(&state, &ui, AdminWrite::RevokeGrant(grant_id)).await;
@@ -2395,6 +2582,10 @@ async fn run_worker(
                         let system_dark = state.system_dark;
                         state = WorkerState::new();
                         state.system_dark = system_dark;
+                        // Like Cicchetto, signing out stops the radio.
+                        radio.stop();
+                        radio_state.stop();
+                        push_radio_now(&ui, &radio_state);
                     }
                     Some(WorkerCommand::LoadOlderHistory) => {
                         handle_load_older_history(&mut state, &ui).await;
@@ -3439,6 +3630,80 @@ async fn handle_attach_file(
     }
 }
 
+/// Asks for the upload when Settings says so, then hands `path` to the
+/// worker with the chosen lifetime: the paperclip, a dropped file and a
+/// paste all end here, as in Cicchetto.
+fn confirm_and_attach(
+    ui: &AppWindow,
+    tx: &mpsc::UnboundedSender<WorkerCommand>,
+    path: std::path::PathBuf,
+) {
+    if ui.get_pref_upload_confirm() {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let answer = rfd::MessageDialog::new()
+            .set_title(ui.get_upload_confirm_title().as_str())
+            .set_description(format!("{}\n\n{name}", ui.get_upload_confirm_text()))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if !matches!(answer, rfd::MessageDialogResult::Yes) {
+            return;
+        }
+    }
+    let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
+    let _ = tx.send(WorkerCommand::AttachFile(path, expire));
+}
+
+/// Lines of pasted text above which Cordiale offers a .txt upload.
+const PASTE_UPLOAD_LINES: usize = 2;
+
+/// What the clipboard holds that should go up as a file: an image (saved
+/// as PNG), or, when the user agrees, a multi-line text (saved as
+/// `paste.txt`). `None` lets the compose box paste as usual.
+fn clipboard_upload(ui: &AppWindow) -> Option<std::path::PathBuf> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let folder = std::env::temp_dir()
+        .join("cordiale-paste")
+        .join(stamp.to_string());
+    if let Ok(image) = clipboard.get_image() {
+        let width = u32::try_from(image.width).ok()?;
+        let height = u32::try_from(image.height).ok()?;
+        let pixels = image::RgbaImage::from_raw(width, height, image.bytes.into_owned())?;
+        std::fs::create_dir_all(&folder).ok()?;
+        let path = folder.join("image.png");
+        if let Err(err) = pixels.save_with_format(&path, image::ImageFormat::Png) {
+            persistence::log_line(&format!("pasted image not saved: {err}"));
+            return None;
+        }
+        return Some(path);
+    }
+    let text = clipboard.get_text().ok()?;
+    if text.lines().count() < PASTE_UPLOAD_LINES {
+        return None;
+    }
+    let answer = rfd::MessageDialog::new()
+        .set_title(ui.get_paste_upload_title().as_str())
+        .set_description(
+            ui.invoke_paste_upload_text(i32::try_from(text.lines().count()).unwrap_or(i32::MAX))
+                .as_str(),
+        )
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show();
+    if !matches!(answer, rfd::MessageDialogResult::Yes) {
+        return None;
+    }
+    std::fs::create_dir_all(&folder).ok()?;
+    let path = folder.join("paste.txt");
+    std::fs::write(&path, text).ok()?;
+    Some(path)
+}
+
 /// Upload lifetimes offered in Settings, in the order of its menu: the
 /// server's default, then the `expire` values Grappa accepts (1 hour,
 /// 12 hours, 1 day, 3 days).
@@ -3722,6 +3987,14 @@ async fn run_slash_command(
                 serde_json::json!({ "target": target, "modes": modes, "params": params }),
             );
             Ok(())
+        }
+        SlashCommand::NowPlaying => {
+            let line = match now_playing_text(&radio_now_playing(), std::time::Instant::now()) {
+                Ok(line) => line,
+                Err((kind, station)) => return set_command_status(ui, kind, station),
+            };
+            let request = SendMessageRequest::plain(format!("\u{1}ACTION {line}\u{1}"));
+            post_message(&client, &token, &network, &channel, request).await
         }
         SlashCommand::UmodeShow => {
             state.umode_view_network = Some(network.clone());
@@ -4187,6 +4460,320 @@ async fn handle_save_notification_prefs(
     }
 }
 
+/// A station ready to tune: its name, stream URL, decoder hint and
+/// now-playing feed.
+struct TunableStation {
+    title: String,
+    url: String,
+    hint: &'static str,
+    source: Option<cordiale_core::radio::NowPlayingSource>,
+}
+
+/// `builtin:<id>` from Cicchetto's list, or `custom:<index>` from Settings.
+fn tunable_station(key: &str) -> Option<TunableStation> {
+    use cordiale_core::radio::{RadioCodec, RADIO_STATIONS};
+    if let Some(id) = key.strip_prefix("builtin:") {
+        let station = RADIO_STATIONS.iter().find(|station| station.id == id)?;
+        return Some(TunableStation {
+            title: station.title.to_string(),
+            url: station.stream_url.to_string(),
+            hint: station.codec.extension(),
+            source: station.now_playing,
+        });
+    }
+    let index: usize = key.strip_prefix("custom:")?.parse().ok()?;
+    let station = persistence::load_settings()
+        .ok()?
+        .radio_stations
+        .into_iter()
+        .nth(index)?;
+    let codec = RadioCodec::from_setting_key(&station.codec);
+    Some(TunableStation {
+        title: station.name,
+        url: station.url,
+        hint: codec.extension(),
+        source: None,
+    })
+}
+
+/// A custom station from the Settings form; `None` without a name or an
+/// http(s) URL. `codec_index` follows the form's menu (`RADIO_CODECS`).
+fn custom_radio_station(
+    name: &str,
+    url: &str,
+    codec_index: i32,
+) -> Option<persistence::CustomRadioStation> {
+    let name = name.trim();
+    let url = url.trim();
+    let valid_url = is_http_url(url);
+    if name.is_empty() || !valid_url {
+        return None;
+    }
+    Some(persistence::CustomRadioStation {
+        name: name.to_string(),
+        url: url.to_string(),
+        codec: usize::try_from(codec_index)
+            .ok()
+            .and_then(|index| cordiale_core::radio::RADIO_CODECS.get(index))
+            .copied()
+            .unwrap_or(cordiale_core::radio::RadioCodec::Mp3)
+            .setting_key()
+            .to_string(),
+    })
+}
+
+/// An `http://` or `https://` URL with a host and no spaces.
+fn is_http_url(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    rest.is_some_and(|rest| {
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        !host.is_empty() && !url.chars().any(char::is_whitespace)
+    })
+}
+
+/// Mirrors the station list (Cicchetto's, then the custom ones) and the
+/// custom list of Settings > Radio.
+fn push_radio_stations(ui: &AppWindow, custom: &[persistence::CustomRadioStation]) {
+    use cordiale_core::radio::{RadioCodec, RADIO_CODECS, RADIO_STATIONS};
+    let mut rows: Vec<RadioRow> = RADIO_STATIONS
+        .iter()
+        .map(|station| {
+            let format = match station.bitrate {
+                Some(bitrate) => format!("{} {bitrate}k", station.codec.label()),
+                None => station.codec.label().to_string(),
+            };
+            RadioRow {
+                key: format!("builtin:{}", station.id).into(),
+                title: station.title.into(),
+                detail: format!("{} · {format}", station.genres.join(", ")).into(),
+                description: station.description.into(),
+                custom: false,
+            }
+        })
+        .collect();
+    let custom_rows: Vec<CustomRadioRow> = custom
+        .iter()
+        .map(|station| CustomRadioRow {
+            name: station.name.clone().into(),
+            url: station.url.clone().into(),
+            codec_index: RADIO_CODECS
+                .iter()
+                .position(|codec| codec.setting_key() == station.codec)
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or(0),
+            codec_label: RadioCodec::from_setting_key(&station.codec).label().into(),
+        })
+        .collect();
+    rows.extend(custom.iter().enumerate().map(|(index, station)| {
+        let codec = RadioCodec::from_setting_key(&station.codec).label();
+        RadioRow {
+            key: format!("custom:{index}").into(),
+            title: station.name.clone().into(),
+            detail: codec.into(),
+            description: station.url.clone().into(),
+            custom: true,
+        }
+    }));
+    ui.set_radio_stations(Rc::new(slint::VecModel::from(rows)).into());
+    ui.set_radio_custom_stations(Rc::new(slint::VecModel::from(custom_rows)).into());
+}
+
+/// The station on air, as the worker tracks it.
+struct TunedRadio {
+    key: String,
+    title: String,
+    source: Option<cordiale_core::radio::NowPlayingSource>,
+    /// Last track the feed gave, and when.
+    track: Option<(cordiale_core::radio::Track, std::time::Instant)>,
+    /// Last title the stream itself carried (ICY), for stations without a
+    /// feed.
+    stream_title: Option<String>,
+    /// "connecting", "playing", "failed" or "ended".
+    status: &'static str,
+    error: String,
+}
+
+#[derive(Default)]
+struct RadioState {
+    generation: u64,
+    tuned: Option<TunedRadio>,
+    poll: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RadioState {
+    fn stop(&mut self) {
+        self.generation += 1;
+        self.tuned = None;
+        if let Some(poll) = self.poll.take() {
+            poll.abort();
+        }
+    }
+}
+
+impl Drop for RadioState {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// What `/np` reads, shared with the slash command handler.
+#[derive(Clone, Default)]
+struct RadioNowPlaying {
+    station: Option<String>,
+    has_feed: bool,
+    track: Option<(cordiale_core::radio::Track, std::time::Instant)>,
+    stream_title: Option<String>,
+}
+
+static RADIO_NOW_PLAYING: std::sync::Mutex<Option<RadioNowPlaying>> = std::sync::Mutex::new(None);
+
+fn radio_now_playing() -> RadioNowPlaying {
+    RADIO_NOW_PLAYING
+        .lock()
+        .ok()
+        .and_then(|now| now.clone())
+        .unwrap_or_default()
+}
+
+/// The `/np` action text, or the status explaining why there's none (as
+/// Cicchetto: idle, a station without track information, a feed that
+/// hasn't answered, a track over three minutes old). Stations without a
+/// feed fall back to the title in the stream itself.
+fn now_playing_text(
+    now: &RadioNowPlaying,
+    at: std::time::Instant,
+) -> Result<String, (&'static str, String)> {
+    use cordiale_core::radio::{now_playing_line, Track, NOW_PLAYING_STALE_SECS};
+    let Some(station) = now.station.clone() else {
+        return Err(("np-idle", String::new()));
+    };
+    if let Some((track, read_at)) = &now.track {
+        if at.duration_since(*read_at).as_secs() > NOW_PLAYING_STALE_SECS {
+            return Err(("np-stale", station));
+        }
+        return Ok(now_playing_line(track, &station));
+    }
+    if let Some(title) = &now.stream_title {
+        let track = Track {
+            artist: None,
+            title: title.clone(),
+        };
+        return Ok(now_playing_line(&track, &station));
+    }
+    Err(if now.has_feed {
+        ("np-unanswered", station)
+    } else {
+        ("np-unsupported", station)
+    })
+}
+
+fn tune_radio(
+    radio_state: &mut RadioState,
+    radio: &player::RadioPlayer,
+    worker_self: &mpsc::UnboundedSender<WorkerCommand>,
+    ui: &slint::Weak<AppWindow>,
+    key: &str,
+) {
+    let Some(station) = tunable_station(key) else {
+        return;
+    };
+    radio_state.stop();
+    let generation = radio_state.generation;
+    radio.play(&station.url, station.hint, generation);
+    if let Some(source) = station.source {
+        let tx = worker_self.clone();
+        radio_state.poll = Some(tokio::spawn(async move {
+            loop {
+                let track = cordiale_core::radio::fetch_now_playing(source).await;
+                if tx
+                    .send(WorkerCommand::RadioTrack { generation, track })
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    cordiale_core::radio::NOW_PLAYING_POLL_SECS,
+                ))
+                .await;
+            }
+        }));
+    }
+    radio_state.tuned = Some(TunedRadio {
+        key: key.to_string(),
+        title: station.title,
+        source: station.source,
+        track: None,
+        stream_title: None,
+        status: "connecting",
+        error: String::new(),
+    });
+    push_radio_now(ui, radio_state);
+}
+
+fn handle_radio_event(
+    radio_state: &mut RadioState,
+    ui: &slint::Weak<AppWindow>,
+    generation: u64,
+    event: player::PlayerEvent,
+) {
+    if radio_state.generation != generation {
+        return;
+    }
+    let Some(tuned) = radio_state.tuned.as_mut() else {
+        return;
+    };
+    match event {
+        player::PlayerEvent::Playing => tuned.status = "playing",
+        player::PlayerEvent::Title(title) => tuned.stream_title = Some(title),
+        player::PlayerEvent::Failed(error) => {
+            persistence::log_line(&format!("radio stream failed: {error}"));
+            tuned.status = "failed";
+            tuned.error = error;
+        }
+        player::PlayerEvent::Ended => tuned.status = "ended",
+    }
+    push_radio_now(ui, radio_state);
+}
+
+/// Mirrors the station on air into the player bar and `/np`.
+fn push_radio_now(ui: &slint::Weak<AppWindow>, radio_state: &RadioState) {
+    let now = radio_state.tuned.as_ref().map(|tuned| RadioNowPlaying {
+        station: Some(tuned.title.clone()),
+        has_feed: tuned.source.is_some(),
+        track: tuned.track.clone(),
+        stream_title: tuned.stream_title.clone(),
+    });
+    let label = now
+        .as_ref()
+        .and_then(|now| match (&now.track, &now.stream_title) {
+            (Some((track, _)), _) => Some(track.label()),
+            (None, Some(title)) => Some(title.clone()),
+            (None, None) => None,
+        })
+        .unwrap_or_default();
+    if let Ok(mut shared) = RADIO_NOW_PLAYING.lock() {
+        *shared = now;
+    }
+    let (key, title, status, error) = match &radio_state.tuned {
+        Some(tuned) => (
+            tuned.key.clone(),
+            tuned.title.clone(),
+            tuned.status,
+            tuned.error.clone(),
+        ),
+        None => (String::new(), String::new(), "", String::new()),
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_radio_tuned_key(key.into());
+        ui.set_radio_station(title.into());
+        ui.set_radio_track(label.into());
+        ui.set_radio_status(status.into());
+        ui.set_radio_error(error.into());
+    });
+}
+
 /// Sound presets Grappa accepts for `notification_sound`, in the order of
 /// the Settings menu.
 const NOTIFICATION_SOUNDS: [&str; 10] = [
@@ -4515,9 +5102,65 @@ enum AdminWrite {
     DeleteVhost(String),
     GrantVhost {
         vhost_id: String,
-        user_id: String,
+        subject_type: String,
+        subject_id: String,
     },
     RevokeGrant(String),
+}
+
+/// One `subject_search` row: `(type, id, network, nick)`, `network` empty
+/// for an account.
+fn admin_subject_row(row: &Value) -> Option<(String, String, String, String)> {
+    let text = |field: &str| row.get(field).and_then(Value::as_str);
+    let kind = text("type").filter(|kind| matches!(*kind, "user" | "visitor"))?;
+    Some((
+        kind.to_string(),
+        text("id")?.to_string(),
+        text("network").unwrap_or_default().to_string(),
+        text("nick")?.to_string(),
+    ))
+}
+
+/// Finds accounts and visitors for a vhost grant, like Cicchetto's
+/// autocomplete.
+async fn handle_admin_subject_search(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    query: &str,
+) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    match client.search_admin_subjects(token, query).await {
+        Ok(rows) => {
+            let rows: Vec<(String, String, String, String)> =
+                rows.iter().filter_map(admin_subject_row).collect();
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let rows: Vec<AdminSubjectRow> = rows
+                    .into_iter()
+                    .map(|(kind, id, network, nick)| AdminSubjectRow {
+                        kind: kind.into(),
+                        subject_id: id.into(),
+                        network: network.into(),
+                        nick: nick.into(),
+                    })
+                    .collect();
+                ui.set_admin_subject_searched(true);
+                ui.set_admin_subject_results(Rc::new(slint::VecModel::from(rows)).into());
+            });
+        }
+        Err(err) => {
+            let status = err
+                .status()
+                .map(|status| status.as_u16().to_string())
+                .unwrap_or_else(|| "network error".to_string());
+            persistence::log_line(&format!("admin subject search failed: {status}"));
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(status.into());
+                ui.set_status_kind("admin-action-failed".into());
+            });
+        }
+    }
 }
 
 /// Runs an admin write, then refreshes the panel. Success clears the
@@ -4599,9 +5242,16 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
             "",
         ),
         AdminWrite::DeleteVhost(vhost_id) => (client.delete_admin_vhost(token, vhost_id).await, ""),
-        AdminWrite::GrantVhost { vhost_id, user_id } => {
-            (client.grant_admin_vhost(token, vhost_id, user_id).await, "")
-        }
+        AdminWrite::GrantVhost {
+            vhost_id,
+            subject_type,
+            subject_id,
+        } => (
+            client
+                .grant_admin_vhost(token, vhost_id, subject_type, subject_id)
+                .await,
+            "",
+        ),
         AdminWrite::RevokeGrant(grant_id) => {
             (client.revoke_admin_vhost_grant(token, grant_id).await, "")
         }
@@ -9284,12 +9934,25 @@ fn members_average_probe(rows: &[MemberRow]) -> String {
     "n".repeat(total.div_ceil(rows.len()))
 }
 
+/// The color of a member's role marker: the theme's op, halfop or voice
+/// color, or the nick's own color on the classic look.
+fn role_color(prefix: &str, nick_rgb: (u8, u8, u8)) -> slint::Color {
+    let rgb = match (active_palette(), prefix.chars().next()) {
+        (Some(palette), Some('~' | '&' | '@')) => palette.mode_op,
+        (Some(palette), Some('%')) => palette.mode_halfop,
+        (Some(palette), Some('+')) => palette.mode_voiced,
+        _ => nick_rgb,
+    };
+    slint_color(rgb)
+}
+
 fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
     members
         .iter()
         .map(|(name, prefix)| {
             let (r, g, b) = nick_color(name, dark_theme);
             MemberRow {
+                prefix_color: role_color(prefix, (r, g, b)),
                 name: name.clone().into(),
                 prefix: highest_prefix(prefix).into(),
                 color: slint::Color::from_rgb_u8(r, g, b),
@@ -9307,6 +9970,46 @@ struct ThemeChoice {
     author: String,
     palette: ThemePalette,
     font_family: String,
+    background: Option<ThemeBackground>,
+}
+
+/// A theme's wallpaper, resolved to the path Grappa serves it at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThemeBackground {
+    path: String,
+    tile: bool,
+    /// 0 to 100.
+    opacity: u8,
+}
+
+/// The wallpaper of a theme payload, as Cicchetto resolves it: a built-in
+/// key wins over an uploaded image; anything but `"repeat"` is full-bleed.
+fn theme_background(
+    wire: Option<&cordiale_core::rest::ThemeBackgroundWire>,
+) -> Option<ThemeBackground> {
+    let wire = wire?;
+    let safe = |value: &str| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    };
+    let path = match (wire.builtin.as_deref(), wire.image_id.as_deref()) {
+        (Some(key), _) if safe(key) => format!("/backgrounds/{key}.webp"),
+        (_, Some(id)) if safe(id) => format!("/uploads/{id}"),
+        _ => return None,
+    };
+    let opacity = wire
+        .opacity
+        .as_ref()
+        .and_then(serde_json::Number::as_f64)
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    Some(ThemeBackground {
+        path,
+        tile: wire.size.as_deref() == Some("repeat"),
+        opacity: (opacity * 100.0).round() as u8,
+    })
 }
 
 /// The built-in color themes (copies of Grappa's irssi-derived gallery).
@@ -9319,6 +10022,7 @@ fn builtin_theme_choices() -> Vec<ThemeChoice> {
             author: String::new(),
             palette: theme.palette(),
             font_family: "mono-default".to_string(),
+            background: None,
         })
         .collect()
 }
@@ -9331,7 +10035,65 @@ fn server_theme_choice(theme: &cordiale_core::rest::ThemeWire) -> Option<ThemeCh
         author: theme.author.clone(),
         palette: ThemePalette::from_colors(&theme.payload.colors)?,
         font_family: theme.payload.font_family.clone(),
+        background: theme_background(theme.payload.background.as_ref()),
     })
+}
+
+/// Theme wallpapers are fetched in the background; a newer theme pick
+/// makes an older download's result irrelevant.
+static THEME_BACKGROUND_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Shows the theme's wallpaper behind the window (or removes it): the image
+/// is downloaded from Grappa into a temp file named after its path, since
+/// Slint loads images from files and caches them by path.
+fn load_theme_background(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    background: Option<ThemeBackground>,
+) {
+    use std::sync::atomic::Ordering;
+    let generation = THEME_BACKGROUND_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let (Some(background), Some(client), Some(token)) =
+        (background, state.client.clone(), state.token.clone())
+    else {
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_palette_background_set(false));
+        return;
+    };
+    let ui = ui.clone();
+    tokio::spawn(async move {
+        let file = match client.fetch_server_file(&token, &background.path).await {
+            Ok((bytes, content_type)) => {
+                let extension = avatar_extension(content_type.as_deref()).unwrap_or("webp");
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&background.path, &mut hasher);
+                let path = std::env::temp_dir().join(format!(
+                    "cordiale-wallpaper-{:016x}.{extension}",
+                    std::hash::Hasher::finish(&hasher)
+                ));
+                std::fs::write(&path, bytes).ok().map(|()| path)
+            }
+            Err(err) => {
+                persistence::log_line(&format!("theme wallpaper unavailable: {err:?}"));
+                None
+            }
+        };
+        if THEME_BACKGROUND_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            let image = file.and_then(|file| slint::Image::load_from_path(&file).ok());
+            match image {
+                Some(image) => {
+                    ui.set_palette_background(image);
+                    ui.set_palette_background_tile(background.tile);
+                    ui.set_palette_background_opacity(f32::from(background.opacity) / 100.0);
+                    ui.set_palette_background_set(true);
+                }
+                None => ui.set_palette_background_set(false),
+            }
+        });
+    });
 }
 
 /// Palette of the color theme in use, read by the nick and timestamp color
@@ -9631,6 +10393,11 @@ fn apply_color_theme(
     choice: Option<ThemeChoice>,
 ) {
     set_active_palette(choice.as_ref().map(|choice| choice.palette.clone()));
+    load_theme_background(
+        state,
+        ui,
+        choice.as_ref().and_then(|choice| choice.background.clone()),
+    );
     state.theme = match &choice {
         Some(choice) if choice.palette.is_dark() => Theme::Dark,
         Some(_) => Theme::Light,
@@ -17859,6 +18626,7 @@ mod tests {
             payload: cordiale_core::rest::ThemePayloadWire {
                 colors,
                 font_family: "hack".to_string(),
+                background: None,
             },
         };
         let choice = server_theme_choice(&theme).expect("complete palette");
@@ -18138,6 +18906,39 @@ mod tests {
     }
 
     #[test]
+    fn theme_backgrounds_resolve_like_cicchetto() {
+        use cordiale_core::rest::ThemeBackgroundWire;
+        let builtin = ThemeBackgroundWire {
+            builtin: Some("aurora".to_string()),
+            image_id: Some("01hzzzzzzzzzzzzzzzzzzzzzzz".to_string()),
+            size: Some("repeat".to_string()),
+            opacity: serde_json::Number::from_f64(0.35),
+        };
+        assert_eq!(
+            theme_background(Some(&builtin)),
+            Some(ThemeBackground {
+                path: "/backgrounds/aurora.webp".to_string(),
+                tile: true,
+                opacity: 35,
+            })
+        );
+        let upload = ThemeBackgroundWire {
+            image_id: Some("01habc".to_string()),
+            ..ThemeBackgroundWire::default()
+        };
+        let resolved = theme_background(Some(&upload)).expect("an upload");
+        assert_eq!(resolved.path, "/uploads/01habc");
+        assert!(!resolved.tile);
+        assert_eq!(resolved.opacity, 100);
+        let unsafe_key = ThemeBackgroundWire {
+            builtin: Some("../etc".to_string()),
+            ..ThemeBackgroundWire::default()
+        };
+        assert_eq!(theme_background(Some(&unsafe_key)), None);
+        assert_eq!(theme_background(None), None);
+    }
+
+    #[test]
     fn avatar_extension_follows_the_content_type() {
         assert_eq!(avatar_extension(Some("image/png")), Some("png"));
         assert_eq!(
@@ -18293,6 +19094,105 @@ mod tests {
         assert_eq!(network_nick(&networks, "libera"), Some("ada".to_string()));
         assert_eq!(network_nick(&networks, "oftc"), None);
         assert_eq!(network_nick(&networks, "efnet"), None);
+    }
+
+    #[test]
+    fn now_playing_text_follows_cicchetto_states() {
+        use cordiale_core::radio::Track;
+        let at = std::time::Instant::now();
+        assert_eq!(
+            now_playing_text(&RadioNowPlaying::default(), at),
+            Err(("np-idle", String::new()))
+        );
+        let mut now = RadioNowPlaying {
+            station: Some("Kohina".to_string()),
+            has_feed: true,
+            ..RadioNowPlaying::default()
+        };
+        assert_eq!(
+            now_playing_text(&now, at),
+            Err(("np-unanswered", "Kohina".to_string()))
+        );
+        now.track = Some((
+            Track {
+                artist: Some("Hubbard".to_string()),
+                title: "Commando".to_string(),
+            },
+            at,
+        ));
+        assert_eq!(
+            now_playing_text(&now, at).as_deref(),
+            Ok("is now playing: Hubbard — Commando [Kohina]")
+        );
+        let later = at + std::time::Duration::from_secs(181);
+        assert_eq!(
+            now_playing_text(&now, later),
+            Err(("np-stale", "Kohina".to_string()))
+        );
+        let icy = RadioNowPlaying {
+            station: Some("KNAC".to_string()),
+            stream_title: Some("Band - Song".to_string()),
+            ..RadioNowPlaying::default()
+        };
+        assert_eq!(
+            now_playing_text(&icy, at).as_deref(),
+            Ok("is now playing: Band - Song [KNAC]")
+        );
+        let silent = RadioNowPlaying {
+            station: Some("KNAC".to_string()),
+            ..RadioNowPlaying::default()
+        };
+        assert_eq!(
+            now_playing_text(&silent, at),
+            Err(("np-unsupported", "KNAC".to_string()))
+        );
+    }
+
+    #[test]
+    fn custom_stations_need_a_name_and_an_http_url() {
+        let station = custom_radio_station(" Local ", "https://radio.example/live.ogg", 1)
+            .expect("valid station");
+        assert_eq!(station.name, "Local");
+        assert_eq!(station.codec, "vorbis");
+        assert_eq!(
+            custom_radio_station("x", "https://radio.example/s.flac", 2)
+                .map(|station| station.codec),
+            Some("flac".to_string())
+        );
+        assert!(custom_radio_station("", "https://radio.example/", 0).is_none());
+        assert!(custom_radio_station("x", "ftp://radio.example/", 0).is_none());
+        assert!(custom_radio_station("x", "https://", 0).is_none());
+        assert!(custom_radio_station("x", "https://a b/", 0).is_none());
+        assert_eq!(
+            custom_radio_station("x", "http://radio.example/s", 0).map(|station| station.codec),
+            Some("mp3".to_string())
+        );
+    }
+
+    #[test]
+    fn admin_subject_rows_keep_accounts_and_visitors() {
+        assert_eq!(
+            admin_subject_row(&serde_json::json!({
+                "type": "visitor", "id": "v-1", "network": "libera", "nick": "guest7"
+            })),
+            Some((
+                "visitor".to_string(),
+                "v-1".to_string(),
+                "libera".to_string(),
+                "guest7".to_string()
+            ))
+        );
+        assert_eq!(
+            admin_subject_row(&serde_json::json!({
+                "type": "user", "id": "u-1", "network": null, "nick": "ada"
+            }))
+            .map(|row| row.2),
+            Some(String::new())
+        );
+        assert_eq!(
+            admin_subject_row(&serde_json::json!({"type": "bot", "id": "x", "nick": "y"})),
+            None
+        );
     }
 
     #[test]
