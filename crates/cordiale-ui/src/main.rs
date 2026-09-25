@@ -8905,23 +8905,26 @@ fn chat_line_from_message(
         None => (String::new(), slint::Color::from_rgb_u8(0, 0, 0)),
     };
 
-    let mut segments = Vec::new();
-    for segment in cordiale_core::formatting::parse_mirc_text(&message.text) {
-        let (has_color, color) = match segment.color {
-            Some(rgb) => {
-                let (r, g, b) = ensure_legible(rgb, dark_theme);
-                (true, slint::Color::from_rgb_u8(r, g, b))
-            }
-            None => (false, slint::Color::from_rgb_u8(0, 0, 0)),
-        };
-        segments.push(MessageSegment {
-            text: segment.text.into(),
-            has_color,
-            color,
-            bold: segment.bold,
-            italic: message.italic,
+    let default_color = if dark_theme {
+        (255, 255, 255)
+    } else {
+        (0, 0, 0)
+    };
+    let runs: Vec<(String, (u8, u8, u8), bool)> =
+        cordiale_core::formatting::parse_mirc_text(&message.text)
+            .into_iter()
+            .map(|segment| {
+                let color = segment
+                    .color
+                    .map_or(default_color, |rgb| ensure_legible(rgb, dark_theme));
+                (segment.text, color, segment.bold)
+            })
+            .collect();
+    let body = slint::StyledText::from_markdown(&message_markdown(&runs, message.italic))
+        .unwrap_or_else(|_| {
+            let plain: String = runs.iter().map(|run| run.0.as_str()).collect();
+            slint::StyledText::from_plain_text(&plain)
         });
-    }
 
     ChatLine {
         timestamp: message.timestamp.clone().into(),
@@ -8930,8 +8933,68 @@ fn chat_line_from_message(
         nick_prefix: nick_prefix.into(),
         nick_color: nick_color_value,
         italic: message.italic,
-        segments: Rc::new(slint::VecModel::from(segments)).into(),
+        body,
     }
+}
+
+/// A message's mIRC runs as Slint styled-text markup, so a line with
+/// several colors wraps as one paragraph. Every run gets an explicit
+/// `<font color>` (the default color too): emphasis markers then always sit
+/// next to a tag bracket, where CommonMark reliably opens and closes them.
+/// Text is backslash-escaped, so nothing a user typed becomes markup.
+fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> String {
+    let mut markdown = String::new();
+    for (text, (r, g, b), bold) in runs {
+        let text: String = text
+            .chars()
+            .filter(|ch| *ch != slint_markdown_placeholder())
+            .collect();
+        if text.is_empty() {
+            continue;
+        }
+        let core = text.trim();
+        let leading = &text[..text.len() - text.trim_start().len()];
+        let trailing = &text[text.trim_end().len()..];
+        let marker = match (*bold, italic) {
+            (true, true) => "***",
+            (true, false) => "**",
+            (false, true) => "*",
+            (false, false) => "",
+        };
+        markdown.push_str(&format!("<font color=\"#{r:02x}{g:02x}{b:02x}\">"));
+        markdown.push_str(&escape_markdown(leading));
+        if !core.is_empty() {
+            markdown.push_str(marker);
+            markdown.push_str(&escape_markdown(core));
+            markdown.push_str(marker);
+        }
+        markdown.push_str(&escape_markdown(trailing));
+        markdown.push_str("</font>");
+    }
+    markdown
+}
+
+/// Slint's `@markdown` interpolation placeholder, never valid in chat text.
+fn slint_markdown_placeholder() -> char {
+    '\u{e541}'
+}
+
+/// Escapes every ASCII punctuation character (CommonMark allows a
+/// backslash before any of them). IRC lines have no line breaks; a stray
+/// one becomes a space so the body stays one paragraph.
+fn escape_markdown(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch == '\n' || ch == '\r' {
+            escaped.push(' ');
+            continue;
+        }
+        if ch.is_ascii_punctuation() {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 fn chat_lines_model(messages: &[RenderedMessage], dark_theme: bool) -> Vec<ChatLine> {
@@ -17893,6 +17956,30 @@ mod tests {
         assert_eq!(avatar_extension(Some("image/gif")), Some("gif"));
         assert_eq!(avatar_extension(Some("image/svg+xml")), None);
         assert_eq!(avatar_extension(None), None);
+    }
+
+    #[test]
+    fn message_markdown_escapes_text_and_keeps_every_run() {
+        let runs = vec![
+            (
+                "# 1. *not* <b>markup</b> & [x](y) ".to_string(),
+                (255, 0, 0),
+                false,
+            ),
+            ("bold!".to_string(), (0, 0, 0), true),
+            ("   ".to_string(), (0, 0, 0), false),
+            ("- tail_\u{e541}".to_string(), (0, 128, 0), false),
+        ];
+        let markdown = message_markdown(&runs, false);
+        assert!(markdown.starts_with("<font color=\"#ff0000\">\\# 1\\. \\*not\\*"));
+        assert!(markdown.contains("<font color=\"#000000\">**bold\\!**</font>"));
+        assert!(!markdown.contains('\u{e541}'));
+        assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+        let italic = message_markdown(&runs, true);
+        assert!(italic.contains("***bold\\!***"));
+        assert!(slint::StyledText::from_markdown(&italic).is_ok());
+        let multiline = message_markdown(&[("a\n    b".to_string(), (0, 0, 0), false)], false);
+        assert!(slint::StyledText::from_markdown(&multiline).is_ok());
     }
 
     #[test]
