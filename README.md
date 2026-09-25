@@ -63,8 +63,8 @@ Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-
 Cordiale still has these user-visible or behavioral gaps:
 
 - **Themes:** Cordiale applies Grappa's gallery themes (or built-in copies)
-  with their day/night pairing and wallpapers, but not Cicchetto's
-  custom-theme editor or theme publishing. Buttons and menus keep Slint's own widget
+  with their day/night pairing and wallpapers, and edits, copies, deletes and
+  publishes the account's own themes. Buttons and menus keep Slint's own widget
   style in its dark or light variant.
 - **Sign-in and account security:** Cordiale does not expose Cicchetto's
   TOTP/passkey management.

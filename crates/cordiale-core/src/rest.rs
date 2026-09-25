@@ -242,6 +242,11 @@ pub struct ThemeWire {
     pub author: String,
     #[serde(default)]
     pub built_in: bool,
+    /// Whether the viewer owns it (and so may edit, delete or publish it).
+    #[serde(default)]
+    pub mine: bool,
+    #[serde(default)]
+    pub published: bool,
     pub payload: ThemePayloadWire,
 }
 

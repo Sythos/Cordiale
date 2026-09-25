@@ -126,6 +126,20 @@ enum WorkerCommand {
     SelectColorTheme(String),
     /// Night slot of the account's theme pair; "" goes back to one theme.
     SelectNightTheme(String),
+    /// Opens the theme editor on a theme key, or on a copy of the theme in
+    /// use for "".
+    ThemeEdit(String),
+    ThemeSave {
+        theme_id: Option<i64>,
+        name: String,
+        payload: Value,
+    },
+    ThemeDelete(i64),
+    ThemePublish(i64, bool),
+    ThemeCopy(i64),
+    ThemeBackgroundUpload(std::path::PathBuf),
+    /// Leaves the editor, putting back the theme in use.
+    ThemeEditorCancel,
     /// The OS switched between light (`false`) and dark (`true`).
     SystemScheme(bool),
     SaveDisplayPrefs(DisplayPrefs),
@@ -773,6 +787,110 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_color_theme = worker_tx.clone();
     ui.on_color_theme_requested(move |key| {
         let _ = tx_for_color_theme.send(WorkerCommand::SelectColorTheme(key.to_string()));
+    });
+
+    let tx_for_theme_edit = worker_tx.clone();
+    ui.on_theme_edit_requested(move |key| {
+        let _ = tx_for_theme_edit.send(WorkerCommand::ThemeEdit(key.to_string()));
+    });
+
+    let tx_for_theme_delete = worker_tx.clone();
+    let weak_for_theme_delete = ui.as_weak();
+    ui.on_theme_delete_requested(move |key, name| {
+        let (Some(ui), Some(theme_id)) = (weak_for_theme_delete.upgrade(), server_theme_id(&key))
+        else {
+            return;
+        };
+        let answer = rfd::MessageDialog::new()
+            .set_title(ui.get_theme_delete_title().as_str())
+            .set_description(ui.invoke_theme_delete_text(name).as_str())
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if matches!(answer, rfd::MessageDialogResult::Yes) {
+            let _ = tx_for_theme_delete.send(WorkerCommand::ThemeDelete(theme_id));
+        }
+    });
+
+    let tx_for_theme_publish = worker_tx.clone();
+    ui.on_theme_publish_requested(move |key, published| {
+        if let Some(theme_id) = server_theme_id(&key) {
+            let _ = tx_for_theme_publish.send(WorkerCommand::ThemePublish(theme_id, published));
+        }
+    });
+
+    let tx_for_theme_copy = worker_tx.clone();
+    ui.on_theme_copy_requested(move |key| {
+        if let Some(theme_id) = server_theme_id(&key) {
+            let _ = tx_for_theme_copy.send(WorkerCommand::ThemeCopy(theme_id));
+        }
+    });
+
+    let weak_for_editor_color = ui.as_weak();
+    ui.on_editor_color_edited(move |index, value| {
+        use slint::Model as _;
+        let Some(ui) = weak_for_editor_color.upgrade() else {
+            return;
+        };
+        let colors = ui.get_editor_colors();
+        let Some(mut row) = usize::try_from(index)
+            .ok()
+            .and_then(|index| colors.row_data(index))
+        else {
+            return;
+        };
+        let parsed = cordiale_core::theme::parse_hex(value.trim());
+        row.value = value;
+        row.valid = parsed.is_some();
+        if let Some(rgb) = parsed {
+            row.color = slint_color(rgb);
+        }
+        if let Ok(index) = usize::try_from(index) {
+            colors.set_row_data(index, row);
+        }
+        preview_editor_theme(&ui);
+    });
+
+    let weak_for_editor_font = ui.as_weak();
+    ui.on_editor_font_changed(move || {
+        if let Some(ui) = weak_for_editor_font.upgrade() {
+            preview_editor_theme(&ui);
+        }
+    });
+
+    let tx_for_editor_save = worker_tx.clone();
+    let weak_for_editor_save = ui.as_weak();
+    ui.on_editor_save(move || {
+        let Some(ui) = weak_for_editor_save.upgrade() else {
+            return;
+        };
+        let name = ui.get_editor_name().trim().to_string();
+        let payload = editor_payload(&ui);
+        match payload {
+            Some(payload) if !name.is_empty() && name.chars().count() <= 60 => {
+                let theme_id = i64::from(ui.get_editor_theme_id());
+                let _ = tx_for_editor_save.send(WorkerCommand::ThemeSave {
+                    theme_id: (theme_id >= 0).then_some(theme_id),
+                    name,
+                    payload,
+                });
+            }
+            _ => ui.set_status_kind("theme-invalid".into()),
+        }
+    });
+
+    let tx_for_editor_cancel = worker_tx.clone();
+    ui.on_editor_cancel(move || {
+        let _ = tx_for_editor_cancel.send(WorkerCommand::ThemeEditorCancel);
+    });
+
+    let tx_for_editor_background = worker_tx.clone();
+    ui.on_editor_pick_background(move || {
+        let picked = rfd::FileDialog::new()
+            .add_filter("image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"])
+            .pick_file();
+        if let Some(path) = picked {
+            let _ = tx_for_editor_background.send(WorkerCommand::ThemeBackgroundUpload(path));
+        }
     });
 
     let tx_for_night_theme = worker_tx.clone();
@@ -2143,6 +2261,48 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SelectColorTheme(key)) => {
                         select_color_theme(&mut state, &ui, &key).await;
+                    }
+                    Some(WorkerCommand::ThemeEdit(key)) => {
+                        open_theme_editor(&state, &ui, &key).await;
+                    }
+                    Some(WorkerCommand::ThemeSave {
+                        theme_id,
+                        name,
+                        payload,
+                    }) => {
+                        save_theme(&mut state, &ui, theme_id, &name, &payload).await;
+                    }
+                    Some(WorkerCommand::ThemeDelete(theme_id)) => {
+                        if let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) {
+                            let result = client.delete_theme(&token, theme_id).await;
+                            report_theme_action(&ui, result.err());
+                            load_color_themes(&mut state, &ui).await;
+                        }
+                    }
+                    Some(WorkerCommand::ThemePublish(theme_id, published)) => {
+                        if let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) {
+                            let result = client.set_theme_published(&token, theme_id, published).await;
+                            report_theme_action(&ui, result.err());
+                            load_color_themes(&mut state, &ui).await;
+                        }
+                    }
+                    Some(WorkerCommand::ThemeCopy(theme_id)) => {
+                        if let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) {
+                            match client.copy_theme(&token, theme_id).await {
+                                Ok(copy) => {
+                                    load_color_themes(&mut state, &ui).await;
+                                    let key = format!("server:{}", copy.id);
+                                    open_theme_editor(&state, &ui, &key).await;
+                                }
+                                Err(err) => report_theme_action(&ui, Some(err)),
+                            }
+                        }
+                    }
+                    Some(WorkerCommand::ThemeBackgroundUpload(path)) => {
+                        upload_theme_background(&state, &ui, &path).await;
+                    }
+                    Some(WorkerCommand::ThemeEditorCancel) => {
+                        load_color_themes(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::SelectNightTheme(key)) => {
                         select_night_theme(&mut state, &ui, &key).await;
@@ -9971,6 +10131,11 @@ struct ThemeChoice {
     palette: ThemePalette,
     font_family: String,
     background: Option<ThemeBackground>,
+    /// Owned by the account: editable, deletable, publishable.
+    mine: bool,
+    published: bool,
+    /// The payload's wallpaper as Grappa stores it, to reopen in the editor.
+    background_wire: Option<cordiale_core::rest::ThemeBackgroundWire>,
 }
 
 /// A theme's wallpaper, resolved to the path Grappa serves it at.
@@ -10023,6 +10188,9 @@ fn builtin_theme_choices() -> Vec<ThemeChoice> {
             palette: theme.palette(),
             font_family: "mono-default".to_string(),
             background: None,
+            mine: false,
+            published: false,
+            background_wire: None,
         })
         .collect()
 }
@@ -10036,6 +10204,9 @@ fn server_theme_choice(theme: &cordiale_core::rest::ThemeWire) -> Option<ThemeCh
         palette: ThemePalette::from_colors(&theme.payload.colors)?,
         font_family: theme.payload.font_family.clone(),
         background: theme_background(theme.payload.background.as_ref()),
+        mine: theme.mine,
+        published: theme.published,
+        background_wire: theme.payload.background.clone(),
     })
 }
 
@@ -10154,29 +10325,32 @@ fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected
         ),
         None => (selected, None),
     };
-    let rows: Vec<(String, String, String, bool, bool, ThemePalette)> = state
+    let rows: Vec<(ThemeChoice, bool, bool)> = state
         .theme_choices
         .iter()
         .map(|choice| {
             (
-                choice.key.clone(),
-                choice.name.clone(),
-                choice.author.clone(),
+                choice.clone(),
                 day == Some(choice.key.as_str()),
                 night == Some(choice.key.as_str()),
-                choice.palette.clone(),
             )
         })
         .collect();
+    let editable = state
+        .theme_choices
+        .iter()
+        .any(|choice| choice.key.starts_with("server:"));
     let pair_active = state.theme_pair.is_some();
     let has_night = night.is_some();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_theme_pair_active(pair_active);
         ui.set_theme_has_night(has_night);
+        ui.set_theme_editing_available(editable);
         let rows: Vec<ThemeChoiceRow> = rows
             .into_iter()
-            .map(|(key, name, author, selected, night, palette)| {
+            .map(|(choice, selected, night)| {
+                let palette = &choice.palette;
                 let swatches: Vec<slint::Color> = [
                     palette.bg,
                     palette.fg,
@@ -10191,11 +10365,14 @@ fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected
                 .map(slint_color)
                 .collect();
                 ThemeChoiceRow {
-                    key: key.into(),
-                    name: name.into(),
-                    author: author.into(),
+                    server: choice.key.starts_with("server:"),
+                    key: choice.key.into(),
+                    name: choice.name.into(),
+                    author: choice.author.into(),
                     selected,
                     night,
+                    mine: choice.mine,
+                    published: choice.published,
                     swatches: Rc::new(slint::VecModel::from(swatches)).into(),
                 }
             })
@@ -10210,13 +10387,23 @@ async fn load_color_themes(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
         return;
     };
-    let server_choices: Vec<ThemeChoice> = match client.fetch_themes(&token).await {
+    let mut server_choices: Vec<ThemeChoice> = match client.fetch_themes(&token).await {
         Ok(themes) => themes.iter().filter_map(server_theme_choice).collect(),
         Err(err) => {
             persistence::log_line(&format!("theme gallery unavailable: {err:?}"));
             Vec::new()
         }
     };
+    // The gallery lists published themes; the account's own drafts join it.
+    if !server_choices.is_empty() {
+        if let Ok(mine) = client.fetch_my_themes(&token).await {
+            for choice in mine.iter().filter_map(server_theme_choice) {
+                if !server_choices.iter().any(|known| known.key == choice.key) {
+                    server_choices.push(choice);
+                }
+            }
+        }
+    }
     state.theme_choices = if server_choices.is_empty() {
         builtin_theme_choices()
     } else {
@@ -10242,6 +10429,294 @@ async fn load_color_themes(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
         None => None,
     };
     apply_color_theme(state, ui, active);
+}
+
+/// The Grappa id in a `server:<id>` theme key.
+fn server_theme_id(key: &str) -> Option<i64> {
+    key.strip_prefix("server:")?.parse().ok()
+}
+
+/// The editor's wallpaper menu: keys ("" none, "upload" the uploaded
+/// image, then Grappa's built-in keys) and their names.
+fn editor_background_menu(
+    ui: &AppWindow,
+    builtins: &[(String, String)],
+) -> (Vec<slint::SharedString>, Vec<slint::SharedString>) {
+    let mut keys: Vec<slint::SharedString> = vec!["".into(), "upload".into()];
+    let mut names = vec![
+        ui.get_editor_no_wallpaper_label(),
+        ui.get_editor_uploaded_wallpaper_label(),
+    ];
+    for (key, name) in builtins {
+        keys.push(key.clone().into());
+        names.push(name.clone().into());
+    }
+    (keys, names)
+}
+
+/// Opens the editor on `key` (an owned Grappa theme) or, for "", on a new
+/// theme starting from the one in use.
+async fn open_theme_editor(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &str) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let source = if key.is_empty() {
+        state
+            .theme_pair
+            .as_ref()
+            .map(|pair| pair.0.clone())
+            .or_else(|| state.theme_choices.first().cloned())
+    } else {
+        state
+            .theme_choices
+            .iter()
+            .find(|choice| choice.key == key && choice.mine)
+            .cloned()
+    };
+    let Some(source) = source else {
+        return;
+    };
+    let theme_id = if key.is_empty() {
+        -1
+    } else {
+        server_theme_id(key)
+            .and_then(|id| i32::try_from(id).ok())
+            .unwrap_or(-1)
+    };
+    let name = if key.is_empty() {
+        String::new()
+    } else {
+        source.name.clone()
+    };
+    let builtins = client
+        .fetch_theme_backgrounds(&token)
+        .await
+        .unwrap_or_default();
+    let colors: Vec<(String, (u8, u8, u8))> = source.palette.color_entries();
+    let font_index = cordiale_core::theme::FONT_FAMILIES
+        .iter()
+        .position(|font| *font == source.font_family)
+        .unwrap_or(0);
+    let wire = source.background_wire.clone().unwrap_or_default();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let (keys, names) = editor_background_menu(&ui, &builtins);
+        let background_index = match (wire.builtin.as_deref(), wire.image_id.as_deref()) {
+            (Some(builtin), _) => keys
+                .iter()
+                .position(|key| key.as_str() == builtin)
+                .unwrap_or(0),
+            (None, Some(_)) => 1,
+            (None, None) => 0,
+        };
+        let rows: Vec<EditorColor> = colors
+            .into_iter()
+            .map(|(key, rgb)| EditorColor {
+                nick_index: key
+                    .strip_prefix("nick_")
+                    .and_then(|index| index.parse().ok())
+                    .unwrap_or(-1),
+                key: key.into(),
+                value: cordiale_core::theme::to_hex(rgb).into(),
+                color: slint_color(rgb),
+                valid: true,
+            })
+            .collect();
+        ui.set_editor_theme_id(theme_id);
+        ui.set_editor_name(name.into());
+        ui.set_editor_font_index(i32::try_from(font_index).unwrap_or(0));
+        ui.set_editor_colors(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_editor_background_keys(Rc::new(slint::VecModel::from(keys)).into());
+        ui.set_editor_background_names(Rc::new(slint::VecModel::from(names)).into());
+        ui.set_editor_background_index(i32::try_from(background_index).unwrap_or(0));
+        ui.set_editor_image_id(wire.image_id.clone().unwrap_or_default().into());
+        ui.set_editor_tile(wire.size.as_deref() == Some("repeat"));
+        let opacity = wire
+            .opacity
+            .as_ref()
+            .and_then(serde_json::Number::as_f64)
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        ui.set_editor_opacity((opacity * 100.0).round() as i32);
+        ui.set_settings_section("theme-editor".into());
+    });
+}
+
+/// The editor's colors as Grappa's `colors` map, when all 27 are valid.
+fn editor_colors(ui: &AppWindow) -> Option<HashMap<String, String>> {
+    use slint::Model as _;
+    ui.get_editor_colors()
+        .iter()
+        .map(|row| {
+            let rgb = cordiale_core::theme::parse_hex(row.value.trim())?;
+            Some((row.key.to_string(), cordiale_core::theme::to_hex(rgb)))
+        })
+        .collect()
+}
+
+/// The payload the editor would save: colors, font and wallpaper.
+fn editor_payload(ui: &AppWindow) -> Option<Value> {
+    use slint::Model as _;
+    let colors = editor_colors(ui)?;
+    ThemePalette::from_colors(&colors)?;
+    let font = usize::try_from(ui.get_editor_font_index())
+        .ok()
+        .and_then(|index| cordiale_core::theme::FONT_FAMILIES.get(index))
+        .copied()
+        .unwrap_or("mono-default");
+    let key = usize::try_from(ui.get_editor_background_index())
+        .ok()
+        .and_then(|index| ui.get_editor_background_keys().row_data(index))
+        .unwrap_or_default();
+    let image_id = ui.get_editor_image_id();
+    let (builtin, image_id) = match key.as_str() {
+        "" => (None, None),
+        "upload" if !image_id.is_empty() => (None, Some(image_id.to_string())),
+        "upload" => (None, None),
+        builtin => (Some(builtin.to_string()), None),
+    };
+    let opacity = f64::from(ui.get_editor_opacity().clamp(0, 100)) / 100.0;
+    Some(serde_json::json!({
+        "colors": colors,
+        "font_family": font,
+        "background": {
+            "image_id": image_id,
+            "builtin": builtin,
+            "size": if ui.get_editor_tile() { "repeat" } else { "cover" },
+            "opacity": opacity,
+        },
+    }))
+}
+
+/// Shows the editor's colors and font on the window while editing, like
+/// Cicchetto's live preview; Cancel puts the theme in use back.
+fn preview_editor_theme(ui: &AppWindow) {
+    let Some(palette) = editor_colors(ui).and_then(|colors| ThemePalette::from_colors(&colors))
+    else {
+        return;
+    };
+    let font_family = usize::try_from(ui.get_editor_font_index())
+        .ok()
+        .and_then(|index| cordiale_core::theme::FONT_FAMILIES.get(index))
+        .copied()
+        .unwrap_or("mono-default")
+        .to_string();
+    let preview = ThemeChoice {
+        key: String::new(),
+        name: String::new(),
+        author: String::new(),
+        palette,
+        font_family,
+        background: None,
+        mine: true,
+        published: false,
+        background_wire: None,
+    };
+    push_palette(ui, Some(&preview));
+}
+
+/// Saves the edited theme, then makes it the day theme like Cicchetto's
+/// Save (the night theme, if any, stays).
+async fn save_theme(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    theme_id: Option<i64>,
+    name: &str,
+    payload: &Value,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let saved = match client.save_theme(&token, theme_id, name, payload).await {
+        Ok(saved) => saved,
+        Err(err) => return report_theme_action(ui, Some(err)),
+    };
+    let night = state
+        .theme_pair
+        .as_ref()
+        .and_then(|pair| pair.1.as_ref())
+        .and_then(|night| server_theme_id(&night.key))
+        .filter(|night| *night != saved.id);
+    if let Err(err) = client.set_active_theme(&token, saved.id, night).await {
+        return report_theme_action(ui, Some(err));
+    }
+    let mut settings = persistence::load_settings().unwrap_or_default();
+    settings.color_theme = Some("server".to_string());
+    let _ = persistence::save_settings(&settings);
+    load_color_themes(state, ui).await;
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_settings_section("themes".into());
+        ui.set_status_kind("theme-saved".into());
+    });
+}
+
+/// Shows why a theme action failed: 422 for an invalid theme or a taken
+/// name, 429 for Grappa's daily limit on new themes.
+fn report_theme_action(ui: &slint::Weak<AppWindow>, err: Option<GrappaClientError>) {
+    let Some(err) = err else {
+        return;
+    };
+    persistence::log_line(&format!("theme action failed: {err:?}"));
+    let status = err.status().map(|status| status.as_u16());
+    let (kind, hint) = match status {
+        Some(422) => ("theme-refused", String::new()),
+        Some(429) => ("theme-rate-limited", String::new()),
+        Some(code) => ("theme-action-failed", code.to_string()),
+        None => ("theme-action-failed", "network error".to_string()),
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_command_hint(hint.into());
+        ui.set_status_kind(kind.into());
+    });
+}
+
+/// Uploads a picked wallpaper to Grappa, which re-encodes it, and selects
+/// it in the editor.
+async fn upload_theme_background(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    path: &std::path::Path,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "wallpaper".to_string());
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mime = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        _ => "application/octet-stream",
+    };
+    let result = match std::fs::read(path) {
+        Ok(bytes) => client
+            .upload_theme_background(&token, &filename, mime, bytes)
+            .await
+            .map_err(|err| {
+                persistence::log_line(&format!("wallpaper upload failed: {err:?}"));
+                err.status()
+                    .map(|status| status.as_u16().to_string())
+                    .unwrap_or_else(|| "network error".to_string())
+            }),
+        Err(err) => Err(err.to_string()),
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| match result {
+        Ok(image_id) => {
+            ui.set_editor_image_id(image_id.into());
+            ui.set_editor_background_index(1);
+        }
+        Err(reason) => {
+            ui.set_status_command_hint(reason.into());
+            ui.set_status_kind("theme-background-failed".into());
+        }
+    });
 }
 
 /// Day and night choices of Grappa's active pair; `None` without a day
@@ -18628,6 +19103,8 @@ mod tests {
                 font_family: "hack".to_string(),
                 background: None,
             },
+            mine: true,
+            published: false,
         };
         let choice = server_theme_choice(&theme).expect("complete palette");
         assert_eq!(choice.key, "server:12");

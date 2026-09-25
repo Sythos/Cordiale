@@ -43,6 +43,23 @@ pub const BASE_COLOR_KEYS: [&str; 11] = [
     "mode_plain",
 ];
 
+/// The font tokens a theme may name, in the editor's menu order.
+pub const FONT_FAMILIES: [&str; 8] = [
+    "mono-default",
+    "jetbrains-mono",
+    "fira-code",
+    "iosevka",
+    "hack",
+    "cascadia-code",
+    "source-code-pro",
+    "ibm-plex-mono",
+];
+
+/// `#rrggbb`, the form Grappa stores.
+pub fn to_hex((r, g, b): Rgb) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
 /// A theme's full palette: the eleven base colors plus sixteen nick colors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemePalette {
@@ -84,6 +101,34 @@ impl ThemePalette {
             mode_plain: color("mode_plain")?,
             nicks,
         })
+    }
+
+    /// The 27 colors in wire order: the base keys, then `nick_0`..`nick_15`.
+    pub fn color_entries(&self) -> Vec<(String, Rgb)> {
+        let base = [
+            self.bg,
+            self.bg_alt,
+            self.fg,
+            self.accent,
+            self.muted,
+            self.border,
+            self.mention,
+            self.mode_op,
+            self.mode_halfop,
+            self.mode_voiced,
+            self.mode_plain,
+        ];
+        BASE_COLOR_KEYS
+            .iter()
+            .map(|key| key.to_string())
+            .zip(base)
+            .chain(
+                self.nicks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rgb)| (format!("nick_{index}"), *rgb)),
+            )
+            .collect()
     }
 
     /// Whether the background is dark (perceived luminance below half).
@@ -234,6 +279,22 @@ pub fn default_monospace_family() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_round_trips_through_its_color_entries() {
+        let palette = builtin_theme("sux").expect("sux").palette();
+        let entries = palette.color_entries();
+        assert_eq!(entries.len(), 27);
+        assert_eq!(entries[0].0, "bg");
+        assert_eq!(entries[11].0, "nick_0");
+        let colors: HashMap<String, String> = entries
+            .iter()
+            .map(|(key, rgb)| (key.clone(), to_hex(*rgb)))
+            .collect();
+        assert_eq!(ThemePalette::from_colors(&colors), Some(palette));
+        assert_eq!(to_hex((255, 0, 10)), "#ff000a");
+        assert_eq!(FONT_FAMILIES[0], "mono-default");
+    }
 
     #[test]
     fn parses_short_and_long_hex() {
