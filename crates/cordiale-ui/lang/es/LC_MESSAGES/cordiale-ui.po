@@ -2075,3 +2075,7 @@ msgstr "Copiar"
 msgctxt "AppWindow"
 msgid "Only the first megabyte is shown."
 msgstr "Solo se muestra el primer megabyte."
+
+msgctxt "AppWindow"
+msgid "{}: finished"
+msgstr "{}: terminado"

@@ -2175,7 +2175,10 @@ async fn run_worker(
                         delete_archive_target(&mut state, &ui, &target).await;
                     }
                     Some(WorkerCommand::OpenLink(href)) => {
-                        open_link(&state, &ui, href);
+                        match audio_link(&state, &href) {
+                            Some(hint) => play_audio_link(&mut radio_state, &radio, &ui, &href, hint),
+                            None => open_link(&state, &ui, href),
+                        }
                     }
                     Some(WorkerCommand::RadioTune(key)) => {
                         tune_radio(&mut radio_state, &radio, &worker_self, &ui, &key);
@@ -4759,9 +4762,13 @@ struct TunedRadio {
     /// Last title the stream itself carried (ICY), for stations without a
     /// feed.
     stream_title: Option<String>,
-    /// "connecting", "playing", "failed" or "ended".
+    /// "connecting", "playing", "failed", "ended" (a station stopped) or
+    /// "finished" (an audio file played to its end).
     status: &'static str,
     error: String,
+    /// An audio link from the chat rather than a station: `/np` ignores
+    /// it, like Cicchetto.
+    upload: bool,
 }
 
 #[derive(Default)]
@@ -4877,6 +4884,52 @@ fn tune_radio(
         stream_title: None,
         status: "connecting",
         error: String::new(),
+        upload: false,
+    });
+    push_radio_now(ui, radio_state);
+}
+
+/// The decoder hint when a clicked link is audio the player takes.
+fn audio_link(state: &WorkerState, href: &str) -> Option<&'static str> {
+    let base = state
+        .client
+        .as_ref()
+        .map(|client| client.base_url().to_string())
+        .unwrap_or_default();
+    match cordiale_core::media::link_target(href, &base) {
+        cordiale_core::media::LinkTarget::Audio(hint) => Some(hint),
+        _ => None,
+    }
+}
+
+/// Plays an audio link from the chat in the integrated player, replacing
+/// whatever was on, as Cicchetto's mini-player does.
+fn play_audio_link(
+    radio_state: &mut RadioState,
+    radio: &player::RadioPlayer,
+    ui: &slint::Weak<AppWindow>,
+    href: &str,
+    hint: &'static str,
+) {
+    radio_state.stop();
+    radio.play(href, hint, radio_state.generation);
+    let title = href
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    radio_state.tuned = Some(TunedRadio {
+        key: String::new(),
+        title,
+        source: None,
+        track: None,
+        stream_title: None,
+        status: "connecting",
+        error: String::new(),
+        upload: true,
     });
     push_radio_now(ui, radio_state);
 }
@@ -4901,19 +4954,26 @@ fn handle_radio_event(
             tuned.status = "failed";
             tuned.error = error;
         }
-        player::PlayerEvent::Ended => tuned.status = "ended",
+        player::PlayerEvent::Ended => {
+            tuned.status = if tuned.upload { "finished" } else { "ended" };
+        }
     }
     push_radio_now(ui, radio_state);
 }
 
 /// Mirrors the station on air into the player bar and `/np`.
 fn push_radio_now(ui: &slint::Weak<AppWindow>, radio_state: &RadioState) {
-    let now = radio_state.tuned.as_ref().map(|tuned| RadioNowPlaying {
-        station: Some(tuned.title.clone()),
-        has_feed: tuned.source.is_some(),
-        track: tuned.track.clone(),
-        stream_title: tuned.stream_title.clone(),
-    });
+    let now = radio_state
+        .tuned
+        .as_ref()
+        .filter(|tuned| !tuned.upload)
+        .map(|tuned| RadioNowPlaying {
+            station: Some(tuned.title.clone()),
+            has_feed: tuned.source.is_some(),
+            track: tuned.track.clone(),
+            stream_title: tuned.stream_title.clone(),
+        });
+    let upload = radio_state.tuned.as_ref().is_some_and(|tuned| tuned.upload);
     let label = now
         .as_ref()
         .and_then(|now| match (&now.track, &now.stream_title) {
@@ -4935,6 +4995,7 @@ fn push_radio_now(ui: &slint::Weak<AppWindow>, radio_state: &RadioState) {
         None => (String::new(), String::new(), "", String::new()),
     };
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_radio_upload(upload);
         ui.set_radio_tuned_key(key.into());
         ui.set_radio_station(title.into());
         ui.set_radio_track(label.into());
