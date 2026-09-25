@@ -107,6 +107,12 @@ pub enum SessionEvent {
     Reconnecting {
         reason: String,
     },
+    /// Terminal: Grappa refused the user-topic join for good (`forbidden`,
+    /// `unknown_topic`): retrying with the same topic can't succeed, so the
+    /// session has stopped.
+    JoinRefused {
+        reason: String,
+    },
     /// Terminal: the WebSocket upgrade was refused with 401/403, so the
     /// bearer is missing, invalid or revoked. The session has stopped and
     /// will not retry with that bearer.
@@ -369,6 +375,10 @@ async fn run_session(
                                 Some(Ok(protocol_version)) => {
                                     let _ = events.send(SessionEvent::Connected { protocol_version });
                                 }
+                                Some(Err(reason)) if is_permanent_join_refusal(&reason) => {
+                                    let _ = events.send(SessionEvent::JoinRefused { reason });
+                                    return;
+                                }
                                 Some(Err(reason)) => {
                                     let _ = events.send(SessionEvent::Reconnecting {
                                         reason: format!("user topic join rejected: {reason}"),
@@ -409,10 +419,17 @@ async fn run_session(
 
 /// Joins `topic`, returning the `join_ref` the server now associates with
 /// it — required on every subsequent command frame for that topic.
+/// Grappa's join refusals that no retry can fix: the topic's user segment
+/// isn't this socket's subject, or the topic doesn't parse.
+fn is_permanent_join_refusal(reason: &str) -> bool {
+    matches!(reason, "forbidden" | "unknown_topic")
+}
+
 /// Reads the server's answer to the user-topic join: `None` for any other
 /// frame (replies to later commands on the same topic included), the
 /// advertised protocol version on `status: "ok"`, and the server's reason
-/// (or the status itself) otherwise.
+/// otherwise: Grappa's `error` (`forbidden`, `unknown_topic`), a `reason`,
+/// or the status itself.
 fn user_join_outcome(
     message: &PhoenixMessage,
     user_topic: &str,
@@ -432,7 +449,7 @@ fn user_join_outcome(
     let response = message.payload.get("response");
     if status != "ok" {
         let reason = response
-            .and_then(|response| response.get("reason"))
+            .and_then(|response| response.get("error").or_else(|| response.get("reason")))
             .and_then(|reason| reason.as_str())
             .unwrap_or(status);
         return Some(Err(reason.to_string()));
@@ -518,6 +535,17 @@ mod tests {
             user_join_outcome(&rejected, "grappa:user:vjt", "1"),
             Some(Err("unauthorized".to_string()))
         );
+        let forbidden = reply(
+            "1",
+            serde_json::json!({"status": "error", "response": {"error": "forbidden"}}),
+        );
+        assert_eq!(
+            user_join_outcome(&forbidden, "grappa:user:vjt", "1"),
+            Some(Err("forbidden".to_string()))
+        );
+        assert!(is_permanent_join_refusal("forbidden"));
+        assert!(is_permanent_join_refusal("unknown_topic"));
+        assert!(!is_permanent_join_refusal("unauthorized"));
         let bare_error = reply("1", serde_json::json!({"status": "error"}));
         assert_eq!(
             user_join_outcome(&bare_error, "grappa:user:vjt", "1"),

@@ -1581,6 +1581,8 @@ export component AppWindow inherits Window {
             return @tr("Couldn't leave the channel. Please try again.");
         } else if status-kind == "disconnected" {
             return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
+        } else if status-kind == "session-refused" {
+            return @tr("Grappa refused the realtime session ({}). Sign out and in again; if it keeps happening, please report it.", status-message);
         } else if status-kind == "reconnecting" {
             return status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
         } else if status-kind == "presence-online" {

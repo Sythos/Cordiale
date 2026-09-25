@@ -2087,3 +2087,7 @@ msgstr "Informa de los problemas de Cordiale en:"
 msgctxt "AppWindow"
 msgid "Issues with Grappa itself (grappa-irc) go to its own repository:"
 msgstr "Los problemas de Grappa (grappa-irc) van en su propio repositorio:"
+
+msgctxt "AppWindow"
+msgid "Grappa refused the realtime session ({}). Sign out and in again; if it keeps happening, please report it."
+msgstr "Grappa rechazó la sesión en tiempo real ({}). Cierra la sesión y vuelve a entrar; si sigue ocurriendo, infórmalo."
