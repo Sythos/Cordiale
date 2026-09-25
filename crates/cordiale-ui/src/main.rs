@@ -8514,7 +8514,12 @@ fn apply_members_seeded(state: &mut WorkerState, payload: &Value) -> Option<(Str
     let network = payload.get("network").and_then(Value::as_str)?.to_string();
     let channel = payload.get("channel").and_then(Value::as_str)?.to_string();
     let list = payload.get("members").and_then(Value::as_array)?;
-    let mut members: Vec<MemberEntry> = list.iter().filter_map(member_from_entry).collect();
+    let order =
+        cordiale_core::isupport::prefix_symbol_order(state.isupport_by_network.get(&network));
+    let mut members: Vec<MemberEntry> = list
+        .iter()
+        .filter_map(|entry| member_from_entry(entry, &order))
+        .collect();
     sort_members_by_rank(&mut members);
     let key = (network, channel);
     state.members.insert(key.clone(), members);
@@ -9397,9 +9402,14 @@ type MembersByChannel = HashMap<(String, String), Vec<MemberEntry>>;
 /// Parses one member list entry: either a plain string with an optional
 /// leading role-prefix character (`"@nick"`, `"+nick"`, `"nick"`), or an
 /// object carrying a `nick`/`name` field plus either an explicit `prefix`
-/// string or a `modes` array of mode letters (`o`/`h`/`v`) to derive one
-/// from.
-fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
+/// string or a `modes` array. Grappa's real wire shape (`members_seeded`,
+/// `names_reply`) puts role sigils (`~`/`&`/`@`/`%`/`+`, taken from the
+/// network's ISUPPORT PREFIX) directly in `modes`, not mode letters —
+/// letters (`q`/`a`/`o`/`h`/`v`) are still accepted for backwards
+/// compatibility. `order` ranks the symbols highest first (see
+/// `prefix_symbol_order`), so a member holding several roles ends up
+/// stored with its highest one leading.
+fn member_from_entry(entry: &Value, order: &[String]) -> Option<MemberEntry> {
     if let Some(raw) = entry.as_str() {
         let name = raw.trim_start_matches(|c| "@%+&~".contains(c));
         let prefix = raw[..raw.len() - name.len()].to_string();
@@ -9418,12 +9428,26 @@ fn member_from_entry(entry: &Value) -> Option<MemberEntry> {
         .map(str::to_string)
         .or_else(|| {
             obj.get("modes").and_then(Value::as_array).map(|modes| {
-                ["o", "h", "v"]
+                let mut symbols: Vec<&str> = modes
                     .iter()
-                    .zip(["@", "%", "+"])
-                    .filter(|(mode, _)| modes.iter().any(|held| held.as_str() == Some(**mode)))
-                    .map(|(_, symbol)| symbol)
-                    .collect::<String>()
+                    .filter_map(Value::as_str)
+                    .filter_map(|held| match held {
+                        "~" | "&" | "@" | "%" | "+" => Some(held),
+                        "q" => Some("~"),
+                        "a" => Some("&"),
+                        "o" => Some("@"),
+                        "h" => Some("%"),
+                        "v" => Some("+"),
+                        _ => None,
+                    })
+                    .collect();
+                symbols.sort_by_key(|symbol| {
+                    order
+                        .iter()
+                        .position(|held| held.as_str() == *symbol)
+                        .unwrap_or(order.len())
+                });
+                symbols.concat()
             })
         })
         .unwrap_or_default();
@@ -19655,13 +19679,61 @@ mod tests {
         assert_eq!(highest_prefix("@+"), "@");
         assert_eq!(highest_prefix(""), "");
         assert_eq!(
-            member_from_entry(&serde_json::json!("@+ada")),
+            member_from_entry(&serde_json::json!("@+ada"), &order),
             Some(("ada".to_string(), "@+".to_string()))
         );
+    }
+
+    #[test]
+    fn member_from_entry_reads_sigils_from_modes() {
+        // Real wire shape: `modes` holds role sigils (`~&@%+`), not mode
+        // letters — see Grappa's `Session.Wire.member/1`. Fall back to the
+        // default `~&@%+` order, same as before any ISUPPORT snapshot.
+        let order = cordiale_core::isupport::prefix_symbol_order(None);
         assert_eq!(
-            member_from_entry(&serde_json::json!({"nick": "bob", "modes": ["v", "o"]})),
+            member_from_entry(
+                &serde_json::json!({"nick": "bob", "modes": ["+", "@"]}),
+                &order
+            ),
             Some(("bob".to_string(), "@+".to_string()))
         );
+        assert_eq!(
+            member_from_entry(&serde_json::json!({"nick": "ann", "modes": []}), &order),
+            Some(("ann".to_string(), String::new()))
+        );
+        assert_eq!(
+            member_from_entry(&serde_json::json!({"nick": "eve", "modes": ["~"]}), &order),
+            Some(("eve".to_string(), "~".to_string()))
+        );
+        // Mode letters are still accepted for backwards compatibility.
+        assert_eq!(
+            member_from_entry(
+                &serde_json::json!({"nick": "cy", "modes": ["v", "o"]}),
+                &order
+            ),
+            Some(("cy".to_string(), "@+".to_string()))
+        );
+        // Unknown entries in `modes` are ignored rather than kept verbatim.
+        assert_eq!(
+            member_from_entry(&serde_json::json!({"nick": "gus", "modes": ["x"]}), &order),
+            Some(("gus".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn sort_members_by_rank_groups_by_role_then_alphabetically() {
+        let mut members: Vec<MemberEntry> = vec![
+            ("bob".to_string(), String::new()),
+            ("Zoe".to_string(), "@".to_string()),
+            ("ada".to_string(), "@".to_string()),
+            ("cy".to_string(), "+".to_string()),
+            ("Hal".to_string(), "%".to_string()),
+            ("root".to_string(), "~".to_string()),
+            ("Amy".to_string(), String::new()),
+        ];
+        sort_members_by_rank(&mut members);
+        let names: Vec<&str> = members.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["root", "ada", "Zoe", "Hal", "cy", "Amy", "bob"]);
     }
 
     #[test]
