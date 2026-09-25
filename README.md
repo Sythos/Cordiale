@@ -73,8 +73,11 @@ Cordiale still has these user-visible or behavioral gaps:
   Grappa (`POST /api/uploads`) and posts its link with the category emoji,
   as Cicchetto does, after checking the file type and the advertised size
   cap. Settings > General sets how long uploads are kept and whether to ask
-  before each one. Drag-and-drop and paste, inline previews and the media
-  viewer are not implemented yet.
+  before each one. Links in messages are clickable, as in Cicchetto: image
+  and text uploads on Grappa, and https images elsewhere, open in the media
+  viewer (fit or actual size; text read-only, with Copy), the rest in the
+  browser. Like Cicchetto, Cordiale shows no inline previews. Drag-and-drop
+  and paste are not implemented yet.
 - **Slash commands:** Cordiale handles the everyday IRC verbs (`/me`,
   `/msg`, `/notice`, `/query`, `/join`, `/part`, `/cycle`, `/topic`, `/nick`,
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,

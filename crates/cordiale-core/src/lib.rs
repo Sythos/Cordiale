@@ -39,6 +39,7 @@ pub mod domain;
 pub mod formatting;
 pub mod isupport;
 pub mod links;
+pub mod media;
 pub mod persistence;
 pub mod phoenix;
 pub mod profile;

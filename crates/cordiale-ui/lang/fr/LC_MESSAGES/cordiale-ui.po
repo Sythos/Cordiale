@@ -1755,3 +1755,39 @@ msgstr "Utiliser la nuit"
 msgctxt "AppWindow"
 msgid "Use theme {} at night"
 msgstr "Utiliser le thème {} la nuit"
+
+msgctxt "AppWindow"
+msgid "Fit"
+msgstr "Ajuster"
+
+msgctxt "AppWindow"
+msgid "Fit to the window"
+msgstr "Ajuster à la fenêtre"
+
+msgctxt "AppWindow"
+msgid "Actual size"
+msgstr "Taille réelle"
+
+msgctxt "AppWindow"
+msgid "Open in browser"
+msgstr "Ouvrir dans le navigateur"
+
+msgctxt "AppWindow"
+msgid "Close"
+msgstr "Fermer"
+
+msgctxt "AppWindow"
+msgid "This file is no longer on the server."
+msgstr "Ce fichier n'est plus sur le serveur."
+
+msgctxt "AppWindow"
+msgid "The file couldn't be shown ({})."
+msgstr "Le fichier n'a pas pu être affiché ({})."
+
+msgctxt "AppWindow"
+msgid "Copy"
+msgstr "Copier"
+
+msgctxt "AppWindow"
+msgid "Only the first megabyte is shown."
+msgstr "Seul le premier mégaoctet est affiché."

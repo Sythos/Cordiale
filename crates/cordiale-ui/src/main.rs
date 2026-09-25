@@ -91,6 +91,8 @@ enum WorkerCommand {
         accept: bool,
     },
     ArchiveDelete(String),
+    /// A link clicked in the chat: the viewer or the browser opens it.
+    OpenLink(String),
     ArchiveClose,
     /// Flips one user mode of the network shown in the user-mode view.
     UmodeToggle(String),
@@ -544,6 +546,18 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_archive_delete = worker_tx.clone();
     ui.on_archive_delete_requested(move |target| {
         let _ = tx_for_archive_delete.send(WorkerCommand::ArchiveDelete(target.to_string()));
+    });
+
+    let tx_for_link = worker_tx.clone();
+    ui.on_chat_link_clicked(move |href| {
+        let _ = tx_for_link.send(WorkerCommand::OpenLink(href.to_string()));
+    });
+
+    let weak_for_media_browser = ui.as_weak();
+    ui.on_media_open_in_browser(move || {
+        if let Some(ui) = weak_for_media_browser.upgrade() {
+            open_in_browser(&ui.get_media_url());
+        }
     });
 
     let tx_for_archive_close = worker_tx.clone();
@@ -1891,6 +1905,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ArchiveDelete(target)) => {
                         delete_archive_target(&mut state, &ui, &target).await;
+                    }
+                    Some(WorkerCommand::OpenLink(href)) => {
+                        open_link(&state, &ui, href);
                     }
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
@@ -8965,13 +8982,174 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
         markdown.push_str(&escape_markdown(leading));
         if !core.is_empty() {
             markdown.push_str(marker);
-            markdown.push_str(&escape_markdown(core));
+            markdown.push_str(&linked_markdown(core));
             markdown.push_str(marker);
         }
         markdown.push_str(&escape_markdown(trailing));
         markdown.push_str("</font>");
     }
     markdown
+}
+
+/// Escaped text with its links as markdown links, which the chat's
+/// `StyledText` draws in the link color and reports when clicked.
+fn linked_markdown(text: &str) -> String {
+    let mut markdown = String::new();
+    let mut last = 0;
+    for link in cordiale_core::media::find_links(text) {
+        markdown.push_str(&escape_markdown(&text[last..link.range.start]));
+        markdown.push('[');
+        markdown.push_str(&escape_markdown(&text[link.range.clone()]));
+        markdown.push_str("](<");
+        markdown.push_str(&link.href);
+        markdown.push_str(">)");
+        last = link.range.end;
+    }
+    markdown.push_str(&escape_markdown(&text[last..]));
+    markdown
+}
+
+/// Asks the system to open an http(s) or ftp URL in the browser; other
+/// schemes are ignored.
+fn open_in_browser(href: &str) {
+    if !cordiale_core::media::is_openable(href) {
+        return;
+    }
+    let mut command = if cfg!(target_os = "windows") {
+        let mut command = std::process::Command::new("rundll32");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    if let Err(err) = command.arg(href).spawn() {
+        persistence::log_line(&format!("browser not opened: {err}"));
+    }
+}
+
+/// A clicked chat link: images and text uploads (and https images
+/// elsewhere) open in the viewer, like Cicchetto; anything else in the
+/// browser. Grappa files are read with the session; other hosts without
+/// any credential.
+fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
+    use cordiale_core::media::{self, FetchError, LinkTarget};
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        open_in_browser(&href);
+        return;
+    };
+    let target = media::link_target(&href, client.base_url());
+    if target == LinkTarget::Browser {
+        open_in_browser(&href);
+        return;
+    }
+    let title = href
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let url = href.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_media_url(url.into());
+        ui.set_media_title(title.into());
+        ui.set_media_kind("loading".into());
+        ui.set_media_zoom(false);
+        ui.set_screen("media".into());
+    });
+    let ui = ui.clone();
+    tokio::spawn(async move {
+        let on_grappa = href.starts_with(&format!("{}/", client.base_url().trim_end_matches('/')));
+        let text = target == LinkTarget::Text;
+        let limit = if text {
+            media::MAX_TEXT_BYTES
+        } else {
+            media::MAX_IMAGE_BYTES
+        };
+        let fetched = if on_grappa {
+            client
+                .fetch_server_file(&token, &href)
+                .await
+                .map(|(bytes, content_type)| {
+                    let cut = text && bytes.len() > limit;
+                    let mut bytes = bytes;
+                    bytes.truncate(limit);
+                    (bytes, content_type, cut)
+                })
+                .map_err(|err| match err.status().map(|status| status.as_u16()) {
+                    Some(404 | 410) => FetchError::Gone,
+                    _ => FetchError::Failed(format!("{err:?}")),
+                })
+        } else {
+            media::fetch_public(&href, limit, text).await
+        };
+        let outcome = fetched.map(|(bytes, content_type, cut)| {
+            if text {
+                return MediaContent::Text(String::from_utf8_lossy(&bytes).into_owned(), cut);
+            }
+            let extension = avatar_extension(content_type.as_deref())
+                .or_else(|| href.rsplit('.').next().filter(|ext| ext.len() <= 4))
+                .unwrap_or("png")
+                .to_ascii_lowercase();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&href, &mut hasher);
+            let path = std::env::temp_dir().join(format!(
+                "cordiale-media-{:016x}.{extension}",
+                std::hash::Hasher::finish(&hasher)
+            ));
+            match std::fs::write(&path, bytes) {
+                Ok(()) => MediaContent::Image(path),
+                Err(err) => MediaContent::Failed(err.to_string()),
+            }
+        });
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            if ui.get_media_url().as_str() != href {
+                return;
+            }
+            match outcome {
+                Ok(MediaContent::Image(path)) => match slint::Image::load_from_path(&path) {
+                    Ok(image) => {
+                        ui.set_media_image(image);
+                        ui.set_media_kind("image".into());
+                    }
+                    Err(_) => {
+                        ui.set_media_error("unsupported image".into());
+                        ui.set_media_kind("failed".into());
+                    }
+                },
+                Ok(MediaContent::Text(body, cut)) => {
+                    ui.set_media_text(body.into());
+                    ui.set_media_truncated(cut);
+                    ui.set_media_kind("text".into());
+                }
+                Ok(MediaContent::Failed(reason)) => {
+                    ui.set_media_error(reason.into());
+                    ui.set_media_kind("failed".into());
+                }
+                Err(FetchError::Gone) => ui.set_media_kind("gone".into()),
+                Err(FetchError::TooLarge) => {
+                    ui.set_media_error("too large".into());
+                    ui.set_media_kind("failed".into());
+                }
+                Err(FetchError::Failed(reason)) => {
+                    persistence::log_line(&format!("media fetch failed: {reason}"));
+                    ui.set_media_error(reason.into());
+                    ui.set_media_kind("failed".into());
+                }
+            }
+        });
+    });
+}
+
+/// What the viewer shows once a file is downloaded.
+enum MediaContent {
+    Image(std::path::PathBuf),
+    /// The text, and whether it was cut at the size limit.
+    Text(String, bool),
+    Failed(String),
 }
 
 /// Slint's `@markdown` interpolation placeholder, never valid in chat text.
@@ -17943,6 +18121,20 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn chat_links_become_markdown_links() {
+        let markdown = linked_markdown("see https://x.io/a_b. now");
+        assert!(markdown.starts_with("see ["));
+        assert!(markdown.contains("](<https://x.io/a_b>)"));
+        assert!(markdown.ends_with(". now"));
+        assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+        let runs = vec![("www.rust-lang.org!".to_string(), (0, 0, 0), true)];
+        let bold = message_markdown(&runs, false);
+        assert!(bold.contains("**["));
+        assert!(bold.contains("](<https://www.rust-lang.org>)"));
+        assert!(slint::StyledText::from_markdown(&bold).is_ok());
     }
 
     #[test]
