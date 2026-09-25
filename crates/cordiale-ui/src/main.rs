@@ -2903,16 +2903,18 @@ async fn handle_connect(
             // returned by a successful login may be persisted now.
             discard_legacy_profile_secret(&server_url, &identifier);
 
-            let (login_identifier, login_password) = if is_guest_attempt {
-                // A blank Connect action is unconditionally guest, even if
-                // the username field is prefilled with a remembered profile.
-                ("guest".to_string(), "guest".to_string())
+            // A blank password is a guest sign-in under the typed nickname,
+            // sent without a `password` field, as Cicchetto does. Grappa
+            // keys visitors by nick, so a shared fixed name would make every
+            // guest after the first collide with it (#88).
+            let (login_identifier, login_password, auth) = if is_guest_attempt {
+                (identifier.trim().to_string(), String::new(), "guest")
             } else {
-                (identifier.clone(), password)
+                (identifier.clone(), password, "typed")
             };
             persistence::log_line(&format!(
                 "connect attempt: server={server_url} identifier={login_identifier} \
-                 guest={is_guest_attempt} auth=password_or_guest"
+                 guest={is_guest_attempt} auth={auth}"
             ));
             let request = LoginRequest {
                 identifier: login_identifier,
@@ -15696,6 +15698,19 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
         BootstrapError::Login(LoginError::TooManyAttempts) => {
             ui.set_status_kind("too-many-attempts".into());
         }
+        BootstrapError::Login(LoginError::Refused {
+            code: Some(code),
+            retry_after,
+            ..
+        }) if login_refusal_kind(code).is_some() => {
+            ui.set_status_message(
+                retry_after
+                    .map(|secs| secs.to_string())
+                    .unwrap_or_default()
+                    .into(),
+            );
+            ui.set_status_kind(login_refusal_kind(code).unwrap_or("login-failed").into());
+        }
         BootstrapError::Login(_) => {
             ui.set_status_kind("login-failed".into());
         }
@@ -15708,9 +15723,39 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
     }
 }
 
+/// The status key for a login refusal Grappa names in its `error` field,
+/// for the codes a guest sign-in can run into.
+fn login_refusal_kind(code: &str) -> Option<&'static str> {
+    match code {
+        "anon_collision" => Some("guest-nick-taken"),
+        "nick_in_use" => Some("guest-nick-in-use"),
+        "malformed_nick" => Some("guest-nick-invalid"),
+        "captcha_required" => Some("guest-captcha-required"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_login_refusals_get_their_own_status() {
+        assert_eq!(
+            login_refusal_kind("anon_collision"),
+            Some("guest-nick-taken")
+        );
+        assert_eq!(login_refusal_kind("nick_in_use"), Some("guest-nick-in-use"));
+        assert_eq!(
+            login_refusal_kind("malformed_nick"),
+            Some("guest-nick-invalid")
+        );
+        assert_eq!(
+            login_refusal_kind("captcha_required"),
+            Some("guest-captcha-required")
+        );
+        assert_eq!(login_refusal_kind("internal"), None);
+    }
 
     #[test]
     fn blank_connect_form_is_guest_but_saved_profile_is_explicit() {

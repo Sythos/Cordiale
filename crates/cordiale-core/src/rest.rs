@@ -56,10 +56,13 @@ pub struct ConfigResponse {
 /// both travel on the same wire field (see `docs/protocol-notes.md` §1).
 /// The bearer returned by Grappa after a successful login is a separate
 /// credential and must be sent directly as `Authorization: Bearer`, never
-/// placed in this request field.
+/// placed in this request field. An empty `password` is left out of the
+/// body: that's a guest sign-in under the `identifier` nickname, the same
+/// `{identifier}` body Cicchetto sends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LoginRequest {
     pub identifier: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub password: String,
 }
 
@@ -415,6 +418,17 @@ mod tests {
         let json = serde_json::to_string(&request).expect("serialize");
         assert!(json.contains("\"identifier\":\"vjt\""));
         assert!(json.contains("\"password\":\"either-a-password-or-a-client-token\""));
+    }
+
+    #[test]
+    fn guest_login_request_sends_only_the_nickname() {
+        let request = LoginRequest {
+            identifier: "ada_guest".to_string(),
+            password: String::new(),
+        };
+
+        let json = serde_json::to_string(&request).expect("serialize");
+        assert_eq!(json, r#"{"identifier":"ada_guest"}"#);
     }
 
     #[test]
