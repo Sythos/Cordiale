@@ -35,7 +35,7 @@ use serde_json::{Number, Value};
 use tokio::sync::mpsc;
 
 use cordiale_core::bootstrap::{
-    bootstrap, bootstrap_with_bearer, BootstrapError, BootstrapOutcome,
+    bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, BootstrapError, BootstrapOutcome,
 };
 use cordiale_core::client::{GrappaClient, GrappaClientError, LoginError};
 use cordiale_core::credentials::{
@@ -1817,6 +1817,7 @@ struct NetworkConnectionTransition {
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
+    guest_session: bool,
     /// The subject label of the realtime topics (`grappa:user:<label>`):
     /// the account name, or `visitor:<id>` for a guest.
     identifier: Option<String>,
@@ -2035,6 +2036,7 @@ impl WorkerState {
         WorkerState {
             client: None,
             token: None,
+            guest_session: false,
             identifier: None,
             login_identifier: None,
             session: None,
@@ -2780,6 +2782,36 @@ async fn run_worker(
                         // A manual disconnect is how the user switches
                         // accounts: don't sign back in at the next launch.
                         set_auto_connect(false);
+                        let guest_logout_failed = if state.guest_session {
+                            if let (Some(client), Some(token), Some(identifier)) = (
+                                state.client.as_ref(),
+                                state.token.as_deref(),
+                                state.login_identifier.as_deref(),
+                            ) {
+                                match client.logout(token).await {
+                                    Ok(()) => {
+                                        forget_guest_bearer(client.base_url(), identifier);
+                                        false
+                                    }
+                                    Err(error)
+                                        if error.status().map(|status| status.as_u16()) == Some(401) =>
+                                    {
+                                        forget_guest_bearer(client.base_url(), identifier);
+                                        true
+                                    }
+                                    Err(error) => {
+                                        persistence::log_line(&format!(
+                                            "guest logout was not confirmed: {error:?}"
+                                        ));
+                                        true
+                                    }
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
                         if let Some(handle) = state.session.take() {
                             handle.shutdown();
                         }
@@ -2792,6 +2824,11 @@ async fn run_worker(
                         radio.stop();
                         radio_state.stop();
                         push_radio_now(&ui, &radio_state);
+                        if guest_logout_failed {
+                            let _ = ui.upgrade_in_event_loop(|ui| {
+                                ui.set_status_kind("guest-logout-unconfirmed".into());
+                            });
+                        }
                     }
                     Some(WorkerCommand::LoadOlderHistory) => {
                         handle_load_older_history(&mut state, &ui).await;
@@ -2927,12 +2964,17 @@ async fn handle_connect(
         _ => None,
     };
     let mut used_remembered_password = false;
+    let previous_guest_bearer = is_guest_attempt
+        .then(|| remembered_guest_bearer(&server_url, identifier.trim()))
+        .flatten();
     let result = match credential {
         ConnectCredential::FormValue(password) => {
             // Older releases stored the entered password/client token in
             // the credential store. Drop that legacy value; only a bearer
             // returned by a successful login may be persisted now.
-            discard_legacy_profile_secret(&server_url, &identifier);
+            if !is_guest_attempt {
+                discard_legacy_profile_secret(&server_url, &identifier);
+            }
 
             // A blank password is a guest sign-in under the typed nickname,
             // sent without a `password` field, as Cicchetto does. Grappa
@@ -2951,7 +2993,12 @@ async fn handle_connect(
                 identifier: login_identifier,
                 password: login_password,
             };
-            bootstrap(&client, &request).await
+            if is_guest_attempt {
+                bootstrap_with_login_bearer(&client, &request, previous_guest_bearer.as_deref())
+                    .await
+            } else {
+                bootstrap(&client, &request).await
+            }
         }
         ConnectCredential::SavedProfile => {
             let with_bearer = match remembered_profile_credential(&server_url, &identifier) {
@@ -3003,6 +3050,14 @@ async fn handle_connect(
         }
     };
 
+    if previous_guest_bearer.is_some() {
+        if let Err(error) = &result {
+            if stale_guest_bearer(error) {
+                forget_guest_bearer(&server_url, identifier.trim());
+            }
+        }
+    }
+
     match result {
         Ok(outcome) => {
             persistence::log_line(&format!("connect succeeded: server={server_url}"));
@@ -3018,7 +3073,9 @@ async fn handle_connect(
                     ));
                 }
             }
-            if !is_guest_attempt {
+            if is_guest_attempt {
+                remember_guest_bearer(&server_url, identifier.trim(), &outcome.token);
+            } else {
                 remember_profile(&server_url, &identifier, &outcome.token);
                 if let Some(password) = typed_password.as_deref() {
                     remember_login_password(&server_url, &identifier, password);
@@ -3124,6 +3181,7 @@ async fn handle_connect(
 
             state.client = Some(client);
             state.token = Some(token.clone());
+            state.guest_session = is_guest_attempt;
             state.identifier = Some(session_identifier.clone());
             state.login_identifier = Some(identifier.clone());
             state.session = Some(handle);
@@ -12641,7 +12699,11 @@ fn end_revoked_session(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, flo
     if let (Some(client), Some(identifier)) =
         (state.client.as_ref(), state.login_identifier.as_deref())
     {
-        forget_remembered_bearer(client.base_url(), identifier);
+        if state.guest_session {
+            forget_guest_bearer(client.base_url(), identifier);
+        } else {
+            forget_remembered_bearer(client.base_url(), identifier);
+        }
     }
     state.token = None;
     let status = if flood {
@@ -15711,6 +15773,48 @@ fn remember_profile(server_url: &str, identifier: &str, bearer: &str) {
     let _ = persistence::save_servers_file(&file);
 }
 
+/// Anonymous visitor bearers are kept apart from account profiles. This
+/// lets a returning guest reclaim the same nickname without adding a guest
+/// to `servers.json` or replacing an account credential with the same name.
+fn guest_bearer_service(server_url: &str) -> String {
+    format!("{server_url}#guest-bearer")
+}
+
+fn remember_guest_bearer(server_url: &str, identifier: &str, bearer: &str) {
+    if identifier.is_empty() || bearer.is_empty() {
+        return;
+    }
+    let stored = resolve_credential_store()
+        .and_then(|store| store.set_secret(&guest_bearer_service(server_url), identifier, bearer))
+        .is_ok();
+    if !stored {
+        persistence::log_line(
+            "guest bearer could not be persisted; reconnect may require a new nickname",
+        );
+    }
+}
+
+fn remembered_guest_bearer(server_url: &str, identifier: &str) -> Option<String> {
+    if identifier.is_empty() {
+        return None;
+    }
+    resolve_credential_store()
+        .ok()?
+        .get_secret(&guest_bearer_service(server_url), identifier)
+        .ok()
+        .flatten()
+        .filter(|bearer| !bearer.is_empty())
+}
+
+fn forget_guest_bearer(server_url: &str, identifier: &str) {
+    if identifier.is_empty() {
+        return;
+    }
+    if let Ok(store) = resolve_credential_store() {
+        let _ = store.delete_secret(&guest_bearer_service(server_url), identifier);
+    }
+}
+
 /// The base URLs of every server previously connected to successfully, for
 /// the connect screen's quick-switch list.
 fn known_servers_model() -> slint::ModelRc<slint::SharedString> {
@@ -15982,13 +16086,24 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
             retry_after,
             ..
         }) if login_refusal_kind(code).is_some() => {
+            let kind = if code == "anon_collision" && retry_after.is_some_and(|secs| secs >= 3600) {
+                "guest-nick-taken-hours"
+            } else {
+                login_refusal_kind(code).unwrap_or("login-failed")
+            };
             ui.set_status_message(
                 retry_after
-                    .map(|secs| secs.to_string())
+                    .map(|secs| {
+                        if kind == "guest-nick-taken-hours" {
+                            secs.div_ceil(3600).to_string()
+                        } else {
+                            secs.to_string()
+                        }
+                    })
                     .unwrap_or_default()
                     .into(),
             );
-            ui.set_status_kind(login_refusal_kind(code).unwrap_or("login-failed").into());
+            ui.set_status_kind(kind.into());
         }
         BootstrapError::Login(_) => {
             ui.set_status_kind("login-failed".into());
@@ -16010,7 +16125,21 @@ fn login_refusal_kind(code: &str) -> Option<&'static str> {
         "nick_in_use" => Some("guest-nick-in-use"),
         "malformed_nick" => Some("guest-nick-invalid"),
         "captcha_required" => Some("guest-captcha-required"),
+        "too_many_sessions" | "ip_cap_exceeded" => Some("guest-too-many-sessions"),
         _ => None,
+    }
+}
+
+/// Only terminal proof failures invalidate a visitor bearer. A rate limit,
+/// session cap, server error or transport failure must leave it available
+/// for a later retry of the same nickname.
+fn stale_guest_bearer(error: &BootstrapError) -> bool {
+    match error {
+        BootstrapError::Login(LoginError::InvalidCredentials) => true,
+        BootstrapError::Login(LoginError::Refused { status, code, .. }) => {
+            status.as_u16() == 409 && code.as_deref() == Some("anon_collision")
+        }
+        _ => false,
     }
 }
 
@@ -16034,6 +16163,10 @@ mod tests {
             Some("guest-captcha-required")
         );
         assert_eq!(login_refusal_kind("internal"), None);
+        assert_eq!(
+            login_refusal_kind("too_many_sessions"),
+            Some("guest-too-many-sessions")
+        );
     }
 
     #[test]
@@ -16041,6 +16174,32 @@ mod tests {
         assert!(ConnectCredential::FormValue(String::new()).is_guest_attempt());
         assert!(!ConnectCredential::FormValue("new-password".into()).is_guest_attempt());
         assert!(!ConnectCredential::SavedProfile.is_guest_attempt());
+    }
+
+    #[test]
+    fn guest_bearers_have_a_separate_server_scoped_credential_namespace() {
+        let first = guest_bearer_service("https://one.example");
+        let second = guest_bearer_service("https://two.example");
+        assert_ne!(first, second);
+        assert_ne!(first, "https://one.example");
+        assert_ne!(first, login_password_service("https://one.example"));
+    }
+
+    #[test]
+    fn transient_guest_login_failures_preserve_the_previous_bearer() {
+        let refused = |status: &str, code: &str| {
+            BootstrapError::Login(LoginError::Refused {
+                status: status.parse().expect("valid HTTP status"),
+                code: Some(code.to_string()),
+                retry_after: None,
+            })
+        };
+        assert!(!stale_guest_bearer(&refused("503", "too_many_sessions")));
+        assert!(!stale_guest_bearer(&refused("429", "too_many_attempts")));
+        assert!(stale_guest_bearer(&refused("409", "anon_collision")));
+        assert!(stale_guest_bearer(&BootstrapError::Login(
+            LoginError::InvalidCredentials
+        )));
     }
 
     #[test]

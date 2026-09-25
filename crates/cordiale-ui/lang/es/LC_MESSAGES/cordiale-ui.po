@@ -2101,6 +2101,18 @@ msgid "That nickname is taken on this server right now. Pick another one or try 
 msgstr "Ese apodo ya está ocupado en este servidor. Elige otro o vuelve a intentarlo dentro de {} segundos."
 
 msgctxt "AppWindow"
+msgid "That nickname is taken on this server right now. Pick another one or try again in about {} hours."
+msgstr "Ese apodo ya está ocupado en este servidor. Elige otro o vuelve a intentarlo dentro de unas {} horas."
+
+msgctxt "AppWindow"
+msgid "This server has reached its guest session limit for your connection. Sign out another guest session or try again later."
+msgstr "Este servidor ha alcanzado el límite de sesiones de invitado para tu conexión. Cierra otra sesión de invitado o inténtalo más tarde."
+
+msgctxt "AppWindow"
+msgid "Disconnected here, but the server did not confirm guest sign-out. Your nickname may remain reserved; reconnect to try again."
+msgstr "Desconectado aquí, pero el servidor no confirmó la salida del invitado. Tu apodo puede seguir reservado; vuelve a conectarte para intentarlo de nuevo."
+
+msgctxt "AppWindow"
 msgid "That nickname is already in use on the network. Pick another one."
 msgstr "Ese apodo ya está en uso en la red. Elige otro."
 
