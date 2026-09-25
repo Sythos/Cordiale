@@ -998,6 +998,8 @@ export component AppWindow inherits Window {
     in property <string> radio-track: "";
     in property <string> radio-status: "";
     in property <string> radio-error: "";
+    // Playing an audio link from the chat rather than a station.
+    in property <bool> radio-upload: false;
     in-out property <int> radio-volume: 80;
     in-out property <int> radio-edit-index: -1;
     in-out property <string> radio-form-name: "";
@@ -2199,15 +2201,17 @@ export component AppWindow inherits Window {
                 padding-right: 6px;
 
                 Text {
-                    text: radio-status == "connecting"
-                        ? "📻  " + @tr("{}: connecting…", radio-station)
+                    text: (radio-upload ? "🎵  " : "📻  ") + (radio-status == "connecting"
+                        ? @tr("{}: connecting…", radio-station)
                         : radio-status == "failed"
-                        ? "📻  " + @tr("{}: the stream failed ({})", radio-station, radio-error)
+                        ? @tr("{}: the stream failed ({})", radio-station, radio-error)
                         : radio-status == "ended"
-                        ? "📻  " + @tr("{}: the station ended the stream", radio-station)
+                        ? @tr("{}: the station ended the stream", radio-station)
+                        : radio-status == "finished"
+                        ? @tr("{}: finished", radio-station)
                         : radio-track == ""
-                        ? "📻  " + radio-station
-                        : "📻  " + radio-station + " — " + radio-track;
+                        ? radio-station
+                        : radio-station + " — " + radio-track);
                     vertical-alignment: center;
                     horizontal-stretch: 1;
                     overflow: elide;

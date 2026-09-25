@@ -89,7 +89,8 @@ Cordiale still has these user-visible or behavioral gaps:
   flow, and pasting several lines of text offers to upload them as
   `paste.txt`. Links in messages are clickable, as in Cicchetto: image and text
   uploads on Grappa, and https images elsewhere, open in the media viewer
-  (fit or actual size; text read-only, with Copy), the rest in the browser.
+  (fit or actual size; text read-only, with Copy), MP3, Ogg and FLAC links
+  play in the radio's player, and the rest opens in the browser.
   Like Cicchetto, Cordiale shows no inline previews.
 - **Slash commands:** Cordiale handles the everyday IRC verbs (`/me`,
   `/msg`, `/notice`, `/query`, `/join`, `/part`, `/cycle`, `/topic`, `/nick`,

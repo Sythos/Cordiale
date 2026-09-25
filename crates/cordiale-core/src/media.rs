@@ -137,12 +137,24 @@ pub enum LinkTarget {
     Image,
     /// The in-app text viewer (`.txt`/`.md` uploads on Grappa only).
     Text,
+    /// The integrated player, with the decoder hint for its format.
+    Audio(&'static str),
     /// The system browser.
     Browser,
 }
 
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
 const TEXT_EXTENSIONS: [&str; 2] = ["txt", "md"];
+
+/// Audio the integrated player decodes, and the hint it is given.
+fn audio_hint(extension: &str) -> Option<&'static str> {
+    match extension {
+        "mp3" => Some("mp3"),
+        "ogg" | "oga" => Some("ogg"),
+        "flac" => Some("flac"),
+        _ => None,
+    }
+}
 
 /// Where `href` opens, given the Grappa server's base URL: an upload on
 /// Grappa (`/uploads/<slug>.<ext>`) opens images and text in the viewer,
@@ -171,9 +183,17 @@ pub fn link_target(href: &str, server_base: &str) -> LinkTarget {
         if TEXT_EXTENSIONS.contains(&extension.as_str()) {
             return LinkTarget::Text;
         }
+        if let Some(hint) = audio_hint(&extension) {
+            return LinkTarget::Audio(hint);
+        }
     }
     if url.scheme() == "https" && image {
         return LinkTarget::Image;
+    }
+    if url.scheme() == "https" {
+        if let Some(hint) = audio_hint(&extension) {
+            return LinkTarget::Audio(hint);
+        }
     }
     LinkTarget::Browser
 }
@@ -300,6 +320,18 @@ mod tests {
         );
         assert_eq!(
             link_target("https://grappa.example/uploads/abc.mp4", base),
+            LinkTarget::Browser
+        );
+        assert_eq!(
+            link_target("https://grappa.example/uploads/song.OGA", base),
+            LinkTarget::Audio("ogg")
+        );
+        assert_eq!(
+            link_target("https://elsewhere.org/live.flac", base),
+            LinkTarget::Audio("flac")
+        );
+        assert_eq!(
+            link_target("http://elsewhere.org/a.mp3", base),
             LinkTarget::Browser
         );
         assert_eq!(
