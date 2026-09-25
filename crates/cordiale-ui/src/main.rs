@@ -462,8 +462,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_status_message("".into());
             let empty_groups = Rc::new(slint::VecModel::from(Vec::<NetworkGroup>::new()));
             ui.set_network_groups(empty_groups.into());
-            let empty_lines = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
-            ui.set_chat_lines(empty_lines.into());
+            show_chat_lines(&ui, Vec::new());
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
@@ -495,8 +494,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_home.send(WorkerCommand::GoHome);
         if let Some(ui) = weak_for_home.upgrade() {
             ui.set_screen("connected".into());
-            let empty_lines = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
-            ui.set_chat_lines(empty_lines.into());
+            show_chat_lines(&ui, Vec::new());
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
@@ -3318,7 +3316,7 @@ async fn handle_select_channel(
         ui.set_history_start_reached(history_start);
         ui.set_history_loading(false);
         let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
-        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+        show_chat_lines(&ui, model);
         let member_rows = members_model(&members, dark_theme);
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
@@ -3486,7 +3484,7 @@ fn show_query_window(
         ui.set_history_start_reached(history_start);
         ui.set_history_loading(false);
         let model = chat_lines_model(&lines, dark_theme);
-        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+        show_chat_lines(&ui, model);
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
         ui.set_channel_members(empty_members.into());
     });
@@ -3602,7 +3600,6 @@ async fn handle_dismiss_kicked_channel(
     let _ = persistence::save_settings(&settings);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let empty_lines = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
         ui.set_has_selected_channel(false);
         ui.set_current_channel_label("".into());
@@ -3611,7 +3608,7 @@ async fn handle_dismiss_kicked_channel(
         ui.set_current_window_is_joined(false);
         ui.set_can_moderate_members(false);
         ui.set_compose_text("".into());
-        ui.set_chat_lines(empty_lines.into());
+        show_chat_lines(&ui, Vec::new());
         ui.set_channel_members(empty_members.into());
     });
 }
@@ -4603,7 +4600,7 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
                 ),
                 None => chat_lines_model(&lines, new_theme == Theme::Dark),
             };
-            ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+            show_chat_lines(&ui, model);
         }
     });
 }
@@ -5343,7 +5340,13 @@ async fn handle_load_older_history(state: &mut WorkerState, ui: &slint::Weak<App
             }
             None => chat_lines_model(&lines, dark_theme),
         };
-        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+        // This intentionally doesn't force the pane to the bottom: it's an
+        // older-history page prepended above what's already on screen, so
+        // the reader's scroll position should stay put rather than jump.
+        // `current-channel-label` (appwindow.slint's cue for a real window
+        // switch) isn't touched here, so `chat-list.follow-bottom` is left
+        // wherever the user already had it (bottom or not).
+        show_chat_lines(&ui, model);
         ui.set_history_start_reached(start_reached);
         ui.set_history_loading(false);
     });
@@ -7127,7 +7130,7 @@ async fn handle_frame(
                     let ui = ui.clone();
                     let _ = ui.upgrade_in_event_loop(move |ui| {
                         let model = chat_lines_model(&lines, dark_theme);
-                        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+                        show_chat_lines(&ui, model);
                     });
                 }
             } else {
@@ -7335,7 +7338,7 @@ async fn handle_frame(
                     let ui = ui.clone();
                     let _ = ui.upgrade_in_event_loop(move |ui| {
                         let model = chat_lines_model(&lines, dark_theme);
-                        ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+                        show_chat_lines(&ui, model);
                     });
                 }
                 return;
@@ -7361,18 +7364,28 @@ async fn handle_frame(
     let key = (network.clone(), channel.clone());
 
     let line = render_message(effective_payload, Some(&frame.event));
-    state.messages.entry(key.clone()).or_default().push(line);
+    state
+        .messages
+        .entry(key.clone())
+        .or_default()
+        .push(line.clone());
 
     if state.current_channel.as_ref() == Some(&key) {
-        let lines = state.messages[&key].clone();
         let dark_theme = state.theme == Theme::Dark;
         refresh_mention_context(state);
         let members = state.members.get(&key).cloned().unwrap_or_default();
         let casemapping = network_casemapping(state, &network);
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
-            let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
-            ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+            // A plain append (not `show_chat_lines`): channel history is
+            // only ever pushed to, never reordered, so the new row is
+            // guaranteed to belong at the end — see `append_chat_line`.
+            let prefix = line
+                .nick
+                .as_deref()
+                .map(|nick| member_prefix_for_nick(&members, nick, casemapping))
+                .unwrap_or("");
+            append_chat_line(&ui, chat_line_from_message(&line, dark_theme, prefix));
         });
     }
 
@@ -8584,7 +8597,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
         let chat_lines = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
-        ui.set_chat_lines(Rc::new(slint::VecModel::from(chat_lines)).into());
+        show_chat_lines(&ui, chat_lines);
     });
 }
 
@@ -9793,7 +9806,7 @@ fn return_home_if_network_selected(
         ui.set_current_query_ready(false);
         ui.set_can_moderate_members(false);
         ui.set_compose_text("".into());
-        ui.set_chat_lines(Rc::new(slint::VecModel::from(Vec::<ChatLine>::new())).into());
+        show_chat_lines(&ui, Vec::new());
         ui.set_channel_members(Rc::new(slint::VecModel::from(Vec::<MemberRow>::new())).into());
     });
 }
@@ -10206,6 +10219,53 @@ fn chat_lines_model_with_roster(
             chat_line_from_message(message, dark_theme, prefix)
         })
         .collect()
+}
+
+/// Runs `mutate` against the chat pane's persistent row model, installing
+/// one on `chat-lines` first if it isn't a `VecModel` yet (only true before
+/// the very first render). See `show_chat_lines` for why the model is kept
+/// around instead of being replaced on every update.
+fn with_chat_lines_model(ui: &AppWindow, mutate: impl FnOnce(&slint::VecModel<ChatLine>)) {
+    use slint::Model as _;
+    if let Some(model) = ui
+        .get_chat_lines()
+        .as_any()
+        .downcast_ref::<slint::VecModel<ChatLine>>()
+    {
+        mutate(model);
+        return;
+    }
+    let model = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
+    mutate(&model);
+    ui.set_chat_lines(model.into());
+}
+
+/// Replaces the chat pane's contents in place: a window switch, a history
+/// page, an edit/redaction re-render, a theme change... Every one of these
+/// call sites used to hand `chat-lines` a brand-new model object
+/// (`ui.set_chat_lines(Rc::new(VecModel::from(model)).into())`), which made
+/// the `ListView` throw away its whole layout estimate on every update —
+/// Slint's `ListView` re-estimates its scrolled content height from the
+/// average height of the rows it currently has instantiated
+/// (`internal/core/model/repeater.rs`, `update_visible_instances`), and
+/// swapping in a new model resets that estimate from scratch instead of
+/// just the rows. Reusing the same `VecModel` (`set_vec` fires a gentler
+/// "reset" notification that keeps the estimate) is what lets
+/// `appwindow.slint`'s `chat-list.follow-bottom` logic hold the view
+/// steady instead of jumping (GitHub issue #89).
+fn show_chat_lines(ui: &AppWindow, lines: Vec<ChatLine>) {
+    with_chat_lines_model(ui, |model| model.set_vec(lines));
+}
+
+/// Appends one already-rendered line without rebuilding the rest of the
+/// model — a plain `row_added` notification, gentler still than the
+/// `set_vec` reset `show_chat_lines` triggers. Only correct when the
+/// caller knows the new row truly belongs at the very end, e.g. a live
+/// channel message; query/DM history gets re-sorted on arrival
+/// (`append_query_live_message`), so those go through `show_chat_lines`
+/// instead.
+fn append_chat_line(ui: &AppWindow, line: ChatLine) {
+    with_chat_lines_model(ui, |model| model.push(line));
 }
 
 fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isupport::CaseMapping {
@@ -11251,7 +11311,7 @@ fn apply_color_theme(
                 }
                 None => chat_lines_model(&lines, dark_theme),
             };
-            ui.set_chat_lines(Rc::new(slint::VecModel::from(model)).into());
+            show_chat_lines(&ui, model);
         }
         if let Some((members, _)) = current_roster {
             let rows = members_model(&members, dark_theme);
@@ -15577,7 +15637,6 @@ fn handle_query_windows_list(
 fn clear_closed_query_view(ui: &slint::Weak<AppWindow>) {
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let empty_lines = Rc::new(slint::VecModel::from(Vec::<ChatLine>::new()));
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
         ui.set_current_channel_label("".into());
         ui.set_current_topic("".into());
@@ -15588,7 +15647,7 @@ fn clear_closed_query_view(ui: &slint::Weak<AppWindow>) {
         ui.set_current_query_ready(false);
         ui.set_can_moderate_members(false);
         ui.set_compose_text("".into());
-        ui.set_chat_lines(empty_lines.into());
+        show_chat_lines(&ui, Vec::new());
         ui.set_channel_members(empty_members.into());
     });
 }
