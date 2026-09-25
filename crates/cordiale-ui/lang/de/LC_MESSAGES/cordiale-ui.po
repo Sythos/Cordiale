@@ -1879,3 +1879,11 @@ msgstr "Eigene Sender"
 msgctxt "AppWindow"
 msgid "Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen."
 msgstr "Füge eigene MP3-, Ogg-Vorbis- oder FLAC-Sender hinzu (URL eines Streams oder einer .pls/.m3u-Playlist). Sie bleiben nur auf diesem Gerät, neben den Sendern von Cicchetto im Radio-Bildschirm."
+
+msgctxt "AppWindow"
+msgid "Paste as a file"
+msgstr "Als Datei einfügen"
+
+msgctxt "AppWindow"
+msgid "The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?"
+msgstr "Die Zwischenablage enthält {} Zeilen. Als paste.txt hochladen und den Link senden, statt sie in eine Nachricht einzufügen?"

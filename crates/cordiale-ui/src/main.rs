@@ -672,22 +672,47 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(path) = rfd::FileDialog::new().pick_file() else {
             return;
         };
-        if ui.get_pref_upload_confirm() {
-            let name = path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let answer = rfd::MessageDialog::new()
-                .set_title(ui.get_upload_confirm_title().as_str())
-                .set_description(format!("{}\n\n{name}", ui.get_upload_confirm_text()))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show();
-            if !matches!(answer, rfd::MessageDialogResult::Yes) {
-                return;
-            }
-        }
-        let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
-        let _ = tx_for_attach.send(WorkerCommand::AttachFile(path, expire));
+        confirm_and_attach(&ui, &tx_for_attach, path);
+    });
+
+    // Files dropped on the window go through the paperclip's flow, like
+    // Cicchetto's drop zone. Winit reports them (Windows, macOS, X11);
+    // the confirmation runs once the event has been handled.
+    {
+        use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
+        let tx_for_drop = worker_tx.clone();
+        let weak_for_drop = ui.as_weak();
+        ui.window().on_winit_window_event(move |_, event| {
+            let WindowEvent::DroppedFile(path) = event else {
+                return EventResult::Propagate;
+            };
+            let path = path.clone();
+            let tx = tx_for_drop.clone();
+            let weak = weak_for_drop.clone();
+            slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+                if let Some(ui) = weak.upgrade() {
+                    confirm_and_attach(&ui, &tx, path);
+                }
+            });
+            EventResult::PreventDefault
+        });
+    }
+
+    // Ctrl+V (Cmd+V) in the compose box: an image on the clipboard is
+    // uploaded like a picked file, and a multi-line text can go up as a .txt
+    // instead of being flattened into one message. Plain text pastes as
+    // usual.
+    let tx_for_paste = worker_tx.clone();
+    let weak_for_paste = ui.as_weak();
+    ui.on_paste_requested(move || {
+        let Some(ui) = weak_for_paste.upgrade() else {
+            return false;
+        };
+        let Some(path) = clipboard_upload(&ui) else {
+            return false;
+        };
+        confirm_and_attach(&ui, &tx_for_paste, path);
+        true
     });
 
     let tx_for_upload_prefs = worker_tx.clone();
@@ -3586,6 +3611,80 @@ async fn handle_attach_file(
             );
         }
     }
+}
+
+/// Asks for the upload when Settings says so, then hands `path` to the
+/// worker with the chosen lifetime: the paperclip, a dropped file and a
+/// paste all end here, as in Cicchetto.
+fn confirm_and_attach(
+    ui: &AppWindow,
+    tx: &mpsc::UnboundedSender<WorkerCommand>,
+    path: std::path::PathBuf,
+) {
+    if ui.get_pref_upload_confirm() {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let answer = rfd::MessageDialog::new()
+            .set_title(ui.get_upload_confirm_title().as_str())
+            .set_description(format!("{}\n\n{name}", ui.get_upload_confirm_text()))
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .show();
+        if !matches!(answer, rfd::MessageDialogResult::Yes) {
+            return;
+        }
+    }
+    let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
+    let _ = tx.send(WorkerCommand::AttachFile(path, expire));
+}
+
+/// Lines of pasted text above which Cordiale offers a .txt upload.
+const PASTE_UPLOAD_LINES: usize = 2;
+
+/// What the clipboard holds that should go up as a file: an image (saved
+/// as PNG), or, when the user agrees, a multi-line text (saved as
+/// `paste.txt`). `None` lets the compose box paste as usual.
+fn clipboard_upload(ui: &AppWindow) -> Option<std::path::PathBuf> {
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let folder = std::env::temp_dir()
+        .join("cordiale-paste")
+        .join(stamp.to_string());
+    if let Ok(image) = clipboard.get_image() {
+        let width = u32::try_from(image.width).ok()?;
+        let height = u32::try_from(image.height).ok()?;
+        let pixels = image::RgbaImage::from_raw(width, height, image.bytes.into_owned())?;
+        std::fs::create_dir_all(&folder).ok()?;
+        let path = folder.join("image.png");
+        if let Err(err) = pixels.save_with_format(&path, image::ImageFormat::Png) {
+            persistence::log_line(&format!("pasted image not saved: {err}"));
+            return None;
+        }
+        return Some(path);
+    }
+    let text = clipboard.get_text().ok()?;
+    if text.lines().count() < PASTE_UPLOAD_LINES {
+        return None;
+    }
+    let answer = rfd::MessageDialog::new()
+        .set_title(ui.get_paste_upload_title().as_str())
+        .set_description(
+            ui.invoke_paste_upload_text(i32::try_from(text.lines().count()).unwrap_or(i32::MAX))
+                .as_str(),
+        )
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show();
+    if !matches!(answer, rfd::MessageDialogResult::Yes) {
+        return None;
+    }
+    std::fs::create_dir_all(&folder).ok()?;
+    let path = folder.join("paste.txt");
+    std::fs::write(&path, text).ok()?;
+    Some(path)
 }
 
 /// Upload lifetimes offered in Settings, in the order of its menu: the

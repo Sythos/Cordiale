@@ -1879,3 +1879,11 @@ msgstr "Stazioni personalizzate"
 msgctxt "AppWindow"
 msgid "Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen."
 msgstr "Aggiungi le tue stazioni MP3, Ogg Vorbis o FLAC (URL di uno stream o di una playlist .pls/.m3u). Restano solo su questo dispositivo, accanto alle stazioni di Cicchetto nella schermata Radio."
+
+msgctxt "AppWindow"
+msgid "Paste as a file"
+msgstr "Incolla come file"
+
+msgctxt "AppWindow"
+msgid "The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?"
+msgstr "Gli appunti contengono {} righe. Caricarle come paste.txt e inviarne il link invece di incollarle in un unico messaggio?"
