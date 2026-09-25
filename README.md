@@ -22,6 +22,8 @@ Cordiale isn't the only way to sit on a Grappa server, and it's worth knowing wh
 
 Each of the above has its own maintainer(s) and its own issue tracker — if something's broken in Grappa, Cicchetto, Shottino, Resentin, or Bicchierino, that's the place to report it, not here.
 
+## Features
+
 The channel sidebar and member list have resizable columns with content-based
 minimum widths. Channel rows sit directly below their network row, member
 roles appear in brackets (for example, `[@] Sythos`), and the member list's
@@ -60,17 +62,15 @@ Cordiale's own files; without a keyring it is not stored. The eject button
 at the top of the sidebar, or Switch account in the Actions menu, signs out
 and turns off automatic sign-in until the next successful sign-in.
 
-## Known gaps
+### Parity with Cicchetto
 
 Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-irc/tree/main/cicchetto),
-Cordiale still has these user-visible or behavioral gaps:
+Cordiale also covers:
 
-- **Themes:** Cordiale applies Grappa's gallery themes (or built-in copies)
-  with their day/night pairing and wallpapers, and edits, copies, deletes and
-  publishes the account's own themes. Buttons and menus keep Slint's own widget
-  style in its dark or light variant.
-- **Sign-in and account security:** Cordiale does not expose Cicchetto's
-  TOTP/passkey management.
+- **Themes:** Grappa's gallery themes (or built-in copies) with their
+  day/night pairing and wallpapers; the account's own themes can be created,
+  edited (27 colors with a live preview, font, wallpaper), copied, deleted
+  and published.
 - **Admin tools:** the panel (which needs a password sign-in; a client
   token is refused on `/admin`) creates accounts, resets passwords and
   creates, edits and deletes networks and their IRC servers, edits the
@@ -78,8 +78,8 @@ Cordiale still has these user-visible or behavioral gaps:
   credentials, manages vhosts and their grants to accounts and visitors,
   and follows the live admin event feed.
 - **Settings and watch lists:** the identity editor reads back the nick in
-  use on each network, but Grappa no longer reports ident and realname, so
-  those start blank; the server's upload limits are shown read-only. Settings >
+  use on each network, watch-list keywords are read from Grappa, and
+  On-Connect Commands take one IRC command per line. Settings >
   Notifications edits the push switches, the per-channel and per-nick lists,
   muted conversations (muted from the Actions menu, for an hour, eight hours
   or for good) and the sound other devices play, also set with `/beep`.
@@ -87,25 +87,43 @@ Cordiale still has these user-visible or behavioral gaps:
   Grappa (`POST /api/uploads`) and posts its link with the category emoji,
   as Cicchetto does, after checking the file type and the advertised size
   cap. Settings > General sets how long uploads are kept and whether to ask
-  before each one. Files dropped on the window (Windows, macOS and X11; not
-  on Wayland) and images pasted into the compose box go through the same
-  flow, and pasting several lines of text offers to upload them as
-  `paste.txt`. Links in messages are clickable, as in Cicchetto: image and text
-  uploads on Grappa, and https images elsewhere, open in the media viewer
-  (fit or actual size; text read-only, with Copy), the rest in the browser.
+  before each one. Files dropped on the window and images pasted into the
+  compose box go through the same flow, and pasting several lines of text
+  offers to upload them as `paste.txt`. Links in messages are clickable:
+  image and text uploads on Grappa, and https images elsewhere, open in the
+  media viewer (fit or actual size; text read-only, with Copy), MP3, Ogg and
+  FLAC links play in the radio's player, and the rest opens in the browser.
   Like Cicchetto, Cordiale shows no inline previews.
-- **Slash commands:** Cordiale handles the everyday IRC verbs (`/me`,
-  `/msg`, `/notice`, `/query`, `/join`, `/part`, `/cycle`, `/topic`, `/nick`,
-  `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
+- **Slash commands:** the everyday IRC verbs (`/me`, `/msg`, `/notice`,
+  `/query`, `/join`, `/part`, `/cycle`, `/topic`, `/nick`, `/away`, `/ctcp`,
+  `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb`, the services shortcuts, `/np` for the radio, and a bare
-  `/umode` that opens the user-mode toggles; a bare `/topic` or `/mode`
-  shows the channel's topic or modes in the status bar).
-- **Remaining presentation gaps:** WHOIS avatars are drawn when Grappa
-  serves them as PNG, JPEG, GIF, WebP or BMP. The account-wide unread count
-  shows in the window title and, on Windows, as a badge on the taskbar
-  button; macOS and Linux have no badge.
+  expansion, `/kb`, `/beep`, the services shortcuts), `/np` for the radio,
+  and a bare `/umode` that opens the user-mode toggles; a bare `/topic` or
+  `/mode` shows the channel's topic or modes in the status bar.
+- **Chat:** multi-colored mIRC messages wrap as one paragraph, channel MODE
+  changes follow the network's ISUPPORT PREFIX and CHANMODES, and direct
+  messages that arrive before the query snapshot are recovered from
+  Grappa's history.
+- **Presentation:** WHOIS avatars in PNG, JPEG, GIF, WebP or BMP; the
+  account-wide unread count in the window title and, on Windows, as a
+  badge on the taskbar button.
+
+## Known gaps
+
+- **Account security:** TOTP and passkey management, client tokens and
+  account deletion stay in Cicchetto, which ships inside Grappa; Cordiale
+  is a separate client and leaves them there on purpose.
+- **Platform limits:**
+  - Files dropped on the window reach Cordiale on Windows, macOS and X11,
+    not on Wayland, where the windowing layer doesn't report them.
+  - The unread badge is drawn only on the Windows taskbar; macOS and Linux
+    show the count in the window title.
+  - Themes restyle the window, chat and member list, while buttons and
+    menus keep Slint's own widget style in its dark or light variant.
+- **Server data:** Grappa no longer reports a network's ident and realname,
+  so the identity editor starts those two fields blank.
 
 ## Download
 

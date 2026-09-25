@@ -143,6 +143,29 @@ Cicchetto: `/me`, `/msg`, `/notice`, `/query`, `/join`, `/part`, `/cycle`,
 `/hilight` e le scorciatoie dei servizi. Un comando sconosciuto non viene
 più inviato come testo; `//` invia un messaggio che inizia con `/`.
 
+**Aggiornamento (2026-09-25) — parità con Cicchetto**: chiusi tutti i gap
+funzionali elencati nel README, tranne quelli lasciati a Cicchetto per
+scelta. Stato per area:
+
+| Area | Stato in Cordiale | Note |
+|---|---|---|
+| Temi | Fatto | Galleria, abbinamento giorno/notte che segue lo schema del sistema, sfondi (built-in e caricati), colori dei ruoli, editor dei 27 colori con anteprima, copia, eliminazione, pubblicazione |
+| Impostazioni sincronizzate | Fatto | Nick di rete riletto, watchlist di parole chiave dal server, comandi on-connect multilinea |
+| Notifiche push | Fatto | Interruttori, liste per canale/nick, conversazioni silenziate con durata, suono e `/beep` |
+| Upload | Fatto | Graffetta, trascinamento file (non su Wayland), incolla immagini, testo lungo come `paste.txt` |
+| Link e visualizzatore media | Fatto | Link cliccabili come il linkify di Cicchetto; immagini e testo nel visualizzatore, audio nel player, il resto nel browser; nessuna anteprima inline, come Cicchetto |
+| Radio | Fatto | Stazioni di Cicchetto più stazioni personalizzate salvate solo in locale; MP3, Ogg Vorbis, FLAC; `/np` |
+| Comandi | Fatto | `/np`, `/beep`, vista di `/umode` senza argomenti |
+| Chat e roster | Fatto | mIRC multicolore a capo, MODE secondo PREFIX/CHANMODES, DM prima dello snapshot recuperati, evidenziazione delle menzioni |
+| Menu Azioni | Fatto | Stanze, archivio, modi utente, silenzia conversazione, radio, cambia account |
+| Admin | Fatto | Compresi i grant dei vhost ai visitatori |
+| Presentazione | Fatto | Avatar GIF/WebP/BMP, badge nativo sulla taskbar di Windows |
+| TOTP, passkey, token client, eliminazione account | Lasciato a Cicchetto | Cicchetto è integrato in Grappa, Cordiale no |
+
+Limiti di piattaforma restanti: niente trascinamento di file su Wayland,
+badge solo su Windows, pulsanti e menu con lo stile dei widget di Slint;
+ident e realname non sono più esposti da Grappa.
+
 ## Voci ancora da chiarire prima di poter classificare
 
 - Guest/visitor: il contratto client non definisce un flusso universale.
