@@ -52,20 +52,15 @@ pub fn find_links(text: &str) -> Vec<Link> {
         let candidate = candidate.split(['<', '>', '"']).next().unwrap_or_default();
         let candidate = trim_trailing(candidate);
         let lower = candidate.to_ascii_lowercase();
-        let href = if ["http://", "https://", "ftp://"]
+        let with_scheme = ["http://", "https://", "ftp://"]
             .iter()
-            .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len())
-        {
+            .any(|scheme| lower.starts_with(scheme) && lower.len() > scheme.len());
+        let www_host =
+            lower.starts_with("www.") && lower.len() > 4 && is_host(host_of(&lower[4..]));
+        let bare_path = lower.contains('/') && is_host(host_of(&lower));
+        let href = if with_scheme {
             candidate.to_string()
-        } else if lower.starts_with("www.") && lower.len() > 4 && is_host(host_of(&lower[4..])) {
-            format!("https://{candidate}")
-        } else if lower.contains('/')
-            && is_host(host_of(&lower))
-            && lower
-                .split('/')
-                .next()
-                .is_some_and(|host| host.contains('.'))
-        {
+        } else if www_host || bare_path {
             format!("https://{candidate}")
         } else {
             continue;
