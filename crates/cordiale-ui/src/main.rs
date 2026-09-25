@@ -654,6 +654,8 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    ui.on_credits_link_clicked(|href| open_in_browser(&href));
+
     let tx_for_archive_close = worker_tx.clone();
     ui.on_archive_closed(move || {
         let _ = tx_for_archive_close.send(WorkerCommand::ArchiveClose);

@@ -165,10 +165,6 @@ msgid "Show bottom bar"
 msgstr "Mostrar barra inferior"
 
 msgctxt "AppWindow"
-msgid "Vhosts, credentials, server-wide settings write, and the live admin event stream aren't built yet."
-msgstr "Los vhosts, las credenciales, la escritura de ajustes del servidor y el flujo de eventos de admin en vivo todavía no están implementados."
-
-msgctxt "AppWindow"
 msgid "Sessions"
 msgstr "Sesiones"
 
@@ -350,7 +346,7 @@ msgstr "CTCP"
 
 msgctxt "MemberContextMenu"
 msgid "Query"
-msgstr "Mensaje privado"
+msgstr "Query"
 
 msgctxt "AppWindow"
 msgid "connecting"
@@ -434,11 +430,11 @@ msgstr "Canales"
 
 msgctxt "AppWindow"
 msgid "Idle"
-msgstr "Inactivo"
+msgstr "Idle"
 
 msgctxt "AppWindow"
 msgid "Signed on"
-msgstr "Conectado desde"
+msgstr "Signed on"
 
 msgctxt "AppWindow"
 msgid "Away"
@@ -794,7 +790,7 @@ msgstr "Expandir o contraer la red aparcada {}"
 
 msgctxt "AppWindow"
 msgid "{} [PARKED]"
-msgstr "{} [APARCADA]"
+msgstr "{} [PARKED]"
 
 msgctxt "AppWindow"
 msgid "Dismiss kicked channel {}"
@@ -2079,3 +2075,15 @@ msgstr "Solo se muestra el primer megabyte."
 msgctxt "AppWindow"
 msgid "{}: finished"
 msgstr "{}: terminado"
+
+msgctxt "AppWindow"
+msgid "A client for grappa-irc by vjt"
+msgstr "Un cliente para grappa-irc de vjt"
+
+msgctxt "AppWindow"
+msgid "Report Cordiale issues at:"
+msgstr "Informa de los problemas de Cordiale en:"
+
+msgctxt "AppWindow"
+msgid "Issues with Grappa itself (grappa-irc) go to its own repository:"
+msgstr "Los problemas de Grappa (grappa-irc) van en su propio repositorio:"
