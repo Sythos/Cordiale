@@ -120,6 +120,7 @@ impl GrappaClient {
         // Building only fails if the TLS backend can't initialise; the
         // default client then fails its first request the same way.
         let http = Client::builder()
+            .user_agent(crate::GRAPPA_USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -2243,6 +2244,28 @@ mod tests {
         let response = client.login(&request).await.expect("login");
 
         assert_eq!(response.token, "abc123");
+    }
+
+    #[tokio::test]
+    async fn login_identifies_the_client_build_to_grappa() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .and(header("user-agent", crate::GRAPPA_USER_AGENT))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "abc123",
+                "subject": {"nick": "vjt"}
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let request = LoginRequest {
+            identifier: "vjt".to_string(),
+            password: "s3cr3t".to_string(),
+        };
+        client.login(&request).await.expect("login");
     }
 
     #[tokio::test]

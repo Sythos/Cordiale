@@ -71,6 +71,9 @@ jobs:
 
       - name: Build release binary
         shell: bash
+        env:
+          # Baked into the Grappa User-Agent by cordiale-core's build.rs.
+          BUILD_ID: ${{ steps.metadata.outputs.build_id }}
         run: cargo build --release --package cordiale-ui --target x86_64-pc-windows-msvc
 
       - name: Install NSIS

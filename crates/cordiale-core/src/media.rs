@@ -224,7 +224,7 @@ pub async fn fetch_public(
     cut_when_larger: bool,
 ) -> Result<(Vec<u8>, Option<String>, bool), FetchError> {
     let http = reqwest::Client::builder()
-        .user_agent(concat!("Cordiale/", env!("CARGO_PKG_VERSION")))
+        .user_agent(crate::EXTERNAL_USER_AGENT)
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|err| FetchError::Failed(err.to_string()))?;
