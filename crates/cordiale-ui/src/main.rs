@@ -70,6 +70,7 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    SelectNetwork(String),
     PartChannel {
         network: String,
         channel: String,
@@ -468,6 +469,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_current_topic("".into());
             ui.set_current_channel_modes("".into());
             ui.set_current_window_is_joined(false);
+            ui.set_current_server_window(false);
             ui.set_has_selected_channel(false);
             ui.set_current_query(false);
             ui.set_current_query_ready(false);
@@ -501,6 +503,7 @@ fn main() -> Result<(), slint::PlatformError> {
             ui.set_current_channel_modes("".into());
             ui.set_current_channel_label("".into());
             ui.set_current_window_is_joined(false);
+            ui.set_current_server_window(false);
             ui.set_has_selected_channel(false);
             ui.set_current_query(false);
             ui.set_current_query_ready(false);
@@ -550,6 +553,11 @@ fn main() -> Result<(), slint::PlatformError> {
             network: network.to_string(),
             channel: channel.to_string(),
         });
+    });
+
+    let tx_for_network = worker_tx.clone();
+    ui.on_network_selected(move |network| {
+        let _ = tx_for_network.send(WorkerCommand::SelectNetwork(network.to_string()));
     });
 
     let tx_for_part = worker_tx.clone();
@@ -2167,6 +2175,18 @@ async fn run_worker(
                         write_back_read_cursor(&mut state);
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
+                    Some(WorkerCommand::SelectNetwork(network)) => {
+                        if state.network_ids.contains_key(&network) {
+                            write_back_read_cursor(&mut state);
+                            handle_select_channel(
+                                &mut state,
+                                &ui,
+                                network,
+                                SERVER_WINDOW_NAME.to_string(),
+                            )
+                            .await;
+                        }
+                    }
                     Some(WorkerCommand::PartChannel { network, channel }) => {
                         handle_part_channel(&mut state, &ui, network, channel, None).await;
                     }
@@ -3168,6 +3188,12 @@ async fn handle_connect(
 
             let ws_url = to_ws_url(&server_url);
             let (handle, events) = spawn_session(ws_url, token.clone(), session_identifier.clone());
+            for network in state.network_ids.keys() {
+                handle.join_topic(
+                    channel_topic(&session_identifier, network, SERVER_WINDOW_NAME),
+                    false,
+                );
+            }
             for entry in &entries {
                 handle.join_topic(channel_topic(&session_identifier, &entry.0, &entry.1), true);
             }
@@ -3189,6 +3215,13 @@ async fn handle_connect(
                 .iter()
                 .map(|(network, channel, _)| channel_topic(&session_identifier, network, channel))
                 .collect();
+            for network in state.network_ids.keys() {
+                state.joined_topics.insert(channel_topic(
+                    &session_identifier,
+                    network,
+                    SERVER_WINDOW_NAME,
+                ));
+            }
             state.channel_topics = channel_topics_for_entries(&session_identifier, &entries);
             for (network, nick) in &state.own_nicks {
                 state.joined_topics.insert(own_nick_listener_topic(
@@ -3220,12 +3253,7 @@ async fn handle_connect(
             });
 
             let ui = ui.clone();
-            let mut distinct_networks: Vec<String> = entries
-                .iter()
-                .map(|(network, _, _)| network.clone())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
+            let mut distinct_networks: Vec<String> = state.network_ids.keys().cloned().collect();
             distinct_networks.sort();
             state.settings_network = distinct_networks.first().cloned();
             let network_count = distinct_networks.len();
@@ -3261,6 +3289,7 @@ async fn handle_connect(
                 ui.set_personal_prefs_loaded(false);
                 ui.set_server_upload_limits_known(false);
                 ui.set_current_query(false);
+                ui.set_current_server_window(false);
                 ui.set_current_query_ready(false);
                 let networks: Vec<slint::SharedString> =
                     distinct_networks.into_iter().map(Into::into).collect();
@@ -3283,11 +3312,34 @@ async fn handle_connect(
                 .unwrap_or_default()
                 .last_channel
                 .filter(|(network, channel)| {
-                    entries.iter().any(|(n, c, _)| n == network && c == channel)
+                    (channel == SERVER_WINDOW_NAME
+                        && state.network_ids.contains_key(network)
+                        && !state
+                            .network_connection_states
+                            .get(network)
+                            .is_some_and(|snapshot| {
+                                matches!(snapshot.status, NetworkConnectionStatus::Parked)
+                            }))
+                        || entries.iter().any(|(n, c, _)| n == network && c == channel)
                 });
             load_color_themes(state, &ui).await;
             if let Some((network, channel)) = restore_channel {
                 handle_select_channel(state, &ui, network, channel).await;
+            } else if let Some(network) = state
+                .network_ids
+                .keys()
+                .filter(|network| {
+                    !state
+                        .network_connection_states
+                        .get(*network)
+                        .is_some_and(|snapshot| {
+                            matches!(snapshot.status, NetworkConnectionStatus::Parked)
+                        })
+                })
+                .min()
+                .cloned()
+            {
+                handle_select_channel(state, &ui, network, SERVER_WINDOW_NAME.to_string()).await;
             }
         }
         Err(err) => {
@@ -3317,11 +3369,21 @@ async fn handle_select_channel(
     let Some(identifier) = state.identifier.clone() else {
         return;
     };
+    let server_window = channel == SERVER_WINDOW_NAME;
+    if server_window && !state.network_ids.contains_key(&network) {
+        return;
+    }
     let topic = channel_topic(&identifier, &network, &channel);
     if let Some(handle) = &state.session {
         if state.joined_topics.insert(topic.clone()) {
-            handle.join_topic(topic, true);
+            handle.join_topic(topic, !server_window);
         }
+    }
+
+    if server_window && !fetch_server_window_history(state, &network).await {
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_status_kind("server-history-failed".into());
+        });
     }
 
     let key = (network.clone(), channel.clone());
@@ -3348,10 +3410,11 @@ async fn handle_select_channel(
         .map(|snapshot| format_channel_modes(&snapshot.modes))
         .unwrap_or_default();
     let members = state.members.get(&key).cloned().unwrap_or_default();
-    let window_is_joined = state
-        .window_states
-        .get(&window_state_key(&network, &channel))
-        == Some(&ChannelWindowState::Joined);
+    let window_is_joined = !server_window
+        && state
+            .window_states
+            .get(&window_state_key(&network, &channel))
+            == Some(&ChannelWindowState::Joined);
     let can_moderate = is_own_nick_an_op(&members, &identifier);
     let dark_theme = state.theme == Theme::Dark;
     refresh_mention_context(state);
@@ -3366,6 +3429,7 @@ async fn handle_select_channel(
         ui.set_current_topic(irc_topic.into());
         ui.set_current_channel_modes(channel_modes.into());
         ui.set_current_window_is_joined(window_is_joined);
+        ui.set_current_server_window(server_window);
         ui.set_has_selected_channel(true);
         ui.set_current_query(false);
         ui.set_current_query_ready(false);
@@ -3379,6 +3443,37 @@ async fn handle_select_channel(
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
+}
+
+/// The synthetic server window is absent from `boot.channels`; like Cicchetto,
+/// load its scrollback explicitly and merge it with any already received push.
+async fn fetch_server_window_history(state: &mut WorkerState, network: &str) -> bool {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return false;
+    };
+    let key = (network.to_string(), SERVER_WINDOW_NAME.to_string());
+    let after_id = query_high_water_id(state, &key);
+    let rows = client
+        .fetch_messages(
+            &token,
+            network,
+            SERVER_WINDOW_NAME,
+            after_id,
+            after_id.map(|_| 200),
+        )
+        .await;
+    match rows {
+        Ok(rows) => {
+            merge_query_history(state, &key, &rows);
+            true
+        }
+        Err(error) => {
+            persistence::log_line(&format!(
+                "server window history fetch failed for {network}: {error:?}"
+            ));
+            false
+        }
+    }
 }
 
 /// A successful REST response is the server's acknowledgement of PART. Keep
@@ -3454,13 +3549,7 @@ async fn handle_part_channel(
     refresh_network_groups(state, ui);
 
     if selected {
-        state.current_channel = None;
-        state.current_query = false;
-        state.current_query_ready = false;
-        let mut settings = persistence::load_settings().unwrap_or_default();
-        settings.last_channel = None;
-        let _ = persistence::save_settings(&settings);
-        clear_closed_query_view(ui);
+        handle_select_channel(state, ui, network, SERVER_WINDOW_NAME.to_string()).await;
     }
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(|ui| {
@@ -3533,6 +3622,7 @@ fn show_query_window(
         ui.set_current_topic("".into());
         ui.set_current_channel_modes("".into());
         ui.set_current_window_is_joined(false);
+        ui.set_current_server_window(false);
         ui.set_has_selected_channel(true);
         ui.set_current_query(true);
         ui.set_current_query_ready(query_ready);
@@ -3652,6 +3742,11 @@ async fn handle_dismiss_kicked_channel(
         return;
     }
 
+    if state.network_ids.contains_key(&network) {
+        handle_select_channel(state, ui, network, SERVER_WINDOW_NAME.to_string()).await;
+        return;
+    }
+
     state.current_channel = None;
     let mut settings = persistence::load_settings().unwrap_or_default();
     settings.last_channel = None;
@@ -3664,6 +3759,7 @@ async fn handle_dismiss_kicked_channel(
         ui.set_current_topic("".into());
         ui.set_current_channel_modes("".into());
         ui.set_current_window_is_joined(false);
+        ui.set_current_server_window(false);
         ui.set_can_moderate_members(false);
         ui.set_compose_text("".into());
         show_chat_lines(&ui, Vec::new());
@@ -3770,8 +3866,15 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     let (Some(client), Some(token), Some((network, channel))) =
         (&state.client, &state.token, &state.current_channel)
     else {
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("no-active-network".into()));
         return;
     };
+    if channel == SERVER_WINDOW_NAME && !body.trim_start().starts_with('/') {
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_status_kind("server-window-commands-only".into());
+        });
+        return;
+    }
 
     // `/links` isn't a chat message: it asks for the active server's
     // topology graph, same request the old per-network sidebar button
@@ -3881,6 +3984,16 @@ async fn handle_attach_file(
     };
     if state.current_channel.is_none() {
         set_status("attach-no-window", filename);
+        return;
+    }
+    if state
+        .current_channel
+        .as_ref()
+        .is_some_and(|(_, channel)| channel == SERVER_WINDOW_NAME)
+    {
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_status_kind("server-window-commands-only".into());
+        });
         return;
     }
     let Some((mime, category)) = mime_for_filename(&filename) else {
@@ -4061,6 +4174,14 @@ async fn run_slash_command(
     };
     let in_channel = !state.current_query && slash::is_channel(&channel);
     let open_channel = || in_channel.then(|| channel.clone());
+    if channel == SERVER_WINDOW_NAME
+        && matches!(&command, SlashCommand::Say(_) | SlashCommand::Action(_))
+    {
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_status_kind("server-window-commands-only".into());
+        });
+        return;
+    }
     let result: Result<(), GrappaClientError> = match command {
         SlashCommand::Say(text) => {
             let request = SendMessageRequest::plain(text);
@@ -9193,6 +9314,8 @@ fn apply_display_prefs(ui: &AppWindow, prefs: &DisplayPrefs) {
     }
 }
 
+const SERVER_WINDOW_NAME: &str = "$server";
+
 /// `grappa:user:{user}/network:{network}/channel:{channel}`, per
 /// `docs/protocol-notes.md` §2.
 fn channel_topic(user: &str, network: &str, channel: &str) -> String {
@@ -9860,6 +9983,7 @@ fn return_home_if_network_selected(
         ui.set_current_topic("".into());
         ui.set_current_channel_modes("".into());
         ui.set_current_window_is_joined(false);
+        ui.set_current_server_window(false);
         ui.set_current_query(false);
         ui.set_current_query_ready(false);
         ui.set_can_moderate_members(false);
@@ -12265,7 +12389,21 @@ fn apply_network_rest_refresh(
     // each channel's Phoenix topic.
     state.topics.clear();
     state.members.clear();
-    state.messages = messages_from_boot_response(boot);
+    let mut messages = messages_from_boot_response(boot);
+    // `/boot.heads` is not guaranteed to include the synthetic window. Keep
+    // its live/REST rows across unrelated network refreshes while dropping
+    // rows belonging to networks no longer present in the authoritative list.
+    for ((network, channel), rows) in &state.messages {
+        if channel == SERVER_WINDOW_NAME && next_network_ids.contains_key(network) {
+            merge_rendered_messages(
+                messages
+                    .entry((network.clone(), channel.clone()))
+                    .or_default(),
+                rows.iter().cloned(),
+            );
+        }
+    }
+    state.messages = messages;
     state.read_cursors = read_cursors_from_me(&me.read_cursors);
     state.badge_count = normalize_badge_count(Some(&me.badge_count));
     state.network_ids = next_network_ids;
@@ -12302,6 +12440,16 @@ fn apply_network_rest_refresh(
         .retain(|network| known_networks.contains(network.as_str()));
 
     let mut actions = channel_actions;
+    // The server window exists per network even when no IRC channel is joined.
+    // It shares the channel topic shape, but is not part of boot.channels.
+    let mut server_networks: Vec<String> = state.network_ids.keys().cloned().collect();
+    server_networks.sort();
+    for network in server_networks {
+        let topic = channel_topic(identifier, &network, SERVER_WINDOW_NAME);
+        if state.joined_topics.insert(topic.clone()) {
+            actions.push(ChannelTopicAction::Join(topic));
+        }
+    }
     for action in listener_actions {
         actions.push(match action {
             OwnNickListenerAction::Leave(topic) => ChannelTopicAction::Leave(topic),
@@ -14923,8 +15071,8 @@ fn parse_invite_ack(
 }
 
 /// Confirms a sent invite in the status bar. Every acknowledgement is shown,
-/// even repeats; it is transient and never stored, like Cicchetto's
-/// synthetic server-window row (Cordiale has no server window).
+/// even repeats; it is transient and never stored, unlike Cicchetto's
+/// synthetic server-window row.
 fn handle_invite_ack(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -15337,7 +15485,10 @@ async fn handle_network_lifecycle(
                 ChannelTopicAction::Join(topic) => {
                     let is_own_listener =
                         own_nick_listener_network_for_topic(state, &topic).is_some();
-                    session.join_topic(topic, !is_own_listener);
+                    let is_server_window = state.network_ids.keys().any(|network| {
+                        topic == channel_topic(&identifier, network, SERVER_WINDOW_NAME)
+                    });
+                    session.join_topic(topic, !(is_own_listener || is_server_window));
                 }
             }
         }
@@ -15704,6 +15855,7 @@ fn clear_closed_query_view(ui: &slint::Weak<AppWindow>) {
         ui.set_current_topic("".into());
         ui.set_current_channel_modes("".into());
         ui.set_current_window_is_joined(false);
+        ui.set_current_server_window(false);
         ui.set_has_selected_channel(false);
         ui.set_current_query(false);
         ui.set_current_query_ready(false);
@@ -22463,6 +22615,68 @@ mod tests {
     }
 
     #[test]
+    fn server_window_history_is_available_without_joined_channels() {
+        let boot = BootResponse {
+            networks: vec![serde_json::json!({"id": 7, "slug": "libera"})],
+            channels: HashMap::new(),
+            heads: HashMap::from([(
+                "libera".to_string(),
+                HashMap::from([(
+                    SERVER_WINDOW_NAME.to_string(),
+                    vec![serde_json::json!({
+                        "id": 11,
+                        "server_time": 100,
+                        "kind": "notice",
+                        "sender": "NickServ",
+                        "body": "Welcome"
+                    })],
+                )]),
+            )]),
+        };
+
+        assert!(channel_entries_from_channels(&boot.channels).is_empty());
+        let messages = messages_from_boot_response(&boot);
+        assert_eq!(
+            messages
+                .get(&("libera".to_string(), SERVER_WINDOW_NAME.to_string()))
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            channel_topic("visitor:one", "libera", SERVER_WINDOW_NAME),
+            "grappa:user:visitor:one/network:libera/channel:$server"
+        );
+        assert_eq!(
+            channel_from_topic(&channel_topic("visitor:one", "libera", SERVER_WINDOW_NAME)),
+            Some(("libera".to_string(), SERVER_WINDOW_NAME.to_string()))
+        );
+    }
+
+    #[test]
+    fn server_window_history_merges_with_live_messages_without_duplicates() {
+        let key = ("libera".to_string(), SERVER_WINDOW_NAME.to_string());
+        let rows = [
+            serde_json::json!({
+                "id": 11, "server_time": 100, "kind": "notice",
+                "sender": "NickServ", "body": "Welcome"
+            }),
+            serde_json::json!({
+                "id": 12, "server_time": 200, "kind": "notice",
+                "sender": "NickServ", "body": "Identified"
+            }),
+        ];
+        let mut state = WorkerState::new();
+        merge_query_history(&mut state, &key, &rows[1..]);
+        assert_eq!(query_high_water_id(&state, &key), Some(12));
+        merge_query_history(&mut state, &key, &rows);
+        let ids: Vec<_> = state.messages[&key]
+            .iter()
+            .filter_map(|message| message.message_id)
+            .collect();
+        assert_eq!(ids, vec![11, 12]);
+    }
+
+    #[test]
     fn network_attached_rest_refresh_is_idempotent() {
         let boot = BootResponse {
             networks: vec![serde_json::json!({
@@ -22540,7 +22754,14 @@ mod tests {
 
         let second_actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
 
-        assert_eq!(first_actions.len(), 2);
+        assert_eq!(first_actions.len(), 3);
+        assert!(
+            first_actions.contains(&ChannelTopicAction::Join(channel_topic(
+                "sythos",
+                "libera",
+                SERVER_WINDOW_NAME
+            )))
+        );
         assert!(second_actions.is_empty());
         assert_eq!(state.channel_entries, first_channel_entries);
         assert_eq!(state.joined_topics, first_joined_topics);
@@ -22567,6 +22788,22 @@ mod tests {
         });
         let obsolete_topic = channel_topic("sythos", "deleted", "alice");
         state.joined_topics.insert(obsolete_topic.clone());
+        let obsolete_server_topic = channel_topic("sythos", "deleted", SERVER_WINDOW_NAME);
+        state.joined_topics.insert(obsolete_server_topic.clone());
+        let server_row = serde_json::json!({
+            "id": 21, "server_time": 100, "kind": "notice",
+            "sender": "NickServ", "body": "Welcome"
+        });
+        merge_query_history(
+            &mut state,
+            &("deleted".to_string(), SERVER_WINDOW_NAME.to_string()),
+            std::slice::from_ref(&server_row),
+        );
+        merge_query_history(
+            &mut state,
+            &("libera".to_string(), SERVER_WINDOW_NAME.to_string()),
+            std::slice::from_ref(&server_row),
+        );
         state
             .query_ready
             .insert(("deleted".to_string(), "alice".to_string()));
@@ -22588,18 +22825,37 @@ mod tests {
             name: None,
         };
         let actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 4);
         assert!(actions.contains(&ChannelTopicAction::Leave(obsolete_topic)));
+        assert!(actions.contains(&ChannelTopicAction::Leave(obsolete_server_topic)));
         assert!(actions.contains(&ChannelTopicAction::Join(channel_topic(
             "sythos", "libera", "sythos"
         ))));
+        assert!(actions.contains(&ChannelTopicAction::Join(channel_topic(
+            "sythos",
+            "libera",
+            SERVER_WINDOW_NAME
+        ))));
         assert!(!state.network_ids.contains_key("deleted"));
+        assert!(!state
+            .messages
+            .contains_key(&("deleted".to_string(), SERVER_WINDOW_NAME.to_string())));
+        assert_eq!(
+            state
+                .messages
+                .get(&("libera".to_string(), SERVER_WINDOW_NAME.to_string()))
+                .map(Vec::len),
+            Some(1)
+        );
         assert!(state.channel_entries.is_empty());
         assert!(state.query_windows.is_empty());
         assert!(state.query_ready.is_empty());
         assert_eq!(
             state.joined_topics,
-            std::collections::HashSet::from([channel_topic("sythos", "libera", "sythos")])
+            std::collections::HashSet::from([
+                channel_topic("sythos", "libera", "sythos"),
+                channel_topic("sythos", "libera", SERVER_WINDOW_NAME),
+            ])
         );
         let groups = network_groups_data(
             &state.channel_entries,
