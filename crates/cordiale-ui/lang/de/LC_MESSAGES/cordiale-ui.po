@@ -1487,3 +1487,403 @@ msgstr "Stumm aufheben für {}"
 msgctxt "AppWindow"
 msgid "Sound on other devices (also /beep)"
 msgstr "Ton auf anderen Geräten (auch /beep)"
+
+msgctxt "AppWindow"
+msgid "invisible"
+msgstr "unsichtbar"
+
+msgctxt "AppWindow"
+msgid "wallops"
+msgstr "Wallops"
+
+msgctxt "AppWindow"
+msgid "server notices"
+msgstr "Server-Notices"
+
+msgctxt "AppWindow"
+msgid "masked host"
+msgstr "maskierter Host"
+
+msgctxt "AppWindow"
+msgid "registered only"
+msgstr "nur registrierte"
+
+msgctxt "AppWindow"
+msgid "chatops"
+msgstr "Chatops"
+
+msgctxt "AppWindow"
+msgid "client notices"
+msgstr "Client-Notices"
+
+msgctxt "AppWindow"
+msgid "debug notices"
+msgstr "Debug-Notices"
+
+msgctxt "AppWindow"
+msgid "invalid DCC"
+msgstr "ungültige DCC"
+
+msgctxt "AppWindow"
+msgid "flood notices"
+msgstr "Flood-Notices"
+
+msgctxt "AppWindow"
+msgid "globops"
+msgstr "Globops"
+
+msgctxt "AppWindow"
+msgid "kill notices"
+msgstr "Kill-Notices"
+
+msgctxt "AppWindow"
+msgid "U:Line kills"
+msgstr "U:Line-Kills"
+
+msgctxt "AppWindow"
+msgid "spam notices"
+msgstr "Spam-Notices"
+
+msgctxt "AppWindow"
+msgid "routing notices"
+msgstr "Routing-Notices"
+
+msgctxt "AppWindow"
+msgid "command notices"
+msgstr "Befehls-Notices"
+
+msgctxt "AppWindow"
+msgid "flood immune"
+msgstr "flood-immun"
+
+msgctxt "AppWindow"
+msgid "hide idle"
+msgstr "Idle verbergen"
+
+msgctxt "AppWindow"
+msgid "Java user"
+msgstr "Java-Nutzer"
+
+msgctxt "AppWindow"
+msgid "SSL"
+msgstr "SSL"
+
+msgctxt "AppWindow"
+msgid "operator"
+msgstr "Operator"
+
+msgctxt "AppWindow"
+msgid "local operator"
+msgstr "lokaler Operator"
+
+msgctxt "AppWindow"
+msgid "registered"
+msgstr "registriert"
+
+msgctxt "AppWindow"
+msgid "services admin"
+msgstr "Services-Admin"
+
+msgctxt "AppWindow"
+msgid "server admin"
+msgstr "Server-Admin"
+
+msgctxt "AppWindow"
+msgid "help operator"
+msgstr "Hilfe-Operator"
+
+msgctxt "AppWindow"
+msgid "services agent"
+msgstr "Services-Agent"
+
+msgctxt "AppWindow"
+msgid "mode +{}"
+msgstr "Modus +{}"
+
+msgctxt "AppWindow"
+msgid "hidden from WHO and global nick lists"
+msgstr "in WHO und globalen Nick-Listen verborgen"
+
+msgctxt "AppWindow"
+msgid "receive network WALLOPS broadcasts"
+msgstr "WALLOPS-Rundsendungen des Netzes empfangen"
+
+msgctxt "AppWindow"
+msgid "receive server notice broadcasts"
+msgstr "Server-Notice-Rundsendungen empfangen"
+
+msgctxt "AppWindow"
+msgid "cloak your hostname from other users"
+msgstr "deinen Hostnamen vor anderen verbergen"
+
+msgctxt "AppWindow"
+msgid "only registered nicks may message you"
+msgstr "nur registrierte Nicks dürfen dir schreiben"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive CHATOPS messages"
+msgstr "IRC-Operatoren: CHATOPS-Nachrichten empfangen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: client connect and disconnect notices"
+msgstr "IRC-Operatoren: Notices zu Verbindungen und Trennungen von Clients"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive DEBUG messages"
+msgstr "IRC-Operatoren: DEBUG-Nachrichten empfangen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive invalid DCC notices"
+msgstr "IRC-Operatoren: Notices zu ungültigen DCC empfangen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive FLOOD messages"
+msgstr "IRC-Operatoren: FLOOD-Nachrichten empfangen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive GLOBOPS messages"
+msgstr "IRC-Operatoren: GLOBOPS-Nachrichten empfangen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive KILL notices"
+msgstr "IRC-Operatoren: KILL-Notices empfangen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive KILL notices from U:Lines"
+msgstr "IRC-Operatoren: KILL-Notices von U:Lines empfangen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive SPAM messages"
+msgstr "IRC-Operatoren: SPAM-Nachrichten empfangen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: receive ROUTING messages"
+msgstr "IRC-Operatoren: ROUTING-Nachrichten empfangen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: notified of /ADMIN, /LINKS, /WHOIS and similar"
+msgstr "IRC-Operatoren: über /ADMIN, /LINKS, /WHOIS und Ähnliches informiert"
+
+msgctxt "AppWindow"
+msgid "IRC operators: immune from flood limits"
+msgstr "IRC-Operatoren: von Flood-Limits ausgenommen"
+
+msgctxt "AppWindow"
+msgid "IRC operators: idle time hidden in WHOIS"
+msgstr "IRC-Operatoren: Idle-Zeit in WHOIS verborgen"
+
+msgctxt "AppWindow"
+msgid "chatting from the web via Java"
+msgstr "Chat im Web über Java"
+
+msgctxt "AppWindow"
+msgid "connected to the server via SSL"
+msgstr "über SSL mit dem Server verbunden"
+
+msgctxt "AppWindow"
+msgid "IRC operator, granted by the server"
+msgstr "IRC-Operator, vom Server vergeben"
+
+msgctxt "AppWindow"
+msgid "local IRC operator, granted by the server"
+msgstr "lokaler IRC-Operator, vom Server vergeben"
+
+msgctxt "AppWindow"
+msgid "identified to NickServ, set by services"
+msgstr "bei NickServ identifiziert, von den Services gesetzt"
+
+msgctxt "AppWindow"
+msgid "services administrator, set by services"
+msgstr "Services-Administrator, von den Services gesetzt"
+
+msgctxt "AppWindow"
+msgid "server administrator, set by the server"
+msgstr "Server-Administrator, vom Server gesetzt"
+
+msgctxt "AppWindow"
+msgid "services help operator"
+msgstr "Hilfe-Operator der Services"
+
+msgctxt "AppWindow"
+msgid "user mode, no description available"
+msgstr "Benutzermodus, keine Beschreibung verfügbar"
+
+msgctxt "AppWindow"
+msgid "Rooms"
+msgstr "Räume"
+
+msgctxt "AppWindow"
+msgid "Archive"
+msgstr "Archiv"
+
+msgctxt "AppWindow"
+msgid "Switch account"
+msgstr "Konto wechseln"
+
+msgctxt "AppWindow"
+msgid "User modes on {}"
+msgstr "Benutzermodi auf {}"
+
+msgctxt "AppWindow"
+msgid "{} (+{})"
+msgstr "{} (+{})"
+
+msgctxt "AppWindow"
+msgid "{} (set by the server)"
+msgstr "{} (vom Server gesetzt)"
+
+msgctxt "AppWindow"
+msgid "Pick a night theme too and Cordiale switches to it while your system is in dark mode, like Cicchetto."
+msgstr "Wähle auch ein Nacht-Theme: Cordiale nutzt es, solange das System im dunklen Modus ist, wie Cicchetto."
+
+msgctxt "AppWindow"
+msgid "Same theme day and night"
+msgstr "Gleiches Theme Tag und Nacht"
+
+msgctxt "AppWindow"
+msgid "By day"
+msgstr "Tagsüber"
+
+msgctxt "AppWindow"
+msgid "At night"
+msgstr "Nachts"
+
+msgctxt "AppWindow"
+msgid "Use at night"
+msgstr "Nachts verwenden"
+
+msgctxt "AppWindow"
+msgid "Use theme {} at night"
+msgstr "Theme {} nachts verwenden"
+
+msgctxt "AppWindow"
+msgid "Find a visitor or account by nick"
+msgstr "Besucher oder Konto nach Nick suchen"
+
+msgctxt "AppWindow"
+msgid "Search"
+msgstr "Suchen"
+
+msgctxt "AppWindow"
+msgid "Nobody matches."
+msgstr "Keine Treffer."
+
+msgctxt "AppWindow"
+msgid "{} on {} (visitor)"
+msgstr "{} auf {} (Besucher)"
+
+msgctxt "AppWindow"
+msgid "{} (account)"
+msgstr "{} (Konto)"
+
+msgctxt "AppWindow"
+msgid "Grant the vhost above"
+msgstr "Obigen Vhost gewähren"
+
+msgctxt "AppWindow"
+msgid "Grant the selected vhost to {}"
+msgstr "Ausgewählten Vhost an {} gewähren"
+
+msgctxt "AppWindow"
+msgid "{} unread"
+msgstr "{} ungelesen"
+
+msgctxt "AppWindow"
+msgid "/np: nothing is playing. Tune a station from the radio first."
+msgstr "/np: es läuft nichts. Stelle zuerst einen Radiosender ein."
+
+msgctxt "AppWindow"
+msgid "/np: {} publishes no track information."
+msgstr "/np: {} veröffentlicht keine Titelinformationen."
+
+msgctxt "AppWindow"
+msgid "/np: no track from {} yet; its feed hasn't answered."
+msgstr "/np: noch kein Titel von {}; sein Feed hat nicht geantwortet."
+
+msgctxt "AppWindow"
+msgid "/np: the last track from {} is over 3 minutes old, so it wasn't sent."
+msgstr "/np: der letzte Titel von {} ist über 3 Minuten alt und wurde daher nicht gesendet."
+
+msgctxt "AppWindow"
+msgid "A station needs a name and an http:// or https:// stream URL."
+msgstr "Ein Sender braucht einen Namen und eine http://- oder https://-Stream-URL."
+
+msgctxt "AppWindow"
+msgid "{}: connecting…"
+msgstr "{}: verbinde…"
+
+msgctxt "AppWindow"
+msgid "{}: the stream failed ({})"
+msgstr "{}: der Stream ist fehlgeschlagen ({})"
+
+msgctxt "AppWindow"
+msgid "{}: the station ended the stream"
+msgstr "{}: der Sender hat den Stream beendet"
+
+msgctxt "AppWindow"
+msgid "Stop the radio"
+msgstr "Radio stoppen"
+
+msgctxt "AppWindow"
+msgid "Radio"
+msgstr "Radio"
+
+msgctxt "AppWindow"
+msgid "Radio stations"
+msgstr "Radiosender"
+
+msgctxt "AppWindow"
+msgid "Edit {}"
+msgstr "{} bearbeiten"
+
+msgctxt "AppWindow"
+msgid "Delete {}"
+msgstr "{} löschen"
+
+msgctxt "AppWindow"
+msgid "Edit station"
+msgstr "Sender bearbeiten"
+
+msgctxt "AppWindow"
+msgid "New station"
+msgstr "Neuer Sender"
+
+msgctxt "AppWindow"
+msgid "Name"
+msgstr "Name"
+
+msgctxt "AppWindow"
+msgid "Stream URL"
+msgstr "Stream-URL"
+
+msgctxt "AppWindow"
+msgid "Stop"
+msgstr "Stopp"
+
+msgctxt "AppWindow"
+msgid "Play"
+msgstr "Abspielen"
+
+msgctxt "AppWindow"
+msgid "Stop {}"
+msgstr "{} stoppen"
+
+msgctxt "AppWindow"
+msgid "Play {}"
+msgstr "{} abspielen"
+
+msgctxt "AppWindow"
+msgid "Custom stations"
+msgstr "Eigene Sender"
+
+msgctxt "AppWindow"
+msgid "Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen."
+msgstr "Füge eigene MP3-, Ogg-Vorbis- oder FLAC-Sender hinzu (URL eines Streams oder einer .pls/.m3u-Playlist). Sie bleiben nur auf diesem Gerät, neben den Sendern von Cicchetto im Radio-Bildschirm."
+
+msgctxt "AppWindow"
+msgid "Paste as a file"
+msgstr "Als Datei einfügen"
+
+msgctxt "AppWindow"
+msgid "The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?"
+msgstr "Die Zwischenablage enthält {} Zeilen. Als paste.txt hochladen und den Link senden, statt sie in eine Nachricht einzufügen?"

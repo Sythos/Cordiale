@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette } from "std-widgets.slint";
+import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette, Slider } from "std-widgets.slint";
 
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
@@ -62,6 +62,33 @@ struct DccOfferRow {
     from: string,
     filename: string,
     size: string,
+}
+
+// One user mode in the `/umode` view; `settable` modes can be flipped,
+// the others are set by the server or services.
+struct UmodeToggle {
+    letter: string,
+    settable: bool,
+    active: bool,
+}
+
+// One station of the radio screen: Cicchetto's list, then the custom
+// ones. `key` is `builtin:<id>` or `custom:<index>`.
+struct RadioRow {
+    key: string,
+    title: string,
+    detail: string,
+    description: string,
+    custom: bool,
+}
+
+// One custom station in Settings > Radio; `codec-index` follows the
+// form's menu (MP3, Ogg Vorbis, FLAC).
+struct CustomRadioRow {
+    name: string,
+    url: string,
+    codec-index: int,
+    codec-label: string,
 }
 
 // One archived window (`/archive`): `kind` is the wire token (channel or
@@ -120,28 +147,20 @@ struct NetworkGroup {
 
 // One color/weight run within a rendered chat line — mIRC control codes
 // (see `cordiale_core::formatting`) already parsed out on the Rust side.
-struct MessageSegment {
-    text: string,
-    has-color: bool,
-    color: color,
-    bold: bool,
-    italic: bool,
-}
-
-// One line of chat, already split into mIRC color/weight segments.
+// One line of chat; the body is styled text built from its mIRC runs, so
+// several colors still wrap as one paragraph.
 struct ChatLine {
-    // `timestamp`/`nick` are split out from `segments` on purpose: lets
-    // the markup style the timestamp as muted text and wrap just the
-    // nick in its own right-click context-menu area, separate from the
-    // mIRC body `Text` elements around them. Empty `nick` (a
-    // system/event line has none) means no nick to show.
+    // `timestamp`/`nick` are split out from `body` on purpose: lets the
+    // markup style the timestamp as muted text and wrap just the nick in
+    // its own right-click context-menu area, separate from the body. Empty
+    // `nick` (a system/event line has none) means no nick to show.
     timestamp: string,
     timestamp-color: color,
     nick: string,
     nick-prefix: string,
     nick-color: color,
     italic: bool,
-    segments: [MessageSegment],
+    body: styled-text,
 }
 
 // One row in the admin Sessions list.
@@ -189,6 +208,15 @@ struct AdminVhostRow {
 struct AdminGrantRow {
     label: string,
     grant-id: string,
+}
+
+// One vhost grant candidate from the admin subject search: an account
+// (`kind` "user", no network) or a visitor on one network.
+struct AdminSubjectRow {
+    kind: string,
+    subject-id: string,
+    network: string,
+    nick: string,
 }
 
 // One muted conversation: its label and Grappa's key for it.
@@ -392,6 +420,8 @@ struct ThemeChoiceRow {
     name: string,
     author: string,
     selected: bool,
+    // In use at night, when the OS is in dark mode.
+    night: bool,
     swatches: [color],
 }
 
@@ -499,11 +529,18 @@ component SectionCard inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    // Account-wide unread count (Grappa's `badge_count`). There's no
-    // portable taskbar/dock badge, so it goes in the title, which the
-    // taskbar shows; the "Show event badge" preference turns it off.
+    // Account-wide unread count (Grappa's `badge_count`). It goes in the
+    // title, which every taskbar shows, and on Windows also in a taskbar
+    // badge; the "Show event badge" preference turns both off.
     in property <int> unread-badge: 0;
     title: pref-show-event-badge && unread-badge > 0 ? "(" + unread-badge + ") Cordiale" : "Cordiale";
+    // The same count as a native badge on the Windows taskbar button; 0
+    // clears it. Other platforms ignore the callback.
+    property <int> taskbar-badge: pref-show-event-badge ? unread-badge : 0;
+    callback taskbar-badge-changed(int, string);
+    changed taskbar-badge => {
+        taskbar-badge-changed(taskbar-badge, @tr("{} unread", taskbar-badge));
+    }
     // A color theme (see `palette-active`) paints the window itself and
     // switches the app to a monospace font, irssi-style.
     background: palette-active ? palette-bg : Palette.background;
@@ -743,6 +780,14 @@ export component AppWindow inherits Window {
     // Texts of the native confirmation shown before an upload.
     out property <string> upload-confirm-title: @tr("Upload file");
     out property <string> upload-confirm-text: @tr("Upload this file to the server and post its link in the open window?");
+    // Offered when pasting text of several lines into the one-line compose
+    // box.
+    out property <string> paste-upload-title: @tr("Paste as a file");
+    public pure function paste-upload-text(lines: int) -> string {
+        return @tr("The clipboard holds {} lines. Upload them as paste.txt and post its link instead of pasting them into one message?", lines);
+    }
+    // True when the paste went up as a file, so the compose box skips it.
+    callback paste-requested() -> bool;
 
     // Admin — Settings > Admin, only meaningful when `is-admin` (see
     // `docs/protocol-notes.md` §4ter): a deliberately small slice of
@@ -824,6 +869,11 @@ export component AppWindow inherits Window {
     callback kicked-channel-dismiss-requested(string, string);
     callback recover-dismiss-requested();
     callback color-theme-requested(string); // choice key, "" for classic
+    // Night theme of Grappa's pair ("" for the day theme at all hours);
+    // offered while a gallery theme is in use.
+    callback night-theme-requested(string);
+    in property <bool> theme-pair-active: false;
+    in property <bool> theme-has-night: false;
     callback peer-away-dismiss-requested();
     callback dcc-offer-accept-requested(string, string); // network, offer id
     callback dcc-offer-refuse-requested(string, string); // network, offer id
@@ -834,6 +884,150 @@ export component AppWindow inherits Window {
     callback directory-closed();
     callback archive-delete-requested(string);
     callback archive-closed();
+    // The integrated radio. `radio-status` is "", "connecting", "playing",
+    // "failed" or "ended"; the custom stations live in Settings > Radio.
+    in property <[RadioRow]> radio-stations: [];
+    in property <[CustomRadioRow]> radio-custom-stations: [];
+    in property <string> radio-tuned-key: "";
+    in property <string> radio-station: "";
+    in property <string> radio-track: "";
+    in property <string> radio-status: "";
+    in property <string> radio-error: "";
+    in-out property <int> radio-volume: 80;
+    in-out property <int> radio-edit-index: -1;
+    in-out property <string> radio-form-name: "";
+    in-out property <string> radio-form-url: "";
+    in-out property <int> radio-form-codec: 0;
+    callback radio-tune(string);
+    callback radio-stop();
+    callback radio-volume-changed(int);
+    callback radio-station-save(int, string, string, int); // index (-1 new), name, url, codec
+    callback radio-station-delete(int);
+    // User-mode view (bare `/umode`).
+    in property <string> umode-network: "";
+    in property <[UmodeToggle]> umode-toggles: [];
+    callback umode-toggle-requested(string);
+    callback umode-view-closed();
+    // Runs a slash command on the open window without touching the draft.
+    callback menu-command(string);
+
+    function umode-label(letter: string) -> string {
+        if letter == "i" {
+            return @tr("invisible");
+        } else if letter == "w" {
+            return @tr("wallops");
+        } else if letter == "s" {
+            return @tr("server notices");
+        } else if letter == "x" {
+            return @tr("masked host");
+        } else if letter == "R" {
+            return @tr("registered only");
+        } else if letter == "b" {
+            return @tr("chatops");
+        } else if letter == "c" {
+            return @tr("client notices");
+        } else if letter == "d" {
+            return @tr("debug notices");
+        } else if letter == "e" {
+            return @tr("invalid DCC");
+        } else if letter == "f" {
+            return @tr("flood notices");
+        } else if letter == "g" {
+            return @tr("globops");
+        } else if letter == "k" {
+            return @tr("kill notices");
+        } else if letter == "K" {
+            return @tr("U:Line kills");
+        } else if letter == "m" {
+            return @tr("spam notices");
+        } else if letter == "n" {
+            return @tr("routing notices");
+        } else if letter == "y" {
+            return @tr("command notices");
+        } else if letter == "F" {
+            return @tr("flood immune");
+        } else if letter == "I" {
+            return @tr("hide idle");
+        } else if letter == "j" {
+            return @tr("Java user");
+        } else if letter == "S" {
+            return @tr("SSL");
+        } else if letter == "o" {
+            return @tr("operator");
+        } else if letter == "O" {
+            return @tr("local operator");
+        } else if letter == "r" {
+            return @tr("registered");
+        } else if letter == "a" {
+            return @tr("services admin");
+        } else if letter == "A" {
+            return @tr("server admin");
+        } else if letter == "h" {
+            return @tr("help operator");
+        } else if letter == "z" {
+            return @tr("services agent");
+        }
+        return @tr("mode +{}", letter);
+    }
+
+    function umode-description(letter: string) -> string {
+        if letter == "i" {
+            return @tr("hidden from WHO and global nick lists");
+        } else if letter == "w" {
+            return @tr("receive network WALLOPS broadcasts");
+        } else if letter == "s" {
+            return @tr("receive server notice broadcasts");
+        } else if letter == "x" {
+            return @tr("cloak your hostname from other users");
+        } else if letter == "R" {
+            return @tr("only registered nicks may message you");
+        } else if letter == "b" {
+            return @tr("IRC operators: receive CHATOPS messages");
+        } else if letter == "c" {
+            return @tr("IRC operators: client connect and disconnect notices");
+        } else if letter == "d" {
+            return @tr("IRC operators: receive DEBUG messages");
+        } else if letter == "e" {
+            return @tr("IRC operators: receive invalid DCC notices");
+        } else if letter == "f" {
+            return @tr("IRC operators: receive FLOOD messages");
+        } else if letter == "g" {
+            return @tr("IRC operators: receive GLOBOPS messages");
+        } else if letter == "k" {
+            return @tr("IRC operators: receive KILL notices");
+        } else if letter == "K" {
+            return @tr("IRC operators: receive KILL notices from U:Lines");
+        } else if letter == "m" {
+            return @tr("IRC operators: receive SPAM messages");
+        } else if letter == "n" {
+            return @tr("IRC operators: receive ROUTING messages");
+        } else if letter == "y" {
+            return @tr("IRC operators: notified of /ADMIN, /LINKS, /WHOIS and similar");
+        } else if letter == "F" {
+            return @tr("IRC operators: immune from flood limits");
+        } else if letter == "I" {
+            return @tr("IRC operators: idle time hidden in WHOIS");
+        } else if letter == "j" {
+            return @tr("chatting from the web via Java");
+        } else if letter == "S" {
+            return @tr("connected to the server via SSL");
+        } else if letter == "o" {
+            return @tr("IRC operator, granted by the server");
+        } else if letter == "O" {
+            return @tr("local IRC operator, granted by the server");
+        } else if letter == "r" {
+            return @tr("identified to NickServ, set by services");
+        } else if letter == "a" {
+            return @tr("services administrator, set by services");
+        } else if letter == "A" {
+            return @tr("server administrator, set by the server");
+        } else if letter == "h" {
+            return @tr("services help operator");
+        } else if letter == "z" {
+            return @tr("services agent");
+        }
+        return @tr("user mode, no description available");
+    }
     callback network-toggle-requested(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
@@ -907,6 +1101,12 @@ export component AppWindow inherits Window {
     callback admin-vhost-delete(string);
     callback admin-grant-add();
     callback admin-grant-revoke(string);
+    // Grants to visitors (and accounts) found by name.
+    in-out property <string> admin-subject-query: "";
+    in property <[AdminSubjectRow]> admin-subject-results: [];
+    in property <bool> admin-subject-searched: false;
+    callback admin-subject-search(string);
+    callback admin-subject-grant(string, string); // kind, subject id
     callback admin-settings-save();
     callback links-graph-requested();
     callback theme-toggle-requested();
@@ -1199,6 +1399,16 @@ export component AppWindow inherits Window {
             return @tr("Notification sound set to {}.", status-command-hint);
         } else if status-kind == "beep-unknown" {
             return @tr("Unknown sound. Available: {}", status-command-hint);
+        } else if status-kind == "np-idle" {
+            return @tr("/np: nothing is playing. Tune a station from the radio first.");
+        } else if status-kind == "np-unsupported" {
+            return @tr("/np: {} publishes no track information.", status-command-hint);
+        } else if status-kind == "np-unanswered" {
+            return @tr("/np: no track from {} yet; its feed hasn't answered.", status-command-hint);
+        } else if status-kind == "np-stale" {
+            return @tr("/np: the last track from {} is over 3 minutes old, so it wasn't sent.", status-command-hint);
+        } else if status-kind == "radio-station-invalid" {
+            return @tr("A station needs a name and an http:// or https:// stream URL.");
         } else if status-kind == "command-usage-hint" {
             return @tr("Usage: {}", status-command-hint);
         } else if status-kind == "command-unknown" {
@@ -1841,15 +2051,49 @@ export component AppWindow inherits Window {
                         query(nick) => { member-query-requested(nick); }
                     }
 
-                    for segment in line.segments : Text {
-                        text: segment.text;
-                        wrap: word-wrap;
-                        font-weight: segment.bold ? 700 : 400;
-                        font-italic: segment.italic;
-                        color: segment.has-color
-                            ? segment.color
-                            : (theme == "dark" ? white : black);
+                    StyledText {
+                        text: line.body;
+                        default-color: theme == "dark" ? white : black;
+                        horizontal-stretch: 1;
                     }
+                }
+            }
+
+            // The radio on air, docked above the compose bar like
+            // Cicchetto's mini-player.
+            if radio-status != "" : HorizontalLayout {
+                spacing: 8px;
+                padding-left: 6px;
+                padding-right: 6px;
+
+                Text {
+                    text: radio-status == "connecting"
+                        ? "📻  " + @tr("{}: connecting…", radio-station)
+                        : radio-status == "failed"
+                        ? "📻  " + @tr("{}: the stream failed ({})", radio-station, radio-error)
+                        : radio-status == "ended"
+                        ? "📻  " + @tr("{}: the station ended the stream", radio-station)
+                        : radio-track == ""
+                        ? "📻  " + radio-station
+                        : "📻  " + radio-station + " — " + radio-track;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Slider {
+                    minimum: 0;
+                    maximum: 100;
+                    value: radio-volume;
+                    width: 100px;
+                    released(value) => {
+                        radio-volume = Math.round(value);
+                        radio-volume-changed(radio-volume);
+                    }
+                }
+                CompactButton {
+                    text: "⏹";
+                    a11y-label: @tr("Stop the radio");
+                    clicked => { radio-stop(); }
                 }
             }
 
@@ -1868,13 +2112,26 @@ export component AppWindow inherits Window {
                     clicked => { attach-file-requested(); }
                 }
 
-                LineEdit {
-                    placeholder-text: @tr("Message");
-                    accessible-label: @tr("Message");
-                    text <=> compose-text;
-                    enabled: !current-query || current-query-ready;
-                    accepted => { send-chat-message(compose-text); }
-                    edited(new-text) => { compose-text-changed(new-text); }
+                FocusScope {
+                    horizontal-stretch: 1;
+                    capture-key-pressed(event) => {
+                        if (event.modifiers.control || event.modifiers.meta) && (event.text == "v" || event.text == "V") && !event.modifiers.shift {
+                            return paste-requested() ? EventResult.accept : EventResult.reject;
+                        }
+                        return EventResult.reject;
+                    }
+
+                    // A layout, so the scope takes the field's size.
+                    HorizontalLayout {
+                        LineEdit {
+                            placeholder-text: @tr("Message");
+                            accessible-label: @tr("Message");
+                            text <=> compose-text;
+                            enabled: !current-query || current-query-ready;
+                            accepted => { send-chat-message(compose-text); }
+                            edited(new-text) => { compose-text-changed(new-text); }
+                        }
+                    }
                 }
 
                 Button {
@@ -1935,7 +2192,7 @@ export component AppWindow inherits Window {
             // — confirmed against its real source and the user's own
             // screenshot: a global nav/utility menu, not a per-member one.
             // Only lists what Cordiale actually has; Cicchetto's version
-            // also has rooms/radio/archive/mute/switch-account.
+            // also has the radio.
             HorizontalLayout {
                 alignment: start;
 
@@ -1947,6 +2204,9 @@ export component AppWindow inherits Window {
                 actions-menu-area := ContextMenuArea {
                     Menu {
                         MenuItem { title: "🏠  " + @tr("Home"); activated => { home-requested(); } }
+                        MenuItem { title: "🚪  " + @tr("Rooms"); activated => { menu-command("/list"); } }
+                        MenuItem { title: "📂  " + @tr("Archive"); activated => { menu-command("/archive"); } }
+                        MenuItem { title: "👤  " + @tr("User modes"); activated => { menu-command("/umode"); } }
                         MenuItem { title: "⚙  " + @tr("Settings"); activated => { screen = "settings"; } }
                         MenuItem {
                             title: "🎨  " + @tr("Themes");
@@ -1955,6 +2215,7 @@ export component AppWindow inherits Window {
                                 settings-section = "themes";
                             }
                         }
+                        MenuItem { title: "📻  " + @tr("Radio"); activated => { screen = "radio"; } }
                         if is-admin : MenuItem {
                             title: "🛡  " + @tr("Admin");
                             activated => {
@@ -1968,7 +2229,7 @@ export component AppWindow inherits Window {
                             MenuItem { title: @tr("For 8 hours"); activated => { mute-current-requested(28800); } }
                             MenuItem { title: @tr("Until I unmute it"); activated => { mute-current-requested(0); } }
                         }
-                        MenuItem { title: "⏏  " + @tr("Disconnect"); activated => { disconnect-requested(); } }
+                        MenuItem { title: "🔁  " + @tr("Switch account"); activated => { disconnect-requested(); } }
                     }
                 }
             }
@@ -2016,6 +2277,12 @@ export component AppWindow inherits Window {
                 label: @tr("Themes");
                 selected: settings-section == "themes";
                 clicked => { settings-section = "themes"; }
+            }
+            NavButton {
+                icon: "📻";
+                label: @tr("Radio");
+                selected: settings-section == "radio";
+                clicked => { settings-section = "radio"; }
             }
             NavButton {
                 icon: "🔔";
@@ -2490,6 +2757,10 @@ export component AppWindow inherits Window {
                     text: @tr("Color themes come from Grappa's gallery (irssi-dark, sux and more) and follow your account; without a connection, built-in copies are offered. The classic look follows the light/dark switch.");
                     wrap: word-wrap;
                 }
+                if theme-pair-active : Text {
+                    text: @tr("Pick a night theme too and Cordiale switches to it while your system is in dark mode, like Cicchetto.");
+                    wrap: word-wrap;
+                }
                 HorizontalLayout {
                     spacing: 6px;
                     alignment: start;
@@ -2501,6 +2772,10 @@ export component AppWindow inherits Window {
                     if palette-active : CompactButton {
                         text: @tr("Back to classic");
                         clicked => { color-theme-requested(""); }
+                    }
+                    if theme-has-night : CompactButton {
+                        text: @tr("Same theme day and night");
+                        clicked => { night-theme-requested(""); }
                     }
                 }
                 ListView {
@@ -2531,10 +2806,91 @@ export component AppWindow inherits Window {
                             overflow: elide;
                         }
                         CompactButton {
-                            text: choice.selected ? @tr("In use") : @tr("Use");
+                            text: choice.selected ? (theme-has-night ? "☀  " + @tr("By day") : @tr("In use")) : @tr("Use");
                             enabled: !choice.selected;
                             a11y-label: @tr("Use theme {}", choice.name);
                             clicked => { color-theme-requested(choice.key); }
+                        }
+                        if theme-pair-active && !choice.selected : CompactButton {
+                            text: choice.night ? "🌙  " + @tr("At night") : "🌙  " + @tr("Use at night");
+                            enabled: !choice.night;
+                            a11y-label: @tr("Use theme {} at night", choice.name);
+                            clicked => { night-theme-requested(choice.key); }
+                        }
+                    }
+                }
+            }
+
+            if settings-section == "radio" : SectionCard {
+                icon: "📻";
+                title: @tr("Radio stations");
+                fill: true;
+
+                Text {
+                    text: @tr("Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen.");
+                    wrap: word-wrap;
+                }
+                for station[index] in radio-custom-stations : HorizontalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: station.name + "  (" + station.codec-label + ")\n" + station.url;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    CompactButton {
+                        text: "✎";
+                        a11y-label: @tr("Edit {}", station.name);
+                        clicked => {
+                            radio-edit-index = index;
+                            radio-form-name = station.name;
+                            radio-form-url = station.url;
+                            radio-form-codec = station.codec-index;
+                        }
+                    }
+                    CompactButton {
+                        text: "🗑";
+                        a11y-label: @tr("Delete {}", station.name);
+                        clicked => { radio-station-delete(index); }
+                    }
+                }
+                Text {
+                    text: radio-edit-index >= 0 ? @tr("Edit station") : @tr("New station");
+                    font-weight: 600;
+                }
+                LineEdit {
+                    placeholder-text: @tr("Name");
+                    accessible-label: @tr("Name");
+                    text <=> radio-form-name;
+                }
+                LineEdit {
+                    placeholder-text: "https://…";
+                    accessible-label: @tr("Stream URL");
+                    text <=> radio-form-url;
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: start;
+
+                    ComboBox {
+                        model: ["MP3", "Ogg Vorbis", "FLAC"];
+                        current-index <=> radio-form-codec;
+                        min-width: 120px;
+                    }
+                    CompactButton {
+                        text: radio-edit-index >= 0 ? "💾  " + @tr("Save") : "➕  " + @tr("Add");
+                        a11y-label: radio-edit-index >= 0 ? @tr("Save") : @tr("Add");
+                        enabled: radio-form-name != "" && radio-form-url != "";
+                        clicked => { radio-station-save(radio-edit-index, radio-form-name, radio-form-url, radio-form-codec); }
+                    }
+                    if radio-edit-index >= 0 : CompactButton {
+                        text: @tr("Cancel");
+                        clicked => {
+                            radio-edit-index = -1;
+                            radio-form-name = "";
+                            radio-form-url = "";
+                            radio-form-codec = 0;
                         }
                     }
                 }
@@ -3338,6 +3694,48 @@ export component AppWindow inherits Window {
                         clicked => { admin-grant-add(); }
                     }
                 }
+                if admin-section == "vhosts" : HorizontalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("Find a visitor or account by nick");
+                        accessible-label: @tr("Find a visitor or account by nick");
+                        text <=> admin-subject-query;
+                        horizontal-stretch: 1;
+                        accepted => { admin-subject-search(admin-subject-query); }
+                    }
+                    CompactButton {
+                        text: "🔍  " + @tr("Search");
+                        a11y-label: @tr("Search");
+                        enabled: admin-subject-query != "";
+                        clicked => { admin-subject-search(admin-subject-query); }
+                    }
+                }
+                if admin-section == "vhosts" && admin-subject-searched && admin-subject-results.length == 0 : Text {
+                    text: @tr("Nobody matches.");
+                }
+                if admin-section == "vhosts" : VerticalLayout {
+                    spacing: 2px;
+
+                    for subject in admin-subject-results : HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: subject.kind == "visitor"
+                                ? @tr("{} on {} (visitor)", subject.nick, subject.network)
+                                : @tr("{} (account)", subject.nick);
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Grant the vhost above");
+                            a11y-label: @tr("Grant the selected vhost to {}", subject.nick);
+                            enabled: admin-vhost-names.length > 0;
+                            clicked => { admin-subject-grant(subject.kind, subject.subject-id); }
+                        }
+                    }
+                }
                 if admin-section == "vhosts" : ListView {
                     vertical-stretch: 1;
                     min-height: 80px;
@@ -3520,6 +3918,128 @@ export component AppWindow inherits Window {
         Button {
             text: @tr("Back");
             clicked => { screen = "connected"; }
+        }
+    }
+
+    if screen == "umodes" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: @tr("User modes on {}", umode-network);
+            font-size: 18px;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+        }
+
+        ListView {
+            vertical-stretch: 1;
+
+            for row in umode-toggles : HorizontalLayout {
+                spacing: 8px;
+                padding-bottom: 6px;
+
+                CheckBox {
+                    text: "+" + row.letter;
+                    checked: row.active;
+                    enabled: row.settable;
+                    accessible-label: @tr("{} (+{})", umode-label(row.letter), row.letter);
+                    toggled => {
+                        // The box follows Grappa's push, not the click.
+                        self.checked = row.active;
+                        umode-toggle-requested(row.letter);
+                    }
+                }
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: row.settable ? umode-label(row.letter) : @tr("{} (set by the server)", umode-label(row.letter));
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: umode-description(row.letter);
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        Button {
+            text: @tr("Back");
+            clicked => {
+                screen = "connected";
+                umode-view-closed();
+            }
+        }
+    }
+
+    if screen == "radio" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: "📻  " + @tr("Radio");
+            font-size: 18px;
+            accessible-role: AccessibleRole.text;
+        }
+
+        ListView {
+            vertical-stretch: 1;
+
+            for station in radio-stations : HorizontalLayout {
+                spacing: 8px;
+                padding-bottom: 8px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+
+                    Text {
+                        text: station.title;
+                        font-weight: station.key == radio-tuned-key ? 700 : 600;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: station.detail;
+                        wrap: word-wrap;
+                        opacity: 0.75;
+                    }
+                    Text {
+                        text: station.description;
+                        wrap: word-wrap;
+                    }
+                }
+                CompactButton {
+                    text: station.key == radio-tuned-key ? "⏹  " + @tr("Stop") : "▶  " + @tr("Play");
+                    a11y-label: station.key == radio-tuned-key ? @tr("Stop {}", station.title) : @tr("Play {}", station.title);
+                    clicked => {
+                        if station.key == radio-tuned-key {
+                            radio-stop();
+                        } else {
+                            radio-tune(station.key);
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            Button {
+                text: @tr("Back");
+                clicked => { screen = "connected"; }
+            }
+            Button {
+                text: "⚙  " + @tr("Custom stations");
+                clicked => {
+                    screen = "settings";
+                    settings-section = "radio";
+                }
+            }
         }
     }
 

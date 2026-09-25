@@ -1127,12 +1127,14 @@ impl GrappaClient {
         Ok(())
     }
 
-    /// `POST /admin/vhosts/:id/grants {subject_type: "user", subject_id}`.
+    /// `POST /admin/vhosts/:id/grants {subject_type, subject_id}`, where the
+    /// subject is a `"user"` or a `"visitor"`.
     pub async fn grant_admin_vhost(
         &self,
         token: &str,
         vhost_id: &str,
-        user_id: &str,
+        subject_type: &str,
+        subject_id: &str,
     ) -> Result<(), GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
@@ -1142,11 +1144,39 @@ impl GrappaClient {
         self.http
             .post(url)
             .bearer_auth(token)
-            .json(&serde_json::json!({ "subject_type": "user", "subject_id": user_id }))
+            .json(&serde_json::json!({ "subject_type": subject_type, "subject_id": subject_id }))
             .send()
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    /// `GET /admin/vhosts/subject_search?q=` — accounts and visitors whose
+    /// name matches, as `{type, id, network, nick}` rows for a grant.
+    pub async fn search_admin_subjects(
+        &self,
+        token: &str,
+        query: &str,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "vhosts", "subject_search"]);
+        url.query_pairs_mut().append_pair("q", query);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        let body: Value = response.json().await?;
+        Ok(body
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
     }
 
     /// `DELETE /admin/vhosts/grants/:grant_id` — idempotent.
@@ -1697,19 +1727,20 @@ impl GrappaClient {
         Ok(response.json::<ActiveThemePair>().await?)
     }
 
-    /// `PUT /me/theme` with a single pick: `theme_id` becomes the light slot
-    /// and the dark slot is cleared, so it applies in both modes.
+    /// `PUT /me/theme`: `light` is the day theme, and `dark` the night one;
+    /// without a night theme the day one applies in both modes.
     pub async fn set_active_theme(
         &self,
         token: &str,
-        theme_id: i64,
+        light: i64,
+        dark: Option<i64>,
     ) -> Result<ActiveThemePair, GrappaClientError> {
         let url = format!("{}/me/theme", self.base_url);
         let response = self
             .http
             .put(url)
             .bearer_auth(token)
-            .json(&serde_json::json!({ "light": theme_id, "dark": null }))
+            .json(&serde_json::json!({ "light": light, "dark": dark }))
             .send()
             .await?
             .error_for_status()?;
@@ -2577,7 +2608,7 @@ mod tests {
             .await
             .expect("toggle");
         client
-            .grant_admin_vhost("t", "4", "u-1")
+            .grant_admin_vhost("t", "4", "user", "u-1")
             .await
             .expect("grant");
         client
@@ -3024,7 +3055,7 @@ mod tests {
         let themes = client.fetch_themes("abc123").await.expect("fetch_themes");
         assert_eq!(themes[0].name, "irssi-dark");
         let pair = client
-            .set_active_theme("abc123", 7)
+            .set_active_theme("abc123", 7, None)
             .await
             .expect("set_active_theme");
         assert_eq!(pair.light.map(|theme| theme.id), Some(7));
