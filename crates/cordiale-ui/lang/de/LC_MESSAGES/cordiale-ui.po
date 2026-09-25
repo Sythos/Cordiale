@@ -1783,3 +1783,7 @@ msgstr "Obigen Vhost gewähren"
 msgctxt "AppWindow"
 msgid "Grant the selected vhost to {}"
 msgstr "Ausgewählten Vhost an {} gewähren"
+
+msgctxt "AppWindow"
+msgid "{} unread"
+msgstr "{} ungelesen"

@@ -22,6 +22,8 @@
 
 slint::include_modules!();
 
+mod taskbar;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -644,6 +646,13 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_theme = worker_tx.clone();
     ui.on_theme_toggle_requested(move || {
         let _ = tx_for_theme.send(WorkerCommand::ToggleTheme);
+    });
+
+    let weak_for_badge = ui.as_weak();
+    ui.on_taskbar_badge_changed(move |count, description| {
+        if let Some(ui) = weak_for_badge.upgrade() {
+            taskbar::set_badge(ui.window(), count, &description);
+        }
     });
 
     let tx_for_color_theme = worker_tx.clone();

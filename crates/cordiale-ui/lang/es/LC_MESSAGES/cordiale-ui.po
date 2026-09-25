@@ -1783,3 +1783,7 @@ msgstr "Conceder el vhost de arriba"
 msgctxt "AppWindow"
 msgid "Grant the selected vhost to {}"
 msgstr "Conceder el vhost seleccionado a {}"
+
+msgctxt "AppWindow"
+msgid "{} unread"
+msgstr "{} sin leer"

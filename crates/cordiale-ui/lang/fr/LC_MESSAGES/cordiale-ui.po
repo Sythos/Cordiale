@@ -1783,3 +1783,7 @@ msgstr "Accorder le vhost ci-dessus"
 msgctxt "AppWindow"
 msgid "Grant the selected vhost to {}"
 msgstr "Accorder le vhost sélectionné à {}"
+
+msgctxt "AppWindow"
+msgid "{} unread"
+msgstr "{} non lus"
