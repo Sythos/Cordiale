@@ -81,6 +81,8 @@ pub enum SlashCommand {
     },
     /// `/umode <modes>`.
     Umode(String),
+    /// Bare `/umode`: opens the user-mode view of the active network.
+    UmodeShow,
     /// `/names [#chan]`.
     Names(Option<String>),
     /// A raw IRC line: `/quote`, and the operator verbs built on it
@@ -383,8 +385,9 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             }
         }
         "umode" => match words(args).as_slice() {
+            [] => UmodeShow,
             [modes] => Umode(modes.clone()),
-            _ => Usage("/umode <modes>"),
+            _ => Usage("/umode [modes]"),
         },
         "names" => match words(args).as_slice() {
             [] => Names(None),
@@ -819,6 +822,7 @@ mod tests {
         assert_eq!(parse("/mode"), Some(ModeShow { channel: None }));
         assert!(matches!(parse("/mode alice"), Some(Usage(_))));
         assert_eq!(parse("/umode +i"), Some(Umode("+i".to_string())));
+        assert_eq!(parse("/umode"), Some(UmodeShow));
         assert_eq!(parse("/names"), Some(Names(None)));
         assert_eq!(
             parse("/quote PRIVMSG x :y"),
