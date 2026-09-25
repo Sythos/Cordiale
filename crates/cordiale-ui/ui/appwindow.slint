@@ -2171,8 +2171,63 @@ export component AppWindow inherits Window {
                 }
             }
 
-            ListView {
+            chat-list := ListView {
                 vertical-stretch: 1;
+
+                // Whether the pane should keep chasing the newest line.
+                // Slint's `ListView` virtualizes its rows and estimates the
+                // total scrolled content height from the average height of
+                // the rows it currently has instantiated (see Slint's
+                // `internal/core/model/repeater.rs`,
+                // `update_visible_instances`); with the word-wrapping,
+                // variable-height rows here that estimate shifts on almost
+                // every update, so `content-y` alone can't tell "at the
+                // bottom" from "estimate drifted". Track intent explicitly
+                // instead: true until the user scrolls away from the
+                // bottom, so their scroll position (up or down) is always
+                // respected.
+                property <bool> follow-bottom: true;
+
+                // Fires only for a genuine user-driven scroll (wheel, drag,
+                // scrollbar) — not for the programmatic `content-y` writes
+                // below, which go through a plain property set rather than
+                // Flickable's input-event path. `content-y` is 0 at the top
+                // and increasingly negative going down; a few pixels of
+                // slack absorb the height-estimate's own imprecision.
+                scrolled => {
+                    self.follow-bottom = self.content-y <= self.visible-height - self.content-height + 4px;
+                }
+
+                // The height estimate above is recomputed — and
+                // `content-height` changes — after essentially every chat
+                // update (a new line, a history page, an edit, a theme
+                // re-render...), not just once. Re-snap to the bottom each
+                // time while following, so a wrapped or newly-measured row
+                // never leaves a gap under the newest line; once the
+                // estimate settles the next change is a no-op.
+                changed content-height => {
+                    if self.follow-bottom {
+                        self.content-y = min(0px, self.visible-height - self.content-height);
+                    }
+                }
+
+                // `current-channel-label` only changes when Rust swaps in a
+                // different window's history (channel/query switch, or the
+                // pane being cleared) — never for a same-window refresh
+                // (a live message, a history page, an edit, a theme
+                // re-render). That makes it the right signal to force the
+                // pane back to the bottom regardless of where it was
+                // scrolled: a freshly opened window should always open on
+                // its newest line. Mirrored into a local property first,
+                // rather than a `changed current-channel-label` directly on
+                // this nested element: only a property that's local to the
+                // element (even one that just forwards an ancestor's,
+                // like this) is a valid `changed` target.
+                property <string> window-label: current-channel-label;
+                changed window-label => {
+                    self.follow-bottom = true;
+                    self.content-y = min(0px, self.visible-height - self.content-height);
+                }
 
                 for line in chat-lines : Rectangle {
                     // Cicchetto's flat mention background.
