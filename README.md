@@ -27,6 +27,14 @@ minimum widths. Channel rows sit directly below their network row, member
 roles appear in brackets (for example, `[@] Sythos`), and the member list's
 Actions menu includes a shortcut to the Themes settings.
 
+The Actions menu opens the radio: Cicchetto's stations (SomaFM and a few
+other Icecast streams) play in Cordiale itself, with the same player on
+every platform for MP3, Ogg Vorbis and FLAC streams, a volume control and
+the current track read from the station's feed or the stream's own titles;
+`/np` shares it in the open window. Settings > Radio adds, edits and
+removes your own stations (stream or `.pls`/`.m3u` URLs), kept on this
+device only.
+
 Settings > Themes lists Grappa's theme gallery, including the irssi-derived
 `irssi-dark` and `sux`, each shown with its color set. Picking one makes it
 the account's active theme on Grappa (`PUT /me/theme`) and restyles Cordiale:
@@ -80,9 +88,9 @@ Cordiale still has these user-visible or behavioral gaps:
   `/away`, `/ctcp`, `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb`, the services shortcuts, and a bare `/umode` that opens
-  the user-mode toggles), but not `/np` (a bare `/topic` or `/mode` shows
-  the channel's topic or modes in the status bar).
+  expansion, `/kb`, the services shortcuts, `/np` for the radio, and a bare
+  `/umode` that opens the user-mode toggles; a bare `/topic` or `/mode`
+  shows the channel's topic or modes in the status bar).
 - **Remaining presentation gaps:** WHOIS avatars are drawn when Grappa
   serves them as PNG, JPEG, GIF, WebP or BMP. The account-wide unread count
   shows in the window title and, on Windows, as a badge on the taskbar

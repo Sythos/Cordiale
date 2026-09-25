@@ -22,6 +22,7 @@
 
 slint::include_modules!();
 
+mod player;
 mod taskbar;
 
 use std::cell::RefCell;
@@ -93,6 +94,16 @@ enum WorkerCommand {
         accept: bool,
     },
     ArchiveDelete(String),
+    /// Tunes a station: `builtin:<id>` or `custom:<index>`.
+    RadioTune(String),
+    RadioStop,
+    /// Volume from 0 to 100.
+    RadioVolume(i32),
+    RadioEvent(u64, player::PlayerEvent),
+    RadioTrack {
+        generation: u64,
+        track: Option<cordiale_core::radio::Track>,
+    },
     ArchiveClose,
     /// Flips one user mode of the network shown in the user-mode view.
     UmodeToggle(String),
@@ -280,11 +291,76 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     ui.set_known_servers(known_servers_model());
 
+    ui.set_radio_volume(i32::from(settings.radio_volume));
+    push_radio_stations(&ui, &settings.radio_stations);
+
     let (worker_tx, worker_rx) = mpsc::unbounded_channel::<WorkerCommand>();
     let ui_weak = ui.as_weak();
+    let worker_self = worker_tx.clone();
     thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().expect("failed to start network runtime");
-        runtime.block_on(run_worker(worker_rx, ui_weak));
+        runtime.block_on(run_worker(worker_rx, worker_self, ui_weak));
+    });
+
+    let tx_for_radio_tune = worker_tx.clone();
+    ui.on_radio_tune(move |key| {
+        let _ = tx_for_radio_tune.send(WorkerCommand::RadioTune(key.to_string()));
+    });
+
+    let tx_for_radio_stop = worker_tx.clone();
+    ui.on_radio_stop(move || {
+        let _ = tx_for_radio_stop.send(WorkerCommand::RadioStop);
+    });
+
+    let tx_for_radio_volume = worker_tx.clone();
+    ui.on_radio_volume_changed(move |volume| {
+        let volume = volume.clamp(0, 100);
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.radio_volume = u8::try_from(volume).unwrap_or(100);
+        let _ = persistence::save_settings(&settings);
+        let _ = tx_for_radio_volume.send(WorkerCommand::RadioVolume(volume));
+    });
+
+    let weak_for_radio_save = ui.as_weak();
+    ui.on_radio_station_save(move |index, name, url, codec_index| {
+        let Some(ui) = weak_for_radio_save.upgrade() else {
+            return;
+        };
+        let Some(station) = custom_radio_station(&name, &url, codec_index) else {
+            ui.set_status_kind("radio-station-invalid".into());
+            return;
+        };
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        match usize::try_from(index)
+            .ok()
+            .filter(|index| *index < settings.radio_stations.len())
+        {
+            Some(index) => settings.radio_stations[index] = station,
+            None => settings.radio_stations.push(station),
+        }
+        let _ = persistence::save_settings(&settings);
+        push_radio_stations(&ui, &settings.radio_stations);
+        ui.set_radio_edit_index(-1);
+        ui.set_radio_form_name("".into());
+        ui.set_radio_form_url("".into());
+        ui.set_radio_form_codec(0);
+    });
+
+    let weak_for_radio_delete = ui.as_weak();
+    ui.on_radio_station_delete(move |index| {
+        let Some(ui) = weak_for_radio_delete.upgrade() else {
+            return;
+        };
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        if let Some(index) = usize::try_from(index)
+            .ok()
+            .filter(|index| *index < settings.radio_stations.len())
+        {
+            settings.radio_stations.remove(index);
+            let _ = persistence::save_settings(&settings);
+        }
+        push_radio_stations(&ui, &settings.radio_stations);
+        ui.set_radio_edit_index(-1);
     });
 
     let weak_for_language = ui.as_weak();
@@ -1846,9 +1922,19 @@ impl WorkerState {
 /// never fires.
 async fn run_worker(
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
+    worker_self: mpsc::UnboundedSender<WorkerCommand>,
     ui: slint::Weak<AppWindow>,
 ) {
     let mut state = WorkerState::new();
+    let radio_events = worker_self.clone();
+    let radio = player::RadioPlayer::spawn(move |generation, event| {
+        let _ = radio_events.send(WorkerCommand::RadioEvent(generation, event));
+    });
+    let volume = persistence::load_settings()
+        .unwrap_or_default()
+        .radio_volume;
+    radio.set_volume(f32::from(volume) / 100.0);
+    let mut radio_state = RadioState::default();
     let mut session_events: Option<mpsc::UnboundedReceiver<SessionEvent>> = None;
 
     loop {
@@ -1930,6 +2016,32 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ArchiveDelete(target)) => {
                         delete_archive_target(&mut state, &ui, &target).await;
+                    }
+                    Some(WorkerCommand::RadioTune(key)) => {
+                        tune_radio(&mut radio_state, &radio, &worker_self, &ui, &key);
+                    }
+                    Some(WorkerCommand::RadioStop) => {
+                        radio.stop();
+                        radio_state.stop();
+                        push_radio_now(&ui, &radio_state);
+                    }
+                    Some(WorkerCommand::RadioVolume(volume)) => {
+                        radio.set_volume(volume.clamp(0, 100) as f32 / 100.0);
+                    }
+                    Some(WorkerCommand::RadioEvent(generation, event)) => {
+                        handle_radio_event(&mut radio_state, &ui, generation, event);
+                    }
+                    Some(WorkerCommand::RadioTrack { generation, track }) => {
+                        if let Some(tuned) = radio_state
+                            .tuned
+                            .as_mut()
+                            .filter(|_| radio_state.generation == generation)
+                        {
+                            if let Some(track) = track {
+                                tuned.track = Some((track, std::time::Instant::now()));
+                            }
+                            push_radio_now(&ui, &radio_state);
+                        }
                     }
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
@@ -2428,6 +2540,10 @@ async fn run_worker(
                         let system_dark = state.system_dark;
                         state = WorkerState::new();
                         state.system_dark = system_dark;
+                        // Like Cicchetto, signing out stops the radio.
+                        radio.stop();
+                        radio_state.stop();
+                        push_radio_now(&ui, &radio_state);
                     }
                     Some(WorkerCommand::LoadOlderHistory) => {
                         handle_load_older_history(&mut state, &ui).await;
@@ -3756,6 +3872,14 @@ async fn run_slash_command(
             );
             Ok(())
         }
+        SlashCommand::NowPlaying => {
+            let line = match now_playing_text(&radio_now_playing(), std::time::Instant::now()) {
+                Ok(line) => line,
+                Err((kind, station)) => return set_command_status(ui, kind, station),
+            };
+            let request = SendMessageRequest::plain(format!("\u{1}ACTION {line}\u{1}"));
+            post_message(&client, &token, &network, &channel, request).await
+        }
         SlashCommand::UmodeShow => {
             state.umode_view_network = Some(network.clone());
             push_umode_view(state, ui, true);
@@ -4218,6 +4342,320 @@ async fn handle_save_notification_prefs(
             let _ = ui.upgrade_in_event_loop(move |ui| ui.set_status_kind(kind.into()));
         }
     }
+}
+
+/// A station ready to tune: its name, stream URL, decoder hint and
+/// now-playing feed.
+struct TunableStation {
+    title: String,
+    url: String,
+    hint: &'static str,
+    source: Option<cordiale_core::radio::NowPlayingSource>,
+}
+
+/// `builtin:<id>` from Cicchetto's list, or `custom:<index>` from Settings.
+fn tunable_station(key: &str) -> Option<TunableStation> {
+    use cordiale_core::radio::{RadioCodec, RADIO_STATIONS};
+    if let Some(id) = key.strip_prefix("builtin:") {
+        let station = RADIO_STATIONS.iter().find(|station| station.id == id)?;
+        return Some(TunableStation {
+            title: station.title.to_string(),
+            url: station.stream_url.to_string(),
+            hint: station.codec.extension(),
+            source: station.now_playing,
+        });
+    }
+    let index: usize = key.strip_prefix("custom:")?.parse().ok()?;
+    let station = persistence::load_settings()
+        .ok()?
+        .radio_stations
+        .into_iter()
+        .nth(index)?;
+    let codec = RadioCodec::from_setting_key(&station.codec);
+    Some(TunableStation {
+        title: station.name,
+        url: station.url,
+        hint: codec.extension(),
+        source: None,
+    })
+}
+
+/// A custom station from the Settings form; `None` without a name or an
+/// http(s) URL. `codec_index` follows the form's menu (`RADIO_CODECS`).
+fn custom_radio_station(
+    name: &str,
+    url: &str,
+    codec_index: i32,
+) -> Option<persistence::CustomRadioStation> {
+    let name = name.trim();
+    let url = url.trim();
+    let valid_url = is_http_url(url);
+    if name.is_empty() || !valid_url {
+        return None;
+    }
+    Some(persistence::CustomRadioStation {
+        name: name.to_string(),
+        url: url.to_string(),
+        codec: usize::try_from(codec_index)
+            .ok()
+            .and_then(|index| cordiale_core::radio::RADIO_CODECS.get(index))
+            .copied()
+            .unwrap_or(cordiale_core::radio::RadioCodec::Mp3)
+            .setting_key()
+            .to_string(),
+    })
+}
+
+/// An `http://` or `https://` URL with a host and no spaces.
+fn is_http_url(url: &str) -> bool {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    rest.is_some_and(|rest| {
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        !host.is_empty() && !url.chars().any(char::is_whitespace)
+    })
+}
+
+/// Mirrors the station list (Cicchetto's, then the custom ones) and the
+/// custom list of Settings > Radio.
+fn push_radio_stations(ui: &AppWindow, custom: &[persistence::CustomRadioStation]) {
+    use cordiale_core::radio::{RadioCodec, RADIO_CODECS, RADIO_STATIONS};
+    let mut rows: Vec<RadioRow> = RADIO_STATIONS
+        .iter()
+        .map(|station| {
+            let format = match station.bitrate {
+                Some(bitrate) => format!("{} {bitrate}k", station.codec.label()),
+                None => station.codec.label().to_string(),
+            };
+            RadioRow {
+                key: format!("builtin:{}", station.id).into(),
+                title: station.title.into(),
+                detail: format!("{} · {format}", station.genres.join(", ")).into(),
+                description: station.description.into(),
+                custom: false,
+            }
+        })
+        .collect();
+    let custom_rows: Vec<CustomRadioRow> = custom
+        .iter()
+        .map(|station| CustomRadioRow {
+            name: station.name.clone().into(),
+            url: station.url.clone().into(),
+            codec_index: RADIO_CODECS
+                .iter()
+                .position(|codec| codec.setting_key() == station.codec)
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or(0),
+            codec_label: RadioCodec::from_setting_key(&station.codec).label().into(),
+        })
+        .collect();
+    rows.extend(custom.iter().enumerate().map(|(index, station)| {
+        let codec = RadioCodec::from_setting_key(&station.codec).label();
+        RadioRow {
+            key: format!("custom:{index}").into(),
+            title: station.name.clone().into(),
+            detail: codec.into(),
+            description: station.url.clone().into(),
+            custom: true,
+        }
+    }));
+    ui.set_radio_stations(Rc::new(slint::VecModel::from(rows)).into());
+    ui.set_radio_custom_stations(Rc::new(slint::VecModel::from(custom_rows)).into());
+}
+
+/// The station on air, as the worker tracks it.
+struct TunedRadio {
+    key: String,
+    title: String,
+    source: Option<cordiale_core::radio::NowPlayingSource>,
+    /// Last track the feed gave, and when.
+    track: Option<(cordiale_core::radio::Track, std::time::Instant)>,
+    /// Last title the stream itself carried (ICY), for stations without a
+    /// feed.
+    stream_title: Option<String>,
+    /// "connecting", "playing", "failed" or "ended".
+    status: &'static str,
+    error: String,
+}
+
+#[derive(Default)]
+struct RadioState {
+    generation: u64,
+    tuned: Option<TunedRadio>,
+    poll: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RadioState {
+    fn stop(&mut self) {
+        self.generation += 1;
+        self.tuned = None;
+        if let Some(poll) = self.poll.take() {
+            poll.abort();
+        }
+    }
+}
+
+impl Drop for RadioState {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// What `/np` reads, shared with the slash command handler.
+#[derive(Clone, Default)]
+struct RadioNowPlaying {
+    station: Option<String>,
+    has_feed: bool,
+    track: Option<(cordiale_core::radio::Track, std::time::Instant)>,
+    stream_title: Option<String>,
+}
+
+static RADIO_NOW_PLAYING: std::sync::Mutex<Option<RadioNowPlaying>> = std::sync::Mutex::new(None);
+
+fn radio_now_playing() -> RadioNowPlaying {
+    RADIO_NOW_PLAYING
+        .lock()
+        .ok()
+        .and_then(|now| now.clone())
+        .unwrap_or_default()
+}
+
+/// The `/np` action text, or the status explaining why there's none (as
+/// Cicchetto: idle, a station without track information, a feed that
+/// hasn't answered, a track over three minutes old). Stations without a
+/// feed fall back to the title in the stream itself.
+fn now_playing_text(
+    now: &RadioNowPlaying,
+    at: std::time::Instant,
+) -> Result<String, (&'static str, String)> {
+    use cordiale_core::radio::{now_playing_line, Track, NOW_PLAYING_STALE_SECS};
+    let Some(station) = now.station.clone() else {
+        return Err(("np-idle", String::new()));
+    };
+    if let Some((track, read_at)) = &now.track {
+        if at.duration_since(*read_at).as_secs() > NOW_PLAYING_STALE_SECS {
+            return Err(("np-stale", station));
+        }
+        return Ok(now_playing_line(track, &station));
+    }
+    if let Some(title) = &now.stream_title {
+        let track = Track {
+            artist: None,
+            title: title.clone(),
+        };
+        return Ok(now_playing_line(&track, &station));
+    }
+    Err(if now.has_feed {
+        ("np-unanswered", station)
+    } else {
+        ("np-unsupported", station)
+    })
+}
+
+fn tune_radio(
+    radio_state: &mut RadioState,
+    radio: &player::RadioPlayer,
+    worker_self: &mpsc::UnboundedSender<WorkerCommand>,
+    ui: &slint::Weak<AppWindow>,
+    key: &str,
+) {
+    let Some(station) = tunable_station(key) else {
+        return;
+    };
+    radio_state.stop();
+    let generation = radio_state.generation;
+    radio.play(&station.url, station.hint, generation);
+    if let Some(source) = station.source {
+        let tx = worker_self.clone();
+        radio_state.poll = Some(tokio::spawn(async move {
+            loop {
+                let track = cordiale_core::radio::fetch_now_playing(source).await;
+                if tx
+                    .send(WorkerCommand::RadioTrack { generation, track })
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    cordiale_core::radio::NOW_PLAYING_POLL_SECS,
+                ))
+                .await;
+            }
+        }));
+    }
+    radio_state.tuned = Some(TunedRadio {
+        key: key.to_string(),
+        title: station.title,
+        source: station.source,
+        track: None,
+        stream_title: None,
+        status: "connecting",
+        error: String::new(),
+    });
+    push_radio_now(ui, radio_state);
+}
+
+fn handle_radio_event(
+    radio_state: &mut RadioState,
+    ui: &slint::Weak<AppWindow>,
+    generation: u64,
+    event: player::PlayerEvent,
+) {
+    if radio_state.generation != generation {
+        return;
+    }
+    let Some(tuned) = radio_state.tuned.as_mut() else {
+        return;
+    };
+    match event {
+        player::PlayerEvent::Playing => tuned.status = "playing",
+        player::PlayerEvent::Title(title) => tuned.stream_title = Some(title),
+        player::PlayerEvent::Failed(error) => {
+            persistence::log_line(&format!("radio stream failed: {error}"));
+            tuned.status = "failed";
+            tuned.error = error;
+        }
+        player::PlayerEvent::Ended => tuned.status = "ended",
+    }
+    push_radio_now(ui, radio_state);
+}
+
+/// Mirrors the station on air into the player bar and `/np`.
+fn push_radio_now(ui: &slint::Weak<AppWindow>, radio_state: &RadioState) {
+    let now = radio_state.tuned.as_ref().map(|tuned| RadioNowPlaying {
+        station: Some(tuned.title.clone()),
+        has_feed: tuned.source.is_some(),
+        track: tuned.track.clone(),
+        stream_title: tuned.stream_title.clone(),
+    });
+    let label = now
+        .as_ref()
+        .and_then(|now| match (&now.track, &now.stream_title) {
+            (Some((track, _)), _) => Some(track.label()),
+            (None, Some(title)) => Some(title.clone()),
+            (None, None) => None,
+        })
+        .unwrap_or_default();
+    if let Ok(mut shared) = RADIO_NOW_PLAYING.lock() {
+        *shared = now;
+    }
+    let (key, title, status, error) = match &radio_state.tuned {
+        Some(tuned) => (
+            tuned.key.clone(),
+            tuned.title.clone(),
+            tuned.status,
+            tuned.error.clone(),
+        ),
+        None => (String::new(), String::new(), "", String::new()),
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_radio_tuned_key(key.into());
+        ui.set_radio_station(title.into());
+        ui.set_radio_track(label.into());
+        ui.set_radio_status(status.into());
+        ui.set_radio_error(error.into());
+    });
 }
 
 /// Sound presets Grappa accepts for `notification_sound`, in the order of
@@ -18214,6 +18652,79 @@ mod tests {
         assert_eq!(network_nick(&networks, "libera"), Some("ada".to_string()));
         assert_eq!(network_nick(&networks, "oftc"), None);
         assert_eq!(network_nick(&networks, "efnet"), None);
+    }
+
+    #[test]
+    fn now_playing_text_follows_cicchetto_states() {
+        use cordiale_core::radio::Track;
+        let at = std::time::Instant::now();
+        assert_eq!(
+            now_playing_text(&RadioNowPlaying::default(), at),
+            Err(("np-idle", String::new()))
+        );
+        let mut now = RadioNowPlaying {
+            station: Some("Kohina".to_string()),
+            has_feed: true,
+            ..RadioNowPlaying::default()
+        };
+        assert_eq!(
+            now_playing_text(&now, at),
+            Err(("np-unanswered", "Kohina".to_string()))
+        );
+        now.track = Some((
+            Track {
+                artist: Some("Hubbard".to_string()),
+                title: "Commando".to_string(),
+            },
+            at,
+        ));
+        assert_eq!(
+            now_playing_text(&now, at).as_deref(),
+            Ok("is now playing: Hubbard — Commando [Kohina]")
+        );
+        let later = at + std::time::Duration::from_secs(181);
+        assert_eq!(
+            now_playing_text(&now, later),
+            Err(("np-stale", "Kohina".to_string()))
+        );
+        let icy = RadioNowPlaying {
+            station: Some("KNAC".to_string()),
+            stream_title: Some("Band - Song".to_string()),
+            ..RadioNowPlaying::default()
+        };
+        assert_eq!(
+            now_playing_text(&icy, at).as_deref(),
+            Ok("is now playing: Band - Song [KNAC]")
+        );
+        let silent = RadioNowPlaying {
+            station: Some("KNAC".to_string()),
+            ..RadioNowPlaying::default()
+        };
+        assert_eq!(
+            now_playing_text(&silent, at),
+            Err(("np-unsupported", "KNAC".to_string()))
+        );
+    }
+
+    #[test]
+    fn custom_stations_need_a_name_and_an_http_url() {
+        let station = custom_radio_station(" Local ", "https://radio.example/live.ogg", 1)
+            .expect("valid station");
+        assert_eq!(station.name, "Local");
+        assert_eq!(station.codec, "vorbis");
+        assert_eq!(
+            custom_radio_station("x", "https://radio.example/s.flac", 2)
+                .map(|station| station.codec),
+            Some("flac".to_string())
+        );
+        assert!(custom_radio_station("", "https://radio.example/", 0).is_none());
+        assert!(custom_radio_station("x", "ftp://radio.example/", 0).is_none());
+        assert!(custom_radio_station("x", "https://", 0).is_none());
+        assert!(custom_radio_station("x", "https://a b/", 0).is_none());
+        assert_eq!(
+            custom_radio_station("x", "http://radio.example/s", 0).map(|station| station.codec),
+            Some("mp3".to_string())
+        );
     }
 
     #[test]

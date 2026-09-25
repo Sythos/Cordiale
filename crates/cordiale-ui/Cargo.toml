@@ -26,6 +26,9 @@ slint = { version = "1", default-features = false, features = [
     "raw-window-handle-06",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+# The radio player: MP3, Ogg Vorbis and FLAC streams, decoded the same way
+# on every platform (ALSA on Linux, WASAPI on Windows, CoreAudio on macOS).
+rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "vorbis", "flac"] }
 
 # The taskbar overlay badge: the window handle and ITaskbarList3.
 [target.'cfg(windows)'.dependencies]
