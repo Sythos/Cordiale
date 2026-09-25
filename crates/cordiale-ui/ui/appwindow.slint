@@ -668,6 +668,7 @@ export component AppWindow inherits Window {
     callback older-history-requested();
     in-out property <string> compose-text: "";
     in property <string> current-channel-label: "";
+    in property <bool> current-server-window: false;
     // RPL_TOPIC-equivalent for the selected channel, shown above the chat
     // list; empty when the server hasn't sent one (falls back to the
     // channel label in the markup below).
@@ -1147,6 +1148,7 @@ export component AppWindow inherits Window {
         return @tr("user mode, no description available");
     }
     callback network-toggle-requested(string);
+    callback network-selected(string);
     callback send-chat-message(string);
     callback compose-text-changed(string);
     // Tab-completes the word before the (assumed end-of-text) caret against
@@ -1551,6 +1553,12 @@ export component AppWindow inherits Window {
             return @tr("Unknown command: {}", status-command-hint);
         } else if status-kind == "command-needs-channel" {
             return @tr("{} only works in a channel window.", status-command-hint);
+        } else if status-kind == "no-active-network" {
+            return @tr("Select a network before entering a command.");
+        } else if status-kind == "server-window-commands-only" {
+            return @tr("The server window accepts only slash commands.");
+        } else if status-kind == "server-history-failed" {
+            return @tr("Could not load the server messages. Live messages may still arrive.");
         } else if status-kind == "command-failed" {
             return @tr("{} failed.", status-command-hint);
         } else if status-kind == "command-usage" {
@@ -2004,12 +2012,21 @@ export component AppWindow inherits Window {
                         background: #808080;
                     }
 
-                    if !group.parked : Button {
-                        text: (group.expanded ? "▾ 🔌 " : "▸ 🔌 ") + group.network
-                            + (group.connection-label == "" ? "" : " · " + connection-label-text(group.connection-label));
-                        accessible-label: group.network
-                            + (group.connection-label == "" ? "" : " — " + connection-label-text(group.connection-label));
-                        clicked => { network-toggle-requested(group.network); }
+                    if !group.parked : HorizontalLayout {
+                        spacing: 4px;
+                        Button {
+                            text: group.expanded ? "▾" : "▸";
+                            width: 28px;
+                            accessible-label: @tr("Expand or collapse network {}", group.network);
+                            clicked => { network-toggle-requested(group.network); }
+                        }
+                        Button {
+                            horizontal-stretch: 1;
+                            text: "🔌 " + group.network
+                                + (group.connection-label == "" ? "" : " · " + connection-label-text(group.connection-label));
+                            accessible-label: @tr("Open network messages on {}", group.network);
+                            clicked => { network-selected(group.network); }
+                        }
                     }
                     if group.parked : HorizontalLayout {
                         spacing: 4px;
@@ -2108,7 +2125,7 @@ export component AppWindow inherits Window {
             }
             // The layout gives the topic the box's width, so it wraps at word
             // boundaries and the box grows to fit every line.
-            if has-selected-channel && !current-query : Rectangle {
+            if has-selected-channel && !current-query && !current-server-window : Rectangle {
                 background: palette-active ? palette-bg-alt : (theme == "dark" ? #242424 : #f5f5f5);
                 border-width: 1px;
                 border-color: palette-active ? palette-border : (theme == "dark" ? #5c5c5c : #d0d0d0);
@@ -2344,7 +2361,7 @@ export component AppWindow inherits Window {
                     text: "📎";
                     accessible-label: @tr("Attach file");
                     width: 36px;
-                    enabled: !current-query || current-query-ready;
+                    enabled: (!current-query || current-query-ready) && !current-server-window;
                     clicked => { attach-file-requested(); }
                 }
 
@@ -2384,8 +2401,8 @@ export component AppWindow inherits Window {
                     // A layout, so the scope takes the field's size.
                     HorizontalLayout {
                         compose-line-edit := LineEdit {
-                            placeholder-text: @tr("Message");
-                            accessible-label: @tr("Message");
+                            placeholder-text: current-server-window ? @tr("Command") : @tr("Message");
+                            accessible-label: current-server-window ? @tr("Command") : @tr("Message");
                             text <=> compose-text;
                             enabled: !current-query || current-query-ready;
                             accepted => { send-chat-message(compose-text); }

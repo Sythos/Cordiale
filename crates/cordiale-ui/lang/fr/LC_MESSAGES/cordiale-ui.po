@@ -2111,3 +2111,23 @@ msgstr "Ce n'est pas un pseudo IRC valide. Saisissez-en un dans le champ du nom.
 msgctxt "AppWindow"
 msgid "This server asks guests to solve a CAPTCHA, which needs a browser. Sign in from a browser instead."
 msgstr "Ce serveur demande aux invités de résoudre un CAPTCHA, ce qui nécessite un navigateur. Connectez-vous depuis un navigateur."
+
+msgctxt "AppWindow"
+msgid "Expand or collapse network {}"
+msgstr "Développer ou réduire le réseau {}"
+
+msgctxt "AppWindow"
+msgid "Open network messages on {}"
+msgstr "Ouvrir les messages du réseau {}"
+
+msgctxt "AppWindow"
+msgid "Select a network before entering a command."
+msgstr "Sélectionnez un réseau avant de saisir une commande."
+
+msgctxt "AppWindow"
+msgid "The server window accepts only slash commands."
+msgstr "La fenêtre du serveur n'accepte que les commandes commençant par une barre oblique."
+
+msgctxt "AppWindow"
+msgid "Could not load the server messages. Live messages may still arrive."
+msgstr "Impossible de charger les messages du serveur. Les messages en direct peuvent encore arriver."

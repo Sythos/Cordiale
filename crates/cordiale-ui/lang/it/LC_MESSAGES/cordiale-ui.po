@@ -2111,3 +2111,23 @@ msgstr "Non è un nickname IRC valido. Inseriscine uno nel campo del nome."
 msgctxt "AppWindow"
 msgid "This server asks guests to solve a CAPTCHA, which needs a browser. Sign in from a browser instead."
 msgstr "Questo server chiede agli ospiti di risolvere un CAPTCHA, che richiede un browser. Accedi da un browser."
+
+msgctxt "AppWindow"
+msgid "Expand or collapse network {}"
+msgstr "Espandi o comprimi la rete {}"
+
+msgctxt "AppWindow"
+msgid "Open network messages on {}"
+msgstr "Apri i messaggi della rete {}"
+
+msgctxt "AppWindow"
+msgid "Select a network before entering a command."
+msgstr "Seleziona una rete prima di inserire un comando."
+
+msgctxt "AppWindow"
+msgid "The server window accepts only slash commands."
+msgstr "La finestra del server accetta solo comandi con la barra."
+
+msgctxt "AppWindow"
+msgid "Could not load the server messages. Live messages may still arrive."
+msgstr "Impossibile caricare i messaggi del server. I messaggi in diretta potrebbero comunque arrivare."
