@@ -12,6 +12,8 @@ Some of us just want to sit on Grappa without hauling a full browser engine alon
 
 ## The wider Grappa ecosystem
 
+Fair warning: the Grappa biome is spreading, and it is **not** slowing down. What started as one humble bouncer now sprouts web apps, terminal bridges, Android clients and native desktop apps faster than you can say "just one more glass", and at this rate it'll have colonized every device in the known universe before your IRC client of choice finishes reconnecting. Resistance is futile. Pick a client and pour yourself a drink.
+
 Cordiale isn't the only way to sit on a Grappa server, and it's worth knowing what else is out there:
 
 - **["Grappa"](https://github.com/vjt/grappa-irc)** itself is the always-on bouncer/server this whole thing revolves around — REST + Phoenix Channels, no raw IRC on the wire unless you go through Shottino below. Own repo, own maintainer, own history.
