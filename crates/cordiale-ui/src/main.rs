@@ -774,6 +774,39 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_draft.send(WorkerCommand::ComposeTextChanged(text.to_string()));
     });
 
+    // Tab-completion cycle state (see `NickCompletionCycle`): UI-thread only,
+    // reset by any compose-box edit that doesn't come from this same
+    // callback, so a plain `RefCell` local to this closure is enough — no
+    // worker involvement needed to decide what the next Tab press does.
+    let tx_for_nick_complete = worker_tx.clone();
+    let weak_for_nick_complete = ui.as_weak();
+    let nick_completion_cycle: RefCell<Option<NickCompletionCycle>> = RefCell::new(None);
+    ui.on_nick_complete_requested(move |forward| {
+        let Some(ui) = weak_for_nick_complete.upgrade() else {
+            return slint::SharedString::default();
+        };
+        let text = ui.get_compose_text();
+        let candidates = nick_completion_candidates(&ui);
+        let mut cycle = nick_completion_cycle.borrow_mut();
+        match complete_nick(text.as_str(), &candidates, forward, cycle.as_ref()) {
+            Some((new_text, new_cycle)) => {
+                *cycle = Some(new_cycle);
+                // Setting `compose-text` from Rust doesn't fire the
+                // LineEdit's `edited` callback (that only fires on direct
+                // user input), so the draft has to be saved explicitly here
+                // — same command `compose-text-changed` sends for a typed
+                // edit.
+                let _ =
+                    tx_for_nick_complete.send(WorkerCommand::ComposeTextChanged(new_text.clone()));
+                new_text.into()
+            }
+            None => {
+                *cycle = None;
+                text
+            }
+        }
+    });
+
     let tx_for_theme = worker_tx.clone();
     ui.on_theme_toggle_requested(move || {
         let _ = tx_for_theme.send(WorkerCommand::ToggleTheme);
@@ -3434,6 +3467,7 @@ fn show_query_window(
     let query_ready = state.current_query_ready;
     let history_start = state.history_start_reached.contains(key);
     let label = format!("{} — {}", query.network, query.target_nick);
+    let peer_nick = query.target_nick.clone();
     push_peer_away_banner(state, ui);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -3444,6 +3478,7 @@ fn show_query_window(
         ui.set_has_selected_channel(true);
         ui.set_current_query(true);
         ui.set_current_query_ready(query_ready);
+        ui.set_current_query_peer_nick(peer_nick.into());
         ui.set_compose_text(draft.into());
         ui.set_can_moderate_members(false);
         ui.set_history_start_reached(history_start);
@@ -10240,6 +10275,167 @@ fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
                 color: slint::Color::from_rgb_u8(r, g, b),
             }
         })
+        .collect()
+}
+
+/// State kept across repeated Tab presses on the compose box so they cycle
+/// through the other matches instead of repeating the first one. Lives on
+/// the UI thread only (see `main`); there's nothing to persist across
+/// restarts or send to the worker.
+#[derive(Clone, Debug, PartialEq)]
+struct NickCompletionCycle {
+    /// Text before the completed word, kept byte-for-byte as typed (any
+    /// leading whitespace included) and put back ahead of whichever entry
+    /// is shown.
+    prefix: String,
+    /// The word exactly as the user typed it, before any Tab press.
+    original: String,
+    /// Matching nicks that produced this cycle, in member-list order.
+    matches: Vec<String>,
+    /// Index into `matches` currently shown, or `matches.len()` for "the
+    /// original text, uncompleted" — the last stop before the cycle wraps.
+    index: usize,
+    /// The exact compose-box text this cycle last produced. Continuing the
+    /// cycle on the next Tab press requires the box to still hold exactly
+    /// this text; anything else means a manual edit happened in between and
+    /// the cycle restarts from scratch.
+    last_text: String,
+}
+
+/// Moves `index` one step forward or backward through `len` slots, wrapping
+/// at either end.
+fn step_cycle_index(index: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        (index + 1) % len
+    } else {
+        (index + len - 1) % len
+    }
+}
+
+/// Renders one stop of the cycle: `index == matches.len()` restores the
+/// original typed text verbatim (no suffix — it was never a completion);
+/// any other index is `prefix` + that match + the addressing suffix.
+fn render_nick_completion(
+    prefix: &str,
+    original: &str,
+    matches: &[String],
+    index: usize,
+) -> String {
+    if index == matches.len() {
+        format!("{prefix}{original}")
+    } else {
+        // ": " only when the completed word opens the line (nothing before
+        // it to address), a plain space mid-sentence — matches Cicchetto.
+        let suffix = if prefix.is_empty() { ": " } else { " " };
+        format!("{prefix}{}{suffix}", matches[index])
+    }
+}
+
+/// Tab-completes the word before the caret in the compose box against
+/// `candidates` (already in the order Tab-completion should prefer, i.e.
+/// the channel member list's on-screen order — see `members_model`).
+///
+/// The compose `LineEdit` (Slint 1.18's std-widgets) exposes no way to read
+/// the caret position — `LineEditInterface` only has a setter
+/// (`set-selection-offsets`), confirmed against the widget's `.slint`
+/// source. So this always treats the caret as being at the very end of
+/// `text` and completes its last whitespace-delimited word; the caller
+/// places the real caret at the end after applying the result, which is
+/// exactly where this function assumed it to be.
+///
+/// Returns `None` when there's nothing to complete (empty trailing word, or
+/// no candidate matches it) — the caller leaves the text untouched. Matches
+/// candidates case-insensitively on an ASCII fold (nicks are compared
+/// byte-for-byte otherwise; the worker's own casemapping fold isn't
+/// reachable from the UI thread without a lot of new plumbing for a rarely
+/// relevant edge case — non-ASCII nick characters that only differ by
+/// case).
+fn complete_nick(
+    text: &str,
+    candidates: &[String],
+    forward: bool,
+    cycle: Option<&NickCompletionCycle>,
+) -> Option<(String, NickCompletionCycle)> {
+    if let Some(cycle) = cycle {
+        if cycle.last_text == text {
+            let slots = cycle.matches.len() + 1;
+            let index = step_cycle_index(cycle.index, slots, forward);
+            let new_text =
+                render_nick_completion(&cycle.prefix, &cycle.original, &cycle.matches, index);
+            return Some((
+                new_text.clone(),
+                NickCompletionCycle {
+                    index,
+                    last_text: new_text,
+                    ..cycle.clone()
+                },
+            ));
+        }
+    }
+
+    // Fresh completion: find the word right before the (assumed) end
+    // caret, i.e. everything after the last whitespace run.
+    let word_start = text
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(idx, c)| idx + c.len_utf8())
+        .unwrap_or(0);
+    let prefix = &text[..word_start];
+    let word = &text[word_start..];
+    if word.is_empty() {
+        return None;
+    }
+
+    let folded_word = word.to_ascii_lowercase();
+    let matches: Vec<String> = candidates
+        .iter()
+        .filter(|nick| nick.to_ascii_lowercase().starts_with(&folded_word))
+        .cloned()
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+
+    // The top-of-member-list match always wins the first Tab press,
+    // regardless of direction — cycling only kicks in on the next press.
+    let new_text = render_nick_completion(prefix, word, &matches, 0);
+    Some((
+        new_text.clone(),
+        NickCompletionCycle {
+            prefix: prefix.to_string(),
+            original: word.to_string(),
+            matches,
+            index: 0,
+            last_text: new_text,
+        },
+    ))
+}
+
+/// Tab-completion candidates for the currently open window, in the order
+/// completion should prefer them: the open channel's member list as shown
+/// in the member column (`channel-members`, already in `state.members[key]`
+/// order), or — in a private query window, which carries no member list of
+/// its own — the peer's nick as the sole candidate. That's a deliberate
+/// choice beyond what's strictly required: Cicchetto (the reference web
+/// client) has no candidates at all in a query window and Tab silently does
+/// nothing there, but completing to the one nick you can possibly be
+/// addressing is more useful and no more surprising.
+fn nick_completion_candidates(ui: &AppWindow) -> Vec<String> {
+    use slint::Model as _;
+
+    if ui.get_current_query() {
+        let peer = ui.get_current_query_peer_nick();
+        return if peer.is_empty() {
+            Vec::new()
+        } else {
+            vec![peer.to_string()]
+        };
+    }
+
+    ui.get_channel_members()
+        .iter()
+        .map(|row| row.name.to_string())
         .collect()
 }
 
@@ -22309,5 +22505,105 @@ mod tests {
             to_ws_url("http://localhost:4000"),
             "ws://localhost:4000/socket/websocket?vsn=2.0.0"
         );
+    }
+
+    fn nick_list(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn complete_nick_matches_prefix_case_insensitively_with_real_capitalisation() {
+        let candidates = nick_list(&["Sythos", "sythe", "Somebody"]);
+        let (text, _) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(text, "Sythos: ");
+    }
+
+    #[test]
+    fn complete_nick_breaks_ties_by_member_list_order_not_alphabetical() {
+        // "sythe" sorts after "Sythos" alphabetically but comes first in
+        // the member list here — the list order must win.
+        let candidates = nick_list(&["sythe", "Sythos"]);
+        let (text, _) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(text, "sythe: ");
+    }
+
+    #[test]
+    fn complete_nick_appends_colon_space_only_at_the_start_of_the_line() {
+        let candidates = nick_list(&["Sythos"]);
+        let (start_of_line, _) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(start_of_line, "Sythos: ");
+
+        let (mid_sentence, _) = complete_nick("hello syt", &candidates, true, None).unwrap();
+        assert_eq!(mid_sentence, "hello Sythos ");
+    }
+
+    #[test]
+    fn complete_nick_cycles_forward_then_restores_the_original_then_wraps() {
+        let candidates = nick_list(&["Sythos", "sythe"]);
+
+        let (first, cycle1) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(first, "Sythos: ");
+
+        let (second, cycle2) = complete_nick(&first, &candidates, true, Some(&cycle1)).unwrap();
+        assert_eq!(second, "sythe: ");
+
+        let (third, cycle3) = complete_nick(&second, &candidates, true, Some(&cycle2)).unwrap();
+        assert_eq!(
+            third, "syt",
+            "the last step in the cycle restores the typed text"
+        );
+
+        let (fourth, _) = complete_nick(&third, &candidates, true, Some(&cycle3)).unwrap();
+        assert_eq!(
+            fourth, "Sythos: ",
+            "one more Tab wraps back to the first match"
+        );
+    }
+
+    #[test]
+    fn complete_nick_shift_tab_cycles_backward() {
+        let candidates = nick_list(&["Sythos", "sythe"]);
+        let (first, cycle1) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(first, "Sythos: ");
+
+        // Backward from the first match skips straight to the original
+        // text, the step immediately behind it in the cycle.
+        let (back, _) = complete_nick(&first, &candidates, false, Some(&cycle1)).unwrap();
+        assert_eq!(back, "syt");
+    }
+
+    #[test]
+    fn complete_nick_returns_none_when_nothing_matches() {
+        let candidates = nick_list(&["Alice", "Bob"]);
+        assert_eq!(complete_nick("zzz", &candidates, true, None), None);
+    }
+
+    #[test]
+    fn complete_nick_returns_none_for_an_empty_trailing_word() {
+        let candidates = nick_list(&["Alice"]);
+        assert_eq!(complete_nick("hello ", &candidates, true, None), None);
+        assert_eq!(complete_nick("", &candidates, true, None), None);
+    }
+
+    #[test]
+    fn complete_nick_ignores_a_stale_cycle_after_a_manual_edit() {
+        let candidates = nick_list(&["Sythos", "sythe"]);
+        let (first, cycle1) = complete_nick("syt", &candidates, true, None).unwrap();
+        assert_eq!(first, "Sythos: ");
+
+        // The user kept typing instead of pressing Tab again: the compose
+        // text no longer matches what the cycle last produced, so this is
+        // treated as a brand-new completion request (starting over at the
+        // first match) rather than a cycle step.
+        let edited = "hi syt";
+        let (restarted, _) = complete_nick(edited, &candidates, true, Some(&cycle1)).unwrap();
+        assert_eq!(restarted, "hi Sythos ");
+    }
+
+    #[test]
+    fn complete_nick_keeps_a_multi_byte_prefix_intact_and_does_not_panic() {
+        let candidates = nick_list(&["Test"]);
+        let (text, _) = complete_nick("café tes", &candidates, true, None).unwrap();
+        assert_eq!(text, "café Test ");
     }
 }
