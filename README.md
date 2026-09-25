@@ -25,7 +25,10 @@ Each of the above has its own maintainer(s) and its own issue tracker — if som
 The channel sidebar and member list have resizable columns with content-based
 minimum widths. Channel rows sit directly below their network row, member
 roles appear in brackets (for example, `[@] Sythos`), and the member list's
-Actions menu includes a shortcut to the Themes settings.
+Actions menu includes a shortcut to the Themes settings. As in Cicchetto, a
+message that mentions you (your nick on that network or a `/hilight`
+pattern, as a whole word) gets the mention background, and is bold unless
+"bold mentions" is off in Settings > Display.
 
 Settings > Themes lists Grappa's theme gallery, including the irssi-derived
 `irssi-dark` and `sux`, each shown with its color set. Picking one makes it

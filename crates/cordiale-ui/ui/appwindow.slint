@@ -142,6 +142,9 @@ struct ChatLine {
     nick-color: color,
     italic: bool,
     body: styled-text,
+    // Mentions the user (own nick or a /hilight pattern), as Cicchetto
+    // marks it: the mention background.
+    mention: bool,
 }
 
 // One row in the admin Sessions list.
@@ -723,6 +726,8 @@ export component AppWindow inherits Window {
     // the classic light/dark look.
     in property <bool> palette-active: false;
     in property <color> palette-bg: #000000;
+    // The theme's mention color, behind lines that mention the user.
+    in property <color> palette-mention: #c0a000;
     in property <color> palette-bg-alt: #000000;
     in property <color> palette-fg: #ffffff;
     in property <color> palette-accent: #ffffff;
@@ -1948,35 +1953,44 @@ export component AppWindow inherits Window {
             ListView {
                 vertical-stretch: 1;
 
-                for line in chat-lines : HorizontalLayout {
-                    alignment: start;
-                    spacing: 0px;
+                for line in chat-lines : Rectangle {
+                    // Cicchetto's flat mention background.
+                    background: !line.mention
+                        ? transparent
+                        : palette-active
+                        ? palette-mention.with-alpha(0.25)
+                        : (theme == "dark" ? #6b5a0066 : #fff2b3);
 
-                    Text {
-                        text: "[" + line.timestamp + "] ";
-                        color: line.timestamp-color;
-                        font-italic: line.italic;
-                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 0px;
 
-                    if line.nick != "" : MemberContextMenu {
-                        target-nick: line.nick;
-                        can-moderate: can-moderate-members;
-                        display-text: "<" + line.nick-prefix + line.nick + "> ";
-                        text-color: line.nick-color;
-                        text-bold: true;
-                        text-italic: line.italic;
-                        mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
-                        kick(nick) => { member-kick-requested(nick); }
-                        ban(nick) => { member-ban-requested(nick); }
-                        whois(nick) => { member-whois-requested(nick); }
-                        ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
-                        query(nick) => { member-query-requested(nick); }
-                    }
+                        Text {
+                            text: "[" + line.timestamp + "] ";
+                            color: line.timestamp-color;
+                            font-italic: line.italic;
+                        }
 
-                    StyledText {
-                        text: line.body;
-                        default-color: theme == "dark" ? white : black;
-                        horizontal-stretch: 1;
+                        if line.nick != "" : MemberContextMenu {
+                            target-nick: line.nick;
+                            can-moderate: can-moderate-members;
+                            display-text: "<" + line.nick-prefix + line.nick + "> ";
+                            text-color: line.nick-color;
+                            text-bold: true;
+                            text-italic: line.italic;
+                            mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
+                            kick(nick) => { member-kick-requested(nick); }
+                            ban(nick) => { member-ban-requested(nick); }
+                            whois(nick) => { member-whois-requested(nick); }
+                            ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
+                            query(nick) => { member-query-requested(nick); }
+                        }
+
+                        StyledText {
+                            text: line.body;
+                            default-color: theme == "dark" ? white : black;
+                            horizontal-stretch: 1;
+                        }
                     }
                 }
             }
