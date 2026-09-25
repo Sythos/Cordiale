@@ -9756,12 +9756,25 @@ fn members_average_probe(rows: &[MemberRow]) -> String {
     "n".repeat(total.div_ceil(rows.len()))
 }
 
+/// The color of a member's role marker: the theme's op, halfop or voice
+/// color, or the nick's own color on the classic look.
+fn role_color(prefix: &str, nick_rgb: (u8, u8, u8)) -> slint::Color {
+    let rgb = match (active_palette(), prefix.chars().next()) {
+        (Some(palette), Some('~' | '&' | '@')) => palette.mode_op,
+        (Some(palette), Some('%')) => palette.mode_halfop,
+        (Some(palette), Some('+')) => palette.mode_voiced,
+        _ => nick_rgb,
+    };
+    slint_color(rgb)
+}
+
 fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
     members
         .iter()
         .map(|(name, prefix)| {
             let (r, g, b) = nick_color(name, dark_theme);
             MemberRow {
+                prefix_color: role_color(prefix, (r, g, b)),
                 name: name.clone().into(),
                 prefix: highest_prefix(prefix).into(),
                 color: slint::Color::from_rgb_u8(r, g, b),
@@ -9779,6 +9792,46 @@ struct ThemeChoice {
     author: String,
     palette: ThemePalette,
     font_family: String,
+    background: Option<ThemeBackground>,
+}
+
+/// A theme's wallpaper, resolved to the path Grappa serves it at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThemeBackground {
+    path: String,
+    tile: bool,
+    /// 0 to 100.
+    opacity: u8,
+}
+
+/// The wallpaper of a theme payload, as Cicchetto resolves it: a built-in
+/// key wins over an uploaded image; anything but `"repeat"` is full-bleed.
+fn theme_background(
+    wire: Option<&cordiale_core::rest::ThemeBackgroundWire>,
+) -> Option<ThemeBackground> {
+    let wire = wire?;
+    let safe = |value: &str| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    };
+    let path = match (wire.builtin.as_deref(), wire.image_id.as_deref()) {
+        (Some(key), _) if safe(key) => format!("/backgrounds/{key}.webp"),
+        (_, Some(id)) if safe(id) => format!("/uploads/{id}"),
+        _ => return None,
+    };
+    let opacity = wire
+        .opacity
+        .as_ref()
+        .and_then(serde_json::Number::as_f64)
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    Some(ThemeBackground {
+        path,
+        tile: wire.size.as_deref() == Some("repeat"),
+        opacity: (opacity * 100.0).round() as u8,
+    })
 }
 
 /// The built-in color themes (copies of Grappa's irssi-derived gallery).
@@ -9791,6 +9844,7 @@ fn builtin_theme_choices() -> Vec<ThemeChoice> {
             author: String::new(),
             palette: theme.palette(),
             font_family: "mono-default".to_string(),
+            background: None,
         })
         .collect()
 }
@@ -9803,7 +9857,65 @@ fn server_theme_choice(theme: &cordiale_core::rest::ThemeWire) -> Option<ThemeCh
         author: theme.author.clone(),
         palette: ThemePalette::from_colors(&theme.payload.colors)?,
         font_family: theme.payload.font_family.clone(),
+        background: theme_background(theme.payload.background.as_ref()),
     })
+}
+
+/// Theme wallpapers are fetched in the background; a newer theme pick
+/// makes an older download's result irrelevant.
+static THEME_BACKGROUND_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Shows the theme's wallpaper behind the window (or removes it): the image
+/// is downloaded from Grappa into a temp file named after its path, since
+/// Slint loads images from files and caches them by path.
+fn load_theme_background(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    background: Option<ThemeBackground>,
+) {
+    use std::sync::atomic::Ordering;
+    let generation = THEME_BACKGROUND_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let (Some(background), Some(client), Some(token)) =
+        (background, state.client.clone(), state.token.clone())
+    else {
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_palette_background_set(false));
+        return;
+    };
+    let ui = ui.clone();
+    tokio::spawn(async move {
+        let file = match client.fetch_server_file(&token, &background.path).await {
+            Ok((bytes, content_type)) => {
+                let extension = avatar_extension(content_type.as_deref()).unwrap_or("webp");
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                std::hash::Hash::hash(&background.path, &mut hasher);
+                let path = std::env::temp_dir().join(format!(
+                    "cordiale-wallpaper-{:016x}.{extension}",
+                    std::hash::Hasher::finish(&hasher)
+                ));
+                std::fs::write(&path, bytes).ok().map(|()| path)
+            }
+            Err(err) => {
+                persistence::log_line(&format!("theme wallpaper unavailable: {err:?}"));
+                None
+            }
+        };
+        if THEME_BACKGROUND_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            let image = file.and_then(|file| slint::Image::load_from_path(&file).ok());
+            match image {
+                Some(image) => {
+                    ui.set_palette_background(image);
+                    ui.set_palette_background_tile(background.tile);
+                    ui.set_palette_background_opacity(f32::from(background.opacity) / 100.0);
+                    ui.set_palette_background_set(true);
+                }
+                None => ui.set_palette_background_set(false),
+            }
+        });
+    });
 }
 
 /// Palette of the color theme in use, read by the nick and timestamp color
@@ -10103,6 +10215,11 @@ fn apply_color_theme(
     choice: Option<ThemeChoice>,
 ) {
     set_active_palette(choice.as_ref().map(|choice| choice.palette.clone()));
+    load_theme_background(
+        state,
+        ui,
+        choice.as_ref().and_then(|choice| choice.background.clone()),
+    );
     state.theme = match &choice {
         Some(choice) if choice.palette.is_dark() => Theme::Dark,
         Some(_) => Theme::Light,
@@ -18331,6 +18448,7 @@ mod tests {
             payload: cordiale_core::rest::ThemePayloadWire {
                 colors,
                 font_family: "hack".to_string(),
+                background: None,
             },
         };
         let choice = server_theme_choice(&theme).expect("complete palette");
@@ -18593,6 +18711,39 @@ mod tests {
             })),
             None
         );
+    }
+
+    #[test]
+    fn theme_backgrounds_resolve_like_cicchetto() {
+        use cordiale_core::rest::ThemeBackgroundWire;
+        let builtin = ThemeBackgroundWire {
+            builtin: Some("aurora".to_string()),
+            image_id: Some("01hzzzzzzzzzzzzzzzzzzzzzzz".to_string()),
+            size: Some("repeat".to_string()),
+            opacity: serde_json::Number::from_f64(0.35),
+        };
+        assert_eq!(
+            theme_background(Some(&builtin)),
+            Some(ThemeBackground {
+                path: "/backgrounds/aurora.webp".to_string(),
+                tile: true,
+                opacity: 35,
+            })
+        );
+        let upload = ThemeBackgroundWire {
+            image_id: Some("01habc".to_string()),
+            ..ThemeBackgroundWire::default()
+        };
+        let resolved = theme_background(Some(&upload)).expect("an upload");
+        assert_eq!(resolved.path, "/uploads/01habc");
+        assert!(!resolved.tile);
+        assert_eq!(resolved.opacity, 100);
+        let unsafe_key = ThemeBackgroundWire {
+            builtin: Some("../etc".to_string()),
+            ..ThemeBackgroundWire::default()
+        };
+        assert_eq!(theme_background(Some(&unsafe_key)), None);
+        assert_eq!(theme_background(None), None);
     }
 
     #[test]

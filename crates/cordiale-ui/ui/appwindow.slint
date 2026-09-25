@@ -278,6 +278,8 @@ struct LinksRow {
 struct MemberRow {
     name: string,
     prefix: string,
+    // The theme's op/halfop/voice color for the role marker.
+    prefix-color: color,
     // Same hash-derived per-nick color chat lines use (`nick_color` in
     // Rust) — nicknames stay colored everywhere, not just in the chat
     // body.
@@ -342,6 +344,9 @@ component MemberContextMenu {
     in property <bool> can-moderate;
     in property <string> display-text;
     in property <color> text-color;
+    // An optional role marker drawn before the text in its own color.
+    in property <string> prefix-text: "";
+    in property <color> prefix-color;
     in property <bool> text-bold: false;
     in property <bool> text-italic: false;
     callback mode-action(string, string); // verb, nick
@@ -402,12 +407,21 @@ component MemberContextMenu {
             }
         }
 
-        Text {
-            text: display-text;
-            wrap: no-wrap;
-            font-weight: text-bold ? 700 : 400;
-            font-italic: text-italic;
-            color: text-color;
+        HorizontalLayout {
+            if prefix-text != "" : Text {
+                text: prefix-text;
+                wrap: no-wrap;
+                font-weight: text-bold ? 700 : 400;
+                font-italic: text-italic;
+                color: prefix-color;
+            }
+            Text {
+                text: display-text;
+                wrap: no-wrap;
+                font-weight: text-bold ? 700 : 400;
+                font-italic: text-italic;
+                color: text-color;
+            }
         }
     }
 }
@@ -764,6 +778,12 @@ export component AppWindow inherits Window {
     in property <color> palette-muted: #808080;
     in property <color> palette-border: #808080;
     in property <string> palette-font: "";
+    // The theme's wallpaper, drawn behind every screen while a color theme
+    // is in use: full-bleed, or tiled at its own size.
+    in property <image> palette-background;
+    in property <bool> palette-background-set: false;
+    in property <bool> palette-background-tile: false;
+    in property <float> palette-background-opacity: 1;
     in property <[ThemeChoiceRow]> theme-choices: [];
     in property <bool> display-prefs-loaded: false;
     in-out property <bool> pref-colored-nicklist: true;
@@ -1524,6 +1544,19 @@ export component AppWindow inherits Window {
         enabled: false;
     }
 
+    if palette-active && palette-background-set : Image {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        source: palette-background;
+        image-fit: palette-background-tile ? ImageFit.preserve : ImageFit.cover;
+        horizontal-tiling: palette-background-tile ? ImageTiling.repeat : ImageTiling.none;
+        vertical-tiling: palette-background-tile ? ImageTiling.repeat : ImageTiling.none;
+        opacity: palette-background-opacity;
+        accessible-role: AccessibleRole.none;
+    }
+
     if screen == "splash" : VerticalBox {
         padding: 32px;
         spacing: 24px;
@@ -2169,7 +2202,9 @@ export component AppWindow inherits Window {
                 for member in channel-members : MemberContextMenu {
                     target-nick: member.name;
                     can-moderate: can-moderate-members;
-                    display-text: member.prefix == "" ? member.name : "[" + member.prefix + "] " + member.name;
+                    prefix-text: member.prefix == "" ? "" : "[" + member.prefix + "] ";
+                    prefix-color: member.prefix-color;
+                    display-text: member.name;
                     text-color: member.color;
                     mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
                     kick(nick) => { member-kick-requested(nick); }
