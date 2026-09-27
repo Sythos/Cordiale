@@ -58,6 +58,9 @@ pub enum BootstrapError {
     IncompatibleServer(ServerCompatibility),
     Config(GrappaClientError),
     Login(LoginError),
+    /// `POST /auth/totp/verify` refused the code: see
+    /// `GrappaClient::verify_totp_login` for the codes it carries.
+    TwoFactor(GrappaClientError),
     /// A saved bearer was rejected by an authenticated bootstrap endpoint.
     /// Callers must ask the user to authenticate again; never retry it as a
     /// password or silently switch identities.
@@ -127,6 +130,36 @@ pub async fn bootstrap_with_login_bearer(
     })
 }
 
+/// Completes a `202 two_factor_required` sign-in: verifies the TOTP (or
+/// recovery) code against the challenge, then runs the same `/boot` and
+/// `/me` sequence as a password sign-in with the full-session bearer.
+pub async fn bootstrap_with_totp(
+    client: &GrappaClient,
+    challenge_token: &str,
+    code: &str,
+) -> Result<BootstrapOutcome, BootstrapError> {
+    let compatibility = check_server_compatibility(client).await?;
+    let login = client
+        .verify_totp_login(challenge_token, code)
+        .await
+        .map_err(BootstrapError::TwoFactor)?;
+    let boot = client
+        .fetch_boot(&login.token)
+        .await
+        .map_err(BootstrapError::Boot)?;
+    let me = client
+        .fetch_me(&login.token)
+        .await
+        .map_err(BootstrapError::Me)?;
+    Ok(BootstrapOutcome {
+        compatibility,
+        token: login.token,
+        subject: Some(login.subject),
+        boot,
+        me,
+    })
+}
+
 /// Runs the authenticated cold-start sequence using a bearer already
 /// returned by Grappa. The documented protocol permits presenting that
 /// bearer directly to REST, so this path intentionally skips `/auth/login`
@@ -178,6 +211,74 @@ mod tests {
             })))
             .mount(mock_server)
             .await;
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_totp_verifies_then_boots_with_the_new_bearer() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/totp/verify"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "full",
+                "subject": {"kind": "user", "name": "vjt"}
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/boot"))
+            .and(header("authorization", "Bearer full"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "networks": []
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("authorization", "Bearer full"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"kind": "user", "name": "vjt"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let outcome = bootstrap_with_totp(&client, "ch", "123456")
+            .await
+            .expect("bootstrap");
+        assert_eq!(outcome.token, "full");
+        assert_eq!(outcome.me.name.as_deref(), Some("vjt"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_totp_reports_a_refused_code_as_two_factor() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/totp/verify"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "invalid_two_factor"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        match bootstrap_with_totp(&client, "ch", "000000").await {
+            Err(BootstrapError::TwoFactor(err)) => {
+                assert_eq!(err.code(), Some("invalid_two_factor"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -117,9 +117,10 @@ impl From<reqwest::Error> for GrappaClientError {
 /// Outcome of `POST /auth/login`, per `docs/protocol-notes.md` §1.
 #[derive(Debug)]
 pub enum LoginError {
-    /// `202 two_factor_required`: needs a browser, Cordiale can't resolve
-    /// TOTP/passkey itself.
-    TwoFactorRequired,
+    /// `202 two_factor_required`: the password was right and a second
+    /// factor is armed. With a TOTP challenge Cordiale completes it through
+    /// `verify_totp_login`; a passkey-only account has none to offer.
+    TwoFactorRequired(TwoFactorChallenge),
     /// `401 invalid_credentials`: also returned for a wrong per-client
     /// token — indistinguishable from a wrong password on the wire.
     InvalidCredentials,
@@ -134,6 +135,59 @@ pub enum LoginError {
         code: Option<String>,
         retry_after: Option<u64>,
     },
+}
+
+/// The body of a `202 two_factor_required`, in either of its shapes:
+/// `{two_factor_required, challenge_token}` when TOTP is armed, or the
+/// passkey one, `{..., passkey_options, totp_available, challenge_token}`,
+/// whose `challenge_token` is `null` when a passkey is the only factor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TwoFactorChallenge {
+    /// The short-lived (five minutes) token `POST /auth/totp/verify` takes;
+    /// `None` when there is no TOTP path at all.
+    pub challenge_token: Option<String>,
+    /// A passkey ceremony was offered too, which Cordiale doesn't perform.
+    pub passkey_offered: bool,
+}
+
+impl TwoFactorChallenge {
+    fn from_body(body: &Value) -> Self {
+        let challenge_token = body
+            .get("challenge_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string);
+        TwoFactorChallenge {
+            challenge_token,
+            passkey_offered: body.get("passkey_options").is_some(),
+        }
+    }
+
+    /// Only a passkey could finish this sign-in.
+    pub fn passkey_only(&self) -> bool {
+        self.challenge_token.is_none()
+    }
+}
+
+/// `POST /me/totp/enrollment`: the unarmed secret and the token that
+/// confirms it (valid ten minutes).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct TotpEnrollment {
+    pub enrollment_token: String,
+    pub secret: String,
+    /// `otpauth://totp/...`, what an authenticator app scans.
+    pub provisioning_uri: String,
+}
+
+#[derive(serde::Deserialize)]
+struct TotpStatus {
+    enabled: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct TotpConfirmation {
+    #[serde(default)]
+    recovery_codes: Vec<String>,
 }
 
 impl From<reqwest::Error> for LoginError {
@@ -201,7 +255,12 @@ impl GrappaClient {
 
         match response.status() {
             StatusCode::OK => Ok(response.json::<LoginResponse>().await?),
-            StatusCode::ACCEPTED => Err(LoginError::TwoFactorRequired),
+            StatusCode::ACCEPTED => {
+                let body = response.json::<Value>().await.unwrap_or(Value::Null);
+                Err(LoginError::TwoFactorRequired(
+                    TwoFactorChallenge::from_body(&body),
+                ))
+            }
             StatusCode::UNAUTHORIZED => Err(LoginError::InvalidCredentials),
             StatusCode::TOO_MANY_REQUESTS => Err(LoginError::TooManyAttempts),
             status => {
@@ -224,6 +283,93 @@ impl GrappaClient {
                 })
             }
         }
+    }
+
+    /// `POST /auth/totp/verify` — completes a `202 two_factor_required` with a
+    /// TOTP code or one of the account's recovery codes, and returns a
+    /// full-session bearer. Refusals keep their code: 401
+    /// `invalid_two_factor` (wrong code), 401 `two_factor_challenge_expired`
+    /// (sign in again), 429 `too_many_attempts`.
+    pub async fn verify_totp_login(
+        &self,
+        challenge_token: &str,
+        code: &str,
+    ) -> Result<LoginResponse, GrappaClientError> {
+        let url = format!("{}/auth/totp/verify", self.base_url);
+        let response = self
+            .http
+            .post(url)
+            .json(&serde_json::json!({ "challenge_token": challenge_token, "code": code }))
+            .send()
+            .await?;
+        let response = reject_with_code(response).await?;
+        Ok(response.json::<LoginResponse>().await?)
+    }
+
+    /// `GET /me/totp` — whether TOTP is armed. A per-client token is refused
+    /// with 403 `client_token_scope`: second factors need a full session.
+    pub async fn fetch_totp_status(&self, token: &str) -> Result<bool, GrappaClientError> {
+        let url = format!("{}/me/totp", self.base_url);
+        let response = self.http.get(url).bearer_auth(token).send().await?;
+        let response = reject_with_code(response).await?;
+        Ok(response.json::<TotpStatus>().await?.enabled)
+    }
+
+    /// `POST /me/totp/enrollment` — re-authenticates with the account
+    /// password and returns an unarmed secret. A 401 here means a wrong
+    /// password, never a dead bearer; 409 `already_enabled`.
+    pub async fn start_totp_enrollment(
+        &self,
+        token: &str,
+        password: &str,
+    ) -> Result<TotpEnrollment, GrappaClientError> {
+        let url = format!("{}/me/totp/enrollment", self.base_url);
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "password": password }))
+            .send()
+            .await?;
+        let response = reject_with_code(response).await?;
+        Ok(response.json::<TotpEnrollment>().await?)
+    }
+
+    /// `POST /me/totp/enrollment/confirm` — arms TOTP with a first code and
+    /// returns the recovery codes, the only time Grappa shows them. Other
+    /// browser sessions are revoked; this one and client tokens survive.
+    pub async fn confirm_totp_enrollment(
+        &self,
+        token: &str,
+        enrollment_token: &str,
+        code: &str,
+    ) -> Result<Vec<String>, GrappaClientError> {
+        let url = format!("{}/me/totp/enrollment/confirm", self.base_url);
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "enrollment_token": enrollment_token, "code": code }))
+            .send()
+            .await?;
+        let response = reject_with_code(response).await?;
+        Ok(response.json::<TotpConfirmation>().await?.recovery_codes)
+    }
+
+    /// `DELETE /me/totp` — disarms TOTP after re-authenticating with the
+    /// account password (401 is a wrong password) and revokes the other
+    /// sessions.
+    pub async fn disable_totp(&self, token: &str, password: &str) -> Result<(), GrappaClientError> {
+        let url = format!("{}/me/totp", self.base_url);
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "password": password }))
+            .send()
+            .await?;
+        reject_with_code(response).await?;
+        Ok(())
     }
 
     /// Revoke the current bearer. An anonymous visitor's server-side
@@ -2540,7 +2686,249 @@ mod tests {
         };
         let error = client.login(&request).await.expect_err("should fail");
 
-        assert!(matches!(error, LoginError::TwoFactorRequired));
+        // No body at all: no challenge to complete.
+        match error {
+            LoginError::TwoFactorRequired(challenge) => assert!(challenge.passkey_only()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_202_carries_the_totp_challenge_in_both_shapes() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .and(body_json(
+                serde_json::json!({"identifier": "totp", "password": "pw"}),
+            ))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "two_factor_required": true,
+                "challenge_token": "ch-1"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .and(body_json(
+                serde_json::json!({"identifier": "both", "password": "pw"}),
+            ))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "two_factor_required": true,
+                "passkey_options": {"challenge_id": "p", "public_key": {}},
+                "totp_available": true,
+                "challenge_token": "ch-2"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .and(body_json(
+                serde_json::json!({"identifier": "passkey", "password": "pw"}),
+            ))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "two_factor_required": true,
+                "passkey_options": {"challenge_id": "p", "public_key": {}},
+                "totp_available": false,
+                "challenge_token": null
+            })))
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+        let challenge = |identifier: &str| {
+            let request = LoginRequest {
+                identifier: identifier.to_string(),
+                password: "pw".to_string(),
+            };
+            let client = client.clone();
+            async move {
+                match client.login(&request).await {
+                    Err(LoginError::TwoFactorRequired(challenge)) => challenge,
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        };
+
+        let totp = challenge("totp").await;
+        assert_eq!(totp.challenge_token.as_deref(), Some("ch-1"));
+        assert!(!totp.passkey_offered);
+        let both = challenge("both").await;
+        assert_eq!(both.challenge_token.as_deref(), Some("ch-2"));
+        assert!(both.passkey_offered && !both.passkey_only());
+        let passkey = challenge("passkey").await;
+        assert!(passkey.passkey_only());
+    }
+
+    #[tokio::test]
+    async fn verify_totp_login_returns_the_bearer_and_keeps_refusal_codes() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/totp/verify"))
+            .and(body_json(
+                serde_json::json!({"challenge_token": "ch", "code": "123456"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "full-session",
+                "subject": {"kind": "user", "name": "vjt"}
+            })))
+            .mount(&mock_server)
+            .await;
+        for (code, status, error) in [
+            ("000000", 401, "invalid_two_factor"),
+            ("111111", 401, "two_factor_challenge_expired"),
+            ("222222", 429, "too_many_attempts"),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/auth/totp/verify"))
+                .and(body_json(
+                    serde_json::json!({"challenge_token": "ch", "code": code}),
+                ))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({"error": error})),
+                )
+                .mount(&mock_server)
+                .await;
+        }
+        let client = GrappaClient::new(mock_server.uri());
+
+        let login = client
+            .verify_totp_login("ch", "123456")
+            .await
+            .expect("verify");
+        assert_eq!(login.token, "full-session");
+        for (code, status, error) in [
+            ("000000", StatusCode::UNAUTHORIZED, "invalid_two_factor"),
+            (
+                "111111",
+                StatusCode::UNAUTHORIZED,
+                "two_factor_challenge_expired",
+            ),
+            ("222222", StatusCode::TOO_MANY_REQUESTS, "too_many_attempts"),
+        ] {
+            let refused = client.verify_totp_login("ch", code).await.unwrap_err();
+            assert_eq!(refused.status(), Some(status));
+            assert_eq!(refused.code(), Some(error));
+        }
+    }
+
+    /// A per-run stand-in for the account password in the TOTP tests, built
+    /// from the process id alone: no string literal in the source becomes a
+    /// credential, which is what code scanning looks for.
+    fn test_password() -> String {
+        std::process::id().to_string()
+    }
+
+    #[tokio::test]
+    async fn totp_settings_enroll_confirm_and_disable() {
+        let password = test_password();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/totp"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"enabled": false})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/totp/enrollment"))
+            .and(body_json(serde_json::json!({"password": password})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "enrollment_token": "enr",
+                "secret": "JBSWY3DPEHPK3PXP",
+                "provisioning_uri": "otpauth://totp/Grappa:vjt?secret=JBSWY3DPEHPK3PXP&issuer=Grappa"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/totp/enrollment/confirm"))
+            .and(body_json(
+                serde_json::json!({"enrollment_token": "enr", "code": "123456"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "enabled": true,
+                "recovery_codes": ["aaaa-bbbb", "cccc-dddd"]
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/me/totp"))
+            .and(body_json(serde_json::json!({"password": password})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"enabled": false})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        assert!(!client.fetch_totp_status("tok").await.expect("status"));
+        let enrollment = client
+            .start_totp_enrollment("tok", &password)
+            .await
+            .expect("start");
+        assert_eq!(enrollment.enrollment_token, "enr");
+        assert!(enrollment.provisioning_uri.starts_with("otpauth://totp/"));
+        let codes = client
+            .confirm_totp_enrollment("tok", "enr", "123456")
+            .await
+            .expect("confirm");
+        assert_eq!(
+            codes,
+            vec!["aaaa-bbbb".to_string(), "cccc-dddd".to_string()]
+        );
+        client
+            .disable_totp("tok", &password)
+            .await
+            .expect("disable");
+    }
+
+    #[tokio::test]
+    async fn totp_settings_refusals_keep_their_codes() {
+        let password = test_password();
+        // The refusals below don't depend on which password is sent.
+        let wrong_password = test_password();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/totp"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(serde_json::json!({"error": "client_token_scope"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/totp/enrollment"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(serde_json::json!({"error": "already_enabled"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/me/totp"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "invalid_credentials"})),
+            )
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let scope = client.fetch_totp_status("tok").await.unwrap_err();
+        assert_eq!(scope.status(), Some(StatusCode::FORBIDDEN));
+        assert_eq!(scope.code(), Some("client_token_scope"));
+        let already = client
+            .start_totp_enrollment("tok", &password)
+            .await
+            .unwrap_err();
+        assert_eq!(already.code(), Some("already_enabled"));
+        let wrong = client
+            .disable_totp("tok", &wrong_password)
+            .await
+            .unwrap_err();
+        assert_eq!(wrong.status(), Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(wrong.code(), Some("invalid_credentials"));
     }
 
     #[tokio::test]

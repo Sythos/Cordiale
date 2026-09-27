@@ -670,6 +670,23 @@ export component AppWindow inherits Window {
     in-out property <string> server-url: "https://irc.sindro.me";
     in-out property <string> identifier: "";
     in-out property <string> password: "";
+    // The code step of a two-factor sign-in (screen "totp").
+    in-out property <string> totp-code: "";
+    // Settings > Security, TOTP (issue #118). `security-totp-state` is ""
+    // (loading), `enabled`, `disabled`, `client-token` (a per-client token
+    // can't manage second factors) or `unavailable`; `security-totp-step`
+    // is "" , `enroll` (secret shown, waiting for the first code) or
+    // `codes` (recovery codes shown once).
+    in property <string> security-totp-state: "";
+    in property <string> security-totp-step: "";
+    in property <string> security-totp-secret: "";
+    in property <string> security-totp-uri: "";
+    in property <image> security-totp-qr;
+    in property <[string]> security-recovery-codes: [];
+    in property <string> security-totp-error: "";
+    in property <bool> security-totp-busy: false;
+    in-out property <string> security-password: "";
+    in-out property <string> security-totp-code: "";
     // Set only when this server/identifier has a non-empty returned bearer
     // in CredentialStore. The button compares both against the editable
     // server and identifier, hiding it as soon as either value changes.
@@ -979,6 +996,15 @@ export component AppWindow inherits Window {
     in-out property <string> new-watch-pattern: "";
 
     callback connect-requested(string, string, string);
+    callback totp-verify-requested(string);
+    callback totp-cancel-requested();
+    callback security-totp-requested();
+    callback security-totp-start(string); // password
+    callback security-totp-confirm(string); // code
+    callback security-totp-disable(string); // password
+    callback security-totp-done();
+    callback copy-text-requested(string);
+    callback security-copy-recovery-codes();
     callback saved-profile-connect-requested(string, string);
     callback server-selected(string);
     callback language-selected(string);
@@ -1709,8 +1735,16 @@ export component AppWindow inherits Window {
             return @tr("That command is missing an argument, for example: /whowas <nick>.");
         } else if status-kind == "session-severed-flood" {
             return @tr("You were signed out because this client sent too many requests. Your IRC session is still running; sign in again to continue.");
-        } else if status-kind == "two-factor-required" {
-            return @tr("This account has two-factor authentication enabled. Sign in from a browser instead.");
+        } else if status-kind == "two-factor-passkey-only" {
+            return @tr("This account's second factor is a passkey, which Cordiale can't use yet. Sign in with a per-client token created in Cicchetto, or use Cicchetto.");
+        } else if status-kind == "totp-invalid" {
+            return @tr("That code isn't valid. Check the clock on your device, or use one of your recovery codes.");
+        } else if status-kind == "totp-expired" {
+            return @tr("The sign-in took too long. Enter your password again.");
+        } else if status-kind == "totp-throttled" {
+            return @tr("Too many attempts. Wait a few minutes before trying again.");
+        } else if status-kind == "totp-failed" {
+            return @tr("Couldn't verify the code. Try again.");
         } else if status-kind == "too-many-attempts" {
             return @tr("Too many attempts. Wait a bit before trying again.");
         } else if status-kind == "login-failed" {
@@ -1918,6 +1952,54 @@ export component AppWindow inherits Window {
         Button {
             text: "Español";
             clicked => { language-selected("es"); }
+        }
+    }
+
+    if screen == "totp" : VerticalBox {
+        padding: 32px;
+        spacing: 16px;
+
+        Text {
+            text: "Cordiale";
+            font-size: 28px;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: @tr("Two-factor authentication");
+            font-size: 18px;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: @tr("Enter the 6-digit code from your authenticator app, or one of your recovery codes. The request expires after five minutes.");
+            wrap: word-wrap;
+            horizontal-alignment: center;
+        }
+        totp-field := LineEdit {
+            placeholder-text: @tr("Code or recovery code");
+            accessible-label: @tr("Code or recovery code");
+            text <=> totp-code;
+            enabled: !connecting;
+            init => { self.focus(); }
+            accepted => { totp-verify-requested(totp-code); }
+        }
+        Button {
+            text: connecting ? @tr("Verifying…") : @tr("Verify");
+            enabled: !connecting && totp-code != "";
+            clicked => { totp-verify-requested(totp-code); }
+        }
+        Button {
+            text: @tr("Cancel");
+            enabled: !connecting;
+            clicked => { totp-cancel-requested(); }
+        }
+        Text {
+            text: status-text();
+            color: #cc3333;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+            accessible-live-region: AccessibleLiveness.polite;
         }
     }
 
@@ -2923,7 +3005,10 @@ export component AppWindow inherits Window {
                 icon: "🔒";
                 label: @tr("Security");
                 selected: settings-section == "security";
-                clicked => { settings-section = "security"; }
+                clicked => {
+                    settings-section = "security";
+                    security-totp-requested();
+                }
             }
             NavButton {
                 icon: "🎨";
@@ -3269,8 +3354,155 @@ export component AppWindow inherits Window {
                 title: @tr("Security");
 
                 Text {
-                    text: @tr("Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with.");
+                    text: @tr("Two-factor authentication (TOTP)");
+                    font-weight: 600;
+                }
+                Text {
+                    text: security-totp-state == "enabled" ? @tr("Enabled: signing in with the password also asks for a code from your authenticator app.")
+                        : security-totp-state == "disabled" ? @tr("Not enabled.")
+                        : security-totp-state == "client-token" ? @tr("Cordiale is signed in with a per-client token, which Grappa keeps away from second factors. Sign in with your password to manage TOTP here, or use Cicchetto.")
+                        : security-totp-state == "unavailable" ? @tr("Couldn't read the two-factor status.")
+                        : @tr("Loading…");
                     wrap: word-wrap;
+                }
+
+                // Enrolment and disabling both re-authenticate with the
+                // account password; either one signs out the account's other
+                // browser sessions (per-client tokens survive).
+                if (security-totp-state == "disabled" && security-totp-step == "") || security-totp-state == "enabled" : VerticalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("Account password");
+                        accessible-label: @tr("Account password");
+                        text <=> security-password;
+                        input-type: InputType.password;
+                    }
+                    Text {
+                        text: @tr("This signs out your other browser sessions; per-client tokens keep working.");
+                        wrap: word-wrap;
+                        color: palette-muted;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+
+                        if security-totp-state == "disabled" : Button {
+                            text: @tr("Set up two-factor authentication");
+                            enabled: !security-totp-busy && security-password != "";
+                            clicked => { security-totp-start(security-password); }
+                        }
+                        if security-totp-state == "enabled" : Button {
+                            text: @tr("Turn off two-factor authentication");
+                            enabled: !security-totp-busy && security-password != "";
+                            clicked => { security-totp-disable(security-password); }
+                        }
+                    }
+                }
+
+                if security-totp-step == "enroll" : VerticalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: @tr("Scan the code with your authenticator app, or enter the key by hand, then type the 6-digit code it shows.");
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+
+                        Image {
+                            source: security-totp-qr;
+                            width: 192px;
+                            height: 192px;
+                            image-rendering: pixelated;
+                            accessible-role: AccessibleRole.image;
+                            accessible-label: @tr("QR code for your authenticator app");
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: security-totp-secret;
+                            font-family: "monospace";
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
+                        CompactButton {
+                            text: "📋  " + @tr("Copy key");
+                            clicked => { copy-text-requested(security-totp-secret); }
+                        }
+                        CompactButton {
+                            text: "📋  " + @tr("Copy link");
+                            clicked => { copy-text-requested(security-totp-uri); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("6-digit code");
+                            accessible-label: @tr("6-digit code");
+                            text <=> security-totp-code;
+                            horizontal-stretch: 1;
+                            accepted => { security-totp-confirm(security-totp-code); }
+                        }
+                        Button {
+                            text: @tr("Confirm");
+                            enabled: !security-totp-busy && security-totp-code != "";
+                            clicked => { security-totp-confirm(security-totp-code); }
+                        }
+                        Button {
+                            text: @tr("Cancel");
+                            enabled: !security-totp-busy;
+                            clicked => { security-totp-done(); }
+                        }
+                    }
+                }
+
+                if security-totp-step == "codes" : VerticalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: @tr("Two-factor authentication is on. Keep these recovery codes somewhere safe: each works once in place of a code, and they won't be shown again.");
+                        wrap: word-wrap;
+                        font-weight: 600;
+                    }
+                    for code in security-recovery-codes : Text {
+                        text: code;
+                        font-family: "monospace";
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+
+                        CompactButton {
+                            text: "📋  " + @tr("Copy codes");
+                            clicked => { security-copy-recovery-codes(); }
+                        }
+                        Button {
+                            text: @tr("I've saved them");
+                            clicked => { security-totp-done(); }
+                        }
+                    }
+                }
+
+                if security-totp-error != "" : Text {
+                    text: security-totp-error == "wrong-password" ? @tr("Wrong password.")
+                        : security-totp-error == "invalid-code" ? @tr("That code isn't valid, or the setup expired: check the clock on your device, or start again.")
+                        : security-totp-error == "already-enabled" ? @tr("Two-factor authentication is already on.")
+                        : security-totp-error == "client-token" ? @tr("A per-client token can't change second factors.")
+                        : security-totp-error == "throttled" ? @tr("Too many attempts. Wait a few minutes before trying again.")
+                        : @tr("Couldn't update two-factor authentication.");
+                    wrap: word-wrap;
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+
+                Text {
+                    text: @tr("Passkeys, client tokens and account deletion are managed in Cicchetto.");
+                    wrap: word-wrap;
+                    color: palette-muted;
                 }
             }
 
