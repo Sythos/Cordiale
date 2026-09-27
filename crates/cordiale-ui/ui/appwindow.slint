@@ -1747,7 +1747,7 @@ export component AppWindow inherits Window {
         } else if status-kind == "attach-too-large" {
             return @tr("{} is larger than the server allows for this type of file.", status-attach-name);
         } else if status-kind == "attach-no-space" {
-            return @tr("The server has no room left for {}.", status-attach-name);
+            return @tr("The upload of {} was refused for lack of space.", status-attach-name);
         } else if status-kind == "attach-read-failed" {
             return @tr("Couldn't read {}.", status-attach-name);
         } else if status-kind == "attach-no-window" {

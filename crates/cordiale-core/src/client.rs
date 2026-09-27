@@ -1945,8 +1945,10 @@ impl GrappaClient {
     /// `POST /api/uploads` — uploads one file (multipart field `file`),
     /// kept for `expire` seconds or the server's default lifetime. `mime`
     /// must be one of Grappa's allowlisted types (else 415); the per-file
-    /// cap by category gives 413 and the storage quota 507. Large files get
-    /// a longer timeout than the client default.
+    /// cap by category gives 413. A 507 means either the instance is out of
+    /// space or the subject hit its own upload cap (protocol v26): the two
+    /// are indistinguishable on the wire. Large files get a longer timeout
+    /// than the client default.
     pub async fn upload_file(
         &self,
         token: &str,

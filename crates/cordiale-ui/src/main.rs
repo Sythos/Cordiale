@@ -4220,6 +4220,9 @@ fn upload_cap(limits: &UploadLimits, category: UploadCategory) -> u64 {
 }
 
 /// Status-bar key for a failed upload, by `POST /api/uploads` status.
+/// Since protocol v26 a 507 is either the instance being full or the
+/// subject's own upload cap, and nothing on the wire tells them apart, so
+/// `attach-no-space` carries neutral copy that doesn't blame either.
 fn attachment_error_status(status: Option<u16>) -> &'static str {
     match status {
         Some(413) => "attach-too-large",
@@ -20858,6 +20861,43 @@ mod tests {
         );
         assert_eq!(attachment_error_status(Some(507)), "attach-no-space");
         assert_eq!(attachment_error_status(None), "attach-failed");
+    }
+
+    /// A 507 can't say whether the instance or the subject's own cap is out
+    /// of space (protocol v26), so its copy must not blame the server, in
+    /// the UI or in any catalog.
+    #[test]
+    fn upload_507_copy_does_not_attribute_the_cause() {
+        const MSGID: &str = "The upload of {} was refused for lack of space.";
+        let slint = include_str!("../ui/appwindow.slint");
+        let branch = slint
+            .split("status-kind == \"attach-no-space\"")
+            .nth(1)
+            .and_then(|rest| rest.lines().nth(1))
+            .expect("attach-no-space branch");
+        assert!(branch.contains(&format!("@tr(\"{MSGID}\"")), "{branch}");
+
+        for (lang, catalog) in [
+            ("it", include_str!("../lang/it/LC_MESSAGES/cordiale-ui.po")),
+            ("fr", include_str!("../lang/fr/LC_MESSAGES/cordiale-ui.po")),
+            ("de", include_str!("../lang/de/LC_MESSAGES/cordiale-ui.po")),
+            ("es", include_str!("../lang/es/LC_MESSAGES/cordiale-ui.po")),
+        ] {
+            // Line by line: a Windows checkout may turn the catalogs' line
+            // endings into CRLF, which `lines()` strips like LF.
+            let msgid = format!("msgid \"{MSGID}\"");
+            let msgstr = catalog
+                .lines()
+                .skip_while(|line| *line != msgid)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{lang}: missing msgid"));
+            assert!(
+                msgstr.starts_with("msgstr \"") && msgstr.len() > "msgstr \"\"".len(),
+                "{lang}: {msgstr}"
+            );
+            assert!(msgstr.contains("{}"), "{lang}: {msgstr}");
+            assert!(!catalog.contains("has no room left for {}"), "{lang}");
+        }
     }
 
     #[test]

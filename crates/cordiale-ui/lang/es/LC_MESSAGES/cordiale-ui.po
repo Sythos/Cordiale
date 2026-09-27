@@ -977,8 +977,8 @@ msgid "{} is larger than the server allows for this type of file."
 msgstr "{} supera el tamaño que el servidor permite para este tipo de archivo."
 
 msgctxt "AppWindow"
-msgid "The server has no room left for {}."
-msgstr "El servidor no tiene espacio para {}."
+msgid "The upload of {} was refused for lack of space."
+msgstr "La subida de {} fue rechazada por falta de espacio."
 
 msgctxt "AppWindow"
 msgid "Couldn't read {}."
