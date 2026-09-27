@@ -188,3 +188,11 @@ ident e realname non sono più esposti da Grappa.
   <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>.
 - **Cicchetto**, usato solo come riferimento funzionale e non architetturale:
   <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
+
+**Aggiornamento (2026-09-27)**: i bottoni a sola icona del menu in alto a
+sinistra (Home, Admin per gli admin, Impostazioni, Disconnetti; issue #120)
+mostrano il loro nome tradotto, lo stesso dell'etichetta accessibile, nel
+tooltip nativo di Slint 1.18 al passaggio del mouse: un popup che non
+intercetta clic, leggibile nel tema chiaro e scuro. Con la tastiera il nome
+del bottone che ha il focus compare su una riga sotto le icone, senza
+coprire nulla.
