@@ -753,6 +753,10 @@ export component AppWindow inherits Window {
     in-out property <string> edit-leave-message: "";
     in-out property <string> edit-away-message: "";
     in-out property <string> edit-away-delay: "";
+    // Auto-away nick suffix (protocol v32): "" is rename off. Hidden when
+    // the server doesn't have the setting.
+    in-out property <string> edit-away-nick-suffix: "";
+    in property <bool> away-nick-suffix-supported: false;
     in-out property <bool> pref-show-peer-profiles: false;
     callback personal-prefs-save-requested();
     // Per-network DCC auto-accept for peers with an open private window.
@@ -1501,6 +1505,8 @@ export component AppWindow inherits Window {
             return @tr("The auto-away delay must be a whole number of seconds.");
         } else if status-kind == "personal-prefs-saved" {
             return @tr("Settings saved.");
+        } else if status-kind == "away-nick-suffix-invalid" {
+            return @tr("That nick suffix isn't valid on IRC.");
         } else if status-kind == "personal-prefs-failed" {
             return @tr("Couldn't save those settings.");
         } else if status-kind == "command-refused" {
@@ -2699,6 +2705,16 @@ export component AppWindow inherits Window {
                         placeholder-text: @tr("Auto-away message");
                         accessible-label: @tr("Auto-away message");
                         text <=> edit-away-message;
+                    }
+                    if away-nick-suffix-supported : LineEdit {
+                        placeholder-text: @tr("Nick suffix while auto-away (e.g. |away)");
+                        accessible-label: @tr("Nick suffix while auto-away");
+                        text <=> edit-away-nick-suffix;
+                    }
+                    if away-nick-suffix-supported : Text {
+                        text: @tr("Only automatic away renames you, never /away. Grappa skips the rename when the nick would be too long for the network and keeps the suffix if your bare nick was taken meanwhile, so the nick shown is always the one the network reports.");
+                        wrap: word-wrap;
+                        color: palette-muted;
                     }
                     HorizontalLayout {
                         spacing: 8px;

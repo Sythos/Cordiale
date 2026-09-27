@@ -2143,3 +2143,19 @@ msgstr "La ventana del servidor solo acepta comandos con barra."
 msgctxt "AppWindow"
 msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "No se pudieron cargar los mensajes del servidor. Los mensajes en directo aún pueden llegar."
+
+msgctxt "AppWindow"
+msgid "Nick suffix while auto-away (e.g. |away)"
+msgstr "Sufijo del nick en ausencia automática (p. ej. |away)"
+
+msgctxt "AppWindow"
+msgid "Nick suffix while auto-away"
+msgstr "Sufijo del nick en ausencia automática"
+
+msgctxt "AppWindow"
+msgid "Only automatic away renames you, never /away. Grappa skips the rename when the nick would be too long for the network and keeps the suffix if your bare nick was taken meanwhile, so the nick shown is always the one the network reports."
+msgstr "Solo la ausencia automática te renombra, nunca /away. Grappa omite el cambio si el nick sería demasiado largo para la red y mantiene el sufijo si mientras tanto alguien tomó tu nick, así que el nick mostrado es siempre el que indica la red."
+
+msgctxt "AppWindow"
+msgid "That nick suffix isn't valid on IRC."
+msgstr "Ese sufijo no es válido en un nick de IRC."

@@ -52,7 +52,7 @@ prima di pianificare.
 | CTCP action/query | Sì | Fase 2 | Campo `ctcp_target` |
 | Notice/relay a terzi | Sì | Fase 2 | Campo `notice_target` |
 | Identità ai servizi | Sì | Fase 1 | Evento `session_identity_changed` |
-| Away/auto-away (proprio) | Parziale | Fase 2 | `auto_away_reason_changed` documentato solo per il subject stesso |
+| Away/auto-away (proprio) | Parziale | Fase 2 | `auto_away_reason_changed` documentato solo per il subject stesso; suffisso del nick in auto-away (v32, `GET/PUT /me/settings/away-nick-suffix`, push `away_nick_suffix_changed`, `null` = rinomina spenta) in Settings: il nick mostrato resta quello degli eventi nick, mai `nick + suffisso` |
 | Away dei peer | Incerto | — | Nessun evento documentato (protocol-notes §6.7) |
 | Reason di quit/part personalizzati | Sì | Fase 2 | Evento `quit_part_reason_changed` |
 | Casemapping/chantypes | Sì | Fase 1 | Folding ASCII dei topic, necessario per il modello canale |

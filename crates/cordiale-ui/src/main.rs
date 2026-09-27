@@ -228,6 +228,9 @@ enum WorkerCommand {
         away_message: String,
         away_delay: String,
         show_peer_profiles: bool,
+        /// The auto-away nick suffix as typed; `None` when the server
+        /// doesn't offer the setting (older than protocol v32).
+        away_nick_suffix: Option<String>,
     },
     DccAutoAcceptToggle(bool),
     AliasAdd {
@@ -1337,6 +1340,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 away_message: ui.get_edit_away_message().to_string(),
                 away_delay: ui.get_edit_away_delay().to_string(),
                 show_peer_profiles: ui.get_pref_show_peer_profiles(),
+                away_nick_suffix: ui
+                    .get_away_nick_suffix_supported()
+                    .then(|| ui.get_edit_away_nick_suffix().to_string()),
             });
         }
     });
@@ -1958,6 +1964,10 @@ struct WorkerState {
     /// Display copy of the auto-away text, same shape as `quit_part_reason`
     /// (inner `None`: the server keeps its built-in text).
     auto_away_reason: Option<Option<String>>,
+    /// Display copy of the auto-away nick suffix (protocol v32), same
+    /// shape; inner `None` means the rename is off. Never combined with
+    /// the nick: the actual nick comes from the nick events alone.
+    away_nick_suffix: Option<Option<String>>,
     /// Networks with a `/lusers` awaiting its bundle. The ircd also sends
     /// LUSERS unasked at registration; only a requested bundle is shown,
     /// and each request is consumed by the first matching bundle.
@@ -2089,6 +2099,7 @@ impl WorkerState {
             auto_away_debounce: None,
             quit_part_reason: None,
             auto_away_reason: None,
+            away_nick_suffix: None,
             lusers_requested: std::collections::HashSet::new(),
             directory: None,
             dcc_offers: Vec::new(),
@@ -2669,6 +2680,7 @@ async fn run_worker(
                         away_message,
                         away_delay,
                         show_peer_profiles,
+                        away_nick_suffix,
                     }) => {
                         handle_personal_prefs_save(
                             &state,
@@ -2677,6 +2689,7 @@ async fn run_worker(
                             away_message,
                             away_delay,
                             show_peer_profiles,
+                            away_nick_suffix,
                         )
                         .await;
                     }
@@ -3149,6 +3162,7 @@ async fn handle_connect(
             state.auto_away_debounce = None;
             state.quit_part_reason = None;
             state.auto_away_reason = None;
+            state.away_nick_suffix = None;
             state.lusers_requested.clear();
             state.directory = None;
             state.dcc_offers.clear();
@@ -6339,13 +6353,25 @@ async fn load_personal_prefs(client: &GrappaClient, token: &str, ui: &slint::Wea
     let away = client.fetch_auto_away_reason(token).await;
     let delay = client.fetch_auto_away_debounce(token).await;
     let peers = client.fetch_show_peer_profiles(token).await;
+    // A server older than protocol v32 has no suffix setting: the field is
+    // simply not offered, and the rest of the section still loads.
+    let suffix = client.fetch_away_nick_suffix(token).await;
     let (Ok(leave), Ok(away), Ok(delay), Ok(peers)) = (leave, away, delay, peers) else {
         persistence::log_line("personal settings load failed");
         return;
     };
+    let (suffix_supported, suffix) = match suffix {
+        Ok(suffix) => (true, suffix),
+        Err(err) => {
+            persistence::log_line(&format!("away nick suffix not available: {err:?}"));
+            (false, None)
+        }
+    };
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_edit_leave_message(leave.unwrap_or_default().into());
         ui.set_edit_away_message(away.unwrap_or_default().into());
+        ui.set_away_nick_suffix_supported(suffix_supported);
+        ui.set_edit_away_nick_suffix(suffix.unwrap_or_default().into());
         ui.set_edit_away_delay(away_delay_text(delay).into());
         ui.set_pref_show_peer_profiles(peers);
         ui.set_personal_prefs_loaded(true);
@@ -6380,6 +6406,7 @@ async fn handle_personal_prefs_save(
     away_message: String,
     away_delay: String,
     show_peer_profiles: bool,
+    away_nick_suffix: Option<String>,
 ) {
     let (Some(client), Some(token)) = (&state.client, &state.token) else {
         return;
@@ -6408,9 +6435,24 @@ async fn handle_personal_prefs_save(
     if let Some(Err(err)) = results.into_iter().find(Result::is_err) {
         persistence::log_line(&format!("personal settings save failed: {err:?}"));
         set_status("personal-prefs-failed");
-    } else {
-        set_status("personal-prefs-saved");
+        return;
     }
+    // Empty switches the rename off. Grappa validates the tail; a refusal
+    // gets its own message rather than the generic one.
+    if let Some(suffix) = away_nick_suffix {
+        let suffix = suffix.trim();
+        if let Err(err) = client
+            .set_away_nick_suffix(token, (!suffix.is_empty()).then_some(suffix))
+            .await
+        {
+            persistence::log_line(&format!("away nick suffix save failed: {err:?}"));
+            set_status(away_nick_suffix_error_key(
+                err.status().map(|status| status.as_u16()),
+            ));
+            return;
+        }
+    }
+    set_status("personal-prefs-saved");
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -7054,6 +7096,10 @@ async fn handle_frame(
     }
     if payload_kind == "auto_away_reason_changed" {
         handle_auto_away_reason_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "away_nick_suffix_changed" {
+        handle_away_nick_suffix_changed(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "who_reply" {
@@ -12997,6 +13043,61 @@ fn handle_auto_away_reason_changed(
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_edit_away_message(reason.unwrap_or_default().into());
+    });
+}
+
+/// Status key for a refused auto-away nick suffix: 422 is a tail that isn't
+/// legal in a nick.
+fn away_nick_suffix_error_key(status: Option<u16>) -> &'static str {
+    if status == Some(422) {
+        "away-nick-suffix-invalid"
+    } else {
+        "personal-prefs-failed"
+    }
+}
+
+/// Validates `away_nick_suffix_changed` (always-present, nullable key, on
+/// the subject's own user topic) and records it; `Some(value)` when the
+/// display copy changed. Only the setting moves: the nick itself stays
+/// whatever the nick events say, since Grappa may skip a rename (NICKLEN)
+/// or fail to restore the bare nick.
+fn apply_away_nick_suffix_changed(
+    state: &mut WorkerState,
+    carrier_topic: &str,
+    payload: &Value,
+) -> Option<Option<String>> {
+    let identifier = state.identifier.as_deref()?;
+    let Some(suffix) = parse_nullable_setting_echo(
+        payload,
+        carrier_topic,
+        identifier,
+        "away_nick_suffix_changed",
+        "away_nick_suffix",
+    ) else {
+        persistence::log_line("away_nick_suffix_changed rejected: invalid carrier or payload");
+        return None;
+    };
+    if state.away_nick_suffix.as_ref() == Some(&suffix) {
+        return None;
+    }
+    state.away_nick_suffix = Some(suffix.clone());
+    Some(suffix)
+}
+
+/// Mirrors a suffix saved on any device into the Settings field.
+fn handle_away_nick_suffix_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(suffix) = apply_away_nick_suffix_changed(state, carrier_topic, payload) else {
+        return;
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_away_nick_suffix_supported(true);
+        ui.set_edit_away_nick_suffix(suffix.unwrap_or_default().into());
     });
 }
 
@@ -22179,6 +22280,70 @@ mod tests {
             );
         }
         assert!(parse_lusers_bundle(&payload, "grappa:user:other", "vjt").is_none());
+    }
+
+    #[test]
+    fn away_nick_suffix_push_updates_the_setting_and_never_the_nick() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state
+            .own_nicks
+            .insert("libera".to_string(), "vjt".to_string());
+        let topic = "grappa:user:vjt";
+        let push = |value: Value| serde_json::json!({"kind": "away_nick_suffix_changed", "away_nick_suffix": value});
+
+        // Another device sets a suffix: the setting follows...
+        assert_eq!(
+            apply_away_nick_suffix_changed(&mut state, topic, &push(serde_json::json!("|away"))),
+            Some(Some("|away".to_string()))
+        );
+        // ...and the nick stays the one the nick events reported.
+        assert_eq!(
+            state.own_nicks.get("libera").map(String::as_str),
+            Some("vjt")
+        );
+        // The same value again is no change.
+        assert_eq!(
+            apply_away_nick_suffix_changed(&mut state, topic, &push(serde_json::json!("|away"))),
+            None
+        );
+        // `null` is the rename switched off, not a missing value.
+        assert_eq!(
+            apply_away_nick_suffix_changed(&mut state, topic, &push(Value::Null)),
+            Some(None)
+        );
+        // The key is always present; without it, or on another subject's
+        // topic, the push is rejected.
+        assert_eq!(
+            apply_away_nick_suffix_changed(
+                &mut state,
+                topic,
+                &serde_json::json!({"kind": "away_nick_suffix_changed"})
+            ),
+            None
+        );
+        assert_eq!(
+            apply_away_nick_suffix_changed(
+                &mut state,
+                "grappa:user:other",
+                &push(serde_json::json!("|x"))
+            ),
+            None
+        );
+        assert_eq!(state.away_nick_suffix, Some(None));
+    }
+
+    #[test]
+    fn a_refused_nick_suffix_has_its_own_message() {
+        assert_eq!(
+            away_nick_suffix_error_key(Some(422)),
+            "away-nick-suffix-invalid"
+        );
+        assert_eq!(
+            away_nick_suffix_error_key(Some(500)),
+            "personal-prefs-failed"
+        );
+        assert_eq!(away_nick_suffix_error_key(None), "personal-prefs-failed");
     }
 
     #[test]
