@@ -3078,6 +3078,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_display_prefs_merges_the_date_format_into_the_stored_map() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "display_prefs": {"time_format": "hms", "presence_filter": "all", "bold_mentions": true},
+                "persisted": true
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/display-prefs"))
+            .and(body_json(serde_json::json!({
+                "display_prefs": {
+                    "time_format": "hms",
+                    "presence_filter": "all",
+                    "bold_mentions": true,
+                    "date_format": "dmy"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let prefs = DisplayPrefs {
+            date_format: Some(crate::rest::DateFormat::Dmy),
+            ..DisplayPrefs::default()
+        };
+        GrappaClient::new(mock_server.uri())
+            .update_display_prefs("tok", &prefs)
+            .await
+            .expect("update");
+    }
+
+    #[tokio::test]
+    async fn update_display_prefs_reports_a_rejected_value_as_422() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"display_prefs": {}})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "error": "invalid",
+                "field_errors": {"display_prefs": ["date_format is invalid"]}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let error = GrappaClient::new(mock_server.uri())
+            .update_display_prefs("tok", &DisplayPrefs::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+    }
+
+    #[tokio::test]
     async fn attach_network_posts_the_slug() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))

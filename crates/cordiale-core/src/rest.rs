@@ -270,6 +270,69 @@ pub struct DisplayPrefs {
     pub show_event_badge: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bold_mentions: Option<bool>,
+    /// Date notation (protocol v29). `None` when the server doesn't send
+    /// it or sends a value outside the closed set: an unknown key is one
+    /// the client drops, never a reason to lose the other preferences.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_date_format"
+    )]
+    pub date_format: Option<DateFormat>,
+}
+
+/// `display_prefs.date_format` (protocol v29): the ORDER of a date's
+/// fields, never its language. `Auto` is a real choice meaning "follow the
+/// viewer's locale", not the absence of one; Grappa rejects anything else
+/// with a 422 instead of coercing it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DateFormat {
+    #[default]
+    Auto,
+    Dmy,
+    Mdy,
+    Ymd,
+}
+
+impl DateFormat {
+    /// Settings order, which is also the order Grappa's contract lists.
+    pub const ALL: [DateFormat; 4] = [
+        DateFormat::Auto,
+        DateFormat::Dmy,
+        DateFormat::Mdy,
+        DateFormat::Ymd,
+    ];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "dmy" => Some(Self::Dmy),
+            "mdy" => Some(Self::Mdy),
+            "ymd" => Some(Self::Ymd),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dmy => "dmy",
+            Self::Mdy => "mdy",
+            Self::Ymd => "ymd",
+        }
+    }
+}
+
+fn lenient_date_format<'de, D>(deserializer: D) -> Result<Option<DateFormat>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value
+        .as_ref()
+        .and_then(Value::as_str)
+        .and_then(DateFormat::parse))
 }
 
 /// One channel of `GET /networks/:slug/directory`, as captured from the
@@ -526,6 +589,37 @@ mod tests {
         assert!(me.read_cursors.is_null());
         assert!(me.unread_counts.is_null());
         assert!(me.badge_count.is_null());
+    }
+
+    #[test]
+    fn display_prefs_read_every_date_format_and_drop_an_unknown_one() {
+        for format in DateFormat::ALL {
+            let prefs: DisplayPrefs =
+                serde_json::from_value(serde_json::json!({"date_format": format.as_str()}))
+                    .expect("prefs");
+            assert_eq!(prefs.date_format, Some(format));
+        }
+        let absent: DisplayPrefs = serde_json::from_str("{}").expect("absent");
+        assert_eq!(absent.date_format, None);
+        let unknown: DisplayPrefs = serde_json::from_value(serde_json::json!({
+            "date_format": "dd-mm",
+            "bold_mentions": false
+        }))
+        .expect("unknown value keeps the rest");
+        assert_eq!(unknown.date_format, None);
+        assert_eq!(unknown.bold_mentions, Some(false));
+    }
+
+    #[test]
+    fn display_prefs_send_the_date_format_only_when_set() {
+        let unset = serde_json::to_value(DisplayPrefs::default()).expect("serialize");
+        assert_eq!(unset, serde_json::json!({}));
+        let set = serde_json::to_value(DisplayPrefs {
+            date_format: Some(DateFormat::Ymd),
+            ..DisplayPrefs::default()
+        })
+        .expect("serialize");
+        assert_eq!(set, serde_json::json!({"date_format": "ymd"}));
     }
 
     #[test]

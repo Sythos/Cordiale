@@ -22,6 +22,7 @@
 
 slint::include_modules!();
 
+mod dates;
 mod home;
 mod player;
 mod taskbar;
@@ -46,8 +47,8 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::rest::{
-    ActiveThemePair, ArchiveEntry, BootResponse, DirectoryPage, DisplayPrefs, LoginRequest,
-    MeResponse, SendMessageRequest,
+    ActiveThemePair, ArchiveEntry, BootResponse, DateFormat, DirectoryPage, DisplayPrefs,
+    LoginRequest, MeResponse, SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::slash::{self, SlashCommand};
@@ -308,6 +309,8 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(language) = settings.language {
         let _ = slint::select_bundled_translation(language_code(language));
     }
+    dates::set_language(settings.language);
+    push_date_format_examples(&ui);
     ui.set_theme(theme_to_slint(settings.theme));
     ui.invoke_apply_color_scheme();
     // A built-in color theme applies from the first screen; a Grappa one
@@ -401,8 +404,10 @@ fn main() -> Result<(), slint::PlatformError> {
             settings.language = Some(language);
             let _ = persistence::save_settings(&settings);
             let _ = slint::select_bundled_translation(language_code(language));
+            dates::set_language(Some(language));
         }
         if let Some(ui) = weak_for_language.upgrade() {
+            push_date_format_examples(&ui);
             ui.set_screen("connect".into());
         }
     });
@@ -993,6 +998,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 strip_formatting: Some(ui.get_pref_strip_formatting()),
                 show_event_badge: Some(ui.get_pref_show_event_badge()),
                 bold_mentions: Some(ui.get_pref_bold_mentions()),
+                date_format: ui.get_pref_date_format_set().then(|| {
+                    let index = usize::try_from(ui.get_pref_date_format_index()).unwrap_or(0);
+                    DateFormat::ALL[index.min(DateFormat::ALL.len() - 1)]
+                }),
             };
             let _ = tx_for_prefs.send(WorkerCommand::SaveDisplayPrefs(prefs));
         }
@@ -2444,7 +2453,7 @@ async fn run_worker(
                         if let Some(bold) = prefs.bold_mentions {
                             BOLD_MENTIONS.store(bold, std::sync::atomic::Ordering::Relaxed);
                         }
-                        handle_save_display_prefs(&state, prefs).await;
+                        handle_save_display_prefs(&state, &ui, prefs).await;
                         if let Some(key) = state.current_channel.clone() {
                             push_members_update(&state, &ui, &key);
                         }
@@ -5434,7 +5443,7 @@ fn muted_rows(prefs: &serde_json::Map<String, Value>) -> Vec<(String, String)> {
                 Some(until) => match chrono::DateTime::from_timestamp(until, 0) {
                     Some(time) => format!(
                         "{name} → {}",
-                        time.with_timezone(&chrono::Local).format("%d/%m %H:%M")
+                        dates::render_date_time(&time.with_timezone(&chrono::Local), false)
                     ),
                     None => name,
                 },
@@ -5606,9 +5615,40 @@ async fn handle_load_older_history(state: &mut WorkerState, ui: &slint::Weak<App
     });
 }
 
-async fn handle_save_display_prefs(state: &WorkerState, prefs: DisplayPrefs) {
-    if let (Some(client), Some(token)) = (&state.client, &state.token) {
-        let _ = client.update_display_prefs(token, &prefs).await;
+/// Saves the display preferences. A refusal is not left looking like a
+/// saved choice: the stored preferences are read back and shown again, and
+/// a 422 (a `date_format` outside Grappa's closed set) says so.
+async fn handle_save_display_prefs(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    prefs: DisplayPrefs,
+) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    if prefs.date_format.is_some() {
+        dates::set_format(prefs.date_format);
+    }
+    let Err(err) = client.update_display_prefs(token, &prefs).await else {
+        return;
+    };
+    persistence::log_line(&format!("display prefs save failed: {err:?}"));
+    let kind = display_prefs_error_key(err.status().map(|status| status.as_u16()));
+    let stored = client.fetch_display_prefs(token).await.ok();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        if let Some(stored) = stored {
+            apply_display_prefs(&ui, &stored);
+        }
+        ui.set_status_kind(kind.into());
+    });
+}
+
+/// Status key for a failed display-preferences save.
+fn display_prefs_error_key(status: Option<u16>) -> &'static str {
+    if status == Some(422) {
+        "display-prefs-rejected"
+    } else {
+        "display-prefs-save-failed"
     }
 }
 
@@ -9387,6 +9427,24 @@ fn apply_display_prefs(ui: &AppWindow, prefs: &DisplayPrefs) {
     if let Some(value) = prefs.bold_mentions {
         ui.set_pref_bold_mentions(value);
     }
+    // Absent means the server default; the selector shows `auto` without
+    // marking it as the user's choice.
+    dates::set_format(prefs.date_format);
+    let format = prefs.date_format.unwrap_or_default();
+    let index = DateFormat::ALL
+        .iter()
+        .position(|candidate| *candidate == format)
+        .unwrap_or(0);
+    ui.set_pref_date_format_index(i32::try_from(index).unwrap_or(0));
+    ui.set_pref_date_format_set(prefs.date_format.is_some());
+    push_date_format_examples(ui);
+}
+
+/// Refreshes the date selector's live examples (today, in each format).
+fn push_date_format_examples(ui: &AppWindow) {
+    let examples: Vec<slint::SharedString> =
+        dates::examples().into_iter().map(Into::into).collect();
+    ui.set_date_format_examples(Rc::new(slint::VecModel::from(examples)).into());
 }
 
 const SERVER_WINDOW_NAME: &str = "$server";
@@ -13838,12 +13896,7 @@ fn push_archive(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
 /// values are shown raw.
 fn format_epoch_millis(millis: i64) -> String {
     chrono::DateTime::from_timestamp_millis(millis)
-        .map(|parsed| {
-            parsed
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
+        .map(|parsed| dates::render_date_time(&parsed.with_timezone(&chrono::Local), false))
         .unwrap_or_else(|| millis.to_string())
 }
 
@@ -14728,12 +14781,7 @@ fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) 
 /// shown as sent.
 fn format_iso_timestamp(raw: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(raw)
-        .map(|parsed| {
-            parsed
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
+        .map(|parsed| dates::render_date_time(&parsed.with_timezone(&chrono::Local), false))
         .unwrap_or_else(|_| raw.to_string())
 }
 
@@ -15061,12 +15109,7 @@ fn format_signon(epoch_seconds: i64) -> String {
     epoch_seconds
         .checked_mul(1000)
         .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|moment| {
-            moment
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        })
+        .map(|moment| dates::render_date_time(&moment.with_timezone(&chrono::Local), true))
         .unwrap_or_else(|| epoch_seconds.to_string())
 }
 
@@ -20898,6 +20941,16 @@ mod tests {
             assert!(msgstr.contains("{}"), "{lang}: {msgstr}");
             assert!(!catalog.contains("has no room left for {}"), "{lang}");
         }
+    }
+
+    #[test]
+    fn a_rejected_date_format_has_its_own_message() {
+        assert_eq!(display_prefs_error_key(Some(422)), "display-prefs-rejected");
+        assert_eq!(
+            display_prefs_error_key(Some(500)),
+            "display-prefs-save-failed"
+        );
+        assert_eq!(display_prefs_error_key(None), "display-prefs-save-failed");
     }
 
     #[test]

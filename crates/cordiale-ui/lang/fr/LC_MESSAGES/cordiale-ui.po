@@ -2145,6 +2145,38 @@ msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "Impossible de charger les messages du serveur. Les messages en direct peuvent encore arriver."
 
 msgctxt "AppWindow"
+msgid "Grappa refused that date format; the saved one is back."
+msgstr "Grappa a refusé ce format de date ; celui enregistré est rétabli."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the display preferences."
+msgstr "Impossible d'enregistrer les préférences d'affichage."
+
+msgctxt "AppWindow"
+msgid "Date format"
+msgstr "Format de date"
+
+msgctxt "AppWindow"
+msgid "Automatic ({})"
+msgstr "Automatique ({})"
+
+msgctxt "AppWindow"
+msgid "Day/month/year ({})"
+msgstr "Jour/mois/année ({})"
+
+msgctxt "AppWindow"
+msgid "Month/day/year ({})"
+msgstr "Mois/jour/année ({})"
+
+msgctxt "AppWindow"
+msgid "Year-month-day ({})"
+msgstr "Année-mois-jour ({})"
+
+msgctxt "AppWindow"
+msgid "Automatic follows the language of Cordiale."
+msgstr "Automatique suit la langue de Cordiale."
+
+msgctxt "AppWindow"
 msgid "connected"
 msgstr "connecté"
 
