@@ -2145,6 +2145,34 @@ msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "Die Servernachrichten konnten nicht geladen werden. Live-Nachrichten können weiterhin eintreffen."
 
 msgctxt "AppWindow"
+msgid "The text pattern can't be blank or span more than one line."
+msgstr "Das Textmuster darf nicht leer sein und nicht über mehrere Zeilen gehen."
+
+msgctxt "AppWindow"
+msgid "That mask isn't valid."
+msgstr "Diese Maske ist ungültig."
+
+msgctxt "AppWindow"
+msgid "{} matching {}"
+msgstr "{} passend zu {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} matching {}"
+msgstr "{} passend zu {} löschen"
+
+msgctxt "AppWindow"
+msgid "Text pattern (optional)"
+msgstr "Textmuster (optional)"
+
+msgctxt "AppWindow"
+msgid "A text pattern narrows the rule to messages whose text matches it: * and ? are wildcards, the whole text must match (write *word* for “contains”) and case is ignored. Grappa drops the matching messages."
+msgstr "Ein Textmuster beschränkt die Regel auf Nachrichten, deren Text dazu passt: * und ? sind Platzhalter, der ganze Text muss passen (schreib *Wort* für „enthält“) und Groß-/Kleinschreibung zählt nicht. Grappa verwirft passende Nachrichten."
+
+msgctxt "AppWindow"
+msgid "Couldn't update the ignore list."
+msgstr "Die Ignorierliste konnte nicht aktualisiert werden."
+
+msgctxt "AppWindow"
 msgid "Grappa refused that date format; the saved one is back."
 msgstr "Grappa hat dieses Datumsformat abgelehnt; das gespeicherte gilt wieder."
 
