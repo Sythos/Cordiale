@@ -28,7 +28,9 @@
 
 use std::time::Duration;
 
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
+/// HTTP status of a refusal, re-exported for `GrappaClientError` users.
+pub use reqwest::StatusCode;
 
 use serde_json::Value;
 
@@ -37,13 +39,14 @@ use crate::admin::{
     AdminSessionsResponse, AdminUploadsResponse, AdminUsersResponse, AdminVisitorsResponse,
 };
 use crate::profile::{
-    AddIgnoreRequest, AliasesView, IgnoreMutationResponse, IgnoresResponse, NetworkIdentityRequest,
-    NotifyAddRequest, PerformUpdateRequest, PerformView, VhostSelectionRequest, VhostSettingsView,
+    AddIgnoreRequest, AliasesView, IgnoreEntry, IgnoreMutationResponse, IgnoresResponse,
+    NetworkIdentityRequest, NotifyAddRequest, PerformUpdateRequest, PerformView,
+    VhostSelectionRequest, VhostSettingsView,
 };
 use crate::rest::{
     ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
-    DisplayPrefs, LoginRequest, LoginResponse, MeResponse, SendMessageRequest, ThemeIndex,
-    ThemeWire, UploadResponse,
+    DisplayPrefs, FeaturedChannel, FeaturedChannelsResponse, LoginRequest, LoginResponse,
+    MeResponse, SendMessageRequest, ThemeIndex, ThemeWire, UploadResponse,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -57,6 +60,12 @@ pub struct GrappaClient {
 pub enum GrappaClientError {
     Http(reqwest::Error),
     InvalidUrl(String),
+    /// A refusal whose body names the reason (`{"error": "<code>"}`), for
+    /// the calls where the protocol tells codes apart under one status.
+    Rejected {
+        status: StatusCode,
+        code: Option<String>,
+    },
 }
 
 impl GrappaClientError {
@@ -69,8 +78,34 @@ impl GrappaClientError {
         match self {
             GrappaClientError::Http(err) => err.status(),
             GrappaClientError::InvalidUrl(_) => None,
+            GrappaClientError::Rejected { status, .. } => Some(*status),
         }
     }
+
+    /// The server's error code, when the call reads it (`Rejected`).
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            GrappaClientError::Rejected { code, .. } => code.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// Turns a non-success response into `Rejected` with its `error` code;
+/// a success is passed through.
+async fn reject_with_code(
+    response: reqwest::Response,
+) -> Result<reqwest::Response, GrappaClientError> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let code = response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|body| body.get("error")?.as_str().map(str::to_string));
+    Err(GrappaClientError::Rejected { status, code })
 }
 
 impl From<reqwest::Error> for GrappaClientError {
@@ -556,6 +591,31 @@ impl GrappaClient {
         reason: Option<&str>,
     ) -> Result<(), GrappaClientError> {
         self.put_setting(token, "auto-away-reason", "auto_away_reason", reason.into())
+            .await
+    }
+
+    /// `GET /me/settings/away-nick-suffix` (protocol v32): the tail Grappa
+    /// appends to the nick while it holds the subject auto-away, `None`
+    /// when the rename is off (the default). Only Grappa knows whether a
+    /// rename actually happened, so this is a setting, never a nick.
+    pub async fn fetch_away_nick_suffix(
+        &self,
+        token: &str,
+    ) -> Result<Option<String>, GrappaClientError> {
+        let value = self
+            .fetch_setting(token, "away-nick-suffix", "away_nick_suffix")
+            .await?;
+        Ok(value.as_str().map(str::to_string))
+    }
+
+    /// Stores the auto-away nick suffix; `None` switches the rename off.
+    /// A tail that isn't legal in a nick is refused with a 422.
+    pub async fn set_away_nick_suffix(
+        &self,
+        token: &str,
+        suffix: Option<&str>,
+    ) -> Result<(), GrappaClientError> {
+        self.put_setting(token, "away-nick-suffix", "away_nick_suffix", suffix.into())
             .await
     }
 
@@ -1394,12 +1454,13 @@ impl GrappaClient {
         Ok(response.json::<VhostSettingsView>().await?)
     }
 
-    /// `GET /networks/:slug/ignores`.
+    /// `GET /networks/:slug/ignores` — the rules as `(mask, text_pattern)`
+    /// pairs (protocol v31), or mask-only from an older server.
     pub async fn fetch_ignores(
         &self,
         token: &str,
         network_slug: &str,
-    ) -> Result<Vec<String>, GrappaClientError> {
+    ) -> Result<Vec<IgnoreEntry>, GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
@@ -1412,15 +1473,19 @@ impl GrappaClient {
             .send()
             .await?
             .error_for_status()?;
-        Ok(response.json::<IgnoresResponse>().await?.masks)
+        Ok(response.json::<IgnoresResponse>().await?.into_entries())
     }
 
-    /// `POST /networks/:slug/ignores`.
+    /// `POST /networks/:slug/ignores` — adds the `(mask, text_pattern)`
+    /// rule; no pattern is the plain mask rule. A blank or CR/LF-bearing
+    /// pattern is refused as 422 `invalid_text_pattern`, a bad mask as 422
+    /// `invalid_mask`: both come back as `Rejected` with their code.
     pub async fn add_ignore(
         &self,
         token: &str,
         network_slug: &str,
         mask: &str,
+        text_pattern: Option<&str>,
     ) -> Result<IgnoreMutationResponse, GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
@@ -1429,6 +1494,7 @@ impl GrappaClient {
             .extend(["networks", network_slug, "ignores"]);
         let request = AddIgnoreRequest {
             mask: mask.to_string(),
+            text_pattern: text_pattern.map(str::to_string),
         };
         let response = self
             .http
@@ -1436,30 +1502,31 @@ impl GrappaClient {
             .bearer_auth(token)
             .json(&request)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let response = reject_with_code(response).await?;
         Ok(response.json::<IgnoreMutationResponse>().await?)
     }
 
-    /// `DELETE /networks/:slug/ignores/:mask`.
+    /// `DELETE /networks/:slug/ignores/:mask[?text_pattern=...]` — removes
+    /// exactly that pair. Without a pattern Grappa removes the rule with NO
+    /// pattern, never every rule sharing the mask.
     pub async fn remove_ignore(
         &self,
         token: &str,
         network_slug: &str,
         mask: &str,
+        text_pattern: Option<&str>,
     ) -> Result<IgnoreMutationResponse, GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
             .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
             .extend(["networks", network_slug, "ignores", mask]);
-        let response = self
-            .http
-            .delete(url)
-            .bearer_auth(token)
-            .send()
-            .await?
-            .error_for_status()?;
+        if let Some(pattern) = text_pattern {
+            url.query_pairs_mut().append_pair("text_pattern", pattern);
+        }
+        let response = self.http.delete(url).bearer_auth(token).send().await?;
+        let response = reject_with_code(response).await?;
         Ok(response.json::<IgnoreMutationResponse>().await?)
     }
 
@@ -1984,8 +2051,10 @@ impl GrappaClient {
     /// `POST /api/uploads` — uploads one file (multipart field `file`),
     /// kept for `expire` seconds or the server's default lifetime. `mime`
     /// must be one of Grappa's allowlisted types (else 415); the per-file
-    /// cap by category gives 413 and the storage quota 507. Large files get
-    /// a longer timeout than the client default.
+    /// cap by category gives 413. A 507 means either the instance is out of
+    /// space or the subject hit its own upload cap (protocol v26): the two
+    /// are indistinguishable on the wire. Large files get a longer timeout
+    /// than the client default.
     pub async fn upload_file(
         &self,
         token: &str,
@@ -2177,6 +2246,75 @@ impl GrappaClient {
             .patch(url)
             .bearer_auth(token)
             .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `POST /session/networks` — attaches a network to the caller's own
+    /// session (a one-tap connect from the home page, or the re-attach of a
+    /// detached binding with everything it was detached with). The outcome
+    /// reaches every client as `network_attached`.
+    pub async fn attach_network(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/session/networks", self.base_url);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "network": network_slug }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /networks/:slug/featured` — the operator-curated channels the
+    /// home page suggests for one network.
+    pub async fn fetch_featured_channels(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<Vec<FeaturedChannel>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "featured"]);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<FeaturedChannelsResponse>().await?.channels)
+    }
+
+    /// `DELETE /session/networks/:slug` (protocol v28) — detaches a network
+    /// from the caller's own session: Grappa parks and quits it, then marks
+    /// the binding detached. Nick, SASL user, secrets, perform list and
+    /// autojoin all survive, and `POST /session/networks` on the same slug
+    /// restores them, so this is a remove, not a delete. 204 on success;
+    /// 404 for a slug the deployment doesn't carry or the caller doesn't
+    /// hold attached (one answer for both, by design); 403 for a visitor.
+    /// The outcome reaches every client as `network_detached`.
+    pub async fn detach_network(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["session", "networks", network_slug]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
             .send()
             .await?
             .error_for_status()?;
@@ -3046,6 +3184,242 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_display_prefs_merges_the_date_format_into_the_stored_map() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "display_prefs": {"time_format": "hms", "presence_filter": "all", "bold_mentions": true},
+                "persisted": true
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/display-prefs"))
+            .and(body_json(serde_json::json!({
+                "display_prefs": {
+                    "time_format": "hms",
+                    "presence_filter": "all",
+                    "bold_mentions": true,
+                    "date_format": "dmy"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let prefs = DisplayPrefs {
+            date_format: Some(crate::rest::DateFormat::Dmy),
+            ..DisplayPrefs::default()
+        };
+        GrappaClient::new(mock_server.uri())
+            .update_display_prefs("tok", &prefs)
+            .await
+            .expect("update");
+    }
+
+    #[tokio::test]
+    async fn update_display_prefs_reports_a_rejected_value_as_422() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"display_prefs": {}})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "error": "invalid",
+                "field_errors": {"display_prefs": ["date_format is invalid"]}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let error = GrappaClient::new(mock_server.uri())
+            .update_display_prefs("tok", &DisplayPrefs::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+    }
+
+    #[tokio::test]
+    async fn attach_network_posts_the_slug() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/session/networks"))
+            .and(header("authorization", "Bearer tok"))
+            .and(body_json(serde_json::json!({"network": "libera"})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .attach_network("tok", "libera")
+            .await
+            .expect("attach");
+    }
+
+    #[tokio::test]
+    async fn fetch_featured_channels_reads_names_and_optional_descriptions() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/featured"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "channels": [
+                    {"name": "#grappa", "description": "Support"},
+                    {"name": "#lobby", "description": null}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let channels = GrappaClient::new(mock_server.uri())
+            .fetch_featured_channels("tok", "libera")
+            .await
+            .expect("featured");
+        assert_eq!(
+            channels,
+            vec![
+                FeaturedChannel {
+                    name: "#grappa".into(),
+                    description: Some("Support".into()),
+                },
+                FeaturedChannel {
+                    name: "#lobby".into(),
+                    description: None,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn detach_network_deletes_the_session_binding() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/session/networks/libera"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .detach_network("tok", "libera")
+            .await
+            .expect("detach");
+    }
+
+    #[tokio::test]
+    async fn detach_network_reports_visitor_and_unknown_refusals_by_status() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/session/networks/libera"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/session/networks/gone"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let forbidden = client.detach_network("tok", "libera").await.unwrap_err();
+        assert_eq!(forbidden.status(), Some(StatusCode::FORBIDDEN));
+        let missing = client.detach_network("tok", "gone").await.unwrap_err();
+        assert_eq!(missing.status(), Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn away_nick_suffix_reads_null_as_rename_off() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"away_nick_suffix": null})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let suffix = GrappaClient::new(mock_server.uri())
+            .fetch_away_nick_suffix("tok")
+            .await
+            .expect("suffix");
+        assert_eq!(suffix, None);
+    }
+
+    #[tokio::test]
+    async fn away_nick_suffix_is_an_error_on_a_server_without_it() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        // The caller hides the setting rather than showing "off".
+        let error = GrappaClient::new(mock_server.uri())
+            .fetch_away_nick_suffix("tok")
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn set_away_nick_suffix_sends_the_tail_or_null() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .and(body_json(serde_json::json!({"away_nick_suffix": "|away"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"away_nick_suffix": "|away"})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .and(body_json(serde_json::json!({"away_nick_suffix": null})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"away_nick_suffix": null})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .and(body_json(serde_json::json!({"away_nick_suffix": "a b"})))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "error": "invalid",
+                "field_errors": {"away_nick_suffix": ["is invalid"]}
+            })))
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        client
+            .set_away_nick_suffix("tok", Some("|away"))
+            .await
+            .expect("set");
+        client
+            .set_away_nick_suffix("tok", None)
+            .await
+            .expect("clear");
+        let refused = client
+            .set_away_nick_suffix("tok", Some("a b"))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+    }
+
+    #[tokio::test]
     async fn fetch_admin_uploads_keeps_soft_deleted_rows_and_the_budget() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -3269,10 +3643,158 @@ mod tests {
 
         let client = GrappaClient::new(mock_server.uri());
         let response = client
-            .add_ignore("abc123", "libera", "*!*@spammer.example")
+            .add_ignore("abc123", "libera", "*!*@spammer.example", None)
             .await
             .expect("add_ignore");
         assert_eq!(response.outcome, "added");
+        // An older server answers with masks only: they read as plain rules.
+        assert_eq!(
+            response.entries(),
+            vec![IgnoreEntry {
+                mask: "*!*@spammer.example".into(),
+                text_pattern: None
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_ignores_keeps_two_rules_sharing_a_mask_apart() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/ignores"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "masks": ["relay!*@*", "relay!*@*", "*!*@spam"],
+                "entries": [
+                    {"mask": "relay!*@*", "text_pattern": "<A>*"},
+                    {"mask": "relay!*@*", "text_pattern": "<B> says *"},
+                    {"mask": "*!*@spam", "text_pattern": null}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let entries = GrappaClient::new(mock_server.uri())
+            .fetch_ignores("tok", "libera")
+            .await
+            .expect("ignores");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].text_pattern.as_deref(), Some("<A>*"));
+        assert_eq!(entries[1].text_pattern.as_deref(), Some("<B> says *"));
+        assert_eq!(entries[2].text_pattern, None);
+    }
+
+    #[tokio::test]
+    async fn fetch_ignores_falls_back_to_masks_on_an_older_server() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/ignores"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"masks": ["*!*@spam"]})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let entries = GrappaClient::new(mock_server.uri())
+            .fetch_ignores("tok", "libera")
+            .await
+            .expect("ignores");
+        assert_eq!(
+            entries,
+            vec![IgnoreEntry {
+                mask: "*!*@spam".into(),
+                text_pattern: None
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn add_ignore_posts_the_pair_and_reads_invalid_text_pattern() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/ignores"))
+            .and(body_json(
+                serde_json::json!({"mask": "relay!*@*", "text_pattern": "<A>*"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "masks": ["relay!*@*"],
+                "entries": [{"mask": "relay!*@*", "text_pattern": "<A>*"}],
+                "mask": "relay!*@*",
+                "text_pattern": "<A>*",
+                "outcome": "added"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/ignores"))
+            .and(body_json(
+                serde_json::json!({"mask": "relay!*@*", "text_pattern": "  "}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_json(serde_json::json!({"error": "invalid_text_pattern"})),
+            )
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let added = client
+            .add_ignore("tok", "libera", "relay!*@*", Some("<A>*"))
+            .await
+            .expect("add");
+        assert_eq!(added.text_pattern.as_deref(), Some("<A>*"));
+
+        let refused = client
+            .add_ignore("tok", "libera", "relay!*@*", Some("  "))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+        assert_eq!(refused.code(), Some("invalid_text_pattern"));
+    }
+
+    #[tokio::test]
+    async fn remove_ignore_sends_the_pattern_as_an_encoded_query() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/ignores/relay!*@*"))
+            .and(query_param("text_pattern", "<B> says *"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "masks": [],
+                "entries": [],
+                "mask": "relay!*@*",
+                "text_pattern": "<B> says *",
+                "outcome": "removed"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .remove_ignore("tok", "libera", "relay!*@*", Some("<B> says *"))
+            .await
+            .expect("remove");
+    }
+
+    #[tokio::test]
+    async fn remove_ignore_without_a_pattern_sends_no_query() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/ignores/*!*@spam"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "masks": [],
+                "mask": "*!*@spam",
+                "outcome": "removed"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .remove_ignore("tok", "libera", "*!*@spam", None)
+            .await
+            .expect("remove");
+        let requests = mock_server.received_requests().await.expect("requests");
+        assert_eq!(requests[0].url.query(), None);
     }
 
     #[tokio::test]

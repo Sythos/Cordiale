@@ -81,25 +81,80 @@ pub struct VhostSelectionRequest {
     pub selection: Vec<String>,
 }
 
-/// Response body of `GET /networks/:slug/ignores`.
+/// One ignore rule (protocol v31). Its identity is the PAIR: two rules may
+/// share a mask with different text patterns (a relay bot's authors), so
+/// nothing may key on the mask alone. `text_pattern` is an anchored,
+/// ASCII-case-insensitive glob over the message text that Grappa applies;
+/// `None` is the plain mask rule.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct IgnoreEntry {
+    pub mask: String,
+    #[serde(default)]
+    pub text_pattern: Option<String>,
+}
+
+/// Mask-only entries, from a server older than `entries`.
+fn entries_from_masks(masks: Vec<String>) -> Vec<IgnoreEntry> {
+    masks
+        .into_iter()
+        .map(|mask| IgnoreEntry {
+            mask,
+            text_pattern: None,
+        })
+        .collect()
+}
+
+/// Response body of `GET /networks/:slug/ignores`: `masks` always, and
+/// `entries` from v31.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct IgnoresResponse {
+    #[serde(default)]
     pub masks: Vec<String>,
+    #[serde(default)]
+    pub entries: Option<Vec<IgnoreEntry>>,
+}
+
+impl IgnoresResponse {
+    /// `entries` when the server sends them, else the masks as plain rules.
+    pub fn into_entries(self) -> Vec<IgnoreEntry> {
+        match self.entries {
+            Some(entries) => entries,
+            None => entries_from_masks(self.masks),
+        }
+    }
 }
 
 /// Response body of `POST /networks/:slug/ignores` and
-/// `DELETE /networks/:slug/ignores/:mask`.
+/// `DELETE /networks/:slug/ignores/:mask`: the resulting list plus the
+/// normalised entry acted on.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct IgnoreMutationResponse {
+    #[serde(default)]
     pub masks: Vec<String>,
+    #[serde(default)]
+    pub entries: Option<Vec<IgnoreEntry>>,
     pub mask: String,
+    #[serde(default)]
+    pub text_pattern: Option<String>,
     pub outcome: String,
+}
+
+impl IgnoreMutationResponse {
+    /// The resulting list, as pairs (see `IgnoresResponse::into_entries`).
+    pub fn entries(&self) -> Vec<IgnoreEntry> {
+        match &self.entries {
+            Some(entries) => entries.clone(),
+            None => entries_from_masks(self.masks.clone()),
+        }
+    }
 }
 
 /// Request body of `POST /networks/:slug/ignores`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AddIgnoreRequest {
     pub mask: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_pattern: Option<String>,
 }
 
 /// Response body of `GET /me/settings/aliases`, and the request body of

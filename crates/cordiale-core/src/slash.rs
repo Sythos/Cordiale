@@ -106,8 +106,14 @@ pub enum SlashCommand {
     Quit(Option<String>),
     /// `/hilight <pattern>` or `/dehilight <pattern>`.
     Highlight { add: bool, pattern: String },
-    /// `/ignore <mask>` or `/unignore <mask>`.
-    Ignore { add: bool, mask: String },
+    /// `/ignore <mask> [text pattern]` or `/unignore <mask> [text pattern]`:
+    /// the pattern is the rest of the line, interior spaces kept, and none
+    /// is the plain mask rule (protocol v31).
+    Ignore {
+        add: bool,
+        mask: String,
+        text_pattern: Option<String>,
+    },
     /// `/np`: shares the radio's current track as an action.
     NowPlaying,
     /// `/notify <nick...>`.
@@ -444,13 +450,25 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             },
             None => Usage("/hilight <pattern>"),
         },
-        "ignore" | "unignore" => match words(args).as_slice() {
-            [mask] => Ignore {
-                add: verb == "ignore",
-                mask: mask.clone(),
-            },
-            _ => Usage("/ignore <nick!user@host>"),
-        },
+        "ignore" | "unignore" => {
+            // The mask is the first token (a mask never holds whitespace);
+            // the text pattern is the raw remainder, since its spacing is
+            // part of what it matches.
+            let rest = args.trim();
+            match rest.split_once(char::is_whitespace) {
+                _ if rest.is_empty() => Usage("/ignore <nick!user@host> [text pattern]"),
+                None => Ignore {
+                    add: verb == "ignore",
+                    mask: rest.to_string(),
+                    text_pattern: None,
+                },
+                Some((mask, pattern)) => Ignore {
+                    add: verb == "ignore",
+                    mask: mask.to_string(),
+                    text_pattern: non_empty(pattern.trim()),
+                },
+            }
+        }
         "np" => NowPlaying,
         "beep" => match words(args).as_slice() {
             [] => Beep(None),
@@ -930,9 +948,37 @@ mod tests {
             parse("/unignore *!*@spam"),
             Some(Ignore {
                 add: false,
-                mask: "*!*@spam".to_string()
+                mask: "*!*@spam".to_string(),
+                text_pattern: None
             })
         );
+        assert_eq!(
+            parse("/ignore relay!*@*   <Some Nick>  says *"),
+            Some(Ignore {
+                add: true,
+                mask: "relay!*@*".to_string(),
+                text_pattern: Some("<Some Nick>  says *".to_string())
+            })
+        );
+        // An ACTION is matched by Grappa on its unwrapped text, so the
+        // pattern is written as the action's words.
+        assert_eq!(
+            parse("/unignore bot!*@* waves at *"),
+            Some(Ignore {
+                add: false,
+                mask: "bot!*@*".to_string(),
+                text_pattern: Some("waves at *".to_string())
+            })
+        );
+        assert_eq!(
+            parse("/ignore relay!*@*   "),
+            Some(Ignore {
+                add: true,
+                mask: "relay!*@*".to_string(),
+                text_pattern: None
+            })
+        );
+        assert!(matches!(parse("/ignore"), Some(Usage(_))));
         assert_eq!(
             parse("/watch a b"),
             Some(Notify(vec!["a".to_string(), "b".to_string()]))
