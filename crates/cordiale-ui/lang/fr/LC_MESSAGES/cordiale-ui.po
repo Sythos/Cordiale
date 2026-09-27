@@ -2359,3 +2359,51 @@ msgstr "Connexion à {}…"
 msgctxt "AppWindow"
 msgid "Connect {}"
 msgstr "Connecter {}"
+
+msgctxt "AppWindow"
+msgid "The uploads registry needs an administrator signed in with a full session."
+msgstr "Le registre des fichiers envoyés demande un administrateur connecté avec une session complète."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete the upload."
+msgstr "Impossible de supprimer le fichier envoyé."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the uploads."
+msgstr "Impossible de charger les fichiers envoyés."
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {} ({}%)"
+msgstr "Budget disque : {} sur {} ({} %)"
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {}"
+msgstr "Budget disque : {} sur {}"
+
+msgctxt "AppWindow"
+msgid "Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail."
+msgstr "Octets actifs par rapport au plafond global des envois ; les lignes supprimées ne comptent plus et restent listées comme historique."
+
+msgctxt "AppWindow"
+msgid "Delete {} before it expires? The file is removed at once; its row stays listed."
+msgstr "Supprimer {} avant son expiration ? Le fichier est retiré immédiatement ; sa ligne reste listée."
+
+msgctxt "AppWindow"
+msgid "No uploads."
+msgstr "Aucun fichier envoyé."
+
+msgctxt "AppWindow"
+msgid "never expires"
+msgstr "n'expire jamais"
+
+msgctxt "AppWindow"
+msgid "expires {}"
+msgstr "expire le {}"
+
+msgctxt "AppWindow"
+msgid "live"
+msgstr "actif"
+
+msgctxt "AppWindow"
+msgid "deleted {}"
+msgstr "supprimé le {}"

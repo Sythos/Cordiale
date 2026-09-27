@@ -2359,3 +2359,51 @@ msgstr "Verbinde mit {}…"
 msgctxt "AppWindow"
 msgid "Connect {}"
 msgstr "{} verbinden"
+
+msgctxt "AppWindow"
+msgid "The uploads registry needs an administrator signed in with a full session."
+msgstr "Das Upload-Verzeichnis erfordert einen Administrator mit vollständiger Sitzung."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete the upload."
+msgstr "Der Upload konnte nicht gelöscht werden."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the uploads."
+msgstr "Die Uploads konnten nicht geladen werden."
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {} ({}%)"
+msgstr "Speicherbudget: {} von {} ({} %)"
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {}"
+msgstr "Speicherbudget: {} von {}"
+
+msgctxt "AppWindow"
+msgid "Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail."
+msgstr "Aktive Bytes gegenüber der globalen Upload-Grenze; gelöschte Zeilen zählen nicht mehr und bleiben als Verlauf gelistet."
+
+msgctxt "AppWindow"
+msgid "Delete {} before it expires? The file is removed at once; its row stays listed."
+msgstr "{} vor Ablauf löschen? Die Datei wird sofort entfernt; ihre Zeile bleibt gelistet."
+
+msgctxt "AppWindow"
+msgid "No uploads."
+msgstr "Keine Uploads."
+
+msgctxt "AppWindow"
+msgid "never expires"
+msgstr "läuft nie ab"
+
+msgctxt "AppWindow"
+msgid "expires {}"
+msgstr "läuft ab am {}"
+
+msgctxt "AppWindow"
+msgid "live"
+msgstr "aktiv"
+
+msgctxt "AppWindow"
+msgid "deleted {}"
+msgstr "gelöscht am {}"

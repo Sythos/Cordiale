@@ -22,6 +22,7 @@
 
 slint::include_modules!();
 
+mod admin_uploads;
 mod dates;
 mod home;
 mod player;
@@ -169,6 +170,9 @@ enum WorkerCommand {
     AdminUserToggleAdmin(String, bool),
     AdminUserDelete(String),
     AdminVisitorDelete(String),
+    AdminUploadsRefresh,
+    /// Early delete of a live upload, by id (after its confirmation).
+    AdminUploadDelete(String),
     AdminNetworkResetCircuit(String),
     AdminUserCreate {
         name: String,
@@ -1133,6 +1137,15 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_user_delete.send(WorkerCommand::AdminUserDelete(user_id.to_string()));
     });
 
+    let tx_for_uploads = worker_tx.clone();
+    ui.on_admin_uploads_requested(move || {
+        let _ = tx_for_uploads.send(WorkerCommand::AdminUploadsRefresh);
+    });
+    let tx_for_upload_delete = worker_tx.clone();
+    ui.on_admin_upload_delete(move |upload_id| {
+        let _ = tx_for_upload_delete.send(WorkerCommand::AdminUploadDelete(upload_id.to_string()));
+    });
+
     let tx_for_visitor_delete = worker_tx.clone();
     ui.on_admin_visitor_delete(move |visitor_id| {
         let _ =
@@ -1909,6 +1922,9 @@ struct WorkerState {
     admin_events: Vec<String>,
     /// Last `GET /admin/settings`, to tell whether addressing was edited.
     admin_settings: Option<Value>,
+    /// The last `GET /admin/uploads` answer, which decides what may be
+    /// deleted.
+    admin_uploads: Option<cordiale_core::admin::AdminUploadsResponse>,
     /// `/kb` requests waiting for their `resolve_userhost` reply, by ref.
     pending_kickbans: HashMap<String, PendingKickBan>,
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
@@ -2130,6 +2146,7 @@ impl WorkerState {
             joined_topics: std::collections::HashSet::new(),
             admin_events: Vec::new(),
             admin_settings: None,
+            admin_uploads: None,
             pending_kickbans: HashMap::new(),
             window_states: HashMap::new(),
             window_failures: HashMap::new(),
@@ -2494,6 +2511,13 @@ async fn run_worker(
                             }
                         }
                         handle_admin_refresh(&state, &ui).await;
+                        handle_admin_uploads_refresh(&mut state, &ui, None).await;
+                    }
+                    Some(WorkerCommand::AdminUploadsRefresh) => {
+                        handle_admin_uploads_refresh(&mut state, &ui, None).await;
+                    }
+                    Some(WorkerCommand::AdminUploadDelete(upload_id)) => {
+                        handle_admin_upload_delete(&mut state, &ui, upload_id).await;
                     }
                     Some(WorkerCommand::AdminDisconnectSession(session_id)) => {
                         handle_admin_disconnect_session(&state, &ui, session_id).await;
@@ -6419,6 +6443,88 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         ui.set_admin_visitors(Rc::new(slint::VecModel::from(visitor_rows)).into());
         ui.set_admin_session_log(Rc::new(slint::VecModel::from(session_log_lines)).into());
     });
+}
+
+/// Loads Admin > Uploads. `error` is shown instead of the load's own
+/// outcome when a delete just failed, so the refreshed list still says so.
+async fn handle_admin_uploads_refresh(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    error: Option<&'static str>,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let (view, load_error) = match client.fetch_admin_uploads(&token).await {
+        Ok(view) => (Some(view), ""),
+        Err(err) => {
+            persistence::log_line(&format!("admin uploads load failed: {err:?}"));
+            let key =
+                admin_uploads::error_key(err.status().map(|status| status.as_u16()), "failed");
+            (None, key)
+        }
+    };
+    state.admin_uploads = view.clone();
+    let error = error.unwrap_or(load_error);
+    let rows = view
+        .as_ref()
+        .map(|view| admin_uploads::upload_rows(view, format_file_size, format_iso_timestamp))
+        .unwrap_or_default();
+    let budget = view.as_ref().map(admin_uploads::budget);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<AdminUploadRow> = rows
+            .into_iter()
+            .map(|row| AdminUploadRow {
+                id: row.id.into(),
+                name: row.name.into(),
+                slug: row.slug.into(),
+                mime: row.mime.into(),
+                size: row.size.into(),
+                subject: row.subject.into(),
+                expires: row.expires.into(),
+                deleted: row.deleted.into(),
+                live: row.live,
+            })
+            .collect();
+        ui.set_admin_uploads(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_admin_uploads_loaded(budget.is_some());
+        if let Some((used, cap, share)) = budget {
+            ui.set_admin_uploads_used(format_file_size(used).into());
+            ui.set_admin_uploads_cap(format_file_size(cap).into());
+            ui.set_admin_uploads_share(
+                share.map_or(-1, |share| i32::try_from(share).unwrap_or(i32::MAX)),
+            );
+        }
+        ui.set_admin_uploads_error(error.into());
+        ui.set_admin_upload_confirm_id("".into());
+        ui.set_admin_upload_confirm_name("".into());
+    });
+}
+
+/// Deletes a live upload before its expiry, then re-reads the registry:
+/// the row stays, now with its deletion time and no Delete button.
+async fn handle_admin_upload_delete(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    upload_id: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    if !admin_uploads::can_delete(state.admin_uploads.as_ref(), &upload_id) {
+        return;
+    }
+    let error = match client.delete_admin_upload(&token, &upload_id).await {
+        Ok(()) => None,
+        Err(err) => {
+            persistence::log_line(&format!("admin upload delete failed: {err:?}"));
+            Some(admin_uploads::error_key(
+                err.status().map(|status| status.as_u16()),
+                "delete-failed",
+            ))
+        }
+    };
+    handle_admin_uploads_refresh(state, ui, error).await;
 }
 
 async fn handle_admin_disconnect_session(

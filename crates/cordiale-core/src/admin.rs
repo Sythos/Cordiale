@@ -100,6 +100,76 @@ pub struct AdminSessionLogResponse {
     pub session_log: Vec<Value>,
 }
 
+/// One row of `GET /admin/uploads`, the operator's registry. Soft-deleted
+/// rows stay listed with their `deleted_at` as the audit trail.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AdminUpload {
+    #[serde(deserialize_with = "string_or_number")]
+    pub id: String,
+    pub slug: String,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub bytes: u64,
+    /// Best effort: the uploader may not have sent one.
+    #[serde(default)]
+    pub original_filename: Option<String>,
+    /// `user` or `visitor`.
+    #[serde(default)]
+    pub subject_kind: String,
+    #[serde(default, deserialize_with = "string_or_number")]
+    pub subject_id: String,
+    /// When the reaper means to sweep it; `None` is never.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub deleted_at: Option<String>,
+    #[serde(default)]
+    pub inserted_at: Option<String>,
+}
+
+impl AdminUpload {
+    /// Live while it carries no soft-delete marker. Expiry is not part of
+    /// it: an expired row is still served and still counts against the cap
+    /// until the reaper unlinks it, which is when an early delete matters.
+    pub fn is_live(&self) -> bool {
+        self.deleted_at.is_none()
+    }
+
+    /// The uploader's file name, or the slug (what a channel link shows)
+    /// when there is none.
+    pub fn display_name(&self) -> &str {
+        match self.original_filename.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => name,
+            _ => &self.slug,
+        }
+    }
+}
+
+/// Response body of `GET /admin/uploads`: the registry and the disk budget.
+/// The per-user and per-visitor caps are deliberately not here: they're an
+/// operator knob, never a personal quota meter.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct AdminUploadsResponse {
+    #[serde(default)]
+    pub uploads: Vec<AdminUpload>,
+    #[serde(default)]
+    pub live_bytes_sum: u64,
+    #[serde(default)]
+    pub global_cap_bytes: u64,
+}
+
+fn string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Value::deserialize(deserializer)? {
+        Value::String(text) => text,
+        Value::Null => String::new(),
+        other => other.to_string(),
+    })
+}
+
 /// Response body of `POST /admin/reaper/run`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AdminReaperRunResponse {

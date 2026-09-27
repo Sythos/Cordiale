@@ -2359,3 +2359,51 @@ msgstr "Conectando {}…"
 msgctxt "AppWindow"
 msgid "Connect {}"
 msgstr "Conectar {}"
+
+msgctxt "AppWindow"
+msgid "The uploads registry needs an administrator signed in with a full session."
+msgstr "El registro de subidas requiere un administrador con una sesión completa."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete the upload."
+msgstr "No se pudo eliminar la subida."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the uploads."
+msgstr "No se pudieron cargar las subidas."
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {} ({}%)"
+msgstr "Presupuesto de disco: {} de {} ({} %)"
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {}"
+msgstr "Presupuesto de disco: {} de {}"
+
+msgctxt "AppWindow"
+msgid "Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail."
+msgstr "Bytes activos frente al límite global de subidas; las filas eliminadas ya no cuentan y siguen listadas como historial."
+
+msgctxt "AppWindow"
+msgid "Delete {} before it expires? The file is removed at once; its row stays listed."
+msgstr "¿Eliminar {} antes de que caduque? El archivo se quita en el acto; su fila sigue listada."
+
+msgctxt "AppWindow"
+msgid "No uploads."
+msgstr "No hay subidas."
+
+msgctxt "AppWindow"
+msgid "never expires"
+msgstr "no caduca"
+
+msgctxt "AppWindow"
+msgid "expires {}"
+msgstr "caduca el {}"
+
+msgctxt "AppWindow"
+msgid "live"
+msgstr "activo"
+
+msgctxt "AppWindow"
+msgid "deleted {}"
+msgstr "eliminado el {}"
