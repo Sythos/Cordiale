@@ -26,6 +26,7 @@ mod dates;
 mod home;
 mod player;
 mod taskbar;
+mod totp;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -37,7 +38,8 @@ use serde_json::{Number, Value};
 use tokio::sync::mpsc;
 
 use cordiale_core::bootstrap::{
-    bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, BootstrapError, BootstrapOutcome,
+    bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, bootstrap_with_totp,
+    BootstrapError, BootstrapOutcome,
 };
 use cordiale_core::client::{GrappaClient, GrappaClientError, LoginError};
 use cordiale_core::credentials::{
@@ -63,6 +65,20 @@ const DEFAULT_SERVER_URL: &str = "https://irc.sindro.me";
 /// a plain `tokio::sync::mpsc` channel whose sender is a normal, non-async
 /// value — callbacks fire on the UI thread and just call `.send()`.
 enum WorkerCommand {
+    /// The TOTP or recovery code for the pending sign-in.
+    TotpVerify(String),
+    /// Leaves the code step and forgets its challenge.
+    TotpCancel,
+    /// Settings > Security: reads the TOTP status.
+    SecurityTotpRefresh,
+    /// Starts TOTP enrolment with the account password.
+    SecurityTotpStart(String),
+    /// Arms TOTP with the first code from the authenticator app.
+    SecurityTotpConfirm(String),
+    /// Disarms TOTP with the account password.
+    SecurityTotpDisable(String),
+    /// Closes the enrolment or recovery-codes step.
+    SecurityTotpDone,
     Connect {
         server_url: String,
         identifier: String,
@@ -439,6 +455,54 @@ fn main() -> Result<(), slint::PlatformError> {
             identifier: identifier.to_string(),
             credential: ConnectCredential::FormValue(password.to_string()),
         });
+    });
+
+    let tx_for_totp = worker_tx.clone();
+    let weak_for_totp = ui.as_weak();
+    ui.on_totp_verify_requested(move |code| {
+        if let Some(ui) = weak_for_totp.upgrade() {
+            ui.set_connecting(true);
+            ui.set_status_kind("".into());
+        }
+        let _ = tx_for_totp.send(WorkerCommand::TotpVerify(code.to_string()));
+    });
+    let tx_for_totp_cancel = worker_tx.clone();
+    ui.on_totp_cancel_requested(move || {
+        let _ = tx_for_totp_cancel.send(WorkerCommand::TotpCancel);
+    });
+
+    let tx_for_security = worker_tx.clone();
+    ui.on_security_totp_requested(move || {
+        let _ = tx_for_security.send(WorkerCommand::SecurityTotpRefresh);
+    });
+    let tx_for_security = worker_tx.clone();
+    ui.on_security_totp_start(move |password| {
+        let _ = tx_for_security.send(WorkerCommand::SecurityTotpStart(password.to_string()));
+    });
+    let tx_for_security = worker_tx.clone();
+    ui.on_security_totp_confirm(move |code| {
+        let _ = tx_for_security.send(WorkerCommand::SecurityTotpConfirm(code.to_string()));
+    });
+    let tx_for_security = worker_tx.clone();
+    ui.on_security_totp_disable(move |password| {
+        let _ = tx_for_security.send(WorkerCommand::SecurityTotpDisable(password.to_string()));
+    });
+    let tx_for_security = worker_tx.clone();
+    ui.on_security_totp_done(move || {
+        let _ = tx_for_security.send(WorkerCommand::SecurityTotpDone);
+    });
+    ui.on_copy_text_requested(|text| copy_text(&text));
+    let weak_for_codes = ui.as_weak();
+    ui.on_security_copy_recovery_codes(move || {
+        if let Some(ui) = weak_for_codes.upgrade() {
+            use slint::Model as _;
+            let codes: Vec<String> = ui
+                .get_security_recovery_codes()
+                .iter()
+                .map(|code| code.to_string())
+                .collect();
+            copy_text(&codes.join("\n"));
+        }
     });
 
     let tx_for_saved_profile = worker_tx.clone();
@@ -2088,6 +2152,10 @@ struct WorkerState {
     theme_pair: Option<(ThemeChoice, Option<ThemeChoice>)>,
     /// Whether the OS is in dark mode, which picks the night theme.
     system_dark: bool,
+    /// A sign-in waiting for its second factor (issue #118).
+    pending_totp: Option<PendingTotp>,
+    /// The token confirming a TOTP enrolment started in Settings.
+    totp_enrollment: Option<String>,
     /// The home page's own state (subject, available networks, row
     /// errors, featured channels); its rows come from the snapshots above.
     home: home::HomeState,
@@ -2169,6 +2237,8 @@ impl WorkerState {
             theme_choices: builtin_theme_choices(),
             theme_pair: None,
             system_dark: false,
+            pending_totp: None,
+            totp_enrollment: None,
             home: home::HomeState::default(),
         }
     }
@@ -2225,6 +2295,48 @@ async fn run_worker(
                             });
                             handle_settings_network_refresh(&state, &ui).await;
                         }
+                    }
+                    Some(WorkerCommand::TotpVerify(code)) => {
+                        handle_totp_verify(&mut state, &mut session_events, &ui, code).await;
+                        if let Some(network) = state.settings_network.clone() {
+                            let ui_for_network = ui.clone();
+                            let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
+                                ui.set_settings_network(network.into());
+                            });
+                            handle_settings_network_refresh(&state, &ui).await;
+                        }
+                    }
+                    Some(WorkerCommand::TotpCancel) => {
+                        state.pending_totp = None;
+                        let _ = ui.upgrade_in_event_loop(|ui| {
+                            ui.set_connecting(false);
+                            ui.set_totp_code("".into());
+                            ui.set_screen("connect".into());
+                        });
+                    }
+                    Some(WorkerCommand::SecurityTotpRefresh) => {
+                        handle_security_totp_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::SecurityTotpStart(password)) => {
+                        handle_security_totp_start(&mut state, &ui, password).await;
+                    }
+                    Some(WorkerCommand::SecurityTotpConfirm(code)) => {
+                        handle_security_totp_confirm(&mut state, &ui, code).await;
+                    }
+                    Some(WorkerCommand::SecurityTotpDisable(password)) => {
+                        handle_security_totp_disable(&state, &ui, password).await;
+                    }
+                    Some(WorkerCommand::SecurityTotpDone) => {
+                        state.totp_enrollment = None;
+                        let _ = ui.upgrade_in_event_loop(|ui| {
+                            ui.set_security_totp_step("".into());
+                            ui.set_security_totp_secret("".into());
+                            ui.set_security_totp_uri("".into());
+                            ui.set_security_totp_code("".into());
+                            ui.set_security_totp_qr(slint::Image::default());
+                            ui.set_security_recovery_codes(slint::ModelRc::default());
+                            ui.set_security_totp_error("".into());
+                        });
                     }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         write_back_read_cursor(&mut state);
@@ -3155,6 +3267,67 @@ async fn handle_connect(
         }
     }
 
+    let context = ConnectContext {
+        client,
+        server_url,
+        identifier,
+        is_guest_attempt,
+        typed_password,
+        used_remembered_password,
+    };
+    finish_connect(state, session_events, ui, context, result).await;
+}
+
+/// What a sign-in needs to finish once Grappa has answered, kept across a
+/// TOTP step so the second factor completes the same sign-in.
+struct ConnectContext {
+    client: GrappaClient,
+    server_url: String,
+    identifier: String,
+    is_guest_attempt: bool,
+    typed_password: Option<String>,
+    used_remembered_password: bool,
+}
+
+/// A password sign-in waiting for its TOTP (or recovery) code.
+struct PendingTotp {
+    context: ConnectContext,
+    challenge_token: String,
+}
+
+/// Completes a sign-in with Grappa's answer: the session on success, the
+/// error on the connect screen otherwise. A `202 two_factor_required` with
+/// a TOTP challenge instead opens the code step (issue #118).
+async fn finish_connect(
+    state: &mut WorkerState,
+    session_events: &mut Option<mpsc::UnboundedReceiver<SessionEvent>>,
+    ui: &slint::Weak<AppWindow>,
+    context: ConnectContext,
+    result: Result<BootstrapOutcome, BootstrapError>,
+) {
+    if let Err(BootstrapError::Login(LoginError::TwoFactorRequired(challenge))) = &result {
+        if let Some(challenge_token) = challenge.challenge_token.clone() {
+            persistence::log_line(&format!(
+                "connect needs a TOTP code: server={}",
+                context.server_url
+            ));
+            state.pending_totp = Some(PendingTotp {
+                context,
+                challenge_token,
+            });
+            show_totp_step(ui, "");
+            return;
+        }
+    }
+    let ConnectContext {
+        client,
+        server_url,
+        identifier,
+        is_guest_attempt,
+        typed_password,
+        used_remembered_password,
+    } = context;
+
     match result {
         Ok(outcome) => {
             persistence::log_line(&format!("connect succeeded: server={server_url}"));
@@ -3437,6 +3610,226 @@ async fn handle_connect(
                 ui.set_connecting(false);
                 apply_bootstrap_error(&ui, &err);
             });
+        }
+    }
+}
+
+/// Puts `text` on the system clipboard (a TOTP key, link or recovery
+/// codes); a clipboard that can't be opened is only logged.
+fn copy_text(text: &str) {
+    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.to_string())) {
+        Ok(()) => {}
+        Err(err) => persistence::log_line(&format!("clipboard copy failed: {err}")),
+    }
+}
+
+/// Settings > Security: reads whether TOTP is armed. A per-client token is
+/// refused (403 `client_token_scope`) and the page says so.
+async fn handle_security_totp_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let status = match client.fetch_totp_status(&token).await {
+        Ok(true) => "enabled",
+        Ok(false) => "disabled",
+        Err(err) => {
+            persistence::log_line(&format!("totp status failed: {err:?}"));
+            if totp::settings_error_key(&err) == "client-token" {
+                "client-token"
+            } else {
+                "unavailable"
+            }
+        }
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_security_totp_state(status.into());
+        ui.set_security_totp_error("".into());
+    });
+}
+
+fn set_security_busy(ui: &slint::Weak<AppWindow>, busy: bool) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_security_totp_busy(busy);
+        if busy {
+            ui.set_security_totp_error("".into());
+        }
+    });
+}
+
+fn set_security_error(ui: &slint::Weak<AppWindow>, err: &GrappaClientError) {
+    persistence::log_line(&format!("totp settings refused: {err:?}"));
+    let key = totp::settings_error_key(err);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_security_totp_busy(false);
+        ui.set_security_totp_error(key.into());
+        if key == "client-token" {
+            ui.set_security_totp_state("client-token".into());
+        }
+    });
+}
+
+/// Starts enrolment: shows the unarmed secret as text and QR code and
+/// waits for its first code. The password field is cleared either way.
+async fn handle_security_totp_start(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    password: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    set_security_busy(ui, true);
+    let _ = ui.upgrade_in_event_loop(|ui| ui.set_security_password("".into()));
+    match client.start_totp_enrollment(&token, &password).await {
+        Ok(enrollment) => {
+            state.totp_enrollment = Some(enrollment.enrollment_token.clone());
+            let qr = totp::qr_rgb(&enrollment.provisioning_uri);
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let image = qr
+                    .map(|(side, rgb)| {
+                        slint::Image::from_rgb8(slint::SharedPixelBuffer::clone_from_slice(
+                            &rgb, side, side,
+                        ))
+                    })
+                    .unwrap_or_default();
+                ui.set_security_totp_qr(image);
+                ui.set_security_totp_secret(enrollment.secret.into());
+                ui.set_security_totp_uri(enrollment.provisioning_uri.into());
+                ui.set_security_totp_code("".into());
+                ui.set_security_totp_step("enroll".into());
+                ui.set_security_totp_busy(false);
+            });
+        }
+        Err(err) => {
+            if totp::settings_error_key(&err) == "already-enabled" {
+                let _ = ui.upgrade_in_event_loop(|ui| ui.set_security_totp_state("enabled".into()));
+            }
+            set_security_error(ui, &err);
+        }
+    }
+}
+
+/// Arms TOTP with the first code and shows the recovery codes, once.
+async fn handle_security_totp_confirm(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    code: String,
+) {
+    let (Some(client), Some(token), Some(enrollment)) = (
+        state.client.clone(),
+        state.token.clone(),
+        state.totp_enrollment.clone(),
+    ) else {
+        return;
+    };
+    let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    set_security_busy(ui, true);
+    match client
+        .confirm_totp_enrollment(&token, &enrollment, &code)
+        .await
+    {
+        Ok(codes) => {
+            state.totp_enrollment = None;
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let codes: Vec<slint::SharedString> = codes.into_iter().map(Into::into).collect();
+                ui.set_security_recovery_codes(Rc::new(slint::VecModel::from(codes)).into());
+                ui.set_security_totp_secret("".into());
+                ui.set_security_totp_uri("".into());
+                ui.set_security_totp_qr(slint::Image::default());
+                ui.set_security_totp_code("".into());
+                ui.set_security_totp_state("enabled".into());
+                ui.set_security_totp_step("codes".into());
+                ui.set_security_totp_busy(false);
+            });
+        }
+        Err(err) => set_security_error(ui, &err),
+    }
+}
+
+/// Disarms TOTP after re-authenticating with the password.
+async fn handle_security_totp_disable(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    password: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    set_security_busy(ui, true);
+    let _ = ui.upgrade_in_event_loop(|ui| ui.set_security_password("".into()));
+    match client.disable_totp(&token, &password).await {
+        Ok(()) => {
+            let _ = ui.upgrade_in_event_loop(|ui| {
+                ui.set_security_totp_state("disabled".into());
+                ui.set_security_totp_busy(false);
+            });
+        }
+        Err(err) => set_security_error(ui, &err),
+    }
+}
+
+/// Shows the code step of a two-factor sign-in, with `status` ("" or a
+/// `totp-*` key) under the field.
+fn show_totp_step(ui: &slint::Weak<AppWindow>, status: &'static str) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_connecting(false);
+        ui.set_status_message("".into());
+        ui.set_status_kind(status.into());
+        ui.set_screen("totp".into());
+    });
+}
+
+/// Status key for a refused `POST /auth/totp/verify`. An expired challenge
+/// can't be retried: the sign-in starts again from the password.
+fn totp_error_key(err: &GrappaClientError) -> &'static str {
+    match (err.status().map(|status| status.as_u16()), err.code()) {
+        (_, Some("two_factor_challenge_expired")) => "totp-expired",
+        (_, Some("invalid_two_factor")) | (Some(401), None) => "totp-invalid",
+        (Some(429), _) | (_, Some("too_many_attempts")) => "totp-throttled",
+        _ => "totp-failed",
+    }
+}
+
+/// Verifies the pending sign-in's code. Success finishes the sign-in like
+/// any other; a wrong code or a throttle keeps the step open (the
+/// challenge stays valid for its five minutes); an expired challenge goes
+/// back to the password.
+async fn handle_totp_verify(
+    state: &mut WorkerState,
+    session_events: &mut Option<mpsc::UnboundedReceiver<SessionEvent>>,
+    ui: &slint::Weak<AppWindow>,
+    code: String,
+) {
+    let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    let Some(pending) = state.pending_totp.take() else {
+        return;
+    };
+    if code.is_empty() {
+        state.pending_totp = Some(pending);
+        show_totp_step(ui, "totp-invalid");
+        return;
+    }
+    let result =
+        bootstrap_with_totp(&pending.context.client, &pending.challenge_token, &code).await;
+    match result {
+        Err(BootstrapError::TwoFactor(err)) => {
+            persistence::log_line(&format!("totp verify refused: {err:?}"));
+            let key = totp_error_key(&err);
+            if key == "totp-expired" {
+                let _ = ui.upgrade_in_event_loop(|ui| {
+                    ui.set_connecting(false);
+                    ui.set_totp_code("".into());
+                    ui.set_screen("connect".into());
+                    ui.set_status_kind("totp-expired".into());
+                });
+            } else {
+                state.pending_totp = Some(pending);
+                show_totp_step(ui, key);
+            }
+        }
+        other => {
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_totp_code("".into()));
+            finish_connect(state, session_events, ui, pending.context, other).await;
         }
     }
 }
@@ -16587,8 +16980,13 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
         BootstrapError::Login(LoginError::InvalidCredentials) => {
             ui.set_status_kind("wrong-credentials".into());
         }
-        BootstrapError::Login(LoginError::TwoFactorRequired) => {
-            ui.set_status_kind("two-factor-required".into());
+        // Only reached without a TOTP challenge: a passkey is the account's
+        // only second factor, which Cordiale doesn't perform.
+        BootstrapError::Login(LoginError::TwoFactorRequired(_)) => {
+            ui.set_status_kind("two-factor-passkey-only".into());
+        }
+        BootstrapError::TwoFactor(err) => {
+            ui.set_status_kind(totp_error_key(err).into());
         }
         BootstrapError::Login(LoginError::TooManyAttempts) => {
             ui.set_status_kind("too-many-attempts".into());
@@ -23499,6 +23897,28 @@ mod tests {
             to_ws_url("https://irc.sindro.me"),
             "wss://irc.sindro.me/socket/websocket?vsn=2.0.0"
         );
+    }
+
+    #[test]
+    fn totp_sign_in_refusals_keep_the_step_or_restart_it() {
+        let rejected = |status: u16, code: Option<&str>| GrappaClientError::Rejected {
+            status: cordiale_core::client::StatusCode::from_u16(status).expect("status"),
+            code: code.map(str::to_string),
+        };
+        assert_eq!(
+            totp_error_key(&rejected(401, Some("invalid_two_factor"))),
+            "totp-invalid"
+        );
+        assert_eq!(
+            totp_error_key(&rejected(401, Some("two_factor_challenge_expired"))),
+            "totp-expired"
+        );
+        assert_eq!(
+            totp_error_key(&rejected(429, Some("too_many_attempts"))),
+            "totp-throttled"
+        );
+        assert_eq!(totp_error_key(&rejected(401, None)), "totp-invalid");
+        assert_eq!(totp_error_key(&rejected(503, None)), "totp-failed");
     }
 
     #[test]

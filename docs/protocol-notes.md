@@ -53,8 +53,21 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
 ### Autenticazione
 - **`POST /auth/login`** — body `{ "identifier": "...", "password": "..." }`.
   - Successo: `200 { "token": "...", "subject": {...} }`.
-  - 2FA armato (TOTP o passkey): `202 two_factor_required` — non risolvibile
-    da un client non presidiato come Cordiale, serve un browser.
+  - 2FA armato (TOTP o passkey): `202 two_factor_required`. Il corpo ha due
+    forme: `{two_factor_required, challenge_token}` con TOTP, oppure quella
+    passkey `{…, passkey_options, totp_available, challenge_token}`, dove
+    `challenge_token` è `null` se la passkey è l'unico fattore. Con un
+    `challenge_token` Cordiale completa il login (issue #118, vedi sotto);
+    senza, spiega che serve un token per-client o Cicchetto.
+- **`POST /auth/totp/verify`** — `{challenge_token, code}` → `200 {token,
+  subject}` con un bearer di sessione piena (web, scade dopo 7 giorni di
+  inattività). `code` è il codice TOTP **o** un recovery code (Grappa prova
+  il TOTP e poi consuma un recovery code: `Accounts.verify_second_factor`).
+  Il `challenge_token` è un `Phoenix.Token` valido 300 s, riusabile finché
+  non scade. Errori: `401 invalid_two_factor` (codice errato),
+  `401 two_factor_challenge_expired` (si riparte dalla password),
+  `429 too_many_attempts` (limite per IP e per IP+account), `503
+  db_unavailable`. Fonte: `GrappaWeb.AuthController.verify_totp/2`.
   - Credenziali errate: `401 invalid_credentials`.
   - Throttling: `429 too_many_attempts` dopo 10 fallimenti da un indirizzo in
     15 minuti.
@@ -128,11 +141,31 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
 
 ### Superfici solo-account (non accessibili da token per-client)
 `/admin/*`, `/me/totp*`, `/me/passkeys*`, `DELETE /me` — richiedono sessione
-browser piena; nessuno schema dettagliato nel documento.
+piena (`GrappaWeb.Plugs.RequireFullSession`: `current_session_kind == :web`);
+un token per-client riceve `403 client_token_scope`.
 
-**Nota per Grappa (2026-09-24) — perché Cordiale non ha la sezione
-Sicurezza.** La schermata Settings → Security di Cordiale resta un
-segnaposto per scelta, non per mancanza di lavoro lato client:
+**TOTP (issue #118, schema letto da `GrappaWeb.TotpController` e da
+`cicchetto/src/lib/api.ts`, 2026-09-27).** Cordiale lo gestisce in
+Settings → Security quando è entrato con la password:
+- `GET /me/totp` → `{enabled}`.
+- `POST /me/totp/enrollment {password}` → `{enrollment_token, secret,
+  provisioning_uri}`; il token di enrollment vale 600 s; `401
+  invalid_credentials` = password errata (MAI un bearer morto: non si fa
+  logout), `409 already_enabled`.
+- `POST /me/totp/enrollment/confirm {enrollment_token, code}` → `{enabled:
+  true, recovery_codes}` mostrati una sola volta; codice errato o token
+  scaduto → `401 invalid_two_factor`. Revoca le altre sessioni browser; la
+  corrente e i token per-client restano.
+- `DELETE /me/totp {password}` → `{enabled: false}`; `401` = password errata;
+  revoca anch'essa le altre sessioni.
+- Il QR del `provisioning_uri` è generato in locale (crate `qrcode`), il
+  segreto non lascia il client.
+- Da verificare end-to-end su un'istanza Grappa di prova: il flusso è
+  coperto da test con server simulato.
+
+**Nota per Grappa (2026-09-24, aggiornata 2026-09-27 per il TOTP) — cosa
+resta fuori da Cordiale.** Il TOTP ora è gestito (sopra); il resto della
+sezione Sicurezza resta in Cicchetto:
 
 - Con un token per-client (il login consigliato per un client nativo) ogni
   route di sicurezza risponde `403 client_token_scope`: TOTP, passkey,
@@ -142,17 +175,9 @@ segnaposto per scelta, non per mancanza di lavoro lato client:
   Grappa (RP ID) e al browser/autenticatore di piattaforma. Un client
   nativo non può crearle né usarle senza API di sistema dedicate e senza
   che Grappa accetti un'origine diversa da quella di Cicchetto.
-- TOTP (attivazione, conferma, codici di recupero) sarebbe tecnicamente
-  fattibile via REST con una sessione password piena, ma il contratto non
-  ne documenta gli schemi e l'effetto di un login con password su un
-  account con secondo fattore attivo va verificato su un server di prova.
-
-Cosa servirebbe da Grappa per chiudere il gap: lo schema documentato di
-`/me/totp*` e `/me/client-tokens` (richieste, risposte, errori), e una
-decisione esplicita su quali di queste route una sessione ottenuta da un
-client nativo con password (più TOTP) possa usare. Fino ad allora la
-gestione della sicurezza dell'account resta in Cicchetto, e Cordiale usa
-il token per-client creato lì.
+- Gestione dei token per-client e cancellazione account restano in
+  Cicchetto: con una sessione password piena sarebbero raggiungibili, ma
+  non sono state portate.
 
 ---
 

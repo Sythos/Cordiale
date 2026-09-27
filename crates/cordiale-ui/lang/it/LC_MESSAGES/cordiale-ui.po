@@ -2315,3 +2315,139 @@ msgstr "Connessione a {}…"
 msgctxt "AppWindow"
 msgid "Connect {}"
 msgstr "Connetti {}"
+
+msgctxt "AppWindow"
+msgid "This account's second factor is a passkey, which Cordiale can't use yet. Sign in with a per-client token created in Cicchetto, or use Cicchetto."
+msgstr "Il secondo fattore di questo account è una passkey, che Cordiale non può ancora usare. Accedi con un token client creato in Cicchetto, oppure usa Cicchetto."
+
+msgctxt "AppWindow"
+msgid "That code isn't valid. Check the clock on your device, or use one of your recovery codes."
+msgstr "Quel codice non è valido. Controlla l'orologio del dispositivo, oppure usa uno dei codici di recupero."
+
+msgctxt "AppWindow"
+msgid "The sign-in took too long. Enter your password again."
+msgstr "L'accesso ha richiesto troppo tempo. Inserisci di nuovo la password."
+
+msgctxt "AppWindow"
+msgid "Too many attempts. Wait a few minutes before trying again."
+msgstr "Troppi tentativi. Attendi qualche minuto prima di riprovare."
+
+msgctxt "AppWindow"
+msgid "Couldn't verify the code. Try again."
+msgstr "Impossibile verificare il codice. Riprova."
+
+msgctxt "AppWindow"
+msgid "Two-factor authentication"
+msgstr "Autenticazione a due fattori"
+
+msgctxt "AppWindow"
+msgid "Enter the 6-digit code from your authenticator app, or one of your recovery codes. The request expires after five minutes."
+msgstr "Inserisci il codice a 6 cifre dell'app di autenticazione, oppure uno dei codici di recupero. La richiesta scade dopo cinque minuti."
+
+msgctxt "AppWindow"
+msgid "Code or recovery code"
+msgstr "Codice o codice di recupero"
+
+msgctxt "AppWindow"
+msgid "Verifying…"
+msgstr "Verifica…"
+
+msgctxt "AppWindow"
+msgid "Verify"
+msgstr "Verifica"
+
+msgctxt "AppWindow"
+msgid "Two-factor authentication (TOTP)"
+msgstr "Autenticazione a due fattori (TOTP)"
+
+msgctxt "AppWindow"
+msgid "Enabled: signing in with the password also asks for a code from your authenticator app."
+msgstr "Attiva: l'accesso con la password chiede anche un codice dall'app di autenticazione."
+
+msgctxt "AppWindow"
+msgid "Not enabled."
+msgstr "Non attiva."
+
+msgctxt "AppWindow"
+msgid "Cordiale is signed in with a per-client token, which Grappa keeps away from second factors. Sign in with your password to manage TOTP here, or use Cicchetto."
+msgstr "Cordiale è connesso con un token client, che Grappa tiene lontano dai secondi fattori. Accedi con la password per gestire il TOTP qui, oppure usa Cicchetto."
+
+msgctxt "AppWindow"
+msgid "Couldn't read the two-factor status."
+msgstr "Impossibile leggere lo stato dell'autenticazione a due fattori."
+
+msgctxt "AppWindow"
+msgid "Account password"
+msgstr "Password dell'account"
+
+msgctxt "AppWindow"
+msgid "This signs out your other browser sessions; per-client tokens keep working."
+msgstr "Questo chiude le altre sessioni del browser; i token client continuano a funzionare."
+
+msgctxt "AppWindow"
+msgid "Set up two-factor authentication"
+msgstr "Attiva l'autenticazione a due fattori"
+
+msgctxt "AppWindow"
+msgid "Turn off two-factor authentication"
+msgstr "Disattiva l'autenticazione a due fattori"
+
+msgctxt "AppWindow"
+msgid "Scan the code with your authenticator app, or enter the key by hand, then type the 6-digit code it shows."
+msgstr "Inquadra il codice con l'app di autenticazione, o inserisci la chiave a mano, poi scrivi il codice a 6 cifre che mostra."
+
+msgctxt "AppWindow"
+msgid "QR code for your authenticator app"
+msgstr "Codice QR per l'app di autenticazione"
+
+msgctxt "AppWindow"
+msgid "Copy key"
+msgstr "Copia chiave"
+
+msgctxt "AppWindow"
+msgid "Copy link"
+msgstr "Copia link"
+
+msgctxt "AppWindow"
+msgid "6-digit code"
+msgstr "Codice a 6 cifre"
+
+msgctxt "AppWindow"
+msgid "Confirm"
+msgstr "Conferma"
+
+msgctxt "AppWindow"
+msgid "Two-factor authentication is on. Keep these recovery codes somewhere safe: each works once in place of a code, and they won't be shown again."
+msgstr "L'autenticazione a due fattori è attiva. Conserva questi codici di recupero in un posto sicuro: ognuno vale una volta al posto di un codice, e non verranno più mostrati."
+
+msgctxt "AppWindow"
+msgid "Copy codes"
+msgstr "Copia codici"
+
+msgctxt "AppWindow"
+msgid "I've saved them"
+msgstr "Li ho salvati"
+
+msgctxt "AppWindow"
+msgid "Wrong password."
+msgstr "Password errata."
+
+msgctxt "AppWindow"
+msgid "That code isn't valid, or the setup expired: check the clock on your device, or start again."
+msgstr "Quel codice non è valido, oppure la configurazione è scaduta: controlla l'orologio del dispositivo, o ricomincia."
+
+msgctxt "AppWindow"
+msgid "Two-factor authentication is already on."
+msgstr "L'autenticazione a due fattori è già attiva."
+
+msgctxt "AppWindow"
+msgid "A per-client token can't change second factors."
+msgstr "Un token client non può modificare i secondi fattori."
+
+msgctxt "AppWindow"
+msgid "Couldn't update two-factor authentication."
+msgstr "Impossibile aggiornare l'autenticazione a due fattori."
+
+msgctxt "AppWindow"
+msgid "Passkeys, client tokens and account deletion are managed in Cicchetto."
+msgstr "Passkey, token client ed eliminazione dell'account si gestiscono in Cicchetto."
