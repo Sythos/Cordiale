@@ -2143,3 +2143,35 @@ msgstr "Das Serverfenster akzeptiert nur Befehle mit Schrägstrich."
 msgctxt "AppWindow"
 msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "Die Servernachrichten konnten nicht geladen werden. Live-Nachrichten können weiterhin eintreffen."
+
+msgctxt "AppWindow"
+msgid "Grappa refused that date format; the saved one is back."
+msgstr "Grappa hat dieses Datumsformat abgelehnt; das gespeicherte gilt wieder."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the display preferences."
+msgstr "Die Anzeigeeinstellungen konnten nicht gespeichert werden."
+
+msgctxt "AppWindow"
+msgid "Date format"
+msgstr "Datumsformat"
+
+msgctxt "AppWindow"
+msgid "Automatic ({})"
+msgstr "Automatisch ({})"
+
+msgctxt "AppWindow"
+msgid "Day/month/year ({})"
+msgstr "Tag/Monat/Jahr ({})"
+
+msgctxt "AppWindow"
+msgid "Month/day/year ({})"
+msgstr "Monat/Tag/Jahr ({})"
+
+msgctxt "AppWindow"
+msgid "Year-month-day ({})"
+msgstr "Jahr-Monat-Tag ({})"
+
+msgctxt "AppWindow"
+msgid "Automatic follows the language of Cordiale."
+msgstr "Automatisch folgt der Sprache von Cordiale."

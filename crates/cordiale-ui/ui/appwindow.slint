@@ -813,6 +813,13 @@ export component AppWindow inherits Window {
     in property <[ThemeChoiceRow]> theme-choices: [];
     in property <bool> display-prefs-loaded: false;
     in-out property <bool> pref-colored-nicklist: true;
+    // `display_prefs.date_format` (protocol v29), by `DateFormat::ALL`
+    // index. `pref-date-format-set` is false while the server hasn't sent
+    // one and the user hasn't picked one, so a save doesn't invent it.
+    in-out property <int> pref-date-format-index: 0;
+    in-out property <bool> pref-date-format-set: false;
+    // Live examples for the selector, one per format, on today's date.
+    in property <[string]> date-format-examples: ["", "", "", ""];
     in-out property <bool> pref-bold-mentions: true;
     in-out property <bool> pref-strip-formatting: false;
     in-out property <bool> pref-show-event-badge: true;
@@ -1655,6 +1662,10 @@ export component AppWindow inherits Window {
             return @tr("The server doesn't accept this type of file: {}", status-attach-name);
         } else if status-kind == "attach-too-large" {
             return @tr("{} is larger than the server allows for this type of file.", status-attach-name);
+        } else if status-kind == "display-prefs-rejected" {
+            return @tr("Grappa refused that date format; the saved one is back.");
+        } else if status-kind == "display-prefs-save-failed" {
+            return @tr("Couldn't save the display preferences.");
         } else if status-kind == "attach-no-space" {
             return @tr("The server has no room left for {}.", status-attach-name);
         } else if status-kind == "attach-read-failed" {
@@ -2854,6 +2865,35 @@ export component AppWindow inherits Window {
                     text: @tr("Show bottom bar");
                     checked <=> pref-show-bottom-bar;
                     toggled => { display-prefs-changed(); }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: @tr("Date format");
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    ComboBox {
+                        model: [
+                            @tr("Automatic ({})", date-format-examples[0]),
+                            @tr("Day/month/year ({})", date-format-examples[1]),
+                            @tr("Month/day/year ({})", date-format-examples[2]),
+                            @tr("Year-month-day ({})", date-format-examples[3])
+                        ];
+                        current-index <=> pref-date-format-index;
+                        horizontal-stretch: 0;
+                        min-width: 220px;
+                        selected => {
+                            pref-date-format-set = true;
+                            display-prefs-changed();
+                        }
+                    }
+                }
+                Text {
+                    text: @tr("Automatic follows the language of Cordiale.");
+                    wrap: word-wrap;
+                    color: palette-muted;
                 }
             }
 
