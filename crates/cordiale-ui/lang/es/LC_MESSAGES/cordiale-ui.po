@@ -2143,3 +2143,31 @@ msgstr "La ventana del servidor solo acepta comandos con barra."
 msgctxt "AppWindow"
 msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "No se pudieron cargar los mensajes del servidor. Los mensajes en directo aún pueden llegar."
+
+msgctxt "AppWindow"
+msgid "The text pattern can't be blank or span more than one line."
+msgstr "El patrón de texto no puede estar vacío ni ocupar más de una línea."
+
+msgctxt "AppWindow"
+msgid "That mask isn't valid."
+msgstr "Esa máscara no es válida."
+
+msgctxt "AppWindow"
+msgid "{} matching {}"
+msgstr "{} que coincide con {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} matching {}"
+msgstr "Eliminar {} que coincide con {}"
+
+msgctxt "AppWindow"
+msgid "Text pattern (optional)"
+msgstr "Patrón de texto (opcional)"
+
+msgctxt "AppWindow"
+msgid "A text pattern narrows the rule to messages whose text matches it: * and ? are wildcards, the whole text must match (write *word* for “contains”) and case is ignored. Grappa drops the matching messages."
+msgstr "Un patrón de texto limita la regla a los mensajes cuyo texto coincide con él: * y ? son comodines, debe coincidir todo el texto (escribe *palabra* para «contiene») y se ignoran mayúsculas y minúsculas. Grappa descarta los mensajes que coinciden."
+
+msgctxt "AppWindow"
+msgid "Couldn't update the ignore list."
+msgstr "No se pudo actualizar la lista de ignorados."

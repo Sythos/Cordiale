@@ -28,7 +28,9 @@
 
 use std::time::Duration;
 
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
+/// HTTP status of a refusal, re-exported for `GrappaClientError` users.
+pub use reqwest::StatusCode;
 
 use serde_json::Value;
 
@@ -37,8 +39,9 @@ use crate::admin::{
     AdminSessionsResponse, AdminUsersResponse, AdminVisitorsResponse,
 };
 use crate::profile::{
-    AddIgnoreRequest, AliasesView, IgnoreMutationResponse, IgnoresResponse, NetworkIdentityRequest,
-    NotifyAddRequest, PerformUpdateRequest, PerformView, VhostSelectionRequest, VhostSettingsView,
+    AddIgnoreRequest, AliasesView, IgnoreEntry, IgnoreMutationResponse, IgnoresResponse,
+    NetworkIdentityRequest, NotifyAddRequest, PerformUpdateRequest, PerformView,
+    VhostSelectionRequest, VhostSettingsView,
 };
 use crate::rest::{
     ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
@@ -57,6 +60,12 @@ pub struct GrappaClient {
 pub enum GrappaClientError {
     Http(reqwest::Error),
     InvalidUrl(String),
+    /// A refusal whose body names the reason (`{"error": "<code>"}`), for
+    /// the calls where the protocol tells codes apart under one status.
+    Rejected {
+        status: StatusCode,
+        code: Option<String>,
+    },
 }
 
 impl GrappaClientError {
@@ -69,8 +78,34 @@ impl GrappaClientError {
         match self {
             GrappaClientError::Http(err) => err.status(),
             GrappaClientError::InvalidUrl(_) => None,
+            GrappaClientError::Rejected { status, .. } => Some(*status),
         }
     }
+
+    /// The server's error code, when the call reads it (`Rejected`).
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            GrappaClientError::Rejected { code, .. } => code.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// Turns a non-success response into `Rejected` with its `error` code;
+/// a success is passed through.
+async fn reject_with_code(
+    response: reqwest::Response,
+) -> Result<reqwest::Response, GrappaClientError> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let code = response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|body| body.get("error")?.as_str().map(str::to_string));
+    Err(GrappaClientError::Rejected { status, code })
 }
 
 impl From<reqwest::Error> for GrappaClientError {
@@ -1355,12 +1390,13 @@ impl GrappaClient {
         Ok(response.json::<VhostSettingsView>().await?)
     }
 
-    /// `GET /networks/:slug/ignores`.
+    /// `GET /networks/:slug/ignores` — the rules as `(mask, text_pattern)`
+    /// pairs (protocol v31), or mask-only from an older server.
     pub async fn fetch_ignores(
         &self,
         token: &str,
         network_slug: &str,
-    ) -> Result<Vec<String>, GrappaClientError> {
+    ) -> Result<Vec<IgnoreEntry>, GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
@@ -1373,15 +1409,19 @@ impl GrappaClient {
             .send()
             .await?
             .error_for_status()?;
-        Ok(response.json::<IgnoresResponse>().await?.masks)
+        Ok(response.json::<IgnoresResponse>().await?.into_entries())
     }
 
-    /// `POST /networks/:slug/ignores`.
+    /// `POST /networks/:slug/ignores` — adds the `(mask, text_pattern)`
+    /// rule; no pattern is the plain mask rule. A blank or CR/LF-bearing
+    /// pattern is refused as 422 `invalid_text_pattern`, a bad mask as 422
+    /// `invalid_mask`: both come back as `Rejected` with their code.
     pub async fn add_ignore(
         &self,
         token: &str,
         network_slug: &str,
         mask: &str,
+        text_pattern: Option<&str>,
     ) -> Result<IgnoreMutationResponse, GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
@@ -1390,6 +1430,7 @@ impl GrappaClient {
             .extend(["networks", network_slug, "ignores"]);
         let request = AddIgnoreRequest {
             mask: mask.to_string(),
+            text_pattern: text_pattern.map(str::to_string),
         };
         let response = self
             .http
@@ -1397,30 +1438,31 @@ impl GrappaClient {
             .bearer_auth(token)
             .json(&request)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let response = reject_with_code(response).await?;
         Ok(response.json::<IgnoreMutationResponse>().await?)
     }
 
-    /// `DELETE /networks/:slug/ignores/:mask`.
+    /// `DELETE /networks/:slug/ignores/:mask[?text_pattern=...]` — removes
+    /// exactly that pair. Without a pattern Grappa removes the rule with NO
+    /// pattern, never every rule sharing the mask.
     pub async fn remove_ignore(
         &self,
         token: &str,
         network_slug: &str,
         mask: &str,
+        text_pattern: Option<&str>,
     ) -> Result<IgnoreMutationResponse, GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
             .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
             .extend(["networks", network_slug, "ignores", mask]);
-        let response = self
-            .http
-            .delete(url)
-            .bearer_auth(token)
-            .send()
-            .await?
-            .error_for_status()?;
+        if let Some(pattern) = text_pattern {
+            url.query_pairs_mut().append_pair("text_pattern", pattern);
+        }
+        let response = self.http.delete(url).bearer_auth(token).send().await?;
+        let response = reject_with_code(response).await?;
         Ok(response.json::<IgnoreMutationResponse>().await?)
     }
 
@@ -3158,10 +3200,158 @@ mod tests {
 
         let client = GrappaClient::new(mock_server.uri());
         let response = client
-            .add_ignore("abc123", "libera", "*!*@spammer.example")
+            .add_ignore("abc123", "libera", "*!*@spammer.example", None)
             .await
             .expect("add_ignore");
         assert_eq!(response.outcome, "added");
+        // An older server answers with masks only: they read as plain rules.
+        assert_eq!(
+            response.entries(),
+            vec![IgnoreEntry {
+                mask: "*!*@spammer.example".into(),
+                text_pattern: None
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_ignores_keeps_two_rules_sharing_a_mask_apart() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/ignores"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "masks": ["relay!*@*", "relay!*@*", "*!*@spam"],
+                "entries": [
+                    {"mask": "relay!*@*", "text_pattern": "<A>*"},
+                    {"mask": "relay!*@*", "text_pattern": "<B> says *"},
+                    {"mask": "*!*@spam", "text_pattern": null}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let entries = GrappaClient::new(mock_server.uri())
+            .fetch_ignores("tok", "libera")
+            .await
+            .expect("ignores");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].text_pattern.as_deref(), Some("<A>*"));
+        assert_eq!(entries[1].text_pattern.as_deref(), Some("<B> says *"));
+        assert_eq!(entries[2].text_pattern, None);
+    }
+
+    #[tokio::test]
+    async fn fetch_ignores_falls_back_to_masks_on_an_older_server() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/ignores"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"masks": ["*!*@spam"]})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let entries = GrappaClient::new(mock_server.uri())
+            .fetch_ignores("tok", "libera")
+            .await
+            .expect("ignores");
+        assert_eq!(
+            entries,
+            vec![IgnoreEntry {
+                mask: "*!*@spam".into(),
+                text_pattern: None
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn add_ignore_posts_the_pair_and_reads_invalid_text_pattern() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/ignores"))
+            .and(body_json(
+                serde_json::json!({"mask": "relay!*@*", "text_pattern": "<A>*"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "masks": ["relay!*@*"],
+                "entries": [{"mask": "relay!*@*", "text_pattern": "<A>*"}],
+                "mask": "relay!*@*",
+                "text_pattern": "<A>*",
+                "outcome": "added"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/ignores"))
+            .and(body_json(
+                serde_json::json!({"mask": "relay!*@*", "text_pattern": "  "}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_json(serde_json::json!({"error": "invalid_text_pattern"})),
+            )
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let added = client
+            .add_ignore("tok", "libera", "relay!*@*", Some("<A>*"))
+            .await
+            .expect("add");
+        assert_eq!(added.text_pattern.as_deref(), Some("<A>*"));
+
+        let refused = client
+            .add_ignore("tok", "libera", "relay!*@*", Some("  "))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+        assert_eq!(refused.code(), Some("invalid_text_pattern"));
+    }
+
+    #[tokio::test]
+    async fn remove_ignore_sends_the_pattern_as_an_encoded_query() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/ignores/relay!*@*"))
+            .and(query_param("text_pattern", "<B> says *"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "masks": [],
+                "entries": [],
+                "mask": "relay!*@*",
+                "text_pattern": "<B> says *",
+                "outcome": "removed"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .remove_ignore("tok", "libera", "relay!*@*", Some("<B> says *"))
+            .await
+            .expect("remove");
+    }
+
+    #[tokio::test]
+    async fn remove_ignore_without_a_pattern_sends_no_query() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/ignores/*!*@spam"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "masks": [],
+                "mask": "*!*@spam",
+                "outcome": "removed"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .remove_ignore("tok", "libera", "*!*@spam", None)
+            .await
+            .expect("remove");
+        let requests = mock_server.received_requests().await.expect("requests");
+        assert_eq!(requests[0].url.query(), None);
     }
 
     #[tokio::test]

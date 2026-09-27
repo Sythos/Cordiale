@@ -44,6 +44,7 @@ use cordiale_core::credentials::{
 use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
+use cordiale_core::profile::IgnoreEntry;
 use cordiale_core::rest::{
     ActiveThemePair, ArchiveEntry, BootResponse, DirectoryPage, DisplayPrefs, LoginRequest,
     MeResponse, SendMessageRequest,
@@ -220,8 +221,16 @@ enum WorkerCommand {
         ident: String,
         realname: String,
     },
-    IgnoreAdd(String),
-    IgnoreRemove(String),
+    /// An ignore rule of the Settings network: mask and optional text
+    /// pattern, whose pair is the rule's identity (protocol v31).
+    IgnoreAdd {
+        mask: String,
+        text_pattern: Option<String>,
+    },
+    IgnoreRemove {
+        mask: String,
+        text_pattern: Option<String>,
+    },
     PerformSave(String),
     PersonalPrefsSave {
         leave_message: String,
@@ -1347,13 +1356,19 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let tx_for_ignore_add = worker_tx.clone();
-    ui.on_ignore_add_requested(move |mask| {
-        let _ = tx_for_ignore_add.send(WorkerCommand::IgnoreAdd(mask.to_string()));
+    ui.on_ignore_add_requested(move |mask, pattern| {
+        let _ = tx_for_ignore_add.send(WorkerCommand::IgnoreAdd {
+            mask: mask.trim().to_string(),
+            text_pattern: ignore_pattern_from_ui(&pattern),
+        });
     });
 
     let tx_for_ignore_remove = worker_tx.clone();
-    ui.on_ignore_remove_requested(move |mask| {
-        let _ = tx_for_ignore_remove.send(WorkerCommand::IgnoreRemove(mask.to_string()));
+    ui.on_ignore_remove_requested(move |mask, pattern| {
+        let _ = tx_for_ignore_remove.send(WorkerCommand::IgnoreRemove {
+            mask: mask.to_string(),
+            text_pattern: (!pattern.is_empty()).then(|| pattern.to_string()),
+        });
     });
 
     let tx_for_perform_save = worker_tx.clone();
@@ -2693,21 +2708,25 @@ async fn run_worker(
                             }
                         }
                     }
-                    Some(WorkerCommand::IgnoreAdd(mask)) => {
+                    Some(WorkerCommand::IgnoreAdd { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
-                            let _ = client.add_ignore(token, network, &mask).await;
+                            let result = client
+                                .add_ignore(token, network, &mask, text_pattern.as_deref())
+                                .await;
+                            push_ignore_mutation(&ui, result);
                         }
-                        handle_settings_network_refresh(&state, &ui).await;
                     }
-                    Some(WorkerCommand::IgnoreRemove(mask)) => {
+                    Some(WorkerCommand::IgnoreRemove { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
-                            let _ = client.remove_ignore(token, network, &mask).await;
+                            let result = client
+                                .remove_ignore(token, network, &mask, text_pattern.as_deref())
+                                .await;
+                            push_ignore_mutation(&ui, result);
                         }
-                        handle_settings_network_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::PerformSave(text)) => {
                         if let (Some(client), Some(token), Some(network)) =
@@ -4514,13 +4533,40 @@ async fn run_slash_command(
             push_watch_patterns(state, ui);
             Ok(())
         }
-        SlashCommand::Ignore { add: true, mask } => {
-            client.add_ignore(&token, &network, &mask).await.map(|_| ())
+        SlashCommand::Ignore {
+            add,
+            mask,
+            text_pattern,
+        } => {
+            let result = if add {
+                client
+                    .add_ignore(&token, &network, &mask, text_pattern.as_deref())
+                    .await
+            } else {
+                client
+                    .remove_ignore(&token, &network, &mask, text_pattern.as_deref())
+                    .await
+            };
+            // Grappa answers with the resulting list: an open ignore list for
+            // the same network shows it at once, like Cicchetto's mirror.
+            match result {
+                Ok(response) => {
+                    if state.settings_network.as_deref() == Some(network.as_str()) {
+                        push_ignore_entries(ui, response.entries(), "");
+                    }
+                    Ok(())
+                }
+                Err(err) => {
+                    persistence::log_line(&format!("{label} failed: {err:?}"));
+                    let kind = match ignore_error_key(&err) {
+                        "invalid-text-pattern" => "ignore-invalid-text-pattern",
+                        "invalid-mask" => "ignore-invalid-mask",
+                        _ => "command-failed",
+                    };
+                    return set_command_status(ui, kind, label);
+                }
+            }
         }
-        SlashCommand::Ignore { add: false, mask } => client
-            .remove_ignore(&token, &network, &mask)
-            .await
-            .map(|_| ()),
         SlashCommand::Notify(nicks) => client.add_notify_nicks(&token, &network, nicks).await,
         SlashCommand::Beep(None) => {
             if state.notification_prefs.is_none() {
@@ -6265,7 +6311,7 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
         return;
     };
 
-    let ignores = match &state.settings_network {
+    let ignores: Vec<IgnoreEntry> = match &state.settings_network {
         Some(network) => client
             .fetch_ignores(token, network)
             .await
@@ -6323,13 +6369,71 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
 
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let ignores_model: Vec<slint::SharedString> = ignores.into_iter().map(Into::into).collect();
-        ui.set_settings_ignores(Rc::new(slint::VecModel::from(ignores_model)).into());
+        ui.set_settings_ignores(ignore_rows_model(ignores));
+        ui.set_settings_ignore_error("".into());
         ui.set_perform_text(perform_text.into());
         ui.set_settings_aliases(Rc::new(slint::VecModel::from(alias_rows)).into());
         ui.set_settings_vhost_options(Rc::new(slint::VecModel::from(vhost_rows)).into());
         ui.set_pref_dcc_auto_accept(dcc_auto_accept);
     });
+}
+
+/// The ignore list as Slint rows, keeping every pair (two rules may share
+/// a mask).
+fn ignore_rows_model(entries: Vec<IgnoreEntry>) -> slint::ModelRc<IgnoreRow> {
+    let rows: Vec<IgnoreRow> = entries
+        .into_iter()
+        .map(|entry| IgnoreRow {
+            mask: entry.mask.into(),
+            text_pattern: entry.text_pattern.unwrap_or_default().into(),
+        })
+        .collect();
+    Rc::new(slint::VecModel::from(rows)).into()
+}
+
+/// Shows `entries` as the Settings ignore list, with `error` under it.
+fn push_ignore_entries(
+    ui: &slint::Weak<AppWindow>,
+    entries: Vec<IgnoreEntry>,
+    error: &'static str,
+) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_settings_ignores(ignore_rows_model(entries));
+        ui.set_settings_ignore_error(error.into());
+    });
+}
+
+/// A Settings add/remove: the response carries the resulting list, which
+/// is rendered as is; a refusal keeps the list and says why.
+fn push_ignore_mutation(
+    ui: &slint::Weak<AppWindow>,
+    result: Result<cordiale_core::profile::IgnoreMutationResponse, GrappaClientError>,
+) {
+    match result {
+        Ok(response) => push_ignore_entries(ui, response.entries(), ""),
+        Err(err) => {
+            persistence::log_line(&format!("ignore change failed: {err:?}"));
+            let error = ignore_error_key(&err);
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_settings_ignore_error(error.into()));
+        }
+    }
+}
+
+/// Grappa's two 422 codes for an ignore change are distinct because the
+/// user typed two things (protocol v31).
+fn ignore_error_key(err: &GrappaClientError) -> &'static str {
+    match err.code() {
+        Some("invalid_text_pattern") => "invalid-text-pattern",
+        Some("invalid_mask") => "invalid-mask",
+        _ => "failed",
+    }
+}
+
+/// The Settings text-pattern field: blank means no pattern; anything else
+/// goes to Grappa trimmed, and Grappa refuses a CR/LF-bearing one itself.
+fn ignore_pattern_from_ui(pattern: &str) -> Option<String> {
+    let pattern = pattern.trim();
+    (!pattern.is_empty()).then(|| pattern.to_string())
 }
 
 /// Loads the account's away/leave messages, auto-away delay and
@@ -20544,6 +20648,37 @@ mod tests {
         );
         assert_eq!(attachment_error_status(Some(507)), "attach-no-space");
         assert_eq!(attachment_error_status(None), "attach-failed");
+    }
+
+    #[test]
+    fn ignore_refusals_name_the_field_the_user_got_wrong() {
+        let rejected = |code: Option<&str>| GrappaClientError::Rejected {
+            status: cordiale_core::client::StatusCode::UNPROCESSABLE_ENTITY,
+            code: code.map(str::to_string),
+        };
+        assert_eq!(
+            ignore_error_key(&rejected(Some("invalid_text_pattern"))),
+            "invalid-text-pattern"
+        );
+        assert_eq!(
+            ignore_error_key(&rejected(Some("invalid_mask"))),
+            "invalid-mask"
+        );
+        assert_eq!(ignore_error_key(&rejected(None)), "failed");
+        assert_eq!(
+            ignore_error_key(&GrappaClientError::InvalidUrl("x".into())),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn a_blank_settings_pattern_is_the_plain_mask_rule() {
+        assert_eq!(ignore_pattern_from_ui(""), None);
+        assert_eq!(ignore_pattern_from_ui("   "), None);
+        assert_eq!(
+            ignore_pattern_from_ui("  <Some Nick>  says * "),
+            Some("<Some Nick>  says *".to_string())
+        );
     }
 
     #[test]

@@ -135,6 +135,13 @@ struct RecoverStepRow {
 
 // One connected network in the sidebar, with its joined channels and
 // whether the channel list under it is currently shown (default: yes).
+// One ignore rule (protocol v31): its identity is the pair, so two rows
+// may share a mask. `text-pattern` is "" for a plain mask rule.
+struct IgnoreRow {
+    mask: string,
+    text-pattern: string,
+}
+
 struct NetworkGroup {
     network: string,
     connection-label: string,
@@ -878,8 +885,12 @@ export component AppWindow inherits Window {
     in-out property <string> identity-nick: "";
     in-out property <string> identity-ident: "";
     in-out property <string> identity-realname: "";
-    in property <[string]> settings-ignores: [];
+    in property <[IgnoreRow]> settings-ignores: [];
     in-out property <string> new-ignore-mask: "";
+    in-out property <string> new-ignore-pattern: "";
+    // Last refused ignore change: `invalid-text-pattern`, `invalid-mask`
+    // or `failed` ("" when none).
+    in property <string> settings-ignore-error: "";
     in-out property <string> perform-text: "";
     in property <[AliasRow]> settings-aliases: [];
     in-out property <string> new-alias-command: "";
@@ -1262,8 +1273,8 @@ export component AppWindow inherits Window {
     callback notification-prefs-changed();
     callback settings-network-selected(string);
     callback identity-save-requested();
-    callback ignore-add-requested(string);
-    callback ignore-remove-requested(string);
+    callback ignore-add-requested(string, string); // mask, text pattern ("" for none)
+    callback ignore-remove-requested(string, string); // mask, text pattern ("" for none)
     callback perform-save-requested(string);
     callback alias-add-requested(string, string);
     callback alias-remove-requested(string);
@@ -1655,6 +1666,10 @@ export component AppWindow inherits Window {
             return @tr("The server doesn't accept this type of file: {}", status-attach-name);
         } else if status-kind == "attach-too-large" {
             return @tr("{} is larger than the server allows for this type of file.", status-attach-name);
+        } else if status-kind == "ignore-invalid-text-pattern" {
+            return @tr("The text pattern can't be blank or span more than one line.");
+        } else if status-kind == "ignore-invalid-mask" {
+            return @tr("That mask isn't valid.");
         } else if status-kind == "attach-no-space" {
             return @tr("The server has no room left for {}.", status-attach-name);
         } else if status-kind == "attach-read-failed" {
@@ -3429,19 +3444,21 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                for mask in settings-ignores : HorizontalLayout {
+                for rule in settings-ignores : HorizontalLayout {
                     spacing: 8px;
 
                     Text {
-                        text: mask;
+                        text: rule.text-pattern == "" ? rule.mask : @tr("{} matching {}", rule.mask, rule.text-pattern);
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                         wrap: word-wrap;
                     }
                     CompactButton {
                         text: "🗑  " + @tr("Delete");
-                        a11y-label: @tr("Delete");
-                        clicked => { ignore-remove-requested(mask); }
+                        a11y-label: rule.text-pattern == ""
+                            ? @tr("Delete {}", rule.mask)
+                            : @tr("Delete {} matching {}", rule.mask, rule.text-pattern);
+                        clicked => { ignore-remove-requested(rule.mask, rule.text-pattern); }
                     }
                 }
                 HorizontalLayout {
@@ -3453,15 +3470,37 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                         min-width: 80px;
                     }
+                    LineEdit {
+                        placeholder-text: @tr("Text pattern (optional)");
+                        text <=> new-ignore-pattern;
+                        horizontal-stretch: 1;
+                        min-width: 80px;
+                    }
                     CompactButton {
                         text: "➕  " + @tr("Add");
                         a11y-label: @tr("Add");
-                        enabled: settings-network != "";
+                        enabled: settings-network != "" && new-ignore-mask != "";
                         clicked => {
-                            ignore-add-requested(new-ignore-mask);
+                            ignore-add-requested(new-ignore-mask, new-ignore-pattern);
                             new-ignore-mask = "";
+                            new-ignore-pattern = "";
                         }
                     }
+                }
+                Text {
+                    text: @tr("A text pattern narrows the rule to messages whose text matches it: * and ? are wildcards, the whole text must match (write *word* for “contains”) and case is ignored. Grappa drops the matching messages.");
+                    wrap: word-wrap;
+                    color: palette-muted;
+                }
+                if settings-ignore-error != "" : Text {
+                    text: settings-ignore-error == "invalid-text-pattern"
+                        ? @tr("The text pattern can't be blank or span more than one line.")
+                        : (settings-ignore-error == "invalid-mask"
+                            ? @tr("That mask isn't valid.")
+                            : @tr("Couldn't update the ignore list."));
+                    wrap: word-wrap;
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
                 }
             }
 
