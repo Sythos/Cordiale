@@ -45,14 +45,14 @@ prima di pianificare.
 | Barra inferiore, nicklist colorata, badge eventi, bold mentions, strip formatting, formato data | Sì | Fase 2 | Chiavi `display_prefs`; `date_format` (v29: `auto`/`dmy`/`mdy`/`ymd`, 422 fuori insieme) applicato da un solo percorso di rendering (`cordiale-ui/src/dates.rs`) |
 | Filtro presenza | Sì (probabile collegamento) | Fase 2 | Possibile legame con join-param `presence: false`, non esplicito nel doc |
 | Finestra menzioni | Incerto | — | Presumibilmente derivato client-side |
-| Ignore list, watchlist, alias comandi, perform on connect | Sì, non-admin self-service | Fase 2 (2026-09-19) | **Corretto**: la nota "presumibilmente client-local" era sbagliata, mai verificata — ignores/aliases/perform sono REST server-persistiti (`GET/POST/PUT /networks/:slug/{ignores,perform}`, `GET/PUT /me/settings/aliases`), la watchlist di presenza è REST (`/networks/:slug/notify`), quella per parola chiave è WS (`ch.push("watchlist", ...)`). Tutti e quattro ora implementati in Cordiale (Settings → Ignore List/Aliases/On-Connect Commands/Watch Lists) — dettaglio completo in `docs/protocol-notes.md` §4quater |
+| Ignore list, watchlist, alias comandi, perform on connect | Sì, non-admin self-service | Fase 2 (2026-09-19) | **Corretto**: la nota "presumibilmente client-local" era sbagliata, mai verificata — ignores/aliases/perform sono REST server-persistiti (`GET/POST/PUT /networks/:slug/{ignores,perform}`, `GET/PUT /me/settings/aliases`), la watchlist di presenza è REST (`/networks/:slug/notify`), quella per parola chiave è WS (`ch.push("watchlist", ...)`). Tutti e quattro ora implementati in Cordiale (Settings → Ignore List/Aliases/On-Connect Commands/Watch Lists) — dettaglio completo in `docs/protocol-notes.md` §4quater. Dalla v31 una regola ignore è la coppia `(mask, text_pattern)`: Cordiale legge `entries` (ripiegando su `masks` coi server vecchi), aggiunge e rimuove la coppia esatta, `/ignore <mask> [pattern]` |
 | Inviti | Sì (parziale) | Fase 2 | `window_invited` tra i kind di stato-finestra |
 | Kick | Sì | Fase 1/2 | Kind terminale di stato-finestra |
 | Statusmsg (ops/voice-only) | Sì | Fase 2 | `meta.statusmsg` |
 | CTCP action/query | Sì | Fase 2 | Campo `ctcp_target` |
 | Notice/relay a terzi | Sì | Fase 2 | Campo `notice_target` |
 | Identità ai servizi | Sì | Fase 1 | Evento `session_identity_changed` |
-| Away/auto-away (proprio) | Parziale | Fase 2 | `auto_away_reason_changed` documentato solo per il subject stesso |
+| Away/auto-away (proprio) | Parziale | Fase 2 | `auto_away_reason_changed` documentato solo per il subject stesso; suffisso del nick in auto-away (v32, `GET/PUT /me/settings/away-nick-suffix`, push `away_nick_suffix_changed`, `null` = rinomina spenta) in Settings: il nick mostrato resta quello degli eventi nick, mai `nick + suffisso` |
 | Away dei peer | Incerto | — | Nessun evento documentato (protocol-notes §6.7) |
 | Reason di quit/part personalizzati | Sì | Fase 2 | Evento `quit_part_reason_changed` |
 | Casemapping/chantypes | Sì | Fase 1 | Folding ASCII dei topic, necessario per il modello canale |
@@ -159,7 +159,7 @@ scelta. Stato per area:
 | Chat e roster | Fatto | mIRC multicolore a capo, MODE secondo PREFIX/CHANMODES, DM prima dello snapshot recuperati, evidenziazione delle menzioni |
 | Home | Fatto | Come la HomePane di Cicchetto: benvenuto con la durata della sessione per utente/visitatore, righe dei network (connesse: vai a `$server`, Disconnect con conferma; parcheggiate o fallite: Reconnect, Remove con conferma via `DELETE /session/networks/:slug`, v28, mai offerto ai visitatori), canali in evidenza, "Available to connect" via `POST /session/networks`, Recover identity per i visitatori |
 | Menu Azioni | Fatto | Stanze, archivio, modi utente, silenzia conversazione, radio, cambia account |
-| Admin | Fatto | Compresi i grant dei vhost ai visitatori |
+| Admin | Fatto | Compresi i grant dei vhost ai visitatori; tab Uploads (`GET /admin/uploads`, `DELETE /admin/uploads/:id`): registro con le righe eliminate come storico, budget globale, eliminazione anticipata di un upload attivo con conferma. Nessuna eliminazione per l’utente normale, nessun indicatore di quota personale |
 | Presentazione | Fatto | Avatar GIF/WebP/BMP, badge nativo sulla taskbar di Windows |
 | TOTP, passkey, token client, eliminazione account | Lasciato a Cicchetto | Cicchetto è integrato in Grappa, Cordiale no |
 

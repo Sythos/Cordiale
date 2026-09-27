@@ -2145,6 +2145,50 @@ msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "Impossibile caricare i messaggi del server. I messaggi in diretta potrebbero comunque arrivare."
 
 msgctxt "AppWindow"
+msgid "Nick suffix while auto-away (e.g. |away)"
+msgstr "Suffisso del nick in assenza automatica (es. |away)"
+
+msgctxt "AppWindow"
+msgid "Nick suffix while auto-away"
+msgstr "Suffisso del nick in assenza automatica"
+
+msgctxt "AppWindow"
+msgid "Only automatic away renames you, never /away. Grappa skips the rename when the nick would be too long for the network and keeps the suffix if your bare nick was taken meanwhile, so the nick shown is always the one the network reports."
+msgstr "Solo l'assenza automatica ti rinomina, mai /away. Grappa salta il cambio se il nick sarebbe troppo lungo per la rete e tiene il suffisso se nel frattempo il tuo nick è stato preso, quindi il nick mostrato è sempre quello che riporta la rete."
+
+msgctxt "AppWindow"
+msgid "That nick suffix isn't valid on IRC."
+msgstr "Quel suffisso non è valido in un nick IRC."
+
+msgctxt "AppWindow"
+msgid "The text pattern can't be blank or span more than one line."
+msgstr "Il pattern di testo non può essere vuoto né occupare più di una riga."
+
+msgctxt "AppWindow"
+msgid "That mask isn't valid."
+msgstr "Quella maschera non è valida."
+
+msgctxt "AppWindow"
+msgid "{} matching {}"
+msgstr "{} che corrisponde a {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} matching {}"
+msgstr "Elimina {} che corrisponde a {}"
+
+msgctxt "AppWindow"
+msgid "Text pattern (optional)"
+msgstr "Pattern di testo (facoltativo)"
+
+msgctxt "AppWindow"
+msgid "A text pattern narrows the rule to messages whose text matches it: * and ? are wildcards, the whole text must match (write *word* for “contains”) and case is ignored. Grappa drops the matching messages."
+msgstr "Un pattern di testo limita la regola ai messaggi il cui testo gli corrisponde: * e ? sono caratteri jolly, deve corrispondere tutto il testo (scrivi *parola* per «contiene») e maiuscole e minuscole non contano. Grappa scarta i messaggi che corrispondono."
+
+msgctxt "AppWindow"
+msgid "Couldn't update the ignore list."
+msgstr "Impossibile aggiornare la lista ignorati."
+
+msgctxt "AppWindow"
 msgid "Grappa refused that date format; the saved one is back."
 msgstr "Grappa ha rifiutato quel formato data; è tornato quello salvato."
 
@@ -2315,6 +2359,54 @@ msgstr "Connessione a {}…"
 msgctxt "AppWindow"
 msgid "Connect {}"
 msgstr "Connetti {}"
+
+msgctxt "AppWindow"
+msgid "The uploads registry needs an administrator signed in with a full session."
+msgstr "Il registro dei caricamenti richiede un amministratore con una sessione completa."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete the upload."
+msgstr "Impossibile eliminare il caricamento."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the uploads."
+msgstr "Impossibile leggere l'elenco dei caricamenti."
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {} ({}%)"
+msgstr "Spazio disco: {} su {} ({}%)"
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {}"
+msgstr "Spazio disco: {} su {}"
+
+msgctxt "AppWindow"
+msgid "Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail."
+msgstr "Byte attivi rispetto al limite globale dei caricamenti; le righe eliminate non contano più e restano elencate come storico."
+
+msgctxt "AppWindow"
+msgid "Delete {} before it expires? The file is removed at once; its row stays listed."
+msgstr "Eliminare {} prima della scadenza? Il file viene rimosso subito; la sua riga resta elencata."
+
+msgctxt "AppWindow"
+msgid "No uploads."
+msgstr "Nessun caricamento."
+
+msgctxt "AppWindow"
+msgid "never expires"
+msgstr "non scade"
+
+msgctxt "AppWindow"
+msgid "expires {}"
+msgstr "scade {}"
+
+msgctxt "AppWindow"
+msgid "live"
+msgstr "attivo"
+
+msgctxt "AppWindow"
+msgid "deleted {}"
+msgstr "eliminato {}"
 
 msgctxt "AppWindow"
 msgid "This account's second factor is a passkey, which Cordiale can't use yet. Sign in with a per-client token created in Cicchetto, or use Cicchetto."

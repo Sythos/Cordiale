@@ -2145,6 +2145,50 @@ msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "Impossible de charger les messages du serveur. Les messages en direct peuvent encore arriver."
 
 msgctxt "AppWindow"
+msgid "Nick suffix while auto-away (e.g. |away)"
+msgstr "Suffixe du pseudo en absence automatique (ex. |away)"
+
+msgctxt "AppWindow"
+msgid "Nick suffix while auto-away"
+msgstr "Suffixe du pseudo en absence automatique"
+
+msgctxt "AppWindow"
+msgid "Only automatic away renames you, never /away. Grappa skips the rename when the nick would be too long for the network and keeps the suffix if your bare nick was taken meanwhile, so the nick shown is always the one the network reports."
+msgstr "Seule l'absence automatique te renomme, jamais /away. Grappa saute le changement si le pseudo serait trop long pour le réseau et garde le suffixe si ton pseudo a été pris entre-temps : le pseudo affiché est toujours celui que le réseau indique."
+
+msgctxt "AppWindow"
+msgid "That nick suffix isn't valid on IRC."
+msgstr "Ce suffixe n'est pas valide dans un pseudo IRC."
+
+msgctxt "AppWindow"
+msgid "The text pattern can't be blank or span more than one line."
+msgstr "Le motif de texte ne peut pas être vide ni tenir sur plusieurs lignes."
+
+msgctxt "AppWindow"
+msgid "That mask isn't valid."
+msgstr "Ce masque n'est pas valide."
+
+msgctxt "AppWindow"
+msgid "{} matching {}"
+msgstr "{} correspondant à {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} matching {}"
+msgstr "Supprimer {} correspondant à {}"
+
+msgctxt "AppWindow"
+msgid "Text pattern (optional)"
+msgstr "Motif de texte (facultatif)"
+
+msgctxt "AppWindow"
+msgid "A text pattern narrows the rule to messages whose text matches it: * and ? are wildcards, the whole text must match (write *word* for “contains”) and case is ignored. Grappa drops the matching messages."
+msgstr "Un motif de texte limite la règle aux messages dont le texte y correspond : * et ? sont des jokers, tout le texte doit correspondre (écris *mot* pour « contient ») et la casse est ignorée. Grappa supprime les messages correspondants."
+
+msgctxt "AppWindow"
+msgid "Couldn't update the ignore list."
+msgstr "Impossible de mettre à jour la liste d'ignorés."
+
+msgctxt "AppWindow"
 msgid "Grappa refused that date format; the saved one is back."
 msgstr "Grappa a refusé ce format de date ; celui enregistré est rétabli."
 
@@ -2315,6 +2359,54 @@ msgstr "Connexion à {}…"
 msgctxt "AppWindow"
 msgid "Connect {}"
 msgstr "Connecter {}"
+
+msgctxt "AppWindow"
+msgid "The uploads registry needs an administrator signed in with a full session."
+msgstr "Le registre des fichiers envoyés demande un administrateur connecté avec une session complète."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete the upload."
+msgstr "Impossible de supprimer le fichier envoyé."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the uploads."
+msgstr "Impossible de charger les fichiers envoyés."
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {} ({}%)"
+msgstr "Budget disque : {} sur {} ({} %)"
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {}"
+msgstr "Budget disque : {} sur {}"
+
+msgctxt "AppWindow"
+msgid "Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail."
+msgstr "Octets actifs par rapport au plafond global des envois ; les lignes supprimées ne comptent plus et restent listées comme historique."
+
+msgctxt "AppWindow"
+msgid "Delete {} before it expires? The file is removed at once; its row stays listed."
+msgstr "Supprimer {} avant son expiration ? Le fichier est retiré immédiatement ; sa ligne reste listée."
+
+msgctxt "AppWindow"
+msgid "No uploads."
+msgstr "Aucun fichier envoyé."
+
+msgctxt "AppWindow"
+msgid "never expires"
+msgstr "n'expire jamais"
+
+msgctxt "AppWindow"
+msgid "expires {}"
+msgstr "expire le {}"
+
+msgctxt "AppWindow"
+msgid "live"
+msgstr "actif"
+
+msgctxt "AppWindow"
+msgid "deleted {}"
+msgstr "supprimé le {}"
 
 msgctxt "AppWindow"
 msgid "This account's second factor is a passkey, which Cordiale can't use yet. Sign in with a per-client token created in Cicchetto, or use Cicchetto."

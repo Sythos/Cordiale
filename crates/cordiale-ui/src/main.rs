@@ -22,6 +22,7 @@
 
 slint::include_modules!();
 
+mod admin_uploads;
 mod dates;
 mod home;
 mod player;
@@ -48,6 +49,7 @@ use cordiale_core::credentials::{
 use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
+use cordiale_core::profile::IgnoreEntry;
 use cordiale_core::rest::{
     ActiveThemePair, ArchiveEntry, BootResponse, DateFormat, DirectoryPage, DisplayPrefs,
     LoginRequest, MeResponse, SendMessageRequest,
@@ -184,6 +186,9 @@ enum WorkerCommand {
     AdminUserToggleAdmin(String, bool),
     AdminUserDelete(String),
     AdminVisitorDelete(String),
+    AdminUploadsRefresh,
+    /// Early delete of a live upload, by id (after its confirmation).
+    AdminUploadDelete(String),
     AdminNetworkResetCircuit(String),
     AdminUserCreate {
         name: String,
@@ -251,14 +256,25 @@ enum WorkerCommand {
         ident: String,
         realname: String,
     },
-    IgnoreAdd(String),
-    IgnoreRemove(String),
+    /// An ignore rule of the Settings network: mask and optional text
+    /// pattern, whose pair is the rule's identity (protocol v31).
+    IgnoreAdd {
+        mask: String,
+        text_pattern: Option<String>,
+    },
+    IgnoreRemove {
+        mask: String,
+        text_pattern: Option<String>,
+    },
     PerformSave(String),
     PersonalPrefsSave {
         leave_message: String,
         away_message: String,
         away_delay: String,
         show_peer_profiles: bool,
+        /// The auto-away nick suffix as typed; `None` when the server
+        /// doesn't offer the setting (older than protocol v32).
+        away_nick_suffix: Option<String>,
     },
     DccAutoAcceptToggle(bool),
     AliasAdd {
@@ -550,7 +566,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
-            ui.set_current_channel_modes("".into());
+            ui.set_window_status("".into());
             ui.set_current_window_is_joined(false);
             ui.set_current_server_window(false);
             ui.set_has_selected_channel(false);
@@ -583,7 +599,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
-            ui.set_current_channel_modes("".into());
+            ui.set_window_status("".into());
             ui.set_current_channel_label("".into());
             ui.set_current_window_is_joined(false);
             ui.set_current_server_window(false);
@@ -1185,6 +1201,15 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_user_delete.send(WorkerCommand::AdminUserDelete(user_id.to_string()));
     });
 
+    let tx_for_uploads = worker_tx.clone();
+    ui.on_admin_uploads_requested(move || {
+        let _ = tx_for_uploads.send(WorkerCommand::AdminUploadsRefresh);
+    });
+    let tx_for_upload_delete = worker_tx.clone();
+    ui.on_admin_upload_delete(move |upload_id| {
+        let _ = tx_for_upload_delete.send(WorkerCommand::AdminUploadDelete(upload_id.to_string()));
+    });
+
     let tx_for_visitor_delete = worker_tx.clone();
     ui.on_admin_visitor_delete(move |visitor_id| {
         let _ =
@@ -1452,6 +1477,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 away_message: ui.get_edit_away_message().to_string(),
                 away_delay: ui.get_edit_away_delay().to_string(),
                 show_peer_profiles: ui.get_pref_show_peer_profiles(),
+                away_nick_suffix: ui
+                    .get_away_nick_suffix_supported()
+                    .then(|| ui.get_edit_away_nick_suffix().to_string()),
             });
         }
     });
@@ -1462,13 +1490,19 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let tx_for_ignore_add = worker_tx.clone();
-    ui.on_ignore_add_requested(move |mask| {
-        let _ = tx_for_ignore_add.send(WorkerCommand::IgnoreAdd(mask.to_string()));
+    ui.on_ignore_add_requested(move |mask, pattern| {
+        let _ = tx_for_ignore_add.send(WorkerCommand::IgnoreAdd {
+            mask: mask.trim().to_string(),
+            text_pattern: ignore_pattern_from_ui(&pattern),
+        });
     });
 
     let tx_for_ignore_remove = worker_tx.clone();
-    ui.on_ignore_remove_requested(move |mask| {
-        let _ = tx_for_ignore_remove.send(WorkerCommand::IgnoreRemove(mask.to_string()));
+    ui.on_ignore_remove_requested(move |mask, pattern| {
+        let _ = tx_for_ignore_remove.send(WorkerCommand::IgnoreRemove {
+            mask: mask.to_string(),
+            text_pattern: (!pattern.is_empty()).then(|| pattern.to_string()),
+        });
     });
 
     let tx_for_perform_save = worker_tx.clone();
@@ -1952,6 +1986,9 @@ struct WorkerState {
     admin_events: Vec<String>,
     /// Last `GET /admin/settings`, to tell whether addressing was edited.
     admin_settings: Option<Value>,
+    /// The last `GET /admin/uploads` answer, which decides what may be
+    /// deleted.
+    admin_uploads: Option<cordiale_core::admin::AdminUploadsResponse>,
     /// `/kb` requests waiting for their `resolve_userhost` reply, by ref.
     pending_kickbans: HashMap<String, PendingKickBan>,
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
@@ -2073,6 +2110,10 @@ struct WorkerState {
     /// Display copy of the auto-away text, same shape as `quit_part_reason`
     /// (inner `None`: the server keeps its built-in text).
     auto_away_reason: Option<Option<String>>,
+    /// Display copy of the auto-away nick suffix (protocol v32), same
+    /// shape; inner `None` means the rename is off. Never combined with
+    /// the nick: the actual nick comes from the nick events alone.
+    away_nick_suffix: Option<Option<String>>,
     /// Networks with a `/lusers` awaiting its bundle. The ircd also sends
     /// LUSERS unasked at registration; only a requested bundle is shown,
     /// and each request is consumed by the first matching bundle.
@@ -2173,6 +2214,7 @@ impl WorkerState {
             joined_topics: std::collections::HashSet::new(),
             admin_events: Vec::new(),
             admin_settings: None,
+            admin_uploads: None,
             pending_kickbans: HashMap::new(),
             window_states: HashMap::new(),
             window_failures: HashMap::new(),
@@ -2211,6 +2253,7 @@ impl WorkerState {
             auto_away_debounce: None,
             quit_part_reason: None,
             auto_away_reason: None,
+            away_nick_suffix: None,
             lusers_requested: std::collections::HashSet::new(),
             directory: None,
             dcc_offers: Vec::new(),
@@ -2580,6 +2623,13 @@ async fn run_worker(
                             }
                         }
                         handle_admin_refresh(&state, &ui).await;
+                        handle_admin_uploads_refresh(&mut state, &ui, None).await;
+                    }
+                    Some(WorkerCommand::AdminUploadsRefresh) => {
+                        handle_admin_uploads_refresh(&mut state, &ui, None).await;
+                    }
+                    Some(WorkerCommand::AdminUploadDelete(upload_id)) => {
+                        handle_admin_upload_delete(&mut state, &ui, upload_id).await;
                     }
                     Some(WorkerCommand::AdminDisconnectSession(session_id)) => {
                         handle_admin_disconnect_session(&state, &ui, session_id).await;
@@ -2836,6 +2886,7 @@ async fn run_worker(
                         away_message,
                         away_delay,
                         show_peer_profiles,
+                        away_nick_suffix,
                     }) => {
                         handle_personal_prefs_save(
                             &state,
@@ -2844,6 +2895,7 @@ async fn run_worker(
                             away_message,
                             away_delay,
                             show_peer_profiles,
+                            away_nick_suffix,
                         )
                         .await;
                     }
@@ -2860,21 +2912,25 @@ async fn run_worker(
                             }
                         }
                     }
-                    Some(WorkerCommand::IgnoreAdd(mask)) => {
+                    Some(WorkerCommand::IgnoreAdd { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
-                            let _ = client.add_ignore(token, network, &mask).await;
+                            let result = client
+                                .add_ignore(token, network, &mask, text_pattern.as_deref())
+                                .await;
+                            push_ignore_mutation(&ui, result);
                         }
-                        handle_settings_network_refresh(&state, &ui).await;
                     }
-                    Some(WorkerCommand::IgnoreRemove(mask)) => {
+                    Some(WorkerCommand::IgnoreRemove { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
-                            let _ = client.remove_ignore(token, network, &mask).await;
+                            let result = client
+                                .remove_ignore(token, network, &mask, text_pattern.as_deref())
+                                .await;
+                            push_ignore_mutation(&ui, result);
                         }
-                        handle_settings_network_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::PerformSave(text)) => {
                         if let (Some(client), Some(token), Some(network)) =
@@ -3399,6 +3455,7 @@ async fn finish_connect(
             state.auto_away_debounce = None;
             state.quit_part_reason = None;
             state.auto_away_reason = None;
+            state.away_nick_suffix = None;
             state.lusers_requested.clear();
             state.directory = None;
             state.dcc_offers.clear();
@@ -3878,11 +3935,7 @@ async fn handle_select_channel(
     let lines = state.messages.get(&key).cloned().unwrap_or_default();
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
     let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
-    let channel_modes = state
-        .channel_modes
-        .get(&key)
-        .map(|snapshot| format_channel_modes(&snapshot.modes))
-        .unwrap_or_default();
+    let window_status = window_status_for(state);
     let members = state.members.get(&key).cloned().unwrap_or_default();
     let window_is_joined = !server_window
         && state
@@ -3901,7 +3954,7 @@ async fn handle_select_channel(
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
         ui.set_current_topic(irc_topic.into());
-        ui.set_current_channel_modes(channel_modes.into());
+        ui.set_window_status(window_status.into());
         ui.set_current_window_is_joined(window_is_joined);
         ui.set_current_server_window(server_window);
         ui.set_has_selected_channel(true);
@@ -4088,13 +4141,14 @@ fn show_query_window(
     let query_ready = state.current_query_ready;
     let history_start = state.history_start_reached.contains(key);
     let label = format!("{} — {}", query.network, query.target_nick);
+    let window_status = window_status_for(state);
     let peer_nick = query.target_nick.clone();
     push_peer_away_banner(state, ui);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
         ui.set_current_topic("".into());
-        ui.set_current_channel_modes("".into());
+        ui.set_window_status(window_status.into());
         ui.set_current_window_is_joined(false);
         ui.set_current_server_window(false);
         ui.set_has_selected_channel(true);
@@ -4231,7 +4285,7 @@ async fn handle_dismiss_kicked_channel(
         ui.set_has_selected_channel(false);
         ui.set_current_channel_label("".into());
         ui.set_current_topic("".into());
-        ui.set_current_channel_modes("".into());
+        ui.set_window_status("".into());
         ui.set_current_window_is_joined(false);
         ui.set_current_server_window(false);
         ui.set_can_moderate_members(false);
@@ -4991,13 +5045,40 @@ async fn run_slash_command(
             push_watch_patterns(state, ui);
             Ok(())
         }
-        SlashCommand::Ignore { add: true, mask } => {
-            client.add_ignore(&token, &network, &mask).await.map(|_| ())
+        SlashCommand::Ignore {
+            add,
+            mask,
+            text_pattern,
+        } => {
+            let result = if add {
+                client
+                    .add_ignore(&token, &network, &mask, text_pattern.as_deref())
+                    .await
+            } else {
+                client
+                    .remove_ignore(&token, &network, &mask, text_pattern.as_deref())
+                    .await
+            };
+            // Grappa answers with the resulting list: an open ignore list for
+            // the same network shows it at once, like Cicchetto's mirror.
+            match result {
+                Ok(response) => {
+                    if state.settings_network.as_deref() == Some(network.as_str()) {
+                        push_ignore_entries(ui, response.entries(), "");
+                    }
+                    Ok(())
+                }
+                Err(err) => {
+                    persistence::log_line(&format!("{label} failed: {err:?}"));
+                    let kind = match ignore_error_key(&err) {
+                        "invalid-text-pattern" => "ignore-invalid-text-pattern",
+                        "invalid-mask" => "ignore-invalid-mask",
+                        _ => "command-failed",
+                    };
+                    return set_command_status(ui, kind, label);
+                }
+            }
         }
-        SlashCommand::Ignore { add: false, mask } => client
-            .remove_ignore(&token, &network, &mask)
-            .await
-            .map(|_| ()),
         SlashCommand::Notify(nicks) => client.add_notify_nicks(&token, &network, nicks).await,
         SlashCommand::Beep(None) => {
             if state.notification_prefs.is_none() {
@@ -6754,6 +6835,88 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
     });
 }
 
+/// Loads Admin > Uploads. `error` is shown instead of the load's own
+/// outcome when a delete just failed, so the refreshed list still says so.
+async fn handle_admin_uploads_refresh(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    error: Option<&'static str>,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let (view, load_error) = match client.fetch_admin_uploads(&token).await {
+        Ok(view) => (Some(view), ""),
+        Err(err) => {
+            persistence::log_line(&format!("admin uploads load failed: {err:?}"));
+            let key =
+                admin_uploads::error_key(err.status().map(|status| status.as_u16()), "failed");
+            (None, key)
+        }
+    };
+    state.admin_uploads = view.clone();
+    let error = error.unwrap_or(load_error);
+    let rows = view
+        .as_ref()
+        .map(|view| admin_uploads::upload_rows(view, format_file_size, format_iso_timestamp))
+        .unwrap_or_default();
+    let budget = view.as_ref().map(admin_uploads::budget);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<AdminUploadRow> = rows
+            .into_iter()
+            .map(|row| AdminUploadRow {
+                id: row.id.into(),
+                name: row.name.into(),
+                slug: row.slug.into(),
+                mime: row.mime.into(),
+                size: row.size.into(),
+                subject: row.subject.into(),
+                expires: row.expires.into(),
+                deleted: row.deleted.into(),
+                live: row.live,
+            })
+            .collect();
+        ui.set_admin_uploads(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_admin_uploads_loaded(budget.is_some());
+        if let Some((used, cap, share)) = budget {
+            ui.set_admin_uploads_used(format_file_size(used).into());
+            ui.set_admin_uploads_cap(format_file_size(cap).into());
+            ui.set_admin_uploads_share(
+                share.map_or(-1, |share| i32::try_from(share).unwrap_or(i32::MAX)),
+            );
+        }
+        ui.set_admin_uploads_error(error.into());
+        ui.set_admin_upload_confirm_id("".into());
+        ui.set_admin_upload_confirm_name("".into());
+    });
+}
+
+/// Deletes a live upload before its expiry, then re-reads the registry:
+/// the row stays, now with its deletion time and no Delete button.
+async fn handle_admin_upload_delete(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    upload_id: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    if !admin_uploads::can_delete(state.admin_uploads.as_ref(), &upload_id) {
+        return;
+    }
+    let error = match client.delete_admin_upload(&token, &upload_id).await {
+        Ok(()) => None,
+        Err(err) => {
+            persistence::log_line(&format!("admin upload delete failed: {err:?}"));
+            Some(admin_uploads::error_key(
+                err.status().map(|status| status.as_u16()),
+                "delete-failed",
+            ))
+        }
+    };
+    handle_admin_uploads_refresh(state, ui, error).await;
+}
+
 async fn handle_admin_disconnect_session(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -6773,7 +6936,7 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
         return;
     };
 
-    let ignores = match &state.settings_network {
+    let ignores: Vec<IgnoreEntry> = match &state.settings_network {
         Some(network) => client
             .fetch_ignores(token, network)
             .await
@@ -6831,13 +6994,71 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
 
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let ignores_model: Vec<slint::SharedString> = ignores.into_iter().map(Into::into).collect();
-        ui.set_settings_ignores(Rc::new(slint::VecModel::from(ignores_model)).into());
+        ui.set_settings_ignores(ignore_rows_model(ignores));
+        ui.set_settings_ignore_error("".into());
         ui.set_perform_text(perform_text.into());
         ui.set_settings_aliases(Rc::new(slint::VecModel::from(alias_rows)).into());
         ui.set_settings_vhost_options(Rc::new(slint::VecModel::from(vhost_rows)).into());
         ui.set_pref_dcc_auto_accept(dcc_auto_accept);
     });
+}
+
+/// The ignore list as Slint rows, keeping every pair (two rules may share
+/// a mask).
+fn ignore_rows_model(entries: Vec<IgnoreEntry>) -> slint::ModelRc<IgnoreRow> {
+    let rows: Vec<IgnoreRow> = entries
+        .into_iter()
+        .map(|entry| IgnoreRow {
+            mask: entry.mask.into(),
+            text_pattern: entry.text_pattern.unwrap_or_default().into(),
+        })
+        .collect();
+    Rc::new(slint::VecModel::from(rows)).into()
+}
+
+/// Shows `entries` as the Settings ignore list, with `error` under it.
+fn push_ignore_entries(
+    ui: &slint::Weak<AppWindow>,
+    entries: Vec<IgnoreEntry>,
+    error: &'static str,
+) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_settings_ignores(ignore_rows_model(entries));
+        ui.set_settings_ignore_error(error.into());
+    });
+}
+
+/// A Settings add/remove: the response carries the resulting list, which
+/// is rendered as is; a refusal keeps the list and says why.
+fn push_ignore_mutation(
+    ui: &slint::Weak<AppWindow>,
+    result: Result<cordiale_core::profile::IgnoreMutationResponse, GrappaClientError>,
+) {
+    match result {
+        Ok(response) => push_ignore_entries(ui, response.entries(), ""),
+        Err(err) => {
+            persistence::log_line(&format!("ignore change failed: {err:?}"));
+            let error = ignore_error_key(&err);
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_settings_ignore_error(error.into()));
+        }
+    }
+}
+
+/// Grappa's two 422 codes for an ignore change are distinct because the
+/// user typed two things (protocol v31).
+fn ignore_error_key(err: &GrappaClientError) -> &'static str {
+    match err.code() {
+        Some("invalid_text_pattern") => "invalid-text-pattern",
+        Some("invalid_mask") => "invalid-mask",
+        _ => "failed",
+    }
+}
+
+/// The Settings text-pattern field: blank means no pattern; anything else
+/// goes to Grappa trimmed, and Grappa refuses a CR/LF-bearing one itself.
+fn ignore_pattern_from_ui(pattern: &str) -> Option<String> {
+    let pattern = pattern.trim();
+    (!pattern.is_empty()).then(|| pattern.to_string())
 }
 
 /// Loads the account's away/leave messages, auto-away delay and
@@ -6847,13 +7068,25 @@ async fn load_personal_prefs(client: &GrappaClient, token: &str, ui: &slint::Wea
     let away = client.fetch_auto_away_reason(token).await;
     let delay = client.fetch_auto_away_debounce(token).await;
     let peers = client.fetch_show_peer_profiles(token).await;
+    // A server older than protocol v32 has no suffix setting: the field is
+    // simply not offered, and the rest of the section still loads.
+    let suffix = client.fetch_away_nick_suffix(token).await;
     let (Ok(leave), Ok(away), Ok(delay), Ok(peers)) = (leave, away, delay, peers) else {
         persistence::log_line("personal settings load failed");
         return;
     };
+    let (suffix_supported, suffix) = match suffix {
+        Ok(suffix) => (true, suffix),
+        Err(err) => {
+            persistence::log_line(&format!("away nick suffix not available: {err:?}"));
+            (false, None)
+        }
+    };
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_edit_leave_message(leave.unwrap_or_default().into());
         ui.set_edit_away_message(away.unwrap_or_default().into());
+        ui.set_away_nick_suffix_supported(suffix_supported);
+        ui.set_edit_away_nick_suffix(suffix.unwrap_or_default().into());
         ui.set_edit_away_delay(away_delay_text(delay).into());
         ui.set_pref_show_peer_profiles(peers);
         ui.set_personal_prefs_loaded(true);
@@ -6888,6 +7121,7 @@ async fn handle_personal_prefs_save(
     away_message: String,
     away_delay: String,
     show_peer_profiles: bool,
+    away_nick_suffix: Option<String>,
 ) {
     let (Some(client), Some(token)) = (&state.client, &state.token) else {
         return;
@@ -6916,9 +7150,24 @@ async fn handle_personal_prefs_save(
     if let Some(Err(err)) = results.into_iter().find(Result::is_err) {
         persistence::log_line(&format!("personal settings save failed: {err:?}"));
         set_status("personal-prefs-failed");
-    } else {
-        set_status("personal-prefs-saved");
+        return;
     }
+    // Empty switches the rename off. Grappa validates the tail; a refusal
+    // gets its own message rather than the generic one.
+    if let Some(suffix) = away_nick_suffix {
+        let suffix = suffix.trim();
+        if let Err(err) = client
+            .set_away_nick_suffix(token, (!suffix.is_empty()).then_some(suffix))
+            .await
+        {
+            persistence::log_line(&format!("away nick suffix save failed: {err:?}"));
+            set_status(away_nick_suffix_error_key(
+                err.status().map(|status| status.as_u16()),
+            ));
+            return;
+        }
+    }
+    set_status("personal-prefs-saved");
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -7564,6 +7813,10 @@ async fn handle_frame(
         handle_auto_away_reason_changed(state, ui, &frame.topic, &frame.payload);
         return;
     }
+    if payload_kind == "away_nick_suffix_changed" {
+        handle_away_nick_suffix_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
     if payload_kind == "who_reply" {
         handle_who_reply(state, ui, &frame.topic, &frame.payload);
         return;
@@ -7697,6 +7950,7 @@ async fn handle_frame(
     if payload_kind == "umode_changed" {
         handle_umode_changed(state, &frame.topic, &frame.payload);
         push_umode_view(state, ui, false);
+        push_window_status(state, ui);
         return;
     }
     if payload_kind == "supported_umodes_changed" {
@@ -8123,14 +8377,11 @@ fn handle_channel_modes_changed(
     topic: &str,
     payload: &Value,
 ) {
-    let Some((key, label)) = apply_channel_modes_changed(state, topic, payload) else {
+    let Some((key, _label)) = apply_channel_modes_changed(state, topic, payload) else {
         return;
     };
-    if state.current_channel.as_ref() == Some(&key) {
-        let ui = ui.clone();
-        let _ = ui.upgrade_in_event_loop(move |ui| {
-            ui.set_current_channel_modes(label.into());
-        });
+    if state.current_channel.as_ref() == Some(&key) && !state.current_query {
+        push_window_status(state, ui);
     }
 }
 
@@ -8479,6 +8730,56 @@ fn format_channel_modes(modes: &[String]) -> String {
     } else {
         format!("+{}", modes.join(""))
     }
+}
+
+/// The one-line status above the topic (issue #110): the network with its
+/// user modes, then the window with its channel modes, as
+/// `Azzurra +Sir · #grappa +rnt`. Flags come only from a server snapshot
+/// (`umode_changed`, `channel_modes_changed`): none yet, or an empty one,
+/// shows the bare name rather than an invented `+`. A DM or `$server`
+/// window has no channel modes to show.
+fn window_status_line(
+    network: &str,
+    user_modes: Option<&[String]>,
+    window: &str,
+    channel_modes: Option<&[String]>,
+) -> String {
+    let with_modes = |name: &str, modes: Option<&[String]>| {
+        let flags = modes.map(format_channel_modes).unwrap_or_default();
+        if flags.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} {flags}")
+        }
+    };
+    format!(
+        "{} · {}",
+        with_modes(network, user_modes),
+        with_modes(window, channel_modes)
+    )
+}
+
+/// The status line of the window on screen, "" when none is (home).
+fn window_status_for(state: &WorkerState) -> String {
+    let Some((network, window)) = state.current_channel.as_ref() else {
+        return String::new();
+    };
+    let user_modes = state.user_modes_by_network.get(network).map(Vec::as_slice);
+    let channel_modes = if state.current_query || window == SERVER_WINDOW_NAME {
+        None
+    } else {
+        state
+            .channel_modes
+            .get(&(network.clone(), window.clone()))
+            .map(|snapshot| snapshot.modes.as_slice())
+    };
+    window_status_line(network, user_modes, window, channel_modes)
+}
+
+/// Re-renders the status line after a live mode change.
+fn push_window_status(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let status = window_status_for(state);
+    let _ = ui.upgrade_in_event_loop(move |ui| ui.set_window_status(status.into()));
 }
 
 /// Parses Cicchetto's typed `joined` payload from either supported delivery
@@ -10744,7 +11045,7 @@ fn return_home_if_network_selected(
         ui.set_has_selected_channel(false);
         ui.set_current_channel_label("".into());
         ui.set_current_topic("".into());
-        ui.set_current_channel_modes("".into());
+        ui.set_window_status("".into());
         ui.set_current_window_is_joined(false);
         ui.set_current_server_window(false);
         ui.set_current_query(false);
@@ -13767,6 +14068,61 @@ fn handle_auto_away_reason_changed(
     });
 }
 
+/// Status key for a refused auto-away nick suffix: 422 is a tail that isn't
+/// legal in a nick.
+fn away_nick_suffix_error_key(status: Option<u16>) -> &'static str {
+    if status == Some(422) {
+        "away-nick-suffix-invalid"
+    } else {
+        "personal-prefs-failed"
+    }
+}
+
+/// Validates `away_nick_suffix_changed` (always-present, nullable key, on
+/// the subject's own user topic) and records it; `Some(value)` when the
+/// display copy changed. Only the setting moves: the nick itself stays
+/// whatever the nick events say, since Grappa may skip a rename (NICKLEN)
+/// or fail to restore the bare nick.
+fn apply_away_nick_suffix_changed(
+    state: &mut WorkerState,
+    carrier_topic: &str,
+    payload: &Value,
+) -> Option<Option<String>> {
+    let identifier = state.identifier.as_deref()?;
+    let Some(suffix) = parse_nullable_setting_echo(
+        payload,
+        carrier_topic,
+        identifier,
+        "away_nick_suffix_changed",
+        "away_nick_suffix",
+    ) else {
+        persistence::log_line("away_nick_suffix_changed rejected: invalid carrier or payload");
+        return None;
+    };
+    if state.away_nick_suffix.as_ref() == Some(&suffix) {
+        return None;
+    }
+    state.away_nick_suffix = Some(suffix.clone());
+    Some(suffix)
+}
+
+/// Mirrors a suffix saved on any device into the Settings field.
+fn handle_away_nick_suffix_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(suffix) = apply_away_nick_suffix_changed(state, carrier_topic, payload) else {
+        return;
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_away_nick_suffix_supported(true);
+        ui.set_edit_away_nick_suffix(suffix.unwrap_or_default().into());
+    });
+}
+
 /// Mirrors `state.recover_panel` into the sidebar panel. The Slint row model
 /// is built inside the UI-thread closure because `ModelRc` is not `Send`.
 fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
@@ -16606,7 +16962,7 @@ fn clear_closed_query_view(ui: &slint::Weak<AppWindow>) {
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
         ui.set_current_channel_label("".into());
         ui.set_current_topic("".into());
-        ui.set_current_channel_modes("".into());
+        ui.set_window_status("".into());
         ui.set_current_window_is_joined(false);
         ui.set_current_server_window(false);
         ui.set_has_selected_channel(false);
@@ -21352,6 +21708,111 @@ mod tests {
     }
 
     #[test]
+    fn ignore_refusals_name_the_field_the_user_got_wrong() {
+        let rejected = |code: Option<&str>| GrappaClientError::Rejected {
+            status: cordiale_core::client::StatusCode::UNPROCESSABLE_ENTITY,
+            code: code.map(str::to_string),
+        };
+        assert_eq!(
+            ignore_error_key(&rejected(Some("invalid_text_pattern"))),
+            "invalid-text-pattern"
+        );
+        assert_eq!(
+            ignore_error_key(&rejected(Some("invalid_mask"))),
+            "invalid-mask"
+        );
+        assert_eq!(ignore_error_key(&rejected(None)), "failed");
+        assert_eq!(
+            ignore_error_key(&GrappaClientError::InvalidUrl("x".into())),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn a_blank_settings_pattern_is_the_plain_mask_rule() {
+        assert_eq!(ignore_pattern_from_ui(""), None);
+        assert_eq!(ignore_pattern_from_ui("   "), None);
+        assert_eq!(
+            ignore_pattern_from_ui("  <Some Nick>  says * "),
+            Some("<Some Nick>  says *".to_string())
+        );
+    }
+
+    #[test]
+    fn window_status_line_joins_network_and_window_with_their_flags() {
+        let modes = |letters: &[&str]| letters.iter().map(|m| m.to_string()).collect::<Vec<_>>();
+        let user = modes(&["S", "i", "r"]);
+        let channel = modes(&["r", "n", "t"]);
+        assert_eq!(
+            window_status_line("Azzurra", Some(&user), "#grappa", Some(&channel)),
+            "Azzurra +Sir · #grappa +rnt"
+        );
+        // No snapshot yet, or an empty one: no invented `+`.
+        assert_eq!(
+            window_status_line("Azzurra", None, "#grappa", None),
+            "Azzurra · #grappa"
+        );
+        assert_eq!(
+            window_status_line("Azzurra", Some(&[]), "#grappa", Some(&[])),
+            "Azzurra · #grappa"
+        );
+        // A DM or `$server` window carries the user modes only.
+        assert_eq!(
+            window_status_line("Azzurra", Some(&user), "vjt", None),
+            "Azzurra +Sir · vjt"
+        );
+    }
+
+    #[test]
+    fn window_status_follows_the_active_window_and_never_leaks_flags() {
+        let mut state = WorkerState::new();
+        state
+            .user_modes_by_network
+            .insert("azzurra".into(), vec!["i".into(), "r".into()]);
+        state.channel_modes.insert(
+            ("azzurra".into(), "#grappa".into()),
+            ChannelModes {
+                modes: vec!["n".into(), "t".into()],
+                params: HashMap::new(),
+            },
+        );
+        assert_eq!(window_status_for(&state), "");
+
+        state.current_channel = Some(("azzurra".into(), "#grappa".into()));
+        assert_eq!(window_status_for(&state), "azzurra +ir · #grappa +nt");
+
+        // A live channel-mode snapshot replaces the old flags.
+        state.channel_modes.insert(
+            ("azzurra".into(), "#grappa".into()),
+            ChannelModes {
+                modes: vec!["m".into()],
+                params: HashMap::new(),
+            },
+        );
+        assert_eq!(window_status_for(&state), "azzurra +ir · #grappa +m");
+
+        // Another network's window: its own (missing) snapshots, nothing
+        // carried over from the last one.
+        state.current_channel = Some(("libera".into(), "#rust".into()));
+        assert_eq!(window_status_for(&state), "libera · #rust");
+
+        // The server window and a DM show no channel modes, even when a
+        // channel of that name happens to hold a snapshot.
+        state.current_channel = Some(("azzurra".into(), SERVER_WINDOW_NAME.into()));
+        assert_eq!(window_status_for(&state), "azzurra +ir · $server");
+        state.channel_modes.insert(
+            ("azzurra".into(), "vjt".into()),
+            ChannelModes {
+                modes: vec!["s".into()],
+                params: HashMap::new(),
+            },
+        );
+        state.current_channel = Some(("azzurra".into(), "vjt".into()));
+        state.current_query = true;
+        assert_eq!(window_status_for(&state), "azzurra +ir · vjt");
+    }
+
+    #[test]
     fn render_message_formats_a_ctcp_action_as_a_sentence() {
         let inner = serde_json::json!({
             "kind": "action",
@@ -22984,6 +23445,70 @@ mod tests {
             );
         }
         assert!(parse_lusers_bundle(&payload, "grappa:user:other", "vjt").is_none());
+    }
+
+    #[test]
+    fn away_nick_suffix_push_updates_the_setting_and_never_the_nick() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state
+            .own_nicks
+            .insert("libera".to_string(), "vjt".to_string());
+        let topic = "grappa:user:vjt";
+        let push = |value: Value| serde_json::json!({"kind": "away_nick_suffix_changed", "away_nick_suffix": value});
+
+        // Another device sets a suffix: the setting follows...
+        assert_eq!(
+            apply_away_nick_suffix_changed(&mut state, topic, &push(serde_json::json!("|away"))),
+            Some(Some("|away".to_string()))
+        );
+        // ...and the nick stays the one the nick events reported.
+        assert_eq!(
+            state.own_nicks.get("libera").map(String::as_str),
+            Some("vjt")
+        );
+        // The same value again is no change.
+        assert_eq!(
+            apply_away_nick_suffix_changed(&mut state, topic, &push(serde_json::json!("|away"))),
+            None
+        );
+        // `null` is the rename switched off, not a missing value.
+        assert_eq!(
+            apply_away_nick_suffix_changed(&mut state, topic, &push(Value::Null)),
+            Some(None)
+        );
+        // The key is always present; without it, or on another subject's
+        // topic, the push is rejected.
+        assert_eq!(
+            apply_away_nick_suffix_changed(
+                &mut state,
+                topic,
+                &serde_json::json!({"kind": "away_nick_suffix_changed"})
+            ),
+            None
+        );
+        assert_eq!(
+            apply_away_nick_suffix_changed(
+                &mut state,
+                "grappa:user:other",
+                &push(serde_json::json!("|x"))
+            ),
+            None
+        );
+        assert_eq!(state.away_nick_suffix, Some(None));
+    }
+
+    #[test]
+    fn a_refused_nick_suffix_has_its_own_message() {
+        assert_eq!(
+            away_nick_suffix_error_key(Some(422)),
+            "away-nick-suffix-invalid"
+        );
+        assert_eq!(
+            away_nick_suffix_error_key(Some(500)),
+            "personal-prefs-failed"
+        );
+        assert_eq!(away_nick_suffix_error_key(None), "personal-prefs-failed");
     }
 
     #[test]

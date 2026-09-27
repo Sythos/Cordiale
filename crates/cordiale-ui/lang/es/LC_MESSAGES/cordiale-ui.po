@@ -2145,6 +2145,50 @@ msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "No se pudieron cargar los mensajes del servidor. Los mensajes en directo aún pueden llegar."
 
 msgctxt "AppWindow"
+msgid "Nick suffix while auto-away (e.g. |away)"
+msgstr "Sufijo del nick en ausencia automática (p. ej. |away)"
+
+msgctxt "AppWindow"
+msgid "Nick suffix while auto-away"
+msgstr "Sufijo del nick en ausencia automática"
+
+msgctxt "AppWindow"
+msgid "Only automatic away renames you, never /away. Grappa skips the rename when the nick would be too long for the network and keeps the suffix if your bare nick was taken meanwhile, so the nick shown is always the one the network reports."
+msgstr "Solo la ausencia automática te renombra, nunca /away. Grappa omite el cambio si el nick sería demasiado largo para la red y mantiene el sufijo si mientras tanto alguien tomó tu nick, así que el nick mostrado es siempre el que indica la red."
+
+msgctxt "AppWindow"
+msgid "That nick suffix isn't valid on IRC."
+msgstr "Ese sufijo no es válido en un nick de IRC."
+
+msgctxt "AppWindow"
+msgid "The text pattern can't be blank or span more than one line."
+msgstr "El patrón de texto no puede estar vacío ni ocupar más de una línea."
+
+msgctxt "AppWindow"
+msgid "That mask isn't valid."
+msgstr "Esa máscara no es válida."
+
+msgctxt "AppWindow"
+msgid "{} matching {}"
+msgstr "{} que coincide con {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} matching {}"
+msgstr "Eliminar {} que coincide con {}"
+
+msgctxt "AppWindow"
+msgid "Text pattern (optional)"
+msgstr "Patrón de texto (opcional)"
+
+msgctxt "AppWindow"
+msgid "A text pattern narrows the rule to messages whose text matches it: * and ? are wildcards, the whole text must match (write *word* for “contains”) and case is ignored. Grappa drops the matching messages."
+msgstr "Un patrón de texto limita la regla a los mensajes cuyo texto coincide con él: * y ? son comodines, debe coincidir todo el texto (escribe *palabra* para «contiene») y se ignoran mayúsculas y minúsculas. Grappa descarta los mensajes que coinciden."
+
+msgctxt "AppWindow"
+msgid "Couldn't update the ignore list."
+msgstr "No se pudo actualizar la lista de ignorados."
+
+msgctxt "AppWindow"
 msgid "Grappa refused that date format; the saved one is back."
 msgstr "Grappa rechazó ese formato de fecha; vuelve el guardado."
 
@@ -2315,6 +2359,54 @@ msgstr "Conectando {}…"
 msgctxt "AppWindow"
 msgid "Connect {}"
 msgstr "Conectar {}"
+
+msgctxt "AppWindow"
+msgid "The uploads registry needs an administrator signed in with a full session."
+msgstr "El registro de subidas requiere un administrador con una sesión completa."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete the upload."
+msgstr "No se pudo eliminar la subida."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the uploads."
+msgstr "No se pudieron cargar las subidas."
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {} ({}%)"
+msgstr "Presupuesto de disco: {} de {} ({} %)"
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {}"
+msgstr "Presupuesto de disco: {} de {}"
+
+msgctxt "AppWindow"
+msgid "Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail."
+msgstr "Bytes activos frente al límite global de subidas; las filas eliminadas ya no cuentan y siguen listadas como historial."
+
+msgctxt "AppWindow"
+msgid "Delete {} before it expires? The file is removed at once; its row stays listed."
+msgstr "¿Eliminar {} antes de que caduque? El archivo se quita en el acto; su fila sigue listada."
+
+msgctxt "AppWindow"
+msgid "No uploads."
+msgstr "No hay subidas."
+
+msgctxt "AppWindow"
+msgid "never expires"
+msgstr "no caduca"
+
+msgctxt "AppWindow"
+msgid "expires {}"
+msgstr "caduca el {}"
+
+msgctxt "AppWindow"
+msgid "live"
+msgstr "activo"
+
+msgctxt "AppWindow"
+msgid "deleted {}"
+msgstr "eliminado el {}"
 
 msgctxt "AppWindow"
 msgid "This account's second factor is a passkey, which Cordiale can't use yet. Sign in with a per-client token created in Cicchetto, or use Cicchetto."
