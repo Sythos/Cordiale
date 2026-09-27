@@ -121,6 +121,63 @@ pub struct MeResponse {
     /// The account name, for a user subject.
     #[serde(default)]
     pub name: Option<String>,
+    /// A visitor's services registration (identity-wide: true when any of
+    /// its networks holds a credential with a committed secret). Absent for
+    /// a user.
+    #[serde(default)]
+    pub registered: Option<bool>,
+    /// The home page's data (`home_data`), populated for both subject kinds.
+    #[serde(default)]
+    pub home_data: Option<HomeData>,
+}
+
+/// `home_data` on `GET /me`: the subject's attached networks as home rows,
+/// plus the networks it may attach with one tap (`POST /session/networks`),
+/// which includes its own detached bindings (protocol v28).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct HomeData {
+    #[serde(default)]
+    pub networks: Vec<HomeNetworkRow>,
+    #[serde(default)]
+    pub available_networks: Vec<AvailableNetworkRow>,
+}
+
+/// One attached network on the home page.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct HomeNetworkRow {
+    pub slug: String,
+    #[serde(default)]
+    pub nick: String,
+    /// `connected`, `failing`, `parked` or `failed`.
+    #[serde(default)]
+    pub connection_state: String,
+    #[serde(default)]
+    pub connection_state_reason: Option<String>,
+    /// The credential carries a NickServ secret, so `/recover` has
+    /// something to identify with.
+    #[serde(default)]
+    pub recoverable: bool,
+}
+
+/// A network the subject can attach from the home page.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AvailableNetworkRow {
+    pub slug: String,
+}
+
+/// One operator-curated channel of `GET /networks/:slug/featured`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct FeaturedChannel {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Response body of `GET /networks/:slug/featured`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct FeaturedChannelsResponse {
+    #[serde(default)]
+    pub(crate) channels: Vec<FeaturedChannel>,
 }
 
 impl MeResponse {
@@ -469,6 +526,52 @@ mod tests {
         assert!(me.read_cursors.is_null());
         assert!(me.unread_counts.is_null());
         assert!(me.badge_count.is_null());
+    }
+
+    #[test]
+    fn me_response_reads_home_data_rows_and_available_networks() {
+        let me: MeResponse = serde_json::from_value(serde_json::json!({
+            "kind": "visitor",
+            "id": "v1",
+            "registered": true,
+            "home_data": {
+                "networks": [{
+                    "slug": "azzurra",
+                    "nick": "guest",
+                    "connection_state": "parked",
+                    "connection_state_reason": "user requested",
+                    "connection_state_changed_at": "2026-09-27T10:00:00Z",
+                    "recoverable": true
+                }],
+                "available_networks": [{"slug": "libera"}]
+            }
+        }))
+        .expect("deserialize");
+        assert_eq!(me.registered, Some(true));
+        let home = me.home_data.expect("home_data");
+        assert_eq!(
+            home.networks,
+            vec![HomeNetworkRow {
+                slug: "azzurra".into(),
+                nick: "guest".into(),
+                connection_state: "parked".into(),
+                connection_state_reason: Some("user requested".into()),
+                recoverable: true,
+            }]
+        );
+        assert_eq!(
+            home.available_networks,
+            vec![AvailableNetworkRow {
+                slug: "libera".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn me_response_without_home_data_has_none() {
+        let me: MeResponse = serde_json::from_str(r#"{"kind":"user","name":"vjt"}"#).expect("me");
+        assert_eq!(me.home_data, None);
+        assert_eq!(me.registered, None);
     }
 
     #[test]
