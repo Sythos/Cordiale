@@ -594,6 +594,31 @@ impl GrappaClient {
             .await
     }
 
+    /// `GET /me/settings/away-nick-suffix` (protocol v32): the tail Grappa
+    /// appends to the nick while it holds the subject auto-away, `None`
+    /// when the rename is off (the default). Only Grappa knows whether a
+    /// rename actually happened, so this is a setting, never a nick.
+    pub async fn fetch_away_nick_suffix(
+        &self,
+        token: &str,
+    ) -> Result<Option<String>, GrappaClientError> {
+        let value = self
+            .fetch_setting(token, "away-nick-suffix", "away_nick_suffix")
+            .await?;
+        Ok(value.as_str().map(str::to_string))
+    }
+
+    /// Stores the auto-away nick suffix; `None` switches the rename off.
+    /// A tail that isn't legal in a nick is refused with a 422.
+    pub async fn set_away_nick_suffix(
+        &self,
+        token: &str,
+        suffix: Option<&str>,
+    ) -> Result<(), GrappaClientError> {
+        self.put_setting(token, "away-nick-suffix", "away_nick_suffix", suffix.into())
+            .await
+    }
+
     /// The auto-away delay: `None` for the server default, `Some(0)` when
     /// auto-away is off, otherwise seconds.
     pub async fn fetch_auto_away_debounce(
@@ -3268,6 +3293,91 @@ mod tests {
         assert_eq!(forbidden.status(), Some(StatusCode::FORBIDDEN));
         let missing = client.detach_network("tok", "gone").await.unwrap_err();
         assert_eq!(missing.status(), Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn away_nick_suffix_reads_null_as_rename_off() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"away_nick_suffix": null})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let suffix = GrappaClient::new(mock_server.uri())
+            .fetch_away_nick_suffix("tok")
+            .await
+            .expect("suffix");
+        assert_eq!(suffix, None);
+    }
+
+    #[tokio::test]
+    async fn away_nick_suffix_is_an_error_on_a_server_without_it() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        // The caller hides the setting rather than showing "off".
+        let error = GrappaClient::new(mock_server.uri())
+            .fetch_away_nick_suffix("tok")
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn set_away_nick_suffix_sends_the_tail_or_null() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .and(body_json(serde_json::json!({"away_nick_suffix": "|away"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"away_nick_suffix": "|away"})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .and(body_json(serde_json::json!({"away_nick_suffix": null})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"away_nick_suffix": null})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/away-nick-suffix"))
+            .and(body_json(serde_json::json!({"away_nick_suffix": "a b"})))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "error": "invalid",
+                "field_errors": {"away_nick_suffix": ["is invalid"]}
+            })))
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        client
+            .set_away_nick_suffix("tok", Some("|away"))
+            .await
+            .expect("set");
+        client
+            .set_away_nick_suffix("tok", None)
+            .await
+            .expect("clear");
+        let refused = client
+            .set_away_nick_suffix("tok", Some("a b"))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
     }
 
     #[tokio::test]

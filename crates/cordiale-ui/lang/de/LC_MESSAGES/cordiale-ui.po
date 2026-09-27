@@ -2145,6 +2145,22 @@ msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "Die Servernachrichten konnten nicht geladen werden. Live-Nachrichten können weiterhin eintreffen."
 
 msgctxt "AppWindow"
+msgid "Nick suffix while auto-away (e.g. |away)"
+msgstr "Nick-Suffix bei automatischer Abwesenheit (z. B. |away)"
+
+msgctxt "AppWindow"
+msgid "Nick suffix while auto-away"
+msgstr "Nick-Suffix bei automatischer Abwesenheit"
+
+msgctxt "AppWindow"
+msgid "Only automatic away renames you, never /away. Grappa skips the rename when the nick would be too long for the network and keeps the suffix if your bare nick was taken meanwhile, so the nick shown is always the one the network reports."
+msgstr "Nur die automatische Abwesenheit benennt dich um, nie /away. Grappa lässt die Umbenennung aus, wenn der Nick für das Netzwerk zu lang wäre, und behält das Suffix, falls dein Nick inzwischen vergeben ist – angezeigt wird also immer der Nick, den das Netzwerk meldet."
+
+msgctxt "AppWindow"
+msgid "That nick suffix isn't valid on IRC."
+msgstr "Dieses Suffix ist in einem IRC-Nick ungültig."
+
+msgctxt "AppWindow"
 msgid "The text pattern can't be blank or span more than one line."
 msgstr "Das Textmuster darf nicht leer sein und nicht über mehrere Zeilen gehen."
 
