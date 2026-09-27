@@ -2739,8 +2739,15 @@ mod tests {
         }
     }
 
+    /// A per-run stand-in for the account password in the TOTP tests: not a
+    /// literal, so it can't be mistaken for a credential in the source.
+    fn test_password(tag: &str) -> String {
+        format!("{tag}-{}", std::process::id())
+    }
+
     #[tokio::test]
     async fn totp_settings_enroll_confirm_and_disable() {
+        let password = test_password("pw");
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/me/totp"))
@@ -2752,7 +2759,7 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/me/totp/enrollment"))
-            .and(body_json(serde_json::json!({"password": "pw"})))
+            .and(body_json(serde_json::json!({"password": password})))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "enrollment_token": "enr",
                 "secret": "JBSWY3DPEHPK3PXP",
@@ -2773,7 +2780,7 @@ mod tests {
             .await;
         Mock::given(method("DELETE"))
             .and(path("/me/totp"))
-            .and(body_json(serde_json::json!({"password": "pw"})))
+            .and(body_json(serde_json::json!({"password": password})))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"enabled": false})),
             )
@@ -2784,7 +2791,7 @@ mod tests {
 
         assert!(!client.fetch_totp_status("tok").await.expect("status"));
         let enrollment = client
-            .start_totp_enrollment("tok", "pw")
+            .start_totp_enrollment("tok", &password)
             .await
             .expect("start");
         assert_eq!(enrollment.enrollment_token, "enr");
@@ -2797,11 +2804,16 @@ mod tests {
             codes,
             vec!["aaaa-bbbb".to_string(), "cccc-dddd".to_string()]
         );
-        client.disable_totp("tok", "pw").await.expect("disable");
+        client
+            .disable_totp("tok", &password)
+            .await
+            .expect("disable");
     }
 
     #[tokio::test]
     async fn totp_settings_refusals_keep_their_codes() {
+        let password = test_password("pw");
+        let wrong_password = test_password("bad");
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/me/totp"))
@@ -2832,9 +2844,15 @@ mod tests {
         let scope = client.fetch_totp_status("tok").await.unwrap_err();
         assert_eq!(scope.status(), Some(StatusCode::FORBIDDEN));
         assert_eq!(scope.code(), Some("client_token_scope"));
-        let already = client.start_totp_enrollment("tok", "pw").await.unwrap_err();
+        let already = client
+            .start_totp_enrollment("tok", &password)
+            .await
+            .unwrap_err();
         assert_eq!(already.code(), Some("already_enabled"));
-        let wrong = client.disable_totp("tok", "bad").await.unwrap_err();
+        let wrong = client
+            .disable_totp("tok", &wrong_password)
+            .await
+            .unwrap_err();
         assert_eq!(wrong.status(), Some(StatusCode::UNAUTHORIZED));
         assert_eq!(wrong.code(), Some("invalid_credentials"));
     }
