@@ -4,7 +4,8 @@
 
 Cordiale is a native desktop client for Grappa, written in Rust with Slint.
 It doesn't speak IRC directly: it uses REST and Phoenix Channels/WebSocket
-per Grappa's documented client protocol.
+per Grappa's documented client protocol. It keeps pace with Cicchetto's
+everyday features without bringing a browser engine to chat.
 
 ## Why Cordiale
 
@@ -36,8 +37,9 @@ pattern, as a whole word) gets the mention background, and is bold unless
 
 The Actions menu opens the radio: Cicchetto's stations (SomaFM and a few
 other Icecast streams) play in Cordiale itself, with the same player on
-every platform for MP3, Ogg Vorbis and FLAC streams, a volume control and
-the current track read from the station's feed or the stream's own titles;
+every platform for MP3, Ogg Vorbis and **FLAC** streams (yes, lossless radio
+gets a seat at the table). You also get a volume control and the current
+track, read from the station's feed or the stream's own titles;
 `/np` shares it in the open window. Settings > Radio adds, edits and
 removes your own stations (stream or `.pls`/`.m3u` URLs), kept on this
 device only.
@@ -69,6 +71,17 @@ and turns off automatic sign-in until the next successful sign-in.
 Compared with [Cicchetto on Grappa's main branch](https://github.com/vjt/grappa-irc/tree/main/cicchetto),
 Cordiale also covers:
 
+- **Home and network state:** a Cicchetto-style home view shows active,
+  parked and failed networks, featured channels and networks available to
+  connect. Reconnect or remove a binding there, and see the current network
+  and channel modes above the topic instead of having to guess.
+- **Account security:** password sign-in can finish Grappa's TOTP challenge
+  with an authenticator code or one-time recovery code. Full-session users
+  can enable or disable TOTP in Settings > Security and see new recovery
+  codes once. Passkey-only sign-in still needs Cicchetto or a client token.
+- **The newer Grappa preferences:** date order follows your language or
+  your explicit choice; auto-away nick suffixes are server-backed; ignore
+  rules pair an IRC mask with an optional text pattern.
 - **Themes:** Grappa's gallery themes (or built-in copies) with their
   day/night pairing and wallpapers; the account's own themes can be created,
   edited (27 colors with a live preview, font, wallpaper), copied, deleted
@@ -78,7 +91,9 @@ Cordiale also covers:
   creates, edits and deletes networks and their IRC servers, edits the
   server-wide upload, DCC and addressing settings, binds and unbinds
   credentials, manages vhosts and their grants to accounts and visitors,
-  and follows the live admin event feed.
+  and follows the live admin event feed. Its Uploads tab can inspect the
+  upload budget and remove an active upload early; that is admin-only,
+  not a secret delete button for everyone else.
 - **Settings and watch lists:** the identity editor reads back the nick in
   use on each network, watch-list keywords are read from Grappa, and
   On-Connect Commands take one IRC command per line. Settings >
@@ -114,9 +129,10 @@ Cordiale also covers:
 
 ## Known gaps
 
-- **Account security:** TOTP and passkey management, client tokens and
-  account deletion stay in Cicchetto, which ships inside Grappa; Cordiale
-  is a separate client and leaves them there on purpose.
+- **Account security:** passkey creation/sign-in, creating or managing
+  client tokens, and account deletion still live in Cicchetto. TOTP works
+  in Cordiale with a full password-backed session; a scoped client token
+  cannot use Grappa's account-security endpoints.
 - **Platform limits:**
   - Files dropped on the window reach Cordiale on Windows, macOS and X11,
     not on Wayland, where the windowing layer doesn't report them.

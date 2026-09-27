@@ -22,9 +22,9 @@ prima di pianificare.
 | Bootstrap `/api/config` + `/boot` + `/me` | Sì | Fase 1 | Sequenza di avvio |
 | Phoenix Channels realtime (user/network/channel topic) | Sì | Fase 1 | Vedi protocol-notes §2 |
 | network/channel/query, messaggi, stato realtime | Sì | Fase 1 | Perimetro Fase 1 |
-| TOTP (2FA) | Parziale | — | Richiede sessione browser piena, fuori scope token per-client |
-| Passkey/WebAuthn (2FA) | Parziale | — | Come sopra |
-| Recovery codes | Incerto | — | Nessun endpoint documentato |
+| TOTP (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | Login 202 → /auth/totp/verify; gestione /me/totp con sessione password piena; vedi protocol-notes.md §autenticazione e §superfici solo-account |
+| Passkey/WebAuthn (2FA) | Parziale | — | Cicchetto usa l'origine HTTPS di Grappa; un client nativo richiede un handoff browser o un flusso WebAuthn d'origine verificato |
+| Recovery codes | Verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | /auth/totp/verify accetta anche recovery code; codici nuovi mostrati una volta dopo /me/totp/enrollment/confirm; vedi protocol-notes.md |
 | Eliminazione account | Sì (`DELETE /me`) | — | Superficie solo-account, fuori scope token per-client |
 | Registrazione nuovo account | No / non documentato | — | Nessun endpoint di signup nel contratto; da chiarire (protocol-notes §6.4) |
 | Condivisione sessione via QR | Incerto | — | Non menzionato nel contratto |
