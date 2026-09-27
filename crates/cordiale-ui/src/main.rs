@@ -22,6 +22,7 @@
 
 slint::include_modules!();
 
+mod home;
 mod player;
 mod taskbar;
 
@@ -71,6 +72,19 @@ enum WorkerCommand {
         channel: String,
     },
     SelectNetwork(String),
+    /// Home page: parks a connected network (after its confirmation).
+    HomeDisconnect(String),
+    HomeReconnect(String),
+    /// Home page: detaches a network from the session (after confirmation).
+    HomeRemove(String),
+    HomeRecover(String),
+    /// Home page: attaches an available network.
+    HomeConnect(String),
+    /// Home page: a featured channel, joined first when it isn't.
+    HomeFeaturedOpen {
+        network: String,
+        channel: String,
+    },
     PartChannel {
         network: String,
         channel: String,
@@ -558,6 +572,34 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_network = worker_tx.clone();
     ui.on_network_selected(move |network| {
         let _ = tx_for_network.send(WorkerCommand::SelectNetwork(network.to_string()));
+    });
+
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_disconnect(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeDisconnect(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_reconnect(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeReconnect(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_remove(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeRemove(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_recover(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeRecover(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_connect(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeConnect(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_featured_open(move |network, channel| {
+        let _ = tx_for_home.send(WorkerCommand::HomeFeaturedOpen {
+            network: network.to_string(),
+            channel: channel.to_string(),
+        });
     });
 
     let tx_for_part = worker_tx.clone();
@@ -2037,6 +2079,9 @@ struct WorkerState {
     theme_pair: Option<(ThemeChoice, Option<ThemeChoice>)>,
     /// Whether the OS is in dark mode, which picks the night theme.
     system_dark: bool,
+    /// The home page's own state (subject, available networks, row
+    /// errors, featured channels); its rows come from the snapshots above.
+    home: home::HomeState,
 }
 
 impl WorkerState {
@@ -2115,6 +2160,7 @@ impl WorkerState {
             theme_choices: builtin_theme_choices(),
             theme_pair: None,
             system_dark: false,
+            home: home::HomeState::default(),
         }
     }
 }
@@ -2840,6 +2886,7 @@ async fn run_worker(
                         let system_dark = state.system_dark;
                         state = WorkerState::new();
                         state.system_dark = system_dark;
+                        push_home(&state, &ui);
                         // Like Cicchetto, signing out stops the radio.
                         radio.stop();
                         radio_state.stop();
@@ -2858,6 +2905,27 @@ async fn run_worker(
                         state.current_channel = None;
                         state.current_query = false;
                         state.current_query_ready = false;
+                    }
+                    Some(WorkerCommand::HomeDisconnect(network)) => {
+                        home_set_connection_state(&mut state, &ui, network, "parked").await;
+                    }
+                    Some(WorkerCommand::HomeReconnect(network)) => {
+                        home_set_connection_state(&mut state, &ui, network, "connected").await;
+                    }
+                    Some(WorkerCommand::HomeRemove(network)) => {
+                        home_remove_network(&mut state, &ui, network).await;
+                    }
+                    Some(WorkerCommand::HomeRecover(network)) => {
+                        if state.network_ids.contains_key(&network) {
+                            send_user_network_verb(&state, &network, "recover");
+                        }
+                    }
+                    Some(WorkerCommand::HomeConnect(network)) => {
+                        home_connect_network(&mut state, &ui, network).await;
+                    }
+                    Some(WorkerCommand::HomeFeaturedOpen { network, channel }) => {
+                        write_back_read_cursor(&mut state);
+                        home_open_featured(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::MemberModeAction { verb, nick }) => {
                         send_member_mode_action(&state, &verb, &nick);
@@ -3169,6 +3237,8 @@ async fn handle_connect(
             state.current_query = false;
             state.current_query_ready = false;
             state.current_channel = None;
+            state.home = home::HomeState::default();
+            state.home.apply_me(&outcome.me);
             // The Grappa login `subject` is opaque (and absent when reusing
             // a bearer); admin status comes only from the separate `/me`
             // response, where it is a top-level field.
@@ -3323,6 +3393,8 @@ async fn handle_connect(
                         || entries.iter().any(|(n, c, _)| n == network && c == channel)
                 });
             load_color_themes(state, &ui).await;
+            push_home(state, &ui);
+            load_featured_channels(state, &ui).await;
             if let Some((network, channel)) = restore_channel {
                 handle_select_channel(state, &ui, network, channel).await;
             } else if let Some(network) = state
@@ -9960,6 +10032,243 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
         ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
     });
+    push_home(state, &ui);
+}
+
+/// Mirrors the home page. Its rows come from the same snapshots as the
+/// sidebar (attached networks, their connection state and nick, the
+/// services verdict), so the two never disagree; `state.home` adds what
+/// only the home page shows.
+fn push_home(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let inputs: Vec<home::HomeRowInput> = state
+        .network_ids
+        .keys()
+        .map(|network| {
+            let snapshot = state.network_connection_states.get(network);
+            home::HomeRowInput {
+                network: network.clone(),
+                nick: state.own_nicks.get(network).cloned(),
+                state: snapshot.map_or("connected", |snapshot| snapshot.status.wire_name()),
+                reason: snapshot.and_then(|snapshot| snapshot.reason.clone()),
+                identified: state
+                    .session_identities
+                    .get(network)
+                    .is_some_and(|identity| identity.identified),
+            }
+        })
+        .collect();
+    let rows = home::home_rows(&state.home, inputs);
+    let (named_nick, named_network) =
+        home::registered_naming(&state.home, &rows).unwrap_or_default();
+    let session_kind = state.home.session_kind();
+    let available = state.home.available.clone();
+    let connecting = state.home.connecting.clone().unwrap_or_default();
+    let (available_error_network, available_error) =
+        state.home.available_error.clone().unwrap_or_default();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<HomeNetworkRow> = rows
+            .into_iter()
+            .map(|row| {
+                let featured: Vec<HomeFeaturedLink> = row
+                    .featured
+                    .into_iter()
+                    .map(|link| HomeFeaturedLink {
+                        name: link.name.into(),
+                        description: link.description.unwrap_or_default().into(),
+                    })
+                    .collect();
+                HomeNetworkRow {
+                    network: row.network.into(),
+                    nick: row.nick.into(),
+                    state: row.state.into(),
+                    connected: row.connected,
+                    reason: row.reason.into(),
+                    error: row.error.into(),
+                    reconnecting: row.reconnecting,
+                    can_remove: row.can_remove,
+                    can_recover: row.can_recover,
+                    featured: Rc::new(slint::VecModel::from(featured)).into(),
+                    featured_error: row.featured_error.into(),
+                }
+            })
+            .collect();
+        let attached: Vec<slint::SharedString> =
+            rows.iter().map(|row| row.network.clone()).collect();
+        let available: Vec<slint::SharedString> = available.into_iter().map(Into::into).collect();
+        ui.set_home_session_kind(session_kind.into());
+        ui.set_home_named_nick(named_nick.into());
+        ui.set_home_named_network(named_network.into());
+        ui.set_home_networks(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_home_available(Rc::new(slint::VecModel::from(available)).into());
+        ui.set_home_connecting(connecting.into());
+        ui.set_home_available_error(available_error.into());
+        ui.set_home_available_error_network(available_error_network.into());
+        // A confirmation for a network that has since gone is dropped.
+        let pending = ui.get_home_confirm_network();
+        if !pending.is_empty() && !attached.contains(&pending) {
+            ui.set_home_confirm_network("".into());
+            ui.set_home_confirm_kind("".into());
+        }
+    });
+}
+
+/// Fetches the featured channels of every attached network not fetched
+/// yet. A failure leaves the section empty rather than breaking the page,
+/// as in Cicchetto; only a user-initiated join reports its error.
+async fn load_featured_channels(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let mut missing: Vec<String> = state
+        .network_ids
+        .keys()
+        .filter(|network| !state.home.featured.contains_key(*network))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    missing.sort();
+    for network in missing {
+        let channels = match client.fetch_featured_channels(&token, &network).await {
+            Ok(channels) => channels,
+            Err(err) => {
+                persistence::log_line(&format!("featured channels failed: {err:?}"));
+                Vec::new()
+            }
+        };
+        if state.network_ids.contains_key(&network) {
+            state.home.featured.insert(network, channels);
+        }
+    }
+    push_home(state, ui);
+}
+
+/// Home page Disconnect (`parked`) or Reconnect (`connected`). Success is
+/// the row changing on `connection_state_changed`; a failure stays on the
+/// row, never silently.
+async fn home_set_connection_state(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    target: &'static str,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+    let reconnect = target == "connected";
+    state.home.row_errors.remove(&network);
+    if reconnect {
+        state.home.reconnecting.insert(network.clone());
+    }
+    push_home(state, ui);
+    let result = client
+        .set_connection_state(&token, &network, target, None)
+        .await;
+    state.home.reconnecting.remove(&network);
+    if let Err(err) = result {
+        persistence::log_line(&format!("home {target} failed: {err:?}"));
+        let key = if reconnect {
+            "reconnect-failed"
+        } else {
+            "disconnect-failed"
+        };
+        state.home.row_errors.insert(network, key);
+    }
+    push_home(state, ui);
+}
+
+/// Home page Remove: `DELETE /session/networks/:slug` (protocol v28). The
+/// row goes when `network_detached` lands and `/boot` + `/me` are re-read;
+/// a refusal stays on the row so it doesn't just sit there unexplained.
+async fn home_remove_network(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+    state.home.row_errors.remove(&network);
+    push_home(state, ui);
+    if let Err(err) = client.detach_network(&token, &network).await {
+        persistence::log_line(&format!("network remove failed: {err:?}"));
+        let key = home::remove_error_key(err.status().map(|status| status.as_u16()));
+        state.home.row_errors.insert(network, key);
+        push_home(state, ui);
+    }
+}
+
+/// Home page one-tap connect of an available network. `network_attached`
+/// brings the new row; `/me` is re-read here too so the button leaves the
+/// available list even if that push is late.
+async fn home_connect_network(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    if state.home.connecting.is_some() || !state.home.available.contains(&network) {
+        return;
+    }
+    state.home.connecting = Some(network.clone());
+    state.home.available_error = None;
+    push_home(state, ui);
+    let result = client.attach_network(&token, &network).await;
+    state.home.connecting = None;
+    match result {
+        Ok(()) => {
+            if let Ok(me) = client.fetch_me(&token).await {
+                state.home.apply_me(&me);
+            }
+        }
+        Err(err) => {
+            persistence::log_line(&format!("network connect failed: {err:?}"));
+            state.home.available_error = Some((network, "connect-failed"));
+        }
+    }
+    push_home(state, ui);
+}
+
+/// Home page featured channel: joined first when it isn't, then focused,
+/// like Cicchetto (the intent follows the tap). A failed join is shown on
+/// the network's row.
+async fn home_open_featured(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: String,
+) {
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+    state.home.featured_errors.remove(&network);
+    let joined = matches!(
+        state.window_states.get(&(network.clone(), channel.clone())),
+        Some(ChannelWindowState::Joined)
+    );
+    if !joined {
+        let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+            return;
+        };
+        if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
+            persistence::log_line(&format!("featured join failed: {err:?}"));
+            state.home.featured_errors.insert(network, channel);
+            push_home(state, ui);
+            return;
+        }
+    }
+    push_home(state, ui);
+    handle_select_channel(state, ui, network, channel).await;
 }
 
 fn return_home_if_network_selected(
@@ -12409,6 +12718,10 @@ fn apply_network_rest_refresh(
     state.messages = messages;
     state.read_cursors = read_cursors_from_me(&me.read_cursors);
     state.badge_count = normalize_badge_count(Some(&me.badge_count));
+    state.home.apply_me(me);
+    state
+        .home
+        .retain_networks(&next_network_ids.keys().map(String::as_str).collect());
     state.network_ids = next_network_ids;
     state.network_connection_states = network_connection_states_from_entries(&boot.networks);
 
@@ -15509,6 +15822,7 @@ async fn handle_network_lifecycle(
     }
 
     refresh_network_groups(state, ui);
+    load_featured_channels(state, ui).await;
     persistence::log_line(&format!(
         "{} refreshed authoritative state for {network_slug}",
         lifecycle.wire_name()
@@ -22755,6 +23069,8 @@ mod tests {
             kind: None,
             id: None,
             name: None,
+            registered: None,
+            home_data: None,
         };
 
         let mut state = WorkerState::new();
@@ -22863,6 +23179,8 @@ mod tests {
             kind: None,
             id: None,
             name: None,
+            registered: None,
+            home_data: None,
         };
         let actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
         assert_eq!(actions.len(), 4);

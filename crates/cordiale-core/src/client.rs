@@ -42,8 +42,8 @@ use crate::profile::{
 };
 use crate::rest::{
     ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
-    DisplayPrefs, LoginRequest, LoginResponse, MeResponse, SendMessageRequest, ThemeIndex,
-    ThemeWire, UploadResponse,
+    DisplayPrefs, FeaturedChannel, FeaturedChannelsResponse, LoginRequest, LoginResponse,
+    MeResponse, SendMessageRequest, ThemeIndex, ThemeWire, UploadResponse,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -2146,6 +2146,75 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `POST /session/networks` — attaches a network to the caller's own
+    /// session (a one-tap connect from the home page, or the re-attach of a
+    /// detached binding with everything it was detached with). The outcome
+    /// reaches every client as `network_attached`.
+    pub async fn attach_network(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/session/networks", self.base_url);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "network": network_slug }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /networks/:slug/featured` — the operator-curated channels the
+    /// home page suggests for one network.
+    pub async fn fetch_featured_channels(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<Vec<FeaturedChannel>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "featured"]);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<FeaturedChannelsResponse>().await?.channels)
+    }
+
+    /// `DELETE /session/networks/:slug` (protocol v28) — detaches a network
+    /// from the caller's own session: Grappa parks and quits it, then marks
+    /// the binding detached. Nick, SASL user, secrets, perform list and
+    /// autojoin all survive, and `POST /session/networks` on the same slug
+    /// restores them, so this is a remove, not a delete. 204 on success;
+    /// 404 for a slug the deployment doesn't carry or the caller doesn't
+    /// hold attached (one answer for both, by design); 403 for a visitor.
+    /// The outcome reaches every client as `network_detached`.
+    pub async fn detach_network(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["session", "networks", network_slug]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `POST /networks/:slug/channels/:channel/read-cursor` — marks the
     /// window read up to `message_id` (a query window uses the peer's nick
     /// as `channel`). Grappa answers with the stored cursor and broadcasts
@@ -3006,6 +3075,95 @@ mod tests {
             .expect("fetch_admin_sessions");
 
         assert_eq!(sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attach_network_posts_the_slug() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/session/networks"))
+            .and(header("authorization", "Bearer tok"))
+            .and(body_json(serde_json::json!({"network": "libera"})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .attach_network("tok", "libera")
+            .await
+            .expect("attach");
+    }
+
+    #[tokio::test]
+    async fn fetch_featured_channels_reads_names_and_optional_descriptions() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/featured"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "channels": [
+                    {"name": "#grappa", "description": "Support"},
+                    {"name": "#lobby", "description": null}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let channels = GrappaClient::new(mock_server.uri())
+            .fetch_featured_channels("tok", "libera")
+            .await
+            .expect("featured");
+        assert_eq!(
+            channels,
+            vec![
+                FeaturedChannel {
+                    name: "#grappa".into(),
+                    description: Some("Support".into()),
+                },
+                FeaturedChannel {
+                    name: "#lobby".into(),
+                    description: None,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn detach_network_deletes_the_session_binding() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/session/networks/libera"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .detach_network("tok", "libera")
+            .await
+            .expect("detach");
+    }
+
+    #[tokio::test]
+    async fn detach_network_reports_visitor_and_unknown_refusals_by_status() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/session/networks/libera"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/session/networks/gone"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let forbidden = client.detach_network("tok", "libera").await.unwrap_err();
+        assert_eq!(forbidden.status(), Some(StatusCode::FORBIDDEN));
+        let missing = client.detach_network("tok", "gone").await.unwrap_err();
+        assert_eq!(missing.status(), Some(StatusCode::NOT_FOUND));
     }
 
     #[tokio::test]
