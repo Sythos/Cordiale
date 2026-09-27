@@ -157,6 +157,7 @@ scelta. Stato per area:
 | Radio | Fatto | Stazioni di Cicchetto più stazioni personalizzate salvate solo in locale; MP3, Ogg Vorbis, FLAC; `/np` |
 | Comandi | Fatto | `/np`, `/beep`, vista di `/umode` senza argomenti |
 | Chat e roster | Fatto | mIRC multicolore a capo, MODE secondo PREFIX/CHANMODES, DM prima dello snapshot recuperati, evidenziazione delle menzioni |
+| Home | Fatto | Come la HomePane di Cicchetto: benvenuto con la durata della sessione per utente/visitatore, righe dei network (connesse: vai a `$server`, Disconnect con conferma; parcheggiate o fallite: Reconnect, Remove con conferma via `DELETE /session/networks/:slug`, v28, mai offerto ai visitatori), canali in evidenza, "Available to connect" via `POST /session/networks`, Recover identity per i visitatori |
 | Menu Azioni | Fatto | Stanze, archivio, modi utente, silenzia conversazione, radio, cambia account |
 | Admin | Fatto | Compresi i grant dei vhost ai visitatori |
 | Presentazione | Fatto | Avatar GIF/WebP/BMP, badge nativo sulla taskbar di Windows |

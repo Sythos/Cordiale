@@ -977,8 +977,8 @@ msgid "{} is larger than the server allows for this type of file."
 msgstr "{} supera el tamaño que el servidor permite para este tipo de archivo."
 
 msgctxt "AppWindow"
-msgid "The server has no room left for {}."
-msgstr "El servidor no tiene espacio para {}."
+msgid "The upload of {} was refused for lack of space."
+msgstr "La subida de {} fue rechazada por falta de espacio."
 
 msgctxt "AppWindow"
 msgid "Couldn't read {}."
@@ -2175,3 +2175,143 @@ msgstr "Año-mes-día ({})"
 msgctxt "AppWindow"
 msgid "Automatic follows the language of Cordiale."
 msgstr "Automático sigue el idioma de Cordiale."
+
+msgctxt "AppWindow"
+msgid "connected"
+msgstr "conectada"
+
+msgctxt "AppWindow"
+msgid "failing"
+msgstr "con fallos"
+
+msgctxt "AppWindow"
+msgid "parked"
+msgstr "aparcada"
+
+msgctxt "AppWindow"
+msgid "A guest session can't remove {}."
+msgstr "Una sesión de invitado no puede quitar {}."
+
+msgctxt "AppWindow"
+msgid "{} is no longer part of this session."
+msgstr "{} ya no forma parte de esta sesión."
+
+msgctxt "AppWindow"
+msgid "Couldn't remove {}."
+msgstr "No se pudo quitar {}."
+
+msgctxt "AppWindow"
+msgid "Couldn't disconnect {}."
+msgstr "No se pudo desconectar {}."
+
+msgctxt "AppWindow"
+msgid "Couldn't reconnect {}."
+msgstr "No se pudo reconectar {}."
+
+msgctxt "AppWindow"
+msgid "Couldn't connect {}."
+msgstr "No se pudo conectar {}."
+
+msgctxt "AppWindow"
+msgid "Your chat stays connected — always. This device stays signed in for 7 days of inactivity; after that you'll sign back in, but Grappa never drops your IRC connection."
+msgstr "Tu chat sigue conectado, siempre. Este dispositivo sigue con la sesión iniciada durante 7 días de inactividad; después tendrás que volver a entrar, pero Grappa nunca corta tu conexión IRC."
+
+msgctxt "AppWindow"
+msgid "You're registered as {} on {}, so your chat stays connected and your history is kept for good. This device stays signed in for 7 days of inactivity; after that you'll sign back in, but nothing is lost."
+msgstr "Estás registrado como {} en {}, así que tu chat sigue conectado y tu historial se conserva para siempre. Este dispositivo sigue con la sesión iniciada durante 7 días de inactividad; después tendrás que volver a entrar, pero no se pierde nada."
+
+msgctxt "AppWindow"
+msgid "You're registered, so your chat stays connected and your history is kept for good. This device stays signed in for 7 days of inactivity; after that you'll sign back in, but nothing is lost."
+msgstr "Estás registrado, así que tu chat sigue conectado y tu historial se conserva para siempre. Este dispositivo sigue con la sesión iniciada durante 7 días de inactividad; después tendrás que volver a entrar, pero no se pierde nada."
+
+msgctxt "AppWindow"
+msgid "You're chatting as a guest. Your session is kept alive for up to 48 hours of inactivity — after that it expires and everything in it is gone."
+msgstr "Estás chateando como invitado. Tu sesión se mantiene hasta 48 horas de inactividad; después caduca y todo lo que contiene se pierde."
+
+msgctxt "AppWindow"
+msgid "Remove network"
+msgstr "Quitar red"
+
+msgctxt "AppWindow"
+msgid "Disconnect network"
+msgstr "Desconectar red"
+
+msgctxt "AppWindow"
+msgid "Remove {} from your session? Your nick, login details and autojoin channels are kept — connecting it again restores them."
+msgstr "¿Quitar {} de tu sesión? Tu nick, tus datos de acceso y tus canales de autojoin se conservan: al volver a conectarla se restauran."
+
+msgctxt "AppWindow"
+msgid "Disconnect from {}?"
+msgstr "¿Desconectarse de {}?"
+
+msgctxt "AppWindow"
+msgid "Remove"
+msgstr "Quitar"
+
+msgctxt "AppWindow"
+msgid "Yes"
+msgstr "Sí"
+
+msgctxt "AppWindow"
+msgid "Welcome to Grappa"
+msgstr "Bienvenido a Grappa"
+
+msgctxt "AppWindow"
+msgid "Grappa keeps you connected to IRC even while this app is closed. Just open it and you're back in your conversations right where you left off — no reconnecting, nothing lost."
+msgstr "Grappa te mantiene conectado a IRC aunque esta aplicación esté cerrada. Basta con abrirla y vuelves a tus conversaciones justo donde las dejaste: sin reconectar, sin perder nada."
+
+msgctxt "AppWindow"
+msgid "Below are the IRC networks you can chat on."
+msgstr "Estas son las redes IRC en las que puedes chatear."
+
+msgctxt "AppWindow"
+msgid "Pick a network below to get started."
+msgstr "Elige una red abajo para empezar."
+
+msgctxt "AppWindow"
+msgid "No networks bound. Ask the operator to bind one."
+msgstr "No hay redes asociadas. Pide al operador que asocie una."
+
+msgctxt "AppWindow"
+msgid "Disconnect {}"
+msgstr "Desconectar {}"
+
+msgctxt "AppWindow"
+msgid "Reconnect"
+msgstr "Reconectar"
+
+msgctxt "AppWindow"
+msgid "Reconnect {}"
+msgstr "Reconectar {}"
+
+msgctxt "AppWindow"
+msgid "Recover identity"
+msgstr "Recuperar identidad"
+
+msgctxt "AppWindow"
+msgid "Channels worth a look on {}:"
+msgstr "Canales que merecen la pena en {}:"
+
+msgctxt "AppWindow"
+msgid "Open {} on {}"
+msgstr "Abrir {} en {}"
+
+msgctxt "AppWindow"
+msgid "Couldn't join {}."
+msgstr "No se pudo entrar en {}."
+
+msgctxt "AppWindow"
+msgid "Available to connect"
+msgstr "Disponibles para conectar"
+
+msgctxt "AppWindow"
+msgid "Pick a network to connect and start chatting on it."
+msgstr "Elige una red para conectarte y empezar a chatear en ella."
+
+msgctxt "AppWindow"
+msgid "Connecting {}…"
+msgstr "Conectando {}…"
+
+msgctxt "AppWindow"
+msgid "Connect {}"
+msgstr "Conectar {}"
