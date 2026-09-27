@@ -605,14 +605,6 @@ msgid "identification not confirmed"
 msgstr "identificazione non confermata"
 
 msgctxt "AppWindow"
-msgid "{} channels, listed {}."
-msgstr "{} canali, elencati {}."
-
-msgctxt "AppWindow"
-msgid "{} channels, listed {} (may be out of date)."
-msgstr "{} canali, elencati {} (potrebbero non essere aggiornati)."
-
-msgctxt "AppWindow"
 msgid "The server listed no channels."
 msgstr "Il server non ha elencato canali."
 
@@ -901,24 +893,8 @@ msgid "Search channels"
 msgstr "Cerca canali"
 
 msgctxt "AppWindow"
-msgid "Sort by users"
-msgstr "Ordina per utenti"
-
-msgctxt "AppWindow"
-msgid "Sort by name"
-msgstr "Ordina per nome"
-
-msgctxt "AppWindow"
 msgid "Refreshing…"
 msgstr "Aggiornamento in corso…"
-
-msgctxt "AppWindow"
-msgid "{} ({} users)"
-msgstr "{} ({} utenti)"
-
-msgctxt "AppWindow"
-msgid "{} ({} users) — {}"
-msgstr "{} ({} utenti) — {}"
 
 msgctxt "AppWindow"
 msgid "Load more"
@@ -2543,3 +2519,107 @@ msgstr "Impossibile aggiornare l'autenticazione a due fattori."
 msgctxt "AppWindow"
 msgid "Passkeys, client tokens and account deletion are managed in Cicchetto."
 msgstr "Passkey, token client ed eliminazione dell'account si gestiscono in Cicchetto."
+
+msgctxt "AppWindow"
+msgid "Open {}"
+msgstr "Apri {}"
+
+msgctxt "AppWindow"
+msgid "Join {}"
+msgstr "Entra in {}"
+
+msgctxt "AppWindow"
+msgid "{} users"
+msgstr "{} utenti"
+
+msgctxt "AppWindow"
+msgid "{} users — {}"
+msgstr "{} utenti — {}"
+
+msgctxt "AppWindow"
+msgid "featured"
+msgstr "in evidenza"
+
+msgctxt "AppWindow"
+msgid "joined"
+msgstr "dentro"
+
+msgctxt "AppWindow"
+msgid "listing…"
+msgstr "elenco in corso…"
+
+msgctxt "AppWindow"
+msgid "never listed"
+msgstr "mai elencati"
+
+msgctxt "AppWindow"
+msgid "just now"
+msgstr "adesso"
+
+msgctxt "AppWindow"
+msgid "{}m ago"
+msgstr "{} min fa"
+
+msgctxt "AppWindow"
+msgid "{}h ago"
+msgstr "{} h fa"
+
+msgctxt "AppWindow"
+msgid "{}d ago"
+msgstr "{} g fa"
+
+msgctxt "AppWindow"
+msgid "No channels match your search."
+msgstr "Nessun canale corrisponde alla ricerca."
+
+msgctxt "AppWindow"
+msgid "Couldn't join that channel."
+msgstr "Impossibile entrare in quel canale."
+
+msgctxt "AppWindow"
+msgid "Close channel list"
+msgstr "Chiudi l'elenco dei canali"
+
+msgctxt "AppWindow"
+msgid "Search channels…"
+msgstr "Cerca canali…"
+
+msgctxt "AppWindow"
+msgid "Refresh the channel list of {}"
+msgstr "Aggiorna l'elenco dei canali di {}"
+
+msgctxt "AppWindow"
+msgid "{} channels"
+msgstr "{} canali"
+
+msgctxt "AppWindow"
+msgid "Listed {}"
+msgstr "Elencati il {}"
+
+msgctxt "AppWindow"
+msgid "{} — refresh now"
+msgstr "{} — aggiorna ora"
+
+msgctxt "AppWindow"
+msgid "Listed {}, may be out of date. Refresh now"
+msgstr "Elencati il {}, potrebbero non essere aggiornati. Aggiorna ora"
+
+msgctxt "AppWindow"
+msgid "Sort: name"
+msgstr "Ordine: nome"
+
+msgctxt "AppWindow"
+msgid "Sort: users"
+msgstr "Ordine: utenti"
+
+msgctxt "AppWindow"
+msgid "Sorted by name; sort by users"
+msgstr "Ordinati per nome; ordina per utenti"
+
+msgctxt "AppWindow"
+msgid "Sorted by users; sort by name"
+msgstr "Ordinati per utenti; ordina per nome"
+
+msgctxt "AppWindow"
+msgid "Reload"
+msgstr "Ricarica"
