@@ -528,21 +528,25 @@ component DirectoryEntry inherits Rectangle {
         : @tr("{} users — {}", users, topic);
     accessible-action-default => { activated(); }
 
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            focus.focus();
-            root.activated();
-        }
-    }
-
+    // Under the touch area, and not focused by the click itself: otherwise
+    // it takes the first click on a row for focus and only the second one
+    // activates.
     focus := FocusScope {
+        focus-on-click: false;
         key-pressed(event) => {
             if event.text == Key.Return || event.text == " " {
                 root.activated();
                 return accept;
             }
             return reject;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            focus.focus();
+            root.activated();
         }
     }
 
@@ -2450,10 +2454,11 @@ export component AppWindow inherits Window {
 
                         // Channel directory of this network (`/list`),
                         // above its channels like Cicchetto's "channels" row.
-                        if !group.parked : NavButton {
-                            icon: "📇";
-                            label: @tr("Channels");
-                            selected: directory-open && directory-network == group.network;
+                        if !group.parked : Button {
+                            horizontal-stretch: 1;
+                            text: "📇 " + @tr("Channels");
+                            primary: directory-open && directory-network == group.network;
+                            accessible-label: @tr("Channels on {}", group.network);
                             clicked => { directory-open-requested(group.network); }
                         }
 
