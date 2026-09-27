@@ -675,7 +675,9 @@ export component AppWindow inherits Window {
     in property <string> current-topic: "";
     // Compact `+nt` snapshot for the selected channel; empty when unknown or
     // when the server confirms there are no channel modes.
-    in property <string> current-channel-modes: "";
+    // One-line status above the topic: network + user modes, then the
+    // window + channel modes (`Azzurra +Sir · #grappa +rnt`); "" on home.
+    in property <string> window-status: "";
     in property <bool> has-selected-channel: false;
     in property <bool> current-query: false;
     // The peer's nick for the open private window — set together with
@@ -2123,11 +2125,16 @@ export component AppWindow inherits Window {
         VerticalBox {
             spacing: 8px;
 
-            Text {
-                text: current-channel-label;
+            // Truncated on a narrow window; the full line stays the
+            // accessible label.
+            if window-status != "" : Text {
+                text: window-status;
                 font-size: 14px;
                 font-weight: 700;
+                overflow: elide;
                 color: palette-active ? palette-accent : Palette.foreground;
+                accessible-role: AccessibleRole.text;
+                accessible-label: window-status;
             }
             // The layout gives the topic the box's width, so it wraps at word
             // boundaries and the box grows to fit every line.
@@ -2149,10 +2156,6 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                     }
                 }
-            }
-            if current-channel-modes != "" : Text {
-                text: current-channel-modes;
-                font-size: 12px;
             }
             if !current-query && window-note-kind != "" : Rectangle {
                 background: theme == "dark" ? #3a2424 : #fde2e2;

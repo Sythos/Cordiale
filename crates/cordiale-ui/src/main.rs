@@ -467,7 +467,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
-            ui.set_current_channel_modes("".into());
+            ui.set_window_status("".into());
             ui.set_current_window_is_joined(false);
             ui.set_current_server_window(false);
             ui.set_has_selected_channel(false);
@@ -500,7 +500,7 @@ fn main() -> Result<(), slint::PlatformError> {
             let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
-            ui.set_current_channel_modes("".into());
+            ui.set_window_status("".into());
             ui.set_current_channel_label("".into());
             ui.set_current_window_is_joined(false);
             ui.set_current_server_window(false);
@@ -3404,11 +3404,7 @@ async fn handle_select_channel(
     let lines = state.messages.get(&key).cloned().unwrap_or_default();
     let draft = state.drafts.get(&key).cloned().unwrap_or_default();
     let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
-    let channel_modes = state
-        .channel_modes
-        .get(&key)
-        .map(|snapshot| format_channel_modes(&snapshot.modes))
-        .unwrap_or_default();
+    let window_status = window_status_for(state);
     let members = state.members.get(&key).cloned().unwrap_or_default();
     let window_is_joined = !server_window
         && state
@@ -3427,7 +3423,7 @@ async fn handle_select_channel(
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
         ui.set_current_topic(irc_topic.into());
-        ui.set_current_channel_modes(channel_modes.into());
+        ui.set_window_status(window_status.into());
         ui.set_current_window_is_joined(window_is_joined);
         ui.set_current_server_window(server_window);
         ui.set_has_selected_channel(true);
@@ -3614,13 +3610,14 @@ fn show_query_window(
     let query_ready = state.current_query_ready;
     let history_start = state.history_start_reached.contains(key);
     let label = format!("{} — {}", query.network, query.target_nick);
+    let window_status = window_status_for(state);
     let peer_nick = query.target_nick.clone();
     push_peer_away_banner(state, ui);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
         ui.set_current_topic("".into());
-        ui.set_current_channel_modes("".into());
+        ui.set_window_status(window_status.into());
         ui.set_current_window_is_joined(false);
         ui.set_current_server_window(false);
         ui.set_has_selected_channel(true);
@@ -3757,7 +3754,7 @@ async fn handle_dismiss_kicked_channel(
         ui.set_has_selected_channel(false);
         ui.set_current_channel_label("".into());
         ui.set_current_topic("".into());
-        ui.set_current_channel_modes("".into());
+        ui.set_window_status("".into());
         ui.set_current_window_is_joined(false);
         ui.set_current_server_window(false);
         ui.set_can_moderate_members(false);
@@ -7189,6 +7186,7 @@ async fn handle_frame(
     if payload_kind == "umode_changed" {
         handle_umode_changed(state, &frame.topic, &frame.payload);
         push_umode_view(state, ui, false);
+        push_window_status(state, ui);
         return;
     }
     if payload_kind == "supported_umodes_changed" {
@@ -7615,14 +7613,11 @@ fn handle_channel_modes_changed(
     topic: &str,
     payload: &Value,
 ) {
-    let Some((key, label)) = apply_channel_modes_changed(state, topic, payload) else {
+    let Some((key, _label)) = apply_channel_modes_changed(state, topic, payload) else {
         return;
     };
-    if state.current_channel.as_ref() == Some(&key) {
-        let ui = ui.clone();
-        let _ = ui.upgrade_in_event_loop(move |ui| {
-            ui.set_current_channel_modes(label.into());
-        });
+    if state.current_channel.as_ref() == Some(&key) && !state.current_query {
+        push_window_status(state, ui);
     }
 }
 
@@ -7971,6 +7966,56 @@ fn format_channel_modes(modes: &[String]) -> String {
     } else {
         format!("+{}", modes.join(""))
     }
+}
+
+/// The one-line status above the topic (issue #110): the network with its
+/// user modes, then the window with its channel modes, as
+/// `Azzurra +Sir · #grappa +rnt`. Flags come only from a server snapshot
+/// (`umode_changed`, `channel_modes_changed`): none yet, or an empty one,
+/// shows the bare name rather than an invented `+`. A DM or `$server`
+/// window has no channel modes to show.
+fn window_status_line(
+    network: &str,
+    user_modes: Option<&[String]>,
+    window: &str,
+    channel_modes: Option<&[String]>,
+) -> String {
+    let with_modes = |name: &str, modes: Option<&[String]>| {
+        let flags = modes.map(format_channel_modes).unwrap_or_default();
+        if flags.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} {flags}")
+        }
+    };
+    format!(
+        "{} · {}",
+        with_modes(network, user_modes),
+        with_modes(window, channel_modes)
+    )
+}
+
+/// The status line of the window on screen, "" when none is (home).
+fn window_status_for(state: &WorkerState) -> String {
+    let Some((network, window)) = state.current_channel.as_ref() else {
+        return String::new();
+    };
+    let user_modes = state.user_modes_by_network.get(network).map(Vec::as_slice);
+    let channel_modes = if state.current_query || window == SERVER_WINDOW_NAME {
+        None
+    } else {
+        state
+            .channel_modes
+            .get(&(network.clone(), window.clone()))
+            .map(|snapshot| snapshot.modes.as_slice())
+    };
+    window_status_line(network, user_modes, window, channel_modes)
+}
+
+/// Re-renders the status line after a live mode change.
+fn push_window_status(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let status = window_status_for(state);
+    let _ = ui.upgrade_in_event_loop(move |ui| ui.set_window_status(status.into()));
 }
 
 /// Parses Cicchetto's typed `joined` payload from either supported delivery
@@ -9981,7 +10026,7 @@ fn return_home_if_network_selected(
         ui.set_has_selected_channel(false);
         ui.set_current_channel_label("".into());
         ui.set_current_topic("".into());
-        ui.set_current_channel_modes("".into());
+        ui.set_window_status("".into());
         ui.set_current_window_is_joined(false);
         ui.set_current_server_window(false);
         ui.set_current_query(false);
@@ -15853,7 +15898,7 @@ fn clear_closed_query_view(ui: &slint::Weak<AppWindow>) {
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
         ui.set_current_channel_label("".into());
         ui.set_current_topic("".into());
-        ui.set_current_channel_modes("".into());
+        ui.set_window_status("".into());
         ui.set_current_window_is_joined(false);
         ui.set_current_server_window(false);
         ui.set_has_selected_channel(false);
@@ -20544,6 +20589,80 @@ mod tests {
         );
         assert_eq!(attachment_error_status(Some(507)), "attach-no-space");
         assert_eq!(attachment_error_status(None), "attach-failed");
+    }
+
+    #[test]
+    fn window_status_line_joins_network_and_window_with_their_flags() {
+        let modes = |letters: &[&str]| letters.iter().map(|m| m.to_string()).collect::<Vec<_>>();
+        let user = modes(&["S", "i", "r"]);
+        let channel = modes(&["r", "n", "t"]);
+        assert_eq!(
+            window_status_line("Azzurra", Some(&user), "#grappa", Some(&channel)),
+            "Azzurra +Sir · #grappa +rnt"
+        );
+        // No snapshot yet, or an empty one: no invented `+`.
+        assert_eq!(
+            window_status_line("Azzurra", None, "#grappa", None),
+            "Azzurra · #grappa"
+        );
+        assert_eq!(
+            window_status_line("Azzurra", Some(&[]), "#grappa", Some(&[])),
+            "Azzurra · #grappa"
+        );
+        // A DM or `$server` window carries the user modes only.
+        assert_eq!(
+            window_status_line("Azzurra", Some(&user), "vjt", None),
+            "Azzurra +Sir · vjt"
+        );
+    }
+
+    #[test]
+    fn window_status_follows_the_active_window_and_never_leaks_flags() {
+        let mut state = WorkerState::new();
+        state
+            .user_modes_by_network
+            .insert("azzurra".into(), vec!["i".into(), "r".into()]);
+        state.channel_modes.insert(
+            ("azzurra".into(), "#grappa".into()),
+            ChannelModes {
+                modes: vec!["n".into(), "t".into()],
+                params: HashMap::new(),
+            },
+        );
+        assert_eq!(window_status_for(&state), "");
+
+        state.current_channel = Some(("azzurra".into(), "#grappa".into()));
+        assert_eq!(window_status_for(&state), "azzurra +ir · #grappa +nt");
+
+        // A live channel-mode snapshot replaces the old flags.
+        state.channel_modes.insert(
+            ("azzurra".into(), "#grappa".into()),
+            ChannelModes {
+                modes: vec!["m".into()],
+                params: HashMap::new(),
+            },
+        );
+        assert_eq!(window_status_for(&state), "azzurra +ir · #grappa +m");
+
+        // Another network's window: its own (missing) snapshots, nothing
+        // carried over from the last one.
+        state.current_channel = Some(("libera".into(), "#rust".into()));
+        assert_eq!(window_status_for(&state), "libera · #rust");
+
+        // The server window and a DM show no channel modes, even when a
+        // channel of that name happens to hold a snapshot.
+        state.current_channel = Some(("azzurra".into(), SERVER_WINDOW_NAME.into()));
+        assert_eq!(window_status_for(&state), "azzurra +ir · $server");
+        state.channel_modes.insert(
+            ("azzurra".into(), "vjt".into()),
+            ChannelModes {
+                modes: vec!["s".into()],
+                params: HashMap::new(),
+            },
+        );
+        state.current_channel = Some(("azzurra".into(), "vjt".into()));
+        state.current_query = true;
+        assert_eq!(window_status_for(&state), "azzurra +ir · vjt");
     }
 
     #[test]
