@@ -2143,3 +2143,51 @@ msgstr "La finestra del server accetta solo comandi con la barra."
 msgctxt "AppWindow"
 msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "Impossibile caricare i messaggi del server. I messaggi in diretta potrebbero comunque arrivare."
+
+msgctxt "AppWindow"
+msgid "The uploads registry needs an administrator signed in with a full session."
+msgstr "Il registro dei caricamenti richiede un amministratore con una sessione completa."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete the upload."
+msgstr "Impossibile eliminare il caricamento."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the uploads."
+msgstr "Impossibile leggere l'elenco dei caricamenti."
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {} ({}%)"
+msgstr "Spazio disco: {} su {} ({}%)"
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {}"
+msgstr "Spazio disco: {} su {}"
+
+msgctxt "AppWindow"
+msgid "Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail."
+msgstr "Byte attivi rispetto al limite globale dei caricamenti; le righe eliminate non contano più e restano elencate come storico."
+
+msgctxt "AppWindow"
+msgid "Delete {} before it expires? The file is removed at once; its row stays listed."
+msgstr "Eliminare {} prima della scadenza? Il file viene rimosso subito; la sua riga resta elencata."
+
+msgctxt "AppWindow"
+msgid "No uploads."
+msgstr "Nessun caricamento."
+
+msgctxt "AppWindow"
+msgid "never expires"
+msgstr "non scade"
+
+msgctxt "AppWindow"
+msgid "expires {}"
+msgstr "scade {}"
+
+msgctxt "AppWindow"
+msgid "live"
+msgstr "attivo"
+
+msgctxt "AppWindow"
+msgid "deleted {}"
+msgstr "eliminato {}"

@@ -240,6 +240,20 @@ struct AdminVisitorRow {
     visitor-id: string,
 }
 
+// One row of the admin Uploads registry (see `admin_uploads.rs`). A
+// deleted row stays as audit history and has no Delete.
+struct AdminUploadRow {
+    id: string,
+    name: string,
+    slug: string,
+    mime: string,
+    size: string,
+    subject: string,
+    expires: string,
+    deleted: string,
+    live: bool,
+}
+
 // One custom command alias — Settings > Aliases (account-scoped).
 struct AliasRow {
     command: string,
@@ -844,6 +858,17 @@ export component AppWindow inherits Window {
     in property <[AdminUserRow]> admin-users: [];
     in property <[AdminNetworkRow]> admin-networks: [];
     in property <[AdminVisitorRow]> admin-visitors: [];
+    // Admin > Uploads: the registry, and the budget once the server has
+    // answered (`admin-uploads-loaded`). `admin-uploads-error` is
+    // `forbidden`, `failed` or `delete-failed` ("" when none).
+    in property <[AdminUploadRow]> admin-uploads: [];
+    in property <bool> admin-uploads-loaded: false;
+    in property <string> admin-uploads-used: "";
+    in property <string> admin-uploads-cap: "";
+    in property <int> admin-uploads-share: -1;
+    in property <string> admin-uploads-error: "";
+    in-out property <string> admin-upload-confirm-id: "";
+    in-out property <string> admin-upload-confirm-name: "";
     in property <[string]> admin-session-log: [];
     // Live admin feed (`grappa:admin:events`), newest first.
     in property <[string]> admin-events: [];
@@ -1167,6 +1192,8 @@ export component AppWindow inherits Window {
     callback admin-user-toggle-admin(string, bool);
     callback admin-user-delete(string);
     callback admin-visitor-delete(string);
+    callback admin-uploads-requested();
+    callback admin-upload-delete(string); // upload id
     callback admin-network-reset-circuit(string);
     callback admin-reaper-run();
     // Admin writes: new accounts, password resets, network create/edit/delete.
@@ -3663,6 +3690,15 @@ export component AppWindow inherits Window {
                         clicked => { admin-section = "visitors"; }
                     }
                     NavButton {
+                        icon: "📎";
+                        label: @tr("Uploads");
+                        selected: admin-section == "uploads";
+                        clicked => {
+                            admin-section = "uploads";
+                            admin-uploads-requested();
+                        }
+                    }
+                    NavButton {
                         icon: "📜";
                         label: @tr("Session Log");
                         selected: admin-section == "session-log";
@@ -3984,6 +4020,97 @@ export component AppWindow inherits Window {
                             text: "🗑  " + @tr("Delete");
                             a11y-label: @tr("Delete");
                             clicked => { admin-visitor-delete(row.visitor-id); }
+                        }
+                    }
+                }
+
+                if admin-section == "uploads" && admin-uploads-error != "" : Text {
+                    text: admin-uploads-error == "forbidden"
+                        ? @tr("The uploads registry needs an administrator signed in with a full session.")
+                        : (admin-uploads-error == "delete-failed"
+                            ? @tr("Couldn't delete the upload.")
+                            : @tr("Couldn't load the uploads."));
+                    wrap: word-wrap;
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+                // The budget shows only once the server has answered: before
+                // that "0 B of 0 B" would look like a measurement.
+                if admin-section == "uploads" && admin-uploads-loaded : Text {
+                    text: admin-uploads-share >= 0
+                        ? @tr("Disk budget: {} of {} ({}%)", admin-uploads-used, admin-uploads-cap, admin-uploads-share)
+                        : @tr("Disk budget: {} of {}", admin-uploads-used, admin-uploads-cap);
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+                if admin-section == "uploads" && admin-uploads-loaded : Text {
+                    text: @tr("Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail.");
+                    wrap: word-wrap;
+                    color: palette-muted;
+                }
+                if admin-section == "uploads" && admin-upload-confirm-id != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 4px;
+
+                    Text {
+                        text: @tr("Delete {} before it expires? The file is removed at once; its row stays listed.", admin-upload-confirm-name);
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: @tr("Cancel");
+                        init => { self.focus(); }
+                        clicked => {
+                            admin-upload-confirm-id = "";
+                            admin-upload-confirm-name = "";
+                        }
+                    }
+                    Button {
+                        text: @tr("Delete");
+                        clicked => {
+                            admin-upload-delete(admin-upload-confirm-id);
+                            admin-upload-confirm-id = "";
+                            admin-upload-confirm-name = "";
+                        }
+                    }
+                }
+                if admin-section == "uploads" && admin-uploads-loaded && admin-uploads.length == 0 : Text {
+                    text: @tr("No uploads.");
+                    color: palette-muted;
+                }
+                if admin-section == "uploads" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
+                    for row in admin-uploads : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+
+                            Text {
+                                text: (row.live ? "📎  " : "🗑  ") + row.name;
+                                font-weight: 600;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: row.slug + " · " + row.mime + " · " + row.size + " · " + row.subject
+                                    + " · " + (row.expires == "" ? @tr("never expires") : @tr("expires {}", row.expires))
+                                    + " · " + (row.live ? @tr("live") : @tr("deleted {}", row.deleted));
+                                color: palette-muted;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if row.live : CompactButton {
+                            text: "🗑  " + @tr("Delete");
+                            a11y-label: @tr("Delete {}", row.name);
+                            clicked => {
+                                admin-upload-confirm-id = row.id;
+                                admin-upload-confirm-name = row.name;
+                            }
                         }
                     }
                 }

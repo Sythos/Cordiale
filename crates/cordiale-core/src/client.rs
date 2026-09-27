@@ -34,7 +34,7 @@ use serde_json::Value;
 
 use crate::admin::{
     AdminNetworksResponse, AdminOverview, AdminReaperRunResponse, AdminSessionLogResponse,
-    AdminSessionsResponse, AdminUsersResponse, AdminVisitorsResponse,
+    AdminSessionsResponse, AdminUploadsResponse, AdminUsersResponse, AdminVisitorsResponse,
 };
 use crate::profile::{
     AddIgnoreRequest, AliasesView, IgnoreMutationResponse, IgnoresResponse, NetworkIdentityRequest,
@@ -765,6 +765,45 @@ impl GrappaClient {
         url.path_segments_mut()
             .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
             .extend(["admin", "visitors", visitor_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /admin/uploads` — every upload, soft-deleted ones included,
+    /// with live usage against the global budget. Admin with a full session
+    /// only: a per-client token gets 403.
+    pub async fn fetch_admin_uploads(
+        &self,
+        token: &str,
+    ) -> Result<AdminUploadsResponse, GrappaClientError> {
+        let url = format!("{}/admin/uploads", self.base_url);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<AdminUploadsResponse>().await?)
+    }
+
+    /// `DELETE /admin/uploads/:id` — unlinks a live upload before its
+    /// expiry and soft-deletes its row, which stays listed. 204.
+    pub async fn delete_admin_upload(
+        &self,
+        token: &str,
+        upload_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "uploads", upload_id]);
         self.http
             .delete(url)
             .bearer_auth(token)
@@ -3004,6 +3043,78 @@ mod tests {
             .expect("fetch_admin_sessions");
 
         assert_eq!(sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_admin_uploads_keeps_soft_deleted_rows_and_the_budget() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/uploads"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uploads": [
+                    {"id": "u1", "slug": "abcdefghijklmnopqrstuvwxyz", "mime": "image/png",
+                     "bytes": 2048, "original_filename": "cat.png", "subject_kind": "user",
+                     "subject_id": "s1", "expires_at": "2026-10-01T00:00:00Z",
+                     "deleted_at": null, "inserted_at": "2026-09-27T00:00:00Z"},
+                    {"id": "u2", "slug": "zyxwvutsrqponmlkjihgfedcba", "mime": "text/plain",
+                     "bytes": 10, "original_filename": null, "subject_kind": "visitor",
+                     "subject_id": "v1", "expires_at": null,
+                     "deleted_at": "2026-09-27T10:00:00Z", "inserted_at": null}
+                ],
+                "live_bytes_sum": 2048,
+                "global_cap_bytes": 1073741824
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let view = GrappaClient::new(mock_server.uri())
+            .fetch_admin_uploads("tok")
+            .await
+            .expect("uploads");
+        assert_eq!(view.uploads.len(), 2);
+        assert!(view.uploads[0].is_live());
+        assert_eq!(view.uploads[0].display_name(), "cat.png");
+        assert!(!view.uploads[1].is_live());
+        assert_eq!(view.uploads[1].display_name(), "zyxwvutsrqponmlkjihgfedcba");
+        assert_eq!(view.live_bytes_sum, 2048);
+        assert_eq!(view.global_cap_bytes, 1_073_741_824);
+    }
+
+    #[tokio::test]
+    async fn admin_uploads_are_refused_to_a_client_token() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/uploads"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/uploads/u1"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let list = client.fetch_admin_uploads("tok").await.unwrap_err();
+        assert_eq!(list.status(), Some(StatusCode::FORBIDDEN));
+        let delete = client.delete_admin_upload("tok", "u1").await.unwrap_err();
+        assert_eq!(delete.status(), Some(StatusCode::FORBIDDEN));
+    }
+
+    #[tokio::test]
+    async fn delete_admin_upload_targets_the_row_id() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/uploads/u1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        GrappaClient::new(mock_server.uri())
+            .delete_admin_upload("tok", "u1")
+            .await
+            .expect("delete");
     }
 
     #[tokio::test]

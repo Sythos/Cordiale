@@ -158,7 +158,7 @@ scelta. Stato per area:
 | Comandi | Fatto | `/np`, `/beep`, vista di `/umode` senza argomenti |
 | Chat e roster | Fatto | mIRC multicolore a capo, MODE secondo PREFIX/CHANMODES, DM prima dello snapshot recuperati, evidenziazione delle menzioni |
 | Menu Azioni | Fatto | Stanze, archivio, modi utente, silenzia conversazione, radio, cambia account |
-| Admin | Fatto | Compresi i grant dei vhost ai visitatori |
+| Admin | Fatto | Compresi i grant dei vhost ai visitatori; tab Uploads (`GET /admin/uploads`, `DELETE /admin/uploads/:id`): registro con le righe eliminate come storico, budget globale, eliminazione anticipata di un upload attivo con conferma. Nessuna eliminazione per l’utente normale, nessun indicatore di quota personale |
 | Presentazione | Fatto | Avatar GIF/WebP/BMP, badge nativo sulla taskbar di Windows |
 | TOTP, passkey, token client, eliminazione account | Lasciato a Cicchetto | Cicchetto è integrato in Grappa, Cordiale no |
 
