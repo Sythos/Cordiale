@@ -20569,10 +20569,13 @@ mod tests {
             ("de", include_str!("../lang/de/LC_MESSAGES/cordiale-ui.po")),
             ("es", include_str!("../lang/es/LC_MESSAGES/cordiale-ui.po")),
         ] {
+            // Line by line: a Windows checkout may turn the catalogs' line
+            // endings into CRLF, which `lines()` strips like LF.
+            let msgid = format!("msgid \"{MSGID}\"");
             let msgstr = catalog
-                .split(&format!("msgid \"{MSGID}\"\n"))
+                .lines()
+                .skip_while(|line| *line != msgid)
                 .nth(1)
-                .and_then(|rest| rest.lines().next())
                 .unwrap_or_else(|| panic!("{lang}: missing msgid"));
             assert!(
                 msgstr.starts_with("msgstr \"") && msgstr.len() > "msgstr \"\"".len(),
