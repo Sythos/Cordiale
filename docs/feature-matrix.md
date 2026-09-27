@@ -42,10 +42,10 @@ prima di pianificare.
 | Media viewer | No / non documentato | — | Rendering client-side, protocollo consegna solo byte grezzi |
 | Audio dock/mini player | No | — | Puramente client-side |
 | Editor/galleria temi | No | Fase 1/2 (nativo) | Cordiale gestisce temi via design token Slint, non wire protocol |
-| Barra inferiore, nicklist colorata, badge eventi, bold mentions, strip formatting | Sì | Fase 2 | Chiavi `display_prefs` |
+| Barra inferiore, nicklist colorata, badge eventi, bold mentions, strip formatting, formato data | Sì | Fase 2 | Chiavi `display_prefs`; `date_format` (v29: `auto`/`dmy`/`mdy`/`ymd`, 422 fuori insieme) applicato da un solo percorso di rendering (`cordiale-ui/src/dates.rs`) |
 | Filtro presenza | Sì (probabile collegamento) | Fase 2 | Possibile legame con join-param `presence: false`, non esplicito nel doc |
 | Finestra menzioni | Incerto | — | Presumibilmente derivato client-side |
-| Ignore list, watchlist, alias comandi, perform on connect | Sì, non-admin self-service | Fase 2 (2026-09-19) | **Corretto**: la nota "presumibilmente client-local" era sbagliata, mai verificata — ignores/aliases/perform sono REST server-persistiti (`GET/POST/PUT /networks/:slug/{ignores,perform}`, `GET/PUT /me/settings/aliases`), la watchlist di presenza è REST (`/networks/:slug/notify`), quella per parola chiave è WS (`ch.push("watchlist", ...)`). Tutti e quattro ora implementati in Cordiale (Settings → Ignore List/Aliases/On-Connect Commands/Watch Lists) — dettaglio completo in `docs/protocol-notes.md` §4quater |
+| Ignore list, watchlist, alias comandi, perform on connect | Sì, non-admin self-service | Fase 2 (2026-09-19) | **Corretto**: la nota "presumibilmente client-local" era sbagliata, mai verificata — ignores/aliases/perform sono REST server-persistiti (`GET/POST/PUT /networks/:slug/{ignores,perform}`, `GET/PUT /me/settings/aliases`), la watchlist di presenza è REST (`/networks/:slug/notify`), quella per parola chiave è WS (`ch.push("watchlist", ...)`). Tutti e quattro ora implementati in Cordiale (Settings → Ignore List/Aliases/On-Connect Commands/Watch Lists) — dettaglio completo in `docs/protocol-notes.md` §4quater. Dalla v31 una regola ignore è la coppia `(mask, text_pattern)`: Cordiale legge `entries` (ripiegando su `masks` coi server vecchi), aggiunge e rimuove la coppia esatta, `/ignore <mask> [pattern]` |
 | Inviti | Sì (parziale) | Fase 2 | `window_invited` tra i kind di stato-finestra |
 | Kick | Sì | Fase 1/2 | Kind terminale di stato-finestra |
 | Statusmsg (ops/voice-only) | Sì | Fase 2 | `meta.statusmsg` |
@@ -157,6 +157,7 @@ scelta. Stato per area:
 | Radio | Fatto | Stazioni di Cicchetto più stazioni personalizzate salvate solo in locale; MP3, Ogg Vorbis, FLAC; `/np` |
 | Comandi | Fatto | `/np`, `/beep`, vista di `/umode` senza argomenti |
 | Chat e roster | Fatto | mIRC multicolore a capo, MODE secondo PREFIX/CHANMODES, DM prima dello snapshot recuperati, evidenziazione delle menzioni |
+| Home | Fatto | Come la HomePane di Cicchetto: benvenuto con la durata della sessione per utente/visitatore, righe dei network (connesse: vai a `$server`, Disconnect con conferma; parcheggiate o fallite: Reconnect, Remove con conferma via `DELETE /session/networks/:slug`, v28, mai offerto ai visitatori), canali in evidenza, "Available to connect" via `POST /session/networks`, Recover identity per i visitatori |
 | Menu Azioni | Fatto | Stanze, archivio, modi utente, silenzia conversazione, radio, cambia account |
 | Admin | Fatto | Compresi i grant dei vhost ai visitatori |
 | Presentazione | Fatto | Avatar GIF/WebP/BMP, badge nativo sulla taskbar di Windows |
