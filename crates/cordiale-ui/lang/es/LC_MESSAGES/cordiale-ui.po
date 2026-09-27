@@ -977,8 +977,8 @@ msgid "{} is larger than the server allows for this type of file."
 msgstr "{} supera el tamaño que el servidor permite para este tipo de archivo."
 
 msgctxt "AppWindow"
-msgid "The server has no room left for {}."
-msgstr "El servidor no tiene espacio para {}."
+msgid "The upload of {} was refused for lack of space."
+msgstr "La subida de {} fue rechazada por falta de espacio."
 
 msgctxt "AppWindow"
 msgid "Couldn't read {}."
@@ -2143,3 +2143,267 @@ msgstr "La ventana del servidor solo acepta comandos con barra."
 msgctxt "AppWindow"
 msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "No se pudieron cargar los mensajes del servidor. Los mensajes en directo aún pueden llegar."
+
+msgctxt "AppWindow"
+msgid "Nick suffix while auto-away (e.g. |away)"
+msgstr "Sufijo del nick en ausencia automática (p. ej. |away)"
+
+msgctxt "AppWindow"
+msgid "Nick suffix while auto-away"
+msgstr "Sufijo del nick en ausencia automática"
+
+msgctxt "AppWindow"
+msgid "Only automatic away renames you, never /away. Grappa skips the rename when the nick would be too long for the network and keeps the suffix if your bare nick was taken meanwhile, so the nick shown is always the one the network reports."
+msgstr "Solo la ausencia automática te renombra, nunca /away. Grappa omite el cambio si el nick sería demasiado largo para la red y mantiene el sufijo si mientras tanto alguien tomó tu nick, así que el nick mostrado es siempre el que indica la red."
+
+msgctxt "AppWindow"
+msgid "That nick suffix isn't valid on IRC."
+msgstr "Ese sufijo no es válido en un nick de IRC."
+
+msgctxt "AppWindow"
+msgid "The text pattern can't be blank or span more than one line."
+msgstr "El patrón de texto no puede estar vacío ni ocupar más de una línea."
+
+msgctxt "AppWindow"
+msgid "That mask isn't valid."
+msgstr "Esa máscara no es válida."
+
+msgctxt "AppWindow"
+msgid "{} matching {}"
+msgstr "{} que coincide con {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} matching {}"
+msgstr "Eliminar {} que coincide con {}"
+
+msgctxt "AppWindow"
+msgid "Text pattern (optional)"
+msgstr "Patrón de texto (opcional)"
+
+msgctxt "AppWindow"
+msgid "A text pattern narrows the rule to messages whose text matches it: * and ? are wildcards, the whole text must match (write *word* for “contains”) and case is ignored. Grappa drops the matching messages."
+msgstr "Un patrón de texto limita la regla a los mensajes cuyo texto coincide con él: * y ? son comodines, debe coincidir todo el texto (escribe *palabra* para «contiene») y se ignoran mayúsculas y minúsculas. Grappa descarta los mensajes que coinciden."
+
+msgctxt "AppWindow"
+msgid "Couldn't update the ignore list."
+msgstr "No se pudo actualizar la lista de ignorados."
+
+msgctxt "AppWindow"
+msgid "Grappa refused that date format; the saved one is back."
+msgstr "Grappa rechazó ese formato de fecha; vuelve el guardado."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the display preferences."
+msgstr "No se pudieron guardar las preferencias de visualización."
+
+msgctxt "AppWindow"
+msgid "Date format"
+msgstr "Formato de fecha"
+
+msgctxt "AppWindow"
+msgid "Automatic ({})"
+msgstr "Automático ({})"
+
+msgctxt "AppWindow"
+msgid "Day/month/year ({})"
+msgstr "Día/mes/año ({})"
+
+msgctxt "AppWindow"
+msgid "Month/day/year ({})"
+msgstr "Mes/día/año ({})"
+
+msgctxt "AppWindow"
+msgid "Year-month-day ({})"
+msgstr "Año-mes-día ({})"
+
+msgctxt "AppWindow"
+msgid "Automatic follows the language of Cordiale."
+msgstr "Automático sigue el idioma de Cordiale."
+
+msgctxt "AppWindow"
+msgid "connected"
+msgstr "conectada"
+
+msgctxt "AppWindow"
+msgid "failing"
+msgstr "con fallos"
+
+msgctxt "AppWindow"
+msgid "parked"
+msgstr "aparcada"
+
+msgctxt "AppWindow"
+msgid "A guest session can't remove {}."
+msgstr "Una sesión de invitado no puede quitar {}."
+
+msgctxt "AppWindow"
+msgid "{} is no longer part of this session."
+msgstr "{} ya no forma parte de esta sesión."
+
+msgctxt "AppWindow"
+msgid "Couldn't remove {}."
+msgstr "No se pudo quitar {}."
+
+msgctxt "AppWindow"
+msgid "Couldn't disconnect {}."
+msgstr "No se pudo desconectar {}."
+
+msgctxt "AppWindow"
+msgid "Couldn't reconnect {}."
+msgstr "No se pudo reconectar {}."
+
+msgctxt "AppWindow"
+msgid "Couldn't connect {}."
+msgstr "No se pudo conectar {}."
+
+msgctxt "AppWindow"
+msgid "Your chat stays connected — always. This device stays signed in for 7 days of inactivity; after that you'll sign back in, but Grappa never drops your IRC connection."
+msgstr "Tu chat sigue conectado, siempre. Este dispositivo sigue con la sesión iniciada durante 7 días de inactividad; después tendrás que volver a entrar, pero Grappa nunca corta tu conexión IRC."
+
+msgctxt "AppWindow"
+msgid "You're registered as {} on {}, so your chat stays connected and your history is kept for good. This device stays signed in for 7 days of inactivity; after that you'll sign back in, but nothing is lost."
+msgstr "Estás registrado como {} en {}, así que tu chat sigue conectado y tu historial se conserva para siempre. Este dispositivo sigue con la sesión iniciada durante 7 días de inactividad; después tendrás que volver a entrar, pero no se pierde nada."
+
+msgctxt "AppWindow"
+msgid "You're registered, so your chat stays connected and your history is kept for good. This device stays signed in for 7 days of inactivity; after that you'll sign back in, but nothing is lost."
+msgstr "Estás registrado, así que tu chat sigue conectado y tu historial se conserva para siempre. Este dispositivo sigue con la sesión iniciada durante 7 días de inactividad; después tendrás que volver a entrar, pero no se pierde nada."
+
+msgctxt "AppWindow"
+msgid "You're chatting as a guest. Your session is kept alive for up to 48 hours of inactivity — after that it expires and everything in it is gone."
+msgstr "Estás chateando como invitado. Tu sesión se mantiene hasta 48 horas de inactividad; después caduca y todo lo que contiene se pierde."
+
+msgctxt "AppWindow"
+msgid "Remove network"
+msgstr "Quitar red"
+
+msgctxt "AppWindow"
+msgid "Disconnect network"
+msgstr "Desconectar red"
+
+msgctxt "AppWindow"
+msgid "Remove {} from your session? Your nick, login details and autojoin channels are kept — connecting it again restores them."
+msgstr "¿Quitar {} de tu sesión? Tu nick, tus datos de acceso y tus canales de autojoin se conservan: al volver a conectarla se restauran."
+
+msgctxt "AppWindow"
+msgid "Disconnect from {}?"
+msgstr "¿Desconectarse de {}?"
+
+msgctxt "AppWindow"
+msgid "Remove"
+msgstr "Quitar"
+
+msgctxt "AppWindow"
+msgid "Yes"
+msgstr "Sí"
+
+msgctxt "AppWindow"
+msgid "Welcome to Grappa"
+msgstr "Bienvenido a Grappa"
+
+msgctxt "AppWindow"
+msgid "Grappa keeps you connected to IRC even while this app is closed. Just open it and you're back in your conversations right where you left off — no reconnecting, nothing lost."
+msgstr "Grappa te mantiene conectado a IRC aunque esta aplicación esté cerrada. Basta con abrirla y vuelves a tus conversaciones justo donde las dejaste: sin reconectar, sin perder nada."
+
+msgctxt "AppWindow"
+msgid "Below are the IRC networks you can chat on."
+msgstr "Estas son las redes IRC en las que puedes chatear."
+
+msgctxt "AppWindow"
+msgid "Pick a network below to get started."
+msgstr "Elige una red abajo para empezar."
+
+msgctxt "AppWindow"
+msgid "No networks bound. Ask the operator to bind one."
+msgstr "No hay redes asociadas. Pide al operador que asocie una."
+
+msgctxt "AppWindow"
+msgid "Disconnect {}"
+msgstr "Desconectar {}"
+
+msgctxt "AppWindow"
+msgid "Reconnect"
+msgstr "Reconectar"
+
+msgctxt "AppWindow"
+msgid "Reconnect {}"
+msgstr "Reconectar {}"
+
+msgctxt "AppWindow"
+msgid "Recover identity"
+msgstr "Recuperar identidad"
+
+msgctxt "AppWindow"
+msgid "Channels worth a look on {}:"
+msgstr "Canales que merecen la pena en {}:"
+
+msgctxt "AppWindow"
+msgid "Open {} on {}"
+msgstr "Abrir {} en {}"
+
+msgctxt "AppWindow"
+msgid "Couldn't join {}."
+msgstr "No se pudo entrar en {}."
+
+msgctxt "AppWindow"
+msgid "Available to connect"
+msgstr "Disponibles para conectar"
+
+msgctxt "AppWindow"
+msgid "Pick a network to connect and start chatting on it."
+msgstr "Elige una red para conectarte y empezar a chatear en ella."
+
+msgctxt "AppWindow"
+msgid "Connecting {}…"
+msgstr "Conectando {}…"
+
+msgctxt "AppWindow"
+msgid "Connect {}"
+msgstr "Conectar {}"
+
+msgctxt "AppWindow"
+msgid "The uploads registry needs an administrator signed in with a full session."
+msgstr "El registro de subidas requiere un administrador con una sesión completa."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete the upload."
+msgstr "No se pudo eliminar la subida."
+
+msgctxt "AppWindow"
+msgid "Couldn't load the uploads."
+msgstr "No se pudieron cargar las subidas."
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {} ({}%)"
+msgstr "Presupuesto de disco: {} de {} ({} %)"
+
+msgctxt "AppWindow"
+msgid "Disk budget: {} of {}"
+msgstr "Presupuesto de disco: {} de {}"
+
+msgctxt "AppWindow"
+msgid "Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail."
+msgstr "Bytes activos frente al límite global de subidas; las filas eliminadas ya no cuentan y siguen listadas como historial."
+
+msgctxt "AppWindow"
+msgid "Delete {} before it expires? The file is removed at once; its row stays listed."
+msgstr "¿Eliminar {} antes de que caduque? El archivo se quita en el acto; su fila sigue listada."
+
+msgctxt "AppWindow"
+msgid "No uploads."
+msgstr "No hay subidas."
+
+msgctxt "AppWindow"
+msgid "never expires"
+msgstr "no caduca"
+
+msgctxt "AppWindow"
+msgid "expires {}"
+msgstr "caduca el {}"
+
+msgctxt "AppWindow"
+msgid "live"
+msgstr "activo"
+
+msgctxt "AppWindow"
+msgid "deleted {}"
+msgstr "eliminado el {}"

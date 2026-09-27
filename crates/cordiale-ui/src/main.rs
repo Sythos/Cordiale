@@ -22,6 +22,9 @@
 
 slint::include_modules!();
 
+mod admin_uploads;
+mod dates;
+mod home;
 mod player;
 mod taskbar;
 
@@ -44,9 +47,10 @@ use cordiale_core::credentials::{
 use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
+use cordiale_core::profile::IgnoreEntry;
 use cordiale_core::rest::{
-    ActiveThemePair, ArchiveEntry, BootResponse, DirectoryPage, DisplayPrefs, LoginRequest,
-    MeResponse, SendMessageRequest,
+    ActiveThemePair, ArchiveEntry, BootResponse, DateFormat, DirectoryPage, DisplayPrefs,
+    LoginRequest, MeResponse, SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::slash::{self, SlashCommand};
@@ -71,6 +75,19 @@ enum WorkerCommand {
         channel: String,
     },
     SelectNetwork(String),
+    /// Home page: parks a connected network (after its confirmation).
+    HomeDisconnect(String),
+    HomeReconnect(String),
+    /// Home page: detaches a network from the session (after confirmation).
+    HomeRemove(String),
+    HomeRecover(String),
+    /// Home page: attaches an available network.
+    HomeConnect(String),
+    /// Home page: a featured channel, joined first when it isn't.
+    HomeFeaturedOpen {
+        network: String,
+        channel: String,
+    },
     PartChannel {
         network: String,
         channel: String,
@@ -153,6 +170,9 @@ enum WorkerCommand {
     AdminUserToggleAdmin(String, bool),
     AdminUserDelete(String),
     AdminVisitorDelete(String),
+    AdminUploadsRefresh,
+    /// Early delete of a live upload, by id (after its confirmation).
+    AdminUploadDelete(String),
     AdminNetworkResetCircuit(String),
     AdminUserCreate {
         name: String,
@@ -220,14 +240,25 @@ enum WorkerCommand {
         ident: String,
         realname: String,
     },
-    IgnoreAdd(String),
-    IgnoreRemove(String),
+    /// An ignore rule of the Settings network: mask and optional text
+    /// pattern, whose pair is the rule's identity (protocol v31).
+    IgnoreAdd {
+        mask: String,
+        text_pattern: Option<String>,
+    },
+    IgnoreRemove {
+        mask: String,
+        text_pattern: Option<String>,
+    },
     PerformSave(String),
     PersonalPrefsSave {
         leave_message: String,
         away_message: String,
         away_delay: String,
         show_peer_profiles: bool,
+        /// The auto-away nick suffix as typed; `None` when the server
+        /// doesn't offer the setting (older than protocol v32).
+        away_nick_suffix: Option<String>,
     },
     DccAutoAcceptToggle(bool),
     AliasAdd {
@@ -294,6 +325,8 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Some(language) = settings.language {
         let _ = slint::select_bundled_translation(language_code(language));
     }
+    dates::set_language(settings.language);
+    push_date_format_examples(&ui);
     ui.set_theme(theme_to_slint(settings.theme));
     ui.invoke_apply_color_scheme();
     // A built-in color theme applies from the first screen; a Grappa one
@@ -387,8 +420,10 @@ fn main() -> Result<(), slint::PlatformError> {
             settings.language = Some(language);
             let _ = persistence::save_settings(&settings);
             let _ = slint::select_bundled_translation(language_code(language));
+            dates::set_language(Some(language));
         }
         if let Some(ui) = weak_for_language.upgrade() {
+            push_date_format_examples(&ui);
             ui.set_screen("connect".into());
         }
     });
@@ -558,6 +593,34 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_network = worker_tx.clone();
     ui.on_network_selected(move |network| {
         let _ = tx_for_network.send(WorkerCommand::SelectNetwork(network.to_string()));
+    });
+
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_disconnect(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeDisconnect(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_reconnect(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeReconnect(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_remove(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeRemove(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_recover(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeRecover(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_network_connect(move |network| {
+        let _ = tx_for_home.send(WorkerCommand::HomeConnect(network.to_string()));
+    });
+    let tx_for_home = worker_tx.clone();
+    ui.on_home_featured_open(move |network, channel| {
+        let _ = tx_for_home.send(WorkerCommand::HomeFeaturedOpen {
+            network: network.to_string(),
+            channel: channel.to_string(),
+        });
     });
 
     let tx_for_part = worker_tx.clone();
@@ -951,6 +1014,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 strip_formatting: Some(ui.get_pref_strip_formatting()),
                 show_event_badge: Some(ui.get_pref_show_event_badge()),
                 bold_mentions: Some(ui.get_pref_bold_mentions()),
+                date_format: ui.get_pref_date_format_set().then(|| {
+                    let index = usize::try_from(ui.get_pref_date_format_index()).unwrap_or(0);
+                    DateFormat::ALL[index.min(DateFormat::ALL.len() - 1)]
+                }),
             };
             let _ = tx_for_prefs.send(WorkerCommand::SaveDisplayPrefs(prefs));
         }
@@ -1068,6 +1135,15 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_user_delete = worker_tx.clone();
     ui.on_admin_user_delete(move |user_id| {
         let _ = tx_for_user_delete.send(WorkerCommand::AdminUserDelete(user_id.to_string()));
+    });
+
+    let tx_for_uploads = worker_tx.clone();
+    ui.on_admin_uploads_requested(move || {
+        let _ = tx_for_uploads.send(WorkerCommand::AdminUploadsRefresh);
+    });
+    let tx_for_upload_delete = worker_tx.clone();
+    ui.on_admin_upload_delete(move |upload_id| {
+        let _ = tx_for_upload_delete.send(WorkerCommand::AdminUploadDelete(upload_id.to_string()));
     });
 
     let tx_for_visitor_delete = worker_tx.clone();
@@ -1337,6 +1413,9 @@ fn main() -> Result<(), slint::PlatformError> {
                 away_message: ui.get_edit_away_message().to_string(),
                 away_delay: ui.get_edit_away_delay().to_string(),
                 show_peer_profiles: ui.get_pref_show_peer_profiles(),
+                away_nick_suffix: ui
+                    .get_away_nick_suffix_supported()
+                    .then(|| ui.get_edit_away_nick_suffix().to_string()),
             });
         }
     });
@@ -1347,13 +1426,19 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     let tx_for_ignore_add = worker_tx.clone();
-    ui.on_ignore_add_requested(move |mask| {
-        let _ = tx_for_ignore_add.send(WorkerCommand::IgnoreAdd(mask.to_string()));
+    ui.on_ignore_add_requested(move |mask, pattern| {
+        let _ = tx_for_ignore_add.send(WorkerCommand::IgnoreAdd {
+            mask: mask.trim().to_string(),
+            text_pattern: ignore_pattern_from_ui(&pattern),
+        });
     });
 
     let tx_for_ignore_remove = worker_tx.clone();
-    ui.on_ignore_remove_requested(move |mask| {
-        let _ = tx_for_ignore_remove.send(WorkerCommand::IgnoreRemove(mask.to_string()));
+    ui.on_ignore_remove_requested(move |mask, pattern| {
+        let _ = tx_for_ignore_remove.send(WorkerCommand::IgnoreRemove {
+            mask: mask.to_string(),
+            text_pattern: (!pattern.is_empty()).then(|| pattern.to_string()),
+        });
     });
 
     let tx_for_perform_save = worker_tx.clone();
@@ -1837,6 +1922,9 @@ struct WorkerState {
     admin_events: Vec<String>,
     /// Last `GET /admin/settings`, to tell whether addressing was edited.
     admin_settings: Option<Value>,
+    /// The last `GET /admin/uploads` answer, which decides what may be
+    /// deleted.
+    admin_uploads: Option<cordiale_core::admin::AdminUploadsResponse>,
     /// `/kb` requests waiting for their `resolve_userhost` reply, by ref.
     pending_kickbans: HashMap<String, PendingKickBan>,
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
@@ -1958,6 +2046,10 @@ struct WorkerState {
     /// Display copy of the auto-away text, same shape as `quit_part_reason`
     /// (inner `None`: the server keeps its built-in text).
     auto_away_reason: Option<Option<String>>,
+    /// Display copy of the auto-away nick suffix (protocol v32), same
+    /// shape; inner `None` means the rename is off. Never combined with
+    /// the nick: the actual nick comes from the nick events alone.
+    away_nick_suffix: Option<Option<String>>,
     /// Networks with a `/lusers` awaiting its bundle. The ircd also sends
     /// LUSERS unasked at registration; only a requested bundle is shown,
     /// and each request is consumed by the first matching bundle.
@@ -2037,6 +2129,9 @@ struct WorkerState {
     theme_pair: Option<(ThemeChoice, Option<ThemeChoice>)>,
     /// Whether the OS is in dark mode, which picks the night theme.
     system_dark: bool,
+    /// The home page's own state (subject, available networks, row
+    /// errors, featured channels); its rows come from the snapshots above.
+    home: home::HomeState,
 }
 
 impl WorkerState {
@@ -2051,6 +2146,7 @@ impl WorkerState {
             joined_topics: std::collections::HashSet::new(),
             admin_events: Vec::new(),
             admin_settings: None,
+            admin_uploads: None,
             pending_kickbans: HashMap::new(),
             window_states: HashMap::new(),
             window_failures: HashMap::new(),
@@ -2089,6 +2185,7 @@ impl WorkerState {
             auto_away_debounce: None,
             quit_part_reason: None,
             auto_away_reason: None,
+            away_nick_suffix: None,
             lusers_requested: std::collections::HashSet::new(),
             directory: None,
             dcc_offers: Vec::new(),
@@ -2115,6 +2212,7 @@ impl WorkerState {
             theme_choices: builtin_theme_choices(),
             theme_pair: None,
             system_dark: false,
+            home: home::HomeState::default(),
         }
     }
 }
@@ -2398,7 +2496,7 @@ async fn run_worker(
                         if let Some(bold) = prefs.bold_mentions {
                             BOLD_MENTIONS.store(bold, std::sync::atomic::Ordering::Relaxed);
                         }
-                        handle_save_display_prefs(&state, prefs).await;
+                        handle_save_display_prefs(&state, &ui, prefs).await;
                         if let Some(key) = state.current_channel.clone() {
                             push_members_update(&state, &ui, &key);
                         }
@@ -2413,6 +2511,13 @@ async fn run_worker(
                             }
                         }
                         handle_admin_refresh(&state, &ui).await;
+                        handle_admin_uploads_refresh(&mut state, &ui, None).await;
+                    }
+                    Some(WorkerCommand::AdminUploadsRefresh) => {
+                        handle_admin_uploads_refresh(&mut state, &ui, None).await;
+                    }
+                    Some(WorkerCommand::AdminUploadDelete(upload_id)) => {
+                        handle_admin_upload_delete(&mut state, &ui, upload_id).await;
                     }
                     Some(WorkerCommand::AdminDisconnectSession(session_id)) => {
                         handle_admin_disconnect_session(&state, &ui, session_id).await;
@@ -2669,6 +2774,7 @@ async fn run_worker(
                         away_message,
                         away_delay,
                         show_peer_profiles,
+                        away_nick_suffix,
                     }) => {
                         handle_personal_prefs_save(
                             &state,
@@ -2677,6 +2783,7 @@ async fn run_worker(
                             away_message,
                             away_delay,
                             show_peer_profiles,
+                            away_nick_suffix,
                         )
                         .await;
                     }
@@ -2693,21 +2800,25 @@ async fn run_worker(
                             }
                         }
                     }
-                    Some(WorkerCommand::IgnoreAdd(mask)) => {
+                    Some(WorkerCommand::IgnoreAdd { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
-                            let _ = client.add_ignore(token, network, &mask).await;
+                            let result = client
+                                .add_ignore(token, network, &mask, text_pattern.as_deref())
+                                .await;
+                            push_ignore_mutation(&ui, result);
                         }
-                        handle_settings_network_refresh(&state, &ui).await;
                     }
-                    Some(WorkerCommand::IgnoreRemove(mask)) => {
+                    Some(WorkerCommand::IgnoreRemove { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.settings_network)
                         {
-                            let _ = client.remove_ignore(token, network, &mask).await;
+                            let result = client
+                                .remove_ignore(token, network, &mask, text_pattern.as_deref())
+                                .await;
+                            push_ignore_mutation(&ui, result);
                         }
-                        handle_settings_network_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::PerformSave(text)) => {
                         if let (Some(client), Some(token), Some(network)) =
@@ -2840,6 +2951,7 @@ async fn run_worker(
                         let system_dark = state.system_dark;
                         state = WorkerState::new();
                         state.system_dark = system_dark;
+                        push_home(&state, &ui);
                         // Like Cicchetto, signing out stops the radio.
                         radio.stop();
                         radio_state.stop();
@@ -2858,6 +2970,27 @@ async fn run_worker(
                         state.current_channel = None;
                         state.current_query = false;
                         state.current_query_ready = false;
+                    }
+                    Some(WorkerCommand::HomeDisconnect(network)) => {
+                        home_set_connection_state(&mut state, &ui, network, "parked").await;
+                    }
+                    Some(WorkerCommand::HomeReconnect(network)) => {
+                        home_set_connection_state(&mut state, &ui, network, "connected").await;
+                    }
+                    Some(WorkerCommand::HomeRemove(network)) => {
+                        home_remove_network(&mut state, &ui, network).await;
+                    }
+                    Some(WorkerCommand::HomeRecover(network)) => {
+                        if state.network_ids.contains_key(&network) {
+                            send_user_network_verb(&state, &network, "recover");
+                        }
+                    }
+                    Some(WorkerCommand::HomeConnect(network)) => {
+                        home_connect_network(&mut state, &ui, network).await;
+                    }
+                    Some(WorkerCommand::HomeFeaturedOpen { network, channel }) => {
+                        write_back_read_cursor(&mut state);
+                        home_open_featured(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::MemberModeAction { verb, nick }) => {
                         send_member_mode_action(&state, &verb, &nick);
@@ -3149,6 +3282,7 @@ async fn handle_connect(
             state.auto_away_debounce = None;
             state.quit_part_reason = None;
             state.auto_away_reason = None;
+            state.away_nick_suffix = None;
             state.lusers_requested.clear();
             state.directory = None;
             state.dcc_offers.clear();
@@ -3169,6 +3303,8 @@ async fn handle_connect(
             state.current_query = false;
             state.current_query_ready = false;
             state.current_channel = None;
+            state.home = home::HomeState::default();
+            state.home.apply_me(&outcome.me);
             // The Grappa login `subject` is opaque (and absent when reusing
             // a bearer); admin status comes only from the separate `/me`
             // response, where it is a top-level field.
@@ -3323,6 +3459,8 @@ async fn handle_connect(
                         || entries.iter().any(|(n, c, _)| n == network && c == channel)
                 });
             load_color_themes(state, &ui).await;
+            push_home(state, &ui);
+            load_featured_channels(state, &ui).await;
             if let Some((network, channel)) = restore_channel {
                 handle_select_channel(state, &ui, network, channel).await;
             } else if let Some(network) = state
@@ -4145,6 +4283,9 @@ fn upload_cap(limits: &UploadLimits, category: UploadCategory) -> u64 {
 }
 
 /// Status-bar key for a failed upload, by `POST /api/uploads` status.
+/// Since protocol v26 a 507 is either the instance being full or the
+/// subject's own upload cap, and nothing on the wire tells them apart, so
+/// `attach-no-space` carries neutral copy that doesn't blame either.
 fn attachment_error_status(status: Option<u16>) -> &'static str {
     match status {
         Some(413) => "attach-too-large",
@@ -4511,13 +4652,40 @@ async fn run_slash_command(
             push_watch_patterns(state, ui);
             Ok(())
         }
-        SlashCommand::Ignore { add: true, mask } => {
-            client.add_ignore(&token, &network, &mask).await.map(|_| ())
+        SlashCommand::Ignore {
+            add,
+            mask,
+            text_pattern,
+        } => {
+            let result = if add {
+                client
+                    .add_ignore(&token, &network, &mask, text_pattern.as_deref())
+                    .await
+            } else {
+                client
+                    .remove_ignore(&token, &network, &mask, text_pattern.as_deref())
+                    .await
+            };
+            // Grappa answers with the resulting list: an open ignore list for
+            // the same network shows it at once, like Cicchetto's mirror.
+            match result {
+                Ok(response) => {
+                    if state.settings_network.as_deref() == Some(network.as_str()) {
+                        push_ignore_entries(ui, response.entries(), "");
+                    }
+                    Ok(())
+                }
+                Err(err) => {
+                    persistence::log_line(&format!("{label} failed: {err:?}"));
+                    let kind = match ignore_error_key(&err) {
+                        "invalid-text-pattern" => "ignore-invalid-text-pattern",
+                        "invalid-mask" => "ignore-invalid-mask",
+                        _ => "command-failed",
+                    };
+                    return set_command_status(ui, kind, label);
+                }
+            }
         }
-        SlashCommand::Ignore { add: false, mask } => client
-            .remove_ignore(&token, &network, &mask)
-            .await
-            .map(|_| ()),
         SlashCommand::Notify(nicks) => client.add_notify_nicks(&token, &network, nicks).await,
         SlashCommand::Beep(None) => {
             if state.notification_prefs.is_none() {
@@ -5356,7 +5524,7 @@ fn muted_rows(prefs: &serde_json::Map<String, Value>) -> Vec<(String, String)> {
                 Some(until) => match chrono::DateTime::from_timestamp(until, 0) {
                     Some(time) => format!(
                         "{name} → {}",
-                        time.with_timezone(&chrono::Local).format("%d/%m %H:%M")
+                        dates::render_date_time(&time.with_timezone(&chrono::Local), false)
                     ),
                     None => name,
                 },
@@ -5528,9 +5696,40 @@ async fn handle_load_older_history(state: &mut WorkerState, ui: &slint::Weak<App
     });
 }
 
-async fn handle_save_display_prefs(state: &WorkerState, prefs: DisplayPrefs) {
-    if let (Some(client), Some(token)) = (&state.client, &state.token) {
-        let _ = client.update_display_prefs(token, &prefs).await;
+/// Saves the display preferences. A refusal is not left looking like a
+/// saved choice: the stored preferences are read back and shown again, and
+/// a 422 (a `date_format` outside Grappa's closed set) says so.
+async fn handle_save_display_prefs(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    prefs: DisplayPrefs,
+) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    if prefs.date_format.is_some() {
+        dates::set_format(prefs.date_format);
+    }
+    let Err(err) = client.update_display_prefs(token, &prefs).await else {
+        return;
+    };
+    persistence::log_line(&format!("display prefs save failed: {err:?}"));
+    let kind = display_prefs_error_key(err.status().map(|status| status.as_u16()));
+    let stored = client.fetch_display_prefs(token).await.ok();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        if let Some(stored) = stored {
+            apply_display_prefs(&ui, &stored);
+        }
+        ui.set_status_kind(kind.into());
+    });
+}
+
+/// Status key for a failed display-preferences save.
+fn display_prefs_error_key(status: Option<u16>) -> &'static str {
+    if status == Some(422) {
+        "display-prefs-rejected"
+    } else {
+        "display-prefs-save-failed"
     }
 }
 
@@ -6243,6 +6442,88 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
     });
 }
 
+/// Loads Admin > Uploads. `error` is shown instead of the load's own
+/// outcome when a delete just failed, so the refreshed list still says so.
+async fn handle_admin_uploads_refresh(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    error: Option<&'static str>,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let (view, load_error) = match client.fetch_admin_uploads(&token).await {
+        Ok(view) => (Some(view), ""),
+        Err(err) => {
+            persistence::log_line(&format!("admin uploads load failed: {err:?}"));
+            let key =
+                admin_uploads::error_key(err.status().map(|status| status.as_u16()), "failed");
+            (None, key)
+        }
+    };
+    state.admin_uploads = view.clone();
+    let error = error.unwrap_or(load_error);
+    let rows = view
+        .as_ref()
+        .map(|view| admin_uploads::upload_rows(view, format_file_size, format_iso_timestamp))
+        .unwrap_or_default();
+    let budget = view.as_ref().map(admin_uploads::budget);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<AdminUploadRow> = rows
+            .into_iter()
+            .map(|row| AdminUploadRow {
+                id: row.id.into(),
+                name: row.name.into(),
+                slug: row.slug.into(),
+                mime: row.mime.into(),
+                size: row.size.into(),
+                subject: row.subject.into(),
+                expires: row.expires.into(),
+                deleted: row.deleted.into(),
+                live: row.live,
+            })
+            .collect();
+        ui.set_admin_uploads(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_admin_uploads_loaded(budget.is_some());
+        if let Some((used, cap, share)) = budget {
+            ui.set_admin_uploads_used(format_file_size(used).into());
+            ui.set_admin_uploads_cap(format_file_size(cap).into());
+            ui.set_admin_uploads_share(
+                share.map_or(-1, |share| i32::try_from(share).unwrap_or(i32::MAX)),
+            );
+        }
+        ui.set_admin_uploads_error(error.into());
+        ui.set_admin_upload_confirm_id("".into());
+        ui.set_admin_upload_confirm_name("".into());
+    });
+}
+
+/// Deletes a live upload before its expiry, then re-reads the registry:
+/// the row stays, now with its deletion time and no Delete button.
+async fn handle_admin_upload_delete(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    upload_id: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    if !admin_uploads::can_delete(state.admin_uploads.as_ref(), &upload_id) {
+        return;
+    }
+    let error = match client.delete_admin_upload(&token, &upload_id).await {
+        Ok(()) => None,
+        Err(err) => {
+            persistence::log_line(&format!("admin upload delete failed: {err:?}"));
+            Some(admin_uploads::error_key(
+                err.status().map(|status| status.as_u16()),
+                "delete-failed",
+            ))
+        }
+    };
+    handle_admin_uploads_refresh(state, ui, error).await;
+}
+
 async fn handle_admin_disconnect_session(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -6262,7 +6543,7 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
         return;
     };
 
-    let ignores = match &state.settings_network {
+    let ignores: Vec<IgnoreEntry> = match &state.settings_network {
         Some(network) => client
             .fetch_ignores(token, network)
             .await
@@ -6320,13 +6601,71 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
 
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let ignores_model: Vec<slint::SharedString> = ignores.into_iter().map(Into::into).collect();
-        ui.set_settings_ignores(Rc::new(slint::VecModel::from(ignores_model)).into());
+        ui.set_settings_ignores(ignore_rows_model(ignores));
+        ui.set_settings_ignore_error("".into());
         ui.set_perform_text(perform_text.into());
         ui.set_settings_aliases(Rc::new(slint::VecModel::from(alias_rows)).into());
         ui.set_settings_vhost_options(Rc::new(slint::VecModel::from(vhost_rows)).into());
         ui.set_pref_dcc_auto_accept(dcc_auto_accept);
     });
+}
+
+/// The ignore list as Slint rows, keeping every pair (two rules may share
+/// a mask).
+fn ignore_rows_model(entries: Vec<IgnoreEntry>) -> slint::ModelRc<IgnoreRow> {
+    let rows: Vec<IgnoreRow> = entries
+        .into_iter()
+        .map(|entry| IgnoreRow {
+            mask: entry.mask.into(),
+            text_pattern: entry.text_pattern.unwrap_or_default().into(),
+        })
+        .collect();
+    Rc::new(slint::VecModel::from(rows)).into()
+}
+
+/// Shows `entries` as the Settings ignore list, with `error` under it.
+fn push_ignore_entries(
+    ui: &slint::Weak<AppWindow>,
+    entries: Vec<IgnoreEntry>,
+    error: &'static str,
+) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_settings_ignores(ignore_rows_model(entries));
+        ui.set_settings_ignore_error(error.into());
+    });
+}
+
+/// A Settings add/remove: the response carries the resulting list, which
+/// is rendered as is; a refusal keeps the list and says why.
+fn push_ignore_mutation(
+    ui: &slint::Weak<AppWindow>,
+    result: Result<cordiale_core::profile::IgnoreMutationResponse, GrappaClientError>,
+) {
+    match result {
+        Ok(response) => push_ignore_entries(ui, response.entries(), ""),
+        Err(err) => {
+            persistence::log_line(&format!("ignore change failed: {err:?}"));
+            let error = ignore_error_key(&err);
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_settings_ignore_error(error.into()));
+        }
+    }
+}
+
+/// Grappa's two 422 codes for an ignore change are distinct because the
+/// user typed two things (protocol v31).
+fn ignore_error_key(err: &GrappaClientError) -> &'static str {
+    match err.code() {
+        Some("invalid_text_pattern") => "invalid-text-pattern",
+        Some("invalid_mask") => "invalid-mask",
+        _ => "failed",
+    }
+}
+
+/// The Settings text-pattern field: blank means no pattern; anything else
+/// goes to Grappa trimmed, and Grappa refuses a CR/LF-bearing one itself.
+fn ignore_pattern_from_ui(pattern: &str) -> Option<String> {
+    let pattern = pattern.trim();
+    (!pattern.is_empty()).then(|| pattern.to_string())
 }
 
 /// Loads the account's away/leave messages, auto-away delay and
@@ -6336,13 +6675,25 @@ async fn load_personal_prefs(client: &GrappaClient, token: &str, ui: &slint::Wea
     let away = client.fetch_auto_away_reason(token).await;
     let delay = client.fetch_auto_away_debounce(token).await;
     let peers = client.fetch_show_peer_profiles(token).await;
+    // A server older than protocol v32 has no suffix setting: the field is
+    // simply not offered, and the rest of the section still loads.
+    let suffix = client.fetch_away_nick_suffix(token).await;
     let (Ok(leave), Ok(away), Ok(delay), Ok(peers)) = (leave, away, delay, peers) else {
         persistence::log_line("personal settings load failed");
         return;
     };
+    let (suffix_supported, suffix) = match suffix {
+        Ok(suffix) => (true, suffix),
+        Err(err) => {
+            persistence::log_line(&format!("away nick suffix not available: {err:?}"));
+            (false, None)
+        }
+    };
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_edit_leave_message(leave.unwrap_or_default().into());
         ui.set_edit_away_message(away.unwrap_or_default().into());
+        ui.set_away_nick_suffix_supported(suffix_supported);
+        ui.set_edit_away_nick_suffix(suffix.unwrap_or_default().into());
         ui.set_edit_away_delay(away_delay_text(delay).into());
         ui.set_pref_show_peer_profiles(peers);
         ui.set_personal_prefs_loaded(true);
@@ -6377,6 +6728,7 @@ async fn handle_personal_prefs_save(
     away_message: String,
     away_delay: String,
     show_peer_profiles: bool,
+    away_nick_suffix: Option<String>,
 ) {
     let (Some(client), Some(token)) = (&state.client, &state.token) else {
         return;
@@ -6405,9 +6757,24 @@ async fn handle_personal_prefs_save(
     if let Some(Err(err)) = results.into_iter().find(Result::is_err) {
         persistence::log_line(&format!("personal settings save failed: {err:?}"));
         set_status("personal-prefs-failed");
-    } else {
-        set_status("personal-prefs-saved");
+        return;
     }
+    // Empty switches the rename off. Grappa validates the tail; a refusal
+    // gets its own message rather than the generic one.
+    if let Some(suffix) = away_nick_suffix {
+        let suffix = suffix.trim();
+        if let Err(err) = client
+            .set_away_nick_suffix(token, (!suffix.is_empty()).then_some(suffix))
+            .await
+        {
+            persistence::log_line(&format!("away nick suffix save failed: {err:?}"));
+            set_status(away_nick_suffix_error_key(
+                err.status().map(|status| status.as_u16()),
+            ));
+            return;
+        }
+    }
+    set_status("personal-prefs-saved");
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -7051,6 +7418,10 @@ async fn handle_frame(
     }
     if payload_kind == "auto_away_reason_changed" {
         handle_auto_away_reason_changed(state, ui, &frame.topic, &frame.payload);
+        return;
+    }
+    if payload_kind == "away_nick_suffix_changed" {
+        handle_away_nick_suffix_changed(state, ui, &frame.topic, &frame.payload);
         return;
     }
     if payload_kind == "who_reply" {
@@ -9357,6 +9728,24 @@ fn apply_display_prefs(ui: &AppWindow, prefs: &DisplayPrefs) {
     if let Some(value) = prefs.bold_mentions {
         ui.set_pref_bold_mentions(value);
     }
+    // Absent means the server default; the selector shows `auto` without
+    // marking it as the user's choice.
+    dates::set_format(prefs.date_format);
+    let format = prefs.date_format.unwrap_or_default();
+    let index = DateFormat::ALL
+        .iter()
+        .position(|candidate| *candidate == format)
+        .unwrap_or(0);
+    ui.set_pref_date_format_index(i32::try_from(index).unwrap_or(0));
+    ui.set_pref_date_format_set(prefs.date_format.is_some());
+    push_date_format_examples(ui);
+}
+
+/// Refreshes the date selector's live examples (today, in each format).
+fn push_date_format_examples(ui: &AppWindow) {
+    let examples: Vec<slint::SharedString> =
+        dates::examples().into_iter().map(Into::into).collect();
+    ui.set_date_format_examples(Rc::new(slint::VecModel::from(examples)).into());
 }
 
 const SERVER_WINDOW_NAME: &str = "$server";
@@ -10002,6 +10391,243 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
         ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
     });
+    push_home(state, &ui);
+}
+
+/// Mirrors the home page. Its rows come from the same snapshots as the
+/// sidebar (attached networks, their connection state and nick, the
+/// services verdict), so the two never disagree; `state.home` adds what
+/// only the home page shows.
+fn push_home(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let inputs: Vec<home::HomeRowInput> = state
+        .network_ids
+        .keys()
+        .map(|network| {
+            let snapshot = state.network_connection_states.get(network);
+            home::HomeRowInput {
+                network: network.clone(),
+                nick: state.own_nicks.get(network).cloned(),
+                state: snapshot.map_or("connected", |snapshot| snapshot.status.wire_name()),
+                reason: snapshot.and_then(|snapshot| snapshot.reason.clone()),
+                identified: state
+                    .session_identities
+                    .get(network)
+                    .is_some_and(|identity| identity.identified),
+            }
+        })
+        .collect();
+    let rows = home::home_rows(&state.home, inputs);
+    let (named_nick, named_network) =
+        home::registered_naming(&state.home, &rows).unwrap_or_default();
+    let session_kind = state.home.session_kind();
+    let available = state.home.available.clone();
+    let connecting = state.home.connecting.clone().unwrap_or_default();
+    let (available_error_network, available_error) =
+        state.home.available_error.clone().unwrap_or_default();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<HomeNetworkRow> = rows
+            .into_iter()
+            .map(|row| {
+                let featured: Vec<HomeFeaturedLink> = row
+                    .featured
+                    .into_iter()
+                    .map(|link| HomeFeaturedLink {
+                        name: link.name.into(),
+                        description: link.description.unwrap_or_default().into(),
+                    })
+                    .collect();
+                HomeNetworkRow {
+                    network: row.network.into(),
+                    nick: row.nick.into(),
+                    state: row.state.into(),
+                    connected: row.connected,
+                    reason: row.reason.into(),
+                    error: row.error.into(),
+                    reconnecting: row.reconnecting,
+                    can_remove: row.can_remove,
+                    can_recover: row.can_recover,
+                    featured: Rc::new(slint::VecModel::from(featured)).into(),
+                    featured_error: row.featured_error.into(),
+                }
+            })
+            .collect();
+        let attached: Vec<slint::SharedString> =
+            rows.iter().map(|row| row.network.clone()).collect();
+        let available: Vec<slint::SharedString> = available.into_iter().map(Into::into).collect();
+        ui.set_home_session_kind(session_kind.into());
+        ui.set_home_named_nick(named_nick.into());
+        ui.set_home_named_network(named_network.into());
+        ui.set_home_networks(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_home_available(Rc::new(slint::VecModel::from(available)).into());
+        ui.set_home_connecting(connecting.into());
+        ui.set_home_available_error(available_error.into());
+        ui.set_home_available_error_network(available_error_network.into());
+        // A confirmation for a network that has since gone is dropped.
+        let pending = ui.get_home_confirm_network();
+        if !pending.is_empty() && !attached.contains(&pending) {
+            ui.set_home_confirm_network("".into());
+            ui.set_home_confirm_kind("".into());
+        }
+    });
+}
+
+/// Fetches the featured channels of every attached network not fetched
+/// yet. A failure leaves the section empty rather than breaking the page,
+/// as in Cicchetto; only a user-initiated join reports its error.
+async fn load_featured_channels(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let mut missing: Vec<String> = state
+        .network_ids
+        .keys()
+        .filter(|network| !state.home.featured.contains_key(*network))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    missing.sort();
+    for network in missing {
+        let channels = match client.fetch_featured_channels(&token, &network).await {
+            Ok(channels) => channels,
+            Err(err) => {
+                persistence::log_line(&format!("featured channels failed: {err:?}"));
+                Vec::new()
+            }
+        };
+        if state.network_ids.contains_key(&network) {
+            state.home.featured.insert(network, channels);
+        }
+    }
+    push_home(state, ui);
+}
+
+/// Home page Disconnect (`parked`) or Reconnect (`connected`). Success is
+/// the row changing on `connection_state_changed`; a failure stays on the
+/// row, never silently.
+async fn home_set_connection_state(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    target: &'static str,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+    let reconnect = target == "connected";
+    state.home.row_errors.remove(&network);
+    if reconnect {
+        state.home.reconnecting.insert(network.clone());
+    }
+    push_home(state, ui);
+    let result = client
+        .set_connection_state(&token, &network, target, None)
+        .await;
+    state.home.reconnecting.remove(&network);
+    if let Err(err) = result {
+        persistence::log_line(&format!("home {target} failed: {err:?}"));
+        let key = if reconnect {
+            "reconnect-failed"
+        } else {
+            "disconnect-failed"
+        };
+        state.home.row_errors.insert(network, key);
+    }
+    push_home(state, ui);
+}
+
+/// Home page Remove: `DELETE /session/networks/:slug` (protocol v28). The
+/// row goes when `network_detached` lands and `/boot` + `/me` are re-read;
+/// a refusal stays on the row so it doesn't just sit there unexplained.
+async fn home_remove_network(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+    state.home.row_errors.remove(&network);
+    push_home(state, ui);
+    if let Err(err) = client.detach_network(&token, &network).await {
+        persistence::log_line(&format!("network remove failed: {err:?}"));
+        let key = home::remove_error_key(err.status().map(|status| status.as_u16()));
+        state.home.row_errors.insert(network, key);
+        push_home(state, ui);
+    }
+}
+
+/// Home page one-tap connect of an available network. `network_attached`
+/// brings the new row; `/me` is re-read here too so the button leaves the
+/// available list even if that push is late.
+async fn home_connect_network(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    if state.home.connecting.is_some() || !state.home.available.contains(&network) {
+        return;
+    }
+    state.home.connecting = Some(network.clone());
+    state.home.available_error = None;
+    push_home(state, ui);
+    let result = client.attach_network(&token, &network).await;
+    state.home.connecting = None;
+    match result {
+        Ok(()) => {
+            if let Ok(me) = client.fetch_me(&token).await {
+                state.home.apply_me(&me);
+            }
+        }
+        Err(err) => {
+            persistence::log_line(&format!("network connect failed: {err:?}"));
+            state.home.available_error = Some((network, "connect-failed"));
+        }
+    }
+    push_home(state, ui);
+}
+
+/// Home page featured channel: joined first when it isn't, then focused,
+/// like Cicchetto (the intent follows the tap). A failed join is shown on
+/// the network's row.
+async fn home_open_featured(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: String,
+) {
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+    state.home.featured_errors.remove(&network);
+    let joined = matches!(
+        state.window_states.get(&(network.clone(), channel.clone())),
+        Some(ChannelWindowState::Joined)
+    );
+    if !joined {
+        let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+            return;
+        };
+        if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
+            persistence::log_line(&format!("featured join failed: {err:?}"));
+            state.home.featured_errors.insert(network, channel);
+            push_home(state, ui);
+            return;
+        }
+    }
+    push_home(state, ui);
+    handle_select_channel(state, ui, network, channel).await;
 }
 
 fn return_home_if_network_selected(
@@ -12451,6 +13077,10 @@ fn apply_network_rest_refresh(
     state.messages = messages;
     state.read_cursors = read_cursors_from_me(&me.read_cursors);
     state.badge_count = normalize_badge_count(Some(&me.badge_count));
+    state.home.apply_me(me);
+    state
+        .home
+        .retain_networks(&next_network_ids.keys().map(String::as_str).collect());
     state.network_ids = next_network_ids;
     state.network_connection_states = network_connection_states_from_entries(&boot.networks);
 
@@ -13045,6 +13675,61 @@ fn handle_auto_away_reason_changed(
     });
 }
 
+/// Status key for a refused auto-away nick suffix: 422 is a tail that isn't
+/// legal in a nick.
+fn away_nick_suffix_error_key(status: Option<u16>) -> &'static str {
+    if status == Some(422) {
+        "away-nick-suffix-invalid"
+    } else {
+        "personal-prefs-failed"
+    }
+}
+
+/// Validates `away_nick_suffix_changed` (always-present, nullable key, on
+/// the subject's own user topic) and records it; `Some(value)` when the
+/// display copy changed. Only the setting moves: the nick itself stays
+/// whatever the nick events say, since Grappa may skip a rename (NICKLEN)
+/// or fail to restore the bare nick.
+fn apply_away_nick_suffix_changed(
+    state: &mut WorkerState,
+    carrier_topic: &str,
+    payload: &Value,
+) -> Option<Option<String>> {
+    let identifier = state.identifier.as_deref()?;
+    let Some(suffix) = parse_nullable_setting_echo(
+        payload,
+        carrier_topic,
+        identifier,
+        "away_nick_suffix_changed",
+        "away_nick_suffix",
+    ) else {
+        persistence::log_line("away_nick_suffix_changed rejected: invalid carrier or payload");
+        return None;
+    };
+    if state.away_nick_suffix.as_ref() == Some(&suffix) {
+        return None;
+    }
+    state.away_nick_suffix = Some(suffix.clone());
+    Some(suffix)
+}
+
+/// Mirrors a suffix saved on any device into the Settings field.
+fn handle_away_nick_suffix_changed(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    carrier_topic: &str,
+    payload: &Value,
+) {
+    let Some(suffix) = apply_away_nick_suffix_changed(state, carrier_topic, payload) else {
+        return;
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_away_nick_suffix_supported(true);
+        ui.set_edit_away_nick_suffix(suffix.unwrap_or_default().into());
+    });
+}
+
 /// Mirrors `state.recover_panel` into the sidebar panel. The Slint row model
 /// is built inside the UI-thread closure because `ModelRc` is not `Send`.
 fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
@@ -13567,12 +14252,7 @@ fn push_archive(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
 /// values are shown raw.
 fn format_epoch_millis(millis: i64) -> String {
     chrono::DateTime::from_timestamp_millis(millis)
-        .map(|parsed| {
-            parsed
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
+        .map(|parsed| dates::render_date_time(&parsed.with_timezone(&chrono::Local), false))
         .unwrap_or_else(|| millis.to_string())
 }
 
@@ -14457,12 +15137,7 @@ fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) 
 /// shown as sent.
 fn format_iso_timestamp(raw: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(raw)
-        .map(|parsed| {
-            parsed
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-        })
+        .map(|parsed| dates::render_date_time(&parsed.with_timezone(&chrono::Local), false))
         .unwrap_or_else(|_| raw.to_string())
 }
 
@@ -14790,12 +15465,7 @@ fn format_signon(epoch_seconds: i64) -> String {
     epoch_seconds
         .checked_mul(1000)
         .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|moment| {
-            moment
-                .with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        })
+        .map(|moment| dates::render_date_time(&moment.with_timezone(&chrono::Local), true))
         .unwrap_or_else(|| epoch_seconds.to_string())
 }
 
@@ -15551,6 +16221,7 @@ async fn handle_network_lifecycle(
     }
 
     refresh_network_groups(state, ui);
+    load_featured_channels(state, ui).await;
     persistence::log_line(&format!(
         "{} refreshed authoritative state for {network_slug}",
         lifecycle.wire_name()
@@ -20591,6 +21262,84 @@ mod tests {
         assert_eq!(attachment_error_status(None), "attach-failed");
     }
 
+    /// A 507 can't say whether the instance or the subject's own cap is out
+    /// of space (protocol v26), so its copy must not blame the server, in
+    /// the UI or in any catalog.
+    #[test]
+    fn upload_507_copy_does_not_attribute_the_cause() {
+        const MSGID: &str = "The upload of {} was refused for lack of space.";
+        let slint = include_str!("../ui/appwindow.slint");
+        let branch = slint
+            .split("status-kind == \"attach-no-space\"")
+            .nth(1)
+            .and_then(|rest| rest.lines().nth(1))
+            .expect("attach-no-space branch");
+        assert!(branch.contains(&format!("@tr(\"{MSGID}\"")), "{branch}");
+
+        for (lang, catalog) in [
+            ("it", include_str!("../lang/it/LC_MESSAGES/cordiale-ui.po")),
+            ("fr", include_str!("../lang/fr/LC_MESSAGES/cordiale-ui.po")),
+            ("de", include_str!("../lang/de/LC_MESSAGES/cordiale-ui.po")),
+            ("es", include_str!("../lang/es/LC_MESSAGES/cordiale-ui.po")),
+        ] {
+            // Line by line: a Windows checkout may turn the catalogs' line
+            // endings into CRLF, which `lines()` strips like LF.
+            let msgid = format!("msgid \"{MSGID}\"");
+            let msgstr = catalog
+                .lines()
+                .skip_while(|line| *line != msgid)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{lang}: missing msgid"));
+            assert!(
+                msgstr.starts_with("msgstr \"") && msgstr.len() > "msgstr \"\"".len(),
+                "{lang}: {msgstr}"
+            );
+            assert!(msgstr.contains("{}"), "{lang}: {msgstr}");
+            assert!(!catalog.contains("has no room left for {}"), "{lang}");
+        }
+    }
+
+    #[test]
+    fn a_rejected_date_format_has_its_own_message() {
+        assert_eq!(display_prefs_error_key(Some(422)), "display-prefs-rejected");
+        assert_eq!(
+            display_prefs_error_key(Some(500)),
+            "display-prefs-save-failed"
+        );
+        assert_eq!(display_prefs_error_key(None), "display-prefs-save-failed");
+    }
+
+    #[test]
+    fn ignore_refusals_name_the_field_the_user_got_wrong() {
+        let rejected = |code: Option<&str>| GrappaClientError::Rejected {
+            status: cordiale_core::client::StatusCode::UNPROCESSABLE_ENTITY,
+            code: code.map(str::to_string),
+        };
+        assert_eq!(
+            ignore_error_key(&rejected(Some("invalid_text_pattern"))),
+            "invalid-text-pattern"
+        );
+        assert_eq!(
+            ignore_error_key(&rejected(Some("invalid_mask"))),
+            "invalid-mask"
+        );
+        assert_eq!(ignore_error_key(&rejected(None)), "failed");
+        assert_eq!(
+            ignore_error_key(&GrappaClientError::InvalidUrl("x".into())),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn a_blank_settings_pattern_is_the_plain_mask_rule() {
+        assert_eq!(ignore_pattern_from_ui(""), None);
+        assert_eq!(ignore_pattern_from_ui("   "), None);
+        assert_eq!(
+            ignore_pattern_from_ui("  <Some Nick>  says * "),
+            Some("<Some Nick>  says *".to_string())
+        );
+    }
+
     #[test]
     fn window_status_line_joins_network_and_window_with_their_flags() {
         let modes = |letters: &[&str]| letters.iter().map(|m| m.to_string()).collect::<Vec<_>>();
@@ -22301,6 +23050,70 @@ mod tests {
     }
 
     #[test]
+    fn away_nick_suffix_push_updates_the_setting_and_never_the_nick() {
+        let mut state = WorkerState::new();
+        state.identifier = Some("vjt".to_string());
+        state
+            .own_nicks
+            .insert("libera".to_string(), "vjt".to_string());
+        let topic = "grappa:user:vjt";
+        let push = |value: Value| serde_json::json!({"kind": "away_nick_suffix_changed", "away_nick_suffix": value});
+
+        // Another device sets a suffix: the setting follows...
+        assert_eq!(
+            apply_away_nick_suffix_changed(&mut state, topic, &push(serde_json::json!("|away"))),
+            Some(Some("|away".to_string()))
+        );
+        // ...and the nick stays the one the nick events reported.
+        assert_eq!(
+            state.own_nicks.get("libera").map(String::as_str),
+            Some("vjt")
+        );
+        // The same value again is no change.
+        assert_eq!(
+            apply_away_nick_suffix_changed(&mut state, topic, &push(serde_json::json!("|away"))),
+            None
+        );
+        // `null` is the rename switched off, not a missing value.
+        assert_eq!(
+            apply_away_nick_suffix_changed(&mut state, topic, &push(Value::Null)),
+            Some(None)
+        );
+        // The key is always present; without it, or on another subject's
+        // topic, the push is rejected.
+        assert_eq!(
+            apply_away_nick_suffix_changed(
+                &mut state,
+                topic,
+                &serde_json::json!({"kind": "away_nick_suffix_changed"})
+            ),
+            None
+        );
+        assert_eq!(
+            apply_away_nick_suffix_changed(
+                &mut state,
+                "grappa:user:other",
+                &push(serde_json::json!("|x"))
+            ),
+            None
+        );
+        assert_eq!(state.away_nick_suffix, Some(None));
+    }
+
+    #[test]
+    fn a_refused_nick_suffix_has_its_own_message() {
+        assert_eq!(
+            away_nick_suffix_error_key(Some(422)),
+            "away-nick-suffix-invalid"
+        );
+        assert_eq!(
+            away_nick_suffix_error_key(Some(500)),
+            "personal-prefs-failed"
+        );
+        assert_eq!(away_nick_suffix_error_key(None), "personal-prefs-failed");
+    }
+
+    #[test]
     fn parse_nullable_setting_echo_keeps_null_distinct_from_missing() {
         let topic = "grappa:user:vjt";
         let kind = "quit_part_reason_changed";
@@ -22834,6 +23647,8 @@ mod tests {
             kind: None,
             id: None,
             name: None,
+            registered: None,
+            home_data: None,
         };
 
         let mut state = WorkerState::new();
@@ -22942,6 +23757,8 @@ mod tests {
             kind: None,
             id: None,
             name: None,
+            registered: None,
+            home_data: None,
         };
         let actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
         assert_eq!(actions.len(), 4);

@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette, Slider } from "std-widgets.slint";
+import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette, ScrollView, Slider } from "std-widgets.slint";
 
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
@@ -135,6 +135,13 @@ struct RecoverStepRow {
 
 // One connected network in the sidebar, with its joined channels and
 // whether the channel list under it is currently shown (default: yes).
+// One ignore rule (protocol v31): its identity is the pair, so two rows
+// may share a mask. `text-pattern` is "" for a plain mask rule.
+struct IgnoreRow {
+    mask: string,
+    text-pattern: string,
+}
+
 struct NetworkGroup {
     network: string,
     connection-label: string,
@@ -143,6 +150,29 @@ struct NetworkGroup {
     expanded: bool,
     channels: [ChannelEntry],
     queries: [QueryEntry],
+}
+
+// One operator-featured channel on the home page.
+struct HomeFeaturedLink {
+    name: string,
+    description: string,
+}
+
+// One attached network on the home page (see `home.rs`): a connected row
+// jumps to its `$server` window and can be disconnected; any other state
+// gets Reconnect and, for an account, Remove.
+struct HomeNetworkRow {
+    network: string,
+    nick: string,
+    state: string,
+    connected: bool,
+    reason: string,
+    error: string,
+    reconnecting: bool,
+    can-remove: bool,
+    can-recover: bool,
+    featured: [HomeFeaturedLink],
+    featured-error: string,
 }
 
 // One color/weight run within a rendered chat line — mIRC control codes
@@ -238,6 +268,20 @@ struct AdminServerRow {
 struct AdminVisitorRow {
     label: string,
     visitor-id: string,
+}
+
+// One row of the admin Uploads registry (see `admin_uploads.rs`). A
+// deleted row stays as audit history and has no Delete.
+struct AdminUploadRow {
+    id: string,
+    name: string,
+    slug: string,
+    mime: string,
+    size: string,
+    subject: string,
+    expires: string,
+    deleted: string,
+    live: bool,
 }
 
 // One custom command alias — Settings > Aliases (account-scoped).
@@ -661,6 +705,22 @@ export component AppWindow inherits Window {
     // Sidebar model: one entry per connected network, each carrying its own
     // joined-channels list and expand/collapse state (default expanded).
     in property <[NetworkGroup]> network-groups: [];
+    // Home page, shown whenever no window is selected (Cicchetto's
+    // HomePane). The session line picks its copy by `home-session-kind`
+    // (`user`, `visitor-registered`, `visitor-guest`); a registered visitor
+    // on a single network is named by `home-named-nick`/`-network`.
+    in property <string> home-session-kind: "";
+    in property <string> home-named-nick: "";
+    in property <string> home-named-network: "";
+    in property <[HomeNetworkRow]> home-networks: [];
+    in property <[string]> home-available: [];
+    in property <string> home-connecting: "";
+    in property <string> home-available-error: "";
+    in property <string> home-available-error-network: "";
+    // The pending confirmation, `disconnect` or `remove`, for
+    // `home-confirm-network` ("" when none).
+    in-out property <string> home-confirm-kind: "";
+    in-out property <string> home-confirm-network: "";
     in property <[ChatLine]> chat-lines: [];
     // Paging back through the open window's history (`?before=`).
     in property <bool> history-loading: false;
@@ -755,6 +815,10 @@ export component AppWindow inherits Window {
     in-out property <string> edit-leave-message: "";
     in-out property <string> edit-away-message: "";
     in-out property <string> edit-away-delay: "";
+    // Auto-away nick suffix (protocol v32): "" is rename off. Hidden when
+    // the server doesn't have the setting.
+    in-out property <string> edit-away-nick-suffix: "";
+    in property <bool> away-nick-suffix-supported: false;
     in-out property <bool> pref-show-peer-profiles: false;
     callback personal-prefs-save-requested();
     // Per-network DCC auto-accept for peers with an open private window.
@@ -815,6 +879,13 @@ export component AppWindow inherits Window {
     in property <[ThemeChoiceRow]> theme-choices: [];
     in property <bool> display-prefs-loaded: false;
     in-out property <bool> pref-colored-nicklist: true;
+    // `display_prefs.date_format` (protocol v29), by `DateFormat::ALL`
+    // index. `pref-date-format-set` is false while the server hasn't sent
+    // one and the user hasn't picked one, so a save doesn't invent it.
+    in-out property <int> pref-date-format-index: 0;
+    in-out property <bool> pref-date-format-set: false;
+    // Live examples for the selector, one per format, on today's date.
+    in property <[string]> date-format-examples: ["", "", "", ""];
     in-out property <bool> pref-bold-mentions: true;
     in-out property <bool> pref-strip-formatting: false;
     in-out property <bool> pref-show-event-badge: true;
@@ -846,6 +917,17 @@ export component AppWindow inherits Window {
     in property <[AdminUserRow]> admin-users: [];
     in property <[AdminNetworkRow]> admin-networks: [];
     in property <[AdminVisitorRow]> admin-visitors: [];
+    // Admin > Uploads: the registry, and the budget once the server has
+    // answered (`admin-uploads-loaded`). `admin-uploads-error` is
+    // `forbidden`, `failed` or `delete-failed` ("" when none).
+    in property <[AdminUploadRow]> admin-uploads: [];
+    in property <bool> admin-uploads-loaded: false;
+    in property <string> admin-uploads-used: "";
+    in property <string> admin-uploads-cap: "";
+    in property <int> admin-uploads-share: -1;
+    in property <string> admin-uploads-error: "";
+    in-out property <string> admin-upload-confirm-id: "";
+    in-out property <string> admin-upload-confirm-name: "";
     in property <[string]> admin-session-log: [];
     // Live admin feed (`grappa:admin:events`), newest first.
     in property <[string]> admin-events: [];
@@ -880,8 +962,12 @@ export component AppWindow inherits Window {
     in-out property <string> identity-nick: "";
     in-out property <string> identity-ident: "";
     in-out property <string> identity-realname: "";
-    in property <[string]> settings-ignores: [];
+    in property <[IgnoreRow]> settings-ignores: [];
     in-out property <string> new-ignore-mask: "";
+    in-out property <string> new-ignore-pattern: "";
+    // Last refused ignore change: `invalid-text-pattern`, `invalid-mask`
+    // or `failed` ("" when none).
+    in property <string> settings-ignore-error: "";
     in-out property <string> perform-text: "";
     in property <[AliasRow]> settings-aliases: [];
     in-out property <string> new-alias-command: "";
@@ -1151,6 +1237,12 @@ export component AppWindow inherits Window {
     }
     callback network-toggle-requested(string);
     callback network-selected(string);
+    callback home-network-disconnect(string);
+    callback home-network-reconnect(string);
+    callback home-network-remove(string);
+    callback home-network-recover(string);
+    callback home-network-connect(string);
+    callback home-featured-open(string, string); // network, channel
     callback send-chat-message(string);
     callback compose-text-changed(string);
     // Tab-completes the word before the (assumed end-of-text) caret against
@@ -1169,6 +1261,8 @@ export component AppWindow inherits Window {
     callback admin-user-toggle-admin(string, bool);
     callback admin-user-delete(string);
     callback admin-visitor-delete(string);
+    callback admin-uploads-requested();
+    callback admin-upload-delete(string); // upload id
     callback admin-network-reset-circuit(string);
     callback admin-reaper-run();
     // Admin writes: new accounts, password resets, network create/edit/delete.
@@ -1264,8 +1358,8 @@ export component AppWindow inherits Window {
     callback notification-prefs-changed();
     callback settings-network-selected(string);
     callback identity-save-requested();
-    callback ignore-add-requested(string);
-    callback ignore-remove-requested(string);
+    callback ignore-add-requested(string, string); // mask, text pattern ("" for none)
+    callback ignore-remove-requested(string, string); // mask, text pattern ("" for none)
     callback perform-save-requested(string);
     callback alias-add-requested(string, string);
     callback alias-remove-requested(string);
@@ -1282,6 +1376,52 @@ export component AppWindow inherits Window {
     // that live in a `.slint` file.
     // Sidebar connection labels arrive from Rust as English keys
     // ("connecting", "reconnecting", "paused", "connection failed").
+    function home-state-text(state: string) -> string {
+        if state == "connected" {
+            return @tr("connected");
+        } else if state == "failing" {
+            return @tr("failing");
+        } else if state == "parked" {
+            return @tr("parked");
+        } else if state == "failed" {
+            return @tr("failed");
+        } else {
+            return state;
+        }
+    }
+
+    function home-error-text(key: string, network: string) -> string {
+        if key == "remove-forbidden" {
+            return @tr("A guest session can't remove {}.", network);
+        } else if key == "remove-not-found" {
+            return @tr("{} is no longer part of this session.", network);
+        } else if key == "remove-failed" {
+            return @tr("Couldn't remove {}.", network);
+        } else if key == "disconnect-failed" {
+            return @tr("Couldn't disconnect {}.", network);
+        } else if key == "reconnect-failed" {
+            return @tr("Couldn't reconnect {}.", network);
+        } else if key == "connect-failed" {
+            return @tr("Couldn't connect {}.", network);
+        } else {
+            return key;
+        }
+    }
+
+    function home-session-text() -> string {
+        if home-session-kind == "user" {
+            return @tr("Your chat stays connected — always. This device stays signed in for 7 days of inactivity; after that you'll sign back in, but Grappa never drops your IRC connection.");
+        } else if home-session-kind == "visitor-registered" && home-named-network != "" {
+            return @tr("You're registered as {} on {}, so your chat stays connected and your history is kept for good. This device stays signed in for 7 days of inactivity; after that you'll sign back in, but nothing is lost.", home-named-nick, home-named-network);
+        } else if home-session-kind == "visitor-registered" {
+            return @tr("You're registered, so your chat stays connected and your history is kept for good. This device stays signed in for 7 days of inactivity; after that you'll sign back in, but nothing is lost.");
+        } else if home-session-kind == "visitor-guest" {
+            return @tr("You're chatting as a guest. Your session is kept alive for up to 48 hours of inactivity — after that it expires and everything in it is gone.");
+        } else {
+            return "";
+        }
+    }
+
     function connection-label-text(label: string) -> string {
         if label == "connecting" {
             return @tr("connecting");
@@ -1503,6 +1643,8 @@ export component AppWindow inherits Window {
             return @tr("The auto-away delay must be a whole number of seconds.");
         } else if status-kind == "personal-prefs-saved" {
             return @tr("Settings saved.");
+        } else if status-kind == "away-nick-suffix-invalid" {
+            return @tr("That nick suffix isn't valid on IRC.");
         } else if status-kind == "personal-prefs-failed" {
             return @tr("Couldn't save those settings.");
         } else if status-kind == "command-refused" {
@@ -1657,8 +1799,16 @@ export component AppWindow inherits Window {
             return @tr("The server doesn't accept this type of file: {}", status-attach-name);
         } else if status-kind == "attach-too-large" {
             return @tr("{} is larger than the server allows for this type of file.", status-attach-name);
+        } else if status-kind == "ignore-invalid-text-pattern" {
+            return @tr("The text pattern can't be blank or span more than one line.");
+        } else if status-kind == "ignore-invalid-mask" {
+            return @tr("That mask isn't valid.");
+        } else if status-kind == "display-prefs-rejected" {
+            return @tr("Grappa refused that date format; the saved one is back.");
+        } else if status-kind == "display-prefs-save-failed" {
+            return @tr("Couldn't save the display preferences.");
         } else if status-kind == "attach-no-space" {
-            return @tr("The server has no room left for {}.", status-attach-name);
+            return @tr("The upload of {} was refused for lack of space.", status-attach-name);
         } else if status-kind == "attach-read-failed" {
             return @tr("Couldn't read {}.", status-attach-name);
         } else if status-kind == "attach-no-window" {
@@ -2206,7 +2356,222 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if chat-lines.length > 0 && !history-start-reached : HorizontalLayout {
+            // The home page takes the chat's place when no window is open:
+            // a view, not a chat, so no compose bar either (Cicchetto).
+            if !has-selected-channel : ScrollView {
+                vertical-stretch: 1;
+
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 12px;
+                    padding-right: 8px;
+
+                    // Cancel-focused, like Cicchetto's confirm: a remove is
+                    // reversible, but there's no reason to make it a mistap.
+                    if home-confirm-network != "" : SectionCard {
+                        icon: "⚠";
+                        title: home-confirm-kind == "remove" ? @tr("Remove network") : @tr("Disconnect network");
+
+                        Text {
+                            text: home-confirm-kind == "remove"
+                                ? @tr("Remove {} from your session? Your nick, login details and autojoin channels are kept — connecting it again restores them.", home-confirm-network)
+                                : @tr("Disconnect from {}?", home-confirm-network);
+                            wrap: word-wrap;
+                            accessible-role: AccessibleRole.text;
+                        }
+
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 6px;
+
+                            Button {
+                                text: @tr("Cancel");
+                                init => { self.focus(); }
+                                clicked => {
+                                    home-confirm-network = "";
+                                    home-confirm-kind = "";
+                                }
+                            }
+                            Button {
+                                text: home-confirm-kind == "remove" ? @tr("Remove") : @tr("Yes");
+                                clicked => {
+                                    if home-confirm-kind == "remove" {
+                                        home-network-remove(home-confirm-network);
+                                    } else {
+                                        home-network-disconnect(home-confirm-network);
+                                    }
+                                    home-confirm-network = "";
+                                    home-confirm-kind = "";
+                                }
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        icon: "🍇";
+                        title: @tr("Welcome to Grappa");
+
+                        Text {
+                            text: @tr("Grappa keeps you connected to IRC even while this app is closed. Just open it and you're back in your conversations right where you left off — no reconnecting, nothing lost.");
+                            wrap: word-wrap;
+                            accessible-role: AccessibleRole.text;
+                        }
+                        if home-session-kind != "" : Text {
+                            text: home-session-text();
+                            wrap: word-wrap;
+                            color: palette-muted;
+                            accessible-role: AccessibleRole.text;
+                        }
+                    }
+
+                    SectionCard {
+                        icon: "🔌";
+                        title: @tr("Networks");
+
+                        Text {
+                            text: home-networks.length > 0
+                                ? @tr("Below are the IRC networks you can chat on.")
+                                : (home-available.length > 0
+                                    ? @tr("Pick a network below to get started.")
+                                    : (home-session-kind == "user"
+                                        ? @tr("No networks bound. Ask the operator to bind one.")
+                                        : @tr("Connecting…")));
+                            wrap: word-wrap;
+                            color: palette-muted;
+                            accessible-role: AccessibleRole.text;
+                        }
+
+                        for row in home-networks : VerticalLayout {
+                            spacing: 6px;
+
+                            Rectangle {
+                                height: 1px;
+                                background: #8080806a;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 6px;
+
+                                if row.connected : Button {
+                                    text: row.nick == "" ? row.network : row.network + " · " + row.nick;
+                                    accessible-label: @tr("Open network messages on {}", row.network);
+                                    clicked => { network-selected(row.network); }
+                                }
+                                if !row.connected : Text {
+                                    text: row.nick == "" ? row.network : row.network + " · " + row.nick;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    accessible-role: AccessibleRole.text;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: home-state-text(row.state);
+                                    color: palette-muted;
+                                    vertical-alignment: center;
+                                    accessible-role: AccessibleRole.text;
+                                }
+                                if row.connected : Button {
+                                    text: @tr("Disconnect");
+                                    accessible-label: @tr("Disconnect {}", row.network);
+                                    clicked => {
+                                        home-confirm-kind = "disconnect";
+                                        home-confirm-network = row.network;
+                                    }
+                                }
+                                if !row.connected : Button {
+                                    text: row.reconnecting ? @tr("Reconnecting…") : @tr("Reconnect");
+                                    enabled: !row.reconnecting;
+                                    accessible-label: @tr("Reconnect {}", row.network);
+                                    clicked => { home-network-reconnect(row.network); }
+                                }
+                                if row.can-remove : Button {
+                                    text: @tr("Remove");
+                                    accessible-label: @tr("Remove {}", row.network);
+                                    clicked => {
+                                        home-confirm-kind = "remove";
+                                        home-confirm-network = row.network;
+                                    }
+                                }
+                            }
+
+                            if row.reason != "" : Text {
+                                text: row.reason;
+                                wrap: word-wrap;
+                                color: palette-muted;
+                                accessible-role: AccessibleRole.text;
+                            }
+                            if row.error != "" : Text {
+                                text: home-error-text(row.error, row.network);
+                                wrap: word-wrap;
+                                color: theme == "dark" ? #e57373 : #c0392b;
+                                accessible-role: AccessibleRole.text;
+                                accessible-live-region: AccessibleLiveness.polite;
+                            }
+                            if row.can-recover : HorizontalLayout {
+                                alignment: start;
+
+                                Button {
+                                    text: "🔑 " + @tr("Recover identity");
+                                    clicked => { home-network-recover(row.network); }
+                                }
+                            }
+                            if row.featured.length > 0 : Text {
+                                text: @tr("Channels worth a look on {}:", row.network);
+                                font-weight: 600;
+                                wrap: word-wrap;
+                                accessible-role: AccessibleRole.text;
+                            }
+                            for link in row.featured : HorizontalLayout {
+                                alignment: start;
+
+                                Button {
+                                    text: link.description == "" ? link.name : link.name + " — " + link.description;
+                                    accessible-label: @tr("Open {} on {}", link.name, row.network);
+                                    clicked => { home-featured-open(row.network, link.name); }
+                                }
+                            }
+                            if row.featured-error != "" : Text {
+                                text: @tr("Couldn't join {}.", row.featured-error);
+                                wrap: word-wrap;
+                                color: theme == "dark" ? #e57373 : #c0392b;
+                                accessible-role: AccessibleRole.text;
+                                accessible-live-region: AccessibleLiveness.polite;
+                            }
+                        }
+                    }
+
+                    if home-available.length > 0 : SectionCard {
+                        icon: "➕";
+                        title: @tr("Available to connect");
+
+                        Text {
+                            text: @tr("Pick a network to connect and start chatting on it.");
+                            wrap: word-wrap;
+                            color: palette-muted;
+                            accessible-role: AccessibleRole.text;
+                        }
+                        for slug in home-available : HorizontalLayout {
+                            alignment: start;
+
+                            Button {
+                                text: home-connecting == slug ? @tr("Connecting {}…", slug) : "+ " + slug;
+                                enabled: home-connecting == "";
+                                accessible-label: @tr("Connect {}", slug);
+                                clicked => { home-network-connect(slug); }
+                            }
+                        }
+                        if home-available-error != "" : Text {
+                            text: home-error-text(home-available-error, home-available-error-network);
+                            wrap: word-wrap;
+                            color: theme == "dark" ? #e57373 : #c0392b;
+                            accessible-role: AccessibleRole.text;
+                            accessible-live-region: AccessibleLiveness.polite;
+                        }
+                    }
+                }
+            }
+
+            if has-selected-channel && chat-lines.length > 0 && !history-start-reached : HorizontalLayout {
                 alignment: center;
 
                 CompactButton {
@@ -2217,7 +2582,7 @@ export component AppWindow inherits Window {
                 }
             }
 
-            chat-list := ListView {
+            if has-selected-channel : chat-list := ListView {
                 vertical-stretch: 1;
 
                 // Whether the pane should keep chasing the newest line.
@@ -2362,7 +2727,7 @@ export component AppWindow inherits Window {
             // Small compose bar, never more than one line tall: paperclip
             // to attach a file (left, like Cicchetto), text field, send
             // icon (right).
-            HorizontalBox {
+            if has-selected-channel : HorizontalBox {
                 height: 40px;
                 spacing: 6px;
 
@@ -2703,6 +3068,16 @@ export component AppWindow inherits Window {
                         accessible-label: @tr("Auto-away message");
                         text <=> edit-away-message;
                     }
+                    if away-nick-suffix-supported : LineEdit {
+                        placeholder-text: @tr("Nick suffix while auto-away (e.g. |away)");
+                        accessible-label: @tr("Nick suffix while auto-away");
+                        text <=> edit-away-nick-suffix;
+                    }
+                    if away-nick-suffix-supported : Text {
+                        text: @tr("Only automatic away renames you, never /away. Grappa skips the rename when the nick would be too long for the network and keeps the suffix if your bare nick was taken meanwhile, so the nick shown is always the one the network reports.");
+                        wrap: word-wrap;
+                        color: palette-muted;
+                    }
                     HorizontalLayout {
                         spacing: 8px;
 
@@ -2857,6 +3232,35 @@ export component AppWindow inherits Window {
                     text: @tr("Show bottom bar");
                     checked <=> pref-show-bottom-bar;
                     toggled => { display-prefs-changed(); }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: @tr("Date format");
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    ComboBox {
+                        model: [
+                            @tr("Automatic ({})", date-format-examples[0]),
+                            @tr("Day/month/year ({})", date-format-examples[1]),
+                            @tr("Month/day/year ({})", date-format-examples[2]),
+                            @tr("Year-month-day ({})", date-format-examples[3])
+                        ];
+                        current-index <=> pref-date-format-index;
+                        horizontal-stretch: 0;
+                        min-width: 220px;
+                        selected => {
+                            pref-date-format-set = true;
+                            display-prefs-changed();
+                        }
+                    }
+                }
+                Text {
+                    text: @tr("Automatic follows the language of Cordiale.");
+                    wrap: word-wrap;
+                    color: palette-muted;
                 }
             }
 
@@ -3432,19 +3836,21 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                for mask in settings-ignores : HorizontalLayout {
+                for rule in settings-ignores : HorizontalLayout {
                     spacing: 8px;
 
                     Text {
-                        text: mask;
+                        text: rule.text-pattern == "" ? rule.mask : @tr("{} matching {}", rule.mask, rule.text-pattern);
                         vertical-alignment: center;
                         horizontal-stretch: 1;
                         wrap: word-wrap;
                     }
                     CompactButton {
                         text: "🗑  " + @tr("Delete");
-                        a11y-label: @tr("Delete");
-                        clicked => { ignore-remove-requested(mask); }
+                        a11y-label: rule.text-pattern == ""
+                            ? @tr("Delete {}", rule.mask)
+                            : @tr("Delete {} matching {}", rule.mask, rule.text-pattern);
+                        clicked => { ignore-remove-requested(rule.mask, rule.text-pattern); }
                     }
                 }
                 HorizontalLayout {
@@ -3456,15 +3862,37 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                         min-width: 80px;
                     }
+                    LineEdit {
+                        placeholder-text: @tr("Text pattern (optional)");
+                        text <=> new-ignore-pattern;
+                        horizontal-stretch: 1;
+                        min-width: 80px;
+                    }
                     CompactButton {
                         text: "➕  " + @tr("Add");
                         a11y-label: @tr("Add");
-                        enabled: settings-network != "";
+                        enabled: settings-network != "" && new-ignore-mask != "";
                         clicked => {
-                            ignore-add-requested(new-ignore-mask);
+                            ignore-add-requested(new-ignore-mask, new-ignore-pattern);
                             new-ignore-mask = "";
+                            new-ignore-pattern = "";
                         }
                     }
+                }
+                Text {
+                    text: @tr("A text pattern narrows the rule to messages whose text matches it: * and ? are wildcards, the whole text must match (write *word* for “contains”) and case is ignored. Grappa drops the matching messages.");
+                    wrap: word-wrap;
+                    color: palette-muted;
+                }
+                if settings-ignore-error != "" : Text {
+                    text: settings-ignore-error == "invalid-text-pattern"
+                        ? @tr("The text pattern can't be blank or span more than one line.")
+                        : (settings-ignore-error == "invalid-mask"
+                            ? @tr("That mask isn't valid.")
+                            : @tr("Couldn't update the ignore list."));
+                    wrap: word-wrap;
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
                 }
             }
 
@@ -3664,6 +4092,15 @@ export component AppWindow inherits Window {
                         label: @tr("Visitors");
                         selected: admin-section == "visitors";
                         clicked => { admin-section = "visitors"; }
+                    }
+                    NavButton {
+                        icon: "📎";
+                        label: @tr("Uploads");
+                        selected: admin-section == "uploads";
+                        clicked => {
+                            admin-section = "uploads";
+                            admin-uploads-requested();
+                        }
                     }
                     NavButton {
                         icon: "📜";
@@ -3987,6 +4424,97 @@ export component AppWindow inherits Window {
                             text: "🗑  " + @tr("Delete");
                             a11y-label: @tr("Delete");
                             clicked => { admin-visitor-delete(row.visitor-id); }
+                        }
+                    }
+                }
+
+                if admin-section == "uploads" && admin-uploads-error != "" : Text {
+                    text: admin-uploads-error == "forbidden"
+                        ? @tr("The uploads registry needs an administrator signed in with a full session.")
+                        : (admin-uploads-error == "delete-failed"
+                            ? @tr("Couldn't delete the upload.")
+                            : @tr("Couldn't load the uploads."));
+                    wrap: word-wrap;
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+                // The budget shows only once the server has answered: before
+                // that "0 B of 0 B" would look like a measurement.
+                if admin-section == "uploads" && admin-uploads-loaded : Text {
+                    text: admin-uploads-share >= 0
+                        ? @tr("Disk budget: {} of {} ({}%)", admin-uploads-used, admin-uploads-cap, admin-uploads-share)
+                        : @tr("Disk budget: {} of {}", admin-uploads-used, admin-uploads-cap);
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+                if admin-section == "uploads" && admin-uploads-loaded : Text {
+                    text: @tr("Live bytes against the global upload cap; deleted rows no longer count and stay listed as the audit trail.");
+                    wrap: word-wrap;
+                    color: palette-muted;
+                }
+                if admin-section == "uploads" && admin-upload-confirm-id != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 4px;
+
+                    Text {
+                        text: @tr("Delete {} before it expires? The file is removed at once; its row stays listed.", admin-upload-confirm-name);
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: @tr("Cancel");
+                        init => { self.focus(); }
+                        clicked => {
+                            admin-upload-confirm-id = "";
+                            admin-upload-confirm-name = "";
+                        }
+                    }
+                    Button {
+                        text: @tr("Delete");
+                        clicked => {
+                            admin-upload-delete(admin-upload-confirm-id);
+                            admin-upload-confirm-id = "";
+                            admin-upload-confirm-name = "";
+                        }
+                    }
+                }
+                if admin-section == "uploads" && admin-uploads-loaded && admin-uploads.length == 0 : Text {
+                    text: @tr("No uploads.");
+                    color: palette-muted;
+                }
+                if admin-section == "uploads" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
+                    for row in admin-uploads : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+
+                            Text {
+                                text: (row.live ? "📎  " : "🗑  ") + row.name;
+                                font-weight: 600;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: row.slug + " · " + row.mime + " · " + row.size + " · " + row.subject
+                                    + " · " + (row.expires == "" ? @tr("never expires") : @tr("expires {}", row.expires))
+                                    + " · " + (row.live ? @tr("live") : @tr("deleted {}", row.deleted));
+                                color: palette-muted;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if row.live : CompactButton {
+                            text: "🗑  " + @tr("Delete");
+                            a11y-label: @tr("Delete {}", row.name);
+                            clicked => {
+                                admin-upload-confirm-id = row.id;
+                                admin-upload-confirm-name = row.name;
+                            }
                         }
                     }
                 }
