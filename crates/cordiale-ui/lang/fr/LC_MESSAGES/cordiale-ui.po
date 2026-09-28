@@ -2635,3 +2635,15 @@ msgstr "Plus tard"
 msgctxt "AppWindow"
 msgid "Open latest release in browser"
 msgstr "Ouvrir la dernière version dans le navigateur"
+
+msgctxt "AppWindow"
+msgid "Font size"
+msgstr "Taille du texte"
+
+msgctxt "AppWindow"
+msgid "Font size: {}%"
+msgstr "Taille du texte : {} %"
+
+msgctxt "AppWindow"
+msgid "Reset"
+msgstr "Réinitialiser"

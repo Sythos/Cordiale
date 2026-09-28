@@ -22,6 +22,10 @@
 
 import { LineEdit, TextEdit, Button, VerticalBox, HorizontalBox, ProgressIndicator, CheckBox, ComboBox, ListView, Palette, ScrollView, Slider } from "std-widgets.slint";
 
+global FontScale {
+    in-out property <int> percent: 100;
+}
+
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
     network: string,
@@ -540,7 +544,7 @@ component TopMenuButton {
 
                     Text {
                         text: root.label;
-                        font-size: 12px;
+                        font-size: 12px * FontScale.percent / 100;
                         color: root.dark ? #f0f0f0 : #1a1a1a;
                     }
                 }
@@ -614,7 +618,7 @@ component DirectoryEntry inherits Rectangle {
                 }
                 if root.featured : Text {
                     text: @tr("featured");
-                    font-size: 11px;
+                    font-size: 11px * FontScale.percent / 100;
                     color: #808080;
                     vertical-alignment: center;
                 }
@@ -629,7 +633,7 @@ component DirectoryEntry inherits Rectangle {
                         padding-right: 5px;
                         Text {
                             text: @tr("joined");
-                            font-size: 11px;
+                            font-size: 11px * FontScale.percent / 100;
                             vertical-alignment: center;
                         }
                     }
@@ -638,7 +642,7 @@ component DirectoryEntry inherits Rectangle {
 
             if root.topic != "" : Text {
                 text: root.topic;
-                font-size: 12px;
+                font-size: 12px * FontScale.percent / 100;
                 color: #808080;
                 wrap: word-wrap;
             }
@@ -740,12 +744,12 @@ component SectionCard inherits Rectangle {
 
             Text {
                 text: icon;
-                font-size: 16px;
+                font-size: 16px * FontScale.percent / 100;
                 vertical-alignment: center;
             }
             Text {
                 text: title;
-                font-size: 16px;
+                font-size: 16px * FontScale.percent / 100;
                 font-weight: 600;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
@@ -758,6 +762,9 @@ component SectionCard inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
+    in-out property <int> font-size-percent: 100;
+    callback font-size-changed(int);
+    changed font-size-percent => { FontScale.percent = font-size-percent; }
     // Account-wide unread count (Grappa's `badge_count`). It goes in the
     // title, which every taskbar shows, and on Windows also in a taskbar
     // badge; the "Show event badge" preference turns both off.
@@ -774,6 +781,7 @@ export component AppWindow inherits Window {
     // switches the app to a monospace font, irssi-style.
     background: palette-active ? palette-bg : Palette.background;
     default-font-family: palette-active ? palette-font : "";
+    default-font-size: 14px * FontScale.percent / 100;
     // Winresource only embeds an icon into the .exe file's own Win32
     // resources (Explorer file icon, Alt-Tab before the window exists).
     // The live window's title-bar corner and running taskbar icon come
@@ -2132,7 +2140,7 @@ export component AppWindow inherits Window {
 
         Text {
             text: @tr("Choose your language");
-            font-size: 22px;
+            font-size: 22px * FontScale.percent / 100;
             horizontal-alignment: center;
         }
 
@@ -2168,12 +2176,12 @@ export component AppWindow inherits Window {
 
         Text {
             text: "Cordiale";
-            font-size: 28px;
+            font-size: 28px * FontScale.percent / 100;
             horizontal-alignment: center;
         }
         Text {
             text: @tr("Two-factor authentication");
-            font-size: 18px;
+            font-size: 18px * FontScale.percent / 100;
             font-weight: 600;
             horizontal-alignment: center;
         }
@@ -2216,7 +2224,7 @@ export component AppWindow inherits Window {
 
         Text {
             text: "Cordiale";
-            font-size: 28px;
+            font-size: 28px * FontScale.percent / 100;
             horizontal-alignment: center;
         }
 
@@ -2274,7 +2282,7 @@ export component AppWindow inherits Window {
 
             Text {
                 text: @tr("Previously used servers");
-                font-size: 14px;
+                font-size: 14px * FontScale.percent / 100;
             }
 
             for known in known-servers : Button {
@@ -2361,7 +2369,7 @@ export component AppWindow inherits Window {
                     : admin-button-focused ? @tr("Admin")
                     : settings-button.has-focus ? @tr("Settings")
                     : @tr("Disconnect");
-                font-size: 12px;
+                font-size: 12px * FontScale.percent / 100;
                 overflow: elide;
                 accessible-role: none;
             }
@@ -2565,7 +2573,7 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: right;
                                 vertical-alignment: center;
                                 min-width: 28px;
-                                font-size: 12px;
+                                font-size: 12px * FontScale.percent / 100;
                                 font-weight: 700;
                             }
 
@@ -2613,7 +2621,7 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: @tr("Channels on {}", directory-network);
-                    font-size: 16px;
+                    font-size: 16px * FontScale.percent / 100;
                     font-weight: 700;
                     overflow: elide;
                     horizontal-stretch: 1;
@@ -2745,7 +2753,7 @@ export component AppWindow inherits Window {
             // accessible label.
             if window-status != "" : Text {
                 text: window-status;
-                font-size: 14px;
+                font-size: 14px * FontScale.percent / 100;
                 font-weight: 700;
                 overflow: elide;
                 color: palette-active ? palette-accent : Palette.foreground;
@@ -2765,7 +2773,7 @@ export component AppWindow inherits Window {
                     padding: 6px;
                     Text {
                         text: current-topic == "" ? @tr("No topic set") : current-topic;
-                        font-size: 14px;
+                        font-size: 14px * FontScale.percent / 100;
                         wrap: word-wrap;
                         horizontal-alignment: left;
                         vertical-alignment: top;
@@ -3339,7 +3347,7 @@ export component AppWindow inherits Window {
 
             if current-window-is-joined && !current-query : Text {
                 text: @tr("Members ({})", channel-members.length);
-                font-size: 14px;
+                font-size: 14px * FontScale.percent / 100;
             }
 
             if current-window-is-joined && !current-query : ListView {
@@ -3430,7 +3438,7 @@ export component AppWindow inherits Window {
 
             Text {
                 text: @tr("Settings");
-                font-size: 18px;
+                font-size: 18px * FontScale.percent / 100;
                 font-weight: 600;
             }
             Rectangle { height: 6px; }
@@ -3738,6 +3746,34 @@ export component AppWindow inherits Window {
             if settings-section == "display" : SectionCard {
                 icon: "🖥";
                 title: display-prefs-loaded ? @tr("Display preferences") : @tr("Loading…");
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: @tr("Font size: {}%", font-size-percent);
+                        vertical-alignment: center;
+                    }
+                    Slider {
+                        minimum: 50;
+                        maximum: 150;
+                        step: 5;
+                        value: font-size-percent;
+                        accessible-label: @tr("Font size");
+                        horizontal-stretch: 1;
+                        changed(value) => { font-size-percent = Math.round(value); }
+                        released(value) => {
+                            font-size-percent = Math.round(value);
+                            font-size-changed(font-size-percent);
+                        }
+                    }
+                    Button {
+                        text: @tr("Reset");
+                        clicked => {
+                            font-size-percent = 100;
+                            font-size-changed(100);
+                        }
+                    }
+                }
 
                 CheckBox {
                     text: @tr("Colored nicklist");
@@ -4685,7 +4721,7 @@ export component AppWindow inherits Window {
                 }
                 Text {
                     text: "Cordiale";
-                    font-size: 20px;
+                    font-size: 20px * FontScale.percent / 100;
                     horizontal-alignment: center;
                 }
                 Text {
@@ -5551,7 +5587,7 @@ export component AppWindow inherits Window {
             }
             Text {
                 text: reply-title-text();
-                font-size: 18px;
+                font-size: 18px * FontScale.percent / 100;
                 wrap: word-wrap;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
@@ -5582,7 +5618,7 @@ export component AppWindow inherits Window {
 
         Text {
             text: @tr("User modes on {}", umode-network);
-            font-size: 18px;
+            font-size: 18px * FontScale.percent / 100;
             wrap: word-wrap;
             accessible-role: AccessibleRole.text;
         }
@@ -5637,7 +5673,7 @@ export component AppWindow inherits Window {
 
         Text {
             text: "📻  " + @tr("Radio");
-            font-size: 18px;
+            font-size: 18px * FontScale.percent / 100;
             accessible-role: AccessibleRole.text;
         }
 
@@ -5707,7 +5743,7 @@ export component AppWindow inherits Window {
 
             Text {
                 text: media-title;
-                font-size: 16px;
+                font-size: 16px * FontScale.percent / 100;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
                 overflow: elide;
@@ -5791,7 +5827,7 @@ export component AppWindow inherits Window {
 
         Text {
             text: @tr("Archive on {}", archive-network);
-            font-size: 18px;
+            font-size: 18px * FontScale.percent / 100;
             wrap: word-wrap;
             accessible-role: AccessibleRole.text;
         }
@@ -5876,7 +5912,7 @@ export component AppWindow inherits Window {
 
         Text {
             text: links-network-label;
-            font-size: 18px;
+            font-size: 18px * FontScale.percent / 100;
         }
 
         for row in links-rows : Text {
@@ -5924,7 +5960,7 @@ export component AppWindow inherits Window {
 
                 Text {
                     text: @tr("Cordiale update available");
-                    font-size: 18px;
+                    font-size: 18px * FontScale.percent / 100;
                     font-weight: 600;
                 }
                 Text {
@@ -5973,7 +6009,7 @@ export component LinksGraphWindow inherits Window {
 
             Text {
                 text: network-label;
-                font-size: 18px;
+                font-size: 18px * FontScale.percent / 100;
                 vertical-alignment: center;
                 horizontal-stretch: 1;
                 overflow: elide;
@@ -6043,7 +6079,7 @@ export component LinksGraphWindow inherits Window {
                     y: node.y * 1px * zoom - 7px;
                     text: node.server;
                     color: white;
-                    font-size: 12px;
+                    font-size: 12px * FontScale.percent / 100;
                 }
             }
         }
