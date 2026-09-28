@@ -30,7 +30,7 @@ prima di pianificare.
 | Condivisione sessione via QR | Incerto | — | Non menzionato nel contratto |
 | Console amministrativa | Parziale | — | Gate `is_admin`, nessuna procedura di assegnazione documentata |
 | Vhost settings | No / non documentato | — | Non citato |
-| Directory canali | Incerto | — | Non documentato esplicitamente |
+| Directory canali | Sì (sorgente Grappa/Cicchetto) | Fase 2, implementato | Voce "Canali" per rete nella sidebar e `/list`: ricerca, refresh, totale, età dell'elenco, join o apertura con un clic (issue #121) |
 | Archivio/scrollback | Sì | Fase 1/2 | `GET /networks/:network_id/archive` |
 | Banlist | Sì | Fase 2 | Verbo WS `"banlist"` |
 | Modifica modi canale | Parziale | Fase 2 | Righe `:mode` documentate, nessun verbo dedicato oltre banlist |
@@ -188,6 +188,17 @@ ident e realname non sono più esposti da Grappa.
   <https://github.com/vjt/grappa-irc/blob/main/docs/CLIENT_PROTOCOL.md>.
 - **Cicchetto**, usato solo come riferimento funzionale e non architetturale:
   <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
+
+**Aggiornamento (2026-09-27)**: la directory canali (issue #121) non è più
+una schermata a parte in sola lettura. Ogni rete connessa ha la voce
+"📇 Canali" nella sidebar, sopra i suoi canali (come la riga "channels" di
+Cicchetto); il pannello prende il posto della chat lasciando la sidebar
+visibile: ricerca con debounce e Refresh in alto, totale dei canali e età
+dell'elenco ("5 min fa", aggiornata ogni 30 s; se stantio diventa un
+bottone "aggiorna ora"), ordinamento utenti/nome, righe con nome, badge
+"dentro"/"in evidenza", topic senza codici mIRC e numero di utenti a
+destra. Clic, Invio o Spazio su una riga entrano nel canale (o lo aprono se
+già dentro) e chiudono il pannello.
 
 **Aggiornamento (2026-09-27)**: i bottoni a sola icona del menu in alto a
 sinistra (Home, Admin per gli admin, Impostazioni, Disconnetti; issue #120)

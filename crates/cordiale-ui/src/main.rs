@@ -122,6 +122,10 @@ enum WorkerCommand {
     DirectorySort(String),
     DirectorySearch(String),
     DirectoryClose,
+    /// The sidebar "Channels" entry of a network: opens its directory.
+    DirectoryOpen(String),
+    /// A directory row: joins the channel (or opens it when joined).
+    DirectoryActivate(String),
     DccOfferAnswer {
         network: String,
         offer_id: String,
@@ -750,6 +754,28 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_directory_close = worker_tx.clone();
     ui.on_directory_closed(move || {
         let _ = tx_for_directory_close.send(WorkerCommand::DirectoryClose);
+    });
+
+    let tx_for_directory_open = worker_tx.clone();
+    ui.on_directory_open_requested(move |network| {
+        let _ = tx_for_directory_open.send(WorkerCommand::DirectoryOpen(network.to_string()));
+    });
+
+    let tx_for_directory_activate = worker_tx.clone();
+    ui.on_directory_channel_activated(move |channel| {
+        let _ =
+            tx_for_directory_activate.send(WorkerCommand::DirectoryActivate(channel.to_string()));
+    });
+
+    let weak_for_directory_age = ui.as_weak();
+    ui.on_directory_age_tick(move || {
+        if let Some(ui) = weak_for_directory_age.upgrade() {
+            let age = directory_age_seconds(
+                &ui.get_directory_captured_epoch(),
+                chrono::Utc::now().timestamp(),
+            );
+            ui.set_directory_age_seconds(age);
+        }
     });
 
     let tx_for_dcc_accept = worker_tx.clone();
@@ -2431,7 +2457,23 @@ async fn run_worker(
                         load_directory(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::DirectoryClose) => {
-                        state.directory = None;
+                        close_directory(&mut state, &ui);
+                    }
+                    Some(WorkerCommand::DirectoryOpen(network)) => {
+                        if state.network_ids.contains_key(&network) {
+                            let reopen = state
+                                .directory
+                                .as_ref()
+                                .is_some_and(|view| view.network == network);
+                            if reopen {
+                                push_directory(&state, &ui, true);
+                            } else {
+                                open_directory(&mut state, &ui, network, String::new()).await;
+                            }
+                        }
+                    }
+                    Some(WorkerCommand::DirectoryActivate(channel)) => {
+                        directory_activate(&mut state, &ui, channel).await;
                     }
                     Some(WorkerCommand::DccOfferAnswer {
                         network,
@@ -3079,6 +3121,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::GoHome) => {
                         write_back_read_cursor(&mut state);
+                        close_directory(&mut state, &ui);
                         state.current_channel = None;
                         state.current_query = false;
                         state.current_query_ready = false;
@@ -3457,7 +3500,7 @@ async fn finish_connect(
             state.auto_away_reason = None;
             state.away_nick_suffix = None;
             state.lusers_requested.clear();
-            state.directory = None;
+            close_directory(state, ui);
             state.dcc_offers.clear();
             state.archive = None;
             state.notify_lists.clear();
@@ -3900,6 +3943,7 @@ async fn handle_select_channel(
     let Some(identifier) = state.identifier.clone() else {
         return;
     };
+    close_directory(state, ui);
     let server_window = channel == SERVER_WINDOW_NAME;
     if server_window && !state.network_ids.contains_key(&network) {
         return;
@@ -4102,6 +4146,7 @@ async fn handle_select_query(
     let Some(identifier) = state.identifier.clone() else {
         return;
     };
+    close_directory(state, ui);
 
     let topic = query_topic(&identifier, &query.network, &query.target_nick);
     if let Some(handle) = &state.session {
@@ -15332,7 +15377,66 @@ fn parse_list_command(body: &str) -> Option<String> {
         .then(|| rest.trim().to_string())
 }
 
-/// Opens the directory screen for `network` and loads its first page.
+/// Closes the directory pane, if open, and gives the chat its place back.
+fn close_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    if state.directory.take().is_none() {
+        return;
+    }
+    let _ = ui.upgrade_in_event_loop(|ui| ui.set_directory_open(false));
+}
+
+/// A directory row: joined first when it isn't, then focused, like
+/// Cicchetto (the intent follows the tap). A failed join stays on the pane.
+async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, channel: String) {
+    let Some(network) = state.directory.as_ref().map(|view| view.network.clone()) else {
+        return;
+    };
+    if !state.network_ids.contains_key(&network) {
+        return;
+    }
+    // The directory keeps the server's `LIST` spelling; window states are
+    // keyed ASCII-folded, like Cicchetto's `channelKey`.
+    let joined = state
+        .window_states
+        .get(&window_state_key(&network, &channel))
+        == Some(&ChannelWindowState::Joined);
+    if !joined {
+        let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+            return;
+        };
+        if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
+            persistence::log_line(&format!("directory join failed: {err:?}"));
+            if let Some(view) = state.directory.as_mut() {
+                view.error = Some("directory-join-failed");
+            }
+            push_directory(state, ui, false);
+            return;
+        }
+    }
+    // Focus the sidebar's own spelling of the window when it has one.
+    let key = window_state_key(&network, &channel);
+    let channel = state
+        .channel_entries
+        .iter()
+        .find(|(known_network, known_channel, _)| {
+            window_state_key(known_network, known_channel) == key
+        })
+        .map(|(_, known_channel, _)| known_channel.clone())
+        .unwrap_or(channel);
+    write_back_read_cursor(state);
+    handle_select_channel(state, ui, network, channel).await;
+}
+
+/// Seconds since `captured_epoch` (Unix seconds as pushed to the UI), or
+/// -1 when there is no capture; a clock behind the server reads as 0.
+fn directory_age_seconds(captured_epoch: &str, now: i64) -> i32 {
+    match captured_epoch.parse::<i64>() {
+        Ok(captured) => (now - captured).clamp(0, i64::from(i32::MAX)) as i32,
+        Err(_) => -1,
+    }
+}
+
+/// Opens the directory pane for `network` and loads its first page.
 async fn open_directory(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -15457,8 +15561,10 @@ async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
     }
 }
 
-/// Mirrors the open directory into the UI; `open` also switches to its
-/// screen. Nothing is pushed when no directory is open.
+/// Mirrors the open directory into the UI; `open` also shows its pane (and
+/// the search text, which later pushes leave alone so typing isn't
+/// overwritten by an answer to an earlier query). Nothing is pushed when no
+/// directory is open.
 fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
     let Some(view) = state.directory.as_ref() else {
         return;
@@ -15469,24 +15575,19 @@ fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) 
     let error = view.error.unwrap_or("");
     let refresh_pending = view.refresh_pending;
     let failed_reason = view.failed_reason.clone().unwrap_or_default();
-    let (rows, status, total, captured_at, has_more) = match &view.page {
+    let (rows, status, total, captured_at, captured_epoch, has_more) = match &view.page {
         Some(page) => (
-            page.entries
-                .iter()
-                .map(|entry| {
-                    (
-                        entry.name.clone(),
-                        entry.user_count.to_string(),
-                        entry.topic.clone().unwrap_or_default(),
-                        entry.featured,
-                    )
-                })
-                .collect::<Vec<_>>(),
+            directory_rows(page, &network, &state.window_states),
             page.status.clone(),
             page.total.to_string(),
             page.captured_at
                 .as_deref()
                 .map(format_iso_timestamp)
+                .unwrap_or_default(),
+            page.captured_at
+                .as_deref()
+                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                .map(|parsed| parsed.timestamp().to_string())
                 .unwrap_or_default(),
             page.next_cursor.is_some(),
         ),
@@ -15495,35 +15596,63 @@ fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) 
             String::new(),
             String::new(),
             String::new(),
+            String::new(),
             false,
         ),
     };
+    let age = directory_age_seconds(&captured_epoch, chrono::Utc::now().timestamp());
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let rows: Vec<DirectoryRow> = rows
-            .into_iter()
-            .map(|(name, users, topic, featured)| DirectoryRow {
-                name: name.into(),
-                users: users.into(),
-                topic: topic.into(),
-                featured,
-            })
-            .collect();
         ui.set_directory_rows(Rc::new(slint::VecModel::from(rows)).into());
         ui.set_directory_network(network.into());
         ui.set_directory_sort(sort.into());
-        ui.set_directory_query(query.into());
         ui.set_directory_status(status.into());
         ui.set_directory_total(total.into());
         ui.set_directory_captured_at(captured_at.into());
+        ui.set_directory_captured_epoch(captured_epoch.into());
+        ui.set_directory_age_seconds(age);
         ui.set_directory_error(error.into());
         ui.set_directory_refresh_pending(refresh_pending);
         ui.set_directory_failed_reason(failed_reason.into());
         ui.set_directory_has_more(has_more);
         if open {
-            ui.set_screen("directory".into());
+            ui.set_directory_query(query.into());
+            ui.set_screen("connected".into());
+            ui.set_directory_open(true);
         }
     });
+}
+
+/// The directory page as UI rows: the topic with its mIRC formatting
+/// stripped, and `joined` from the network's window states.
+fn directory_rows(
+    page: &DirectoryPage,
+    network: &str,
+    window_states: &HashMap<(String, String), ChannelWindowState>,
+) -> Vec<DirectoryRow> {
+    page.entries
+        .iter()
+        .map(|entry| {
+            let topic: String = entry
+                .topic
+                .as_deref()
+                .map(|topic| {
+                    cordiale_core::formatting::parse_mirc_text(topic)
+                        .into_iter()
+                        .map(|segment| segment.text)
+                        .collect()
+                })
+                .unwrap_or_default();
+            DirectoryRow {
+                name: entry.name.clone().into(),
+                users: entry.user_count.to_string().into(),
+                topic: topic.into(),
+                featured: entry.featured,
+                joined: window_states.get(&window_state_key(network, &entry.name))
+                    == Some(&ChannelWindowState::Joined),
+            }
+        })
+        .collect()
 }
 
 /// Local-time rendering of an ISO-8601 timestamp; an unparsable value is
@@ -22686,6 +22815,62 @@ mod tests {
         );
         assert_eq!(parse_list_command("/listen"), None);
         assert_eq!(parse_list_command("hello /list"), None);
+    }
+
+    #[test]
+    fn directory_age_counts_seconds_since_the_capture() {
+        assert_eq!(directory_age_seconds("", 1_000), -1);
+        assert_eq!(directory_age_seconds("not a number", 1_000), -1);
+        assert_eq!(directory_age_seconds("400", 1_000), 600);
+        // A local clock behind the server never reads as a negative age.
+        assert_eq!(directory_age_seconds("2000", 1_000), 0);
+    }
+
+    #[test]
+    fn directory_rows_mark_joined_channels_and_strip_topic_formatting() {
+        let page = DirectoryPage {
+            entries: vec![
+                cordiale_core::rest::DirectoryEntry {
+                    name: "#Rust".to_string(),
+                    topic: Some("\x02Welcome\x02 to \x0304rust".to_string()),
+                    user_count: 42,
+                    featured: true,
+                },
+                cordiale_core::rest::DirectoryEntry {
+                    name: "#other".to_string(),
+                    topic: None,
+                    user_count: 3,
+                    featured: false,
+                },
+            ],
+            next_cursor: None,
+            total: 2,
+            captured_at: None,
+            status: "fresh".to_string(),
+        };
+        let mut window_states = HashMap::new();
+        // Window states are ASCII-folded; the directory keeps `LIST` casing.
+        window_states.insert(
+            window_state_key("libera", "#rust"),
+            ChannelWindowState::Joined,
+        );
+        window_states.insert(
+            window_state_key("libera", "#other"),
+            ChannelWindowState::Pending,
+        );
+
+        let rows = directory_rows(&page, "libera", &window_states);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name.as_str(), "#Rust");
+        assert_eq!(rows[0].users.as_str(), "42");
+        assert_eq!(rows[0].topic.as_str(), "Welcome to rust");
+        assert!(rows[0].featured);
+        assert!(rows[0].joined);
+        assert_eq!(rows[1].topic.as_str(), "");
+        assert!(!rows[1].joined);
+        // Another network's window never marks this one's row.
+        assert!(!directory_rows(&page, "oftc", &window_states)[0].joined);
     }
 
     #[test]
