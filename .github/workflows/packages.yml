@@ -484,7 +484,6 @@ jobs:
         with:
           name: Cordiale V${{ needs.build-metadata.outputs.version }} BETA
           prerelease: false
-          make_latest: true
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: false
           files: release-assets/*/*
