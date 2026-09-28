@@ -199,3 +199,11 @@ bottone "aggiorna ora"), ordinamento utenti/nome, righe con nome, badge
 "dentro"/"in evidenza", topic senza codici mIRC e numero di utenti a
 destra. Clic, Invio o Spazio su una riga entrano nel canale (o lo aprono se
 già dentro) e chiudono il pannello.
+
+**Aggiornamento (2026-09-27)**: i bottoni a sola icona del menu in alto a
+sinistra (Home, Admin per gli admin, Impostazioni, Disconnetti; issue #120)
+mostrano il loro nome tradotto, lo stesso dell'etichetta accessibile, nel
+tooltip nativo di Slint 1.18 al passaggio del mouse: un popup che non
+intercetta clic, leggibile nel tema chiaro e scuro. Con la tastiera il nome
+del bottone che ha il focus compare su una riga sotto le icone, senza
+coprire nulla.

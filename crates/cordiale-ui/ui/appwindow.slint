@@ -505,6 +505,50 @@ struct EditorColor {
     valid: bool,
 }
 
+// Icon-only button of the sidebar's top menu. Hovering shows its name in
+// Slint's tooltip (an input-transparent popup: it never takes a click);
+// keyboard focus is reported through `has-focus` so the sidebar can name
+// the focused button under the icons.
+component TopMenuButton {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> dark;
+    out property <bool> has-focus: button.has-focus;
+    callback clicked();
+
+    button := Button {
+        text: root.icon;
+        accessible-label: root.label;
+        width: 32px;
+        height: 32px;
+        clicked => { root.clicked(); }
+
+        // Slint's tooltip: an input-transparent popup next to the pointer,
+        // so it never takes a click meant for the icons under it.
+        Tooltip {
+            Rectangle {
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: root.dark ? #5c5c5c : #a0a0a0;
+                background: root.dark ? #2b2b2b : #ffffe1;
+
+                HorizontalLayout {
+                    padding-top: 3px;
+                    padding-bottom: 3px;
+                    padding-left: 6px;
+                    padding-right: 6px;
+
+                    Text {
+                        text: root.label;
+                        font-size: 12px;
+                        color: root.dark ? #f0f0f0 : #1a1a1a;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // One row of the channel directory: name with its featured/joined labels,
 // topic under it, user count at the right edge. Click, Enter or Space
 // activates it (join, or open when already joined), like Cicchetto.
@@ -930,6 +974,9 @@ export component AppWindow inherits Window {
     in-out property <string> directory-query: "";
     in property <bool> directory-has-more: false;
     in property <bool> directory-refresh-pending: false;
+    // The top menu's Admin button exists only for admins, so its focus is
+    // mirrored here for the row's focused-name label.
+    property <bool> admin-button-focused: false;
     // `reason` of the last failed capture (raw server token), or "".
     in property <string> directory-failed-reason: "";
     // The directory pane replaces the chat while open; the sidebar stays.
@@ -2251,42 +2298,52 @@ export component AppWindow inherits Window {
                 alignment: start;
                 spacing: 4px;
 
-                Button {
-                    text: "🏠";
-                    accessible-label: @tr("Home");
-                    width: 32px;
-                    height: 32px;
+                home-button := TopMenuButton {
+                    icon: "🏠";
+                    label: @tr("Home");
+                    dark: theme == "dark";
                     clicked => { home-requested(); }
                 }
 
-                if is-admin : Button {
-                    text: "🛡";
-                    accessible-label: @tr("Admin");
-                    width: 32px;
-                    height: 32px;
+                if is-admin : TopMenuButton {
+                    icon: "🛡";
+                    label: @tr("Admin");
+                    dark: theme == "dark";
+                    changed has-focus => { admin-button-focused = self.has-focus; }
                     clicked => {
                         screen = "settings";
                         settings-section = "admin";
                     }
                 }
 
-                Button {
-                    text: "⚙";
-                    accessible-label: @tr("Settings");
-                    width: 32px;
-                    height: 32px;
+                settings-button := TopMenuButton {
+                    icon: "⚙";
+                    label: @tr("Settings");
+                    dark: theme == "dark";
                     clicked => { screen = "settings"; }
                 }
 
                 // Signing out is how the user switches accounts: it also
                 // turns off the automatic sign-in at the next launch.
-                Button {
-                    text: "⏏";
-                    accessible-label: @tr("Disconnect");
-                    width: 32px;
-                    height: 32px;
+                disconnect-button := TopMenuButton {
+                    icon: "⏏";
+                    label: @tr("Disconnect");
+                    dark: theme == "dark";
                     clicked => { disconnect-requested(); }
                 }
+            }
+
+            // The focused button's name, for keyboard users (hover has the
+            // tooltip): a line under the icons, only while one has focus, so
+            // nothing is covered.
+            if home-button.has-focus || admin-button-focused || settings-button.has-focus || disconnect-button.has-focus : Text {
+                text: home-button.has-focus ? @tr("Home")
+                    : admin-button-focused ? @tr("Admin")
+                    : settings-button.has-focus ? @tr("Settings")
+                    : @tr("Disconnect");
+                font-size: 12px;
+                overflow: elide;
+                accessible-role: none;
             }
 
             // Once actually signed in, this row of icons is the whole
