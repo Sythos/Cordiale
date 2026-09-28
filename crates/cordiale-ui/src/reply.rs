@@ -40,7 +40,7 @@ fn previous_quote_head_len(text: &str) -> usize {
         let Some((nick, after)) = without_bracket.split_once("> ") else {
             return 0;
         };
-        let nick = nick.trim_start_matches(|ch| matches!(ch, '@' | '%' | '+' | '~' | '&'));
+        let nick = nick.trim_start_matches(['@', '%', '+', '~', '&']);
         if !valid_nick(nick) {
             return 0;
         }
