@@ -102,7 +102,12 @@ mod tests {
     fn newer_release_is_strictly_greater() {
         let (major, minor, patch) = version_triplet(APP_VERSION).expect("package version");
         assert!(!newer_than_installed(&format!("v{major}.{minor}.{patch}")));
-        assert!(!newer_than_installed(&format!("v{major}.{minor}.{patch}.999")));
-        assert!(newer_than_installed(&format!("v{major}.{minor}.{}", patch + 1)));
+        assert!(!newer_than_installed(&format!(
+            "v{major}.{minor}.{patch}.999"
+        )));
+        assert!(newer_than_installed(&format!(
+            "v{major}.{minor}.{}",
+            patch + 1
+        )));
     }
 }
