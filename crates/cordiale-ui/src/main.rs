@@ -28,6 +28,7 @@ mod admin_uploads;
 mod dates;
 mod home;
 mod player;
+mod reply;
 mod taskbar;
 mod totp;
 
@@ -961,6 +962,21 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_draft = worker_tx.clone();
     ui.on_compose_text_changed(move |text| {
         let _ = tx_for_draft.send(WorkerCommand::ComposeTextChanged(text.to_string()));
+    });
+
+    let tx_for_reply = worker_tx.clone();
+    let weak_for_reply = ui.as_weak();
+    ui.on_reply_to_message_requested(move |nick, body| {
+        let Some(ui) = weak_for_reply.upgrade() else {
+            return;
+        };
+        let Some(quote) = reply::reply_quote(nick.as_str(), body.as_str()) else {
+            return;
+        };
+        let draft = reply::draft_with_reply_quote(ui.get_compose_text().as_str(), &quote);
+        ui.set_compose_text(draft.clone().into());
+        // A programmatic Slint property write does not emit LineEdit.edited.
+        let _ = tx_for_reply.send(WorkerCommand::ComposeTextChanged(draft));
     });
 
     // Tab-completion cycle state (see `NickCompletionCycle`): UI-thread only,
@@ -11386,6 +11402,7 @@ fn chat_line_from_message(
         nick_color: nick_color_value,
         italic: message.italic,
         body,
+        reply_body: message.text.clone().into(),
         mention,
     }
 }
