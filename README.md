@@ -28,7 +28,8 @@ Each of the above has its own maintainer(s) and its own issue tracker — if som
 ## Features
 
 The channel sidebar and member list have resizable columns with content-based
-minimum widths. Channel rows sit directly below their network row, member
+minimum widths. Channel rows sit directly below their network row, under
+a **Channels** entry that opens the network's channel list, member
 roles appear in brackets (for example, `[@] Sythos`), and the member list's
 Actions menu includes a shortcut to the Themes settings. As in Cicchetto, a
 message that mentions you (your nick on that network or a `/hilight`
@@ -64,7 +65,9 @@ is still joined. The login password stays in the native keyring (Windows
 Credential Manager, macOS Keychain, or Linux Secret Service), never in
 Cordiale's own files; without a keyring it is not stored. The eject button
 at the top of the sidebar, or Switch account in the Actions menu, signs out
-and turns off automatic sign-in until the next successful sign-in.
+and turns off automatic sign-in until the next successful sign-in. The
+icons at the top of the sidebar (Home, Admin, Settings, Disconnect) show
+their name in a tooltip on hover, and under the icons on keyboard focus.
 
 ### Parity with Cicchetto
 
@@ -79,6 +82,10 @@ Cordiale also covers:
   with an authenticator code or one-time recovery code. Full-session users
   can enable or disable TOTP in Settings > Security and see new recovery
   codes once. Passkey-only sign-in still needs Cicchetto or a client token.
+- **Channel directory:** each network's Channels entry (or `/list`) opens
+  its channel list beside the sidebar: search, Refresh, the channel count
+  and how old the list is, then name, topic and user count per channel.
+  One click (or Enter) joins a channel, or opens it if you're already in.
 - **The newer Grappa preferences:** date order follows your language or
   your explicit choice; auto-away nick suffixes are server-backed; ignore
   rules pair an IRC mask with an optional text pattern.

@@ -452,7 +452,44 @@ jobs:
         with:
           path: release-assets
 
+      # A tag with its own notes in docs/release-notes/<tag>.md gets them as
+      # the release body, with the build's package version, run ID and
+      # attempt filled in; other tags keep the generic body below.
+      - name: Check out release notes
+        uses: actions/checkout@v7
+        with:
+          path: source
+          sparse-checkout: docs/release-notes
+
+      - name: Render release notes
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build-metadata.outputs.version }}
+          PACKAGE_VERSION: ${{ needs.build-metadata.outputs.package_version }}
+          BUILD_ID: ${{ needs.build-metadata.outputs.build_id }}
+          BUILD_ATTEMPT: ${{ needs.build-metadata.outputs.build_attempt }}
+        run: |
+          template="source/docs/release-notes/${TAG}.md"
+          if [[ -f "$template" ]]; then
+            sed -e "s/\${PACKAGE_VERSION}/${PACKAGE_VERSION}/g"                 -e "s/\${VERSION}/${VERSION}/g"                 -e "s/\${BUILD_ID}/${BUILD_ID}/g"                 -e "s/\${BUILD_ATTEMPT}/${BUILD_ATTEMPT}/g"                 "$template" > release-notes.md
+            echo "path=release-notes.md" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release from its notes
+        if: steps.notes.outputs.path != ''
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          name: Cordiale V${{ needs.build-metadata.outputs.version }} BETA (WIP)
+          prerelease: true
+          body_path: ${{ steps.notes.outputs.path }}
+          generate_release_notes: false
+          files: release-assets/*/*
+
       - name: Create GitHub Release
+        if: steps.notes.outputs.path == ''
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: release-assets/*/*
