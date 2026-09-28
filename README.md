@@ -34,7 +34,10 @@ roles appear in brackets (for example, `[@] Sythos`), and the member list's
 Actions menu includes a shortcut to the Themes settings. As in Cicchetto, a
 message that mentions you (your nick on that network or a `/hilight`
 pattern, as a whole word) gets the mention background, and is bold unless
-"bold mentions" is off in Settings > Display.
+"bold mentions" is off in Settings > Display. Scrolling up (or PgUp in
+the message box) past the oldest loaded line fetches the previous page of
+history from Grappa, page by page, keeping the line you were reading in
+place.
 
 The Actions menu opens the radio: Cicchetto's stations (SomaFM and a few
 other Icecast streams) play in Cordiale itself, with the same player on

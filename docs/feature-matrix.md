@@ -207,3 +207,14 @@ tooltip nativo di Slint 1.18 al passaggio del mouse: un popup che non
 intercetta clic, leggibile nel tema chiaro e scuro. Con la tastiera il nome
 del bottone che ha il focus compare su una riga sotto le icone, senza
 coprire nulla.
+
+**Aggiornamento (2026-09-28)**: lo storico più vecchio di un canale o di
+una query si carica da solo (issue #125): quando chi legge arriva, con la
+rotella, la scrollbar o PgSu dal campo di scrittura, entro un terzo di
+schermo dalla riga più vecchia caricata, Cordiale chiede la pagina
+precedente a Grappa (`?before=<id più vecchio>&limit=100`), una alla volta
+per finestra e mai due volte lo stesso cursore, fino all'inizio dello
+storico. La riga che chi legge aveva in cima resta al suo posto, allo stesso
+scostamento. Se una pagina fallisce si riprova solo tornando in cima (o con
+PgSu), mai in un ciclo. Il bottone "Carica messaggi più vecchi" non c'è
+più; PgSu/PgGiù dal campo di scrittura scorrono la chat di una schermata.

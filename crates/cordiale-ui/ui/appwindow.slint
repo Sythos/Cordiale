@@ -891,10 +891,28 @@ export component AppWindow inherits Window {
     in-out property <string> home-confirm-kind: "";
     in-out property <string> home-confirm-network: "";
     in property <[ChatLine]> chat-lines: [];
-    // Paging back through the open window's history (`?before=`).
-    in property <bool> history-loading: false;
+    // Paging back through the open window's history (`?before=`). The
+    // chat pane asks for the previous page by itself when the reader
+    // scrolls (or pages with PgUp) up to the oldest loaded line; it sets
+    // `history-loading` at once, so a burst of scroll events sends one
+    // request, and Rust clears it when the page has landed or failed.
+    in-out property <bool> history-loading: false;
     in property <bool> history-start-reached: false;
+    // Set by Rust with `history-loading` back to false: whether that page
+    // request failed. A failed page is retried only once the reader comes
+    // back to the top (or presses PgUp), never in a loop.
+    in property <bool> history-failed: false;
     callback older-history-requested();
+    // The chat pane's scroll position (two-way with the pane) and height,
+    // read by Rust to keep the reader's line in place while an older page
+    // is prepended, and whether the pane is following the newest line.
+    in-out property <length> chat-scroll-y: 0px;
+    out property <length> chat-content-height: 0px;
+    in-out property <bool> chat-follow-bottom: true;
+    // PgUp/PgDown in the compose box page the chat pane: the direction
+    // (-1 up, 1 down) and a counter bumped on every press.
+    in-out property <int> chat-page-direction: 0;
+    in-out property <int> chat-page-seq: 0;
     in-out property <string> compose-text: "";
     in property <string> current-channel-label: "";
     in property <bool> current-server-window: false;
@@ -3016,17 +3034,6 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if has-selected-channel && chat-lines.length > 0 && !history-start-reached : HorizontalLayout {
-                alignment: center;
-
-                CompactButton {
-                    text: history-loading ? @tr("Loading…") : "⤒  " + @tr("Load older messages");
-                    a11y-label: @tr("Load older messages");
-                    enabled: !history-loading;
-                    clicked => { older-history-requested(); }
-                }
-            }
-
             if has-selected-channel : chat-list := ListView {
                 vertical-stretch: 1;
 
@@ -3042,7 +3049,63 @@ export component AppWindow inherits Window {
                 // instead: true until the user scrolls away from the
                 // bottom, so their scroll position (up or down) is always
                 // respected.
-                property <bool> follow-bottom: true;
+                property <bool> follow-bottom <=> chat-follow-bottom;
+                content-y <=> chat-scroll-y;
+
+                // Older history: asked for when the reader gets within a
+                // third of a screen of the oldest loaded line, and while
+                // the loaded lines don't even fill the pane (there is
+                // nothing to scroll then). `older-armed` allows one
+                // request per arrival at the top: a page that lands
+                // re-arms it, a failed one waits for the reader to leave
+                // the top and come back, or to press PgUp.
+                property <bool> older-armed: true;
+                property <bool> near-top: self.content-y >= -self.visible-height / 3;
+
+                function load-older() {
+                    if older-armed && !history-loading && !history-start-reached && chat-lines.length > 0 {
+                        older-armed = false;
+                        history-loading = true;
+                        older-history-requested();
+                    }
+                }
+
+                property <bool> loading: history-loading;
+                changed loading => {
+                    if !loading && !history-failed {
+                        older-armed = true;
+                        if self.content-height <= self.visible-height {
+                            load-older();
+                        }
+                    }
+                }
+
+                init => {
+                    chat-follow-bottom = true;
+                }
+
+                // A programmatic jump to the top (PgUp) makes the `ListView`
+                // lay the first rows out from its average-height estimate,
+                // which can leave `content-y` above zero: a blank band over
+                // the oldest line. Pull it back flush.
+                changed content-y => {
+                    if self.content-y > 0px {
+                        self.content-y = 0px;
+                    }
+                }
+
+                // PgUp/PgDown from the compose box: nine tenths of a screen
+                // per press, so a line of context stays in view.
+                property <int> page-seq: chat-page-seq;
+                changed page-seq => {
+                    let bottom = min(0px, self.visible-height - self.content-height);
+                    self.content-y = max(bottom, min(0px, self.content-y - chat-page-direction * self.visible-height * 0.9));
+                    self.follow-bottom = self.content-y <= bottom + 4px;
+                    if self.near-top {
+                        older-armed = true;
+                        load-older();
+                    }
+                }
 
                 // Fires only for a genuine user-driven scroll (wheel, drag,
                 // scrollbar) — not for the programmatic `content-y` writes
@@ -3052,6 +3115,11 @@ export component AppWindow inherits Window {
                 // slack absorb the height-estimate's own imprecision.
                 scrolled => {
                     self.follow-bottom = self.content-y <= self.visible-height - self.content-height + 4px;
+                    if self.near-top {
+                        load-older();
+                    } else if history-failed {
+                        older-armed = true;
+                    }
                 }
 
                 // The height estimate above is recomputed — and
@@ -3062,8 +3130,12 @@ export component AppWindow inherits Window {
                 // never leaves a gap under the newest line; once the
                 // estimate settles the next change is a no-op.
                 changed content-height => {
+                    chat-content-height = self.content-height;
                     if self.follow-bottom {
                         self.content-y = min(0px, self.visible-height - self.content-height);
+                    }
+                    if self.content-height <= self.visible-height {
+                        load-older();
                     }
                 }
 
@@ -3082,6 +3154,7 @@ export component AppWindow inherits Window {
                 property <string> window-label: current-channel-label;
                 changed window-label => {
                     self.follow-bottom = true;
+                    older-armed = true;
                     self.content-y = min(0px, self.visible-height - self.content-height);
                 }
 
@@ -3189,6 +3262,13 @@ export component AppWindow inherits Window {
                     capture-key-pressed(event) => {
                         if (event.modifiers.control || event.modifiers.meta) && (event.text == "v" || event.text == "V") && !event.modifiers.shift {
                             return paste-requested() ? EventResult.accept : EventResult.reject;
+                        }
+                        // PgUp/PgDown page the chat pane, as in terminal IRC
+                        // clients; the single-line field has no use for them.
+                        if event.text == Key.PageUp || event.text == Key.PageDown {
+                            chat-page-direction = event.text == Key.PageUp ? -1 : 1;
+                            chat-page-seq += 1;
+                            return EventResult.accept;
                         }
                         // Nick completion instead of the default
                         // focus-traversal behaviour of Tab. Most backends
