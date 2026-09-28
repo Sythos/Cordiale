@@ -39,6 +39,13 @@ the message box) past the oldest loaded line fetches the previous page of
 history from Grappa, page by page, keeping the line you were reading in
 place.
 
+Right-click a sender in the chat and **Reply** drops a Cicchetto-style quote
+into that window's draft, ready to edit before sending; the same nick menu in
+the member list stays message-free. Settings > Display now has a live
+**50–150% font size** control with a one-click reset. The choice is kept on
+this device, and the unread count sits centered alongside its channel row
+instead of wandering into the row below.
+
 The Actions menu opens the radio: Cicchetto's stations (SomaFM and a few
 other Icecast streams) play in Cordiale itself, with the same player on
 every platform for MP3, Ogg Vorbis and **FLAC** streams (yes, lossless radio
@@ -71,6 +78,9 @@ at the top of the sidebar, or Switch account in the Actions menu, signs out
 and turns off automatic sign-in until the next successful sign-in. The
 icons at the top of the sidebar (Home, Admin, Settings, Disconnect) show
 their name in a tooltip on hover, and under the icons on keyboard focus.
+On Windows, launching the desktop app opens its UI without an extra console
+window; the release workflow checks the GUI subsystem in both x64 and ARM64
+executables before packaging them.
 
 ### Parity with Cicchetto
 
