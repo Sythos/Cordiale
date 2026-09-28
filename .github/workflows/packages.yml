@@ -482,8 +482,8 @@ jobs:
         if: steps.notes.outputs.path != ''
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          name: Cordiale V${{ needs.build-metadata.outputs.version }} BETA (WIP)
-          prerelease: true
+          name: Cordiale V${{ needs.build-metadata.outputs.version }} BETA
+          prerelease: false
           body_path: ${{ steps.notes.outputs.path }}
           generate_release_notes: false
           files: release-assets/*/*
