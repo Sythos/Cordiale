@@ -63,6 +63,7 @@ pub mod phoenix;
 pub mod profile;
 pub mod protocol;
 pub mod radio;
+pub mod release;
 pub mod rest;
 pub mod session;
 pub mod slash;

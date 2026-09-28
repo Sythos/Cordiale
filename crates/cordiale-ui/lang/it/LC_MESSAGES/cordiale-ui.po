@@ -2619,3 +2619,19 @@ msgstr "Ordinati per utenti; ordina per nome"
 msgctxt "AppWindow"
 msgid "Reload"
 msgstr "Ricarica"
+
+msgctxt "AppWindow"
+msgid "Cordiale update available"
+msgstr "Aggiornamento di Cordiale disponibile"
+
+msgctxt "AppWindow"
+msgid "Version {} is available; you're using {}."
+msgstr "È disponibile la versione {}; stai usando la {}."
+
+msgctxt "AppWindow"
+msgid "Later"
+msgstr "Più tardi"
+
+msgctxt "AppWindow"
+msgid "Open latest release in browser"
+msgstr "Apri l'ultima release nel browser"

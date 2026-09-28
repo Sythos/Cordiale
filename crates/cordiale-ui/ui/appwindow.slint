@@ -1156,6 +1156,8 @@ export component AppWindow inherits Window {
     // list of Grappa/Cicchetto contributors.
     in property <string> credits-copyright-text: "";
     in property <string> app-version: "";
+    in-out property <string> available-update-version: "";
+    callback update-release-open();
 
     // Self-service network profile (never admin-only) — see
     // `docs/protocol-notes.md` §4quater. `settings-network` picks which
@@ -5889,6 +5891,62 @@ export component AppWindow inherits Window {
         Button {
             text: @tr("Back");
             clicked => { screen = "connected"; }
+        }
+    }
+
+    // A release check is independent of login, so the prompt can appear on
+    // any screen after the splash. The backdrop absorbs clicks on the view
+    // beneath it; both actions leave the decision with the user.
+    if available-update-version != "" && screen != "splash" : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        Rectangle {
+            width: min(460px, parent.width - 32px);
+            height: 190px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-width: 1px;
+            border-radius: 8px;
+            border-color: #8080806a;
+            background: theme == "dark" ? #242424 : white;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+
+                Text {
+                    text: @tr("Cordiale update available");
+                    font-size: 18px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: @tr("Version {} is available; you're using {}.", available-update-version, app-version);
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    Button {
+                        text: @tr("Later");
+                        clicked => { available-update-version = ""; }
+                    }
+                    Button {
+                        text: @tr("Open latest release in browser");
+                        clicked => {
+                            update-release-open();
+                            available-update-version = "";
+                        }
+                    }
+                }
+            }
         }
     }
 }

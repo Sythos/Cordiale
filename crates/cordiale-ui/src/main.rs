@@ -369,7 +369,25 @@ fn main() -> Result<(), slint::PlatformError> {
     let worker_self = worker_tx.clone();
     thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().expect("failed to start network runtime");
-        runtime.block_on(run_worker(worker_rx, worker_self, ui_weak));
+        runtime.block_on(async move {
+            // Run independently of Grappa sign-in: an unavailable release
+            // service must never delay the client or interrupt its session.
+            let update_ui = ui_weak.clone();
+            tokio::spawn(async move {
+                match cordiale_core::release::check_newer_release().await {
+                    Ok(Some(tag)) => {
+                        let _ = update_ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_available_update_version(tag.into());
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        persistence::log_line(&format!("release check failed: {err}"));
+                    }
+                }
+            });
+            run_worker(worker_rx, worker_self, ui_weak).await;
+        });
     });
 
     let tx_for_radio_tune = worker_tx.clone();
@@ -814,6 +832,9 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     ui.on_credits_link_clicked(|href| open_in_browser(&href));
+    ui.on_update_release_open(|| {
+        open_in_browser(cordiale_core::release::LATEST_RELEASE_PAGE);
+    });
 
     let tx_for_archive_close = worker_tx.clone();
     ui.on_archive_closed(move || {
