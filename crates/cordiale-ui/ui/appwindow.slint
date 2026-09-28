@@ -117,12 +117,15 @@ struct UploadLimitsRow {
     audio: string,
 }
 
-// One channel of the directory screen (`/list`), as sent by the server.
+// One channel of the directory pane (`/list`), as sent by the server;
+// `joined` when that channel's window is joined, so activating the row
+// opens it instead of joining again.
 struct DirectoryRow {
     name: string,
     users: string,
     topic: string,
     featured: bool,
+    joined: bool,
 }
 
 // One step of the identity-recovery panel, as raw wire tokens; the visible
@@ -502,6 +505,111 @@ struct EditorColor {
     valid: bool,
 }
 
+// One row of the channel directory: name with its featured/joined labels,
+// topic under it, user count at the right edge. Click, Enter or Space
+// activates it (join, or open when already joined), like Cicchetto.
+component DirectoryEntry inherits Rectangle {
+    in property <string> name;
+    in property <string> topic;
+    in property <string> users;
+    in property <bool> featured;
+    in property <bool> joined;
+    in property <bool> dark;
+    callback activated();
+
+    border-radius: 5px;
+    border-width: focus.has-focus ? 1px : 0px;
+    border-color: #8080807f;
+    background: touch.has-hover || focus.has-focus ? #80808022 : transparent;
+    accessible-role: button;
+    accessible-label: joined ? @tr("Open {}", name) : @tr("Join {}", name);
+    accessible-description: topic == ""
+        ? @tr("{} users", users)
+        : @tr("{} users — {}", users, topic);
+    accessible-action-default => { activated(); }
+
+    // Under the touch area, and not focused by the click itself: otherwise
+    // it takes the first click on a row for focus and only the second one
+    // activates.
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.activated();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            focus.focus();
+            root.activated();
+        }
+    }
+
+    HorizontalLayout {
+        padding: 6px;
+        spacing: 8px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+
+            HorizontalLayout {
+                alignment: start;
+                spacing: 6px;
+
+                Text {
+                    text: root.name;
+                    font-weight: 700;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
+                if root.featured : Text {
+                    text: @tr("featured");
+                    font-size: 11px;
+                    color: #808080;
+                    vertical-alignment: center;
+                }
+                if root.joined : Rectangle {
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: root.dark ? #4a7fb0 : #3d7cc9;
+                    background: root.dark ? #1f2d3a : #e3f0ff;
+
+                    HorizontalLayout {
+                        padding-left: 5px;
+                        padding-right: 5px;
+                        Text {
+                            text: @tr("joined");
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            if root.topic != "" : Text {
+                text: root.topic;
+                font-size: 12px;
+                color: #808080;
+                wrap: word-wrap;
+            }
+        }
+
+        Text {
+            text: root.users;
+            font-weight: 700;
+            horizontal-alignment: right;
+            vertical-alignment: top;
+            min-width: 40px;
+        }
+    }
+}
+
 // Settings/admin navigation entry: a compact, flat row with an icon naming
 // the section's purpose, highlighted while its section is open.
 component NavButton inherits Rectangle {
@@ -824,6 +932,18 @@ export component AppWindow inherits Window {
     in property <bool> directory-refresh-pending: false;
     // `reason` of the last failed capture (raw server token), or "".
     in property <string> directory-failed-reason: "";
+    // The directory pane replaces the chat while open; the sidebar stays.
+    in-out property <bool> directory-open: false;
+    // Unix seconds of the listing's capture ("" when none), and its age in
+    // seconds (-1 when none), re-derived by `directory-age-tick` so the
+    // "N ago" label keeps moving while the pane is open.
+    in property <string> directory-captured-epoch: "";
+    in-out property <int> directory-age-seconds: -1;
+    // Search debounce: typing restarts a short quiet window before the
+    // query is sent, so a burst of keystrokes costs one request.
+    property <int> directory-search-edits: 0;
+    property <int> directory-search-seen: 0;
+    property <bool> directory-search-pending: false;
     // Account settings Grappa stores (`/me/settings/*`), edited on
     // Settings > General and kept in sync with its `*_changed` pushes. An
     // empty text means the server's own default; a delay of 0 turns
@@ -1098,6 +1218,11 @@ export component AppWindow inherits Window {
     callback directory-sort-requested(string);
     callback directory-search-requested(string);
     callback directory-closed();
+    // Sidebar "Channels" entry of `network`.
+    callback directory-open-requested(string);
+    // A directory row: join `channel` (or open it when joined).
+    callback directory-channel-activated(string);
+    callback directory-age-tick();
     callback archive-delete-requested(string);
     callback archive-closed();
     // A link in the Credits page, opened in the browser.
@@ -1620,17 +1745,30 @@ export component AppWindow inherits Window {
         }
     }
 
-    function directory-status-text() -> string {
-        if directory-status == "fresh" || directory-status == "stale" {
-            return directory-status == "fresh"
-                ? @tr("{} channels, listed {}.", directory-total, directory-captured-at)
-                : @tr("{} channels, listed {} (may be out of date).", directory-total, directory-captured-at);
-        } else if directory-status == "no_results" {
-            return @tr("The server listed no channels.");
+    // Relative age of the listing, Cicchetto's thresholds.
+    function directory-age-text() -> string {
+        if directory-age-seconds < 0 {
+            return directory-status == "loading" ? @tr("listing…") : @tr("never listed");
+        } else if directory-age-seconds < 60 {
+            return @tr("just now");
+        } else if directory-age-seconds < 3600 {
+            return @tr("{}m ago", floor(directory-age-seconds / 60));
+        } else if directory-age-seconds < 86400 {
+            return @tr("{}h ago", floor(directory-age-seconds / 3600));
+        } else {
+            return @tr("{}d ago", floor(directory-age-seconds / 86400));
+        }
+    }
+
+    function directory-empty-text() -> string {
+        if directory-rows.length > 0 {
+            return "";
         } else if directory-status == "loading" {
             return @tr("Listing channels…");
         } else if directory-status == "unknown" {
             return @tr("No channel list yet.");
+        } else if directory-status == "no_results" {
+            return directory-query == "" ? @tr("The server listed no channels.") : @tr("No channels match your search.");
         } else {
             return "";
         }
@@ -1653,6 +1791,8 @@ export component AppWindow inherits Window {
             return @tr("Couldn't load the channel list.");
         } else if directory-error == "directory-refresh-failed" {
             return @tr("Couldn't refresh the channel list. Is the network connected?");
+        } else if directory-error == "directory-join-failed" {
+            return @tr("Couldn't join that channel.");
         } else {
             return directory-error;
         }
@@ -2078,6 +2218,27 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Directory search debounce: fires once a tick passes with no new edit.
+    Timer {
+        interval: 250ms;
+        running: directory-search-pending;
+        triggered => {
+            if directory-search-seen == directory-search-edits {
+                directory-search-pending = false;
+                directory-search-requested(directory-query);
+            } else {
+                directory-search-seen = directory-search-edits;
+            }
+        }
+    }
+
+    // Keeps the directory's "N ago" label current while the pane is open.
+    Timer {
+        interval: 30s;
+        running: directory-open && directory-captured-epoch != "";
+        triggered => { directory-age-tick(); }
+    }
+
     if screen == "connected" : HorizontalBox {
         padding: 16px;
         spacing: 8px;
@@ -2291,6 +2452,16 @@ export component AppWindow inherits Window {
                         padding-left: 16px;
                         spacing: 0px;
 
+                        // Channel directory of this network (`/list`),
+                        // above its channels like Cicchetto's "channels" row.
+                        if !group.parked : Button {
+                            horizontal-stretch: 1;
+                            text: "📇 " + @tr("Channels");
+                            primary: directory-open && directory-network == group.network;
+                            accessible-label: @tr("Channels on {}", group.network);
+                            clicked => { directory-open-requested(group.network); }
+                        }
+
                         for entry in group.channels : HorizontalLayout {
                             spacing: 4px;
 
@@ -2354,7 +2525,142 @@ export component AppWindow inherits Window {
             target-max-width: max(360px, sidebar-min-width);
         }
 
-        VerticalBox {
+        // Channel directory of one network: takes the chat's place, the
+        // sidebar stays (Cicchetto's `$list` window).
+        if directory-open : VerticalBox {
+            spacing: 8px;
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: @tr("Channels on {}", directory-network);
+                    font-size: 16px;
+                    font-weight: 700;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    accessible-role: AccessibleRole.text;
+                }
+                Button {
+                    text: "✕";
+                    width: 32px;
+                    accessible-label: @tr("Close channel list");
+                    clicked => {
+                        directory-open = false;
+                        directory-closed();
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: @tr("Search channels…");
+                    accessible-label: @tr("Search channels");
+                    text <=> directory-query;
+                    edited => {
+                        directory-search-edits += 1;
+                        directory-search-pending = true;
+                    }
+                    accepted => {
+                        directory-search-pending = false;
+                        directory-search-seen = directory-search-edits;
+                        directory-search-requested(directory-query);
+                    }
+                }
+                Button {
+                    text: directory-refresh-pending || directory-status == "loading" ? @tr("Refreshing…") : @tr("Refresh");
+                    enabled: !directory-refresh-pending && directory-status != "loading";
+                    accessible-label: @tr("Refresh the channel list of {}", directory-network);
+                    clicked => { directory-refresh-requested(); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Text {
+                    text: directory-total == "" ? "" : @tr("{} channels", directory-total);
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    accessible-role: AccessibleRole.text;
+                }
+                if directory-status != "stale" : Text {
+                    text: directory-age-text();
+                    color: #808080;
+                    vertical-alignment: center;
+                    accessible-role: AccessibleRole.text;
+                    accessible-label: directory-captured-at == "" ? self.text : @tr("Listed {}", directory-captured-at);
+                }
+                // A stale listing offers its own refresh, like Cicchetto.
+                if directory-status == "stale" : Button {
+                    text: @tr("{} — refresh now", directory-age-text());
+                    enabled: !directory-refresh-pending;
+                    accessible-label: @tr("Listed {}, may be out of date. Refresh now", directory-captured-at);
+                    clicked => { directory-refresh-requested(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: directory-sort == "name" ? @tr("Sort: name") : @tr("Sort: users");
+                    accessible-label: directory-sort == "name" ? @tr("Sorted by name; sort by users") : @tr("Sorted by users; sort by name");
+                    clicked => { directory-sort-requested(directory-sort == "name" ? "users" : "name"); }
+                }
+            }
+
+            if directory-failed-reason != "" : Text {
+                text: @tr("The last channel listing failed ({}); showing the previous list.", directory-failed-reason);
+                wrap: word-wrap;
+                accessible-role: AccessibleRole.text;
+                accessible-live-region: AccessibleLiveness.polite;
+            }
+
+            if directory-error != "" : HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: directory-error-text();
+                    color: #cc3333;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    accessible-role: AccessibleRole.text;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+                Button {
+                    text: @tr("Reload");
+                    clicked => { directory-search-requested(directory-query); }
+                }
+            }
+
+            if directory-empty-text() != "" : Text {
+                text: directory-empty-text();
+                color: #808080;
+                wrap: word-wrap;
+                accessible-role: AccessibleRole.text;
+            }
+
+            ListView {
+                vertical-stretch: 1;
+                for row in directory-rows : DirectoryEntry {
+                    name: row.name;
+                    topic: row.topic;
+                    users: row.users;
+                    featured: row.featured;
+                    joined: row.joined;
+                    dark: theme == "dark";
+                    activated => { directory-channel-activated(row.name); }
+                }
+            }
+
+            if directory-has-more : Button {
+                text: @tr("Load more");
+                clicked => { directory-load-more-requested(); }
+            }
+        }
+
+        if !directory-open : VerticalBox {
             spacing: 8px;
 
             // Truncated on a narrow window; the full line stays the
@@ -5420,83 +5726,6 @@ export component AppWindow inherits Window {
             clicked => {
                 screen = "connected";
                 archive-closed();
-            }
-        }
-    }
-
-    if screen == "directory" : VerticalBox {
-        padding: 16px;
-        spacing: 8px;
-
-        Text {
-            text: @tr("Channels on {}", directory-network);
-            font-size: 18px;
-            wrap: word-wrap;
-            accessible-role: AccessibleRole.text;
-        }
-
-        Text {
-            text: directory-status-text();
-            wrap: word-wrap;
-            accessible-role: AccessibleRole.text;
-        }
-
-        if directory-failed-reason != "" : Text {
-            text: @tr("The last channel listing failed ({}); showing the previous list.", directory-failed-reason);
-            wrap: word-wrap;
-            accessible-role: AccessibleRole.text;
-        }
-
-        if directory-error != "" : Text {
-            text: directory-error-text();
-            wrap: word-wrap;
-            accessible-role: AccessibleRole.text;
-        }
-
-        HorizontalBox {
-            padding: 0px;
-
-            LineEdit {
-                placeholder-text: @tr("Search channels");
-                accessible-label: @tr("Search channels");
-                text <=> directory-query;
-                accepted => { directory-search-requested(directory-query); }
-            }
-
-            Button {
-                text: directory-sort == "name" ? @tr("Sort by users") : @tr("Sort by name");
-                clicked => { directory-sort-requested(directory-sort == "name" ? "users" : "name"); }
-            }
-
-            Button {
-                text: directory-refresh-pending ? @tr("Refreshing…") : @tr("Refresh");
-                enabled: !directory-refresh-pending;
-                clicked => { directory-refresh-requested(); }
-            }
-        }
-
-        ListView {
-            vertical-stretch: 1;
-            for row in directory-rows : Text {
-                text: row.topic == ""
-                    ? @tr("{} ({} users)", row.name, row.users)
-                    : @tr("{} ({} users) — {}", row.name, row.users, row.topic);
-                font-weight: row.featured ? 700 : 400;
-                wrap: word-wrap;
-                accessible-role: AccessibleRole.text;
-            }
-        }
-
-        if directory-has-more : Button {
-            text: @tr("Load more");
-            clicked => { directory-load-more-requested(); }
-        }
-
-        Button {
-            text: @tr("Back");
-            clicked => {
-                screen = "connected";
-                directory-closed();
             }
         }
     }
