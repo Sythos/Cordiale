@@ -348,6 +348,10 @@ msgctxt "MemberContextMenu"
 msgid "Query"
 msgstr "Query"
 
+msgctxt "MemberContextMenu"
+msgid "Reply"
+msgstr "Antworten"
+
 msgctxt "AppWindow"
 msgid "connecting"
 msgstr "verbindet"

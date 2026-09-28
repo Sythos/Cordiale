@@ -3204,7 +3204,11 @@ export component AppWindow inherits Window {
                             whois(nick) => { member-whois-requested(nick); }
                             ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                             query(nick) => { member-query-requested(nick); }
-                            reply(nick, body) => { reply-to-message-requested(nick, body); }
+                            reply(nick, body) => {
+                                reply-to-message-requested(nick, body);
+                                compose-line-edit.focus();
+                                compose-line-edit.set-selection-offsets(2147483647, 2147483647);
+                            }
                         }
 
                         StyledText {
