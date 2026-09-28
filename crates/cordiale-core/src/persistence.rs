@@ -73,6 +73,9 @@ pub struct Settings {
     pub language: Option<Language>,
     #[serde(default)]
     pub theme: Theme,
+    /// Local display text scale, relative to Cordiale's default (50–150%).
+    #[serde(default = "default_font_size_percent")]
+    pub font_size_percent: u8,
     /// `(network, channel)` last selected before quitting or disconnecting
     /// — re-selected automatically on the next successful connect, so the
     /// app doesn't drop back to the bare network overview every time.
@@ -111,6 +114,10 @@ fn default_radio_volume() -> u8 {
     80
 }
 
+fn default_font_size_percent() -> u8 {
+    100
+}
+
 fn current_settings_schema_version() -> u32 {
     1
 }
@@ -125,6 +132,7 @@ impl Default for Settings {
             schema_version: current_settings_schema_version(),
             language: None,
             theme: Theme::default(),
+            font_size_percent: default_font_size_percent(),
             last_channel: None,
             auto_connect: default_auto_connect(),
             color_theme: None,
@@ -326,6 +334,7 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.language, None);
         assert_eq!(settings.theme, Theme::Light);
+        assert_eq!(settings.font_size_percent, 100);
     }
 
     #[test]
@@ -334,6 +343,7 @@ mod tests {
             serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
         assert!(decoded.auto_connect);
         assert!(Settings::default().auto_connect);
+        assert_eq!(decoded.font_size_percent, 100);
     }
 
     #[test]
@@ -342,6 +352,7 @@ mod tests {
             schema_version: 1,
             language: Some(Language::It),
             theme: Theme::Dark,
+            font_size_percent: 125,
             last_channel: Some(("libera".to_string(), "#rust".to_string())),
             auto_connect: false,
             color_theme: Some("builtin:sux".to_string()),

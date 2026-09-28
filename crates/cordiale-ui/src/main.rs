@@ -348,6 +348,7 @@ fn main() -> Result<(), slint::PlatformError> {
     dates::set_language(settings.language);
     push_date_format_examples(&ui);
     ui.set_theme(theme_to_slint(settings.theme));
+    ui.set_font_size_percent(i32::from(settings.font_size_percent.clamp(50, 150)));
     ui.invoke_apply_color_scheme();
     // A built-in color theme applies from the first screen; a Grappa one
     // needs the session and is applied after sign-in.
@@ -407,6 +408,12 @@ fn main() -> Result<(), slint::PlatformError> {
         settings.radio_volume = u8::try_from(volume).unwrap_or(100);
         let _ = persistence::save_settings(&settings);
         let _ = tx_for_radio_volume.send(WorkerCommand::RadioVolume(volume));
+    });
+
+    ui.on_font_size_changed(move |percent| {
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.font_size_percent = u8::try_from(percent.clamp(50, 150)).unwrap_or(100);
+        let _ = persistence::save_settings(&settings);
     });
 
     let weak_for_radio_save = ui.as_weak();
