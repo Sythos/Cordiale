@@ -194,6 +194,8 @@ struct ChatLine {
     nick-color: color,
     italic: bool,
     body: styled-text,
+    // Raw wire body for Reply; never reconstruct it from styled markup.
+    reply-body: string,
     // Mentions the user (own nick or a /hilight pattern), as Cicchetto
     // marks it: the mention background.
     mention: bool,
@@ -391,6 +393,8 @@ component ResizeHandle {
 // an ancestor's callbacks by name).
 component MemberContextMenu {
     in property <string> target-nick;
+    in property <bool> is-chat-message: false;
+    in property <string> reply-body: "";
     in property <bool> can-moderate;
     in property <string> display-text;
     in property <color> text-color;
@@ -405,9 +409,15 @@ component MemberContextMenu {
     callback whois(string);
     callback ctcp(string, string); // nick, verb
     callback query(string);
+    callback reply(string, string); // nick, raw message body
 
     ContextMenuArea {
         Menu {
+            if is-chat-message : MenuItem {
+                title: "↩  " + @tr("Reply");
+                enabled: reply-body != "";
+                activated => { reply(target-nick, reply-body); }
+            }
             MenuItem {
                 title: "⬆  " + @tr("Op");
                 enabled: can-moderate;
@@ -1463,6 +1473,7 @@ export component AppWindow inherits Window {
     callback home-featured-open(string, string); // network, channel
     callback send-chat-message(string);
     callback compose-text-changed(string);
+    callback reply-to-message-requested(string, string); // nick, raw body
     // Tab-completes the word before the (assumed end-of-text) caret against
     // the open channel's member nicks, or the query peer's nick in a
     // private window; `true` cycles forward (Tab), `false` backward
@@ -3180,6 +3191,8 @@ export component AppWindow inherits Window {
 
                         if line.nick != "" : MemberContextMenu {
                             target-nick: line.nick;
+                            is-chat-message: true;
+                            reply-body: line.reply-body;
                             can-moderate: can-moderate-members;
                             display-text: "<" + line.nick-prefix + line.nick + "> ";
                             text-color: line.nick-color;
@@ -3191,6 +3204,7 @@ export component AppWindow inherits Window {
                             whois(nick) => { member-whois-requested(nick); }
                             ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                             query(nick) => { member-query-requested(nick); }
+                            reply(nick, body) => { reply-to-message-requested(nick, body); }
                         }
 
                         StyledText {
