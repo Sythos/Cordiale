@@ -350,7 +350,7 @@ fn main() -> Result<(), slint::PlatformError> {
     dates::set_language(settings.language);
     push_date_format_examples(&ui);
     ui.set_theme(theme_to_slint(settings.theme));
-    ui.set_font_size_percent(i32::from(settings.font_size_percent.clamp(50, 150)));
+    ui.set_font_size_percent(i32::from(settings.effective_font_size_percent()));
     ui.invoke_apply_color_scheme();
     // A built-in color theme applies from the first screen; a Grappa one
     // needs the session and is applied after sign-in.

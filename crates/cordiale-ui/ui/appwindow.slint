@@ -3758,6 +3758,7 @@ export component AppWindow inherits Window {
                         maximum: 150;
                         step: 5;
                         value: font-size-percent;
+                        accessible-label: @tr("Font size");
                         horizontal-stretch: 1;
                         changed(value) => { font-size-percent = Math.round(value); }
                         released(value) => {

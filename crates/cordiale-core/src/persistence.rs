@@ -142,6 +142,13 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// Keep hand-edited or older settings within the supported UI range.
+    pub fn effective_font_size_percent(&self) -> u8 {
+        self.font_size_percent.clamp(50, 150)
+    }
+}
+
 /// Servers, profiles and the current selection, persisted to
 /// `servers.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,6 +342,19 @@ mod tests {
         assert_eq!(settings.language, None);
         assert_eq!(settings.theme, Theme::Light);
         assert_eq!(settings.font_size_percent, 100);
+    }
+
+    #[test]
+    fn font_size_is_limited_to_half_and_one_and_a_half() {
+        let mut settings = Settings {
+            font_size_percent: 0,
+            ..Settings::default()
+        };
+        assert_eq!(settings.effective_font_size_percent(), 50);
+        settings.font_size_percent = 150;
+        assert_eq!(settings.effective_font_size_percent(), 150);
+        settings.font_size_percent = 255;
+        assert_eq!(settings.effective_font_size_percent(), 150);
     }
 
     #[test]
