@@ -183,6 +183,31 @@ jobs:
         shell: bash
         run: cross build --release --package cordiale-ui --target "${{ matrix.target }}"
 
+      - name: Verify Windows GUI subsystem
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $exe = "target\$env:TARGET\release\cordiale-ui.exe"
+          $stream = [System.IO.File]::OpenRead($exe)
+          try {
+            $reader = [System.IO.BinaryReader]::new($stream)
+            $stream.Position = 0x3c
+            $peOffset = $reader.ReadInt32()
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x00004550) {
+              throw "Invalid PE signature: $exe"
+            }
+            $stream.Position = $peOffset + 4 + 20 + 68
+            $subsystem = $reader.ReadUInt16()
+            if ($subsystem -ne 2) {
+              throw "Expected Windows GUI subsystem (2), got $subsystem`: $exe"
+            }
+          } finally {
+            $stream.Dispose()
+          }
+
       - name: Install fpm and Linux packaging dependencies
         if: runner.os == 'Linux'
         shell: bash
