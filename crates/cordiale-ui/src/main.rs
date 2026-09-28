@@ -2090,6 +2090,9 @@ struct WorkerState {
     query_full_history_required: std::collections::HashSet<(String, String)>,
     /// Windows whose history was paged back to its very first message.
     history_start_reached: std::collections::HashSet<(String, String)>,
+    /// `?before=` cursors already fetched per window: the same page is
+    /// never asked for twice.
+    history_cursors_fetched: std::collections::HashSet<((String, String), i64)>,
     /// Query keys removed/renamed by a later full snapshot. Since Grappa
     /// shares the channel-shaped Phoenix topic for channels and queries,
     /// remember these identities so their late frames are ignored without
@@ -2265,6 +2268,7 @@ impl WorkerState {
             query_ready: std::collections::HashSet::new(),
             query_full_history_required: std::collections::HashSet::new(),
             history_start_reached: std::collections::HashSet::new(),
+            history_cursors_fetched: std::collections::HashSet::new(),
             stale_query_topics: std::collections::HashSet::new(),
             recent_channels: Vec::new(),
             current_query: false,
@@ -4008,6 +4012,7 @@ async fn handle_select_channel(
         ui.set_can_moderate_members(can_moderate);
         ui.set_history_start_reached(history_start);
         ui.set_history_loading(false);
+        ui.set_history_failed(false);
         let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
         show_chat_lines(&ui, model);
         let member_rows = members_model(&members, dark_theme);
@@ -4204,6 +4209,7 @@ fn show_query_window(
         ui.set_can_moderate_members(false);
         ui.set_history_start_reached(history_start);
         ui.set_history_loading(false);
+        ui.set_history_failed(false);
         let model = chat_lines_model(&lines, dark_theme);
         show_chat_lines(&ui, model);
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
@@ -6059,45 +6065,78 @@ async fn handle_notification_edit(
     }
 }
 
-/// Rows fetched per "Load older messages" click.
+/// Rows fetched per older-history page.
 const OLDER_HISTORY_PAGE: usize = 100;
 
 /// Pages the open window's history back from its oldest known message
-/// (`?before=`), like Cicchetto's scroll-to-top. A short page means the
-/// first message was reached, which hides the button for that window.
+/// (`?before=`), like Cicchetto's scroll-to-top: the chat pane asks for it
+/// when the reader reaches the oldest loaded line. A short page, or one
+/// that brings nothing older, means the first message was reached; a
+/// cursor already fetched is never asked for again.
 async fn handle_load_older_history(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    // Every way out clears `history-loading`, and none of them lets the
+    // pane ask again straight away: a failure waits for the reader, and a
+    // window with nothing older to fetch is marked as fully loaded.
+    let finish = |failed: bool, start_reached: bool| {
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            if start_reached {
+                ui.set_history_start_reached(true);
+            }
+            ui.set_history_failed(failed);
+            ui.set_history_loading(false);
+        });
+    };
     let (Some(client), Some(token), Some(key)) = (
         state.client.clone(),
         state.token.clone(),
         state.current_channel.clone(),
     ) else {
+        finish(true, false);
         return;
     };
     let oldest = state
         .messages
         .get(&key)
         .and_then(|lines| lines.iter().filter_map(|line| line.message_id).min());
-    let Some(oldest) = oldest else {
+    // No line with a Grappa id (a server window), or a cursor already
+    // fetched: there is no page left to ask for.
+    let Some(oldest) = oldest.filter(|oldest| {
+        !state
+            .history_cursors_fetched
+            .contains(&(key.clone(), *oldest))
+    }) else {
+        state.history_start_reached.insert(key);
+        finish(false, true);
         return;
     };
-    {
-        let ui = ui.clone();
-        let _ = ui.upgrade_in_event_loop(|ui| ui.set_history_loading(true));
-    }
     let rows = client
         .fetch_messages_before(&token, &key.0, &key.1, oldest, OLDER_HISTORY_PAGE)
         .await;
-    let start_reached = match &rows {
-        Ok(rows) => rows.len() < OLDER_HISTORY_PAGE,
+    let rows = match rows {
+        Ok(rows) => rows,
         Err(err) => {
             persistence::log_line(&format!("older history fetch failed: {err:?}"));
-            false
+            if state.current_channel.as_ref() == Some(&key) {
+                finish(true, false);
+            }
+            return;
         }
     };
-    if let Ok(rows) = rows {
-        let messages = state.messages.entry(key.clone()).or_default();
-        merge_rendered_messages(messages, rows.iter().map(render_history_entry));
-    }
+    state.history_cursors_fetched.insert((key.clone(), oldest));
+    let messages = state.messages.entry(key.clone()).or_default();
+    let position_of_oldest = |lines: &[RenderedMessage]| {
+        lines
+            .iter()
+            .position(|line| line.message_id == Some(oldest))
+    };
+    let old_rows = messages.len();
+    let before = position_of_oldest(messages);
+    merge_rendered_messages(messages, rows.iter().map(render_history_entry));
+    let prepended = match (before, position_of_oldest(messages)) {
+        (Some(before), Some(after)) => after.saturating_sub(before),
+        _ => 0,
+    };
+    let start_reached = rows.len() < OLDER_HISTORY_PAGE || prepended == 0;
     if start_reached {
         state.history_start_reached.insert(key.clone());
     }
@@ -6122,16 +6161,86 @@ async fn handle_load_older_history(state: &mut WorkerState, ui: &slint::Weak<App
             }
             None => chat_lines_model(&lines, dark_theme),
         };
-        // This intentionally doesn't force the pane to the bottom: it's an
-        // older-history page prepended above what's already on screen, so
-        // the reader's scroll position should stay put rather than jump.
+        // The page goes in above what's on screen, and
         // `current-channel-label` (appwindow.slint's cue for a real window
-        // switch) isn't touched here, so `chat-list.follow-bottom` is left
-        // wherever the user already had it (bottom or not).
+        // switch) isn't touched, so the pane doesn't jump to the newest
+        // line. A pane following the newest line stays on it; otherwise
+        // the line the reader had at the top is put back there.
+        let anchor = (!ui.get_chat_follow_bottom())
+            .then(|| {
+                prepend_scroll_anchor(
+                    ui.get_chat_scroll_y(),
+                    ui.get_chat_content_height(),
+                    old_rows,
+                    prepended,
+                )
+            })
+            .flatten();
         show_chat_lines(&ui, model);
         ui.set_history_start_reached(start_reached);
+        if let Some(anchor) = anchor {
+            restore_chat_anchor(&ui, anchor);
+        }
+        ui.set_history_failed(false);
         ui.set_history_loading(false);
     });
+}
+
+/// Where the chat pane's top line goes once `prepended` older lines went in
+/// above the `old_rows` it had.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ChatAnchor {
+    /// The new index of the line that was at the top of the pane.
+    row: usize,
+    /// How far that line was scrolled past the pane's top edge.
+    offset: f32,
+    /// The `ListView`'s average row height before the page went in: what
+    /// it still seeks by until it lays the new rows out.
+    row_height: f32,
+}
+
+/// Slint's `ListView` places row `i` at `i` times its average row height
+/// (`content-height / rows`, see `update_visible_instances` in Slint's
+/// `internal/core/model/repeater.rs`), laying out real row heights only
+/// around the viewport. So the top line is the row at `-scroll_y` over that
+/// average, and it moves down by `prepended` rows.
+fn prepend_scroll_anchor(
+    scroll_y: f32,
+    content_height: f32,
+    old_rows: usize,
+    prepended: usize,
+) -> Option<ChatAnchor> {
+    if prepended == 0 || old_rows == 0 || content_height <= 0.0 {
+        return None;
+    }
+    let row_height = content_height / old_rows as f32;
+    let scrolled = (-scroll_y).max(0.0);
+    let top = ((scrolled / row_height + 1e-3).floor() as usize).min(old_rows - 1);
+    let offset = (scrolled - top as f32 * row_height).max(0.0);
+    Some(ChatAnchor {
+        row: top + prepended,
+        offset,
+        row_height,
+    })
+}
+
+/// Scrolls the chat pane so `anchor.row` is back at its top. A jump that
+/// far makes the `ListView` seek by its average row height straight to the
+/// row that `content-y` falls in (half a row in, so rounding can't miss it)
+/// and put it flush with the top; one frame later, once the real heights
+/// of the rows around it are laid out, the reader's offset into that line
+/// is scrolled back in. Called right after the model swap, before the
+/// `ListView` lays the new rows out, so it still seeks by the old average.
+fn restore_chat_anchor(ui: &AppWindow, anchor: ChatAnchor) {
+    ui.set_chat_scroll_y(-(anchor.row as f32 + 0.5) * anchor.row_height);
+    if anchor.offset > 0.0 {
+        let weak = ui.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_millis(32), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_chat_scroll_y(ui.get_chat_scroll_y() - anchor.offset);
+            }
+        });
+    }
 }
 
 /// Saves the display preferences. A refusal is not left looking like a
@@ -24737,5 +24846,31 @@ mod tests {
         let candidates = nick_list(&["Test"]);
         let (text, _) = complete_nick("café tes", &candidates, true, None).unwrap();
         assert_eq!(text, "café Test ");
+    }
+
+    #[test]
+    fn prepend_anchor_keeps_the_top_line_and_its_offset() {
+        // 200 rows averaging 20px, scrolled 105px down: row 5, 5px into it.
+        let anchor = prepend_scroll_anchor(-105.0, 4000.0, 200, 100).unwrap();
+        assert_eq!(anchor.row, 105);
+        assert!((anchor.offset - 5.0).abs() < 1e-3);
+        assert!((anchor.row_height - 20.0).abs() < 1e-3);
+
+        // Flush with the top of row 0.
+        let anchor = prepend_scroll_anchor(0.0, 4000.0, 200, 30).unwrap();
+        assert_eq!((anchor.row, anchor.offset), (30, 0.0));
+
+        // Exactly on a row boundary despite float rounding.
+        let anchor = prepend_scroll_anchor(-60.0 + 1e-4, 4000.0, 200, 10).unwrap();
+        assert_eq!(anchor.row, 13);
+    }
+
+    #[test]
+    fn prepend_anchor_needs_something_to_anchor() {
+        assert_eq!(prepend_scroll_anchor(-50.0, 4000.0, 200, 0), None);
+        assert_eq!(prepend_scroll_anchor(0.0, 0.0, 0, 100), None);
+        // Past the end (a stale position) clamps to the last row.
+        let anchor = prepend_scroll_anchor(-9000.0, 4000.0, 200, 100).unwrap();
+        assert_eq!(anchor.row, 299);
     }
 }
