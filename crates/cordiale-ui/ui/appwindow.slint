@@ -924,6 +924,9 @@ export component AppWindow inherits Window {
     in-out property <int> chat-page-direction: 0;
     in-out property <int> chat-page-seq: 0;
     in-out property <string> compose-text: "";
+    // A counter lets the compose field react to every Reply, including
+    // repeated replies to the same message from the scrollback's scope.
+    private property <int> compose-focus-request: 0;
     in property <string> current-channel-label: "";
     in property <bool> current-server-window: false;
     // RPL_TOPIC-equivalent for the selected channel, shown above the chat
@@ -3206,8 +3209,7 @@ export component AppWindow inherits Window {
                             query(nick) => { member-query-requested(nick); }
                             reply(nick, body) => {
                                 reply-to-message-requested(nick, body);
-                                compose-line-edit.focus();
-                                compose-line-edit.set-selection-offsets(2147483647, 2147483647);
+                                compose-focus-request += 1;
                             }
                         }
 
@@ -3320,6 +3322,13 @@ export component AppWindow inherits Window {
                     // A layout, so the scope takes the field's size.
                     HorizontalLayout {
                         compose-line-edit := LineEdit {
+                            property <int> focus-request: compose-focus-request;
+                            changed focus-request => {
+                                if focus-request > 0 {
+                                    self.focus();
+                                    self.set-selection-offsets(2147483647, 2147483647);
+                                }
+                            }
                             placeholder-text: current-server-window ? @tr("Command") : @tr("Message");
                             accessible-label: current-server-window ? @tr("Command") : @tr("Message");
                             text <=> compose-text;
