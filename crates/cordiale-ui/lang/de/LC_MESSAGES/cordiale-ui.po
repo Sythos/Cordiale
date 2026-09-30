@@ -2741,6 +2741,98 @@ msgid "Please include these details when you open an issue:"
 msgstr "Bitte gib diese Angaben an, wenn du ein Problem meldest:"
 
 msgctxt "AppWindow"
+msgid "That isn't a share token or link Grappa accepts. Copy it again from the other device."
+msgstr "Das ist kein Freigabe-Token oder -Link, den Grappa akzeptiert. Kopiere ihn erneut vom anderen Gerät."
+
+msgctxt "AppWindow"
+msgid "This share link has expired. Create a new one on the other device."
+msgstr "Dieser Freigabe-Link ist abgelaufen. Erstelle auf dem anderen Gerät einen neuen."
+
+msgctxt "AppWindow"
+msgid "This share link has already been used. Create a new one on the other device."
+msgstr "Dieser Freigabe-Link wurde bereits verwendet. Erstelle auf dem anderen Gerät einen neuen."
+
+msgctxt "AppWindow"
+msgid "The account this link was made for no longer exists."
+msgstr "Das Konto, für das dieser Link erstellt wurde, existiert nicht mehr."
+
+msgctxt "AppWindow"
+msgid "Couldn't sign in with that share token. Try again."
+msgstr "Die Anmeldung mit diesem Freigabe-Token ist fehlgeschlagen. Versuche es erneut."
+
+msgctxt "AppWindow"
+msgid "Sign in with a share token"
+msgstr "Mit Freigabe-Token anmelden"
+
+msgctxt "AppWindow"
+msgid "Paste the share link or token made on another device, in Settings > Security here or \"open on another device\" in Cicchetto. It works once and expires after ten minutes."
+msgstr "Füge den Freigabe-Link oder das Token ein, das auf einem anderen Gerät erstellt wurde: hier unter Einstellungen > Sicherheit oder in Cicchetto über „Auf anderem Gerät öffnen“. Das Token bzw. der Link funktioniert nur einmal und läuft nach zehn Minuten ab."
+
+msgctxt "AppWindow"
+msgid "Share link or token"
+msgstr "Freigabe-Link oder -Token"
+
+msgctxt "AppWindow"
+msgid "Sign in"
+msgstr "Anmelden"
+
+msgctxt "AppWindow"
+msgid "Sign in with a share token…"
+msgstr "Mit Freigabe-Token anmelden …"
+
+msgctxt "AppWindow"
+msgid "Share this session"
+msgstr "Diese Sitzung teilen"
+
+msgctxt "AppWindow"
+msgid "Make a single-use link or QR code that signs another device, such as Cicchetto on a phone, into this same account. It expires after ten minutes."
+msgstr "Erstelle einen Einmal-Link oder QR-Code, der ein anderes Gerät, etwa Cicchetto auf einem Telefon, bei genau diesem Konto anmeldet. Er läuft nach zehn Minuten ab."
+
+msgctxt "AppWindow"
+msgid "Creating…"
+msgstr "Wird erstellt …"
+
+msgctxt "AppWindow"
+msgid "Create a share link"
+msgstr "Freigabe-Link erstellen"
+
+msgctxt "AppWindow"
+msgid "Open this link, or scan the code, on the other device. Anyone who has it can sign in as you until it is used or expires, so don't post it."
+msgstr "Öffne diesen Link oder scanne den Code auf dem anderen Gerät. Wer ihn hat, kann sich als du anmelden, bis er verwendet wird oder abläuft – poste ihn also nicht."
+
+msgctxt "AppWindow"
+msgid "QR code of the share link"
+msgstr "QR-Code des Freigabe-Links"
+
+msgctxt "AppWindow"
+msgid "Share link"
+msgstr "Freigabe-Link"
+
+msgctxt "AppWindow"
+msgid "It works once, within ten minutes."
+msgstr "Er funktioniert nur einmal, innerhalb von zehn Minuten."
+
+msgctxt "AppWindow"
+msgid "It works once, until {}."
+msgstr "Er funktioniert nur einmal, bis {}."
+
+msgctxt "AppWindow"
+msgid "Hide link"
+msgstr "Link ausblenden"
+
+msgctxt "AppWindow"
+msgid "A per-client token can't share the session. Sign in with your password to do that here."
+msgstr "Ein Client-Token kann die Sitzung nicht teilen. Melde dich dafür hier mit deinem Passwort an."
+
+msgctxt "AppWindow"
+msgid "An incognito guest session can't be shared."
+msgstr "Eine Inkognito-Gastsitzung kann nicht geteilt werden."
+
+msgctxt "AppWindow"
+msgid "Couldn't create a share link."
+msgstr "Der Freigabe-Link konnte nicht erstellt werden."
+
+msgctxt "AppWindow"
 msgid "Profile saved."
 msgstr "Profil gespeichert."
 

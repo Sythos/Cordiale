@@ -61,6 +61,9 @@ pub enum BootstrapError {
     /// `POST /auth/totp/verify` refused the code: see
     /// `GrappaClient::verify_totp_login` for the codes it carries.
     TwoFactor(GrappaClientError),
+    /// `POST /auth/share/consume` refused the share token: see
+    /// `GrappaClient::consume_share_token` for the codes it carries.
+    ShareToken(GrappaClientError),
     /// A saved bearer was rejected by an authenticated bootstrap endpoint.
     /// Callers must ask the user to authenticate again; never retry it as a
     /// password or silently switch identities.
@@ -143,6 +146,35 @@ pub async fn bootstrap_with_totp(
         .verify_totp_login(challenge_token, code)
         .await
         .map_err(BootstrapError::TwoFactor)?;
+    let boot = client
+        .fetch_boot(&login.token)
+        .await
+        .map_err(BootstrapError::Boot)?;
+    let me = client
+        .fetch_me(&login.token)
+        .await
+        .map_err(BootstrapError::Me)?;
+    Ok(BootstrapOutcome {
+        compatibility,
+        token: login.token,
+        subject: Some(login.subject),
+        boot,
+        me,
+    })
+}
+
+/// Signs in with a share token minted on another device: consumes it (it
+/// works once), then runs the same `/boot` and `/me` sequence as any other
+/// sign-in with the full-session bearer Grappa answers with.
+pub async fn bootstrap_with_share_token(
+    client: &GrappaClient,
+    share_token: &str,
+) -> Result<BootstrapOutcome, BootstrapError> {
+    let compatibility = check_server_compatibility(client).await?;
+    let login = client
+        .consume_share_token(share_token)
+        .await
+        .map_err(BootstrapError::ShareToken)?;
     let boot = client
         .fetch_boot(&login.token)
         .await
@@ -276,6 +308,78 @@ mod tests {
         match bootstrap_with_totp(&client, "ch", "000000").await {
             Err(BootstrapError::TwoFactor(err)) => {
                 assert_eq!(err.code(), Some("invalid_two_factor"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_share_token_consumes_then_boots_with_the_new_bearer() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/share/consume"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "shared-session",
+                "subject": {"kind": "user", "id": "u-1", "name": "vjt"}
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/boot"))
+            .and(header("authorization", "Bearer shared-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "networks": []
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("authorization", "Bearer shared-session"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"kind": "user", "name": "vjt"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let outcome = bootstrap_with_share_token(&client, "share-1")
+            .await
+            .expect("bootstrap");
+        assert_eq!(outcome.token, "shared-session");
+        assert_eq!(
+            outcome.subject,
+            Some(serde_json::json!({"kind": "user", "id": "u-1", "name": "vjt"}))
+        );
+        assert_eq!(outcome.me.name.as_deref(), Some("vjt"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_share_token_reports_a_refused_token_as_share_token() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/share/consume"))
+            .respond_with(
+                ResponseTemplate::new(410)
+                    .set_body_json(serde_json::json!({"error": "share_token_consumed"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        match bootstrap_with_share_token(&client, "used").await {
+            Err(BootstrapError::ShareToken(err)) => {
+                assert_eq!(err.code(), Some("share_token_consumed"));
             }
             other => panic!("unexpected {other:?}"),
         }
