@@ -24,12 +24,12 @@ prima di pianificare.
 | network/channel/query, messaggi, stato realtime | Sì | Fase 1 | Perimetro Fase 1 |
 | TOTP (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | Login 202 → /auth/totp/verify; gestione /me/totp con sessione password piena; vedi protocol-notes.md §autenticazione e §superfici solo-account |
 | Passkey/WebAuthn (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto/Wax | Fase 2, parziale (issue #147) | Contratto tipizzato di tutte le route passkey con test su server simulato; Settings → Security mostra modo e passkey e le elimina con la password (sessione password piena). Nessuna ceremonia WebAuthn: aggiunta, cambio modo e login con passkey restano in Cicchetto. Fattibilità per piattaforma (Windows sì via `webauthn.dll`, macOS/Linux solo chiavette USB con PIN) in [`passkey-spike.md`](./passkey-spike.md); non provato su un'istanza reale |
-| Recovery codes | Verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | /auth/totp/verify accetta anche recovery code; codici nuovi mostrati una volta dopo /me/totp/enrollment/confirm; vedi protocol-notes.md |
+| Recovery codes | Verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | /auth/totp/verify accetta anche recovery code; codici nuovi mostrati una volta dopo /me/totp/enrollment/confirm; un account passwordless accede con un recovery code da `/auth/passkeys/recover` (schermata di connessione, issue #162; non provato su un'istanza reale); vedi protocol-notes.md |
 | Eliminazione account | Sì (`DELETE /me`) | — | Superficie solo-account, fuori scope token per-client |
 | Registrazione nuovo account | No / non documentato | — | Nessun endpoint di signup nel contratto; da chiarire (protocol-notes §6.4) |
 | Condivisione sessione (link/QR) | Sì (sorgente Grappa/Cicchetto) | Implementato, non verificato su un server reale | `POST /me/share-token` (sessione piena) e `POST /auth/share/consume`; in Settings → Security si crea il link con QR, dalla schermata di connessione si entra incollando token o link; vedi protocol-notes.md §autenticazione |
-| Console amministrativa | Parziale | — | Gate `is_admin`, nessuna procedura di assegnazione documentata |
-| Vhost settings | No / non documentato | — | Non citato |
+| Console amministrativa | Parziale nel documento (solo il gate `is_admin`), schema dal sorgente Grappa/Cicchetto | Fase 2, implementato | Settings → Admin: sessioni, utenti, visitatori, reti e server, credenziali, vhost e grant, impostazioni server-wide, upload, feed live; vedi la riga Admin della tabella del 2026-09-25 e protocol-notes §4ter. Nessuna procedura di assegnazione di `is_admin` documentata. Non provato contro un server reale |
+| Vhost settings | Sì (sorgente Grappa/Cicchetto, non in `CLIENT_PROTOCOL.md`) | Fase 2, implementato | Self-service `GET`/`PUT /me/settings/vhost` in Settings → Source Address; i grant lato admin stanno in Settings → Admin (protocol-notes §4quater) |
 | Directory canali | Sì (sorgente Grappa/Cicchetto) | Fase 2, implementato | Voce "Canali" per rete nella sidebar e `/list`: ricerca, refresh, totale, età dell'elenco, join o apertura con un clic (issue #121) |
 | Archivio/scrollback | Sì | Fase 1/2 | `GET /networks/:network_id/archive` |
 | Banlist | Sì | Fase 2 | Verbo WS `"banlist"` |
@@ -38,13 +38,13 @@ prima di pianificare.
 | Names/Who/Whois/Whowas/Links/Server info | Sì | Fase 2 | Eventi per-connessione documentati |
 | Lusers | Sì | Fase 2 | Unico evento della famiglia con fan-out a tutte le connessioni |
 | Offerte DCC | Sì | Fase 2 | Endpoint ed eventi completamente documentati |
-| Upload/drag&drop file | Parziale | — | Solo `GET /uploads/:slug` per analogia; nessun endpoint POST documentato |
-| Media viewer | No / non documentato | — | Rendering client-side, protocollo consegna solo byte grezzi |
-| Audio dock/mini player | No | — | Puramente client-side |
+| Upload/drag&drop file | Sì (sorgente Grappa, non in `CLIENT_PROTOCOL.md`) | Fase 2, implementato | `POST /api/uploads` (protocol-notes §6.5): graffetta, trascinamento, incolla |
+| Media viewer | No / non documentato | Implementato (client-side) | Rendering client-side, protocollo consegna solo byte grezzi |
+| Audio dock/mini player | No | Implementato (client-side) | Puramente client-side: player e radio, vedi la tabella del 2026-09-25 |
 | Editor/galleria temi | No | Fase 1/2 (nativo) | Cordiale gestisce temi via design token Slint, non wire protocol |
-| Barra inferiore, nicklist colorata, badge eventi, bold mentions, strip formatting, formato data | Sì | Fase 2 | Chiavi `display_prefs`; `date_format` (v29: `auto`/`dmy`/`mdy`/`ymd`, 422 fuori insieme) applicato da un solo percorso di rendering (`cordiale-ui/src/dates.rs`) |
+| Barra inferiore, nicklist colorata, badge eventi, bold mentions, strip formatting, formato data | Sì | Fase 2 | Chiavi `display_prefs` (8 dalla v29, protocol-notes §1); `date_format` (v29: `auto`/`dmy`/`mdy`/`ymd`, 422 fuori insieme) applicato da un solo percorso di rendering (`cordiale-ui/src/dates.rs`) |
 | Filtro presenza | Sì (probabile collegamento) | Fase 2 | Possibile legame con join-param `presence: false`, non esplicito nel doc |
-| Finestra menzioni | Incerto | — | Presumibilmente derivato client-side |
+| Finestra menzioni | Sì (`mentions_bundle`) | Fase 2, implementato | Riepilogo cross-canale al rientro dall'away (`/mentions`); l'evidenziazione delle menzioni in chat è client-side |
 | Ignore list, watchlist, alias comandi, perform on connect | Sì, non-admin self-service | Fase 2 (2026-09-19) | **Corretto**: la nota "presumibilmente client-local" era sbagliata, mai verificata — ignores/aliases/perform sono REST server-persistiti (`GET/POST/PUT /networks/:slug/{ignores,perform}`, `GET/PUT /me/settings/aliases`), la watchlist di presenza è REST (`/networks/:slug/notify`), quella per parola chiave è WS (`ch.push("watchlist", ...)`). Tutti e quattro ora implementati in Cordiale (Settings → Ignore List/Aliases/On-Connect Commands/Watch Lists) — dettaglio completo in `docs/protocol-notes.md` §4quater. Dalla v31 una regola ignore è la coppia `(mask, text_pattern)`: Cordiale legge `entries` (ripiegando su `masks` coi server vecchi), aggiunge e rimuove la coppia esatta, `/ignore <mask> [pattern]` |
 | Inviti | Sì (parziale) | Fase 2 | `window_invited` tra i kind di stato-finestra; il banner ha Entra e Rifiuta: Rifiuta chiama `DELETE /networks/:slug/invites/:channel` (nulla viene inviato a IRC) e il banner sparisce solo con `window_invite_declined`, così vale anche per una decisione presa su un altro dispositivo (non ancora provato su un server reale) |
 | Kick | Sì | Fase 1/2 | Kind terminale di stato-finestra |
@@ -53,8 +53,8 @@ prima di pianificare.
 | Notice/relay a terzi | Sì | Fase 2 | Campo `notice_target` |
 | Identità ai servizi | Sì | Fase 1 | Evento `session_identity_changed` |
 | Away/auto-away (proprio) | Parziale | Fase 2 | Cordiale dichiara a Grappa quando è in primo piano (`visibility` ogni 30 s, `client_closing` a chiusura e sign-out; non verificato contro un server reale, vedi `docs/protocol-notes.md`); `auto_away_reason_changed` documentato solo per il subject stesso; suffisso del nick in auto-away (v32, `GET/PUT /me/settings/away-nick-suffix`, push `away_nick_suffix_changed`, `null` = rinomina spenta) in Settings: il nick mostrato resta quello degli eventi nick, mai `nick + suffisso` |
-| Away dei peer | Incerto | — | Nessun evento documentato (protocol-notes §6.7) |
-| Reason di quit/part personalizzati | Sì | Fase 2 | Evento `quit_part_reason_changed` |
+| Away dei peer | Sì (evento `peer_away`) | Fase 2, implementato | `{network, peer, message}` sul topic utente, mostrato come banner sopra la finestra privata del peer (protocol-notes §6.7) |
+| Reason di quit/part personalizzati | Sì | Fase 2, implementato | Evento `quit_part_reason_changed`; si modificano in Settings → General con auto-away reason e debounce |
 | Casemapping/chantypes | Sì | Fase 1 | Folding ASCII dei topic, necessario per il modello canale |
 | List modes query | Sì | Fase 2 | `chanmodes_a`/`list_modes_queryable` |
 | Gestione flood/rate limit | Sì | Fase 1 | `web_session_severed`, va gestito nel core rete |
@@ -93,7 +93,9 @@ Le implementazioni successive sono riportate nella matrice qui sopra e
 negli aggiornamenti cronologici sotto: questa nota descrive lo stato di
 quel giorno, non quello corrente.
 
-**Aggiornamento (2026-09-19)**: la superficie admin reale di Grappa
+**Aggiornamento (2026-09-19)** (stato di quel giorno: l'elenco di ciò che
+"resta fuori" è superato, vedi la riga Admin della tabella del 2026-09-25 e
+`docs/protocol-notes.md` §4ter): la superficie admin reale di Grappa
 (catalogata per intero in `docs/protocol-notes.md` §4ter, letta dal
 sorgente Elixir + da Cicchetto) è molto più ampia di quanto stimato
 inizialmente — oltre 30 endpoint `/admin/*` su 8 aree (overview,
@@ -123,8 +125,9 @@ radiale (stesso principio angolo/raggio di Cicchetto, disegnato con
 l'elemento nativo Slint `Path`, niente pan/zoom per ora) — dettaglio
 completo in `docs/protocol-notes.md` §4ter.
 
-**Aggiornamento (2026-09-23)**: Cordiale gestisce tutti i 56 kind evento
-del protocollo. Oltre a quanto sopra sono ora implementati, con i
+**Aggiornamento (2026-09-23)**: Cordiale gestisce tutti i kind evento
+del protocollo (56 allora, 57 dalla v32 con `away_nick_suffix_changed`).
+Oltre a quanto sopra sono ora implementati, con i
 rispettivi comandi slash: schermata risposte per WHO/WHOIS/WHOWAS/MOTD/
 INFO/VERSION/ADMIN/banlist/LUSERS, directory canali (`/list`, sola
 lettura), archivio con cancellazione dello storico (`/archive`), offerte
@@ -162,11 +165,29 @@ scelta. Stato per area:
 | Menu Azioni | Fatto | Stanze, archivio, modi utente, silenzia conversazione, radio, cambia account |
 | Admin | Fatto | Compresi i grant dei vhost ai visitatori; tab Uploads (`GET /admin/uploads`, `DELETE /admin/uploads/:id`): registro con le righe eliminate come storico, budget globale, eliminazione anticipata di un upload attivo con conferma. Nessuna eliminazione per l’utente normale, nessun indicatore di quota personale. Issue #143: l'eliminazione di una rete chiede prima `GET /admin/networks/:id/message_count` (dalla v33 cancella anche tutto lo scrollback) e mostra il numero nella conferma, o dice che non può confermarlo (404 o errore), mai zero; terminate di una sessione account (`DELETE /admin/sessions/:id`) e reconnect di un visitatore (`POST /admin/sessions/:id/reconnect`); featured channels (elenco, aggiunta, abilita/disabilita, elimina); modifica di un server IRC (`PUT`) e di una credenziale (`PATCH`: nick, ident, realname, sasl_user, password). Tutto verificato contro i test wiremock e il sorgente del server, non contro un server reale |
 | Presentazione | Fatto | Avatar GIF/WebP/BMP, badge nativo sulla taskbar di Windows |
-| TOTP, passkey, token client, eliminazione account | Lasciato a Cicchetto | Cicchetto è integrato in Grappa, Cordiale no |
+| Token client, eliminazione account; registrazione di passkey, cambio modo e login con passkey | Lasciato a Cicchetto | Cicchetto è integrato in Grappa, Cordiale no. TOTP (con recovery code), condivisione di sessione ed elenco/eliminazione delle passkey ci sono (righe sopra); una passkey-only entra con un link di condivisione o un token client, o con un recovery code se ne ha. Nessuna ceremonia WebAuthn (#147, `passkey-spike.md`) |
 
 Limiti di piattaforma restanti: niente trascinamento di file su Wayland,
 badge solo su Windows, pulsanti e menu con lo stile dei widget di Slint;
 ident e realname non sono più esposti da Grappa.
+
+**Aggiornamento (2026-09-30) — allineamento a `protocol_version` 34.**
+Cordiale dichiara `client_proto=34` sull'URL del WebSocket e su un `426
+upgrade_required` si ferma invece di ritentare (non verificato contro un
+server che alzi il floor). Stato delle novità: quelle che parlano col server
+sono coperte da test con server simulato e dal suo sorgente, **non ancora
+provate contro un server reale**:
+
+| Area | Stato in Cordiale | Note |
+|---|---|---|
+| `dm_conversation_id` (v34) | Implementato | Letto da `query_windows_list` e dalle righe di scrollback, usato per riconoscere la stessa finestra privata dopo un NICK del peer; il merge di due conversazioni non è rilevato |
+| Catch-up dopo un reconnect | Implementato | Sonda `messages/count?after=<id>&cap=201` per canale; fino a 200 righe con `?after=`, oltre ricarica la coda e lascia una nota del buco |
+| Presenza in primo piano | Implementato | `visibility` ogni 30 s mentre la finestra è attiva, `client_closing` a chiusura e sign-out |
+| Profilo proprio per rete | Implementato | Campi CTCP USERINFO e avatar in Settings → General (`PATCH /networks/:slug/profile`, `PUT`/`DELETE .../avatar`) |
+| Rifiuto di un invito | Implementato | Vedi la riga Inviti sopra |
+| Condivisione di sessione | Implementato | Vedi la riga sopra |
+| Passkey | Parziale | Elenco ed eliminazione con la password; nessuna ceremonia WebAuthn, #147 aperta |
+| Pagina Debug | Implementato | Vedi la tabella del 2026-09-25; da provare a mano su Windows, macOS e Linux |
 
 ## Voci ancora da chiarire prima di poter classificare
 

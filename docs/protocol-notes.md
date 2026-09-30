@@ -12,6 +12,10 @@ Fonti:
 - **Riferimento funzionale (solo funzionalità, non architettura):**
   <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
 
+Ultimo allineamento (2026-09-30): `protocol_version` 34,
+`min_protocol_version` 1 (letti dal sorgente server in `lib/grappa/protocol.ex`);
+Cordiale dichiara `client_proto=34` (§2).
+
 Convenzione: "la documentazione dice" = contenuto verificato del
 `CLIENT_PROTOCOL.md`; "sto inferendo" = deduzione non scritta esplicitamente
 nella fonte. Il codice server Grappa resta l'autorità finale in caso di
@@ -97,8 +101,9 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
   - Da verificare end-to-end su un'istanza Grappa di prova: il flusso è
     coperto da test con server simulato.
 
-- **Token per-client** — pensato esattamente per un client come Cordiale che
-  non può gestire TOTP/WebAuthn:
+- **Token per-client** — pensato per un client nativo che non può completare
+  un secondo fattore (per Cordiale oggi: WebAuthn, vedi sotto; il TOTP lo
+  gestisce con una sessione password):
   - Si invia nello stesso campo `password` di `POST /auth/login`.
   - Il token è il bearer stesso: si può saltare `/auth/login` e presentarlo
     direttamente come `Authorization: Bearer <token>` (REST) o via
@@ -163,10 +168,15 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
 - `GET/PUT .../dcc-auto-accept` — `{"enabled": true|false}`.
 
 ### Impostazioni
-- `GET`/`PUT /me/settings/display-prefs` — 7 chiavi (v24): `time_format`,
-  `colored_nicklist`, `presence_filter`, `show_bottom_bar`,
-  `strip_formatting`, `show_event_badge`, `bold_mentions`. Absent-tolerant in
-  entrambe le direzioni.
+- `GET`/`PUT /me/settings/display-prefs` — 8 chiavi dalla v29: le 7 della v24
+  (`time_format`, `colored_nicklist`, `presence_filter`, `show_bottom_bar`,
+  `strip_formatting`, `show_event_badge`, `bold_mentions`) più `date_format`
+  (`auto|dmy|mdy|ymd`: il primo campo a insieme chiuso, un valore fuori
+  insieme è un `422` con `field_errors.display_prefs`, mai coercito ad
+  `auto`). Absent-tolerant in entrambe le direzioni, ma non
+  value-tolerant. Cordiale legge e scrive i cinque booleani e `date_format`
+  (un valore non riconosciuto in lettura viene scartato senza perdere le
+  altre chiavi).
 - `GET /api/server-settings`, `GET /admin/settings` — dalla v26 espone anche
   `per_user_cap_bytes` e `per_visitor_cap_bytes`, leggibili ma non
   azionabili (rifiuto quota = `507 insufficient_storage` generico).
@@ -174,7 +184,10 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
 ### Superfici solo-account (non accessibili da token per-client)
 `/admin/*`, `/me/totp*`, `/me/passkeys*`, `DELETE /me` — richiedono sessione
 piena (`GrappaWeb.Plugs.RequireFullSession`: `current_session_kind == :web`);
-un token per-client riceve `403 client_token_scope`.
+un token per-client riceve `403 client_token_scope`. `/me/totp*` e
+`/me/passkeys*` accettano solo un account: a un visitatore (ospite o
+registrato con la password NickServ) i controller rispondono `403`. Cordiale
+per le sessioni visitatore non le chiama e lo dice in Settings → Security.
 
 **TOTP (issue #118, schema letto da `GrappaWeb.TotpController` e da
 `cicchetto/src/lib/api.ts`, 2026-09-27).** Cordiale lo gestisce in
@@ -206,6 +219,17 @@ richiedono un autenticatore:
   `409 passkey_required` = ultima passkey con un modo armato, `404
   not_found`, `503 db_unavailable` distinto dall'errore di credenziali. In
   Settings → Security.
+- `POST /auth/passkeys/recover {identifier, recovery_code}` → `200 {token,
+  subject}` con un bearer di sessione piena: login di un account
+  `passwordless` con un recovery code, che viene consumato. Non serve un
+  autenticatore; dalla schermata di connessione (issue #162). `401
+  invalid_two_factor` è opaco (codice errato, già usato o account non
+  passwordless: i codici non hanno scadenza), `429 too_many_attempts` è la
+  finestra di tentativi (per IP e per account, 15 minuti), `503
+  db_unavailable` è distinto. `POST /auth/login` con la password di un
+  account passwordless risponde un semplice `401 invalid_credentials`,
+  indistinguibile da una password errata: Grappa non dice che l'account è
+  passwordless, quindi la schermata di connessione offre sempre l'entrata.
 - Registrazione, cambio modo, attivazione passwordless e le porte di login
   passkey richiedono una ceremonia WebAuthn e restano in Cicchetto; non
   esiste un endpoint di rinomina. Dettagli, controllo esatto
@@ -309,16 +333,55 @@ il resto della sezione Sicurezza resta in Cicchetto:
   `{"quit_part_reason": string|null}`, `auto_away_reason_changed`
   `{"auto_away_reason": string|null}` — chiave sempre presente, `null` è
   significativo.
+- **Suffisso del nick in auto-away** (v32): `away_nick_suffix_changed`
+  `{"away_nick_suffix": string|null}` sul topic utente, chiave sempre
+  presente. Qui `null` non nasconde un testo del server: la rinomina è spenta
+  (il default di ogni soggetto). Si applica solo all'auto-away, mai a un
+  `/away` esplicito, e il server la salta se il nick supererebbe `NICKLEN`: un
+  client non deve mai derivare il nick in away come `nick + suffisso`.
+  Lettura e scrittura via `GET`/`PUT /me/settings/away-nick-suffix`
+  (`422` se il server rifiuta il suffisso). Cordiale lo modifica in Settings →
+  General (campo vuoto = rinomina spenta), allinea il campo a un salvataggio
+  fatto da un altro device e lascia il nick mostrato a ciò che dicono gli
+  eventi nick. Coperto da test con server simulato, non provato contro un
+  server reale.
+- **Rete staccata o riattaccata** (v28): `DELETE /session/networks/:slug`
+  stacca una rete dalla propria sessione (`204`; `404` per uno slug non
+  posseduto o non attaccato, una sola risposta per non enumerare le reti;
+  `403` per un visitatore) senza perdere nick, SASL, segreti, perform e
+  autojoin; `POST /session/networks {network}` la riattacca con tutto quello
+  che aveva. Gli eventi `network_detached` e `network_attached`
+  `{network_id, network_slug}` sul topic utente non portano stato: dicono cosa
+  si è mosso, e la risposta sta in `GET /networks` e `GET /me` (mai dedurre un
+  attach da `connection_state_changed`). Cordiale rilegge `GET /boot` e
+  `GET /me` a ogni evento, e dalla Home offre Remove (mai ai visitatori) e
+  "Available to connect". Non provato contro un server reale.
 - **Liste canale**: `isupport_changed` porta `chanmodes_a` e
   `list_modes_queryable` — usare quest'ultimo per l'UI.
 - **Modifiche di modo strutturali** (v25): righe `:mode` portano
   `meta.structural: true` quando il token cambia il canale (non un prefisso
   membro); assente su storico pre-v25 = "non noto, tratta come prima".
-- **Rate limiting**: su un verbo WS oltre budget →
-  `{"error": "rate_limited", "retry_after_ms": N}` (socket resta aperto).
+- **Rate limiting**: budget condiviso per soggetto su ogni verbo WS e su
+  ogni scrittura REST non-admin (`POST`/`PUT`/`PATCH`/`DELETE`; `/admin/*`
+  e `AdminChannel` sono esenti). Oltre budget: su un verbo WS
+  `{"error": "rate_limited", "retry_after_ms": N}` (socket resta aperto); su
+  una scrittura REST `429` con lo stesso corpo più un header `Retry-After` in
+  secondi. Nulla viene accodato: si aspetta almeno `retry_after_ms`.
   Flood sostenuto → `web_session_severed` `{"code": "rate_limit_flood"}` sul
   topic utente → bearer revocato → socket chiuso. La sessione IRC (bouncer)
-  non viene toccata, solo quella web.
+  non viene toccata, solo quella web. Cordiale gestisce
+  `web_session_severed` e il `429 too_many_attempts` del login, ma non
+  interpreta `rate_limited` (né `retry_after_ms`): una scrittura rifiutata per
+  budget è un errore come un altro, senza backoff dedicato.
+- **Boot e reconnect (§6a del contratto)**: il budget sopra misura solo le
+  scritture, quindi non protegge da un fan-out di `GET`. Quello che lo ferma è
+  di solito un proxy con `limit_req`, che risponde `503` (non `429`), senza
+  `retry_after_ms` né `Retry-After`. Cordiale fa il boot con `GET /boot` +
+  `GET /me` (due richieste, piatte rispetto alla dimensione dell'account) e il
+  recupero dopo un reconnect va un canale alla volta con una pausa di 250 ms
+  (vedi §1). Un `503` del proxy non ha un trattamento dedicato, e il refresh
+  dopo `channels_changed` rilegge i canali di ogni rete in parallelo: non è
+  limitato dalla dimensione dell'account. Non verificato contro un proxy reale.
 
 ### Heartbeat / riconnessione
 - **Non specificato esplicitamente** nel documento: nessun intervallo di
@@ -360,13 +423,15 @@ screenshot dell'utente) e sul report a monte dell'utente stesso,
   `:privmsg` come la stessa famiglia di riga), non ancora osservato
   direttamente.
 - **`topic_changed`** — kind reale, non documentato in `CLIENT_PROTOCOL.md`
-  al momento del report (vedi issue linkata): `{"channel", "kind":
+  al momento del report (vedi issue linkata; oggi è nella tabella §9 del
+  contratto): `{"channel", "kind":
   "topic_changed", "network", "topic": {"set_at", "set_by", "text"}}`. Il
   campo `topic` è un **oggetto**, non la stringa che questo documento aveva
   ipotizzato altrove prima di questa conferma.
-- **Altri sei kind confermati reali ma non documentati** dall'issue
-  dell'utente (estratti via grep sul sorgente server, quindi limite
-  inferiore, non censimento completo): `channel_modes_changed` (snapshot
+- **Altri sei kind confermati reali ma non documentati** al momento
+  dell'issue dell'utente (estratti via grep sul sorgente server, quindi
+  limite inferiore, non censimento completo; oggi cinque di questi stanno
+  nella tabella §9 del contratto, mentre `parted` non esiste, §2ter): `channel_modes_changed` (snapshot
   dei modi dell'intero canale, es. `{"modes": {"modes": ["r","n","t"],
   "params": {}}}` — diverso da una riga `:mode` per-membro), `parted`
   (probabile stato di finestra "il mio canale si è chiuso", simmetrico a
@@ -390,8 +455,11 @@ screenshot dell'utente) e sul report a monte dell'utente stesso,
 Audit diretto sui moduli sorgente Elixir del server (non regex/grep su
 poche righe): `session/wire.ex`'s `@type wire_event_kind` è l'insieme
 chiuso ufficiale (40 kind), più ogni altro `*/wire.ex` non-admin del repo:
-56 kind top-level in totale, elencati con il loro carrier in
-`crates/cordiale-core/src/wire_event.rs` (`ClientEventKind`). Riassunto:
+56 kind top-level in totale all'epoca, elencati con il loro carrier in
+`crates/cordiale-core/src/wire_event.rs` (`ClientEventKind`). Oggi sono 57:
+la tabella §9 del contratto aggiunge `away_nick_suffix_changed` (v32), che
+ora sta nell'enum come gli altri (prima veniva scartato da
+`ClientEventKind::from_payload` prima di arrivare al suo gestore). Riassunto:
 
 - **`"parted"` non esiste**: due commenti nel sorgente server
   (`session/server.ex`, `session/window_state.ex`) confermano che
@@ -405,12 +473,13 @@ chiuso ufficiale (40 kind), più ogni altro `*/wire.ex` non-admin del repo:
   `notice`): `action` (CTCP `/me`), `topic` (riga scrollback di cambio
   topic), `kick` (riga scrollback di kick, diversa da `kicked`
   top-level), `server_event` (riga feed server, diversa da `notice`).
-- **Aggiornamento (2026-09-23)**: Cordiale gestisce tutti i 56 kind
+- **Aggiornamento (2026-09-30)**: Cordiale gestisce tutti i 57 kind
   (ISUPPORT/umode/identità, stato finestra, WHOIS/WHOWAS/LUSERS/banlist,
   DCC, directory canali, archivio, lifecycle network, presence
-  MONITOR/WATCH, notify list, impostazioni server, riepilogo menzioni);
-  il riepilogo per kind è nella sezione "Realtime event coverage" del
-  README. La vecchia costante `IGNORED_KINDS` non esiste più: in
+  MONITOR/WATCH, notify list, impostazioni server, riepilogo menzioni,
+  suffisso del nick in auto-away); l'inventario e il carrier di ciascun kind
+  sono in `wire_event.rs`, con un test che ne controlla i nomi univoci e
+  l'andata e ritorno (non diffa ancora l'enum contro la tabella §9). La vecchia costante `IGNORED_KINDS` non esiste più: in
   `handle_frame` ogni kind ha un gestore dedicato (o un no-op esplicito,
   come `channel_created`) e solo `message` diventa riga di chat
   (`renders_as_chat_line`).
@@ -476,7 +545,7 @@ segue è ricostruito da frammenti sparsi (marcato dove è inferenza).
   `{network, peer, message}` (301 RPL_AWAY fuori da un WHOIS), vedi §6, punto 7.
 - **dcc offer**: `{network, channel, offer_id, from, filename, size}` +
   `resolution` quando risolta.
-- **display_prefs**: 7 chiavi (vedi §1).
+- **display_prefs**: 8 chiavi dalla v29 (vedi §1).
 
 ## 4bis. Modello di persistenza confermato dal manutentore (2026-09-18)
 
@@ -569,17 +638,23 @@ da Cicchetto), `GET /admin/session_log[/sessions]`,
 `POST/DELETE /admin/vhosts/:id/grants[/:grant_id]`.
 
 **Implementato in Cordiale** (`cordiale_core::admin` + `client.rs`,
-Settings → Admin): `GET /admin/overview`, `GET /admin/sessions`,
-`POST /admin/sessions/:id/disconnect`. Anche presenti a livello di
-client ma non ancora collegati alla UI: `GET /admin/users`,
-`GET /admin/networks`. **Tutto il resto è deliberatamente fuori
-perimetro per ora** (networks/vhosts/credentials/settings write,
-visitors, reaper/circuit, session log, il canale WS
-`grappa:admin:events` per aggiornamenti live) — la superficie reale è
-troppo ampia per una singola sessione di lavoro; Settings → Admin lo
-dichiara esplicitamente all'utente invece di fingere completezza.
+Settings → Admin, stato al 2026-09-30): panoramica; sessioni (elenco,
+disconnect, reconnect, terminate); utenti (elenco, crea, cambia password,
+toggle `is_admin`, elimina); visitatori (elenco, elimina); reti (elenco,
+crea, modifica, elimina, reset del circuit) con i loro server IRC (aggiungi,
+modifica, elimina) e i canali in evidenza; credenziali (elenco, crea, modifica,
+elimina); vhost con i grant (crea, modifica, elimina, assegna e revoca, con
+ricerca del soggetto); impostazioni server-wide (`GET`/`PUT /admin/settings`,
+sottoalberi `upload`, `dcc` e `addressing`); upload (registro ed eliminazione
+anticipata); session log; reaper; feed live sul canale WS
+`grappa:admin:events`. **Non implementato**:
+`POST /admin/visitors/:id/share-token`, `GET/POST /admin/db_latency[/reset]`,
+`GET /admin/ws_presence`, `GET /admin/session_log/sessions`. Tutto coperto da
+test con server simulato e dal sorgente del server, non provato contro un
+server reale.
 
-**Aggiunto con l'issue #143** (oltre all'elenco sopra, che è datato):
+**Aggiunto con l'issue #143** (dettagli dei contratti, verificati sul
+sorgente del server):
 `GET /admin/networks/:id/message_count` (`{"message_count": n}`; `404` =
 server precedente alla v33 o rete già sparita: «non posso confermare», mai
 zero), perché dalla v33 `DELETE /admin/networks/:id` cancella la rete
@@ -673,8 +748,9 @@ esplicitamente richiesto dall'utente per la parità con Cicchetto:
 
 Correzione esplicita dell'utente: Grappa è un deployment standalone,
 senza scrittura di settings server-wide né provisioning utenti lato
-client (`/admin/settings` write e `/admin/users` create/password
-restano fuori scope per questo motivo, non per pigrizia). Quello che
+client (così giudicati il 2026-09-19; `/admin/settings` write e
+`/admin/users` create/password sono stati poi implementati in Settings →
+Admin, vedi §4ter). Quello che
 **serve davvero**, come in Cicchetto originale, è che ogni utente possa
 modificare il **proprio** profilo di rete. Fonte: lettura diretta di
 `cicchetto/src/SettingsDrawer.tsx` (non `AdminPane.tsx`) + le route
@@ -713,7 +789,16 @@ opzione disponibile, toggle = fetch attuale → flip → PUT).
 **Ignores** (per-rete) — `GET/POST /networks/:slug/ignores`,
 `DELETE /networks/:slug/ignores/:mask`. Risposta mutazione include
 `outcome: "added"|"already_ignored"|"removed"|"not_ignored"`.
-Implementato per intero con lista + form aggiungi in Settings.
+Dalla v31 una regola è la **coppia** `(mask, text_pattern)`: la risposta ha
+ancora `masks` (solo le stringhe, compat) e in più `entries`
+`[{mask, text_pattern|null}]`; due regole possono condividere la stessa
+mask, quindi l'identità è la coppia. `POST` accetta `{mask, text_pattern?}`
+(`422 invalid_text_pattern` se vuoto o con CR/LF, `422 invalid_mask` per la
+mask); `DELETE` porta il pattern in query (`?text_pattern=`) e senza
+rimuove solo la regola senza pattern. Cordiale legge `entries` (ripiegando su
+`masks` coi server vecchi), aggiunge e rimuove la coppia esatta, e
+`/ignore <mask> [pattern]`. Implementato per intero con lista + form
+aggiungi in Settings; non provato contro un server v31 reale.
 
 **Aliases** (account-scoped, non per-rete) — `GET/PUT
 /me/settings/aliases`, body `{aliases: {comando: espansione}}`,
@@ -753,11 +838,13 @@ non una lista recuperata dal server.
 **Profilo esteso e avatar** (Settings → Generale → Profilo di rete) — `PATCH /networks/:slug/profile` con `{age?, gender?, location?, languages?, custom?}` (stringhe; campo omesso = invariato, `""` = cancella). `gender` ammette solo `male`, `female`, `nonbinary` o vuoto; gli altri quattro campi al massimo 100 byte (non caratteri) e senza CR/LF/NUL, altrimenti `422`. Non riavvia la connessione. `PUT /networks/:slug/avatar` è multipart con campo `file`: stessa allowlist MIME e stesso tetto per file delle immagini di `POST /api/uploads` (`415` tipo non immagine, `413` oltre il tetto, `507` spazio esaurito), `400` se il file manca; `DELETE /networks/:slug/avatar` risponde `200` anche senza avatar. Le tre chiamate rispondono con la credenziale aggiornata (`avatar_url`, `null` se assente). Cordiale invia solo i campi cambiati rispetto all'ultimo valore letto da `GET /networks`. Verificato sul codice del server, non ancora provato contro un server reale.
 
 **Non implementato per scelta esplicita** (non ambiguità, elencato per
-completezza): password/`server_pass` di rete (`PUT /networks/:slug/
-password`, `GET/PUT /networks/:slug/server_pass` — dati sensibili,
-fuori scope per questa sessione), l'intero blocco `/me/settings/*` minore
-(upload-retention, auto-away-debounce, quit/part-reason, ecc. — non
-richiesti esplicitamente), `dcc-auto-accept`.
+completezza; aggiornato al 2026-09-30): password/`server_pass` di rete
+(`PUT /networks/:slug/password`, `GET/PUT /networks/:slug/server_pass` — dati
+sensibili) e `oper_pass` (non esposto in UI). Il blocco minore di
+`/me/settings/*` invece c'è, in Settings → General: upload-retention e
+conferma degli upload, quit/part reason, auto-away reason e debounce,
+suffisso del nick in auto-away, opt-in ai profili dei peer
+(`show-peer-profiles`) e, per rete, `dcc-auto-accept`.
 
 ---
 
@@ -885,10 +972,12 @@ letto in una spec:
    funzionalità distinte; il documento non li mette mai in relazione
    esplicita.
 9. Alcune superfici (schema completo `/admin/*`, TOTP, passkey, recovery
-   codes, upload) non sono nel contratto client documentato: non rilevanti
-   per il perimetro Fase 1 di Cordiale (autenticazione username/password o
-   token per-client, non gestione 2FA/admin), ma da riconsiderare se il
-   perimetro si estende in Fase 2.
+   codes, upload) non sono (o non erano) nel contratto client documentato e
+   sono lette dal sorgente server e da Cicchetto. Il perimetro è andato oltre
+   la Fase 1: TOTP con recovery code (issue #118), upload e admin sono
+   implementati (§1, §4ter). Delle passkey ci sono elenco ed eliminazione,
+   non la ceremonia WebAuthn: fattibilità per piattaforma in
+   [`passkey-spike.md`](./passkey-spike.md), issue #147 ancora aperta.
 
 ---
 
@@ -900,18 +989,21 @@ letto in una spec:
   UX diversa (es. "Password" vs "Client token") e per gestire
   correttamente `403 client_token_scope` come errore di scope e non di
   credenziali (niente retry, niente "riprova la password").
-  - **Nota importante**: `403 client_token_scope` implica che alcune
-    operazioni account-only (2FA, passkey, eliminazione account) **non
-    possono essere svolte da Cordiale con un token per-client** — vanno
-    escluse dal perimetro applicativo o esplicitamente segnalate come "vai
-    sul browser" quando rilevanti.
+  - **Nota importante**: `403 client_token_scope` implica che le operazioni
+    account-only (TOTP, passkey, gestione dei token, eliminazione account)
+    **non possono essere svolte da Cordiale con un token per-client**. Con
+    una sessione password Cordiale offre TOTP, elenco/eliminazione delle
+    passkey e la condivisione di sessione (Settings → Security); registrare
+    una passkey, cambiarne il modo, accedere con una passkey, gestire i
+    token per-client ed eliminare l'account restano da Cicchetto e vanno
+    segnalati come "vai sul browser".
 - Il bootstrap REST va sequenziato come: `GET /api/config` (verifica
   versione) → `POST /auth/login` (o bearer diretto se token già noto) →
   `GET /boot` + `GET /me` in parallelo → join topic utente WS (che conferma
   di nuovo `protocol_version`).
 - Il parser deve confrontare `protocol_version` con `>=`, mai `==`, e
   ignorare i campi sconosciuti. Per i kind evento, Cordiale gestisce
-  tutti i 56 kind dell'inventario upstream attuale; un kind top-level
+  tutti i 57 kind dell'inventario upstream attuale; un kind top-level
   futuro non ancora censito viene scartato in silenzio
   (`ClientEventKind::from_payload`), come prescrive il contratto.
 - Una password vuota nel form Connect avvia il tentativo guest osservato

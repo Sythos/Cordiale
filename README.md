@@ -105,13 +105,23 @@ Cordiale also covers:
   can enable or disable TOTP in Settings > Security and see new recovery
   codes once. Passkey-only sign-in still needs a share link or client token
   from Cicchetto; an account whose passkey is backed by recovery codes can
-  sign in with one of those. Settings > Security also lists the account's
-  passkeys and deletes them with the password.
+  sign in with one of those, and a passwordless account can sign in from
+  the connect screen with a one-time recovery code (not yet checked against
+  a live server). Settings > Security also lists the account's passkeys and
+  deletes them with the password.
 - **Session sharing:** Settings > Security makes a single-use link and QR
   code (valid ten minutes) that signs another device into the same account,
   and the connect screen signs in with such a link or token from another
   device, for example one made in Cicchetto after a passkey sign-in. Not yet
   checked against a live server.
+- **Connection and presence:** Cordiale declares the protocol revision it
+  was checked against (`client_proto=34`) and, if Grappa refuses the
+  upgrade with `426`, stops and asks you to update instead of retrying.
+  After a reconnect it catches up each channel's missed messages (a short gap
+  is paged in, a long one reloads the latest messages and leaves a note where
+  the hole is), and it tells Grappa while the window is in the foreground so
+  auto-away and push notifications follow. A channel invite offers Join and
+  Decline, and a peer's nick change keeps the same private window.
 - **Channel directory:** each network's Channels entry (or `/list`) opens
   its channel list beside the sidebar: search, Refresh, the channel count
   and how old the list is, then name, topic and user count per channel.
@@ -175,11 +185,18 @@ Cordiale also covers:
 
 ## Known gaps
 
-- **Account security:** passkey creation/sign-in and mode changes (Cordiale
-  can't run a WebAuthn ceremony yet, see `docs/passkey-spike.md`), creating
-  or managing client tokens, and account deletion still live in Cicchetto. TOTP works
-  in Cordiale with a full password-backed session; a scoped client token
-  cannot use Grappa's account-security endpoints.
+- **Account security:** registering a passkey, signing in with one and
+  changing the passkey mode (Cordiale can't run a WebAuthn ceremony, see
+  `docs/passkey-spike.md`), creating or managing client tokens, and account
+  deletion still live in Cicchetto. TOTP, the passkey list and session
+  sharing work in Cordiale with a full password-backed session; a scoped
+  client token cannot use Grappa's account-security endpoints.
+- **Not yet tried against a live server:** passkey listing and deletion,
+  session-sharing links, channel-history catch-up after a reconnect, the
+  foreground presence reports, the `client_proto` declaration and its `426`
+  handling, DM renames by conversation id, declining an invite, your own
+  profile and avatar, and the newer admin operations. They follow the server's
+  source and pass tests against a mock server; expect rough edges.
 - **Platform limits:**
   - Files dropped on the window reach Cordiale on Windows, macOS and X11,
     not on Wayland, where the windowing layer doesn't report them.
