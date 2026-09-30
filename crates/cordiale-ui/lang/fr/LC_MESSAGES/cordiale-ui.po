@@ -2521,30 +2521,6 @@ msgid "Passkeys, client tokens and account deletion are managed in Cicchetto."
 msgstr "Les passkeys, les jetons client et la suppression du compte se gèrent dans Cicchetto."
 
 msgctxt "AppWindow"
-msgid "Open {}"
-msgstr "Ouvrir {}"
-
-msgctxt "AppWindow"
-msgid "Join {}"
-msgstr "Rejoindre {}"
-
-msgctxt "AppWindow"
-msgid "{} users"
-msgstr "{} utilisateurs"
-
-msgctxt "AppWindow"
-msgid "{} users — {}"
-msgstr "{} utilisateurs — {}"
-
-msgctxt "AppWindow"
-msgid "featured"
-msgstr "en vedette"
-
-msgctxt "AppWindow"
-msgid "joined"
-msgstr "rejoint"
-
-msgctxt "AppWindow"
 msgid "listing…"
 msgstr "liste en cours…"
 
@@ -2651,3 +2627,27 @@ msgstr "Taille du texte : {} %"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Réinitialiser"
+
+msgctxt "DirectoryEntry"
+msgid "Open {}"
+msgstr "Ouvrir {}"
+
+msgctxt "DirectoryEntry"
+msgid "Join {}"
+msgstr "Rejoindre {}"
+
+msgctxt "DirectoryEntry"
+msgid "{} users"
+msgstr "{} utilisateurs"
+
+msgctxt "DirectoryEntry"
+msgid "{} users — {}"
+msgstr "{} utilisateurs — {}"
+
+msgctxt "DirectoryEntry"
+msgid "featured"
+msgstr "en vedette"
+
+msgctxt "DirectoryEntry"
+msgid "joined"
+msgstr "rejoint"
