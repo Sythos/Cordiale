@@ -222,6 +222,14 @@ impl MeResponse {
     }
 }
 
+/// `GET .../messages/count` answer. A server without the `cap` parameter
+/// also sends `messages` and `events`; only `count` matters here, the rest
+/// is ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct MessageCountResponse {
+    pub count: u64,
+}
+
 /// Request body of `POST /networks/:network_id/channels/:channel_id/messages`.
 ///
 /// `body` isn't documented in `CLIENT_PROTOCOL.md` itself — confirmed by

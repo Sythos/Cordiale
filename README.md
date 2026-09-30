@@ -116,7 +116,13 @@ Cordiale also covers:
   creates, edits and deletes networks and their IRC servers, edits the
   server-wide upload, DCC and addressing settings, binds and unbinds
   credentials, manages vhosts and their grants to accounts and visitors,
-  and follows the live admin event feed. Its Uploads tab can inspect the
+  and follows the live admin event feed. Deleting a network first asks the
+  server how many messages that removes with it (protocol v33 deletes the
+  whole scrollback along with the network) and says so in the confirmation;
+  if the server can't say, the confirmation says that instead of showing
+  zero. The panel also terminates an account's live session, reconnects a
+  visitor's, edits a network's featured channels, an IRC server and a
+  credential's nick, ident, real name, SASL user and password. Its Uploads tab can inspect the
   upload budget and remove an active upload early; that is admin-only,
   not a secret delete button for everyone else.
 - **Settings and watch lists:** the identity editor reads back the nick in

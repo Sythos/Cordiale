@@ -123,6 +123,13 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
   - Il destinatario va letto da `meta`, mai da `channel` (che resta la
     finestra sorgente).
 - Backlog/paginazione per canale: `?before=`, `?after=`, `/messages/count`.
+  Dopo un reconnect del WebSocket Grappa non rigioca gli eventi persi:
+  Cordiale, per ogni canale joined con un id noto, sonda
+  `/messages/count?after=<id>&cap=201` (un server più vecchio ignora `cap` e
+  risponde con tre chiavi: si legge solo `count`). Fino a 200 righe le recupera
+  con `?after=`; oltre ricarica la coda e lascia una nota dove c'è il buco.
+  Le richieste partono una alla volta, distanziate (limit_req del proxy).
+  Non verificato contro un server reale.
 - **`GET /networks/:network_id/archive`** — `{target, kind, last_activity}`.
   Il campo `row_count` è stato **rimosso** alla v8 (unico caso di rimozione
   documentato — vedi §3).
@@ -219,6 +226,12 @@ sezione Sicurezza resta in Cicchetto:
   - Nessun limite superiore: non esiste (né esisterà) un
     `max_protocol_version`.
   - Il controllo versione avviene **prima** dell'autenticazione.
+  - **Cordiale** dichiara `client_proto=34` (intero semplice, la revisione
+    del protocollo contro cui è stato verificato leggendo il sorgente del
+    server: `CLIENT_PROTOCOL_VERSION` in `protocol.rs`, da alzare solo dopo
+    aver riverificato il contratto). Su un `426` la sessione si ferma senza
+    ritentare e la finestra mostra "aggiorna Cordiale". Non verificato
+    contro un server reale che alzi il floor sopra 34.
 - **Payload iniziale**: il primo topic da joinare è il topic utente
   `grappa:user:{user}`; la risposta di join porta `protocol_version`:
   `join "grappa:user:vjt" → {:ok, {"protocol_version": 2}}` — un client che
@@ -236,7 +249,12 @@ sezione Sicurezza resta in Cicchetto:
   **diversi**; il casing non-ASCII (`#CAFÉ` vs `#café`) **non** viene
   foldato.
 - Una finestra query/DM usa come segmento il nick del peer, foldato allo
-  stesso modo.
+  stesso modo. Dal v34 righe di scrollback e voci di `query_windows_list`
+  portano anche `dm_conversation_id` (intero, `null` o assente su server
+  più vecchi): Cordiale lo legge come `Option<i64>` e lo usa solo per
+  riconoscere la stessa finestra dopo un NICK del peer, altrimenti ricade
+  sul nick. Non verificato contro un server v34 reale; il merge di due
+  conversazioni non è rilevato dall'id.
 - I `kind` di evento non riconosciuti vanno ignorati (regola
   additive-only, §3).
 
@@ -525,6 +543,24 @@ visitors, reaper/circuit, session log, il canale WS
 `grappa:admin:events` per aggiornamenti live) — la superficie reale è
 troppo ampia per una singola sessione di lavoro; Settings → Admin lo
 dichiara esplicitamente all'utente invece di fingere completezza.
+
+**Aggiunto con l'issue #143** (oltre all'elenco sopra, che è datato):
+`GET /admin/networks/:id/message_count` (`{"message_count": n}`; `404` =
+server precedente alla v33 o rete già sparita: «non posso confermare», mai
+zero), perché dalla v33 `DELETE /admin/networks/:id` cancella la rete
+**con tutto lo scrollback, per ogni soggetto** e l'unico rifiuto rimasto è
+`409 credentials_present`; `POST /admin/sessions/:id/reconnect` (solo
+visitatori: un subject `user` riceve `400`), `DELETE /admin/sessions/:id`
+(ferma il processo senza toccare credenziale o visitatore, idempotente,
+`422` sulla propria sessione); `GET/POST/PUT/DELETE
+/admin/networks/:id/featured_channels[/:id]` (campi `name`, `description`,
+`position`, `enabled`; `409` se già presente, `422` se non è un canale, `400`
+per chiavi sconosciute); `PUT /admin/networks/:id/servers/:id` e
+`PATCH /admin/credentials/:user_id/:network_id` (chiavi ammesse: `nick`,
+`ident`, `realname`, `sasl_user`, `auth_method`, `auth_command_template`,
+`autojoin_channels`, `password`; cambiare password o `auth_method` ferma la
+sessione viva e non la riavvia: risposta `session_action: "stopped"`).
+Il cambio di `auth_method` non è esposto in UI.
 
 Ogni entry (`AdminSession`/`AdminUser`/`AdminNetwork`) è tenuta come
 JSON opaco: i nomi dei campi sono confermati dal sorgente, non ogni

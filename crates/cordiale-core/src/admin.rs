@@ -86,6 +86,13 @@ pub struct AdminNetworksResponse {
     pub networks: Vec<Value>,
 }
 
+/// Response body of `GET /admin/networks/:id/message_count`: the scrollback
+/// rows a network delete takes with it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminNetworkMessageCount {
+    pub message_count: u64,
+}
+
 /// Response body of `GET /admin/visitors`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AdminVisitorsResponse {
@@ -376,6 +383,173 @@ pub fn admin_server_label(entry: &Value) -> String {
     label
 }
 
+/// What an IRC server endpoint row carries for the editor: `(host, port,
+/// tls, enabled)`, with the port as text.
+pub fn admin_server_fields(entry: &Value) -> (String, String, bool, bool) {
+    (
+        entry
+            .get("host")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        entry
+            .get("port")
+            .and_then(Value::as_i64)
+            .map(|port| port.to_string())
+            .unwrap_or_default(),
+        entry.get("tls").and_then(Value::as_bool) == Some(true),
+        entry.get("enabled").and_then(Value::as_bool) != Some(false),
+    )
+}
+
+/// The body of `PUT /admin/networks/:id/servers/:server_id` for what the
+/// editor holds, or `None` for an empty host or a port outside 1-65535.
+pub fn admin_server_changes(host: &str, port: &str, tls: bool, enabled: bool) -> Option<Value> {
+    let host = host.trim();
+    let port = port.trim().parse::<u16>().ok().filter(|port| *port > 0)?;
+    if host.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({ "host": host, "port": port, "tls": tls, "enabled": enabled }))
+}
+
+/// One curated channel of a network (`GET
+/// /admin/networks/:id/featured_channels`): name, description, and a
+/// marker for one that is switched off.
+pub fn admin_featured_label(entry: &Value) -> String {
+    let name = entry.get("name").and_then(Value::as_str).unwrap_or("?");
+    let mut label = name.to_string();
+    if let Some(description) = entry
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|description| !description.is_empty())
+    {
+        label.push_str(" · ");
+        label.push_str(description);
+    }
+    if entry.get("enabled").and_then(Value::as_bool) == Some(false) {
+        label.push_str(" · off");
+    }
+    label
+}
+
+/// The `:channel_id` segment of a featured channel, and whether it is on.
+pub fn admin_featured_state(entry: &Value) -> Option<(String, bool)> {
+    let id = entry.get("id").and_then(Value::as_i64)?.to_string();
+    let enabled = entry.get("enabled").and_then(Value::as_bool) != Some(false);
+    Some((id, enabled))
+}
+
+/// The body of `POST /admin/networks/:id/featured_channels` for what was
+/// typed, or `None` when the name is empty. A blank description is left
+/// out rather than sent empty.
+pub fn admin_featured_body(name: &str, description: &str) -> Option<Value> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut body = serde_json::json!({ "name": name });
+    let description = description.trim();
+    if !description.is_empty() {
+        body["description"] = Value::from(description);
+    }
+    Some(body)
+}
+
+/// One per-network session of a visitor, as the Visitors tab lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminVisitorSession {
+    /// `nick @ network`, plus the connection state Grappa holds for it.
+    pub label: String,
+    /// The composite `visitor:<id>:<network_id>` key of `/admin/sessions/:id`.
+    pub session_id: String,
+    /// Whether a live process backs it. Reconnect is offered when not,
+    /// judged on this and never on `connection_state`: a credential still
+    /// marked connected whose process died needs the reconnect most.
+    pub alive: bool,
+}
+
+/// The per-network sessions of one opaque `AdminVisitor` entry; a visitor
+/// with no credentials has none.
+pub fn admin_visitor_sessions(entry: &Value) -> Vec<AdminVisitorSession> {
+    let Some(visitor_id) = entry.get("id").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    let networks = entry
+        .get("networks")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    networks
+        .iter()
+        .filter_map(|network| {
+            let network_id = network.get("network_id").and_then(Value::as_i64)?;
+            let text = |key: &str| network.get(key).and_then(Value::as_str).unwrap_or("?");
+            Some(AdminVisitorSession {
+                label: format!(
+                    "{} @ {} · {}",
+                    text("nick"),
+                    text("network_slug"),
+                    text("connection_state")
+                ),
+                session_id: format!("visitor:{visitor_id}:{network_id}"),
+                alive: admin_session_is_alive(network),
+            })
+        })
+        .collect()
+}
+
+/// Whether the session belongs to an account, not a visitor. Only accounts
+/// get Terminate in the session list, like Cicchetto's row actions.
+pub fn admin_session_is_user(entry: &Value) -> bool {
+    entry.get("subject_kind").and_then(Value::as_str) == Some("user")
+}
+
+/// What a bound credential carries for the editor: `(nick, ident,
+/// realname, sasl_user)`, each `""` when unset.
+pub fn admin_credential_fields(entry: &Value) -> (String, String, String, String) {
+    let text = |key: &str| {
+        entry
+            .get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    (
+        text("nick"),
+        text("ident"),
+        text("realname"),
+        text("sasl_user"),
+    )
+}
+
+/// The body of `PATCH /admin/credentials/:user_id/:network_id` for what the
+/// editor holds, or `None` for an empty nick. A password is sent only when
+/// one was typed: it ends a live session, so an empty field must never
+/// rotate anything.
+pub fn admin_credential_changes(
+    nick: &str,
+    ident: &str,
+    realname: &str,
+    sasl_user: &str,
+    password: &str,
+) -> Option<Value> {
+    let nick = nick.trim();
+    if nick.is_empty() {
+        return None;
+    }
+    let mut body = serde_json::json!({
+        "nick": nick,
+        "ident": ident.trim(),
+        "realname": realname.trim(),
+        "sasl_user": sasl_user.trim(),
+    });
+    if !password.is_empty() {
+        body["password"] = Value::from(password);
+    }
+    Some(body)
+}
+
 /// The byte sizes of Grappa's server settings, as MiB text for the
 /// editor: whole numbers when exact, else two decimals.
 pub fn bytes_to_mib_text(bytes: Option<u64>) -> String {
@@ -518,6 +692,121 @@ mod tests {
             "at": "t"
         }));
         assert_eq!(line, "t · server_added · libera · irc.libera.chat:6697");
+    }
+
+    #[test]
+    fn server_editor_fields_and_body() {
+        let entry = serde_json::json!({
+            "id": 3, "host": "irc.libera.chat", "port": 6697, "tls": true, "enabled": false
+        });
+        assert_eq!(
+            admin_server_fields(&entry),
+            ("irc.libera.chat".into(), "6697".into(), true, false)
+        );
+        // A row that doesn't say it is disabled is enabled.
+        assert!(admin_server_fields(&serde_json::json!({"host": "h", "port": 1})).3);
+        assert_eq!(
+            admin_server_changes(" irc2.example ", "6667", false, true),
+            Some(serde_json::json!({
+                "host": "irc2.example", "port": 6667, "tls": false, "enabled": true
+            }))
+        );
+        assert_eq!(admin_server_changes("", "6667", true, true), None);
+        assert_eq!(admin_server_changes("h", "0", true, true), None);
+        assert_eq!(admin_server_changes("h", "70000", true, true), None);
+        assert_eq!(admin_server_changes("h", "irc", true, true), None);
+    }
+
+    #[test]
+    fn featured_channel_label_state_and_body() {
+        let entry = serde_json::json!({
+            "id": 4, "name": "#grappa", "description": "Support", "enabled": false
+        });
+        assert_eq!(admin_featured_label(&entry), "#grappa · Support · off");
+        assert_eq!(admin_featured_state(&entry), Some(("4".to_string(), false)));
+        let plain = serde_json::json!({"id": 5, "name": "#lobby", "description": null});
+        assert_eq!(admin_featured_label(&plain), "#lobby");
+        assert_eq!(admin_featured_state(&plain), Some(("5".to_string(), true)));
+        assert_eq!(
+            admin_featured_state(&serde_json::json!({"name": "#x"})),
+            None
+        );
+        assert_eq!(
+            admin_featured_body(" #lobby ", "  "),
+            Some(serde_json::json!({"name": "#lobby"}))
+        );
+        assert_eq!(
+            admin_featured_body("#lobby", " Hello "),
+            Some(serde_json::json!({"name": "#lobby", "description": "Hello"}))
+        );
+        assert_eq!(admin_featured_body("  ", "Hello"), None);
+    }
+
+    #[test]
+    fn visitor_sessions_follow_live_truth_not_connection_state() {
+        let entry = serde_json::json!({
+            "id": "v-1",
+            "networks": [
+                {"network_id": 7, "network_slug": "libera", "nick": "ada",
+                 "connection_state": "connected", "live_state": null},
+                {"network_id": 8, "network_slug": "oftc", "nick": "ada2",
+                 "connection_state": "connected", "live_state": {"alive": true}}
+            ]
+        });
+        assert_eq!(
+            admin_visitor_sessions(&entry),
+            vec![
+                AdminVisitorSession {
+                    label: "ada @ libera · connected".into(),
+                    session_id: "visitor:v-1:7".into(),
+                    alive: false,
+                },
+                AdminVisitorSession {
+                    label: "ada2 @ oftc · connected".into(),
+                    session_id: "visitor:v-1:8".into(),
+                    alive: true,
+                },
+            ]
+        );
+        assert!(
+            admin_visitor_sessions(&serde_json::json!({"id": "v-2", "networks": []})).is_empty()
+        );
+        assert!(admin_visitor_sessions(&serde_json::json!({"networks": []})).is_empty());
+    }
+
+    #[test]
+    fn only_account_sessions_are_user_sessions() {
+        assert!(admin_session_is_user(
+            &serde_json::json!({"subject_kind": "user"})
+        ));
+        assert!(!admin_session_is_user(
+            &serde_json::json!({"subject_kind": "visitor"})
+        ));
+        assert!(!admin_session_is_user(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn credential_editor_fields_and_body() {
+        let entry = serde_json::json!({
+            "nick": "ada", "ident": null, "realname": "Ada L", "sasl_user": "ada"
+        });
+        assert_eq!(
+            admin_credential_fields(&entry),
+            ("ada".into(), "".into(), "Ada L".into(), "ada".into())
+        );
+        // Built at run time: the value is only passed through.
+        let typed = format!("pw-{}", std::process::id());
+        assert_eq!(
+            admin_credential_changes(" ada ", "", "Ada", "ada", &typed),
+            Some(serde_json::json!({
+                "nick": "ada", "ident": "", "realname": "Ada", "sasl_user": "ada",
+                "password": typed
+            }))
+        );
+        // No password typed: none is sent, since it would end a live session.
+        let body = admin_credential_changes("ada", "", "Ada", "", "").expect("body");
+        assert!(body.get("password").is_none());
+        assert_eq!(admin_credential_changes("  ", "", "", "", ""), None);
     }
 
     #[test]
