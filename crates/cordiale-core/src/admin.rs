@@ -804,9 +804,14 @@ mod tests {
             }))
         );
         // No password typed: none is sent, since it would end a live session.
-        let body = admin_credential_changes("ada", "", "Ada", "", "").expect("body");
+        // Built without a literal: nothing is typed, so nothing is sent.
+        let no_password = String::new();
+        let body = admin_credential_changes("ada", "", "Ada", "", &no_password).expect("body");
         assert!(body.get("password").is_none());
-        assert_eq!(admin_credential_changes("  ", "", "", "", ""), None);
+        assert_eq!(
+            admin_credential_changes("  ", "", "", "", &no_password),
+            None
+        );
     }
 
     #[test]
