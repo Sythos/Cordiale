@@ -208,6 +208,17 @@ pub fn config_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(CONFIG_DIR_NAME))
 }
 
+/// `config_dir()` as shown to the user and put in bug reports: the home
+/// folder is written `~`, so the user name never appears.
+pub fn config_dir_display() -> String {
+    format!("~/{CONFIG_DIR_NAME}")
+}
+
+/// The log file's location, written like `config_dir_display()`.
+pub fn log_file_display() -> String {
+    format!("~/{CONFIG_DIR_NAME}/{LOG_FILE_NAME}")
+}
+
 fn load_json<T: Default + for<'de> Deserialize<'de>>(
     file_name: &str,
 ) -> Result<T, PersistenceError> {
@@ -420,6 +431,12 @@ mod tests {
         assert!(lines[1].ends_with("] second line"));
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn displayed_locations_spell_the_home_folder_as_a_tilde() {
+        assert_eq!(config_dir_display(), "~/.cordiale");
+        assert_eq!(log_file_display(), "~/.cordiale/cordiale.log");
     }
 
     #[test]

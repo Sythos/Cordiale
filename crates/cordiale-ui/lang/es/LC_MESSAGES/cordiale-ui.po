@@ -2723,3 +2723,19 @@ msgstr "Rechazar"
 msgctxt "AppWindow"
 msgid "Decline channel invite"
 msgstr "Rechazar la invitación al canal"
+
+msgctxt "AppWindow"
+msgid "Debug"
+msgstr "Depuración"
+
+msgctxt "AppWindow"
+msgid "Details about this device and this copy of Cordiale. They are shown only here and never sent anywhere."
+msgstr "Detalles sobre este dispositivo y esta copia de Cordiale. Solo se muestran aquí y nunca se envían a ninguna parte."
+
+msgctxt "AppWindow"
+msgid "Open data folder"
+msgstr "Abrir carpeta de datos"
+
+msgctxt "AppWindow"
+msgid "Please include these details when you open an issue:"
+msgstr "Incluye estos detalles cuando informes de un problema:"
