@@ -47,7 +47,8 @@ use crate::profile::{
 use crate::rest::{
     ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
     DisplayPrefs, FeaturedChannel, FeaturedChannelsResponse, LoginRequest, LoginResponse,
-    MeResponse, MessageCountResponse, SendMessageRequest, ThemeIndex, ThemeWire, UploadResponse,
+    MeResponse, MessageCountResponse, SendMessageRequest, ShareTokenMint, ThemeIndex, ThemeWire,
+    UploadResponse,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -301,6 +302,38 @@ impl GrappaClient {
             .http
             .post(url)
             .json(&serde_json::json!({ "challenge_token": challenge_token, "code": code }))
+            .send()
+            .await?;
+        let response = reject_with_code(response).await?;
+        Ok(response.json::<LoginResponse>().await?)
+    }
+
+    /// `POST /me/share-token` — mints a single-use token (valid ten minutes)
+    /// that signs another device into this same identity. It needs a full
+    /// session: a per-client token is refused with 403 `client_token_scope`,
+    /// and an incognito guest with 403 `forbidden`.
+    pub async fn mint_share_token(&self, token: &str) -> Result<ShareTokenMint, GrappaClientError> {
+        let url = format!("{}/me/share-token", self.base_url);
+        let response = self.http.post(url).bearer_auth(token).send().await?;
+        let response = reject_with_code(response).await?;
+        Ok(response.json::<ShareTokenMint>().await?)
+    }
+
+    /// `POST /auth/share/consume` — unauthenticated: the share token is the
+    /// credential. The answer has the shape of a login and carries a fresh
+    /// full-session bearer for the shared identity. Refusals keep their
+    /// code: 410 `share_token_expired` / `share_token_consumed`, 401 (a
+    /// token Grappa didn't sign), 404 `not_found` (the identity is gone),
+    /// 429 `too_many_attempts`.
+    pub async fn consume_share_token(
+        &self,
+        share_token: &str,
+    ) -> Result<LoginResponse, GrappaClientError> {
+        let url = format!("{}/auth/share/consume", self.base_url);
+        let response = self
+            .http
+            .post(url)
+            .json(&serde_json::json!({ "token": share_token }))
             .send()
             .await?;
         let response = reject_with_code(response).await?;
@@ -3117,6 +3150,114 @@ mod tests {
             ("222222", StatusCode::TOO_MANY_REQUESTS, "too_many_attempts"),
         ] {
             let refused = client.verify_totp_login("ch", code).await.unwrap_err();
+            assert_eq!(refused.status(), Some(status));
+            assert_eq!(refused.code(), Some(error));
+        }
+    }
+
+    #[tokio::test]
+    async fn mint_share_token_sends_the_bearer_and_reads_the_token() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/me/share-token"))
+            .and(header("authorization", "Bearer full"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "SFMyNTY.payload.sig",
+                "expires_at": "2026-09-30T12:10:00Z"
+            })))
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let minted = client.mint_share_token("full").await.expect("mint");
+        assert_eq!(minted.token, "SFMyNTY.payload.sig");
+        assert_eq!(minted.expires_at, "2026-09-30T12:10:00Z");
+        assert!(!format!("{minted:?}").contains("SFMyNTY"));
+    }
+
+    #[tokio::test]
+    async fn mint_share_token_keeps_refusal_codes() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/me/share-token"))
+            .and(header("authorization", "Bearer per-client"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(serde_json::json!({"error": "client_token_scope"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/share-token"))
+            .and(header("authorization", "Bearer incognito"))
+            .respond_with(
+                ResponseTemplate::new(403).set_body_json(serde_json::json!({"error": "forbidden"})),
+            )
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let scope = client.mint_share_token("per-client").await.unwrap_err();
+        assert_eq!(scope.status(), Some(StatusCode::FORBIDDEN));
+        assert_eq!(scope.code(), Some("client_token_scope"));
+        let incognito = client.mint_share_token("incognito").await.unwrap_err();
+        assert_eq!(incognito.code(), Some("forbidden"));
+    }
+
+    #[tokio::test]
+    async fn consume_share_token_returns_a_login_shaped_answer_without_a_bearer() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/auth/share/consume"))
+            .and(body_json(serde_json::json!({"token": "share-1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "new-session",
+                "subject": {"kind": "user", "id": "u-1", "name": "vjt"}
+            })))
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let login = client
+            .consume_share_token("share-1")
+            .await
+            .expect("consume");
+        assert_eq!(login.token, "new-session");
+        assert_eq!(login.subject["name"], "vjt");
+        let requests = mock_server.received_requests().await.expect("requests");
+        assert!(requests[0].headers.get("authorization").is_none());
+    }
+
+    #[tokio::test]
+    async fn consume_share_token_keeps_refusal_codes() {
+        let mock_server = MockServer::start().await;
+        for (token, status, error) in [
+            ("old", 410, "share_token_expired"),
+            ("used", 410, "share_token_consumed"),
+            ("forged", 401, "unauthorized"),
+            ("orphan", 404, "not_found"),
+            ("spray", 429, "too_many_attempts"),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/auth/share/consume"))
+                .and(body_json(serde_json::json!({"token": token})))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({"error": error})),
+                )
+                .mount(&mock_server)
+                .await;
+        }
+        let client = GrappaClient::new(mock_server.uri());
+
+        for (token, status, error) in [
+            ("old", StatusCode::GONE, "share_token_expired"),
+            ("used", StatusCode::GONE, "share_token_consumed"),
+            ("forged", StatusCode::UNAUTHORIZED, "unauthorized"),
+            ("orphan", StatusCode::NOT_FOUND, "not_found"),
+            ("spray", StatusCode::TOO_MANY_REQUESTS, "too_many_attempts"),
+        ] {
+            let refused = client.consume_share_token(token).await.unwrap_err();
             assert_eq!(refused.status(), Some(status));
             assert_eq!(refused.code(), Some(error));
         }

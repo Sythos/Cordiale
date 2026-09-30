@@ -43,8 +43,8 @@ use serde_json::{Number, Value};
 use tokio::sync::mpsc;
 
 use cordiale_core::bootstrap::{
-    bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, bootstrap_with_totp,
-    BootstrapError, BootstrapOutcome,
+    bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, bootstrap_with_share_token,
+    bootstrap_with_totp, BootstrapError, BootstrapOutcome,
 };
 use cordiale_core::client::{GrappaClient, GrappaClientError, LoginError};
 use cordiale_core::credentials::{
@@ -60,6 +60,7 @@ use cordiale_core::rest::{
     LoginRequest, MeResponse, SendMessageRequest,
 };
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
+use cordiale_core::share;
 use cordiale_core::slash::{self, SlashCommand};
 use cordiale_core::theme::{font_family_for, ThemePalette, BUILTIN_THEMES};
 use cordiale_core::upload::{attachment_message, mime_for_filename, UploadCategory};
@@ -86,6 +87,14 @@ enum WorkerCommand {
     SecurityTotpDisable(String),
     /// Closes the enrolment or recovery-codes step.
     SecurityTotpDone,
+    /// Connect screen: signs in with a share token or link minted on another
+    /// device.
+    ShareConsume {
+        server_url: String,
+        input: String,
+    },
+    /// Settings > Security: mints a share token for this session.
+    SecurityShareMint,
     Connect {
         server_url: String,
         identifier: String,
@@ -569,9 +578,52 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_totp_cancel.send(WorkerCommand::TotpCancel);
     });
 
+    let tx_for_share = worker_tx.clone();
+    let weak_for_share = ui.as_weak();
+    ui.on_share_consume_requested(move |server_url, input| {
+        let server_url = normalize_server_url(&server_url);
+        if let Some(ui) = weak_for_share.upgrade() {
+            ui.set_server_url(server_url.clone().into());
+            ui.set_connecting(true);
+            ui.set_status_kind("".into());
+            ui.set_status_message("".into());
+        }
+        let _ = tx_for_share.send(WorkerCommand::ShareConsume {
+            server_url,
+            input: input.to_string(),
+        });
+    });
+    let weak_for_share_screen = ui.as_weak();
+    ui.on_share_screen_requested(move |open| {
+        if let Some(ui) = weak_for_share_screen.upgrade() {
+            ui.set_status_kind("".into());
+            ui.set_status_message("".into());
+            if !open {
+                ui.set_share_token_input("".into());
+            }
+            let screen = if open { "share" } else { "connect" };
+            ui.set_screen(screen.into());
+        }
+    });
+
     let tx_for_security = worker_tx.clone();
+    let weak_for_security = ui.as_weak();
     ui.on_security_totp_requested(move || {
+        // Coming back to Security never shows an old share link.
+        if let Some(ui) = weak_for_security.upgrade() {
+            clear_share_link(&ui);
+        }
         let _ = tx_for_security.send(WorkerCommand::SecurityTotpRefresh);
+    });
+    let tx_for_security = worker_tx.clone();
+    ui.on_security_share_requested(move || {
+        let _ = tx_for_security.send(WorkerCommand::SecurityShareMint);
+    });
+    let weak_for_security = ui.as_weak();
+    ui.on_security_share_done(move || {
+        if let Some(ui) = weak_for_security.upgrade() {
+            clear_share_link(&ui);
+        }
     });
     let tx_for_security = worker_tx.clone();
     ui.on_security_totp_start(move |password| {
@@ -639,6 +691,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_disconnect_requested(move || {
         let _ = tx_for_disconnect.send(WorkerCommand::Disconnect);
         if let Some(ui) = weak_for_disconnect.upgrade() {
+            clear_share_link(&ui);
             ui.set_screen("connect".into());
             ui.set_status_kind("".into());
             ui.set_status_message("".into());
@@ -2646,6 +2699,26 @@ async fn run_worker(
                             handle_settings_network_refresh(&state, &ui).await;
                         }
                     }
+                    Some(WorkerCommand::ShareConsume { server_url, input }) => {
+                        handle_share_consume(
+                            &mut state,
+                            &mut session_events,
+                            &ui,
+                            server_url,
+                            input,
+                        )
+                        .await;
+                        if let Some(network) = state.settings_network.clone() {
+                            let ui_for_network = ui.clone();
+                            let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
+                                ui.set_settings_network(network.into());
+                            });
+                            handle_settings_network_refresh(&state, &ui).await;
+                        }
+                    }
+                    Some(WorkerCommand::SecurityShareMint) => {
+                        handle_security_share_mint(&state, &ui).await;
+                    }
                     Some(WorkerCommand::TotpCancel) => {
                         state.pending_totp = None;
                         let _ = ui.upgrade_in_event_loop(|ui| {
@@ -4306,6 +4379,154 @@ async fn handle_security_totp_disable(
         }
         Err(err) => set_security_error(ui, &err),
     }
+}
+
+/// Forgets a share link on screen: it is a credential, so it never outlives
+/// the moment the user is done with it.
+fn clear_share_link(ui: &AppWindow) {
+    ui.set_security_share_link("".into());
+    ui.set_security_share_expires("".into());
+    ui.set_security_share_qr(slint::Image::default());
+    ui.set_security_share_error("".into());
+    ui.set_security_share_busy(false);
+}
+
+/// Settings > Security: mints a share token and shows it as a link and QR
+/// code, the way Cicchetto's "open on another device" does. The token only
+/// ever lives in the UI properties (never in the log) and is dropped by
+/// `clear_share_link`.
+async fn handle_security_share_mint(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_security_share_busy(true);
+        ui.set_security_share_error("".into());
+    });
+    match client.mint_share_token(&token).await {
+        Ok(minted) => {
+            let link = share::share_link(client.base_url(), &minted.token);
+            let qr = totp::qr_rgb(&link);
+            let expires = share_expiry_text(&minted.expires_at);
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let image = qr
+                    .map(|(side, rgb)| {
+                        slint::Image::from_rgb8(slint::SharedPixelBuffer::clone_from_slice(
+                            &rgb, side, side,
+                        ))
+                    })
+                    .unwrap_or_default();
+                ui.set_security_share_qr(image);
+                ui.set_security_share_link(link.into());
+                ui.set_security_share_expires(expires.into());
+                ui.set_security_share_busy(false);
+            });
+        }
+        Err(err) => {
+            persistence::log_line(&format!("share token mint refused: {err:?}"));
+            let key = share_mint_error_key(&err);
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_security_share_busy(false);
+                ui.set_security_share_error(key.into());
+            });
+        }
+    }
+}
+
+/// When a share token stops working, in the user's time zone; empty if
+/// Grappa's timestamp can't be read.
+fn share_expiry_text(expires_at: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map(|expiry| dates::render_date_time(&expiry.with_timezone(&chrono::Local), false))
+        .unwrap_or_default()
+}
+
+/// Status key for a refused `POST /me/share-token`: a per-client token can't
+/// mint one, and neither can an incognito guest.
+fn share_mint_error_key(err: &GrappaClientError) -> &'static str {
+    match (err.status().map(|status| status.as_u16()), err.code()) {
+        (_, Some("client_token_scope")) => "client-token",
+        (_, Some("forbidden")) => "incognito",
+        (Some(429), _) => "throttled",
+        _ => "failed",
+    }
+}
+
+/// Status key for a refused `POST /auth/share/consume`. Expired and used
+/// tokens can't be retried; the user asks the other device for a new one.
+fn share_consume_error_key(err: &GrappaClientError) -> &'static str {
+    match (err.status().map(|status| status.as_u16()), err.code()) {
+        (_, Some("share_token_expired")) => "share-expired",
+        (_, Some("share_token_consumed")) => "share-consumed",
+        (_, Some("not_found")) | (Some(404), _) => "share-gone",
+        (_, Some("too_many_attempts")) | (Some(429), _) => "too-many-attempts",
+        (Some(400 | 401), _) => "share-invalid",
+        _ => "share-failed",
+    }
+}
+
+/// Who a consumed share token signed in. A user keeps its account name, so
+/// the session is remembered like a password sign-in. A guest (visitor) has
+/// no name to key a remembered bearer by, so it runs as an unnamed guest
+/// session that isn't remembered.
+fn shared_identity(subject: Option<&Value>, me: &MeResponse) -> (String, bool) {
+    let kind = subject
+        .and_then(|subject| subject.get("kind"))
+        .and_then(Value::as_str)
+        .or(me.kind.as_deref());
+    let name = subject
+        .and_then(|subject| subject.get("name"))
+        .and_then(Value::as_str)
+        .or(me.name.as_deref())
+        .filter(|name| !name.is_empty());
+    match (kind, name) {
+        (Some("visitor"), _) | (_, None) => (String::new(), true),
+        (_, Some(name)) => (name.to_string(), false),
+    }
+}
+
+/// Signs in with a share token (or the link holding it) pasted on the share
+/// screen. The answer is login-shaped, so the session is finished like any
+/// other sign-in. The token is single use: it is never logged, and the
+/// field is emptied once it has been spent.
+async fn handle_share_consume(
+    state: &mut WorkerState,
+    session_events: &mut Option<mpsc::UnboundedReceiver<SessionEvent>>,
+    ui: &slint::Weak<AppWindow>,
+    server_url: String,
+    input: String,
+) {
+    let Some(share_token) = share::token_from_input(&input) else {
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_connecting(false);
+            ui.set_status_kind("share-invalid".into());
+        });
+        return;
+    };
+    let server_url = normalize_server_url(&server_url);
+    remember_server_url(&server_url);
+
+    let client = GrappaClient::new(server_url.clone());
+    persistence::log_line(&format!(
+        "connect attempt: server={server_url} auth=share_token"
+    ));
+    let result = bootstrap_with_share_token(&client, &share_token).await;
+    let (identifier, is_guest_attempt) = match &result {
+        Ok(outcome) => shared_identity(outcome.subject.as_ref(), &outcome.me),
+        Err(_) => (String::new(), false),
+    };
+    if result.is_ok() {
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_share_token_input("".into()));
+    }
+    let context = ConnectContext {
+        client,
+        server_url,
+        identifier,
+        is_guest_attempt,
+        typed_password: None,
+        used_remembered_password: false,
+    };
+    finish_connect(state, session_events, ui, context, result).await;
 }
 
 /// Shows the code step of a two-factor sign-in, with `status` ("" or a
@@ -18473,6 +18694,9 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
         BootstrapError::TwoFactor(err) => {
             ui.set_status_kind(totp_error_key(err).into());
         }
+        BootstrapError::ShareToken(err) => {
+            ui.set_status_kind(share_consume_error_key(err).into());
+        }
         BootstrapError::Login(LoginError::TooManyAttempts) => {
             ui.set_status_kind("too-many-attempts".into());
         }
@@ -25793,6 +26017,82 @@ mod tests {
             format!(
                 "wss://irc.sindro.me/socket/websocket?vsn=2.0.0&client_proto={CLIENT_PROTOCOL_VERSION}"
             )
+        );
+    }
+
+    #[test]
+    fn share_token_refusals_name_what_the_user_can_do() {
+        let rejected = |status: u16, code: Option<&str>| GrappaClientError::Rejected {
+            status: cordiale_core::client::StatusCode::from_u16(status).expect("status"),
+            code: code.map(str::to_string),
+        };
+        assert_eq!(
+            share_consume_error_key(&rejected(410, Some("share_token_expired"))),
+            "share-expired"
+        );
+        assert_eq!(
+            share_consume_error_key(&rejected(410, Some("share_token_consumed"))),
+            "share-consumed"
+        );
+        assert_eq!(
+            share_consume_error_key(&rejected(404, Some("not_found"))),
+            "share-gone"
+        );
+        assert_eq!(
+            share_consume_error_key(&rejected(429, Some("too_many_attempts"))),
+            "too-many-attempts"
+        );
+        assert_eq!(
+            share_consume_error_key(&rejected(401, Some("unauthorized"))),
+            "share-invalid"
+        );
+        assert_eq!(
+            share_consume_error_key(&rejected(400, Some("bad_request"))),
+            "share-invalid"
+        );
+        assert_eq!(
+            share_consume_error_key(&rejected(503, None)),
+            "share-failed"
+        );
+
+        assert_eq!(
+            share_mint_error_key(&rejected(403, Some("client_token_scope"))),
+            "client-token"
+        );
+        assert_eq!(
+            share_mint_error_key(&rejected(403, Some("forbidden"))),
+            "incognito"
+        );
+        assert_eq!(share_mint_error_key(&rejected(429, None)), "throttled");
+        assert_eq!(share_mint_error_key(&rejected(500, None)), "failed");
+    }
+
+    #[test]
+    fn a_shared_account_is_remembered_and_a_shared_guest_is_not() {
+        let me = |value: serde_json::Value| -> MeResponse {
+            serde_json::from_value(value).expect("a /me body")
+        };
+        let user = serde_json::json!({"kind": "user", "id": "u-1", "name": "vjt"});
+        assert_eq!(
+            shared_identity(Some(&user), &me(serde_json::json!({}))),
+            ("vjt".to_string(), false)
+        );
+        let visitor = serde_json::json!({"kind": "visitor", "id": "v-1", "registered": false});
+        assert_eq!(
+            shared_identity(Some(&visitor), &me(serde_json::json!({"kind": "visitor"}))),
+            (String::new(), true)
+        );
+        // Without a usable subject, `/me` says who signed in.
+        assert_eq!(
+            shared_identity(
+                None,
+                &me(serde_json::json!({"kind": "user", "name": "ada"}))
+            ),
+            ("ada".to_string(), false)
+        );
+        assert_eq!(
+            shared_identity(None, &me(serde_json::json!({}))),
+            (String::new(), true)
         );
     }
 

@@ -884,6 +884,17 @@ export component AppWindow inherits Window {
     in property <bool> security-totp-busy: false;
     in-out property <string> security-password: "";
     in-out property <string> security-totp-code: "";
+    // The sign-in with a share token (screen "share"): the pasted token or link.
+    in-out property <string> share-token-input: "";
+    // Settings > Security, share this session: the link to open on another
+    // device (empty until one is made), its QR code and expiry text, and
+    // the reason a link couldn't be made (`client-token`, `incognito`,
+    // `throttled` or `failed`).
+    in property <string> security-share-link: "";
+    in property <image> security-share-qr;
+    in property <string> security-share-expires: "";
+    in property <string> security-share-error: "";
+    in property <bool> security-share-busy: false;
     // Set only when this server/identifier has a non-empty returned bearer
     // in CredentialStore. The button compares both against the editable
     // server and identifier, hiding it as soon as either value changes.
@@ -1245,6 +1256,10 @@ export component AppWindow inherits Window {
     callback security-totp-confirm(string); // code
     callback security-totp-disable(string); // password
     callback security-totp-done();
+    callback share-consume-requested(string, string); // server URL, token or link
+    callback share-screen-requested(bool); // true opens the share sign-in, false leaves it
+    callback security-share-requested();
+    callback security-share-done();
     callback copy-text-requested(string);
     callback security-copy-recovery-codes();
     callback saved-profile-connect-requested(string, string);
@@ -2048,6 +2063,16 @@ export component AppWindow inherits Window {
             return @tr("Too many attempts. Wait a few minutes before trying again.");
         } else if status-kind == "totp-failed" {
             return @tr("Couldn't verify the code. Try again.");
+        } else if status-kind == "share-invalid" {
+            return @tr("That isn't a share token or link Grappa accepts. Copy it again from the other device.");
+        } else if status-kind == "share-expired" {
+            return @tr("This share link has expired. Create a new one on the other device.");
+        } else if status-kind == "share-consumed" {
+            return @tr("This share link has already been used. Create a new one on the other device.");
+        } else if status-kind == "share-gone" {
+            return @tr("The account this link was made for no longer exists.");
+        } else if status-kind == "share-failed" {
+            return @tr("Couldn't sign in with that share token. Try again.");
         } else if status-kind == "too-many-attempts" {
             return @tr("Too many attempts. Wait a bit before trying again.");
         } else if status-kind == "login-failed" {
@@ -2316,6 +2341,62 @@ export component AppWindow inherits Window {
         }
     }
 
+    if screen == "share" : VerticalBox {
+        padding: 32px;
+        spacing: 16px;
+
+        Text {
+            text: "Cordiale";
+            font-size: 28px * FontScale.percent / 100;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: @tr("Sign in with a share token");
+            font-size: 18px * FontScale.percent / 100;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: @tr("Paste the share link or token made on another device, in Settings > Security here or \"open on another device\" in Cicchetto. It works once and expires after ten minutes.");
+            wrap: word-wrap;
+            horizontal-alignment: center;
+        }
+        LineEdit {
+            placeholder-text: @tr("Server URL");
+            accessible-label: @tr("Server URL");
+            text <=> server-url;
+            enabled: !connecting;
+        }
+        share-field := LineEdit {
+            placeholder-text: @tr("Share link or token");
+            accessible-label: @tr("Share link or token");
+            text <=> share-token-input;
+            // A share token signs in as you, like a password.
+            input-type: InputType.password;
+            enabled: !connecting;
+            init => { self.focus(); }
+            accepted => { share-consume-requested(server-url, share-token-input); }
+        }
+        Button {
+            text: connecting ? @tr("Connecting…") : @tr("Sign in");
+            enabled: !connecting && share-token-input != "";
+            clicked => { share-consume-requested(server-url, share-token-input); }
+        }
+        Button {
+            text: @tr("Cancel");
+            enabled: !connecting;
+            clicked => { share-screen-requested(false); }
+        }
+        Text {
+            text: status-text();
+            color: #cc3333;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+            accessible-live-region: AccessibleLiveness.polite;
+        }
+    }
+
     if screen == "connect" : VerticalBox {
         padding: 32px;
         spacing: 16px;
@@ -2358,6 +2439,12 @@ export component AppWindow inherits Window {
             text: @tr("Sign in with saved profile");
             enabled: !connecting;
             clicked => { saved-profile-connect-requested(server-url, identifier); }
+        }
+
+        Button {
+            text: @tr("Sign in with a share token…");
+            enabled: !connecting;
+            clicked => { share-screen-requested(true); }
         }
 
         Button {
@@ -4112,6 +4199,81 @@ export component AppWindow inherits Window {
                         : security-totp-error == "client-token" ? @tr("A per-client token can't change second factors.")
                         : security-totp-error == "throttled" ? @tr("Too many attempts. Wait a few minutes before trying again.")
                         : @tr("Couldn't update two-factor authentication.");
+                    wrap: word-wrap;
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+
+                Text {
+                    text: @tr("Share this session");
+                    font-weight: 600;
+                }
+                Text {
+                    text: @tr("Make a single-use link or QR code that signs another device, such as Cicchetto on a phone, into this same account. It expires after ten minutes.");
+                    wrap: word-wrap;
+                }
+                if security-share-link == "" : HorizontalLayout {
+                    alignment: start;
+
+                    Button {
+                        text: security-share-busy ? @tr("Creating…") : @tr("Create a share link");
+                        enabled: !security-share-busy;
+                        clicked => { security-share-requested(); }
+                    }
+                }
+                if security-share-link != "" : VerticalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: @tr("Open this link, or scan the code, on the other device. Anyone who has it can sign in as you until it is used or expires, so don't post it.");
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+
+                        Image {
+                            source: security-share-qr;
+                            width: 192px;
+                            height: 192px;
+                            image-rendering: pixelated;
+                            accessible-role: AccessibleRole.image;
+                            accessible-label: @tr("QR code of the share link");
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            text: security-share-link;
+                            read-only: true;
+                            accessible-label: @tr("Share link");
+                            horizontal-stretch: 1;
+                        }
+                        CompactButton {
+                            text: "📋  " + @tr("Copy link");
+                            clicked => { copy-text-requested(security-share-link); }
+                        }
+                    }
+                    Text {
+                        text: security-share-expires == "" ? @tr("It works once, within ten minutes.")
+                            : @tr("It works once, until {}.", security-share-expires);
+                        wrap: word-wrap;
+                        color: palette-muted;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+
+                        Button {
+                            text: @tr("Hide link");
+                            clicked => { security-share-done(); }
+                        }
+                    }
+                }
+                if security-share-error != "" : Text {
+                    text: security-share-error == "client-token" ? @tr("A per-client token can't share the session. Sign in with your password to do that here.")
+                        : security-share-error == "incognito" ? @tr("An incognito guest session can't be shared.")
+                        : security-share-error == "throttled" ? @tr("Too many attempts. Wait a few minutes before trying again.")
+                        : @tr("Couldn't create a share link.");
                     wrap: word-wrap;
                     color: theme == "dark" ? #e57373 : #c0392b;
                     accessible-live-region: AccessibleLiveness.polite;

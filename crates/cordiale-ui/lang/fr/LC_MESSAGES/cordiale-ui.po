@@ -2739,3 +2739,95 @@ msgstr "Ouvrir le dossier de données"
 msgctxt "AppWindow"
 msgid "Please include these details when you open an issue:"
 msgstr "Inclus ces détails quand tu signales un problème :"
+
+msgctxt "AppWindow"
+msgid "That isn't a share token or link Grappa accepts. Copy it again from the other device."
+msgstr "Ce n'est pas un jeton ou un lien de partage accepté par Grappa. Copiez-le à nouveau depuis l'autre appareil."
+
+msgctxt "AppWindow"
+msgid "This share link has expired. Create a new one on the other device."
+msgstr "Ce lien de partage a expiré. Créez-en un nouveau sur l'autre appareil."
+
+msgctxt "AppWindow"
+msgid "This share link has already been used. Create a new one on the other device."
+msgstr "Ce lien de partage a déjà été utilisé. Créez-en un nouveau sur l'autre appareil."
+
+msgctxt "AppWindow"
+msgid "The account this link was made for no longer exists."
+msgstr "Le compte pour lequel ce lien a été créé n'existe plus."
+
+msgctxt "AppWindow"
+msgid "Couldn't sign in with that share token. Try again."
+msgstr "Impossible de se connecter avec ce jeton de partage. Réessayez."
+
+msgctxt "AppWindow"
+msgid "Sign in with a share token"
+msgstr "Se connecter avec un jeton de partage"
+
+msgctxt "AppWindow"
+msgid "Paste the share link or token made on another device, in Settings > Security here or \"open on another device\" in Cicchetto. It works once and expires after ten minutes."
+msgstr "Collez le lien ou le jeton de partage créé sur un autre appareil, dans Paramètres > Sécurité ici ou avec « ouvrir sur un autre appareil » dans Cicchetto. Il ne fonctionne qu'une fois et expire au bout de dix minutes."
+
+msgctxt "AppWindow"
+msgid "Share link or token"
+msgstr "Lien ou jeton de partage"
+
+msgctxt "AppWindow"
+msgid "Sign in"
+msgstr "Se connecter"
+
+msgctxt "AppWindow"
+msgid "Sign in with a share token…"
+msgstr "Se connecter avec un jeton de partage…"
+
+msgctxt "AppWindow"
+msgid "Share this session"
+msgstr "Partager cette session"
+
+msgctxt "AppWindow"
+msgid "Make a single-use link or QR code that signs another device, such as Cicchetto on a phone, into this same account. It expires after ten minutes."
+msgstr "Créez un lien ou un code QR à usage unique qui connecte un autre appareil, par exemple Cicchetto sur un téléphone, à ce même compte. Il expire au bout de dix minutes."
+
+msgctxt "AppWindow"
+msgid "Creating…"
+msgstr "Création…"
+
+msgctxt "AppWindow"
+msgid "Create a share link"
+msgstr "Créer un lien de partage"
+
+msgctxt "AppWindow"
+msgid "Open this link, or scan the code, on the other device. Anyone who has it can sign in as you until it is used or expires, so don't post it."
+msgstr "Ouvrez ce lien, ou scannez le code, sur l'autre appareil. Quiconque l'a peut se connecter à votre place tant qu'il n'est pas utilisé ou expiré : ne le publiez pas."
+
+msgctxt "AppWindow"
+msgid "QR code of the share link"
+msgstr "Code QR du lien de partage"
+
+msgctxt "AppWindow"
+msgid "Share link"
+msgstr "Lien de partage"
+
+msgctxt "AppWindow"
+msgid "It works once, within ten minutes."
+msgstr "Il ne fonctionne qu'une fois, dans les dix minutes."
+
+msgctxt "AppWindow"
+msgid "It works once, until {}."
+msgstr "Il ne fonctionne qu'une fois, jusqu'à {}."
+
+msgctxt "AppWindow"
+msgid "Hide link"
+msgstr "Masquer le lien"
+
+msgctxt "AppWindow"
+msgid "A per-client token can't share the session. Sign in with your password to do that here."
+msgstr "Un jeton par client ne peut pas partager la session. Connectez-vous avec votre mot de passe pour le faire ici."
+
+msgctxt "AppWindow"
+msgid "An incognito guest session can't be shared."
+msgstr "Une session invité en navigation privée ne peut pas être partagée."
+
+msgctxt "AppWindow"
+msgid "Couldn't create a share link."
+msgstr "Impossible de créer un lien de partage."
