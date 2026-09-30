@@ -217,10 +217,6 @@ msgid "Wrong username or password/token."
 msgstr "Nombre de usuario o contraseña/token incorrectos."
 
 msgctxt "AppWindow"
-msgid "This account has two-factor authentication enabled. Sign in from a browser instead."
-msgstr "Esta cuenta tiene la autenticación en dos pasos activada. Inicia sesión desde el navegador en su lugar."
-
-msgctxt "AppWindow"
 msgid "Too many attempts. Wait a bit before trying again."
 msgstr "Demasiados intentos. Espera un poco antes de volver a intentarlo."
 
@@ -1035,10 +1031,6 @@ msgstr "Deja activada al menos una notificación de mensajes."
 msgctxt "AppWindow"
 msgid "Couldn't save the notification settings."
 msgstr "No se pudieron guardar los ajustes de notificaciones."
-
-msgctxt "AppWindow"
-msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
-msgstr "La verificación en dos pasos, las passkeys, los tokens de cliente y la eliminación de la cuenta se gestionan en Cicchetto: Grappa los mantiene fuera del alcance de un token de cliente como el que usa Cordiale."
 
 msgctxt "AppWindow"
 msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
@@ -2651,3 +2643,67 @@ msgstr "Tamaño del texto: {} %"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Restablecer"
+
+msgctxt "AppWindow"
+msgid "Admin actions need an administrator signed in with a full session. A client token can't do them."
+msgstr "Las acciones de administración requieren un administrador con una sesión completa. Un token de cliente no puede realizarlas."
+
+msgctxt "AppWindow"
+msgid "That network still has accounts bound to it. Unbind them on the Credentials tab first."
+msgstr "Esa red todavía tiene cuentas vinculadas. Desvincúlalas primero en la pestaña Credenciales."
+
+msgctxt "AppWindow"
+msgid "Saved. The account's live session was stopped because its login changed; it has to reconnect."
+msgstr "Guardado. La sesión activa de la cuenta se detuvo porque cambiaron sus credenciales; tendrá que volver a conectarse."
+
+msgctxt "AppWindow"
+msgid "Terminate the session of {}? Its connection is stopped; the account and its network binding stay as they are."
+msgstr "¿Terminar la sesión de {}? Se detiene su conexión; la cuenta y su vínculo con la red no cambian."
+
+msgctxt "AppWindow"
+msgid "Terminate"
+msgstr "Terminar"
+
+msgctxt "AppWindow"
+msgid "Counting the messages of {}…"
+msgstr "Contando los mensajes de {}…"
+
+msgctxt "AppWindow"
+msgid "Delete {} for good? Its whole scrollback goes with it, for every account. Messages deleted: {}"
+msgstr "¿Eliminar {} definitivamente? Todo su historial se va con ella, para todas las cuentas. Mensajes eliminados: {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} for good? Its whole scrollback goes with it, for every account; the server couldn't say how many messages that is."
+msgstr "¿Eliminar {} definitivamente? Todo su historial se va con ella, para todas las cuentas; el servidor no pudo decir cuántos mensajes son."
+
+msgctxt "AppWindow"
+msgid "Delete network and scrollback"
+msgstr "Eliminar red e historial"
+
+msgctxt "AppWindow"
+msgid "Enabled"
+msgstr "Activado"
+
+msgctxt "AppWindow"
+msgid "Featured channels"
+msgstr "Canales destacados"
+
+msgctxt "AppWindow"
+msgid "Description"
+msgstr "Descripción"
+
+msgctxt "AppWindow"
+msgid "Add channel"
+msgstr "Añadir canal"
+
+msgctxt "AppWindow"
+msgid "SASL user"
+msgstr "Usuario SASL"
+
+msgctxt "AppWindow"
+msgid "New password (leave empty to keep it)"
+msgstr "Nueva contraseña (déjalo vacío para conservarla)"
+
+msgctxt "AppWindow"
+msgid "A new password ends the account's live session on this network; it has to reconnect."
+msgstr "Una contraseña nueva termina la sesión activa de la cuenta en esta red; tendrá que volver a conectarse."
