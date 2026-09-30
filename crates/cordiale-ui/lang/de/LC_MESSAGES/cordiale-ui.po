@@ -2513,30 +2513,6 @@ msgid "Passkeys, client tokens and account deletion are managed in Cicchetto."
 msgstr "Passkeys, Client-Tokens und die Kontolöschung werden in Cicchetto verwaltet."
 
 msgctxt "AppWindow"
-msgid "Open {}"
-msgstr "{} öffnen"
-
-msgctxt "AppWindow"
-msgid "Join {}"
-msgstr "{} betreten"
-
-msgctxt "AppWindow"
-msgid "{} users"
-msgstr "{} Benutzer"
-
-msgctxt "AppWindow"
-msgid "{} users — {}"
-msgstr "{} Benutzer — {}"
-
-msgctxt "AppWindow"
-msgid "featured"
-msgstr "empfohlen"
-
-msgctxt "AppWindow"
-msgid "joined"
-msgstr "beigetreten"
-
-msgctxt "AppWindow"
 msgid "listing…"
 msgstr "wird aufgelistet…"
 
@@ -2643,6 +2619,10 @@ msgstr "Schriftgröße: {} %"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Zurücksetzen"
+
+msgctxt "AppWindow"
+msgid "This server no longer accepts this version of Cordiale. Please update Cordiale."
+msgstr "Dieser Server akzeptiert diese Version von Cordiale nicht mehr. Bitte aktualisiere Cordiale."
 
 msgctxt "AppWindow"
 msgid "Admin actions need an administrator signed in with a full session. A client token can't do them."
