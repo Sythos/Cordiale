@@ -192,6 +192,10 @@ enum WorkerCommand {
     ThemeEditorCancel,
     /// The OS switched between light (`false`) and dark (`true`).
     SystemScheme(bool),
+    /// The window is now in the foreground (`true`) or not (`false`).
+    Foreground(bool),
+    /// The app is quitting: tells Grappa, then signals `done`.
+    Quit(std::sync::mpsc::Sender<()>),
     SaveDisplayPrefs(DisplayPrefs),
     LoadNotificationPrefs,
     EditNotificationPrefs(NotificationEdit),
@@ -968,6 +972,40 @@ fn main() -> Result<(), slint::PlatformError> {
             });
             EventResult::PreventDefault
         });
+    }
+
+    // Grappa wants to know whether Cordiale is in the foreground: it feeds
+    // auto-away and the push suppression. The window counts as foreground
+    // when it has keyboard focus and is not minimized. The state is polled
+    // from winit rather than rebuilt from window events: Wayland reports no
+    // minimize, and macOS' focus events are unreliable (Slint queries the
+    // window itself there too). Grappa debounces the signal by minutes, so
+    // a second of latency is invisible.
+    let foreground_timer = slint::Timer::default();
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        let tx_for_foreground = worker_tx.clone();
+        let weak_for_foreground = ui.as_weak();
+        let mut reported = None;
+        foreground_timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_secs(1),
+            move || {
+                let Some(ui) = weak_for_foreground.upgrade() else {
+                    return;
+                };
+                let foreground = ui
+                    .window()
+                    .with_winit_window(|window| {
+                        window_in_foreground(window.has_focus(), window.is_minimized())
+                    })
+                    .unwrap_or(false);
+                if reported != Some(foreground) {
+                    reported = Some(foreground);
+                    let _ = tx_for_foreground.send(WorkerCommand::Foreground(foreground));
+                }
+            },
+        );
     }
 
     // Ctrl+V (Cmd+V) in the compose box: an image on the clipboard is
@@ -1755,7 +1793,24 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_watch_remove.send(WorkerCommand::WatchPatternRemove(pattern.to_string()));
     });
 
-    ui.run()
+    let result = ui.run();
+
+    // Closing the window quits: tell Grappa the client is leaving, so
+    // auto-away doesn't wait for the visibility report to go stale. Bounded,
+    // so an unreachable server can't hold the exit up.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    if worker_tx.send(WorkerCommand::Quit(done_tx)).is_ok() {
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+    }
+    result
+}
+
+/// Whether the window counts as being in the foreground: it has keyboard
+/// focus and is not minimized. `minimized` is `None` where the platform
+/// can't tell (Wayland), which is taken as not minimized: such a window
+/// loses focus when it is minimized anyway.
+fn window_in_foreground(focused: bool, minimized: Option<bool>) -> bool {
+    focused && !minimized.unwrap_or(false)
 }
 
 /// State the worker keeps across the whole connected session. Lives only on
@@ -2411,6 +2466,9 @@ struct WorkerState {
     theme_pair: Option<(ThemeChoice, Option<ThemeChoice>)>,
     /// Whether the OS is in dark mode, which picks the night theme.
     system_dark: bool,
+    /// Whether the window is in the foreground, as last reported by the UI
+    /// thread. Kept across sign-outs so the next session starts right.
+    foreground: bool,
     /// A sign-in waiting for its second factor (issue #118).
     pending_totp: Option<PendingTotp>,
     /// The token confirming a TOTP enrolment started in Settings.
@@ -2500,6 +2558,7 @@ impl WorkerState {
             theme_choices: builtin_theme_choices(),
             theme_pair: None,
             system_dark: false,
+            foreground: false,
             pending_totp: None,
             totp_enrollment: None,
             home: home::HomeState::default(),
@@ -2827,6 +2886,18 @@ async fn run_worker(
                         if changed && state.theme_pair.as_ref().is_some_and(|pair| pair.1.is_some()) {
                             apply_theme_pair(&mut state, &ui);
                         }
+                    }
+                    Some(WorkerCommand::Foreground(foreground)) => {
+                        state.foreground = foreground;
+                        if let Some(session) = &state.session {
+                            session.set_foreground(foreground);
+                        }
+                    }
+                    Some(WorkerCommand::Quit(done)) => {
+                        if let Some(handle) = state.session.take() {
+                            let _ = handle.close().await;
+                        }
+                        let _ = done.send(());
                     }
                     Some(WorkerCommand::EditNotificationPrefs(edit)) => {
                         handle_notification_edit(&mut state, &ui, edit).await;
@@ -3388,6 +3459,11 @@ async fn run_worker(
                         // A manual disconnect is how the user switches
                         // accounts: don't sign back in at the next launch.
                         set_auto_connect(false);
+                        // Before a guest logout revokes the bearer, so the
+                        // "leaving" hint still reaches Grappa.
+                        if let Some(handle) = state.session.take() {
+                            drop(handle.close());
+                        }
                         let guest_logout_failed = if state.guest_session {
                             if let (Some(client), Some(token), Some(identifier)) = (
                                 state.client.as_ref(),
@@ -3418,14 +3494,14 @@ async fn run_worker(
                         } else {
                             false
                         };
-                        if let Some(handle) = state.session.take() {
-                            handle.shutdown();
-                        }
                         session_events = None;
-                        // The OS scheme outlives the account.
+                        // The OS scheme and the window's state outlive the
+                        // account.
                         let system_dark = state.system_dark;
+                        let foreground = state.foreground;
                         state = WorkerState::new();
                         state.system_dark = system_dark;
+                        state.foreground = foreground;
                         push_home(&state, &ui);
                         // Like Cicchetto, signing out stops the radio.
                         radio.stop();
@@ -3885,6 +3961,7 @@ async fn finish_connect(
 
             let ws_url = to_ws_url(&server_url);
             let (handle, events) = spawn_session(ws_url, token.clone(), session_identifier.clone());
+            handle.set_foreground(state.foreground);
             for network in state.network_ids.keys() {
                 handle.join_topic(
                     channel_topic(&session_identifier, network, SERVER_WINDOW_NAME),
@@ -18427,6 +18504,15 @@ fn stale_guest_bearer(error: &BootstrapError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_needs_focus_and_no_minimize() {
+        assert!(window_in_foreground(true, Some(false)));
+        assert!(window_in_foreground(true, None));
+        assert!(!window_in_foreground(true, Some(true)));
+        assert!(!window_in_foreground(false, Some(false)));
+        assert!(!window_in_foreground(false, None));
+    }
 
     #[test]
     fn guest_login_refusals_get_their_own_status() {
