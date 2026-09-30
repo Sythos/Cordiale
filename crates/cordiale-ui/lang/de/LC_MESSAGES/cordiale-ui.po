@@ -2711,3 +2711,15 @@ msgstr "empfohlen"
 msgctxt "DirectoryEntry"
 msgid "joined"
 msgstr "beigetreten"
+
+msgctxt "AppWindow"
+msgid "Couldn't decline the invite. Please try again."
+msgstr "Die Einladung konnte nicht abgelehnt werden. Bitte versuche es erneut."
+
+msgctxt "AppWindow"
+msgid "Decline"
+msgstr "Ablehnen"
+
+msgctxt "AppWindow"
+msgid "Decline channel invite"
+msgstr "Kanaleinladung ablehnen"

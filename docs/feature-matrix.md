@@ -46,7 +46,7 @@ prima di pianificare.
 | Filtro presenza | Sì (probabile collegamento) | Fase 2 | Possibile legame con join-param `presence: false`, non esplicito nel doc |
 | Finestra menzioni | Incerto | — | Presumibilmente derivato client-side |
 | Ignore list, watchlist, alias comandi, perform on connect | Sì, non-admin self-service | Fase 2 (2026-09-19) | **Corretto**: la nota "presumibilmente client-local" era sbagliata, mai verificata — ignores/aliases/perform sono REST server-persistiti (`GET/POST/PUT /networks/:slug/{ignores,perform}`, `GET/PUT /me/settings/aliases`), la watchlist di presenza è REST (`/networks/:slug/notify`), quella per parola chiave è WS (`ch.push("watchlist", ...)`). Tutti e quattro ora implementati in Cordiale (Settings → Ignore List/Aliases/On-Connect Commands/Watch Lists) — dettaglio completo in `docs/protocol-notes.md` §4quater. Dalla v31 una regola ignore è la coppia `(mask, text_pattern)`: Cordiale legge `entries` (ripiegando su `masks` coi server vecchi), aggiunge e rimuove la coppia esatta, `/ignore <mask> [pattern]` |
-| Inviti | Sì (parziale) | Fase 2 | `window_invited` tra i kind di stato-finestra |
+| Inviti | Sì (parziale) | Fase 2 | `window_invited` tra i kind di stato-finestra; il banner ha Entra e Rifiuta: Rifiuta chiama `DELETE /networks/:slug/invites/:channel` (nulla viene inviato a IRC) e il banner sparisce solo con `window_invite_declined`, così vale anche per una decisione presa su un altro dispositivo (non ancora provato su un server reale) |
 | Kick | Sì | Fase 1/2 | Kind terminale di stato-finestra |
 | Statusmsg (ops/voice-only) | Sì | Fase 2 | `meta.statusmsg` |
 | CTCP action/query | Sì | Fase 2 | Campo `ctcp_target` |

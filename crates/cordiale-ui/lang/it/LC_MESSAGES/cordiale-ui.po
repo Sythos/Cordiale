@@ -2711,3 +2711,15 @@ msgstr "in evidenza"
 msgctxt "DirectoryEntry"
 msgid "joined"
 msgstr "dentro"
+
+msgctxt "AppWindow"
+msgid "Couldn't decline the invite. Please try again."
+msgstr "Impossibile rifiutare l'invito. Riprova."
+
+msgctxt "AppWindow"
+msgid "Decline"
+msgstr "Rifiuta"
+
+msgctxt "AppWindow"
+msgid "Decline channel invite"
+msgstr "Rifiuta l'invito al canale"
