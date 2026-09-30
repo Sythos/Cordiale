@@ -215,7 +215,12 @@ sezione Sicurezza resta in Cicchetto:
   **diversi**; il casing non-ASCII (`#CAFÉ` vs `#café`) **non** viene
   foldato.
 - Una finestra query/DM usa come segmento il nick del peer, foldato allo
-  stesso modo.
+  stesso modo. Dal v34 righe di scrollback e voci di `query_windows_list`
+  portano anche `dm_conversation_id` (intero, `null` o assente su server
+  più vecchi): Cordiale lo legge come `Option<i64>` e lo usa solo per
+  riconoscere la stessa finestra dopo un NICK del peer, altrimenti ricade
+  sul nick. Non verificato contro un server v34 reale; il merge di due
+  conversazioni non è rilevato dall'id.
 - I `kind` di evento non riconosciuti vanno ignorati (regola
   additive-only, §3).
 
