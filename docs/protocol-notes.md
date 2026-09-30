@@ -198,6 +198,12 @@ sezione Sicurezza resta in Cicchetto:
   - Nessun limite superiore: non esiste (né esisterà) un
     `max_protocol_version`.
   - Il controllo versione avviene **prima** dell'autenticazione.
+  - **Cordiale** dichiara `client_proto=34` (intero semplice, la revisione
+    del protocollo contro cui è stato verificato leggendo il sorgente del
+    server: `CLIENT_PROTOCOL_VERSION` in `protocol.rs`, da alzare solo dopo
+    aver riverificato il contratto). Su un `426` la sessione si ferma senza
+    ritentare e la finestra mostra "aggiorna Cordiale". Non verificato
+    contro un server reale che alzi il floor sopra 34.
 - **Payload iniziale**: il primo topic da joinare è il topic utente
   `grappa:user:{user}`; la risposta di join porta `protocol_version`:
   `join "grappa:user:vjt" → {:ok, {"protocol_version": 2}}` — un client che

@@ -38,6 +38,17 @@ use serde::{Deserialize, Serialize};
 /// `docs/protocol-notes.md` §7).
 pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 
+/// The Grappa `protocol_version` Cordiale declares as `client_proto` on the
+/// WebSocket upgrade.
+///
+/// Not the same as `MIN_SUPPORTED_PROTOCOL_VERSION`: that is the oldest
+/// server this build can talk to, this is the protocol revision this build
+/// was last checked against (by reading the server source). Bump it only
+/// after re-checking the wire contract at the newer version. It must stay a
+/// plain integer: the server silently discards a value it can't read as one
+/// and still accepts the connect.
+pub const CLIENT_PROTOCOL_VERSION: u32 = 34;
+
 /// The bootstrap compatibility fields from `GET /api/config`, and echoed
 /// again in the WebSocket user-topic join response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

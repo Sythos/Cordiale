@@ -2024,6 +2024,8 @@ export component AppWindow inherits Window {
             return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "session-refused" {
             return @tr("Grappa refused the realtime session ({}). Sign out and in again; if it keeps happening, please report it.", status-message);
+        } else if status-kind == "upgrade-required" {
+            return @tr("This server no longer accepts this version of Cordiale. Please update Cordiale.");
         } else if status-kind == "reconnecting" {
             return status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
         } else if status-kind == "presence-online" {
