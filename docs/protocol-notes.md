@@ -102,6 +102,13 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
   - Il destinatario va letto da `meta`, mai da `channel` (che resta la
     finestra sorgente).
 - Backlog/paginazione per canale: `?before=`, `?after=`, `/messages/count`.
+  Dopo un reconnect del WebSocket Grappa non rigioca gli eventi persi:
+  Cordiale, per ogni canale joined con un id noto, sonda
+  `/messages/count?after=<id>&cap=201` (un server più vecchio ignora `cap` e
+  risponde con tre chiavi: si legge solo `count`). Fino a 200 righe le recupera
+  con `?after=`; oltre ricarica la coda e lascia una nota dove c'è il buco.
+  Le richieste partono una alla volta, distanziate (limit_req del proxy).
+  Non verificato contro un server reale.
 - **`GET /networks/:network_id/archive`** — `{target, kind, last_activity}`.
   Il campo `row_count` è stato **rimosso** alla v8 (unico caso di rimozione
   documentato — vedi §3).
