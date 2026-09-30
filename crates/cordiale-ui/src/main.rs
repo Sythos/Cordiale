@@ -26,6 +26,7 @@ slint::include_modules!();
 
 mod admin_uploads;
 mod dates;
+mod debug_info;
 mod home;
 mod player;
 mod reply;
@@ -327,6 +328,7 @@ impl ConnectCredential {
 
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
+    debug_info::watch_renderer(ui.window());
 
     // Settings > Credits: Cordiale's own info only, never a list of
     // Grappa/Cicchetto's contributors — explicit project-owner
@@ -842,6 +844,22 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     ui.on_credits_link_clicked(|href| open_in_browser(&href));
+
+    let weak_for_debug = ui.as_weak();
+    ui.on_debug_requested(move || {
+        if let Some(ui) = weak_for_debug.upgrade() {
+            let language = persistence::load_settings()
+                .ok()
+                .and_then(|settings| settings.language)
+                .map(language_code);
+            ui.set_debug_report(debug_info::report(ui.window(), language).into());
+        }
+    });
+    ui.on_debug_open_data_folder(|| {
+        if let Some(dir) = persistence::config_dir() {
+            open_folder(&dir);
+        }
+    });
     ui.on_update_release_open(|| {
         open_in_browser(cordiale_core::release::LATEST_RELEASE_PAGE);
     });
@@ -11479,6 +11497,25 @@ fn open_in_browser(href: &str) {
     };
     if let Err(err) = command.arg(href).spawn() {
         persistence::log_line(&format!("browser not opened: {err}"));
+    }
+}
+
+/// Opens a folder in the system's file manager, creating it first if it
+/// doesn't exist yet.
+fn open_folder(dir: &std::path::Path) {
+    if let Err(err) = std::fs::create_dir_all(dir) {
+        persistence::log_line(&format!("folder not created: {err}"));
+        return;
+    }
+    let mut command = if cfg!(target_os = "windows") {
+        std::process::Command::new("explorer")
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    if let Err(err) = command.arg(dir).spawn() {
+        persistence::log_line(&format!("folder not opened: {err}"));
     }
 }
 

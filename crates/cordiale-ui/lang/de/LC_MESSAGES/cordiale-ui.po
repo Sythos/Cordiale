@@ -217,10 +217,6 @@ msgid "Wrong username or password/token."
 msgstr "Benutzername oder Passwort/Token falsch."
 
 msgctxt "AppWindow"
-msgid "This account has two-factor authentication enabled. Sign in from a browser instead."
-msgstr "Für diesen Account ist die Zwei-Faktor-Authentifizierung aktiviert. Melde dich stattdessen über den Browser an."
-
-msgctxt "AppWindow"
 msgid "Too many attempts. Wait a bit before trying again."
 msgstr "Zu viele Versuche. Warte kurz, bevor du es erneut versuchst."
 
@@ -1035,10 +1031,6 @@ msgstr "Lass mindestens eine Nachrichtenbenachrichtigung eingeschaltet."
 msgctxt "AppWindow"
 msgid "Couldn't save the notification settings."
 msgstr "Die Benachrichtigungseinstellungen konnten nicht gespeichert werden."
-
-msgctxt "AppWindow"
-msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
-msgstr "Zwei-Faktor-Authentifizierung, Passkeys, Client-Tokens und das Löschen des Kontos werden in Cicchetto verwaltet: Grappa hält sie außer Reichweite eines Client-Tokens, wie Cordiale ihn zur Anmeldung nutzt."
 
 msgctxt "AppWindow"
 msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
@@ -2651,3 +2643,19 @@ msgstr "Schriftgröße: {} %"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Zurücksetzen"
+
+msgctxt "AppWindow"
+msgid "Debug"
+msgstr "Debug"
+
+msgctxt "AppWindow"
+msgid "Details about this device and this copy of Cordiale. They are shown only here and never sent anywhere."
+msgstr "Details zu diesem Gerät und dieser Cordiale-Installation. Sie werden nur hier angezeigt und nirgendwohin gesendet."
+
+msgctxt "AppWindow"
+msgid "Open data folder"
+msgstr "Datenordner öffnen"
+
+msgctxt "AppWindow"
+msgid "Please include these details when you open an issue:"
+msgstr "Bitte gib diese Angaben an, wenn du ein Problem meldest:"

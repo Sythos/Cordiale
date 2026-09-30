@@ -18,6 +18,13 @@ image = { version = "0.25", default-features = false, features = ["gif", "webp",
 arboard = "3"
 # The OS light/dark setting and its changes, to pick the day or night theme.
 dark-light = { version = "3", default-features = false }
+# Host details for the Debug page (OS version, CPU model, RAM). Only the
+# `system` feature: no process, disk, network or user data.
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# The system locale and the IANA time zone name, for the Debug page; Slint
+# and chrono already bring both crates in.
+sys-locale = "0.3"
+iana-time-zone = "0.1"
 # Slint's defaults minus `system-tray`, which Cordiale doesn't use.
 slint = { version = "1", default-features = false, features = [
     "std",
@@ -36,13 +43,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 # on every platform (ALSA on Linux, WASAPI on Windows, CoreAudio on macOS).
 rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "vorbis", "flac"] }
 
-# The taskbar overlay badge: the window handle and ITaskbarList3.
+# The taskbar overlay badge: the window handle and ITaskbarList3; the
+# keyboard layout for the Debug page.
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

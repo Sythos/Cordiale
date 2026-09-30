@@ -1180,6 +1180,12 @@ export component AppWindow inherits Window {
     in-out property <string> available-update-version: "";
     callback update-release-open();
 
+    // The Debug page: `debug-requested` fills `debug-report` with fresh
+    // details about this device. They are only shown, never sent anywhere.
+    in property <string> debug-report: "";
+    callback debug-requested();
+    callback debug-open-data-folder();
+
     // Self-service network profile (never admin-only) — see
     // `docs/protocol-notes.md` §4quater. `settings-network` picks which
     // known network the Identity/Ignores/Perform/Notify sections act on.
@@ -2358,6 +2364,16 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                debug-button := TopMenuButton {
+                    icon: "🐞";
+                    label: @tr("Debug");
+                    dark: theme == "dark";
+                    clicked => {
+                        debug-requested();
+                        screen = "debug";
+                    }
+                }
+
                 settings-button := TopMenuButton {
                     icon: "⚙";
                     label: @tr("Settings");
@@ -2378,9 +2394,10 @@ export component AppWindow inherits Window {
             // The focused button's name, for keyboard users (hover has the
             // tooltip): a line under the icons, only while one has focus, so
             // nothing is covered.
-            if home-button.has-focus || admin-button-focused || settings-button.has-focus || disconnect-button.has-focus : Text {
+            if home-button.has-focus || admin-button-focused || debug-button.has-focus || settings-button.has-focus || disconnect-button.has-focus : Text {
                 text: home-button.has-focus ? @tr("Home")
                     : admin-button-focused ? @tr("Admin")
+                    : debug-button.has-focus ? @tr("Debug")
                     : settings-button.has-focus ? @tr("Settings")
                     : @tr("Disconnect");
                 font-size: 12px * FontScale.percent / 100;
@@ -3423,6 +3440,13 @@ export component AppWindow inherits Window {
                         MenuItem { title: "🚪  " + @tr("Rooms"); activated => { menu-command("/list"); } }
                         MenuItem { title: "📂  " + @tr("Archive"); activated => { menu-command("/archive"); } }
                         MenuItem { title: "👤  " + @tr("User modes"); activated => { menu-command("/umode"); } }
+                        MenuItem {
+                            title: "🐞  " + @tr("Debug");
+                            activated => {
+                                debug-requested();
+                                screen = "debug";
+                            }
+                        }
                         MenuItem { title: "⚙  " + @tr("Settings"); activated => { screen = "settings"; } }
                         MenuItem {
                             title: "🎨  " + @tr("Themes");
@@ -5757,6 +5781,79 @@ export component AppWindow inherits Window {
                     screen = "settings";
                     settings-section = "radio";
                 }
+            }
+        }
+    }
+
+    if screen == "debug" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+
+        Text {
+            text: "🐞  " + @tr("Debug");
+            font-size: 18px * FontScale.percent / 100;
+            accessible-role: AccessibleRole.text;
+        }
+
+        Text {
+            text: @tr("Details about this device and this copy of Cordiale. They are shown only here and never sent anywhere.");
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+
+            CompactButton {
+                text: "📋  " + @tr("Copy");
+                clicked => {
+                    debug-text-view.select-all();
+                    debug-text-view.copy();
+                }
+            }
+            CompactButton {
+                text: "🔄  " + @tr("Refresh");
+                clicked => { debug-requested(); }
+            }
+            CompactButton {
+                text: "📂  " + @tr("Open data folder");
+                clicked => { debug-open-data-folder(); }
+            }
+        }
+
+        debug-text-view := TextEdit {
+            text: debug-report;
+            read-only: true;
+            wrap: word-wrap;
+            vertical-stretch: 1;
+            accessible-label: @tr("Debug");
+        }
+
+        Text {
+            text: @tr("Please include these details when you open an issue:");
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+
+            LineEdit {
+                text: "https://github.com/Sythos/Cordiale/issues";
+                read-only: true;
+                accessible-label: @tr("Report Cordiale issues at:");
+            }
+            CompactButton {
+                text: "🌐  " + @tr("Open in browser");
+                clicked => { credits-link-clicked("https://github.com/Sythos/Cordiale/issues"); }
+            }
+        }
+
+        HorizontalLayout {
+            alignment: start;
+
+            Button {
+                text: @tr("Back");
+                clicked => { screen = "connected"; }
             }
         }
     }

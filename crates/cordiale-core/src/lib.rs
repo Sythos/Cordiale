@@ -53,6 +53,7 @@ pub mod admin;
 pub mod bootstrap;
 pub mod client;
 pub mod credentials;
+pub mod diagnostics;
 pub mod domain;
 pub mod formatting;
 pub mod isupport;
