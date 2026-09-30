@@ -4384,11 +4384,19 @@ fn copy_text(text: &str) {
 }
 
 /// Settings > Security: reads whether TOTP is armed. A per-client token is
-/// refused (403 `client_token_scope`) and the page says so.
+/// refused (403 `client_token_scope`) and the page says so; a visitor
+/// session has no account, so it asks nothing and the page says that.
 async fn handle_security_totp_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
         return;
     };
+    if !home::account_security_available(state.home.session_kind()) {
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_security_totp_state("visitor".into());
+            ui.set_security_totp_error("".into());
+        });
+        return;
+    }
     let status = match client.fetch_totp_status(&token).await {
         Ok(true) => "enabled",
         Ok(false) => "disabled",
@@ -4529,11 +4537,20 @@ async fn handle_security_totp_disable(
 }
 
 /// Settings > Security: reads the passkey mode and list. A per-client token
-/// is refused (403 `client_token_scope`) and the page says so.
+/// is refused (403 `client_token_scope`) and the page says so; a visitor
+/// session has no account, so it asks nothing and the page says that.
 async fn handle_security_passkeys_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
         return;
     };
+    if !home::account_security_available(state.home.session_kind()) {
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_security_passkeys(slint::ModelRc::default());
+            ui.set_security_passkey_state("visitor".into());
+            ui.set_security_passkey_busy(false);
+        });
+        return;
+    }
     match client.fetch_passkeys(&token).await {
         Ok(status) => {
             let mode = passkeys::mode_key(status.mode);

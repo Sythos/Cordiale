@@ -184,7 +184,10 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
 ### Superfici solo-account (non accessibili da token per-client)
 `/admin/*`, `/me/totp*`, `/me/passkeys*`, `DELETE /me` — richiedono sessione
 piena (`GrappaWeb.Plugs.RequireFullSession`: `current_session_kind == :web`);
-un token per-client riceve `403 client_token_scope`.
+un token per-client riceve `403 client_token_scope`. `/me/totp*` e
+`/me/passkeys*` accettano solo un account: a un visitatore (ospite o
+registrato con la password NickServ) i controller rispondono `403`. Cordiale
+per le sessioni visitatore non le chiama e lo dice in Settings → Security.
 
 **TOTP (issue #118, schema letto da `GrappaWeb.TotpController` e da
 `cicchetto/src/lib/api.ts`, 2026-09-27).** Cordiale lo gestisce in

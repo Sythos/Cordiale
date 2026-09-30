@@ -3003,3 +3003,11 @@ msgstr "Wiederherstellungscode"
 msgctxt "AppWindow"
 msgid "Passwordless account? Sign in with a recovery code…"
 msgstr "Konto ohne Passwort? Mit Wiederherstellungscode anmelden …"
+
+msgctxt "AppWindow"
+msgid "Two-factor authentication belongs to Grappa accounts. A guest or visitor session doesn't have one."
+msgstr "Die Zwei-Faktor-Authentifizierung gehört zu Grappa-Konten. Eine Gast- oder Besuchersitzung hat keine."
+
+msgctxt "AppWindow"
+msgid "Passkeys belong to Grappa accounts. A guest or visitor session doesn't have any."
+msgstr "Passkeys gehören zu Grappa-Konten. Eine Gast- oder Besuchersitzung hat keine."
