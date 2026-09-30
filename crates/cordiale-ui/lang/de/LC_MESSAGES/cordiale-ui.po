@@ -217,10 +217,6 @@ msgid "Wrong username or password/token."
 msgstr "Benutzername oder Passwort/Token falsch."
 
 msgctxt "AppWindow"
-msgid "This account has two-factor authentication enabled. Sign in from a browser instead."
-msgstr "Für diesen Account ist die Zwei-Faktor-Authentifizierung aktiviert. Melde dich stattdessen über den Browser an."
-
-msgctxt "AppWindow"
 msgid "Too many attempts. Wait a bit before trying again."
 msgstr "Zu viele Versuche. Warte kurz, bevor du es erneut versuchst."
 
@@ -1035,10 +1031,6 @@ msgstr "Lass mindestens eine Nachrichtenbenachrichtigung eingeschaltet."
 msgctxt "AppWindow"
 msgid "Couldn't save the notification settings."
 msgstr "Die Benachrichtigungseinstellungen konnten nicht gespeichert werden."
-
-msgctxt "AppWindow"
-msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
-msgstr "Zwei-Faktor-Authentifizierung, Passkeys, Client-Tokens und das Löschen des Kontos werden in Cicchetto verwaltet: Grappa hält sie außer Reichweite eines Client-Tokens, wie Cordiale ihn zur Anmeldung nutzt."
 
 msgctxt "AppWindow"
 msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
@@ -2627,6 +2619,74 @@ msgstr "Schriftgröße: {} %"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Zurücksetzen"
+
+msgctxt "AppWindow"
+msgid "This server no longer accepts this version of Cordiale. Please update Cordiale."
+msgstr "Dieser Server akzeptiert diese Version von Cordiale nicht mehr. Bitte aktualisiere Cordiale."
+
+msgctxt "AppWindow"
+msgid "Admin actions need an administrator signed in with a full session. A client token can't do them."
+msgstr "Admin-Aktionen erfordern einen Administrator mit vollständiger Sitzung. Ein Client-Token kann sie nicht ausführen."
+
+msgctxt "AppWindow"
+msgid "That network still has accounts bound to it. Unbind them on the Credentials tab first."
+msgstr "An dieses Netzwerk sind noch Konten gebunden. Löse sie zuerst im Tab „Zugangsdaten“."
+
+msgctxt "AppWindow"
+msgid "Saved. The account's live session was stopped because its login changed; it has to reconnect."
+msgstr "Gespeichert. Die laufende Sitzung des Kontos wurde beendet, weil sich seine Anmeldedaten geändert haben; es muss sich neu verbinden."
+
+msgctxt "AppWindow"
+msgid "Terminate the session of {}? Its connection is stopped; the account and its network binding stay as they are."
+msgstr "Sitzung von {} beenden? Die Verbindung wird getrennt; das Konto und seine Netzwerkbindung bleiben unverändert."
+
+msgctxt "AppWindow"
+msgid "Terminate"
+msgstr "Beenden"
+
+msgctxt "AppWindow"
+msgid "Counting the messages of {}…"
+msgstr "Nachrichten von {} werden gezählt …"
+
+msgctxt "AppWindow"
+msgid "Delete {} for good? Its whole scrollback goes with it, for every account. Messages deleted: {}"
+msgstr "{} endgültig löschen? Der gesamte Verlauf geht damit verloren, für jedes Konto. Gelöschte Nachrichten: {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} for good? Its whole scrollback goes with it, for every account; the server couldn't say how many messages that is."
+msgstr "{} endgültig löschen? Der gesamte Verlauf geht damit verloren, für jedes Konto; der Server konnte nicht sagen, wie viele Nachrichten das sind."
+
+msgctxt "AppWindow"
+msgid "Delete network and scrollback"
+msgstr "Netzwerk und Verlauf löschen"
+
+msgctxt "AppWindow"
+msgid "Enabled"
+msgstr "Aktiviert"
+
+msgctxt "AppWindow"
+msgid "Featured channels"
+msgstr "Empfohlene Kanäle"
+
+msgctxt "AppWindow"
+msgid "Description"
+msgstr "Beschreibung"
+
+msgctxt "AppWindow"
+msgid "Add channel"
+msgstr "Kanal hinzufügen"
+
+msgctxt "AppWindow"
+msgid "SASL user"
+msgstr "SASL-Benutzer"
+
+msgctxt "AppWindow"
+msgid "New password (leave empty to keep it)"
+msgstr "Neues Passwort (leer lassen, um es zu behalten)"
+
+msgctxt "AppWindow"
+msgid "A new password ends the account's live session on this network; it has to reconnect."
+msgstr "Ein neues Passwort beendet die laufende Sitzung des Kontos in diesem Netzwerk; es muss sich neu verbinden."
 
 msgctxt "DirectoryEntry"
 msgid "Open {}"
