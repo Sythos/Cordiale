@@ -61,6 +61,9 @@ pub enum BootstrapError {
     /// `POST /auth/totp/verify` refused the code: see
     /// `GrappaClient::verify_totp_login` for the codes it carries.
     TwoFactor(GrappaClientError),
+    /// `POST /auth/passkeys/recover` refused the recovery code: see
+    /// `GrappaClient::recover_passkey_login` for the codes it carries.
+    Recovery(GrappaClientError),
     /// `POST /auth/share/consume` refused the share token: see
     /// `GrappaClient::consume_share_token` for the codes it carries.
     ShareToken(GrappaClientError),
@@ -163,6 +166,36 @@ pub async fn bootstrap_with_totp(
     })
 }
 
+/// Signs a passwordless account in with one of its recovery codes (which is
+/// spent), then runs the same `/boot` and `/me` sequence as a password
+/// sign-in with the full-session bearer Grappa answers with.
+pub async fn bootstrap_with_recovery_code(
+    client: &GrappaClient,
+    identifier: &str,
+    recovery_code: &str,
+) -> Result<BootstrapOutcome, BootstrapError> {
+    let compatibility = check_server_compatibility(client).await?;
+    let login = client
+        .recover_passkey_login(identifier, recovery_code)
+        .await
+        .map_err(BootstrapError::Recovery)?;
+    let boot = client
+        .fetch_boot(&login.token)
+        .await
+        .map_err(BootstrapError::Boot)?;
+    let me = client
+        .fetch_me(&login.token)
+        .await
+        .map_err(BootstrapError::Me)?;
+    Ok(BootstrapOutcome {
+        compatibility,
+        token: login.token,
+        subject: Some(login.subject),
+        boot,
+        me,
+    })
+}
+
 /// Signs in with a share token minted on another device: consumes it (it
 /// works once), then runs the same `/boot` and `/me` sequence as any other
 /// sign-in with the full-session bearer Grappa answers with.
@@ -229,7 +262,7 @@ pub async fn bootstrap_with_bearer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn mock_config(mock_server: &MockServer, protocol_version: u32) {
@@ -308,6 +341,112 @@ mod tests {
         match bootstrap_with_totp(&client, "ch", "000000").await {
             Err(BootstrapError::TwoFactor(err)) => {
                 assert_eq!(err.code(), Some("invalid_two_factor"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_recovery_code_spends_it_then_boots_with_the_new_bearer() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/passkeys/recover"))
+            .and(body_json(serde_json::json!({
+                "identifier": "vjt",
+                "recovery_code": "abcd-efgh"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "recovered",
+                "subject": {"kind": "user", "name": "vjt"}
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/boot"))
+            .and(header("authorization", "Bearer recovered"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "networks": []
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("authorization", "Bearer recovered"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"kind": "user", "name": "vjt"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let outcome = bootstrap_with_recovery_code(&client, "vjt", "abcd-efgh")
+            .await
+            .expect("bootstrap");
+        assert_eq!(outcome.token, "recovered");
+        assert_eq!(outcome.me.name.as_deref(), Some("vjt"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_recovery_code_keeps_the_refusal_and_never_boots() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/passkeys/recover"))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "invalid_two_factor"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/boot"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        match bootstrap_with_recovery_code(&client, "vjt", "wrong").await {
+            Err(BootstrapError::Recovery(err)) => {
+                assert_eq!(err.status().map(|status| status.as_u16()), Some(401));
+                assert_eq!(err.code(), Some("invalid_two_factor"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bootstrap_with_recovery_code_reports_a_throttle() {
+        let mock_server = MockServer::start().await;
+        mock_config(
+            &mock_server,
+            crate::protocol::MIN_SUPPORTED_PROTOCOL_VERSION,
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/passkeys/recover"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .set_body_json(serde_json::json!({"error": "too_many_attempts"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        match bootstrap_with_recovery_code(&client, "vjt", "abcd-efgh").await {
+            Err(BootstrapError::Recovery(err)) => {
+                assert_eq!(err.code(), Some("too_many_attempts"));
             }
             other => panic!("unexpected {other:?}"),
         }

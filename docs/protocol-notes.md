@@ -206,6 +206,17 @@ richiedono un autenticatore:
   `409 passkey_required` = ultima passkey con un modo armato, `404
   not_found`, `503 db_unavailable` distinto dall'errore di credenziali. In
   Settings → Security.
+- `POST /auth/passkeys/recover {identifier, recovery_code}` → `200 {token,
+  subject}` con un bearer di sessione piena: login di un account
+  `passwordless` con un recovery code, che viene consumato. Non serve un
+  autenticatore; dalla schermata di connessione (issue #162). `401
+  invalid_two_factor` è opaco (codice errato, già usato o account non
+  passwordless: i codici non hanno scadenza), `429 too_many_attempts` è la
+  finestra di tentativi (per IP e per account, 15 minuti), `503
+  db_unavailable` è distinto. `POST /auth/login` con la password di un
+  account passwordless risponde un semplice `401 invalid_credentials`,
+  indistinguibile da una password errata: Grappa non dice che l'account è
+  passwordless, quindi la schermata di connessione offre sempre l'entrata.
 - Registrazione, cambio modo, attivazione passwordless e le porte di login
   passkey richiedono una ceremonia WebAuthn e restano in Cicchetto; non
   esiste un endpoint di rinomina. Dettagli, controllo esatto

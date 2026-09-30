@@ -2979,3 +2979,27 @@ msgstr "No se pudo eliminar la passkey."
 msgctxt "AppWindow"
 msgid "Adding a passkey and changing how the account uses them still happen in Cicchetto: Cordiale can't talk to an authenticator yet. Client tokens and account deletion are managed there too."
 msgstr "Añadir una passkey y cambiar cómo las usa la cuenta se sigue haciendo en Cicchetto: Cordiale todavía no puede hablar con un autenticador. Los tokens de cliente y la eliminación de la cuenta también se gestionan allí."
+
+msgctxt "AppWindow"
+msgid "That recovery code didn't work. It may be wrong or already used: each code works only once."
+msgstr "Ese código de recuperación no ha funcionado. Puede ser incorrecto o ya usado: cada código vale una sola vez."
+
+msgctxt "AppWindow"
+msgid "Couldn't sign in with that recovery code. Try again."
+msgstr "No se ha podido iniciar sesión con ese código de recuperación. Inténtalo de nuevo."
+
+msgctxt "AppWindow"
+msgid "Sign in with a recovery code"
+msgstr "Iniciar sesión con un código de recuperación"
+
+msgctxt "AppWindow"
+msgid "For an account that signs in with a passkey and has no password. Enter your username and one of the recovery codes Grappa showed you when you turned passwordless sign-in on. Each code works only once."
+msgstr "Para una cuenta que inicia sesión con una passkey y no tiene contraseña. Introduce tu nombre de usuario y uno de los códigos de recuperación que Grappa te mostró al activar el inicio de sesión sin contraseña. Cada código vale una sola vez."
+
+msgctxt "AppWindow"
+msgid "Recovery code"
+msgstr "Código de recuperación"
+
+msgctxt "AppWindow"
+msgid "Passwordless account? Sign in with a recovery code…"
+msgstr "¿Cuenta sin contraseña? Iniciar sesión con un código de recuperación…"
