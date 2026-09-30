@@ -41,8 +41,8 @@ use crate::admin::{
 };
 use crate::profile::{
     AddIgnoreRequest, AliasesView, IgnoreEntry, IgnoreMutationResponse, IgnoresResponse,
-    NetworkIdentityRequest, NotifyAddRequest, PerformUpdateRequest, PerformView,
-    VhostSelectionRequest, VhostSettingsView,
+    NetworkIdentityRequest, NetworkProfileRequest, NotifyAddRequest, PerformUpdateRequest,
+    PerformView, VhostSelectionRequest, VhostSettingsView,
 };
 use crate::rest::{
     ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
@@ -1909,6 +1909,90 @@ impl GrappaClient {
         Ok(response.json::<Value>().await?)
     }
 
+    /// `PATCH /networks/:slug/profile` — the CTCP USERINFO fields (age,
+    /// gender, location, languages, custom) of the caller's own
+    /// credential. Omitted fields stay as they are, `""` clears one. It
+    /// never reconnects the session. Returns the updated credential; 422
+    /// when a value breaks the server's limits.
+    pub async fn update_network_profile(
+        &self,
+        token: &str,
+        network_slug: &str,
+        request: &NetworkProfileRequest,
+    ) -> Result<Value, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "profile"]);
+        let response = self
+            .http
+            .patch(url)
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Value>().await?)
+    }
+
+    /// `PUT /networks/:slug/avatar` — sets or replaces the caller's own
+    /// avatar on a network (multipart field `file`, an image type within
+    /// the server's image cap). Returns the updated credential, whose
+    /// `avatar_url` is the new one. 415 for a non-image type, 413 over the
+    /// cap, 507 when the server or the account is out of upload space.
+    pub async fn upload_network_avatar(
+        &self,
+        token: &str,
+        network_slug: &str,
+        filename: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Value, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "avatar"]);
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.to_string())
+            .mime_str(mime)?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let response = self
+            .http
+            .put(url)
+            .bearer_auth(token)
+            .timeout(UPLOAD_TIMEOUT)
+            .multipart(form)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Value>().await?)
+    }
+
+    /// `DELETE /networks/:slug/avatar` — removes the caller's own avatar
+    /// on a network. Returns the updated credential; removing when there
+    /// is none is a success, not an error.
+    pub async fn delete_network_avatar(
+        &self,
+        token: &str,
+        network_slug: &str,
+    ) -> Result<Value, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "avatar"]);
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Value>().await?)
+    }
+
     /// `GET /me/settings/vhost`.
     pub async fn fetch_vhost_settings(
         &self,
@@ -2867,7 +2951,9 @@ impl GrappaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json, header, method, path, query_param};
+    use wiremock::matchers::{
+        body_json, body_string_contains, header, header_regex, method, path, query_param,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -4668,6 +4754,103 @@ mod tests {
             .update_network_identity("abc123", "libera", &request)
             .await
             .expect("update_network_identity");
+    }
+
+    #[tokio::test]
+    async fn update_network_profile_sends_only_set_fields() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/networks/libera/profile"))
+            .and(header("authorization", "Bearer abc123"))
+            .and(body_json(
+                serde_json::json!({"gender": "female", "custom": ""}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"gender": "female", "custom": null})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/networks/libera/profile"))
+            .and(header("authorization", "Bearer invalid"))
+            .respond_with(ResponseTemplate::new(422))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let request = crate::profile::NetworkProfileRequest {
+            gender: Some("female".to_string()),
+            custom: Some(String::new()),
+            ..crate::profile::NetworkProfileRequest::default()
+        };
+        let credential = client
+            .update_network_profile("abc123", "libera", &request)
+            .await
+            .expect("update_network_profile");
+        assert_eq!(credential["gender"], "female");
+        let err = client
+            .update_network_profile("invalid", "libera", &request)
+            .await
+            .expect_err("422");
+        assert_eq!(err.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+    }
+
+    #[tokio::test]
+    async fn upload_network_avatar_puts_multipart_and_returns_the_credential() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/networks/libera/avatar"))
+            .and(header("authorization", "Bearer abc123"))
+            .and(header_regex("content-type", "^multipart/form-data"))
+            .and(body_string_contains("name=\"file\""))
+            .and(body_string_contains("image/png"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "avatar_url": "https://irc.example/uploads/abcd.png"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/networks/libera/avatar"))
+            .and(header("authorization", "Bearer toolarge"))
+            .respond_with(ResponseTemplate::new(413))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let credential = client
+            .upload_network_avatar("abc123", "libera", "me.png", "image/png", vec![1, 2, 3])
+            .await
+            .expect("upload_network_avatar");
+        assert_eq!(
+            credential["avatar_url"],
+            "https://irc.example/uploads/abcd.png"
+        );
+        let err = client
+            .upload_network_avatar("toolarge", "libera", "me.png", "image/png", vec![1, 2, 3])
+            .await
+            .expect_err("413");
+        assert_eq!(err.status(), Some(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+
+    #[tokio::test]
+    async fn delete_network_avatar_returns_the_credential() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/avatar"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"avatar_url": null})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let credential = client
+            .delete_network_avatar("abc123", "libera")
+            .await
+            .expect("delete_network_avatar");
+        assert!(credential["avatar_url"].is_null());
     }
 
     #[tokio::test]

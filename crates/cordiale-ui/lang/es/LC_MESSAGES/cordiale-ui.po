@@ -2831,3 +2831,95 @@ msgstr "Una sesión de invitado de incógnito no se puede compartir."
 msgctxt "AppWindow"
 msgid "Couldn't create a share link."
 msgstr "No se pudo crear un enlace para compartir."
+
+msgctxt "AppWindow"
+msgid "Profile saved."
+msgstr "Perfil guardado."
+
+msgctxt "AppWindow"
+msgid "Profile fields must be one line and at most 100 bytes each."
+msgstr "Los campos del perfil deben ocupar una línea y tener como máximo 100 bytes cada uno."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the profile."
+msgstr "No se pudo guardar el perfil."
+
+msgctxt "AppWindow"
+msgid "Avatar updated."
+msgstr "Avatar actualizado."
+
+msgctxt "AppWindow"
+msgid "Avatar removed."
+msgstr "Avatar eliminado."
+
+msgctxt "AppWindow"
+msgid "Couldn't remove the avatar."
+msgstr "No se pudo quitar el avatar."
+
+msgctxt "AppWindow"
+msgid "Network profile"
+msgstr "Perfil de la red"
+
+msgctxt "AppWindow"
+msgid "What other people see when they look you up. Each field holds at most 100 bytes; leave one empty to clear it."
+msgstr "Lo que ven los demás cuando te consultan. Cada campo admite como máximo 100 bytes; déjalo vacío para borrarlo."
+
+msgctxt "AppWindow"
+msgid "Age"
+msgstr "Edad"
+
+msgctxt "AppWindow"
+msgid "Gender: not set"
+msgstr "Género: sin indicar"
+
+msgctxt "AppWindow"
+msgid "Male"
+msgstr "Masculino"
+
+msgctxt "AppWindow"
+msgid "Female"
+msgstr "Femenino"
+
+msgctxt "AppWindow"
+msgid "Non-binary"
+msgstr "No binario"
+
+msgctxt "AppWindow"
+msgid "Gender"
+msgstr "Género"
+
+msgctxt "AppWindow"
+msgid "Location"
+msgstr "Ubicación"
+
+msgctxt "AppWindow"
+msgid "Languages"
+msgstr "Idiomas"
+
+msgctxt "AppWindow"
+msgid "Custom"
+msgstr "Personalizado"
+
+msgctxt "AppWindow"
+msgid "Save profile"
+msgstr "Guardar perfil"
+
+msgctxt "AppWindow"
+msgid "You have an avatar on this network."
+msgstr "Tienes un avatar en esta red."
+
+msgctxt "AppWindow"
+msgid "You have no avatar on this network."
+msgstr "No tienes un avatar en esta red."
+
+msgctxt "AppWindow"
+msgid "Choose avatar…"
+msgstr "Elegir avatar…"
+
+msgctxt "AppWindow"
+msgid "Choose avatar"
+msgstr "Elegir avatar"
+
+msgctxt "AppWindow"
+msgid "Remove avatar"
+msgstr "Quitar avatar"

@@ -726,11 +726,12 @@ fonte primaria, quindi non viene interpretata — stessa limitazione
 session-local: la UI mostra solo le modifiche tracciate in questa sessione,
 non una lista recuperata dal server.
 
+**Profilo esteso e avatar** (Settings → Generale → Profilo di rete) — `PATCH /networks/:slug/profile` con `{age?, gender?, location?, languages?, custom?}` (stringhe; campo omesso = invariato, `""` = cancella). `gender` ammette solo `male`, `female`, `nonbinary` o vuoto; gli altri quattro campi al massimo 100 byte (non caratteri) e senza CR/LF/NUL, altrimenti `422`. Non riavvia la connessione. `PUT /networks/:slug/avatar` è multipart con campo `file`: stessa allowlist MIME e stesso tetto per file delle immagini di `POST /api/uploads` (`415` tipo non immagine, `413` oltre il tetto, `507` spazio esaurito), `400` se il file manca; `DELETE /networks/:slug/avatar` risponde `200` anche senza avatar. Le tre chiamate rispondono con la credenziale aggiornata (`avatar_url`, `null` se assente). Cordiale invia solo i campi cambiati rispetto all'ultimo valore letto da `GET /networks`. Verificato sul codice del server, non ancora provato contro un server reale.
+
 **Non implementato per scelta esplicita** (non ambiguità, elencato per
 completezza): password/`server_pass` di rete (`PUT /networks/:slug/
 password`, `GET/PUT /networks/:slug/server_pass` — dati sensibili,
-fuori scope per questa sessione), avatar/profilo esteso (age/gender/
-location — bassa priorità), l'intero blocco `/me/settings/*` minore
+fuori scope per questa sessione), l'intero blocco `/me/settings/*` minore
 (upload-retention, auto-away-debounce, quit/part-reason, ecc. — non
 richiesti esplicitamente), `dcc-auto-accept`.
 
