@@ -77,6 +77,27 @@ pub struct LoginResponse {
     pub subject: Value,
 }
 
+/// Response body of `POST /me/share-token`: a single-use credential that
+/// signs a second device into this same identity. `expires_at` is the
+/// absolute ISO 8601 instant after which Grappa refuses it (ten minutes
+/// after minting).
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+pub struct ShareTokenMint {
+    pub token: String,
+    pub expires_at: String,
+}
+
+// A share token is a credential: keep it out of any `{:?}` that ends up in
+// a log line.
+impl std::fmt::Debug for ShareTokenMint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShareTokenMint")
+            .field("token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
 /// Response body of `GET /boot`, the cold-start aggregate endpoint.
 ///
 /// `networks`, `channels` and `heads` don't have a fully published field

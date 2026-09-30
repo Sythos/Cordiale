@@ -66,6 +66,7 @@ pub mod radio;
 pub mod release;
 pub mod rest;
 pub mod session;
+pub mod share;
 pub mod slash;
 pub mod theme;
 pub mod upload;

@@ -95,6 +95,11 @@ Cordiale also covers:
   with an authenticator code or one-time recovery code. Full-session users
   can enable or disable TOTP in Settings > Security and see new recovery
   codes once. Passkey-only sign-in still needs Cicchetto or a client token.
+- **Session sharing:** Settings > Security makes a single-use link and QR
+  code (valid ten minutes) that signs another device into the same account,
+  and the connect screen signs in with such a link or token from another
+  device, for example one made in Cicchetto after a passkey sign-in. Not yet
+  checked against a live server.
 - **Channel directory:** each network's Channels entry (or `/list`) opens
   its channel list beside the sidebar: search, Refresh, the channel count
   and how old the list is, then name, topic and user count per channel.

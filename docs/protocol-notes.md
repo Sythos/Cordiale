@@ -71,6 +71,27 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
   - Credenziali errate: `401 invalid_credentials`.
   - Throttling: `429 too_many_attempts` dopo 10 fallimenti da un indirizzo in
     15 minuti.
+- **Condivisione sessione (issue #142, schema letto da
+  `GrappaWeb.ShareTokenController`/`GrappaWeb.ShareToken` e da
+  `cicchetto/src/lib/api.ts`, 2026-09-30).**
+  - `POST /me/share-token` (sessione piena; un token per-client riceve
+    `403 client_token_scope`, un visitor incognito `403 forbidden`) →
+    `{token, expires_at}`. Il token è un `Phoenix.Token` monouso che vale
+    600 s. Cicchetto lo incapsula in `https://<host>/share#<token>` (nel
+    fragment, mai nel path) e ne mostra il QR; Cordiale genera e legge lo
+    stesso link.
+  - `POST /auth/share/consume {token}` — senza autenticazione, il token
+    firmato è la credenziale. Risponde come il login (`200 {token,
+    subject}`) con un bearer di **sessione piena (web)** per lo stesso
+    soggetto, utente o visitor. Errori: `410 share_token_expired`, `410
+    share_token_consumed`, `401` (firma non valida), `404 not_found`
+    (identità sparita), `400` (corpo malformato), `429 too_many_attempts`
+    (solo le firme non valide contano per la finestra).
+  - Cordiale: un utente entra con il nome account e il bearer ricordato come
+    dopo un login con password; un visitor non ha un nick nella risposta,
+    quindi entra come ospite senza nome e non viene ricordato.
+  - Da verificare end-to-end su un'istanza Grappa di prova: il flusso è
+    coperto da test con server simulato.
 
 - **Token per-client** — pensato esattamente per un client come Cordiale che
   non può gestire TOTP/WebAuthn:

@@ -27,7 +27,7 @@ prima di pianificare.
 | Recovery codes | Verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | /auth/totp/verify accetta anche recovery code; codici nuovi mostrati una volta dopo /me/totp/enrollment/confirm; vedi protocol-notes.md |
 | Eliminazione account | Sì (`DELETE /me`) | — | Superficie solo-account, fuori scope token per-client |
 | Registrazione nuovo account | No / non documentato | — | Nessun endpoint di signup nel contratto; da chiarire (protocol-notes §6.4) |
-| Condivisione sessione via QR | Incerto | — | Non menzionato nel contratto |
+| Condivisione sessione (link/QR) | Sì (sorgente Grappa/Cicchetto) | Implementato, non verificato su un server reale | `POST /me/share-token` (sessione piena) e `POST /auth/share/consume`; in Settings → Security si crea il link con QR, dalla schermata di connessione si entra incollando token o link; vedi protocol-notes.md §autenticazione |
 | Console amministrativa | Parziale | — | Gate `is_admin`, nessuna procedura di assegnazione documentata |
 | Vhost settings | No / non documentato | — | Non citato |
 | Directory canali | Sì (sorgente Grappa/Cicchetto) | Fase 2, implementato | Voce "Canali" per rete nella sidebar e `/list`: ricerca, refresh, totale, età dell'elenco, join o apertura con un clic (issue #121) |
