@@ -23,7 +23,7 @@ prima di pianificare.
 | Phoenix Channels realtime (user/network/channel topic) | Sì | Fase 1 | Vedi protocol-notes §2 |
 | network/channel/query, messaggi, stato realtime | Sì | Fase 1 | Perimetro Fase 1 |
 | TOTP (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | Login 202 → /auth/totp/verify; gestione /me/totp con sessione password piena; vedi protocol-notes.md §autenticazione e §superfici solo-account |
-| Passkey/WebAuthn (2FA) | Parziale | — | Cicchetto usa l'origine HTTPS di Grappa; un client nativo richiede un handoff browser o un flusso WebAuthn d'origine verificato |
+| Passkey/WebAuthn (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto/Wax | Fase 2, parziale (issue #147) | Contratto tipizzato di tutte le route passkey con test su server simulato; Settings → Security mostra modo e passkey e le elimina con la password (sessione password piena). Nessuna ceremonia WebAuthn: aggiunta, cambio modo e login con passkey restano in Cicchetto. Fattibilità per piattaforma (Windows sì via `webauthn.dll`, macOS/Linux solo chiavette USB con PIN) in [`passkey-spike.md`](./passkey-spike.md); non provato su un'istanza reale |
 | Recovery codes | Verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | /auth/totp/verify accetta anche recovery code; codici nuovi mostrati una volta dopo /me/totp/enrollment/confirm; vedi protocol-notes.md |
 | Eliminazione account | Sì (`DELETE /me`) | — | Superficie solo-account, fuori scope token per-client |
 | Registrazione nuovo account | No / non documentato | — | Nessun endpoint di signup nel contratto; da chiarire (protocol-notes §6.4) |

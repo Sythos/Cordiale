@@ -98,6 +98,145 @@ impl std::fmt::Debug for ShareTokenMint {
     }
 }
 
+/// A WebAuthn ceremony Grappa started (`{challenge_id, public_key}`): the
+/// id goes back with the authenticator's answer, `public_key` holds the
+/// options in Grappa's snake_case spelling. Binary values are base64url
+/// without padding, on the way in and out.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PasskeyOptions<T> {
+    pub challenge_id: String,
+    pub public_key: T,
+}
+
+/// A credential the authenticator may answer with.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PasskeyDescriptor {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub id: String,
+    #[serde(default)]
+    pub transports: Vec<String>,
+}
+
+/// `public_key` of an assertion (sign-in or mode change). The
+/// `clientDataJSON` challenge must be `challenge` as sent, and its origin
+/// Grappa's passkey origin exactly, whose host is `rp_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PasskeyRequestOptions {
+    pub challenge: String,
+    pub rp_id: String,
+    /// Milliseconds.
+    pub timeout: Option<u64>,
+    pub user_verification: Option<String>,
+    /// Empty on the passwordless door, which only a discoverable credential
+    /// can answer.
+    #[serde(default)]
+    pub allow_credentials: Vec<PasskeyDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PasskeyRelyingParty {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PasskeyUser {
+    pub id: String,
+    pub name: String,
+    pub display_name: String,
+}
+
+/// An accepted key type: `-7` (ES256) or `-257` (RS256) today.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PasskeyCredentialParameter {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub alg: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PasskeyAuthenticatorSelection {
+    pub resident_key: Option<String>,
+    pub user_verification: Option<String>,
+}
+
+/// `public_key` of a registration. Grappa asks for `attestation: "none"`
+/// and accepts nothing else in practice, so an attestation straight from
+/// a device must be rewritten to the `none` format before it's sent.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PasskeyCreationOptions {
+    pub challenge: String,
+    pub rp: PasskeyRelyingParty,
+    pub user: PasskeyUser,
+    pub pub_key_cred_params: Vec<PasskeyCredentialParameter>,
+    /// Milliseconds.
+    pub timeout: Option<u64>,
+    pub attestation: Option<String>,
+    #[serde(default)]
+    pub authenticator_selection: PasskeyAuthenticatorSelection,
+}
+
+/// An authenticator's assertion, as the passkey sign-in and mode doors
+/// take it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PasskeyAssertion {
+    pub challenge_id: String,
+    pub raw_id: String,
+    pub authenticator_data: String,
+    /// The exact bytes the authenticator signed the hash of.
+    pub client_data_json: String,
+    pub signature: String,
+    pub user_handle: Option<String>,
+}
+
+/// A newly created credential, for `POST /me/passkeys/registration`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PasskeyCredential {
+    pub challenge_id: String,
+    pub raw_id: String,
+    pub attestation_object: String,
+    pub client_data_json: String,
+    pub transports: Vec<String>,
+}
+
+/// How the account uses its passkeys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PasskeyMode {
+    Disabled,
+    SecondFactor,
+    Passwordless,
+}
+
+/// `GET /me/passkeys`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PasskeyStatus {
+    pub mode: PasskeyMode,
+    #[serde(default)]
+    pub passkeys: Vec<PasskeySummary>,
+}
+
+/// One registered passkey; timestamps are ISO 8601 (UTC).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PasskeySummary {
+    pub id: String,
+    pub name: Option<String>,
+    pub inserted_at: String,
+    /// `None` until the passkey is first used.
+    pub last_used_at: Option<String>,
+}
+
+/// `POST /me/passkeys/passwordless/recovery`: the recovery codes to show
+/// before passwordless is armed, and the token (valid ten minutes) that
+/// proves they were shown. The codes only become valid once the mode
+/// change completes. No `Debug`: both fields are credentials.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+pub struct PasswordlessRecovery {
+    pub recovery_codes: Vec<String>,
+    pub recovery_token: String,
+}
+
 /// Response body of `GET /boot`, the cold-start aggregate endpoint.
 ///
 /// `networks`, `channels` and `heads` don't have a fully published field

@@ -58,7 +58,11 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
     passkey `{…, passkey_options, totp_available, challenge_token}`, dove
     `challenge_token` è `null` se la passkey è l'unico fattore. Con un
     `challenge_token` Cordiale completa il login (issue #118, vedi sotto);
-    senza, spiega che serve un token per-client o Cicchetto.
+    senza, spiega che serve un token per-client o Cicchetto. Con passkey e
+    `totp_available: false` il `challenge_token` accetta solo recovery code,
+    e il passo codice lo dice (issue #147). `passkey_options` è letto in
+    forma tipizzata ma non ancora usato: nessuna ceremonia WebAuthn (vedi
+    [`passkey-spike.md`](./passkey-spike.md)).
 - **`POST /auth/totp/verify`** — `{challenge_token, code}` → `200 {token,
   subject}` con un bearer di sessione piena (web, scade dopo 7 giorni di
   inattività). `code` è il codice TOTP **o** un recovery code (Grappa prova
@@ -191,18 +195,38 @@ Settings → Security quando è entrato con la password:
 - Da verificare end-to-end su un'istanza Grappa di prova: il flusso è
   coperto da test con server simulato.
 
-**Nota per Grappa (2026-09-24, aggiornata 2026-09-27 per il TOTP) — cosa
-resta fuori da Cordiale.** Il TOTP ora è gestito (sopra); il resto della
-sezione Sicurezza resta in Cicchetto:
+**Passkey (issue #147, schema letto da `GrappaWeb.PasskeyController`,
+`Grappa.Accounts.WebAuthn` e da Wax 0.7.0, 2026-09-30).** Tutte le route
+sono nel client con test su server simulato; la UI usa solo quelle che non
+richiedono un autenticatore:
+- `GET /me/passkeys` → `{mode: "disabled" | "second_factor" |
+  "passwordless", passkeys: [{id, name, inserted_at, last_used_at}]}`
+  (`last_used_at` nullo finché non è usata). In Settings → Security.
+- `DELETE /me/passkeys/:id {password}` → `204`; `401` = password errata,
+  `409 passkey_required` = ultima passkey con un modo armato, `404
+  not_found`, `503 db_unavailable` distinto dall'errore di credenziali. In
+  Settings → Security.
+- Registrazione, cambio modo, attivazione passwordless e le porte di login
+  passkey richiedono una ceremonia WebAuthn e restano in Cicchetto; non
+  esiste un endpoint di rinomina. Dettagli, controllo esatto
+  dell'origine e fattibilità per piattaforma in
+  [`passkey-spike.md`](./passkey-spike.md).
+
+**Nota per Grappa (2026-09-24, aggiornata 2026-09-30) — cosa resta fuori da
+Cordiale.** TOTP ed elenco/eliminazione delle passkey sono gestiti (sopra);
+il resto della sezione Sicurezza resta in Cicchetto:
 
 - Con un token per-client (il login consigliato per un client nativo) ogni
   route di sicurezza risponde `403 client_token_scope`: TOTP, passkey,
   gestione dei token stessi e cancellazione account sono fuori scope per
   progetto, e un retry non cambia l'esito.
-- Le passkey sono WebAuthn: l'attestazione è legata all'origine web di
-  Grappa (RP ID) e al browser/autenticatore di piattaforma. Un client
-  nativo non può crearle né usarle senza API di sistema dedicate e senza
-  che Grappa accetti un'origine diversa da quella di Cicchetto.
+- Le passkey sono WebAuthn: Grappa confronta l'origine del
+  `clientDataJSON` con la sua origine esatta (`GRAPPA_PASSKEY_ORIGIN` o
+  l'URL pubblico) e l'hash dell'RP ID. Un client nativo può presentare
+  quella stessa origine solo tramite un'API che gli lasci costruire il
+  `clientDataJSON` (su Windows `webauthn.dll`; su Linux e macOS parlando
+  CTAP2 direttamente con una chiavetta), ma le opzioni non la includono e
+  va ricostruita.
 - Gestione dei token per-client e cancellazione account restano in
   Cicchetto: con una sessione password piena sarebbero raggiungibili, ma
   non sono state portate.

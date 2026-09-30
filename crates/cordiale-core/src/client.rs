@@ -47,7 +47,9 @@ use crate::profile::{
 use crate::rest::{
     ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
     DisplayPrefs, FeaturedChannel, FeaturedChannelsResponse, LoginRequest, LoginResponse,
-    MeResponse, MessageCountResponse, SendMessageRequest, ShareTokenMint, ThemeIndex, ThemeWire,
+    MeResponse, MessageCountResponse, PasskeyAssertion, PasskeyCreationOptions, PasskeyCredential,
+    PasskeyMode, PasskeyOptions, PasskeyRequestOptions, PasskeyStatus, PasskeySummary,
+    PasswordlessRecovery, SendMessageRequest, ShareTokenMint, ThemeIndex, ThemeWire,
     UploadResponse,
 };
 
@@ -148,8 +150,15 @@ pub struct TwoFactorChallenge {
     /// The short-lived (five minutes) token `POST /auth/totp/verify` takes;
     /// `None` when there is no TOTP path at all.
     pub challenge_token: Option<String>,
-    /// A passkey ceremony was offered too, which Cordiale doesn't perform.
+    /// A passkey ceremony was offered too.
     pub passkey_offered: bool,
+    /// That ceremony, for `POST /auth/passkeys/second-factor`, when its
+    /// options read as the expected shape. Boxed to keep `LoginError`
+    /// small.
+    pub passkey_options: Option<Box<PasskeyOptions<PasskeyRequestOptions>>>,
+    /// TOTP is armed. `false` with a `challenge_token` means the code door
+    /// only takes recovery codes. A TOTP-only reply doesn't send the field.
+    pub totp_available: bool,
 }
 
 impl TwoFactorChallenge {
@@ -159,9 +168,21 @@ impl TwoFactorChallenge {
             .and_then(Value::as_str)
             .filter(|token| !token.is_empty())
             .map(str::to_string);
+        let passkey_options = body
+            .get("passkey_options")
+            .and_then(|options| {
+                serde_json::from_value::<PasskeyOptions<PasskeyRequestOptions>>(options.clone())
+                    .ok()
+            })
+            .map(Box::new);
         TwoFactorChallenge {
             challenge_token,
             passkey_offered: body.get("passkey_options").is_some(),
+            passkey_options,
+            totp_available: body
+                .get("totp_available")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
         }
     }
 
@@ -169,6 +190,17 @@ impl TwoFactorChallenge {
     pub fn passkey_only(&self) -> bool {
         self.challenge_token.is_none()
     }
+
+    /// The code door is open but takes only recovery codes: a passkey is
+    /// the account's factor and TOTP isn't armed.
+    pub fn recovery_code_only(&self) -> bool {
+        self.challenge_token.is_some() && self.passkey_offered && !self.totp_available
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PasskeyModeReply {
+    mode: PasskeyMode,
 }
 
 /// `POST /me/totp/enrollment`: the unarmed secret and the token that
@@ -395,6 +427,188 @@ impl GrappaClient {
     /// sessions.
     pub async fn disable_totp(&self, token: &str, password: &str) -> Result<(), GrappaClientError> {
         let url = format!("{}/me/totp", self.base_url);
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "password": password }))
+            .send()
+            .await?;
+        reject_with_code(response).await?;
+        Ok(())
+    }
+
+    /// POSTs `body` to a passkey route, with the bearer when there is one,
+    /// keeping a refusal's code. On the passkey doors every failed
+    /// assertion is an opaque 401 `invalid_two_factor`, while 503
+    /// `db_unavailable` means Grappa accepted it but couldn't record it:
+    /// callers must keep the two apart.
+    async fn post_passkey<B, T>(
+        &self,
+        route: &str,
+        token: Option<&str>,
+        body: &B,
+    ) -> Result<T, GrappaClientError>
+    where
+        B: serde::Serialize + ?Sized,
+        T: serde::de::DeserializeOwned,
+    {
+        let url = format!("{}{route}", self.base_url);
+        let mut request = self.http.post(url).json(body);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let response = reject_with_code(request.send().await?).await?;
+        Ok(response.json::<T>().await?)
+    }
+
+    /// `POST /auth/passkeys/second-factor` — finishes a `202` with the
+    /// assertion for its `passkey_options` and returns a full-session
+    /// bearer.
+    pub async fn verify_passkey_second_factor(
+        &self,
+        assertion: &PasskeyAssertion,
+    ) -> Result<LoginResponse, GrappaClientError> {
+        self.post_passkey("/auth/passkeys/second-factor", None, assertion)
+            .await
+    }
+
+    /// `POST /auth/passkeys/options` — starts a passwordless sign-in. An
+    /// account that isn't passwordless (or doesn't exist) is 401
+    /// `invalid_credentials`; the door is throttled per address (429).
+    pub async fn passkey_login_options(
+        &self,
+        identifier: &str,
+    ) -> Result<PasskeyOptions<PasskeyRequestOptions>, GrappaClientError> {
+        let body = serde_json::json!({ "identifier": identifier });
+        self.post_passkey("/auth/passkeys/options", None, &body)
+            .await
+    }
+
+    /// `POST /auth/passkeys/verify` — finishes a passwordless sign-in.
+    pub async fn verify_passkey_login(
+        &self,
+        assertion: &PasskeyAssertion,
+    ) -> Result<LoginResponse, GrappaClientError> {
+        self.post_passkey("/auth/passkeys/verify", None, assertion)
+            .await
+    }
+
+    /// `POST /auth/passkeys/recover` — signs a passwordless account in with
+    /// one of its recovery codes, which is spent. A wrong code is 401
+    /// `invalid_two_factor`, 429 `too_many_attempts` a throttle.
+    pub async fn recover_passkey_login(
+        &self,
+        identifier: &str,
+        recovery_code: &str,
+    ) -> Result<LoginResponse, GrappaClientError> {
+        let body = serde_json::json!({ "identifier": identifier, "recovery_code": recovery_code });
+        self.post_passkey("/auth/passkeys/recover", None, &body)
+            .await
+    }
+
+    /// `GET /me/passkeys` — the account's mode and passkeys. Like every
+    /// `/me/passkeys*` route it needs a full session: a per-client token
+    /// gets 403 `client_token_scope`.
+    pub async fn fetch_passkeys(&self, token: &str) -> Result<PasskeyStatus, GrappaClientError> {
+        let url = format!("{}/me/passkeys", self.base_url);
+        let response = self.http.get(url).bearer_auth(token).send().await?;
+        let response = reject_with_code(response).await?;
+        Ok(response.json::<PasskeyStatus>().await?)
+    }
+
+    /// `POST /me/passkeys/registration/options` — re-authenticates with the
+    /// password (401 is a wrong password) and starts a registration.
+    pub async fn start_passkey_registration(
+        &self,
+        token: &str,
+        password: &str,
+        name: &str,
+    ) -> Result<PasskeyOptions<PasskeyCreationOptions>, GrappaClientError> {
+        let body = serde_json::json!({ "password": password, "name": name });
+        self.post_passkey("/me/passkeys/registration/options", Some(token), &body)
+            .await
+    }
+
+    /// `POST /me/passkeys/registration` — stores the new credential (201).
+    pub async fn finish_passkey_registration(
+        &self,
+        token: &str,
+        credential: &PasskeyCredential,
+    ) -> Result<PasskeySummary, GrappaClientError> {
+        self.post_passkey("/me/passkeys/registration", Some(token), credential)
+            .await
+    }
+
+    /// `POST /me/passkeys/mode/options` — re-authenticates with the
+    /// password and starts the assertion that switches to `mode`.
+    /// Passwordless isn't accepted here (400): it has its own two-step door.
+    pub async fn start_passkey_mode_change(
+        &self,
+        token: &str,
+        password: &str,
+        mode: PasskeyMode,
+    ) -> Result<PasskeyOptions<PasskeyRequestOptions>, GrappaClientError> {
+        let body = serde_json::json!({ "password": password, "mode": mode });
+        self.post_passkey("/me/passkeys/mode/options", Some(token), &body)
+            .await
+    }
+
+    /// `POST /me/passkeys/passwordless/recovery` — first step towards
+    /// passwordless: the recovery codes to show the user before anything
+    /// else, and the token for `start_passwordless_activation`.
+    pub async fn prepare_passwordless(
+        &self,
+        token: &str,
+        password: &str,
+    ) -> Result<PasswordlessRecovery, GrappaClientError> {
+        let body = serde_json::json!({ "password": password });
+        self.post_passkey("/me/passkeys/passwordless/recovery", Some(token), &body)
+            .await
+    }
+
+    /// `POST /me/passkeys/passwordless/options` — starts the assertion that
+    /// arms passwordless. The token is bound to this session and expires
+    /// after ten minutes (401 `invalid_two_factor`).
+    pub async fn start_passwordless_activation(
+        &self,
+        token: &str,
+        recovery_token: &str,
+    ) -> Result<PasskeyOptions<PasskeyRequestOptions>, GrappaClientError> {
+        let body = serde_json::json!({ "recovery_token": recovery_token });
+        self.post_passkey("/me/passkeys/passwordless/options", Some(token), &body)
+            .await
+    }
+
+    /// `POST /me/passkeys/mode` — finishes a mode change (or the
+    /// passwordless activation) and returns the mode now in force. Grappa
+    /// revokes the account's other sessions.
+    pub async fn finish_passkey_mode_change(
+        &self,
+        token: &str,
+        assertion: &PasskeyAssertion,
+    ) -> Result<PasskeyMode, GrappaClientError> {
+        let reply: PasskeyModeReply = self
+            .post_passkey("/me/passkeys/mode", Some(token), assertion)
+            .await?;
+        Ok(reply.mode)
+    }
+
+    /// `DELETE /me/passkeys/:id` — removes a passkey after re-authenticating
+    /// with the password (401). 409 `passkey_required` refuses the last
+    /// passkey while a mode still needs it; 404 `not_found` is one that's
+    /// already gone.
+    pub async fn delete_passkey(
+        &self,
+        token: &str,
+        id: &str,
+        password: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["me", "passkeys", id]);
         let response = self
             .http
             .delete(url)
@@ -3144,9 +3358,33 @@ mod tests {
             ))
             .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
                 "two_factor_required": true,
-                "passkey_options": {"challenge_id": "p", "public_key": {}},
+                "passkey_options": {
+                    "challenge_id": "p",
+                    "public_key": {
+                        "challenge": "q2x0Y2hhbGxlbmdl",
+                        "rp_id": "irc.example.org",
+                        "timeout": 300_000,
+                        "user_verification": "required",
+                        "allow_credentials": [
+                            {"type": "public-key", "id": "Y3JlZA", "transports": ["usb"]}
+                        ]
+                    }
+                },
                 "totp_available": true,
                 "challenge_token": "ch-2"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/login"))
+            .and(body_json(
+                serde_json::json!({"identifier": "codes", "password": "pw"}),
+            ))
+            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+                "two_factor_required": true,
+                "passkey_options": {"challenge_id": "p", "public_key": {}},
+                "totp_available": false,
+                "challenge_token": "ch-3"
             })))
             .mount(&mock_server)
             .await;
@@ -3181,11 +3419,28 @@ mod tests {
         let totp = challenge("totp").await;
         assert_eq!(totp.challenge_token.as_deref(), Some("ch-1"));
         assert!(!totp.passkey_offered);
+        assert!(totp.totp_available && !totp.recovery_code_only());
         let both = challenge("both").await;
         assert_eq!(both.challenge_token.as_deref(), Some("ch-2"));
         assert!(both.passkey_offered && !both.passkey_only());
+        assert!(!both.recovery_code_only());
+        let options = both.passkey_options.expect("typed passkey options");
+        assert_eq!(options.challenge_id, "p");
+        assert_eq!(options.public_key.rp_id, "irc.example.org");
+        assert_eq!(
+            options.public_key.user_verification.as_deref(),
+            Some("required")
+        );
+        assert_eq!(options.public_key.allow_credentials[0].id, "Y3JlZA");
+        assert_eq!(options.public_key.allow_credentials[0].transports, ["usb"]);
+        // A passkey plus recovery codes and no TOTP: the code door only
+        // takes recovery codes. Options that don't read still count as a
+        // passkey offer.
+        let codes = challenge("codes").await;
+        assert!(codes.recovery_code_only());
+        assert!(codes.passkey_offered && codes.passkey_options.is_none());
         let passkey = challenge("passkey").await;
-        assert!(passkey.passkey_only());
+        assert!(passkey.passkey_only() && !passkey.recovery_code_only());
     }
 
     #[tokio::test]
@@ -3467,6 +3722,348 @@ mod tests {
             .unwrap_err();
         assert_eq!(wrong.status(), Some(StatusCode::UNAUTHORIZED));
         assert_eq!(wrong.code(), Some("invalid_credentials"));
+    }
+
+    /// An assertion as an authenticator would hand it back, base64url.
+    fn test_assertion(challenge_id: &str) -> PasskeyAssertion {
+        PasskeyAssertion {
+            challenge_id: challenge_id.to_string(),
+            raw_id: "Y3JlZA".to_string(),
+            authenticator_data: "YXV0aA".to_string(),
+            client_data_json: "e30".to_string(),
+            signature: "c2ln".to_string(),
+            user_handle: None,
+        }
+    }
+
+    fn assertion_body(challenge_id: &str) -> Value {
+        serde_json::json!({
+            "challenge_id": challenge_id,
+            "raw_id": "Y3JlZA",
+            "authenticator_data": "YXV0aA",
+            "client_data_json": "e30",
+            "signature": "c2ln",
+            "user_handle": null
+        })
+    }
+
+    #[tokio::test]
+    async fn passkey_sign_in_doors_return_the_bearer_and_keep_refusal_codes() {
+        // Recovery codes built at run time, like the test passwords.
+        let good_code = format!("{}-good", test_password());
+        let spent_code = format!("{}-spent", test_password());
+        let mock_server = MockServer::start().await;
+        let login = serde_json::json!({"token": "full-session", "subject": {"kind": "user"}});
+        Mock::given(method("POST"))
+            .and(path("/auth/passkeys/second-factor"))
+            .and(body_json(assertion_body("second")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(login.clone()))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/passkeys/second-factor"))
+            .and(body_json(assertion_body("busy")))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .set_body_json(serde_json::json!({"error": "db_unavailable"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/passkeys/options"))
+            .and(body_json(serde_json::json!({"identifier": "vjt"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "challenge_id": "pwless",
+                "public_key": {
+                    "challenge": "Y2hhbA",
+                    "rp_id": "irc.example.org",
+                    "timeout": 300_000,
+                    "user_verification": "required"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/passkeys/verify"))
+            .and(body_json(assertion_body("pwless")))
+            .respond_with(
+                ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"error": "invalid_two_factor"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/passkeys/recover"))
+            .and(body_json(
+                serde_json::json!({"identifier": "vjt", "recovery_code": good_code}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(login))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/auth/passkeys/recover"))
+            .and(body_json(
+                serde_json::json!({"identifier": "vjt", "recovery_code": spent_code}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .set_body_json(serde_json::json!({"error": "too_many_attempts"})),
+            )
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let second = client
+            .verify_passkey_second_factor(&test_assertion("second"))
+            .await
+            .expect("second factor");
+        assert_eq!(second.token, "full-session");
+        // A saturated database is not a bad authenticator.
+        let busy = client
+            .verify_passkey_second_factor(&test_assertion("busy"))
+            .await
+            .unwrap_err();
+        assert_eq!(busy.status(), Some(StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(busy.code(), Some("db_unavailable"));
+
+        let options = client.passkey_login_options("vjt").await.expect("options");
+        assert_eq!(options.challenge_id, "pwless");
+        // The passwordless door never names the account's credentials.
+        assert!(options.public_key.allow_credentials.is_empty());
+        let refused = client
+            .verify_passkey_login(&test_assertion("pwless"))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status(), Some(StatusCode::UNAUTHORIZED));
+        assert_eq!(refused.code(), Some("invalid_two_factor"));
+
+        let recovered = client
+            .recover_passkey_login("vjt", &good_code)
+            .await
+            .expect("recover");
+        assert_eq!(recovered.token, "full-session");
+        let throttled = client
+            .recover_passkey_login("vjt", &spent_code)
+            .await
+            .unwrap_err();
+        assert_eq!(throttled.status(), Some(StatusCode::TOO_MANY_REQUESTS));
+        assert_eq!(throttled.code(), Some("too_many_attempts"));
+    }
+
+    #[tokio::test]
+    async fn passkey_settings_follow_the_grappa_contract() {
+        let password = test_password();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/passkeys"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "mode": "second_factor",
+                "passkeys": [
+                    {
+                        "id": "0b6f0c5e-0000-4000-8000-000000000001",
+                        "name": "YubiKey",
+                        "inserted_at": "2026-09-01T10:00:00.000000Z",
+                        "last_used_at": null
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/passkeys/registration/options"))
+            .and(header("authorization", "Bearer tok"))
+            .and(body_json(
+                serde_json::json!({"password": password, "name": "Laptop"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "challenge_id": "reg",
+                "public_key": {
+                    "challenge": "Y2hhbA",
+                    "rp": {"id": "irc.example.org", "name": "Grappa"},
+                    "user": {"id": "dWlk", "name": "vjt", "display_name": "vjt"},
+                    "pub_key_cred_params": [
+                        {"type": "public-key", "alg": -7},
+                        {"type": "public-key", "alg": -257}
+                    ],
+                    "timeout": 300_000,
+                    "attestation": "none",
+                    "authenticator_selection": {
+                        "resident_key": "preferred",
+                        "user_verification": "required"
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/passkeys/registration"))
+            .and(body_json(serde_json::json!({
+                "challenge_id": "reg",
+                "raw_id": "Y3JlZA",
+                "attestation_object": "b2Jq",
+                "client_data_json": "e30",
+                "transports": ["usb"]
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "0b6f0c5e-0000-4000-8000-000000000002",
+                "name": "Laptop",
+                "inserted_at": "2026-09-30T10:00:00.000000Z",
+                "last_used_at": null
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/passkeys/mode/options"))
+            .and(body_json(
+                serde_json::json!({"password": password, "mode": "disabled"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "challenge_id": "mode",
+                "public_key": {"challenge": "Y2hhbA", "rp_id": "irc.example.org"}
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/passkeys/passwordless/recovery"))
+            .and(body_json(serde_json::json!({"password": password})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "recovery_codes": ["aaaa-bbbb", "cccc-dddd"],
+                "recovery_token": "sealed"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/passkeys/passwordless/options"))
+            .and(body_json(serde_json::json!({"recovery_token": "sealed"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "challenge_id": "activate",
+                "public_key": {"challenge": "Y2hhbA", "rp_id": "irc.example.org"}
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/me/passkeys/mode"))
+            .and(body_json(assertion_body("activate")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"mode": "passwordless"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/me/passkeys/0b6f0c5e-0000-4000-8000-000000000001"))
+            .and(body_json(serde_json::json!({"password": password})))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/me/passkeys/last"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(serde_json::json!({"error": "passkey_required"})),
+            )
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        let status = client.fetch_passkeys("tok").await.expect("status");
+        assert_eq!(status.mode, PasskeyMode::SecondFactor);
+        assert_eq!(status.passkeys.len(), 1);
+        assert_eq!(status.passkeys[0].name.as_deref(), Some("YubiKey"));
+        assert_eq!(status.passkeys[0].last_used_at, None);
+
+        let registration = client
+            .start_passkey_registration("tok", &password, "Laptop")
+            .await
+            .expect("registration options");
+        assert_eq!(registration.challenge_id, "reg");
+        assert_eq!(registration.public_key.rp.id, "irc.example.org");
+        let algorithms: Vec<i64> = registration
+            .public_key
+            .pub_key_cred_params
+            .iter()
+            .map(|param| param.alg)
+            .collect();
+        assert_eq!(algorithms, [-7, -257]);
+        assert_eq!(registration.public_key.attestation.as_deref(), Some("none"));
+        assert_eq!(
+            registration
+                .public_key
+                .authenticator_selection
+                .user_verification
+                .as_deref(),
+            Some("required")
+        );
+        let credential = PasskeyCredential {
+            challenge_id: "reg".to_string(),
+            raw_id: "Y3JlZA".to_string(),
+            attestation_object: "b2Jq".to_string(),
+            client_data_json: "e30".to_string(),
+            transports: vec!["usb".to_string()],
+        };
+        let added = client
+            .finish_passkey_registration("tok", &credential)
+            .await
+            .expect("registration");
+        assert_eq!(added.name.as_deref(), Some("Laptop"));
+
+        let mode = client
+            .start_passkey_mode_change("tok", &password, PasskeyMode::Disabled)
+            .await
+            .expect("mode options");
+        assert_eq!(mode.challenge_id, "mode");
+        assert!(mode.public_key.allow_credentials.is_empty());
+
+        let recovery = client
+            .prepare_passwordless("tok", &password)
+            .await
+            .expect("recovery codes");
+        assert_eq!(recovery.recovery_codes.len(), 2);
+        let activation = client
+            .start_passwordless_activation("tok", &recovery.recovery_token)
+            .await
+            .expect("activation options");
+        assert_eq!(
+            client
+                .finish_passkey_mode_change("tok", &test_assertion(&activation.challenge_id))
+                .await
+                .expect("mode"),
+            PasskeyMode::Passwordless
+        );
+
+        client
+            .delete_passkey("tok", "0b6f0c5e-0000-4000-8000-000000000001", &password)
+            .await
+            .expect("delete");
+        let last = client
+            .delete_passkey("tok", "last", &password)
+            .await
+            .unwrap_err();
+        assert_eq!(last.status(), Some(StatusCode::CONFLICT));
+        assert_eq!(last.code(), Some("passkey_required"));
+    }
+
+    #[tokio::test]
+    async fn passkey_settings_refuse_a_client_token() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/passkeys"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(serde_json::json!({"error": "client_token_scope"})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let scope = GrappaClient::new(mock_server.uri())
+            .fetch_passkeys("client-token")
+            .await
+            .unwrap_err();
+        assert_eq!(scope.status(), Some(StatusCode::FORBIDDEN));
+        assert_eq!(scope.code(), Some("client_token_scope"));
     }
 
     #[tokio::test]
