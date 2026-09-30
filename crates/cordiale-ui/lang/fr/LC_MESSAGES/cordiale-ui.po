@@ -2687,3 +2687,27 @@ msgstr "Nouveau mot de passe (laisser vide pour le conserver)"
 msgctxt "AppWindow"
 msgid "A new password ends the account's live session on this network; it has to reconnect."
 msgstr "Un nouveau mot de passe met fin à la session active du compte sur ce réseau ; il devra se reconnecter."
+
+msgctxt "DirectoryEntry"
+msgid "Open {}"
+msgstr "Ouvrir {}"
+
+msgctxt "DirectoryEntry"
+msgid "Join {}"
+msgstr "Rejoindre {}"
+
+msgctxt "DirectoryEntry"
+msgid "{} users"
+msgstr "{} utilisateurs"
+
+msgctxt "DirectoryEntry"
+msgid "{} users — {}"
+msgstr "{} utilisateurs — {}"
+
+msgctxt "DirectoryEntry"
+msgid "featured"
+msgstr "en vedette"
+
+msgctxt "DirectoryEntry"
+msgid "joined"
+msgstr "rejoint"
