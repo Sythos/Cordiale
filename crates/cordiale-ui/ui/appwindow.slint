@@ -874,6 +874,13 @@ export component AppWindow inherits Window {
     in property <bool> is-admin: false;
 
     in-out property <string> server-url: "https://irc.sindro.me";
+    changed server-url => { passkey-origin-reload(server-url); }
+    // The WebAuthn origin to assert for this server when it isn't the one
+    // rebuilt from its URL (issue #163); empty means no override.
+    in-out property <string> passkey-origin: "";
+    // Set after Settings > Security saved the field; any edit clears it.
+    in-out property <bool> passkey-origin-saved: false;
+    property <bool> passkey-origin-ok: passkey-origin-valid(passkey-origin);
     in-out property <string> identifier: "";
     in-out property <string> password: "";
     // The code step of a two-factor sign-in (screen "totp").
@@ -1291,6 +1298,11 @@ export component AppWindow inherits Window {
     callback security-share-requested();
     callback security-share-done();
     callback security-passkeys-requested();
+    callback passkey-origin-reload(string); // server URL: show its saved override
+    callback passkey-origin-save(string, string); // server URL, origin
+    pure callback passkey-origin-valid(string) -> bool;
+    // The origin used for a server URL and an override text.
+    pure callback passkey-origin-preview(string, string) -> string;
     callback security-passkey-delete(string, string); // id, password
     callback copy-text-requested(string);
     callback security-copy-recovery-codes();
@@ -2102,6 +2114,8 @@ export component AppWindow inherits Window {
             return @tr("You were signed out because this client sent too many requests. Your IRC session is still running; sign in again to continue.");
         } else if status-kind == "two-factor-passkey-only" {
             return @tr("This account's second factor is a passkey, which Cordiale can't use yet. Sign in with a per-client token created in Cicchetto, or use Cicchetto.");
+        } else if status-kind == "passkey-refused" {
+            return @tr("The server refused the passkey. The authenticator may be the wrong one, or the server expects another origin than {}. If it does, enter it under Passkey origin.", passkey-origin-preview(server-url, passkey-origin));
         } else if status-kind == "totp-invalid" {
             return @tr("That code isn't valid. Check the clock on your device, or use one of your recovery codes.");
         } else if status-kind == "totp-expired" {
@@ -2478,9 +2492,22 @@ export component AppWindow inherits Window {
             input-type: InputType.password;
         }
 
+        LineEdit {
+            placeholder-text: @tr("Passkey origin (optional)");
+            accessible-label: @tr("Passkey origin (optional)");
+            text <=> passkey-origin;
+            edited => { passkey-origin-saved = false; }
+        }
+        if !passkey-origin-ok : Text {
+            text: @tr("That isn't an origin. Use the form https://host or https://host:port, without a path.");
+            wrap: word-wrap;
+            color: theme == "dark" ? #e57373 : #c0392b;
+            accessible-live-region: AccessibleLiveness.polite;
+        }
+
         Button {
             text: connecting ? @tr("Connecting…") : @tr("Connect");
-            enabled: !connecting;
+            enabled: !connecting && passkey-origin-ok;
             clicked => { connect-requested(server-url, identifier, password); }
         }
 
@@ -4465,12 +4492,52 @@ export component AppWindow inherits Window {
                 if security-passkey-error != "" : Text {
                     text: security-passkey-error == "wrong-password" ? @tr("Wrong password.")
                         : security-passkey-error == "last-passkey" ? @tr("That's the last passkey and the account still signs in with it. Turn passkeys off or add another one in Cicchetto first.")
+                        : security-passkey-error == "refused" ? @tr("The server refused the passkey. The authenticator may be the wrong one, or the server expects another origin than {}. If it does, enter it under Passkey origin.", passkey-origin-preview(server-url, passkey-origin))
                         : security-passkey-error == "client-token" ? @tr("A per-client token can't change second factors.")
                         : security-passkey-error == "busy" ? @tr("Grappa is busy right now. Try again in a moment.")
                         : security-passkey-error == "throttled" ? @tr("Too many attempts. Wait a few minutes before trying again.")
                         : @tr("Couldn't delete the passkey.");
                     wrap: word-wrap;
                     color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+
+                Text {
+                    text: @tr("Passkey origin");
+                    font-weight: 600;
+                }
+                Text {
+                    text: @tr("A passkey only answers for one exact origin. For this server Cordiale uses {}. If the server is set up with another one (GRAPPA_PASSKEY_ORIGIN), enter it here; leave the field empty otherwise. It stays on this device.", passkey-origin-preview(server-url, passkey-origin));
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    LineEdit {
+                        placeholder-text: @tr("Passkey origin (optional)");
+                        accessible-label: @tr("Passkey origin (optional)");
+                        text <=> passkey-origin;
+                        edited => { passkey-origin-saved = false; }
+                        accepted => {
+                            if passkey-origin-ok { passkey-origin-save(server-url, passkey-origin); }
+                        }
+                    }
+                    CompactButton {
+                        text: "💾  " + @tr("Save");
+                        a11y-label: @tr("Save");
+                        enabled: passkey-origin-ok;
+                        clicked => { passkey-origin-save(server-url, passkey-origin); }
+                    }
+                }
+                if !passkey-origin-ok : Text {
+                    text: @tr("That isn't an origin. Use the form https://host or https://host:port, without a path.");
+                    wrap: word-wrap;
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+                if passkey-origin-saved : Text {
+                    text: @tr("Saved.");
+                    color: palette-muted;
                     accessible-live-region: AccessibleLiveness.polite;
                 }
 

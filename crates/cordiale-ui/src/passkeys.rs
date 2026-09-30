@@ -39,15 +39,19 @@ pub(crate) fn mode_key(mode: PasskeyMode) -> &'static str {
 }
 
 /// Status key for a refused passkey settings call. A 401 is a wrong
-/// password (never a dead session), a 409 the last passkey a mode still
-/// needs, and a 503 a busy server, which must not read as a bad request.
-/// `gone` (404) only asks for a fresh list.
+/// password (never a dead session), unless its code is `invalid_two_factor`:
+/// that is how Grappa refuses a ceremony, and it can't say whether the
+/// authenticator was wrong or the origin Cordiale asserted differs from the
+/// server's (`refused`; see `cordiale_core::passkey_origin`). A 409 is the
+/// last passkey a mode still needs, and a 503 a busy server, which must not
+/// read as a bad request. `gone` (404) only asks for a fresh list.
 pub(crate) fn settings_error_key(err: &GrappaClientError) -> &'static str {
     match (err.status().map(|status| status.as_u16()), err.code()) {
         (_, Some("client_token_scope")) | (Some(403), _) => "client-token",
         (_, Some("passkey_required")) | (Some(409), _) => "last-passkey",
         (Some(404), _) => "gone",
         (_, Some("db_unavailable")) | (Some(503), _) => "busy",
+        (_, Some("invalid_two_factor")) => "refused",
         (Some(401), _) => "wrong-password",
         (Some(429), _) => "throttled",
         _ => "failed",
@@ -100,5 +104,17 @@ mod tests {
             "throttled"
         );
         assert_eq!(settings_error_key(&rejected(500, None)), "failed");
+    }
+
+    #[test]
+    fn a_refused_ceremony_is_not_a_wrong_password() {
+        assert_eq!(
+            settings_error_key(&rejected(401, Some("invalid_two_factor"))),
+            "refused"
+        );
+        assert_eq!(
+            settings_error_key(&rejected(401, Some("invalid_credentials"))),
+            "wrong-password"
+        );
     }
 }

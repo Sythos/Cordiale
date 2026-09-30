@@ -59,6 +59,7 @@ pub mod formatting;
 pub mod isupport;
 pub mod links;
 pub mod media;
+pub mod passkey_origin;
 pub mod persistence;
 pub mod phoenix;
 pub mod profile;

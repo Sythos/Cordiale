@@ -53,6 +53,7 @@ use cordiale_core::credentials::{
 };
 use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
+use cordiale_core::passkey_origin::{check_override, passkey_origin, OverrideCheck};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::profile::{gender_for_index, has_avatar, IgnoreEntry, ProfileFields};
 use cordiale_core::protocol::CLIENT_PROTOCOL_VERSION;
@@ -409,6 +410,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let remembered_server_url = load_remembered_server_url();
     ui.set_server_url(remembered_server_url.clone().into());
     prefill_remembered_profile(&ui, &remembered_server_url);
+    load_passkey_origin_field(&ui, &remembered_server_url);
 
     let settings = persistence::load_settings().unwrap_or_default();
     let auto_connect = settings.auto_connect && settings.language.is_some();
@@ -560,11 +562,32 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    ui.on_passkey_origin_preview(|server_url, origin| {
+        passkey_origin(&server_url, Some(origin.as_str())).into()
+    });
+    ui.on_passkey_origin_valid(|origin| !matches!(check_override(&origin), OverrideCheck::Invalid));
+    let weak_for_origin = ui.as_weak();
+    ui.on_passkey_origin_reload(move |server_url| {
+        if let Some(ui) = weak_for_origin.upgrade() {
+            load_passkey_origin_field(&ui, &server_url);
+        }
+    });
+    let weak_for_origin = ui.as_weak();
+    ui.on_passkey_origin_save(move |server_url, origin| {
+        let saved =
+            persistence::save_passkey_origin_override(&server_url, &check_override(&origin))
+                .is_ok();
+        if let Some(ui) = weak_for_origin.upgrade() {
+            ui.set_passkey_origin_saved(saved);
+        }
+    });
+
     let tx_for_connect = worker_tx.clone();
     let weak_for_connect = ui.as_weak();
     ui.on_connect_requested(move |server_url, identifier, password| {
         let server_url = normalize_server_url(&server_url);
         if let Some(ui) = weak_for_connect.upgrade() {
+            save_passkey_origin_field(&ui, &server_url);
             ui.set_server_url(server_url.clone().into());
             ui.set_connecting(true);
             ui.set_status_kind("".into());
@@ -684,6 +707,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_saved_profile_connect_requested(move |server_url, identifier| {
         let server_url = normalize_server_url(&server_url);
         if let Some(ui) = weak_for_saved_profile.upgrade() {
+            save_passkey_origin_field(&ui, &server_url);
             ui.set_server_url(server_url.clone().into());
             ui.set_connecting(true);
             ui.set_status_kind("".into());
@@ -18679,6 +18703,23 @@ fn remember_server_url(server_url: &str) {
     let mut file = persistence::load_servers_file().unwrap_or_default();
     file.selected_server_base_url = Some(server_url.to_string());
     let _ = persistence::save_servers_file(&file);
+}
+
+/// Shows the passkey origin saved for `server_url` in the origin field.
+fn load_passkey_origin_field(ui: &AppWindow, server_url: &str) {
+    let saved = persistence::load_passkey_origin_override(server_url).unwrap_or_default();
+    ui.set_passkey_origin(saved.into());
+    ui.set_passkey_origin_saved(false);
+}
+
+/// Saves what the origin field holds for `server_url` when signing in, so
+/// the passkey ceremony that may follow uses it. An invalid entry is left
+/// out: the connect screen doesn't let it through.
+fn save_passkey_origin_field(ui: &AppWindow, server_url: &str) {
+    let _ = persistence::save_passkey_origin_override(
+        server_url,
+        &check_override(&ui.get_passkey_origin()),
+    );
 }
 
 /// Called only after a successful non-guest bootstrap. Grappa's returned

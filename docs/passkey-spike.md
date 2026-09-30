@@ -68,12 +68,18 @@ origine.
 **Conseguenza pratica.** Le opzioni che Grappa invia contengono `rp_id` ma
 **non** l'origine (`authentication_options/3` e `registration_options/3`,
 [verificato]), e `/api/config` non la espone. Un client nativo deve
-ricostruirla: la regola sensata è "l'origine dell'URL del server se il suo
-host coincide con `rp_id`, altrimenti `https://<rp_id>`". Se l'operatore ha
-un'origine diversa (porta non standard, dominio dietro proxy, sviluppo),
-l'errore è il generico `401 invalid_two_factor`, indistinguibile da un
-autenticatore sbagliato. Una proposta a Grappa per esporre l'origine (per
-esempio in `/api/config` o nelle opzioni) eliminerebbe l'ipotesi.
+ricostruirla. La regola implementata (`cordiale_core::passkey_origin`,
+issue #163) è: schema, host in minuscolo e porta dell'URL del server a cui
+Cordiale è collegato, con la porta di default (443 per https, 80 per http)
+omessa, senza percorso né credenziali; l'RP ID è l'host di quell'origine.
+Se l'operatore ha un'origine diversa (porta non standard, dominio dietro
+proxy, sviluppo), l'errore è il generico `401 invalid_two_factor`,
+indistinguibile da un autenticatore sbagliato: per questo ogni server ha un
+override locale (Connessione e Impostazioni > Sicurezza), salvato in
+`servers.json` e mai inviato a Grappa, che va scritto come la stringa di
+`GRAPPA_PASSKEY_ORIGIN` e sostituisce la regola. Una proposta a Grappa per
+esporre l'origine (per esempio in `/api/config` o nelle opzioni)
+eliminerebbe l'override; va fatta nel repository di Grappa.
 
 ## b) Cosa deve contenere il `clientDataJSON` e quali formati passano
 
@@ -297,8 +303,8 @@ ricostruito in formato `none`); opzioni e verifica dalla stessa connessione.
    con `GRAPPA_PASSKEY_ORIGIN` noto e una chiave o Windows Hello reali.
 2. **Chiavette USB su Linux/macOS** con `ctap-hid-fido2`: PIN nell'interfaccia,
    ricodifica dell'attestazione in `none`, prova del build C di hidapi in CI.
-3. **Origine**: chiedere a Grappa di esporla, o documentare la regola di
-   ricostruzione e offrire un override.
+3. **Origine**: regola di ricostruzione e override per server fatti (§a);
+   resta da chiedere a Grappa di esporla, così l'override non servirebbe.
 4. **Login con recovery code** per gli account passwordless (non richiede
    autenticatore; il metodo client esiste, manca l'ingresso nella schermata
    di connessione).

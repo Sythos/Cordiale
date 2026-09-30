@@ -2979,3 +2979,27 @@ msgstr "Impossibile eliminare la passkey."
 msgctxt "AppWindow"
 msgid "Adding a passkey and changing how the account uses them still happen in Cicchetto: Cordiale can't talk to an authenticator yet. Client tokens and account deletion are managed there too."
 msgstr "Aggiungere una passkey e cambiare come l'account le usa si fa ancora in Cicchetto: Cordiale non sa ancora dialogare con un autenticatore. Lì si gestiscono anche i token client e l'eliminazione dell'account."
+
+msgctxt "AppWindow"
+msgid "The server refused the passkey. The authenticator may be the wrong one, or the server expects another origin than {}. If it does, enter it under Passkey origin."
+msgstr "Il server ha rifiutato la passkey. L'autenticatore potrebbe essere quello sbagliato, oppure il server si aspetta un'origine diversa da {}. In tal caso inseriscila in Origine delle passkey."
+
+msgctxt "AppWindow"
+msgid "Passkey origin (optional)"
+msgstr "Origine passkey (facoltativa)"
+
+msgctxt "AppWindow"
+msgid "That isn't an origin. Use the form https://host or https://host:port, without a path."
+msgstr "Questa non è un'origine. Usa la forma https://host oppure https://host:porta, senza percorso."
+
+msgctxt "AppWindow"
+msgid "Passkey origin"
+msgstr "Origine delle passkey"
+
+msgctxt "AppWindow"
+msgid "A passkey only answers for one exact origin. For this server Cordiale uses {}. If the server is set up with another one (GRAPPA_PASSKEY_ORIGIN), enter it here; leave the field empty otherwise. It stays on this device."
+msgstr "Una passkey risponde solo per un'origine esatta. Per questo server Cordiale usa {}. Se il server è configurato con un'altra (GRAPPA_PASSKEY_ORIGIN), inseriscila qui; altrimenti lascia il campo vuoto. Resta su questo dispositivo."
+
+msgctxt "AppWindow"
+msgid "Saved."
+msgstr "Salvato."
