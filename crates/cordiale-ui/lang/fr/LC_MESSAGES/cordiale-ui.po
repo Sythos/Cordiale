@@ -2725,6 +2725,22 @@ msgid "Decline channel invite"
 msgstr "Refuser l'invitation au canal"
 
 msgctxt "AppWindow"
+msgid "Debug"
+msgstr "Débogage"
+
+msgctxt "AppWindow"
+msgid "Details about this device and this copy of Cordiale. They are shown only here and never sent anywhere."
+msgstr "Détails sur cet appareil et sur cette copie de Cordiale. Ils ne sont affichés qu'ici et ne sont jamais envoyés nulle part."
+
+msgctxt "AppWindow"
+msgid "Open data folder"
+msgstr "Ouvrir le dossier de données"
+
+msgctxt "AppWindow"
+msgid "Please include these details when you open an issue:"
+msgstr "Inclus ces détails quand tu signales un problème :"
+
+msgctxt "AppWindow"
 msgid "That isn't a share token or link Grappa accepts. Copy it again from the other device."
 msgstr "Ce n'est pas un jeton ou un lien de partage accepté par Grappa. Copiez-le à nouveau depuis l'autre appareil."
 

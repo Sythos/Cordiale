@@ -305,6 +305,17 @@ sezione Sicurezza resta in Cicchetto:
   istanze differenti. Il recupero dello scrollback resta distinto dalla
   riconnessione del socket e segue la paginazione documentata in §4.
 
+### Presenza in primo piano (`visibility`, `client_closing`)
+- Ogni socket nasce `:hidden` su Grappa; diventa visibile solo con
+  `visibility` `{"visible": true}` sul topic utente dopo il join (il valore
+  deve essere un booleano, altrimenti `invalid_payload`). Il report scade dopo
+  circa 60 s, quindi Cordiale lo ripete ogni 30 s finché la finestra è in
+  primo piano (attiva e non ridotta a icona), lo rimanda dopo ogni rejoin del
+  topic utente e manda `visibility` `false` quando la finestra lo perde.
+  `client_closing` (payload vuoto) parte alla chiusura dell'app e al
+  sign-out. Alimenta l'auto-away e la soppressione dei push. Non verificato
+  contro un server reale (vedi `crates/cordiale-core/src/session.rs`).
+
 ### 2bis. Forma reale confermata da traffico live (2026-09-20)
 
 Fino a questa data il WebSocket di Cordiale non si era mai connesso con
