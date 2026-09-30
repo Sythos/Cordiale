@@ -69,6 +69,16 @@ impl std::fmt::Display for PhoenixSocketError {
     }
 }
 
+/// What a `426 upgrade_required` answer to the WebSocket upgrade says:
+/// Grappa's floor for `client_proto` moved above what this build declares.
+/// Fields the body doesn't carry (or carries in an unexpected shape) stay
+/// `None`: the status alone is enough to know the client is too old.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpgradeRequired {
+    pub protocol_version: Option<u32>,
+    pub min_protocol_version: Option<u32>,
+}
+
 impl PhoenixSocketError {
     /// Whether the upgrade was refused because the bearer is missing, invalid
     /// or revoked. Grappa answers a bad bearer with 403 (`CLIENT_PROTOCOL.md`
@@ -82,10 +92,41 @@ impl PhoenixSocketError {
             _ => false,
         }
     }
+
+    /// The refusal details when Grappa answered the upgrade with `426`
+    /// (this build declares a `client_proto` below the server's floor).
+    /// Retrying can't succeed until Cordiale itself is updated.
+    pub fn upgrade_required(&self) -> Option<UpgradeRequired> {
+        match self {
+            PhoenixSocketError::Connect(tokio_tungstenite::tungstenite::Error::Http(response))
+                if response.status().as_u16() == 426 =>
+            {
+                Some(parse_upgrade_required(
+                    response.body().as_deref().unwrap_or_default(),
+                ))
+            }
+            _ => None,
+        }
+    }
 }
 
 fn is_auth_rejection_status(status: u16) -> bool {
     matches!(status, 401 | 403)
+}
+
+/// Reads the `426` body, `{"error": "upgrade_required", "protocol_version":
+/// N, "min_protocol_version": M}` (`CLIENT_PROTOCOL.md` §3b).
+fn parse_upgrade_required(body: &[u8]) -> UpgradeRequired {
+    let json: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    let number = |key: &str| {
+        json.get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    UpgradeRequired {
+        protocol_version: number("protocol_version"),
+        min_protocol_version: number("min_protocol_version"),
+    }
 }
 
 /// Builds the `Sec-WebSocket-Protocol` value Grappa expects for
@@ -111,9 +152,9 @@ pub struct PhoenixSocket {
 }
 
 impl PhoenixSocket {
-    /// Connects to `ws_url` (include `?client_proto=...` in it if Cordiale
-    /// wants to declare a version — omitted means "current", the
-    /// zero-friction path per the protocol notes).
+    /// Connects to `ws_url`, which carries `?client_proto=...` when the
+    /// caller declares a protocol version (see `CLIENT_PROTOCOL_VERSION`;
+    /// omitted means "current" to the server).
     pub async fn connect(ws_url: &str, bearer_token: &str) -> Result<Self, PhoenixSocketError> {
         let mut request = ws_url
             .into_client_request()
@@ -219,6 +260,57 @@ mod tests {
         for status in [400, 404, 426, 429, 500, 502, 503] {
             assert!(!is_auth_rejection_status(status), "{status}");
         }
+    }
+
+    fn refused_upgrade(status: u16, body: Option<&[u8]>) -> PhoenixSocketError {
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(status)
+            .body(body.map(<[u8]>::to_vec))
+            .expect("response");
+        PhoenixSocketError::Connect(tokio_tungstenite::tungstenite::Error::Http(Box::new(
+            response,
+        )))
+    }
+
+    #[test]
+    fn a_426_upgrade_refusal_carries_the_servers_versions() {
+        let err = refused_upgrade(
+            426,
+            Some(
+                br#"{"error":"upgrade_required","protocol_version":40,"min_protocol_version":36}"#,
+            ),
+        );
+        assert_eq!(
+            err.upgrade_required(),
+            Some(UpgradeRequired {
+                protocol_version: Some(40),
+                min_protocol_version: Some(36),
+            })
+        );
+        assert!(!err.is_auth_rejection());
+    }
+
+    #[test]
+    fn a_426_without_a_readable_body_is_still_an_upgrade_refusal() {
+        for body in [
+            None,
+            Some(&b"not json"[..]),
+            Some(&br#"{"min_protocol_version":"x"}"#[..]),
+        ] {
+            assert_eq!(
+                refused_upgrade(426, body).upgrade_required(),
+                Some(UpgradeRequired {
+                    protocol_version: None,
+                    min_protocol_version: None,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn other_refusals_are_not_upgrade_refusals() {
+        assert_eq!(refused_upgrade(403, None).upgrade_required(), None);
+        assert_eq!(refused_upgrade(500, None).upgrade_required(), None);
     }
 
     #[test]
