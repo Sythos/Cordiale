@@ -1234,6 +1234,7 @@ export component AppWindow inherits Window {
     callback channel-part-requested(string, string);
     callback query-selected(string, string);
     callback window-invite-join-requested(string, string);
+    callback window-invite-decline-requested(string, string);
     callback kicked-channel-dismiss-requested(string, string);
     callback recover-dismiss-requested();
     callback color-theme-requested(string); // choice key, "" for classic
@@ -2020,6 +2021,8 @@ export component AppWindow inherits Window {
             return @tr("Couldn't send that message.");
         } else if status-kind == "part-failed" {
             return @tr("Couldn't leave the channel. Please try again.");
+        } else if status-kind == "invite-decline-failed" {
+            return @tr("Couldn't decline the invite. Please try again.");
         } else if status-kind == "disconnected" {
             return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "session-refused" {
@@ -2423,6 +2426,13 @@ export component AppWindow inherits Window {
                         accessible-label: @tr("Join invited channel");
                         clicked => {
                             window-invite-join-requested(window-invite-network, window-invite-channel);
+                        }
+                    }
+                    Button {
+                        text: @tr("Decline");
+                        accessible-label: @tr("Decline channel invite");
+                        clicked => {
+                            window-invite-decline-requested(window-invite-network, window-invite-channel);
                         }
                     }
                 }

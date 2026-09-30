@@ -596,6 +596,31 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `DELETE /networks/:network_slug/invites/:channel` — declines a channel
+    /// invite. Nothing is sent to IRC: the server drops the session's invited
+    /// window (`200 {"ok": true}`) and the banner goes away through the
+    /// `window_invite_declined` push, never from this response. `404`
+    /// (`not_invited`) means the window already left the invited state.
+    pub async fn decline_invite(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "invites", channel]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `GET /me/settings/display-prefs` — absent-tolerant, per
     /// `docs/protocol-notes.md` §1.
     pub async fn fetch_display_prefs(
@@ -3211,6 +3236,36 @@ mod tests {
             .part_channel("abc123", "libera", "#rust", Some("away for now & later"))
             .await
             .expect("part_channel with reason");
+    }
+
+    #[tokio::test]
+    async fn decline_invite_deletes_the_encoded_invite_and_surfaces_not_invited() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/invites/%23rust"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/invites/%23gone"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({"error": "not_invited"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .decline_invite("abc123", "libera", "#rust")
+            .await
+            .expect("decline_invite");
+        let err = client
+            .decline_invite("abc123", "libera", "#gone")
+            .await
+            .expect_err("404 not_invited");
+        assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
     }
 
     #[tokio::test]

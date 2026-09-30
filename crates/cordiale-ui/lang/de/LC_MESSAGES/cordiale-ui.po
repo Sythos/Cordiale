@@ -217,10 +217,6 @@ msgid "Wrong username or password/token."
 msgstr "Benutzername oder Passwort/Token falsch."
 
 msgctxt "AppWindow"
-msgid "This account has two-factor authentication enabled. Sign in from a browser instead."
-msgstr "Für diesen Account ist die Zwei-Faktor-Authentifizierung aktiviert. Melde dich stattdessen über den Browser an."
-
-msgctxt "AppWindow"
 msgid "Too many attempts. Wait a bit before trying again."
 msgstr "Zu viele Versuche. Warte kurz, bevor du es erneut versuchst."
 
@@ -1035,10 +1031,6 @@ msgstr "Lass mindestens eine Nachrichtenbenachrichtigung eingeschaltet."
 msgctxt "AppWindow"
 msgid "Couldn't save the notification settings."
 msgstr "Die Benachrichtigungseinstellungen konnten nicht gespeichert werden."
-
-msgctxt "AppWindow"
-msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
-msgstr "Zwei-Faktor-Authentifizierung, Passkeys, Client-Tokens und das Löschen des Kontos werden in Cicchetto verwaltet: Grappa hält sie außer Reichweite eines Client-Tokens, wie Cordiale ihn zur Anmeldung nutzt."
 
 msgctxt "AppWindow"
 msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
@@ -2651,3 +2643,15 @@ msgstr "Schriftgröße: {} %"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Zurücksetzen"
+
+msgctxt "AppWindow"
+msgid "Couldn't decline the invite. Please try again."
+msgstr "Die Einladung konnte nicht abgelehnt werden. Bitte versuche es erneut."
+
+msgctxt "AppWindow"
+msgid "Decline"
+msgstr "Ablehnen"
+
+msgctxt "AppWindow"
+msgid "Decline channel invite"
+msgstr "Kanaleinladung ablehnen"

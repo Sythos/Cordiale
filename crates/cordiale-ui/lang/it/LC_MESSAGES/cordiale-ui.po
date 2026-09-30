@@ -217,10 +217,6 @@ msgid "Wrong username or password/token."
 msgstr "Nome utente o password/token errati."
 
 msgctxt "AppWindow"
-msgid "This account has two-factor authentication enabled. Sign in from a browser instead."
-msgstr "Questo account ha l'autenticazione a due fattori attiva. Accedi invece dal browser."
-
-msgctxt "AppWindow"
 msgid "Too many attempts. Wait a bit before trying again."
 msgstr "Troppi tentativi. Aspetta un po' prima di riprovare."
 
@@ -1035,10 +1031,6 @@ msgstr "Lascia attiva almeno una notifica dei messaggi."
 msgctxt "AppWindow"
 msgid "Couldn't save the notification settings."
 msgstr "Impossibile salvare le impostazioni delle notifiche."
-
-msgctxt "AppWindow"
-msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
-msgstr "Autenticazione a due fattori, passkey, token dei client ed eliminazione dell'account si gestiscono in Cicchetto: Grappa li tiene fuori dalla portata di un token client come quello con cui accede Cordiale."
 
 msgctxt "AppWindow"
 msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
@@ -2651,3 +2643,15 @@ msgstr "Dimensione caratteri: {}%"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Ripristina"
+
+msgctxt "AppWindow"
+msgid "Couldn't decline the invite. Please try again."
+msgstr "Impossibile rifiutare l'invito. Riprova."
+
+msgctxt "AppWindow"
+msgid "Decline"
+msgstr "Rifiuta"
+
+msgctxt "AppWindow"
+msgid "Decline channel invite"
+msgstr "Rifiuta l'invito al canale"

@@ -119,6 +119,12 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    /// Invite banner: declines the invite over REST. The banner itself is
+    /// removed only by the `window_invite_declined` push.
+    DeclineInvite {
+        network: String,
+        channel: String,
+    },
     DismissRecover,
     DirectoryRefresh,
     DirectoryLoadMore,
@@ -741,6 +747,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_window_invite = worker_tx.clone();
     ui.on_window_invite_join_requested(move |network, channel| {
         let _ = tx_for_window_invite.send(WorkerCommand::SelectChannel {
+            network: network.to_string(),
+            channel: channel.to_string(),
+        });
+    });
+
+    let tx_for_decline_invite = worker_tx.clone();
+    ui.on_window_invite_decline_requested(move |network, channel| {
+        let _ = tx_for_decline_invite.send(WorkerCommand::DeclineInvite {
             network: network.to_string(),
             channel: channel.to_string(),
         });
@@ -2482,6 +2496,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
                         handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;
+                    }
+                    Some(WorkerCommand::DeclineInvite { network, channel }) => {
+                        decline_invite(&state, &ui, &network, &channel).await;
                     }
                     Some(WorkerCommand::DismissRecover) => {
                         state.recover_panel = None;
@@ -9607,6 +9624,42 @@ fn remove_declined_channel_subscription(
         }
     }
     channel_topic_removed || joined_topic_removed
+}
+
+/// Declines an invite over REST. The banner and the invited row stay as they
+/// are: they go away only when `window_invite_declined` arrives, so a decision
+/// taken on another device behaves the same way.
+async fn decline_invite(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    channel: &str,
+) {
+    let (Some(client), Some(token)) = (state.client.as_ref(), state.token.as_deref()) else {
+        return;
+    };
+    let Err(err) = client.decline_invite(token, network, channel).await else {
+        return;
+    };
+    persistence::log_line(&format!("invite decline failed: {err:?}"));
+    let Some(status) = decline_invite_error_status(err.status().map(|status| status.as_u16()))
+    else {
+        return;
+    };
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_kind(status.into());
+    });
+}
+
+/// Status-bar key for a failed decline. A `404` (`not_invited`) means the
+/// window already left the invited state, so the banner is on its way out and
+/// there is nothing to report.
+fn decline_invite_error_status(status: Option<u16>) -> Option<&'static str> {
+    match status {
+        Some(404) => None,
+        _ => Some("invite-decline-failed"),
+    }
 }
 
 fn handle_window_invite_declined(
@@ -23235,6 +23288,19 @@ mod tests {
         assert_eq!(format_file_size(1023), "1023 B");
         assert_eq!(format_file_size(1536), "1.5 KiB");
         assert_eq!(format_file_size(5 * 1024 * 1024), "5.0 MiB");
+    }
+
+    #[test]
+    fn decline_invite_errors_map_to_status_keys() {
+        assert_eq!(decline_invite_error_status(Some(404)), None);
+        assert_eq!(
+            decline_invite_error_status(Some(500)),
+            Some("invite-decline-failed")
+        );
+        assert_eq!(
+            decline_invite_error_status(None),
+            Some("invite-decline-failed")
+        );
     }
 
     #[test]
