@@ -105,8 +105,10 @@ Cordiale also covers:
   can enable or disable TOTP in Settings > Security and see new recovery
   codes once. Passkey-only sign-in still needs a share link or client token
   from Cicchetto; an account whose passkey is backed by recovery codes can
-  sign in with one of those. Settings > Security also lists the account's
-  passkeys and deletes them with the password.
+  sign in with one of those, and a passwordless account can sign in from
+  the connect screen with a one-time recovery code (not yet checked against
+  a live server). Settings > Security also lists the account's passkeys and
+  deletes them with the password.
 - **Session sharing:** Settings > Security makes a single-use link and QR
   code (valid ten minutes) that signs another device into the same account,
   and the connect screen signs in with such a link or token from another

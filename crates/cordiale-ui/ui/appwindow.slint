@@ -899,6 +899,9 @@ export component AppWindow inherits Window {
     in-out property <string> security-totp-code: "";
     // The sign-in with a share token (screen "share"): the pasted token or link.
     in-out property <string> share-token-input: "";
+    // The sign-in with a recovery code (screen "recover"): the code, which is
+    // a credential and is emptied as soon as it is sent.
+    in-out property <string> recovery-code-input: "";
     // Settings > Security, share this session: the link to open on another
     // device (empty until one is made), its QR code and expiry text, and
     // the reason a link couldn't be made (`client-token`, `incognito`,
@@ -1289,6 +1292,8 @@ export component AppWindow inherits Window {
     callback security-totp-done();
     callback share-consume-requested(string, string); // server URL, token or link
     callback share-screen-requested(bool); // true opens the share sign-in, false leaves it
+    callback recovery-sign-in-requested(string, string, string); // server URL, account, recovery code
+    callback recovery-screen-requested(bool); // true opens the recovery code sign-in, false leaves it
     callback security-share-requested();
     callback security-share-done();
     callback security-passkeys-requested();
@@ -2111,6 +2116,12 @@ export component AppWindow inherits Window {
             return @tr("Too many attempts. Wait a few minutes before trying again.");
         } else if status-kind == "totp-failed" {
             return @tr("Couldn't verify the code. Try again.");
+        } else if status-kind == "recovery-invalid" {
+            return @tr("That recovery code didn't work. It may be wrong or already used: each code works only once.");
+        } else if status-kind == "recovery-busy" {
+            return @tr("Grappa is busy right now. Try again in a moment.");
+        } else if status-kind == "recovery-failed" {
+            return @tr("Couldn't sign in with that recovery code. Try again.");
         } else if status-kind == "share-invalid" {
             return @tr("That isn't a share token or link Grappa accepts. Copy it again from the other device.");
         } else if status-kind == "share-expired" {
@@ -2447,6 +2458,68 @@ export component AppWindow inherits Window {
         }
     }
 
+    if screen == "recover" : VerticalBox {
+        padding: 32px;
+        spacing: 16px;
+
+        Text {
+            text: "Cordiale";
+            font-size: 28px * FontScale.percent / 100;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: @tr("Sign in with a recovery code");
+            font-size: 18px * FontScale.percent / 100;
+            font-weight: 600;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: @tr("For an account that signs in with a passkey and has no password. Enter your username and one of the recovery codes Grappa showed you when you turned passwordless sign-in on. Each code works only once.");
+            wrap: word-wrap;
+            horizontal-alignment: center;
+        }
+        LineEdit {
+            placeholder-text: @tr("Server URL");
+            accessible-label: @tr("Server URL");
+            text <=> server-url;
+            enabled: !connecting;
+        }
+        LineEdit {
+            placeholder-text: @tr("Username");
+            accessible-label: @tr("Username");
+            text <=> identifier;
+            enabled: !connecting;
+        }
+        recovery-field := LineEdit {
+            placeholder-text: @tr("Recovery code");
+            accessible-label: @tr("Recovery code");
+            text <=> recovery-code-input;
+            // A recovery code signs in as you, like a password.
+            input-type: InputType.password;
+            enabled: !connecting;
+            init => { self.focus(); }
+            accepted => { recovery-sign-in-requested(server-url, identifier, recovery-code-input); }
+        }
+        Button {
+            text: connecting ? @tr("Connecting…") : @tr("Sign in");
+            enabled: !connecting && identifier != "" && recovery-code-input != "";
+            clicked => { recovery-sign-in-requested(server-url, identifier, recovery-code-input); }
+        }
+        Button {
+            text: @tr("Cancel");
+            enabled: !connecting;
+            clicked => { recovery-screen-requested(false); }
+        }
+        Text {
+            text: status-text();
+            color: #cc3333;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            accessible-role: AccessibleRole.text;
+            accessible-live-region: AccessibleLiveness.polite;
+        }
+    }
+
     if screen == "connect" : VerticalBox {
         padding: 32px;
         spacing: 16px;
@@ -2495,6 +2568,12 @@ export component AppWindow inherits Window {
             text: @tr("Sign in with a share token…");
             enabled: !connecting;
             clicked => { share-screen-requested(true); }
+        }
+
+        Button {
+            text: @tr("Passwordless account? Sign in with a recovery code…");
+            enabled: !connecting;
+            clicked => { recovery-screen-requested(true); }
         }
 
         Button {
