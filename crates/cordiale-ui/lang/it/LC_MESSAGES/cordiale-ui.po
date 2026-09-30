@@ -2513,30 +2513,6 @@ msgid "Passkeys, client tokens and account deletion are managed in Cicchetto."
 msgstr "Passkey, token client ed eliminazione dell'account si gestiscono in Cicchetto."
 
 msgctxt "AppWindow"
-msgid "Open {}"
-msgstr "Apri {}"
-
-msgctxt "AppWindow"
-msgid "Join {}"
-msgstr "Entra in {}"
-
-msgctxt "AppWindow"
-msgid "{} users"
-msgstr "{} utenti"
-
-msgctxt "AppWindow"
-msgid "{} users — {}"
-msgstr "{} utenti — {}"
-
-msgctxt "AppWindow"
-msgid "featured"
-msgstr "in evidenza"
-
-msgctxt "AppWindow"
-msgid "joined"
-msgstr "dentro"
-
-msgctxt "AppWindow"
 msgid "listing…"
 msgstr "elenco in corso…"
 
@@ -2643,6 +2619,98 @@ msgstr "Dimensione caratteri: {}%"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Ripristina"
+
+msgctxt "AppWindow"
+msgid "This server no longer accepts this version of Cordiale. Please update Cordiale."
+msgstr "Questo server non accetta più questa versione di Cordiale. Aggiorna Cordiale."
+
+msgctxt "AppWindow"
+msgid "Admin actions need an administrator signed in with a full session. A client token can't do them."
+msgstr "Le azioni di amministrazione richiedono un amministratore con una sessione completa. Un token client non può eseguirle."
+
+msgctxt "AppWindow"
+msgid "That network still has accounts bound to it. Unbind them on the Credentials tab first."
+msgstr "A quella rete sono ancora collegati degli account. Scollegali prima dalla scheda Credenziali."
+
+msgctxt "AppWindow"
+msgid "Saved. The account's live session was stopped because its login changed; it has to reconnect."
+msgstr "Salvato. La sessione attiva dell'account è stata interrotta perché le sue credenziali sono cambiate; dovrà riconnettersi."
+
+msgctxt "AppWindow"
+msgid "Terminate the session of {}? Its connection is stopped; the account and its network binding stay as they are."
+msgstr "Terminare la sessione di {}? La sua connessione viene interrotta; l'account e il collegamento alla rete restano invariati."
+
+msgctxt "AppWindow"
+msgid "Terminate"
+msgstr "Termina"
+
+msgctxt "AppWindow"
+msgid "Counting the messages of {}…"
+msgstr "Conteggio dei messaggi di {}…"
+
+msgctxt "AppWindow"
+msgid "Delete {} for good? Its whole scrollback goes with it, for every account. Messages deleted: {}"
+msgstr "Eliminare {} definitivamente? Con la rete va via tutto lo storico, per ogni account. Messaggi eliminati: {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} for good? Its whole scrollback goes with it, for every account; the server couldn't say how many messages that is."
+msgstr "Eliminare {} definitivamente? Con la rete va via tutto lo storico, per ogni account; il server non ha saputo dire quanti messaggi siano."
+
+msgctxt "AppWindow"
+msgid "Delete network and scrollback"
+msgstr "Elimina rete e storico"
+
+msgctxt "AppWindow"
+msgid "Enabled"
+msgstr "Attivo"
+
+msgctxt "AppWindow"
+msgid "Featured channels"
+msgstr "Canali in evidenza"
+
+msgctxt "AppWindow"
+msgid "Description"
+msgstr "Descrizione"
+
+msgctxt "AppWindow"
+msgid "Add channel"
+msgstr "Aggiungi canale"
+
+msgctxt "AppWindow"
+msgid "SASL user"
+msgstr "Utente SASL"
+
+msgctxt "AppWindow"
+msgid "New password (leave empty to keep it)"
+msgstr "Nuova password (lascia vuoto per mantenerla)"
+
+msgctxt "AppWindow"
+msgid "A new password ends the account's live session on this network; it has to reconnect."
+msgstr "Una nuova password termina la sessione attiva dell'account su questa rete; dovrà riconnettersi."
+
+msgctxt "DirectoryEntry"
+msgid "Open {}"
+msgstr "Apri {}"
+
+msgctxt "DirectoryEntry"
+msgid "Join {}"
+msgstr "Entra in {}"
+
+msgctxt "DirectoryEntry"
+msgid "{} users"
+msgstr "{} utenti"
+
+msgctxt "DirectoryEntry"
+msgid "{} users — {}"
+msgstr "{} utenti — {}"
+
+msgctxt "DirectoryEntry"
+msgid "featured"
+msgstr "in evidenza"
+
+msgctxt "DirectoryEntry"
+msgid "joined"
+msgstr "dentro"
 
 msgctxt "AppWindow"
 msgid "Couldn't decline the invite. Please try again."

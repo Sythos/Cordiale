@@ -53,6 +53,7 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::profile::IgnoreEntry;
+use cordiale_core::protocol::CLIENT_PROTOCOL_VERSION;
 use cordiale_core::rest::{
     ActiveThemePair, ArchiveEntry, BootResponse, DateFormat, DirectoryPage, DisplayPrefs,
     LoginRequest, MeResponse, SendMessageRequest,
@@ -154,6 +155,8 @@ enum WorkerCommand {
         track: Option<cordiale_core::radio::Track>,
     },
     ArchiveClose,
+    /// Backfills the next channel queued after a reconnect, one at a time.
+    CatchUpNext,
     /// Flips one user mode of the network shown in the user-mode view.
     UmodeToggle(String),
     UmodeClose,
@@ -196,6 +199,8 @@ enum WorkerCommand {
     SaveNotificationPrefs(NotificationToggles),
     AdminRefresh,
     AdminDisconnectSession(String),
+    AdminReconnectSession(String),
+    AdminTerminateSession(String),
     AdminUserToggleAdmin(String, bool),
     AdminUserDelete(String),
     AdminVisitorDelete(String),
@@ -251,6 +256,39 @@ enum WorkerCommand {
     AdminServerDelete {
         network_id: String,
         server_id: String,
+    },
+    AdminServerEdit {
+        network_id: String,
+        server_id: String,
+        host: String,
+        port: String,
+        tls: bool,
+        enabled: bool,
+    },
+    AdminFeaturedAdd {
+        network_id: String,
+        name: String,
+        description: String,
+    },
+    AdminFeaturedSet {
+        network_id: String,
+        featured_id: String,
+        enabled: bool,
+    },
+    AdminFeaturedDelete {
+        network_id: String,
+        featured_id: String,
+    },
+    /// How many messages deleting the network would take with it.
+    AdminNetworkCount(String),
+    AdminCredentialEdit {
+        user_id: String,
+        network_id: String,
+        nick: String,
+        ident: String,
+        realname: String,
+        sasl_user: String,
+        password: String,
     },
     AdminSettingsLoad,
     AdminSettingsSave(AdminSettingsForm),
@@ -1250,6 +1288,18 @@ fn main() -> Result<(), slint::PlatformError> {
         ));
     });
 
+    let tx_for_admin_reconnect = worker_tx.clone();
+    ui.on_admin_reconnect_session(move |session_id| {
+        let _ = tx_for_admin_reconnect
+            .send(WorkerCommand::AdminReconnectSession(session_id.to_string()));
+    });
+
+    let tx_for_admin_terminate = worker_tx.clone();
+    ui.on_admin_terminate_session(move |session_id| {
+        let _ = tx_for_admin_terminate
+            .send(WorkerCommand::AdminTerminateSession(session_id.to_string()));
+    });
+
     // Lazily created, reused across requests rather than spawning a new
     // OS window every click. Only ever touched from this callback, which
     // Slint guarantees runs on the UI thread — safe to be a plain `Rc`.
@@ -1356,6 +1406,77 @@ fn main() -> Result<(), slint::PlatformError> {
             let _ = tx_for_admin_server_delete.send(WorkerCommand::AdminServerDelete {
                 network_id: ui.get_admin_edit_network_id().to_string(),
                 server_id: server_id.to_string(),
+            });
+        }
+    });
+
+    let tx_for_admin_server_save = worker_tx.clone();
+    let weak_for_admin_server_save = ui.as_weak();
+    ui.on_admin_server_save(move || {
+        if let Some(ui) = weak_for_admin_server_save.upgrade() {
+            let _ = tx_for_admin_server_save.send(WorkerCommand::AdminServerEdit {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                server_id: ui.get_admin_edit_server_id().to_string(),
+                host: ui.get_admin_edit_server_host().to_string(),
+                port: ui.get_admin_edit_server_port().to_string(),
+                tls: ui.get_admin_edit_server_tls(),
+                enabled: ui.get_admin_edit_server_enabled(),
+            });
+        }
+    });
+
+    let tx_for_featured_add = worker_tx.clone();
+    let weak_for_featured_add = ui.as_weak();
+    ui.on_admin_featured_add(move || {
+        if let Some(ui) = weak_for_featured_add.upgrade() {
+            let _ = tx_for_featured_add.send(WorkerCommand::AdminFeaturedAdd {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                name: ui.get_admin_new_featured_name().to_string(),
+                description: ui.get_admin_new_featured_description().to_string(),
+            });
+        }
+    });
+
+    let tx_for_featured_set = worker_tx.clone();
+    let weak_for_featured_set = ui.as_weak();
+    ui.on_admin_featured_set(move |featured_id, enabled| {
+        if let Some(ui) = weak_for_featured_set.upgrade() {
+            let _ = tx_for_featured_set.send(WorkerCommand::AdminFeaturedSet {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                featured_id: featured_id.to_string(),
+                enabled,
+            });
+        }
+    });
+
+    let tx_for_featured_delete = worker_tx.clone();
+    let weak_for_featured_delete = ui.as_weak();
+    ui.on_admin_featured_delete(move |featured_id| {
+        if let Some(ui) = weak_for_featured_delete.upgrade() {
+            let _ = tx_for_featured_delete.send(WorkerCommand::AdminFeaturedDelete {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                featured_id: featured_id.to_string(),
+            });
+        }
+    });
+
+    let tx_for_network_count = worker_tx.clone();
+    ui.on_admin_network_count_requested(move |network_id| {
+        let _ = tx_for_network_count.send(WorkerCommand::AdminNetworkCount(network_id.to_string()));
+    });
+
+    let tx_for_credential_save = worker_tx.clone();
+    let weak_for_credential_save = ui.as_weak();
+    ui.on_admin_credential_save(move || {
+        if let Some(ui) = weak_for_credential_save.upgrade() {
+            let _ = tx_for_credential_save.send(WorkerCommand::AdminCredentialEdit {
+                user_id: ui.get_admin_edit_cred_user_id().to_string(),
+                network_id: ui.get_admin_edit_cred_network_id().to_string(),
+                nick: ui.get_admin_edit_cred_nick().to_string(),
+                ident: ui.get_admin_edit_cred_ident().to_string(),
+                realname: ui.get_admin_edit_cred_realname().to_string(),
+                sasl_user: ui.get_admin_edit_cred_sasl_user().to_string(),
+                password: ui.get_admin_edit_cred_password().to_string(),
             });
         }
     });
@@ -1669,14 +1790,18 @@ struct ChannelModes {
     params: HashMap<String, Option<String>>,
 }
 
-/// One open Grappa query window. `opened_at` is retained from the server's
-/// full snapshot so a unique stable opening can be matched across a nick
-/// rename without guessing from list position.
+/// One open Grappa query window. `dm_conversation_id` (protocol v34) names
+/// the conversation across a peer's nick change; it is `None` for servers
+/// older than v34 or when the server has no conversation for the window.
+/// `opened_at` is retained from the server's full snapshot so a unique
+/// stable opening can be matched across a rename when no id is available,
+/// without guessing from list position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct QueryWindow {
     network: String,
     target_nick: String,
     opened_at: String,
+    dm_conversation_id: Option<i64>,
 }
 
 /// Stable per-window key used for server-provided unread counts. Channel
@@ -2068,6 +2193,10 @@ struct WorkerState {
     login_identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
+    /// Channels to backfill after a reconnect, with the highest message id
+    /// they held when the socket dropped (live rows arriving after the
+    /// rejoin must not move the anchor). Drained one channel at a time.
+    catch_up_anchors: std::collections::BTreeMap<(String, String), i64>,
     /// Lines of the live admin feed, newest first (capped).
     admin_events: Vec<String>,
     /// Last `GET /admin/settings`, to tell whether addressing was edited.
@@ -2301,6 +2430,7 @@ impl WorkerState {
             login_identifier: None,
             session: None,
             joined_topics: std::collections::HashSet::new(),
+            catch_up_anchors: std::collections::BTreeMap::new(),
             admin_events: Vec::new(),
             admin_settings: None,
             admin_uploads: None,
@@ -2587,6 +2717,9 @@ async fn run_worker(
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
                     }
+                    Some(WorkerCommand::CatchUpNext) => {
+                        handle_catch_up_next(&mut state, &ui, &worker_self).await;
+                    }
                     Some(WorkerCommand::UmodeToggle(letter)) => {
                         toggle_user_mode(&state, &letter);
                     }
@@ -2743,6 +2876,14 @@ async fn run_worker(
                     Some(WorkerCommand::AdminDisconnectSession(session_id)) => {
                         handle_admin_disconnect_session(&state, &ui, session_id).await;
                     }
+                    Some(WorkerCommand::AdminReconnectSession(session_id)) => {
+                        handle_admin_write(&state, &ui, AdminWrite::ReconnectSession(session_id))
+                            .await;
+                    }
+                    Some(WorkerCommand::AdminTerminateSession(session_id)) => {
+                        handle_admin_write(&state, &ui, AdminWrite::TerminateSession(session_id))
+                            .await;
+                    }
                     Some(WorkerCommand::AdminUserToggleAdmin(user_id, is_admin)) => {
                         if let (Some(client), Some(token)) = (&state.client, &state.token) {
                             let _ = client
@@ -2870,7 +3011,120 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::AdminServersLoad(network_id)) => {
                         push_admin_servers(&state, &ui, &network_id).await;
+                        push_admin_featured(&state, &ui, &network_id).await;
                     }
+                    Some(WorkerCommand::AdminServerEdit {
+                        network_id,
+                        server_id,
+                        host,
+                        port,
+                        tls,
+                        enabled,
+                    }) => match cordiale_core::admin::admin_server_changes(&host, &port, tls, enabled)
+                    {
+                        Some(changes) => {
+                            handle_admin_write(
+                                &state,
+                                &ui,
+                                AdminWrite::EditServer {
+                                    network_id: network_id.clone(),
+                                    server_id,
+                                    changes,
+                                },
+                            )
+                            .await;
+                            push_admin_servers(&state, &ui, &network_id).await;
+                        }
+                        None => {
+                            let _ = ui.upgrade_in_event_loop(|ui| {
+                                ui.set_status_kind("admin-server-invalid".into());
+                            });
+                        }
+                    },
+                    Some(WorkerCommand::AdminFeaturedAdd {
+                        network_id,
+                        name,
+                        description,
+                    }) => {
+                        if let Some(body) =
+                            cordiale_core::admin::admin_featured_body(&name, &description)
+                        {
+                            handle_admin_write(
+                                &state,
+                                &ui,
+                                AdminWrite::AddFeatured {
+                                    network_id: network_id.clone(),
+                                    body,
+                                },
+                            )
+                            .await;
+                            push_admin_featured(&state, &ui, &network_id).await;
+                        }
+                    }
+                    Some(WorkerCommand::AdminFeaturedSet {
+                        network_id,
+                        featured_id,
+                        enabled,
+                    }) => {
+                        handle_admin_write(
+                            &state,
+                            &ui,
+                            AdminWrite::SetFeatured {
+                                network_id: network_id.clone(),
+                                featured_id,
+                                enabled,
+                            },
+                        )
+                        .await;
+                        push_admin_featured(&state, &ui, &network_id).await;
+                    }
+                    Some(WorkerCommand::AdminFeaturedDelete {
+                        network_id,
+                        featured_id,
+                    }) => {
+                        handle_admin_write(
+                            &state,
+                            &ui,
+                            AdminWrite::DeleteFeatured {
+                                network_id: network_id.clone(),
+                                featured_id,
+                            },
+                        )
+                        .await;
+                        push_admin_featured(&state, &ui, &network_id).await;
+                    }
+                    Some(WorkerCommand::AdminNetworkCount(network_id)) => {
+                        handle_admin_network_count(&state, &ui, network_id).await;
+                    }
+                    Some(WorkerCommand::AdminCredentialEdit {
+                        user_id,
+                        network_id,
+                        nick,
+                        ident,
+                        realname,
+                        sasl_user,
+                        password,
+                    }) => match cordiale_core::admin::admin_credential_changes(
+                        &nick, &ident, &realname, &sasl_user, &password,
+                    ) {
+                        Some(changes) => {
+                            handle_admin_write(
+                                &state,
+                                &ui,
+                                AdminWrite::EditCredential {
+                                    user_id,
+                                    network_id,
+                                    changes,
+                                },
+                            )
+                            .await;
+                        }
+                        None => {
+                            let _ = ui.upgrade_in_event_loop(|ui| {
+                                ui.set_status_kind("admin-credential-invalid".into());
+                            });
+                        }
+                    },
                     Some(WorkerCommand::AdminServerAdd {
                         network_id,
                         host,
@@ -3250,6 +3504,11 @@ async fn run_worker(
                             ui.set_status_message("".into());
                         });
                         request_watch_patterns(&mut state);
+                        // Grappa doesn't replay what a channel said while
+                        // the socket was down: backfill it over REST.
+                        if !state.catch_up_anchors.is_empty() {
+                            let _ = worker_self.send(WorkerCommand::CatchUpNext);
+                        }
                     }
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame).await;
@@ -3265,6 +3524,7 @@ async fn run_worker(
                     }
                     Some(SessionEvent::Disconnected { reason }) => {
                         persistence::log_line(&format!("session disconnected: {reason}"));
+                        note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
                         state.supported_user_modes_by_network.clear();
@@ -3280,6 +3540,7 @@ async fn run_worker(
                     }
                     Some(SessionEvent::Reconnecting { reason }) => {
                         persistence::log_line(&format!("session reconnecting: {reason}"));
+                        note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
                         state.supported_user_modes_by_network.clear();
@@ -3301,6 +3562,22 @@ async fn run_worker(
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("session-refused".into());
                             ui.set_status_message(reason.into());
+                            ui.set_current_query_ready(false);
+                        });
+                    }
+                    Some(SessionEvent::UpgradeRequired {
+                        protocol_version,
+                        min_protocol_version,
+                    }) => {
+                        // Stopped for good: no retry helps until Cordiale is updated.
+                        persistence::log_line(&format!(
+                            "session upgrade required: declared client_proto={CLIENT_PROTOCOL_VERSION}, server protocol_version={protocol_version:?}, min_protocol_version={min_protocol_version:?}"
+                        ));
+                        state.session = None;
+                        session_events = None;
+                        let _ = ui.upgrade_in_event_loop(|ui| {
+                            ui.set_status_kind("upgrade-required".into());
+                            ui.set_status_message("".into());
                             ui.set_current_query_ready(false);
                         });
                     }
@@ -3583,6 +3860,7 @@ async fn finish_connect(
             state.user_modes_by_network.clear();
             state.supported_user_modes_by_network.clear();
             state.own_listener_ready.clear();
+            state.catch_up_anchors.clear();
             state.current_query = false;
             state.current_query_ready = false;
             state.current_channel = None;
@@ -6396,6 +6674,42 @@ enum AdminWrite {
         subject_id: String,
     },
     RevokeGrant(String),
+    ReconnectSession(String),
+    TerminateSession(String),
+    EditServer {
+        network_id: String,
+        server_id: String,
+        changes: Value,
+    },
+    AddFeatured {
+        network_id: String,
+        body: Value,
+    },
+    SetFeatured {
+        network_id: String,
+        featured_id: String,
+        enabled: bool,
+    },
+    DeleteFeatured {
+        network_id: String,
+        featured_id: String,
+    },
+    EditCredential {
+        user_id: String,
+        network_id: String,
+        changes: Value,
+    },
+}
+
+/// The status line for a refused admin write. 403 is a session without the
+/// admin console (not an administrator, or a per-client token), and a
+/// network delete answers 409 while accounts are still bound to it.
+fn admin_failure_kind(status: Option<u16>, network_delete: bool) -> &'static str {
+    match status {
+        Some(403) => "admin-forbidden",
+        Some(409) if network_delete => "admin-network-in-use",
+        _ => "admin-action-failed",
+    }
 }
 
 /// One `subject_search` row: `(type, id, network, nick)`, `network` empty
@@ -6545,6 +6859,64 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
         AdminWrite::RevokeGrant(grant_id) => {
             (client.revoke_admin_vhost_grant(token, grant_id).await, "")
         }
+        AdminWrite::ReconnectSession(session_id) => {
+            (client.reconnect_admin_session(token, session_id).await, "")
+        }
+        AdminWrite::TerminateSession(session_id) => {
+            (client.terminate_admin_session(token, session_id).await, "")
+        }
+        AdminWrite::EditServer {
+            network_id,
+            server_id,
+            changes,
+        } => (
+            client
+                .update_admin_server(token, network_id, server_id, changes)
+                .await,
+            "edit-server",
+        ),
+        AdminWrite::AddFeatured { network_id, body } => (
+            client
+                .add_admin_featured_channel(token, network_id, body)
+                .await,
+            "featured",
+        ),
+        AdminWrite::SetFeatured {
+            network_id,
+            featured_id,
+            enabled,
+        } => (
+            client
+                .update_admin_featured_channel(
+                    token,
+                    network_id,
+                    featured_id,
+                    &serde_json::json!({ "enabled": enabled }),
+                )
+                .await,
+            "",
+        ),
+        AdminWrite::DeleteFeatured {
+            network_id,
+            featured_id,
+        } => (
+            client
+                .delete_admin_featured_channel(token, network_id, featured_id)
+                .await,
+            "",
+        ),
+        AdminWrite::EditCredential {
+            user_id,
+            network_id,
+            changes,
+        } => match client
+            .update_admin_credential(token, user_id, network_id, changes)
+            .await
+        {
+            Ok(true) => (Ok(()), "edit-credential-stopped"),
+            Ok(false) => (Ok(()), "edit-credential"),
+            Err(err) => (Err(err), ""),
+        },
     };
     match result {
         Ok(()) => {
@@ -6567,9 +6939,23 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
                         ui.set_admin_new_server_host("".into());
                         ui.set_admin_new_server_port("6697".into());
                     }
+                    "edit-server" => ui.set_admin_edit_server_id("".into()),
+                    "featured" => {
+                        ui.set_admin_new_featured_name("".into());
+                        ui.set_admin_new_featured_description("".into());
+                    }
+                    "edit-credential" | "edit-credential-stopped" => {
+                        ui.set_admin_edit_cred_user_id("".into());
+                        ui.set_admin_edit_cred_password("".into());
+                    }
                     _ => {}
                 }
-                ui.set_status_kind("admin-action-done".into());
+                let done = if clears == "edit-credential-stopped" {
+                    "admin-credential-stopped"
+                } else {
+                    "admin-action-done"
+                };
+                ui.set_status_kind(done.into());
             });
         }
         Err(err) => {
@@ -6578,9 +6964,13 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
                 .map(|status| status.as_u16().to_string())
                 .unwrap_or_else(|| "network error".to_string());
             persistence::log_line(&format!("admin write failed: {status}"));
+            let kind = admin_failure_kind(
+                err.status().map(|status| status.as_u16()),
+                matches!(write, AdminWrite::DeleteNetwork(_)),
+            );
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_status_command_hint(status.into());
-                ui.set_status_kind("admin-action-failed".into());
+                ui.set_status_kind(kind.into());
             });
         }
     }
@@ -6804,7 +7194,7 @@ async fn push_admin_servers(state: &WorkerState, ui: &slint::Weak<AppWindow>, ne
             Vec::new()
         }
     };
-    let rows: Vec<(String, String)> = servers
+    let rows: Vec<AdminServerRow> = servers
         .iter()
         .map(|entry| {
             let id = entry
@@ -6812,18 +7202,85 @@ async fn push_admin_servers(state: &WorkerState, ui: &slint::Weak<AppWindow>, ne
                 .and_then(Value::as_i64)
                 .map(|id| id.to_string())
                 .unwrap_or_default();
-            (cordiale_core::admin::admin_server_label(entry), id)
+            let (host, port, tls, enabled) = cordiale_core::admin::admin_server_fields(entry);
+            AdminServerRow {
+                label: cordiale_core::admin::admin_server_label(entry).into(),
+                server_id: id.into(),
+                host: host.into(),
+                port: port.into(),
+                tls,
+                enabled,
+            }
         })
         .collect();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let rows: Vec<AdminServerRow> = rows
-            .into_iter()
-            .map(|(label, server_id)| AdminServerRow {
-                label: label.into(),
-                server_id: server_id.into(),
-            })
-            .collect();
         ui.set_admin_servers(Rc::new(slint::VecModel::from(rows)).into());
+    });
+}
+
+/// Loads the featured channels of the network being edited.
+async fn push_admin_featured(state: &WorkerState, ui: &slint::Weak<AppWindow>, network_id: &str) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let channels = match client
+        .fetch_admin_featured_channels(token, network_id)
+        .await
+    {
+        Ok(channels) => channels,
+        Err(err) => {
+            persistence::log_line(&format!("admin featured channels load failed: {err:?}"));
+            Vec::new()
+        }
+    };
+    let rows: Vec<AdminFeaturedRow> = channels
+        .iter()
+        .filter_map(|entry| {
+            let (featured_id, enabled) = cordiale_core::admin::admin_featured_state(entry)?;
+            Some(AdminFeaturedRow {
+                label: cordiale_core::admin::admin_featured_label(entry).into(),
+                featured_id: featured_id.into(),
+                enabled,
+            })
+        })
+        .collect();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_admin_featured(Rc::new(slint::VecModel::from(rows)).into());
+    });
+}
+
+/// Asks how many messages deleting a network would take with it, for the
+/// confirmation. A 404 or any failure is "can't say", never zero, and the
+/// answer is dropped if the confirmation moved on to another network.
+async fn handle_admin_network_count(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network_id: String,
+) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let count = match client
+        .fetch_admin_network_message_count(token, &network_id)
+        .await
+    {
+        Ok(count) => count,
+        Err(err) => {
+            persistence::log_line(&format!("admin network message count failed: {err:?}"));
+            None
+        }
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        if ui.get_admin_network_confirm_id() != network_id.as_str() {
+            return;
+        }
+        match count {
+            Some(count) => {
+                ui.set_admin_network_count(count.to_string().into());
+                ui.set_admin_network_count_state("known".into());
+            }
+            None => ui.set_admin_network_count_state("unknown".into()),
+        }
     });
 }
 
@@ -6914,7 +7371,7 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         .unwrap_or_default();
     let vhost_view = client.fetch_admin_vhosts(token).await.unwrap_or_default();
     let (vhost_rows, grant_rows) = admin_vhost_rows(&vhost_view);
-    let credential_rows: Vec<(String, String, String)> = credentials
+    let credential_rows: Vec<AdminCredentialRow> = credentials
         .iter()
         .map(|entry| {
             let id = |key: &str| {
@@ -6926,11 +7383,17 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
                     })
                     .unwrap_or_default()
             };
-            (
-                cordiale_core::admin::admin_credential_label(entry),
-                id("user_id"),
-                id("network_id"),
-            )
+            let (nick, ident, realname, sasl_user) =
+                cordiale_core::admin::admin_credential_fields(entry);
+            AdminCredentialRow {
+                label: cordiale_core::admin::admin_credential_label(entry).into(),
+                user_id: id("user_id").into(),
+                network_id: id("network_id").into(),
+                nick: nick.into(),
+                ident: ident.into(),
+                realname: realname.into(),
+                sasl_user: sasl_user.into(),
+            }
         })
         .collect();
     let session_log = client
@@ -6948,6 +7411,7 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
             session_id: cordiale_core::admin::admin_session_id(entry)
                 .unwrap_or_default()
                 .into(),
+            is_user: cordiale_core::admin::admin_session_is_user(entry),
         })
         .collect();
 
@@ -6995,6 +7459,16 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         })
         .collect();
 
+    let visitor_session_rows: Vec<AdminVisitorSessionRow> = visitors
+        .iter()
+        .flat_map(cordiale_core::admin::admin_visitor_sessions)
+        .map(|session| AdminVisitorSessionRow {
+            label: session.label.into(),
+            session_id: session.session_id.into(),
+            alive: session.alive,
+        })
+        .collect();
+
     let session_log_lines: Vec<slint::SharedString> = session_log
         .iter()
         .map(|entry| cordiale_core::admin::admin_session_log_line(entry).into())
@@ -7013,14 +7487,6 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         ui.set_admin_network_names(Rc::new(slint::VecModel::from(network_names)).into());
         ui.set_admin_users(Rc::new(slint::VecModel::from(user_rows)).into());
         ui.set_admin_networks(Rc::new(slint::VecModel::from(network_rows)).into());
-        let credential_rows: Vec<AdminCredentialRow> = credential_rows
-            .into_iter()
-            .map(|(label, user_id, network_id)| AdminCredentialRow {
-                label: label.into(),
-                user_id: user_id.into(),
-                network_id: network_id.into(),
-            })
-            .collect();
         ui.set_admin_credentials(Rc::new(slint::VecModel::from(credential_rows)).into());
         let vhost_names: Vec<slint::SharedString> = vhost_rows
             .iter()
@@ -7048,6 +7514,7 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
             .collect();
         ui.set_admin_grants(Rc::new(slint::VecModel::from(grant_rows)).into());
         ui.set_admin_visitors(Rc::new(slint::VecModel::from(visitor_rows)).into());
+        ui.set_admin_visitor_sessions(Rc::new(slint::VecModel::from(visitor_session_rows)).into());
         ui.set_admin_session_log(Rc::new(slint::VecModel::from(session_log_lines)).into());
     });
 }
@@ -8522,13 +8989,16 @@ async fn handle_frame(
     let key = (network.clone(), channel.clone());
 
     let line = render_message(effective_payload, Some(&frame.event));
-    state
-        .messages
-        .entry(key.clone())
-        .or_default()
-        .push(line.clone());
+    let messages = state.messages.entry(key.clone()).or_default();
+    // A reconnect catch-up can already hold a row this push announces.
+    let already_shown = line
+        .message_id
+        .is_some_and(|id| messages.iter().any(|known| known.message_id == Some(id)));
+    if !already_shown {
+        messages.push(line.clone());
+    }
 
-    if state.current_channel.as_ref() == Some(&key) {
+    if !already_shown && state.current_channel.as_ref() == Some(&key) {
         let dark_theme = state.theme == Theme::Dark;
         refresh_mention_context(state);
         let members = state.members.get(&key).cloned().unwrap_or_default();
@@ -10286,6 +10756,190 @@ fn merge_query_history(state: &mut WorkerState, key: &(String, String), rows: &[
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
 }
 
+/// Rows one catch-up page holds: Grappa's HTTP page ceiling, and the gap
+/// size past which Cicchetto stops paging forward.
+const CATCH_UP_PAGE: usize = 200;
+/// The gap probe only has to tell "within a page" from "beyond it", so it
+/// stops counting one row past the threshold.
+const CATCH_UP_PROBE_CAP: u64 = CATCH_UP_PAGE as u64 + 1;
+/// Pause between two channels' catch-up, so a session with many channels
+/// doesn't trip the reverse proxy's rate limit.
+const CATCH_UP_PACING: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchUpPlan {
+    /// Nothing was said while the socket was down.
+    Nothing,
+    /// The gap fits in one page: read it with `?after=`.
+    PageForward,
+    /// Too far behind to page through: reload the tail, mark the hole.
+    ReloadTail,
+}
+
+fn catch_up_plan(gap: u64) -> CatchUpPlan {
+    if gap == 0 {
+        CatchUpPlan::Nothing
+    } else if gap > CATCH_UP_PAGE as u64 {
+        CatchUpPlan::ReloadTail
+    } else {
+        CatchUpPlan::PageForward
+    }
+}
+
+/// Notes, when the socket drops, the newest message id of every joined
+/// channel: the point its catch-up resumes from. An anchor already noted
+/// stays (a second drop before the catch-up ran must not skip rows).
+fn note_catch_up_anchors(state: &mut WorkerState) {
+    let anchors: Vec<((String, String), i64)> = state
+        .channel_entries
+        .iter()
+        .filter(|(network, channel, _)| {
+            state.window_states.get(&window_state_key(network, channel))
+                == Some(&ChannelWindowState::Joined)
+        })
+        .filter_map(|(network, channel, _)| {
+            let key = (network.clone(), channel.clone());
+            let id = query_high_water_id(state, &key)?;
+            Some((key, id))
+        })
+        .collect();
+    for (key, id) in anchors {
+        state.catch_up_anchors.entry(key).or_insert(id);
+    }
+}
+
+/// Backfills the next queued channel, then schedules the one after it: the
+/// requests go out one at a time and spaced out, never as a burst.
+async fn handle_catch_up_next(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    worker_self: &mpsc::UnboundedSender<WorkerCommand>,
+) {
+    if state.session.is_none() {
+        state.catch_up_anchors.clear();
+        return;
+    }
+    let Some((key, anchor)) = state.catch_up_anchors.pop_first() else {
+        return;
+    };
+    catch_up_channel(state, ui, &key, anchor).await;
+    if !state.catch_up_anchors.is_empty() {
+        let next = worker_self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(CATCH_UP_PACING).await;
+            let _ = next.send(WorkerCommand::CatchUpNext);
+        });
+    }
+}
+
+/// Fetches what `key` missed after message `anchor` while the socket was
+/// down. A gap of up to one page is read with `?after=`; a bigger one
+/// replaces the window with the newest page and leaves a note where the
+/// hole is, which scrolling up fills, like Cicchetto's far-behind reload.
+async fn catch_up_channel(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: &(String, String),
+    anchor: i64,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let plan = match client
+        .fetch_messages_count(&token, &key.0, &key.1, anchor, Some(CATCH_UP_PROBE_CAP))
+        .await
+    {
+        Ok(gap) => catch_up_plan(gap),
+        // A server without the probe still answers `?after=`.
+        Err(error) if error.status() == Some(cordiale_core::client::StatusCode::NOT_FOUND) => {
+            CatchUpPlan::PageForward
+        }
+        Err(error) => {
+            persistence::log_line(&format!(
+                "catch-up probe failed for {}/{}: {error:?}",
+                key.0, key.1
+            ));
+            return;
+        }
+    };
+    let rows = match plan {
+        CatchUpPlan::Nothing => return,
+        CatchUpPlan::PageForward => {
+            client
+                .fetch_messages(&token, &key.0, &key.1, Some(anchor), Some(CATCH_UP_PAGE))
+                .await
+        }
+        CatchUpPlan::ReloadTail => {
+            client
+                .fetch_messages(&token, &key.0, &key.1, None, Some(CATCH_UP_PAGE))
+                .await
+        }
+    };
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            persistence::log_line(&format!(
+                "catch-up fetch failed for {}/{}: {error:?}",
+                key.0, key.1
+            ));
+            return;
+        }
+    };
+    // The awaits above can outlast the session or the channel membership.
+    if state.session.is_none()
+        || state.window_states.get(&window_state_key(&key.0, &key.1))
+            != Some(&ChannelWindowState::Joined)
+    {
+        return;
+    }
+    let incoming: Vec<RenderedMessage> = rows.iter().map(render_history_entry).collect();
+    if incoming.is_empty() {
+        return;
+    }
+    let messages = state.messages.entry(key.clone()).or_default();
+    if plan == CatchUpPlan::ReloadTail {
+        replace_with_history_tail(messages, incoming);
+        state.history_start_reached.remove(key);
+        state
+            .history_cursors_fetched
+            .retain(|(window, _)| window != key);
+    } else {
+        merge_rendered_messages(messages, incoming);
+    }
+    if !state.current_query && state.current_channel.as_ref() == Some(key) {
+        push_members_update(state, ui, key);
+        if plan == CatchUpPlan::ReloadTail {
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_history_start_reached(false));
+        }
+    }
+}
+
+/// Swaps a window's rows for the newest page, keeping the rows that came
+/// in live after it, and puts a note above the page where the skipped
+/// stretch is. The skipped rows are below what `?before=` pages from, so
+/// scrolling up fills them in.
+fn replace_with_history_tail(messages: &mut Vec<RenderedMessage>, tail: Vec<RenderedMessage>) {
+    let newest = tail.iter().filter_map(|message| message.message_id).max();
+    let first = tail
+        .iter()
+        .min_by(|a, b| compare_rendered_message_order(a, b));
+    let (Some(newest), Some(first)) = (newest, first) else {
+        return;
+    };
+    let note = RenderedMessage {
+        timestamp: first.timestamp.clone(),
+        nick: None,
+        text: format!(
+            "… more than {CATCH_UP_PAGE} messages were missed while disconnected; scroll up to load them"
+        ),
+        italic: true,
+        message_id: None,
+        server_time: first.server_time,
+    };
+    messages.retain(|message| message.message_id.is_some_and(|id| id > newest));
+    merge_rendered_messages(messages, tail.into_iter().chain(std::iter::once(note)));
+}
+
 fn merge_rendered_messages(
     messages: &mut Vec<RenderedMessage>,
     incoming: impl IntoIterator<Item = RenderedMessage>,
@@ -10539,7 +11193,8 @@ fn normalize_server_url(url: &str) -> String {
 }
 
 /// Turns an `https://`/`http://` base URL into the matching `wss://`/`ws://`
-/// Phoenix socket URL, per `docs/protocol-notes.md` §2.
+/// Phoenix socket URL, per `docs/protocol-notes.md` §2. `client_proto` is a
+/// plain integer: the server silently drops anything it can't read as one.
 fn to_ws_url(base_url: &str) -> String {
     let with_scheme = if let Some(rest) = base_url.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -10549,7 +11204,7 @@ fn to_ws_url(base_url: &str) -> String {
         format!("wss://{base_url}")
     };
     format!(
-        "{}/socket/websocket?vsn=2.0.0",
+        "{}/socket/websocket?vsn=2.0.0&client_proto={CLIENT_PROTOCOL_VERSION}",
         with_scheme.trim_end_matches('/')
     )
 }
@@ -17027,6 +17682,9 @@ fn parse_query_windows_list(
                 network: network.clone(),
                 target_nick: target_nick.to_string(),
                 opened_at: opened_at.to_string(),
+                // Absent (server older than v34) and null both mean "no id":
+                // identity falls back to the nick.
+                dm_conversation_id: entry.get("dm_conversation_id").and_then(Value::as_i64),
             };
             if !seen.insert(query_window_key(&query.network, &query.target_nick)) {
                 return None;
@@ -17087,9 +17745,12 @@ fn same_rfc3339_instant(left: &str, right: &str) -> bool {
         && left.timestamp_subsec_nanos() == right.timestamp_subsec_nanos()
 }
 
-/// Infers only unambiguous renames: exactly one disappeared and one appeared
-/// on the same network with the same validated opening instant. No list
-/// ordering or nickname similarity is treated as identity.
+/// Infers only unambiguous renames among the windows that disappeared and
+/// appeared. A window keeps its `dm_conversation_id` under the new nick, so
+/// an id held by exactly one disappeared and one appeared window on the same
+/// network is a rename. Windows without an id (older server) fall back to
+/// the same validated opening instant. No list ordering or nickname
+/// similarity is treated as identity.
 fn query_window_renames(
     previous: &[QueryWindow],
     next: &[QueryWindow],
@@ -17105,11 +17766,27 @@ fn query_window_renames(
 
     let mut renames = Vec::new();
     for old in removed.iter().copied() {
+        if let Some(id) = old.dm_conversation_id {
+            let by_id: Vec<&QueryWindow> = added
+                .iter()
+                .copied()
+                .filter(|new| new.network == old.network && new.dm_conversation_id == Some(id))
+                .collect();
+            if let [new] = by_id.as_slice() {
+                renames.push((old.clone(), (*new).clone()));
+                continue;
+            }
+        }
         let candidates: Vec<&QueryWindow> = added
             .iter()
             .copied()
             .filter(|new| {
-                old.network == new.network && same_rfc3339_instant(&old.opened_at, &new.opened_at)
+                old.network == new.network
+                    // Two different ids are two different conversations.
+                    && (old.dm_conversation_id.is_none()
+                        || new.dm_conversation_id.is_none()
+                        || old.dm_conversation_id == new.dm_conversation_id)
+                    && same_rfc3339_instant(&old.opened_at, &new.opened_at)
             })
             .collect();
         if candidates.len() != 1 {
@@ -18510,6 +19187,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         });
         state
             .stale_query_topics
@@ -18595,6 +19273,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "OldNick".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         });
         let old_topic = own_nick_listener_topic("vjt", "libera", "OldNick");
         let new_topic = own_nick_listener_topic("vjt", "libera", "NewNick");
@@ -18720,6 +19399,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         }];
         let inbound = serde_json::json!({
             "kind": "privmsg",
@@ -18790,6 +19470,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         assert!(!apply_query_windows_snapshot(&mut state, vec![query]));
         drain_pending_own_nick_dms(&mut state);
@@ -18883,6 +19564,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let stale: std::collections::HashSet<(String, String)> =
             [query_window_key("libera", "oldpeer")]
@@ -19006,11 +19688,13 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "oldnick".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let renamed = QueryWindow {
             network: "libera".to_string(),
             target_nick: "newnick".to_string(),
             opened_at: "2026-09-21T12:00:00+02:00".to_string(),
+            dm_conversation_id: None,
         };
         let old_key = (old.network.clone(), old.target_nick.clone());
         let new_key = (renamed.network.clone(), renamed.target_nick.clone());
@@ -19068,11 +19752,13 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "foo".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let recased = QueryWindow {
             network: "libera".to_string(),
             target_nick: "Foo".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let old_key = (old.network.clone(), old.target_nick.clone());
         let recased_key = (recased.network.clone(), recased.target_nick.clone());
@@ -19125,24 +19811,75 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "old-one".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let old_two = QueryWindow {
             network: "libera".to_string(),
             target_nick: "old-two".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let new_one = QueryWindow {
             network: "libera".to_string(),
             target_nick: "new-one".to_string(),
             opened_at: "2026-09-21T12:00:00+02:00".to_string(),
+            dm_conversation_id: None,
         };
         let new_two = QueryWindow {
             network: "libera".to_string(),
             target_nick: "new-two".to_string(),
             opened_at: "2026-09-21T12:00:00+02:00".to_string(),
+            dm_conversation_id: None,
         };
 
         assert!(query_window_renames(&[old_one, old_two], &[new_one, new_two]).is_empty());
+    }
+
+    #[test]
+    fn query_window_rename_matching_uses_conversation_id_over_open_time() {
+        let window = |nick: &str, id: Option<i64>| QueryWindow {
+            network: "libera".to_string(),
+            target_nick: nick.to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: id,
+        };
+        // Same opening instant makes these ambiguous without ids.
+        let previous = [window("old-one", Some(1)), window("old-two", Some(2))];
+        let next = [window("new-one", Some(1)), window("new-two", Some(2))];
+        let renames = query_window_renames(&previous, &next);
+        assert_eq!(renames.len(), 2);
+        assert!(renames
+            .iter()
+            .any(|(old, new)| old.target_nick == "old-one" && new.target_nick == "new-one"));
+        assert!(renames
+            .iter()
+            .any(|(old, new)| old.target_nick == "old-two" && new.target_nick == "new-two"));
+
+        // A different id under the same opening instant is not a rename.
+        assert!(
+            query_window_renames(&[window("old", Some(1))], &[window("new", Some(2))]).is_empty()
+        );
+        // A window without an id still falls back to the opening instant.
+        assert_eq!(
+            query_window_renames(&[window("old", None)], &[window("new", Some(3))]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn query_windows_list_reads_optional_conversation_id() {
+        let network_slugs = HashMap::from([(1, "libera".to_string())]);
+        let payload = serde_json::json!({
+            "kind": "query_windows_list",
+            "windows": {"1": [
+                {"network_id": 1, "target_nick": "with", "opened_at": "2026-09-21T10:00:00Z", "dm_conversation_id": 42},
+                {"network_id": 1, "target_nick": "null", "opened_at": "2026-09-21T10:00:00Z", "dm_conversation_id": null},
+                {"network_id": 1, "target_nick": "absent", "opened_at": "2026-09-21T10:00:00Z"}
+            ]}
+        });
+        let queries = parse_query_windows_list(&payload, &network_slugs).unwrap();
+        let ids: Vec<Option<i64>> = queries.iter().map(|q| q.dm_conversation_id).collect();
+        assert_eq!(ids, vec![Some(42), None, None]);
     }
 
     #[test]
@@ -19151,6 +19888,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let identity = query_window_key(&query.network, &query.target_nick);
         let topic = query_topic("vjt", &query.network, &query.target_nick);
@@ -19191,6 +19929,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let identity = query_window_key(&query.network, &query.target_nick);
         let topic = query_topic("vjt", &query.network, &query.target_nick);
@@ -19486,6 +20225,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         }];
 
         let channel_payload = serde_json::json!({
@@ -19772,6 +20512,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         }];
         state
             .window_mentions
@@ -19998,6 +20739,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         }];
         state
             .window_mentions
@@ -21563,6 +22305,17 @@ mod tests {
         );
         form.sizes[0] = "-1".to_string();
         assert!(admin_settings_body(&form, Some(&loaded)).is_none());
+    }
+
+    #[test]
+    fn a_refused_admin_write_is_told_apart() {
+        assert_eq!(admin_failure_kind(Some(403), false), "admin-forbidden");
+        assert_eq!(admin_failure_kind(Some(403), true), "admin-forbidden");
+        assert_eq!(admin_failure_kind(Some(409), true), "admin-network-in-use");
+        // A 409 elsewhere is a duplicate, not a network in use.
+        assert_eq!(admin_failure_kind(Some(409), false), "admin-action-failed");
+        assert_eq!(admin_failure_kind(Some(422), false), "admin-action-failed");
+        assert_eq!(admin_failure_kind(None, true), "admin-action-failed");
     }
 
     #[test]
@@ -24524,6 +25277,7 @@ mod tests {
             network: "deleted".to_string(),
             target_nick: "alice".to_string(),
             opened_at: "now".to_string(),
+            dm_conversation_id: None,
         });
         let obsolete_topic = channel_topic("sythos", "deleted", "alice");
         state.joined_topics.insert(obsolete_topic.clone());
@@ -24638,6 +25392,92 @@ mod tests {
             read_cursor_to_write(&mut state),
             Some(("libera".to_string(), "#Rust".to_string(), 12))
         );
+    }
+
+    #[test]
+    fn catch_up_plan_pages_up_to_one_page_and_reloads_beyond_it() {
+        assert_eq!(catch_up_plan(0), CatchUpPlan::Nothing);
+        assert_eq!(catch_up_plan(1), CatchUpPlan::PageForward);
+        assert_eq!(catch_up_plan(200), CatchUpPlan::PageForward);
+        assert_eq!(catch_up_plan(201), CatchUpPlan::ReloadTail);
+        assert_eq!(catch_up_plan(CATCH_UP_PROBE_CAP), CatchUpPlan::ReloadTail);
+    }
+
+    #[test]
+    fn catch_up_anchors_cover_joined_channels_and_keep_the_first_one() {
+        let line = |id| RenderedMessage {
+            timestamp: "10:00".to_string(),
+            nick: Some("foo".to_string()),
+            text: "hi".to_string(),
+            italic: false,
+            message_id: Some(id),
+            server_time: Some(id),
+        };
+        let mut state = WorkerState::new();
+        let joined = ("libera".to_string(), "#rust".to_string());
+        let kicked = ("libera".to_string(), "#old".to_string());
+        let empty = ("libera".to_string(), "#new".to_string());
+        for key in [&joined, &kicked, &empty] {
+            state
+                .channel_entries
+                .push((key.0.clone(), key.1.clone(), key.1.clone()));
+            state
+                .window_states
+                .insert(window_state_key(&key.0, &key.1), ChannelWindowState::Joined);
+        }
+        state.window_states.insert(
+            window_state_key(&kicked.0, &kicked.1),
+            ChannelWindowState::Kicked,
+        );
+        state
+            .messages
+            .insert(joined.clone(), vec![line(5), line(9), line(7)]);
+        state.messages.insert(kicked.clone(), vec![line(3)]);
+
+        note_catch_up_anchors(&mut state);
+        assert_eq!(
+            state.catch_up_anchors.iter().collect::<Vec<_>>(),
+            vec![(&joined, &9)]
+        );
+
+        // A second drop before the catch-up ran keeps the older anchor.
+        state.messages.get_mut(&joined).unwrap().push(line(12));
+        note_catch_up_anchors(&mut state);
+        assert_eq!(state.catch_up_anchors.get(&joined), Some(&9));
+    }
+
+    #[test]
+    fn history_tail_replaces_old_rows_keeps_live_ones_and_marks_the_hole() {
+        let line = |id| RenderedMessage {
+            timestamp: "10:00".to_string(),
+            nick: Some("foo".to_string()),
+            text: format!("row {id}"),
+            italic: false,
+            message_id: Some(id),
+            server_time: Some(id),
+        };
+        let mut messages = vec![line(1), line(2), line(900)];
+        // The tail arrives newest first, like the default page.
+        replace_with_history_tail(&mut messages, vec![line(800), line(799), line(798)]);
+
+        let ids: Vec<Option<i64>> = messages.iter().map(|m| m.message_id).collect();
+        assert_eq!(ids, vec![None, Some(798), Some(799), Some(800), Some(900)]);
+        assert!(messages[0].italic && messages[0].nick.is_none());
+        assert_eq!(messages[0].server_time, Some(798));
+    }
+
+    #[test]
+    fn history_tail_without_rows_leaves_the_window_alone() {
+        let mut messages = vec![RenderedMessage {
+            timestamp: "10:00".to_string(),
+            nick: Some("foo".to_string()),
+            text: "hi".to_string(),
+            italic: false,
+            message_id: Some(4),
+            server_time: Some(4),
+        }];
+        replace_with_history_tail(&mut messages, Vec::new());
+        assert_eq!(messages.len(), 1);
     }
 
     #[test]
@@ -24827,7 +25667,9 @@ mod tests {
     fn to_ws_url_upgrades_https_to_wss() {
         assert_eq!(
             to_ws_url("https://irc.sindro.me"),
-            "wss://irc.sindro.me/socket/websocket?vsn=2.0.0"
+            format!(
+                "wss://irc.sindro.me/socket/websocket?vsn=2.0.0&client_proto={CLIENT_PROTOCOL_VERSION}"
+            )
         );
     }
 
@@ -24857,7 +25699,9 @@ mod tests {
     fn to_ws_url_upgrades_http_to_ws() {
         assert_eq!(
             to_ws_url("http://localhost:4000"),
-            "ws://localhost:4000/socket/websocket?vsn=2.0.0"
+            format!(
+                "ws://localhost:4000/socket/websocket?vsn=2.0.0&client_proto={CLIENT_PROTOCOL_VERSION}"
+            )
         );
     }
 
