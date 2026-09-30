@@ -3011,3 +3011,27 @@ msgstr "L'autenticazione a due fattori appartiene agli account Grappa. Una sessi
 msgctxt "AppWindow"
 msgid "Passkeys belong to Grappa accounts. A guest or visitor session doesn't have any."
 msgstr "Le passkey appartengono agli account Grappa. Una sessione ospite o visitatore non ne ha."
+
+msgctxt "AppWindow"
+msgid "The server refused the passkey. The authenticator may be the wrong one, or the server expects another origin than {}. If it does, enter it under Passkey origin."
+msgstr "Il server ha rifiutato la passkey. L'autenticatore potrebbe essere quello sbagliato, oppure il server si aspetta un'origine diversa da {}. In tal caso inseriscila in Origine delle passkey."
+
+msgctxt "AppWindow"
+msgid "Passkey origin (optional)"
+msgstr "Origine passkey (facoltativa)"
+
+msgctxt "AppWindow"
+msgid "That isn't an origin. Use the form https://host or https://host:port, without a path."
+msgstr "Questa non è un'origine. Usa la forma https://host oppure https://host:porta, senza percorso."
+
+msgctxt "AppWindow"
+msgid "Passkey origin"
+msgstr "Origine delle passkey"
+
+msgctxt "AppWindow"
+msgid "A passkey only answers for one exact origin. For this server Cordiale uses {}. If the server is set up with another one (GRAPPA_PASSKEY_ORIGIN), enter it here; leave the field empty otherwise. It stays on this device."
+msgstr "Una passkey risponde solo per un'origine esatta. Per questo server Cordiale usa {}. Se il server è configurato con un'altra (GRAPPA_PASSKEY_ORIGIN), inseriscila qui; altrimenti lascia il campo vuoto. Resta su questo dispositivo."
+
+msgctxt "AppWindow"
+msgid "Saved."
+msgstr "Salvato."

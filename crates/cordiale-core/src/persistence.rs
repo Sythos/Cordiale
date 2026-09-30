@@ -27,6 +27,7 @@
 //! `servers.json`. Actual credentials never land in either file — see
 //! `CredentialStore` (Phase 1, item 3).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -35,6 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{Profile, Server};
+use crate::passkey_origin::{passkey_origin, OverrideCheck};
 
 const CONFIG_DIR_NAME: &str = ".cordiale";
 const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -165,6 +167,13 @@ pub struct ServersFile {
     /// `identifier` of the currently selected `Profile`, if any.
     #[serde(default)]
     pub selected_profile_identifier: Option<String>,
+    /// Per-server WebAuthn origin the user set because the server asserts
+    /// another one than its URL (`GRAPPA_PASSKEY_ORIGIN`). Keyed by the
+    /// origin rebuilt from the server URL, so `irc.example.com`,
+    /// `https://irc.example.com/` and `https://IRC.example.com:443` share
+    /// one entry. Local only, never sent to Grappa.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub passkey_origins: BTreeMap<String, String>,
 }
 
 fn current_servers_schema_version() -> u32 {
@@ -179,6 +188,33 @@ impl Default for ServersFile {
             profiles: Vec::new(),
             selected_server_base_url: None,
             selected_profile_identifier: None,
+            passkey_origins: BTreeMap::new(),
+        }
+    }
+}
+
+impl ServersFile {
+    /// The passkey origin override saved for `server_url`, if any.
+    pub fn passkey_origin_override(&self, server_url: &str) -> Option<&str> {
+        self.passkey_origins
+            .get(&passkey_origin(server_url, None))
+            .map(String::as_str)
+    }
+
+    /// Saves (`Valid`) or clears (`Unset`) the override for `server_url`.
+    /// An `Invalid` one changes nothing and returns false.
+    pub fn set_passkey_origin_override(&mut self, server_url: &str, check: &OverrideCheck) -> bool {
+        let key = passkey_origin(server_url, None);
+        match check {
+            OverrideCheck::Valid(origin) => {
+                self.passkey_origins.insert(key, origin.clone());
+                true
+            }
+            OverrideCheck::Unset => {
+                self.passkey_origins.remove(&key);
+                true
+            }
+            OverrideCheck::Invalid => false,
         }
     }
 }
@@ -256,6 +292,38 @@ pub fn load_servers_file() -> Result<ServersFile, PersistenceError> {
 
 pub fn save_servers_file(servers_file: &ServersFile) -> Result<(), PersistenceError> {
     save_json(SERVERS_FILE_NAME, servers_file)
+}
+
+/// The passkey origin override saved for `server_url`.
+pub fn load_passkey_origin_override(server_url: &str) -> Option<String> {
+    load_servers_file()
+        .ok()?
+        .passkey_origin_override(server_url)
+        .map(str::to_string)
+}
+
+/// The origin to use for a passkey ceremony with `server_url`: its saved
+/// override, else the one rebuilt from the URL.
+pub fn effective_passkey_origin(server_url: &str) -> String {
+    passkey_origin(
+        server_url,
+        load_passkey_origin_override(server_url).as_deref(),
+    )
+}
+
+/// Saves or clears the passkey origin override for `server_url` (see
+/// `ServersFile::set_passkey_origin_override`). Nothing is written for an
+/// invalid one, or when the file already holds that value.
+pub fn save_passkey_origin_override(
+    server_url: &str,
+    check: &OverrideCheck,
+) -> Result<(), PersistenceError> {
+    let mut file = load_servers_file()?;
+    let before = file.passkey_origins.clone();
+    if file.set_passkey_origin_override(server_url, check) && file.passkey_origins != before {
+        save_servers_file(&file)?;
+    }
+    Ok(())
 }
 
 /// Appends one line to `~/.cordiale/cordiale.log`, prefixed with a Unix
@@ -407,6 +475,62 @@ mod tests {
         assert!(servers_file.servers.is_empty());
         assert!(servers_file.profiles.is_empty());
         assert_eq!(servers_file.selected_server_base_url, None);
+    }
+
+    #[test]
+    fn passkey_origin_overrides_are_keyed_by_the_rebuilt_origin() {
+        let mut file = ServersFile::default();
+        let valid = OverrideCheck::Valid("http://localhost:5173".to_string());
+        assert!(file.set_passkey_origin_override("irc.example.com", &valid));
+        for spelling in [
+            "irc.example.com",
+            "https://irc.example.com/",
+            "HTTPS://IRC.example.com:443",
+            "https://irc.example.com/app",
+        ] {
+            assert_eq!(
+                file.passkey_origin_override(spelling),
+                Some("http://localhost:5173"),
+                "{spelling}"
+            );
+        }
+        assert_eq!(file.passkey_origin_override("https://other.example"), None);
+        assert_eq!(
+            file.passkey_origin_override("https://irc.example.com:8443"),
+            None
+        );
+    }
+
+    #[test]
+    fn unset_clears_an_override_and_invalid_leaves_it_alone() {
+        let mut file = ServersFile::default();
+        let server = "https://irc.example.com";
+        let valid = OverrideCheck::Valid("https://auth.example.com".to_string());
+        assert!(file.set_passkey_origin_override(server, &valid));
+        assert!(!file.set_passkey_origin_override(server, &OverrideCheck::Invalid));
+        assert_eq!(
+            file.passkey_origin_override(server),
+            Some("https://auth.example.com")
+        );
+        assert!(file.set_passkey_origin_override(server, &OverrideCheck::Unset));
+        assert_eq!(file.passkey_origin_override(server), None);
+        assert!(file.passkey_origins.is_empty());
+    }
+
+    #[test]
+    fn passkey_origin_overrides_round_trip_and_old_files_still_load() {
+        let mut file = ServersFile::default();
+        let valid = OverrideCheck::Valid("https://auth.example.com".to_string());
+        file.set_passkey_origin_override("https://irc.example.com", &valid);
+        let json = serde_json::to_string(&file).expect("serialize");
+        let decoded: ServersFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded, file);
+
+        let older: ServersFile = serde_json::from_str(r#"{"servers":[],"profiles":[]}"#)
+            .expect("an older servers.json loads");
+        assert!(older.passkey_origins.is_empty());
+        let empty = serde_json::to_string(&older).expect("serialize");
+        assert!(!empty.contains("passkey_origins"), "{empty}");
     }
 
     #[test]
