@@ -29,15 +29,8 @@
 //! corresponding `*.AdminWire` modules) and Cicchetto's admin UI
 //! (`cicchetto/src/AdminPane.tsx`, `cicchetto/src/lib/api.ex`) directly,
 //! since no other authority exists. See `docs/protocol-notes.md` §4ter
-//! for the full endpoint inventory. Covered: overview, sessions (list +
-//! disconnect), users (list + toggle `is_admin` + delete), networks
-//! (list + circuit reset), visitors (list + delete), session log (read),
-//! reaper (run). Still deliberately out of scope: vhosts (+ grants),
-//! credentials, server-wide settings write, network create/patch/delete,
-//! user create/password-change, and the admin WebSocket event stream
-//! (`grappa:admin:events`) — each is a form-heavy or genuinely
-//! destructive surface that needs a real server to validate against,
-//! not something to build blind.
+//! for the full endpoint inventory, which lists what Cordiale covers and
+//! what it leaves out.
 //!
 //! Every entry (`AdminSession`, `AdminUser`, `AdminNetwork`) is kept as
 //! opaque JSON rather than a fully-typed struct: the source confirms
