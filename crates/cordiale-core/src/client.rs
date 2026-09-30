@@ -35,8 +35,9 @@ pub use reqwest::StatusCode;
 use serde_json::Value;
 
 use crate::admin::{
-    AdminNetworksResponse, AdminOverview, AdminReaperRunResponse, AdminSessionLogResponse,
-    AdminSessionsResponse, AdminUploadsResponse, AdminUsersResponse, AdminVisitorsResponse,
+    AdminNetworkMessageCount, AdminNetworksResponse, AdminOverview, AdminReaperRunResponse,
+    AdminSessionLogResponse, AdminSessionsResponse, AdminUploadsResponse, AdminUsersResponse,
+    AdminVisitorsResponse,
 };
 use crate::profile::{
     AddIgnoreRequest, AliasesView, IgnoreEntry, IgnoreMutationResponse, IgnoresResponse,
@@ -46,7 +47,7 @@ use crate::profile::{
 use crate::rest::{
     ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
     DisplayPrefs, FeaturedChannel, FeaturedChannelsResponse, LoginRequest, LoginResponse,
-    MeResponse, SendMessageRequest, ThemeIndex, ThemeWire, UploadResponse,
+    MeResponse, MessageCountResponse, SendMessageRequest, ThemeIndex, ThemeWire, UploadResponse,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -566,6 +567,49 @@ impl GrappaClient {
         Ok(response.json::<Vec<Value>>().await?)
     }
 
+    /// `GET /networks/:slug/channels/:channel/messages/count?after=<id>&cap=`
+    /// — how many rows sit after message `after_id`: the gap probe behind a
+    /// reconnect catch-up. With `cap` the server stops counting there (so
+    /// `count == cap` reads "at least `cap`"); a server that predates the
+    /// parameter ignores it and counts everything, which still answers the
+    /// threshold correctly.
+    pub async fn fetch_messages_count(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel_name: &str,
+        after_id: i64,
+        cap: Option<u64>,
+    ) -> Result<u64, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend([
+                "networks",
+                network_slug,
+                "channels",
+                channel_name,
+                "messages",
+                "count",
+            ]);
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("after", &after_id.to_string());
+            if let Some(cap) = cap {
+                query.append_pair("cap", &cap.to_string());
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<MessageCountResponse>().await?.count)
+    }
+
     /// `DELETE /networks/:network_slug/channels/:channel` — parts from an
     /// IRC channel and removes the joined/pseudo window on the server. A
     /// non-empty optional reason is sent as a query parameter, never a DELETE
@@ -587,6 +631,31 @@ impl GrappaClient {
             url.query_pairs_mut().append_pair("reason", reason);
         }
 
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /networks/:network_slug/invites/:channel` — declines a channel
+    /// invite. Nothing is sent to IRC: the server drops the session's invited
+    /// window (`200 {"ok": true}`) and the banner goes away through the
+    /// `window_invite_declined` push, never from this response. `404`
+    /// (`not_invited`) means the window already left the invited state.
+    pub async fn decline_invite(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_slug, "invites", channel]);
         self.http
             .delete(url)
             .bearer_auth(token)
@@ -921,6 +990,52 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `POST /admin/sessions/:id/reconnect` — brings a downed visitor
+    /// session back up (visitors only: a user subject is refused with 400,
+    /// an account reconnects its own sessions). Idempotent on a live one.
+    pub async fn reconnect_admin_session(
+        &self,
+        token: &str,
+        session_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "sessions", session_id, "reconnect"]);
+
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /admin/sessions/:id` — force-stops the live session without
+    /// touching the credential or visitor row, so the binding stays as it
+    /// was. Idempotent; 422 when an admin targets their own session.
+    pub async fn terminate_admin_session(
+        &self,
+        token: &str,
+        session_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "sessions", session_id]);
+
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// `GET /admin/users`.
     pub async fn fetch_admin_users(&self, token: &str) -> Result<Vec<Value>, GrappaClientError> {
         let url = format!("{}/admin/users", self.base_url);
@@ -1158,8 +1273,10 @@ impl GrappaClient {
         Ok(())
     }
 
-    /// `DELETE /admin/networks/:id` — 409 while it still has credentials or
-    /// scrollback.
+    /// `DELETE /admin/networks/:id` — since protocol v33 this also deletes
+    /// the network's whole scrollback, for every subject. The one refusal
+    /// left is 409 `credentials_present` while accounts are still bound.
+    /// Ask `fetch_admin_network_message_count` first to say what goes.
     pub async fn delete_admin_network(
         &self,
         token: &str,
@@ -1170,6 +1287,142 @@ impl GrappaClient {
         url.path_segments_mut()
             .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
             .extend(["admin", "networks", network_id]);
+        self.http
+            .delete(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `GET /admin/networks/:id/message_count` — how many scrollback rows a
+    /// network delete takes with it. `None` for a 404, which is a server
+    /// older than v33 (no such route) or a network that is already gone:
+    /// either way the count can't be confirmed, and is never zero.
+    pub async fn fetch_admin_network_message_count(
+        &self,
+        token: &str,
+        network_id: &str,
+    ) -> Result<Option<u64>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "networks", network_id, "message_count"]);
+        let response = self.http.get(url).bearer_auth(token).send().await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let count = response
+            .error_for_status()?
+            .json::<AdminNetworkMessageCount>()
+            .await?;
+        Ok(Some(count.message_count))
+    }
+
+    /// `GET /admin/networks/:id/featured_channels` — every curated channel
+    /// of the network, disabled ones included, by position then id.
+    pub async fn fetch_admin_featured_channels(
+        &self,
+        token: &str,
+        network_id: &str,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "networks", network_id, "featured_channels"]);
+        let body = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(body
+            .get("featured_channels")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// `POST /admin/networks/:id/featured_channels` with `name` and, all
+    /// optional, `description`, `position`, `enabled`. The server lowercases
+    /// the name; 409 for a channel already featured, 422 for a name that
+    /// isn't a channel.
+    pub async fn add_admin_featured_channel(
+        &self,
+        token: &str,
+        network_id: &str,
+        channel: &Value,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "networks", network_id, "featured_channels"]);
+        self.http
+            .post(url)
+            .bearer_auth(token)
+            .json(channel)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `PUT /admin/networks/:id/featured_channels/:channel_id` with any of
+    /// `name`, `description`, `position`, `enabled` (an unknown key is a
+    /// 400). A disabled channel stays on the list but is not suggested.
+    pub async fn update_admin_featured_channel(
+        &self,
+        token: &str,
+        network_id: &str,
+        channel_id: &str,
+        changes: &Value,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend([
+                "admin",
+                "networks",
+                network_id,
+                "featured_channels",
+                channel_id,
+            ]);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(changes)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `DELETE /admin/networks/:id/featured_channels/:channel_id`.
+    pub async fn delete_admin_featured_channel(
+        &self,
+        token: &str,
+        network_id: &str,
+        channel_id: &str,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend([
+                "admin",
+                "networks",
+                network_id,
+                "featured_channels",
+                channel_id,
+            ]);
         self.http
             .delete(url)
             .bearer_auth(token)
@@ -1226,6 +1479,31 @@ impl GrappaClient {
             .post(url)
             .bearer_auth(token)
             .json(&serde_json::json!({ "host": host, "port": port, "tls": tls }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// `PUT /admin/networks/:id/servers/:server_id` with any of `host`,
+    /// `port`, `tls`, `enabled`, `priority`. Live sessions keep their
+    /// connection until they next reconnect; 409 for a duplicate endpoint.
+    pub async fn update_admin_server(
+        &self,
+        token: &str,
+        network_id: &str,
+        server_id: &str,
+        changes: &Value,
+    ) -> Result<(), GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "networks", network_id, "servers", server_id]);
+        self.http
+            .put(url)
+            .bearer_auth(token)
+            .json(changes)
             .send()
             .await?
             .error_for_status()?;
@@ -1327,6 +1605,39 @@ impl GrappaClient {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    /// `PATCH /admin/credentials/:user_id/:network_id` with any of `nick`,
+    /// `ident`, `realname`, `sasl_user`, `auth_method`,
+    /// `auth_command_template`, `autojoin_channels` and `password` (any other
+    /// key is a 400). Changing the password or the auth method stops a live
+    /// session, since it authenticated with the old one, and Grappa does not
+    /// dial it again: the answer is `true` in that case, `false` when the
+    /// session was left alone. A new auth method needs a fresh password (422
+    /// without one).
+    pub async fn update_admin_credential(
+        &self,
+        token: &str,
+        user_id: &str,
+        network_id: &str,
+        changes: &Value,
+    ) -> Result<bool, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["admin", "credentials", user_id, network_id]);
+        let body = self
+            .http
+            .patch(url)
+            .bearer_auth(token)
+            .json(changes)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(body.get("session_action").and_then(Value::as_str) == Some("stopped"))
     }
 
     /// `DELETE /admin/credentials/:user_id/:network_id` — unbinds and stops
@@ -3214,6 +3525,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decline_invite_deletes_the_encoded_invite_and_surfaces_not_invited() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/invites/%23rust"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/invites/%23gone"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({"error": "not_invited"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .decline_invite("abc123", "libera", "#rust")
+            .await
+            .expect("decline_invite");
+        let err = client
+            .decline_invite("abc123", "libera", "#gone")
+            .await
+            .expect_err("404 not_invited");
+        assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
     async fn fetch_display_prefs_tolerates_a_partial_response() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -3894,6 +4235,223 @@ mod tests {
             .disconnect_admin_session("abc123", "user:vjt:1")
             .await
             .expect("disconnect_admin_session");
+    }
+
+    #[tokio::test]
+    async fn reconnect_and_terminate_address_the_composite_key() {
+        let mock_server = MockServer::start().await;
+        let visitor = "visitor:3f2a9c1e-0000-4000-8000-000000000001:7";
+        Mock::given(method("POST"))
+            .and(path(format!("/admin/sessions/{visitor}/reconnect")))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/sessions/user:vjt:1"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/sessions/user:self:2"))
+            .respond_with(ResponseTemplate::new(422))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .reconnect_admin_session("abc123", visitor)
+            .await
+            .expect("reconnect");
+        client
+            .terminate_admin_session("abc123", "user:vjt:1")
+            .await
+            .expect("terminate");
+        let refused = client
+            .terminate_admin_session("abc123", "user:self:2")
+            .await
+            .expect_err("own session");
+        assert_eq!(refused.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+    }
+
+    #[tokio::test]
+    async fn network_message_count_distinguishes_zero_from_unknown() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/networks/7/message_count"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"message_count": 1234})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/admin/networks/8/message_count"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"message_count": 0})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/admin/networks/9/message_count"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/admin/networks/10/message_count"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        assert_eq!(
+            client
+                .fetch_admin_network_message_count("abc123", "7")
+                .await
+                .expect("count"),
+            Some(1234)
+        );
+        assert_eq!(
+            client
+                .fetch_admin_network_message_count("abc123", "8")
+                .await
+                .expect("empty"),
+            Some(0)
+        );
+        assert_eq!(
+            client
+                .fetch_admin_network_message_count("abc123", "9")
+                .await
+                .expect("older server"),
+            None
+        );
+        let refused = client
+            .fetch_admin_network_message_count("abc123", "10")
+            .await
+            .expect_err("not an admin");
+        assert_eq!(refused.status(), Some(StatusCode::FORBIDDEN));
+    }
+
+    #[tokio::test]
+    async fn featured_channels_admin_crud_uses_its_contracts() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/admin/networks/7/featured_channels"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "featured_channels": [
+                    {"id": 4, "network_id": 7, "name": "#grappa", "description": null,
+                     "position": 0, "enabled": false}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/admin/networks/7/featured_channels"))
+            .and(body_json(
+                serde_json::json!({"name": "#lobby", "description": "Hello"}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 5})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/admin/networks/7/featured_channels/4"))
+            .and(body_json(serde_json::json!({"enabled": true})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 4})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/admin/networks/7/featured_channels/4"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let listed = client
+            .fetch_admin_featured_channels("t", "7")
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["name"], "#grappa");
+        client
+            .add_admin_featured_channel(
+                "t",
+                "7",
+                &serde_json::json!({"name": "#lobby", "description": "Hello"}),
+            )
+            .await
+            .expect("add");
+        client
+            .update_admin_featured_channel("t", "7", "4", &serde_json::json!({"enabled": true}))
+            .await
+            .expect("update");
+        client
+            .delete_admin_featured_channel("t", "7", "4")
+            .await
+            .expect("delete");
+    }
+
+    #[tokio::test]
+    async fn edit_server_and_credential_send_only_the_changes() {
+        // Built at run time, like the other credential tests: the value is
+        // only passed through.
+        let rotated = format!("pw-{}", std::process::id());
+        let mock_server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/admin/networks/7/servers/3"))
+            .and(body_json(
+                serde_json::json!({"host": "irc3.example", "port": 6667}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 3})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/admin/credentials/u-1/7"))
+            .and(body_json(serde_json::json!({"realname": "Ada"})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"nick": "ada", "session_action": "left_alone"}),
+                ),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/admin/credentials/u-1/8"))
+            .and(body_json(serde_json::json!({"password": rotated})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"nick": "ada", "session_action": "stopped"})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .update_admin_server(
+                "t",
+                "7",
+                "3",
+                &serde_json::json!({"host": "irc3.example", "port": 6667}),
+            )
+            .await
+            .expect("edit server");
+        assert!(!client
+            .update_admin_credential("t", "u-1", "7", &serde_json::json!({"realname": "Ada"}))
+            .await
+            .expect("cosmetic edit"));
+        assert!(client
+            .update_admin_credential("t", "u-1", "8", &serde_json::json!({"password": rotated}))
+            .await
+            .expect("password edit"));
     }
 
     #[tokio::test]
@@ -4615,6 +5173,67 @@ mod tests {
             .await
             .expect("older page");
         assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_count_sends_the_anchor_and_cap() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/%23rust/messages/count"))
+            .and(query_param("after", "812"))
+            .and(query_param("cap", "201"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"count": 42})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let count = client
+            .fetch_messages_count("abc123", "libera", "#rust", 812, Some(201))
+            .await
+            .expect("gap probe");
+        assert_eq!(count, 42);
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_count_reads_count_from_a_three_key_body() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/vjt/messages/count"))
+            .and(query_param("after", "7"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"count": 3, "messages": 2, "events": 1})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let count = client
+            .fetch_messages_count("t", "libera", "vjt", 7, None)
+            .await
+            .expect("uncapped gap probe");
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_count_reports_a_missing_route() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/%23rust/messages/count"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let err = client
+            .fetch_messages_count("t", "libera", "#rust", 1, Some(201))
+            .await
+            .expect_err("404");
+        assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
     }
 
     #[tokio::test]

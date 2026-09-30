@@ -132,6 +132,13 @@ pub enum SessionEvent {
     AuthRejected {
         reason: String,
     },
+    /// Terminal: the WebSocket upgrade was refused with 426, the server's
+    /// `client_proto` floor is above what this build declares. The session
+    /// has stopped: only an updated Cordiale can connect.
+    UpgradeRequired {
+        protocol_version: Option<u32>,
+        min_protocol_version: Option<u32>,
+    },
 }
 
 /// A handle to a running session: send commands, nothing else. Drop it (or
@@ -374,6 +381,13 @@ async fn run_session(
                 return;
             }
             Err(err) => {
+                if let Some(refusal) = err.upgrade_required() {
+                    let _ = events.send(SessionEvent::UpgradeRequired {
+                        protocol_version: refusal.protocol_version,
+                        min_protocol_version: refusal.min_protocol_version,
+                    });
+                    return;
+                }
                 let _ = events.send(SessionEvent::Reconnecting {
                     reason: format!("connect failed: {err}"),
                 });
