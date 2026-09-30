@@ -1187,6 +1187,14 @@ export component AppWindow inherits Window {
     in-out property <string> identity-nick: "";
     in-out property <string> identity-ident: "";
     in-out property <string> identity-realname: "";
+    // The CTCP USERINFO profile and own avatar of `settings-network`.
+    // `profile-gender-index` is 0 for unset, then male, female, non-binary.
+    in-out property <string> profile-age: "";
+    in-out property <int> profile-gender-index: 0;
+    in-out property <string> profile-location: "";
+    in-out property <string> profile-languages: "";
+    in-out property <string> profile-custom: "";
+    in property <bool> profile-has-avatar: false;
     in property <[IgnoreRow]> settings-ignores: [];
     in-out property <string> new-ignore-mask: "";
     in-out property <string> new-ignore-pattern: "";
@@ -1598,6 +1606,9 @@ export component AppWindow inherits Window {
     callback notification-prefs-changed();
     callback settings-network-selected(string);
     callback identity-save-requested();
+    callback profile-save-requested();
+    callback avatar-pick-requested();
+    callback avatar-remove-requested();
     callback ignore-add-requested(string, string); // mask, text pattern ("" for none)
     callback ignore-remove-requested(string, string); // mask, text pattern ("" for none)
     callback perform-save-requested(string);
@@ -1902,6 +1913,18 @@ export component AppWindow inherits Window {
             return @tr("That nick suffix isn't valid on IRC.");
         } else if status-kind == "personal-prefs-failed" {
             return @tr("Couldn't save those settings.");
+        } else if status-kind == "profile-saved" {
+            return @tr("Profile saved.");
+        } else if status-kind == "profile-invalid" {
+            return @tr("Profile fields must be one line and at most 100 bytes each.");
+        } else if status-kind == "profile-failed" {
+            return @tr("Couldn't save the profile.");
+        } else if status-kind == "avatar-saved" {
+            return @tr("Avatar updated.");
+        } else if status-kind == "avatar-removed" {
+            return @tr("Avatar removed.");
+        } else if status-kind == "avatar-remove-failed" {
+            return @tr("Couldn't remove the avatar.");
         } else if status-kind == "command-refused" {
             return @tr("The server refused that command ({}).", status-command-hint);
         } else if status-kind == "alias-too-deep" {
@@ -3766,6 +3789,88 @@ export component AppWindow inherits Window {
                         a11y-label: @tr("Save");
                         enabled: settings-network != "";
                         clicked => { identity-save-requested(); }
+                    }
+                }
+
+                if known-networks.length > 0 : SectionCard {
+                    icon: "👤";
+                    title: @tr("Network profile");
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: start;
+
+                        for network in known-networks : NavButton {
+                            icon: "🌐";
+                            label: network;
+                            selected: settings-network == network;
+                            clicked => {
+                                settings-network = network;
+                                settings-network-selected(network);
+                            }
+                        }
+                    }
+                    Text {
+                        text: @tr("What other people see when they look you up. Each field holds at most 100 bytes; leave one empty to clear it.");
+                        wrap: word-wrap;
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Age");
+                        accessible-label: @tr("Age");
+                        text <=> profile-age;
+                    }
+                    ComboBox {
+                        model: [
+                            @tr("Gender: not set"),
+                            @tr("Male"),
+                            @tr("Female"),
+                            @tr("Non-binary")
+                        ];
+                        current-index <=> profile-gender-index;
+                        accessible-label: @tr("Gender");
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Location");
+                        accessible-label: @tr("Location");
+                        text <=> profile-location;
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Languages");
+                        accessible-label: @tr("Languages");
+                        text <=> profile-languages;
+                    }
+                    LineEdit {
+                        placeholder-text: @tr("Custom");
+                        accessible-label: @tr("Custom");
+                        text <=> profile-custom;
+                    }
+                    CompactButton {
+                        text: "💾  " + @tr("Save profile");
+                        a11y-label: @tr("Save profile");
+                        enabled: settings-network != "";
+                        clicked => { profile-save-requested(); }
+                    }
+                    Text {
+                        text: profile-has-avatar
+                            ? @tr("You have an avatar on this network.")
+                            : @tr("You have no avatar on this network.");
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+
+                        CompactButton {
+                            text: "🖼  " + @tr("Choose avatar…");
+                            a11y-label: @tr("Choose avatar");
+                            enabled: settings-network != "";
+                            clicked => { avatar-pick-requested(); }
+                        }
+                        CompactButton {
+                            text: @tr("Remove avatar");
+                            enabled: settings-network != "" && profile-has-avatar;
+                            clicked => { avatar-remove-requested(); }
+                        }
                     }
                 }
             }

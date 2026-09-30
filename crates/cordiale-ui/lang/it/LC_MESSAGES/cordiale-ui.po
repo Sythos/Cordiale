@@ -217,10 +217,6 @@ msgid "Wrong username or password/token."
 msgstr "Nome utente o password/token errati."
 
 msgctxt "AppWindow"
-msgid "This account has two-factor authentication enabled. Sign in from a browser instead."
-msgstr "Questo account ha l'autenticazione a due fattori attiva. Accedi invece dal browser."
-
-msgctxt "AppWindow"
 msgid "Too many attempts. Wait a bit before trying again."
 msgstr "Troppi tentativi. Aspetta un po' prima di riprovare."
 
@@ -1035,10 +1031,6 @@ msgstr "Lascia attiva almeno una notifica dei messaggi."
 msgctxt "AppWindow"
 msgid "Couldn't save the notification settings."
 msgstr "Impossibile salvare le impostazioni delle notifiche."
-
-msgctxt "AppWindow"
-msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
-msgstr "Autenticazione a due fattori, passkey, token dei client ed eliminazione dell'account si gestiscono in Cicchetto: Grappa li tiene fuori dalla portata di un token client come quello con cui accede Cordiale."
 
 msgctxt "AppWindow"
 msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
@@ -2651,3 +2643,95 @@ msgstr "Dimensione caratteri: {}%"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Ripristina"
+
+msgctxt "AppWindow"
+msgid "Profile saved."
+msgstr "Profilo salvato."
+
+msgctxt "AppWindow"
+msgid "Profile fields must be one line and at most 100 bytes each."
+msgstr "I campi del profilo devono stare su una riga e contare al massimo 100 byte ciascuno."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the profile."
+msgstr "Impossibile salvare il profilo."
+
+msgctxt "AppWindow"
+msgid "Avatar updated."
+msgstr "Avatar aggiornato."
+
+msgctxt "AppWindow"
+msgid "Avatar removed."
+msgstr "Avatar rimosso."
+
+msgctxt "AppWindow"
+msgid "Couldn't remove the avatar."
+msgstr "Impossibile rimuovere l'avatar."
+
+msgctxt "AppWindow"
+msgid "Network profile"
+msgstr "Profilo di rete"
+
+msgctxt "AppWindow"
+msgid "What other people see when they look you up. Each field holds at most 100 bytes; leave one empty to clear it."
+msgstr "Ciò che gli altri vedono quando ti cercano. Ogni campo può contenere al massimo 100 byte; lascialo vuoto per cancellarlo."
+
+msgctxt "AppWindow"
+msgid "Age"
+msgstr "Età"
+
+msgctxt "AppWindow"
+msgid "Gender: not set"
+msgstr "Genere: non indicato"
+
+msgctxt "AppWindow"
+msgid "Male"
+msgstr "Maschile"
+
+msgctxt "AppWindow"
+msgid "Female"
+msgstr "Femminile"
+
+msgctxt "AppWindow"
+msgid "Non-binary"
+msgstr "Non binario"
+
+msgctxt "AppWindow"
+msgid "Gender"
+msgstr "Genere"
+
+msgctxt "AppWindow"
+msgid "Location"
+msgstr "Luogo"
+
+msgctxt "AppWindow"
+msgid "Languages"
+msgstr "Lingue"
+
+msgctxt "AppWindow"
+msgid "Custom"
+msgstr "Personalizzato"
+
+msgctxt "AppWindow"
+msgid "Save profile"
+msgstr "Salva profilo"
+
+msgctxt "AppWindow"
+msgid "You have an avatar on this network."
+msgstr "Hai un avatar su questa rete."
+
+msgctxt "AppWindow"
+msgid "You have no avatar on this network."
+msgstr "Non hai un avatar su questa rete."
+
+msgctxt "AppWindow"
+msgid "Choose avatar…"
+msgstr "Scegli avatar…"
+
+msgctxt "AppWindow"
+msgid "Choose avatar"
+msgstr "Scegli avatar"
+
+msgctxt "AppWindow"
+msgid "Remove avatar"
+msgstr "Rimuovi avatar"

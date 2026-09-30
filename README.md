@@ -102,6 +102,9 @@ Cordiale also covers:
 - **The newer Grappa preferences:** date order follows your language or
   your explicit choice; auto-away nick suffixes are server-backed; ignore
   rules pair an IRC mask with an optional text pattern.
+- **Your own profile:** per network, Settings > General edits the CTCP
+  USERINFO fields (age, gender, location, languages, custom) and uploads or
+  removes your avatar.
 - **Themes:** Grappa's gallery themes (or built-in copies) with their
   day/night pairing and wallpapers; the account's own themes can be created,
   edited (27 colors with a live preview, font, wallpaper), copied, deleted

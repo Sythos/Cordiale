@@ -52,7 +52,7 @@ use cordiale_core::credentials::{
 use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
-use cordiale_core::profile::IgnoreEntry;
+use cordiale_core::profile::{gender_for_index, has_avatar, IgnoreEntry, ProfileFields};
 use cordiale_core::rest::{
     ActiveThemePair, ArchiveEntry, BootResponse, DateFormat, DirectoryPage, DisplayPrefs,
     LoginRequest, MeResponse, SendMessageRequest,
@@ -263,6 +263,11 @@ enum WorkerCommand {
         ident: String,
         realname: String,
     },
+    /// The edited CTCP USERINFO profile of the Settings network.
+    ProfileSave(ProfileFields),
+    /// An image picked as the Settings network's own avatar.
+    AvatarUpload(std::path::PathBuf),
+    AvatarRemove,
     /// An ignore rule of the Settings network: mask and optional text
     /// pattern, whose pair is the rule's identity (protocol v31).
     IgnoreAdd {
@@ -1540,6 +1545,38 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    let tx_for_profile = worker_tx.clone();
+    let weak_for_profile = ui.as_weak();
+    ui.on_profile_save_requested(move || {
+        if let Some(ui) = weak_for_profile.upgrade() {
+            let index = usize::try_from(ui.get_profile_gender_index()).unwrap_or(0);
+            let _ = tx_for_profile.send(WorkerCommand::ProfileSave(ProfileFields {
+                age: ui.get_profile_age().trim().to_string(),
+                gender: gender_for_index(index).to_string(),
+                location: ui.get_profile_location().trim().to_string(),
+                languages: ui.get_profile_languages().trim().to_string(),
+                custom: ui.get_profile_custom().trim().to_string(),
+            }));
+        }
+    });
+
+    // The native file picker is modal and runs on the UI thread, like the
+    // paperclip's; the upload happens in the worker.
+    let tx_for_avatar_pick = worker_tx.clone();
+    ui.on_avatar_pick_requested(move || {
+        let picked = rfd::FileDialog::new()
+            .add_filter("image", &["png", "jpg", "jpeg", "gif", "webp", "apng"])
+            .pick_file();
+        if let Some(path) = picked {
+            let _ = tx_for_avatar_pick.send(WorkerCommand::AvatarUpload(path));
+        }
+    });
+
+    let tx_for_avatar_remove = worker_tx.clone();
+    ui.on_avatar_remove_requested(move || {
+        let _ = tx_for_avatar_remove.send(WorkerCommand::AvatarRemove);
+    });
+
     let tx_for_personal = worker_tx.clone();
     let weak_for_personal = ui.as_weak();
     ui.on_personal_prefs_save_requested(move || {
@@ -2228,6 +2265,9 @@ struct WorkerState {
     /// The network the self-service Identity/Ignores/Perform/Notify
     /// sections currently act on.
     settings_network: Option<String>,
+    /// The profile fields as Grappa last reported them for
+    /// `settings_network`; a save sends only what differs from this.
+    profile_baseline: ProfileFields,
     /// Presence watchlist nicks per network ID, replaced whole by every
     /// `notify_list` snapshot (sent after join and after each change).
     notify_lists: HashMap<i64, Vec<String>>,
@@ -2343,6 +2383,7 @@ impl WorkerState {
             umode_view_network: None,
             own_listener_ready: std::collections::HashSet::new(),
             settings_network: None,
+            profile_baseline: ProfileFields::default(),
             notify_lists: HashMap::new(),
             presence_by_network: HashMap::new(),
             peer_away: HashMap::new(),
@@ -2409,9 +2450,11 @@ async fn run_worker(
                         .await;
                         if let Some(network) = state.settings_network.clone() {
                             let ui_for_network = ui.clone();
+                            let loaded_network = network.clone();
                             let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
                                 ui.set_settings_network(network.into());
                             });
+                            load_identity_settings(&mut state, &ui, &loaded_network).await;
                             handle_settings_network_refresh(&state, &ui).await;
                         }
                     }
@@ -2419,9 +2462,11 @@ async fn run_worker(
                         handle_totp_verify(&mut state, &mut session_events, &ui, code).await;
                         if let Some(network) = state.settings_network.clone() {
                             let ui_for_network = ui.clone();
+                            let loaded_network = network.clone();
                             let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
                                 ui.set_settings_network(network.into());
                             });
+                            load_identity_settings(&mut state, &ui, &loaded_network).await;
                             handle_settings_network_refresh(&state, &ui).await;
                         }
                     }
@@ -2961,7 +3006,7 @@ async fn run_worker(
                         handle_admin_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::SettingsNetworkSelected(network)) => {
-                        load_identity_nick(&state, &ui, &network).await;
+                        load_identity_settings(&mut state, &ui, &network).await;
                         state.settings_network = Some(network);
                         handle_settings_network_refresh(&state, &ui).await;
                         push_notify_nicks(&state, &ui);
@@ -2972,6 +3017,15 @@ async fn run_worker(
                         realname,
                     }) => {
                         handle_identity_save(&state, nick, ident, realname).await;
+                    }
+                    Some(WorkerCommand::ProfileSave(edited)) => {
+                        handle_profile_save(&mut state, &ui, edited).await;
+                    }
+                    Some(WorkerCommand::AvatarUpload(path)) => {
+                        handle_avatar_upload(&state, &ui, path).await;
+                    }
+                    Some(WorkerCommand::AvatarRemove) => {
+                        handle_avatar_remove(&state, &ui).await;
                     }
                     Some(WorkerCommand::PersonalPrefsSave {
                         leave_message,
@@ -7544,20 +7598,30 @@ fn watch_patterns_from_reply(reply: &Value) -> Option<Vec<String>> {
     )
 }
 
-/// The account's current nick on `network`, from a `GET /networks` row.
-fn network_nick(networks: &[Value], network: &str) -> Option<String> {
+/// The `GET /networks` row of `network`.
+fn network_row<'a>(networks: &'a [Value], network: &str) -> Option<&'a Value> {
     networks
         .iter()
-        .find(|row| row.get("slug").and_then(Value::as_str) == Some(network))?
+        .find(|row| row.get("slug").and_then(Value::as_str) == Some(network))
+}
+
+/// The account's current nick on `network`, from a `GET /networks` row.
+fn network_nick(networks: &[Value], network: &str) -> Option<String> {
+    network_row(networks, network)?
         .get("nick")?
         .as_str()
         .filter(|nick| !nick.is_empty())
         .map(str::to_string)
 }
 
-/// Fills the identity editor's nick with the one in use on `network`.
-/// Grappa no longer reports ident and realname, so those stay as typed.
-async fn load_identity_nick(state: &WorkerState, ui: &slint::Weak<AppWindow>, network: &str) {
+/// Fills the identity editor's nick, and the profile editor, from the
+/// `network` row. Grappa no longer reports ident and realname, so those
+/// stay as typed.
+async fn load_identity_settings(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+) {
     let (Some(client), Some(token)) = (&state.client, &state.token) else {
         return;
     };
@@ -7566,6 +7630,164 @@ async fn load_identity_nick(state: &WorkerState, ui: &slint::Weak<AppWindow>, ne
     };
     if let Some(nick) = network_nick(&networks, network) {
         let _ = ui.upgrade_in_event_loop(move |ui| ui.set_identity_nick(nick.into()));
+    }
+    if let Some(row) = network_row(&networks, network) {
+        let fields = ProfileFields::from_credential(row);
+        show_profile(ui, &fields, has_avatar(row));
+        state.profile_baseline = fields;
+    }
+}
+
+/// Puts `fields` in the profile editor, and whether the network has an
+/// avatar next to the picker.
+fn show_profile(ui: &slint::Weak<AppWindow>, fields: &ProfileFields, avatar: bool) {
+    let fields = fields.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_profile_gender_index(i32::try_from(fields.gender_index()).unwrap_or(0));
+        ui.set_profile_age(fields.age.into());
+        ui.set_profile_location(fields.location.into());
+        ui.set_profile_languages(fields.languages.into());
+        ui.set_profile_custom(fields.custom.into());
+        ui.set_profile_has_avatar(avatar);
+    });
+}
+
+/// Status-bar key for a refused profile save: Grappa answers 422 for a
+/// value that breaks its limits.
+fn profile_error_status(status: Option<u16>) -> &'static str {
+    match status {
+        Some(422) => "profile-invalid",
+        _ => "profile-failed",
+    }
+}
+
+/// Saves the edited profile fields of the Settings network, sending only
+/// the ones that differ from what Grappa last reported, then shows what it
+/// returns.
+async fn handle_profile_save(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    edited: ProfileFields,
+) {
+    let (Some(client), Some(token), Some(network)) =
+        (&state.client, &state.token, &state.settings_network)
+    else {
+        return;
+    };
+    let set_status = |kind: &'static str| {
+        let _ = ui.upgrade_in_event_loop(move |ui| ui.set_status_kind(kind.into()));
+    };
+    if !edited.is_valid() {
+        set_status("profile-invalid");
+        return;
+    }
+    let request = state.profile_baseline.changes_to(&edited);
+    if request.is_empty() {
+        set_status("profile-saved");
+        return;
+    }
+    match client
+        .update_network_profile(token, network, &request)
+        .await
+    {
+        Ok(credential) => {
+            let saved = ProfileFields::from_credential(&credential);
+            show_profile(ui, &saved, has_avatar(&credential));
+            state.profile_baseline = saved;
+            set_status("profile-saved");
+        }
+        Err(err) => {
+            persistence::log_line(&format!("profile save failed: {err:?}"));
+            set_status(profile_error_status(
+                err.status().map(|status| status.as_u16()),
+            ));
+        }
+    }
+}
+
+/// Uploads a picked image as the Settings network's own avatar. The checks
+/// and their messages are the paperclip's: the avatar rides the same image
+/// allowlist and cap.
+async fn handle_avatar_upload(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    path: std::path::PathBuf,
+) {
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let set_status = |kind: &'static str, name: String| {
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_status_attach_name(name.into());
+            ui.set_status_kind(kind.into());
+        });
+    };
+    let (Some(client), Some(token), Some(network)) =
+        (&state.client, &state.token, &state.settings_network)
+    else {
+        return;
+    };
+    let Some((mime, UploadCategory::Image)) = mime_for_filename(&filename) else {
+        set_status("attach-unsupported-type", filename);
+        return;
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            persistence::log_line(&format!("avatar read failed: {err}"));
+            set_status("attach-read-failed", filename);
+            return;
+        }
+    };
+    let over_cap = state
+        .upload_limits
+        .as_ref()
+        .is_some_and(|limits| bytes.len() as u64 > upload_cap(limits, UploadCategory::Image));
+    if over_cap {
+        set_status("attach-too-large", filename);
+        return;
+    }
+    set_status("attach-uploading", filename.clone());
+    match client
+        .upload_network_avatar(token, network, &filename, mime, bytes)
+        .await
+    {
+        Ok(credential) => {
+            let avatar = has_avatar(&credential);
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_profile_has_avatar(avatar));
+            set_status("avatar-saved", filename);
+        }
+        Err(err) => {
+            persistence::log_line(&format!("avatar upload failed: {err:?}"));
+            set_status(
+                attachment_error_status(err.status().map(|status| status.as_u16())),
+                filename,
+            );
+        }
+    }
+}
+
+/// Removes the Settings network's own avatar.
+async fn handle_avatar_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token), Some(network)) =
+        (&state.client, &state.token, &state.settings_network)
+    else {
+        return;
+    };
+    match client.delete_network_avatar(token, network).await {
+        Ok(credential) => {
+            let avatar = has_avatar(&credential);
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_profile_has_avatar(avatar);
+                ui.set_status_kind("avatar-removed".into());
+            });
+        }
+        Err(err) => {
+            persistence::log_line(&format!("avatar removal failed: {err:?}"));
+            let _ =
+                ui.upgrade_in_event_loop(|ui| ui.set_status_kind("avatar-remove-failed".into()));
+        }
     }
 }
 
@@ -23850,6 +24072,13 @@ mod tests {
             "personal-prefs-failed"
         );
         assert_eq!(away_nick_suffix_error_key(None), "personal-prefs-failed");
+    }
+
+    #[test]
+    fn a_refused_profile_is_told_apart_from_a_failed_one() {
+        assert_eq!(profile_error_status(Some(422)), "profile-invalid");
+        assert_eq!(profile_error_status(Some(404)), "profile-failed");
+        assert_eq!(profile_error_status(None), "profile-failed");
     }
 
     #[test]
