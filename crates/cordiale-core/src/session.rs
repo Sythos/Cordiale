@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
@@ -46,9 +46,13 @@ use crate::websocket::{PhoenixSocket, PhoenixSocketError};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+/// How often a foreground report is repeated. Grappa stops trusting a
+/// `visible` report after about 60 s, so this has to stay at or under half
+/// of that.
+const VISIBILITY_RESEND_INTERVAL: Duration = Duration::from_secs(30);
 
 /// A request the UI side can make of the running session.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum SessionCommand {
     /// Joins a topic (network or channel), optionally muting join/part/quit
     /// presence noise for it (see `docs/protocol-notes.md` §2).
@@ -72,6 +76,15 @@ pub enum SessionCommand {
         /// A ref chosen by the caller to recognise the reply, or `None` for
         /// the session's own counter.
         message_ref: Option<String>,
+    },
+    /// The window went to (or left) the foreground. Reported to Grappa on the
+    /// user topic, and repeated while it stays in the foreground.
+    SetForeground(bool),
+    /// Tells Grappa this client is leaving, then ends the session. `flushed`
+    /// fires once the hint has been written to the socket (or is dropped
+    /// when there was nothing to write).
+    Close {
+        flushed: oneshot::Sender<()>,
     },
     Shutdown,
 }
@@ -118,6 +131,13 @@ pub enum SessionEvent {
     /// will not retry with that bearer.
     AuthRejected {
         reason: String,
+    },
+    /// Terminal: the WebSocket upgrade was refused with 426, the server's
+    /// `client_proto` floor is above what this build declares. The session
+    /// has stopped: only an updated Cordiale can connect.
+    UpgradeRequired {
+        protocol_version: Option<u32>,
+        min_protocol_version: Option<u32>,
     },
 }
 
@@ -183,9 +203,29 @@ impl SessionHandle {
         message_ref
     }
 
+    /// Reports whether the window is in the foreground. Grappa starts every
+    /// new socket as "hidden", so the session resends the current value on
+    /// its own after each join of the user topic.
+    pub fn set_foreground(&self, foreground: bool) {
+        let _ = self
+            .commands
+            .send(SessionCommand::SetForeground(foreground));
+    }
+
     pub fn shutdown(&self) {
         let _ = self.shutdown.send(true);
         let _ = self.commands.send(SessionCommand::Shutdown);
+    }
+
+    /// Like `shutdown`, but first tells Grappa the client is leaving, so it
+    /// doesn't wait out the visibility timeout before auto-away. The returned
+    /// receiver resolves once the hint is written (or the session is gone),
+    /// for a caller that is about to exit the process.
+    pub fn close(&self) -> oneshot::Receiver<()> {
+        let (flushed, done) = oneshot::channel();
+        let _ = self.shutdown.send(true);
+        let _ = self.commands.send(SessionCommand::Close { flushed });
+        done
     }
 }
 
@@ -239,6 +279,76 @@ async fn wait_before_reconnect(shutdown: &mut watch::Receiver<bool>) -> bool {
     !stopped && !*shutdown.borrow()
 }
 
+/// What the session knows about the window's foreground state, and whether
+/// Grappa can be told about it yet (the user topic is joined). Pure
+/// bookkeeping: each method answers with the value to report, if any, so the
+/// timing rules are testable without a socket.
+#[derive(Debug, Default)]
+struct Presence {
+    foreground: bool,
+    user_topic_joined: bool,
+}
+
+impl Presence {
+    /// The report owed after a change: only when the value actually changed
+    /// and the topic is joined (the join reports the current value anyway).
+    fn set_foreground(&mut self, foreground: bool) -> Option<bool> {
+        if self.foreground == foreground {
+            return None;
+        }
+        self.foreground = foreground;
+        self.user_topic_joined.then_some(foreground)
+    }
+
+    /// The user-topic join was acknowledged. Returns the value to report at
+    /// once, since a new socket starts out hidden on the server.
+    fn topic_joined(&mut self) -> bool {
+        self.user_topic_joined = true;
+        self.foreground
+    }
+
+    /// The socket is gone; nothing can be reported until the next join.
+    fn topic_lost(&mut self) {
+        self.user_topic_joined = false;
+    }
+
+    /// The periodic refresh. Only a foreground window needs one: a hidden
+    /// report doesn't go stale in a way that matters.
+    fn resend(&self) -> Option<bool> {
+        (self.user_topic_joined && self.foreground).then_some(true)
+    }
+}
+
+fn visibility_message(
+    user_topic: &str,
+    join_ref: &str,
+    visible: bool,
+    refs: &mut RefCounter,
+) -> PhoenixMessage {
+    PhoenixMessage {
+        join_ref: Some(join_ref.to_string()),
+        message_ref: Some(refs.next_ref()),
+        topic: user_topic.to_string(),
+        event: "visibility".to_string(),
+        // Strictly a boolean: Grappa answers anything else `invalid_payload`.
+        payload: serde_json::json!({ "visible": visible }),
+    }
+}
+
+fn client_closing_message(
+    user_topic: &str,
+    join_ref: &str,
+    refs: &mut RefCounter,
+) -> PhoenixMessage {
+    PhoenixMessage {
+        join_ref: Some(join_ref.to_string()),
+        message_ref: Some(refs.next_ref()),
+        topic: user_topic.to_string(),
+        event: "client_closing".to_string(),
+        payload: serde_json::json!({}),
+    }
+}
+
 async fn run_session(
     ws_url: String,
     token: String,
@@ -253,11 +363,15 @@ async fn run_session(
     // command frame for that topic, and re-established with a fresh ref
     // on every reconnect (see `SessionCommand::Send`'s doc comment).
     let mut joined_topics: HashMap<String, JoinedTopic> = HashMap::new();
+    // Outlives reconnects: the window's state doesn't change because the
+    // socket did.
+    let mut presence = Presence::default();
 
     'reconnect: loop {
         if *shutdown.borrow() {
             return;
         }
+        presence.topic_lost();
         let mut socket = match PhoenixSocket::connect(&ws_url, &token).await {
             Ok(socket) => socket,
             Err(err) if err.is_auth_rejection() => {
@@ -267,6 +381,13 @@ async fn run_session(
                 return;
             }
             Err(err) => {
+                if let Some(refusal) = err.upgrade_required() {
+                    let _ = events.send(SessionEvent::UpgradeRequired {
+                        protocol_version: refusal.protocol_version,
+                        min_protocol_version: refusal.min_protocol_version,
+                    });
+                    return;
+                }
                 let _ = events.send(SessionEvent::Reconnecting {
                     reason: format!("connect failed: {err}"),
                 });
@@ -316,6 +437,8 @@ async fn run_session(
 
         let mut heartbeat = interval(HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut visibility_resend = interval(VISIBILITY_RESEND_INTERVAL);
+        visibility_resend.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -338,9 +461,40 @@ async fn run_session(
                     }
                 }
 
+                _ = visibility_resend.tick() => {
+                    if let Some(visible) = presence.resend() {
+                        let message =
+                            visibility_message(&user_topic, &user_join_ref, visible, &mut refs);
+                        let _ = socket.send(&message).await;
+                    }
+                }
+
                 command = commands.recv() => {
                     match command {
                         None | Some(SessionCommand::Shutdown) => return,
+                        Some(SessionCommand::SetForeground(foreground)) => {
+                            if let Some(visible) = presence.set_foreground(foreground) {
+                                let message = visibility_message(
+                                    &user_topic,
+                                    &user_join_ref,
+                                    visible,
+                                    &mut refs,
+                                );
+                                let _ = socket.send(&message).await;
+                            }
+                        }
+                        Some(SessionCommand::Close { flushed }) => {
+                            if presence.user_topic_joined {
+                                let message = client_closing_message(
+                                    &user_topic,
+                                    &user_join_ref,
+                                    &mut refs,
+                                );
+                                let _ = socket.send(&message).await;
+                            }
+                            let _ = flushed.send(());
+                            return;
+                        }
                         Some(SessionCommand::JoinTopic { topic, presence }) => {
                             let joined = join(&mut socket, &mut refs, &topic, presence).await;
                             if let Ok(join_ref) = joined {
@@ -374,6 +528,14 @@ async fn run_session(
                             match user_join_outcome(&message, &user_topic, &user_join_ref) {
                                 Some(Ok(protocol_version)) => {
                                     let _ = events.send(SessionEvent::Connected { protocol_version });
+                                    let visible = presence.topic_joined();
+                                    let report = visibility_message(
+                                        &user_topic,
+                                        &user_join_ref,
+                                        visible,
+                                        &mut refs,
+                                    );
+                                    let _ = socket.send(&report).await;
                                 }
                                 Some(Err(reason)) if is_permanent_join_refusal(&reason) => {
                                     let _ = events.send(SessionEvent::JoinRefused { reason });
@@ -552,6 +714,73 @@ mod tests {
             Some(Err("error".to_string()))
         );
         assert_eq!(user_join_outcome(&ok, "grappa:user:other", "1"), None);
+    }
+
+    #[test]
+    fn presence_reports_the_current_state_on_every_join() {
+        let mut presence = Presence::default();
+        // A new socket starts hidden on the server: a background window
+        // still reports once, so both sides agree.
+        assert!(!presence.topic_joined());
+        presence.topic_lost();
+        assert_eq!(presence.set_foreground(true), None);
+        assert!(presence.topic_joined());
+        // The rejoin after a reconnect reports again.
+        presence.topic_lost();
+        assert!(presence.topic_joined());
+    }
+
+    #[test]
+    fn presence_reports_changes_only_while_joined() {
+        let mut presence = Presence::default();
+        // Before the join the value is only remembered.
+        assert_eq!(presence.set_foreground(true), None);
+        assert!(presence.topic_joined());
+        assert_eq!(presence.set_foreground(true), None);
+        assert_eq!(presence.set_foreground(false), Some(false));
+        assert_eq!(presence.set_foreground(false), None);
+        assert_eq!(presence.set_foreground(true), Some(true));
+        presence.topic_lost();
+        assert_eq!(presence.set_foreground(false), None);
+    }
+
+    #[test]
+    fn presence_resends_only_a_joined_foreground_window() {
+        let mut presence = Presence::default();
+        assert_eq!(presence.resend(), None);
+        presence.set_foreground(true);
+        assert_eq!(presence.resend(), None);
+        presence.topic_joined();
+        assert_eq!(presence.resend(), Some(true));
+        presence.set_foreground(false);
+        assert_eq!(presence.resend(), None);
+        presence.set_foreground(true);
+        presence.topic_lost();
+        assert_eq!(presence.resend(), None);
+    }
+
+    #[test]
+    fn visibility_frame_carries_a_strict_boolean_on_the_user_topic() {
+        let mut refs = RefCounter::new();
+        let message = visibility_message("grappa:user:vjt", "join-1", true, &mut refs);
+        assert_eq!(message.topic, "grappa:user:vjt");
+        assert_eq!(message.join_ref.as_deref(), Some("join-1"));
+        assert_eq!(message.message_ref.as_deref(), Some("1"));
+        assert_eq!(message.event, "visibility");
+        assert_eq!(message.payload, serde_json::json!({"visible": true}));
+        let hidden = visibility_message("grappa:user:vjt", "join-1", false, &mut refs);
+        assert_eq!(hidden.payload, serde_json::json!({"visible": false}));
+        assert_eq!(hidden.message_ref.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn client_closing_frame_has_an_empty_payload() {
+        let mut refs = RefCounter::new();
+        let message = client_closing_message("grappa:user:vjt", "join-1", &mut refs);
+        assert_eq!(message.topic, "grappa:user:vjt");
+        assert_eq!(message.join_ref.as_deref(), Some("join-1"));
+        assert_eq!(message.event, "client_closing");
+        assert_eq!(message.payload, serde_json::json!({}));
     }
 
     #[tokio::test]

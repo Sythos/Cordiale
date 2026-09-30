@@ -2513,30 +2513,6 @@ msgid "Passkeys, client tokens and account deletion are managed in Cicchetto."
 msgstr "Las passkeys, los tokens de cliente y la eliminación de la cuenta se gestionan en Cicchetto."
 
 msgctxt "AppWindow"
-msgid "Open {}"
-msgstr "Abrir {}"
-
-msgctxt "AppWindow"
-msgid "Join {}"
-msgstr "Unirse a {}"
-
-msgctxt "AppWindow"
-msgid "{} users"
-msgstr "{} usuarios"
-
-msgctxt "AppWindow"
-msgid "{} users — {}"
-msgstr "{} usuarios — {}"
-
-msgctxt "AppWindow"
-msgid "featured"
-msgstr "destacado"
-
-msgctxt "AppWindow"
-msgid "joined"
-msgstr "unido"
-
-msgctxt "AppWindow"
 msgid "listing…"
 msgstr "listando…"
 
@@ -2643,6 +2619,126 @@ msgstr "Tamaño del texto: {} %"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Restablecer"
+
+msgctxt "AppWindow"
+msgid "This server no longer accepts this version of Cordiale. Please update Cordiale."
+msgstr "Este servidor ya no acepta esta versión de Cordiale. Actualiza Cordiale."
+
+msgctxt "AppWindow"
+msgid "Admin actions need an administrator signed in with a full session. A client token can't do them."
+msgstr "Las acciones de administración requieren un administrador con una sesión completa. Un token de cliente no puede realizarlas."
+
+msgctxt "AppWindow"
+msgid "That network still has accounts bound to it. Unbind them on the Credentials tab first."
+msgstr "Esa red todavía tiene cuentas vinculadas. Desvincúlalas primero en la pestaña Credenciales."
+
+msgctxt "AppWindow"
+msgid "Saved. The account's live session was stopped because its login changed; it has to reconnect."
+msgstr "Guardado. La sesión activa de la cuenta se detuvo porque cambiaron sus credenciales; tendrá que volver a conectarse."
+
+msgctxt "AppWindow"
+msgid "Terminate the session of {}? Its connection is stopped; the account and its network binding stay as they are."
+msgstr "¿Terminar la sesión de {}? Se detiene su conexión; la cuenta y su vínculo con la red no cambian."
+
+msgctxt "AppWindow"
+msgid "Terminate"
+msgstr "Terminar"
+
+msgctxt "AppWindow"
+msgid "Counting the messages of {}…"
+msgstr "Contando los mensajes de {}…"
+
+msgctxt "AppWindow"
+msgid "Delete {} for good? Its whole scrollback goes with it, for every account. Messages deleted: {}"
+msgstr "¿Eliminar {} definitivamente? Todo su historial se va con ella, para todas las cuentas. Mensajes eliminados: {}"
+
+msgctxt "AppWindow"
+msgid "Delete {} for good? Its whole scrollback goes with it, for every account; the server couldn't say how many messages that is."
+msgstr "¿Eliminar {} definitivamente? Todo su historial se va con ella, para todas las cuentas; el servidor no pudo decir cuántos mensajes son."
+
+msgctxt "AppWindow"
+msgid "Delete network and scrollback"
+msgstr "Eliminar red e historial"
+
+msgctxt "AppWindow"
+msgid "Enabled"
+msgstr "Activado"
+
+msgctxt "AppWindow"
+msgid "Featured channels"
+msgstr "Canales destacados"
+
+msgctxt "AppWindow"
+msgid "Description"
+msgstr "Descripción"
+
+msgctxt "AppWindow"
+msgid "Add channel"
+msgstr "Añadir canal"
+
+msgctxt "AppWindow"
+msgid "SASL user"
+msgstr "Usuario SASL"
+
+msgctxt "AppWindow"
+msgid "New password (leave empty to keep it)"
+msgstr "Nueva contraseña (déjalo vacío para conservarla)"
+
+msgctxt "AppWindow"
+msgid "A new password ends the account's live session on this network; it has to reconnect."
+msgstr "Una contraseña nueva termina la sesión activa de la cuenta en esta red; tendrá que volver a conectarse."
+
+msgctxt "DirectoryEntry"
+msgid "Open {}"
+msgstr "Abrir {}"
+
+msgctxt "DirectoryEntry"
+msgid "Join {}"
+msgstr "Unirse a {}"
+
+msgctxt "DirectoryEntry"
+msgid "{} users"
+msgstr "{} usuarios"
+
+msgctxt "DirectoryEntry"
+msgid "{} users — {}"
+msgstr "{} usuarios — {}"
+
+msgctxt "DirectoryEntry"
+msgid "featured"
+msgstr "destacado"
+
+msgctxt "DirectoryEntry"
+msgid "joined"
+msgstr "unido"
+
+msgctxt "AppWindow"
+msgid "Couldn't decline the invite. Please try again."
+msgstr "No se pudo rechazar la invitación. Inténtalo de nuevo."
+
+msgctxt "AppWindow"
+msgid "Decline"
+msgstr "Rechazar"
+
+msgctxt "AppWindow"
+msgid "Decline channel invite"
+msgstr "Rechazar la invitación al canal"
+
+msgctxt "AppWindow"
+msgid "Debug"
+msgstr "Depuración"
+
+msgctxt "AppWindow"
+msgid "Details about this device and this copy of Cordiale. They are shown only here and never sent anywhere."
+msgstr "Detalles sobre este dispositivo y esta copia de Cordiale. Solo se muestran aquí y nunca se envían a ninguna parte."
+
+msgctxt "AppWindow"
+msgid "Open data folder"
+msgstr "Abrir carpeta de datos"
+
+msgctxt "AppWindow"
+msgid "Please include these details when you open an issue:"
+msgstr "Incluye estos detalles cuando informes de un problema:"
 
 msgctxt "AppWindow"
 msgid "Profile saved."

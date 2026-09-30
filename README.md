@@ -55,6 +55,15 @@ track, read from the station's feed or the stream's own titles;
 removes your own stations (stream or `.pls`/`.m3u` URLs), kept on this
 device only.
 
+The Debug page (the bug icon before Settings, or the Actions menu) shows
+selectable, copyable details about your system: Cordiale version and build,
+operating system, CPU, RAM, display, locale, time zone, and where Cordiale
+keeps its files. Paste them into a bug report. They are generated locally
+and never uploaded, and the text leaves out account names, server addresses,
+tokens and your user name in paths. Anything the platform can't report
+reliably says "Not available"; the keyboard layout is only read on Windows,
+and the input method isn't detected yet.
+
 Settings > Themes lists Grappa's theme gallery, including the irssi-derived
 `irssi-dark` and `sux`, each shown with its color set. Picking one makes it
 the account's active theme on Grappa (`PUT /me/theme`) and restyles Cordiale:
@@ -114,7 +123,13 @@ Cordiale also covers:
   creates, edits and deletes networks and their IRC servers, edits the
   server-wide upload, DCC and addressing settings, binds and unbinds
   credentials, manages vhosts and their grants to accounts and visitors,
-  and follows the live admin event feed. Its Uploads tab can inspect the
+  and follows the live admin event feed. Deleting a network first asks the
+  server how many messages that removes with it (protocol v33 deletes the
+  whole scrollback along with the network) and says so in the confirmation;
+  if the server can't say, the confirmation says that instead of showing
+  zero. The panel also terminates an account's live session, reconnects a
+  visitor's, edits a network's featured channels, an IRC server and a
+  credential's nick, ident, real name, SASL user and password. Its Uploads tab can inspect the
   upload budget and remove an active upload early; that is admin-only,
   not a secret delete button for everyone else.
 - **Settings and watch lists:** the identity editor reads back the nick in
