@@ -210,6 +210,8 @@ struct AdminSessionRow {
     label: string,
     alive: bool,
     session-id: string,
+    // An account's session, the only kind that can be terminated.
+    is-user: bool,
 }
 
 // One row in the admin Users list.
@@ -236,6 +238,11 @@ struct AdminCredentialRow {
     label: string,
     user-id: string,
     network-id: string,
+    // What the editor starts from.
+    nick: string,
+    ident: string,
+    realname: string,
+    sasl-user: string,
 }
 
 // One vhost (source address) in Admin, with its two flags.
@@ -271,6 +278,26 @@ struct MutedRow {
 struct AdminServerRow {
     label: string,
     server-id: string,
+    // What the editor starts from.
+    host: string,
+    port: string,
+    tls: bool,
+    enabled: bool,
+}
+
+// One curated channel of the network being edited.
+struct AdminFeaturedRow {
+    label: string,
+    featured-id: string,
+    enabled: bool,
+}
+
+// One per-network session of a visitor: Disconnect while a process backs
+// it, Reconnect when none does.
+struct AdminVisitorSessionRow {
+    label: string,
+    session-id: string,
+    alive: bool,
 }
 
 // One row in the admin Visitors list.
@@ -1140,6 +1167,7 @@ export component AppWindow inherits Window {
     in property <[AdminUserRow]> admin-users: [];
     in property <[AdminNetworkRow]> admin-networks: [];
     in property <[AdminVisitorRow]> admin-visitors: [];
+    in property <[AdminVisitorSessionRow]> admin-visitor-sessions: [];
     // Admin > Uploads: the registry, and the budget once the server has
     // answered (`admin-uploads-loaded`). `admin-uploads-error` is
     // `forbidden`, `failed` or `delete-failed` ("" when none).
@@ -1498,6 +1526,11 @@ export component AppWindow inherits Window {
     in property <string> status-command-hint: "";
     callback admin-refresh-requested();
     callback admin-disconnect-session(string);
+    callback admin-reconnect-session(string);
+    // The session awaiting its terminate confirmation, or "".
+    callback admin-terminate-session(string);
+    in-out property <string> admin-session-confirm-id: "";
+    in-out property <string> admin-session-confirm-label: "";
     callback admin-user-toggle-admin(string, bool);
     callback admin-user-delete(string);
     callback admin-visitor-delete(string);
@@ -1521,6 +1554,16 @@ export component AppWindow inherits Window {
     callback admin-network-create(string);
     callback admin-network-delete(string);
     callback admin-network-save();
+    // The network awaiting its delete confirmation, or "". A delete takes
+    // the whole scrollback with it, so the confirmation says how much:
+    // `admin-network-count-state` is "counting" until the server answers,
+    // then "known" (`admin-network-count` holds the number) or "unknown"
+    // when it can't say, which is never to be read as zero.
+    in-out property <string> admin-network-confirm-id: "";
+    in-out property <string> admin-network-confirm-slug: "";
+    in-out property <string> admin-network-count-state: "counting";
+    in property <string> admin-network-count: "";
+    callback admin-network-count-requested(string);
     // Servers of the network being edited.
     in-out property <string> admin-edit-network-id: "";
     in property <[AdminServerRow]> admin-servers: [];
@@ -1530,6 +1573,20 @@ export component AppWindow inherits Window {
     callback admin-servers-requested(string);
     callback admin-server-add();
     callback admin-server-delete(string);
+    // The server endpoint being edited ("" when none), with its fields.
+    in-out property <string> admin-edit-server-id: "";
+    in-out property <string> admin-edit-server-host: "";
+    in-out property <string> admin-edit-server-port: "";
+    in-out property <bool> admin-edit-server-tls: true;
+    in-out property <bool> admin-edit-server-enabled: true;
+    callback admin-server-save();
+    // Featured channels of the network being edited.
+    in property <[AdminFeaturedRow]> admin-featured: [];
+    in-out property <string> admin-new-featured-name: "";
+    in-out property <string> admin-new-featured-description: "";
+    callback admin-featured-add();
+    callback admin-featured-set(string, bool);
+    callback admin-featured-delete(string);
     // Server-wide settings (`/admin/settings`); sizes are MiB, in the order
     // of `ADMIN_SIZE_SETTINGS`.
     in property <bool> admin-settings-loaded: false;
@@ -1558,6 +1615,16 @@ export component AppWindow inherits Window {
     in-out property <int> admin-grant-user-index: 0;
     callback admin-credential-bind();
     callback admin-credential-unbind(string, string);
+    // The credential being edited: account and network ids, "" when none.
+    in-out property <string> admin-edit-cred-user-id: "";
+    in-out property <string> admin-edit-cred-network-id: "";
+    in-out property <string> admin-edit-cred-label: "";
+    in-out property <string> admin-edit-cred-nick: "";
+    in-out property <string> admin-edit-cred-ident: "";
+    in-out property <string> admin-edit-cred-realname: "";
+    in-out property <string> admin-edit-cred-sasl-user: "";
+    in-out property <string> admin-edit-cred-password: "";
+    callback admin-credential-save();
     callback admin-vhost-add();
     callback admin-vhost-set(string, string, bool);
     callback admin-vhost-delete(string);
@@ -2008,6 +2075,12 @@ export component AppWindow inherits Window {
             return @tr("Done.");
         } else if status-kind == "admin-action-failed" {
             return @tr("The server refused that admin action ({}).", status-command-hint);
+        } else if status-kind == "admin-forbidden" {
+            return @tr("Admin actions need an administrator signed in with a full session. A client token can't do them.");
+        } else if status-kind == "admin-network-in-use" {
+            return @tr("That network still has accounts bound to it. Unbind them on the Credentials tab first.");
+        } else if status-kind == "admin-credential-stopped" {
+            return @tr("Saved. The account's live session was stopped because its login changed; it has to reconnect.");
         } else if status-kind == "admin-credential-invalid" {
             return @tr("A credential needs an account, a network and a nickname.");
         } else if status-kind == "admin-server-invalid" {
@@ -4901,6 +4974,34 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                 }
 
+                if admin-section == "sessions" && admin-session-confirm-id != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 4px;
+
+                    Text {
+                        text: @tr("Terminate the session of {}? Its connection is stopped; the account and its network binding stay as they are.", admin-session-confirm-label);
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: @tr("Cancel");
+                        init => { self.focus(); }
+                        clicked => {
+                            admin-session-confirm-id = "";
+                            admin-session-confirm-label = "";
+                        }
+                    }
+                    Button {
+                        text: @tr("Terminate");
+                        clicked => {
+                            admin-terminate-session(admin-session-confirm-id);
+                            admin-session-confirm-id = "";
+                            admin-session-confirm-label = "";
+                        }
+                    }
+                }
+
                 if admin-section == "sessions" : ListView {
                     vertical-stretch: 1;
                     min-height: 120px;
@@ -4920,6 +5021,15 @@ export component AppWindow inherits Window {
                             a11y-label: @tr("Disconnect");
                             enabled: row.alive;
                             clicked => { admin-disconnect-session(row.session-id); }
+                        }
+                        if row.is-user : CompactButton {
+                            text: "⏹  " + @tr("Terminate");
+                            a11y-label: @tr("Terminate");
+                            enabled: row.alive;
+                            clicked => {
+                                admin-session-confirm-id = row.session-id;
+                                admin-session-confirm-label = row.label;
+                            }
                         }
                     }
                 }
@@ -5008,6 +5118,39 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                if admin-section == "networks" && admin-network-confirm-id != "" : HorizontalBox {
+                    padding: 0px;
+                    spacing: 4px;
+
+                    Text {
+                        text: admin-network-count-state == "counting"
+                            ? @tr("Counting the messages of {}…", admin-network-confirm-slug)
+                            : (admin-network-count-state == "known"
+                                ? @tr("Delete {} for good? Its whole scrollback goes with it, for every account. Messages deleted: {}", admin-network-confirm-slug, admin-network-count)
+                                : @tr("Delete {} for good? Its whole scrollback goes with it, for every account; the server couldn't say how many messages that is.", admin-network-confirm-slug));
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                    Button {
+                        text: @tr("Cancel");
+                        init => { self.focus(); }
+                        clicked => {
+                            admin-network-confirm-id = "";
+                            admin-network-confirm-slug = "";
+                        }
+                    }
+                    Button {
+                        text: @tr("Delete network and scrollback");
+                        enabled: admin-network-count-state != "counting";
+                        clicked => {
+                            admin-network-delete(admin-network-confirm-id);
+                            admin-network-confirm-id = "";
+                            admin-network-confirm-slug = "";
+                        }
+                    }
+                }
+
                 if admin-section == "networks" && admin-edit-network != "" : VerticalLayout {
                     spacing: 6px;
 
@@ -5074,9 +5217,55 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                         }
                         CompactButton {
+                            text: "✏";
+                            a11y-label: @tr("Edit {}", server.label);
+                            clicked => {
+                                admin-edit-server-id = server.server-id;
+                                admin-edit-server-host = server.host;
+                                admin-edit-server-port = server.port;
+                                admin-edit-server-tls = server.tls;
+                                admin-edit-server-enabled = server.enabled;
+                            }
+                        }
+                        CompactButton {
                             text: "🗑";
                             a11y-label: @tr("Remove server {}", server.label);
                             clicked => { admin-server-delete(server.server-id); }
+                        }
+                    }
+                    if admin-edit-server-id != "" : HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("Host");
+                            accessible-label: @tr("Host");
+                            text <=> admin-edit-server-host;
+                            horizontal-stretch: 1;
+                            min-width: 100px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("Port");
+                            accessible-label: @tr("Port");
+                            input-type: number;
+                            text <=> admin-edit-server-port;
+                            min-width: 60px;
+                        }
+                        CheckBox {
+                            text: "TLS";
+                            checked <=> admin-edit-server-tls;
+                        }
+                        CheckBox {
+                            text: @tr("Enabled");
+                            checked <=> admin-edit-server-enabled;
+                        }
+                        CompactButton {
+                            text: "💾  " + @tr("Save");
+                            a11y-label: @tr("Save");
+                            clicked => { admin-server-save(); }
+                        }
+                        CompactButton {
+                            text: @tr("Cancel");
+                            clicked => { admin-edit-server-id = ""; }
                         }
                     }
                     HorizontalLayout {
@@ -5105,6 +5294,54 @@ export component AppWindow inherits Window {
                             a11y-label: @tr("Add server");
                             enabled: admin-new-server-host != "";
                             clicked => { admin-server-add(); }
+                        }
+                    }
+
+                    Text {
+                        text: "⭐  " + @tr("Featured channels");
+                        font-weight: 600;
+                    }
+                    for channel in admin-featured : HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: channel.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        CheckBox {
+                            text: @tr("Enabled");
+                            checked: channel.enabled;
+                            toggled => { admin-featured-set(channel.featured-id, self.checked); }
+                        }
+                        CompactButton {
+                            text: "🗑";
+                            a11y-label: @tr("Delete {}", channel.label);
+                            clicked => { admin-featured-delete(channel.featured-id); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("Channel");
+                            accessible-label: @tr("Channel");
+                            text <=> admin-new-featured-name;
+                            min-width: 100px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("Description");
+                            accessible-label: @tr("Description");
+                            text <=> admin-new-featured-description;
+                            horizontal-stretch: 1;
+                            min-width: 100px;
+                        }
+                        CompactButton {
+                            text: "➕  " + @tr("Add channel");
+                            a11y-label: @tr("Add channel");
+                            enabled: admin-new-featured-name != "";
+                            clicked => { admin-featured-add(); }
                         }
                     }
                 }
@@ -5144,7 +5381,12 @@ export component AppWindow inherits Window {
                         CompactButton {
                             text: "🗑";
                             a11y-label: @tr("Delete network {}", row.slug);
-                            clicked => { admin-network-delete(row.network-id); }
+                            clicked => {
+                                admin-network-confirm-id = row.network-id;
+                                admin-network-confirm-slug = row.slug;
+                                admin-network-count-state = "counting";
+                                admin-network-count-requested(row.network-id);
+                            }
                         }
                     }
                 }
@@ -5167,6 +5409,36 @@ export component AppWindow inherits Window {
                             text: "🗑  " + @tr("Delete");
                             a11y-label: @tr("Delete");
                             clicked => { admin-visitor-delete(row.visitor-id); }
+                        }
+                    }
+                }
+                if admin-section == "visitors" && admin-visitor-sessions.length > 0 : Text {
+                    text: "🔌  " + @tr("Visitor sessions");
+                    font-weight: 600;
+                }
+                if admin-section == "visitors" : ListView {
+                    vertical-stretch: 1;
+                    min-height: 120px;
+
+                    for row in admin-visitor-sessions : HorizontalLayout {
+                        spacing: 8px;
+                        padding: 2px;
+
+                        Text {
+                            text: (row.alive ? "🟢  " : "⚪  ") + row.label;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                        }
+                        if row.alive : CompactButton {
+                            text: "⏏  " + @tr("Disconnect");
+                            a11y-label: @tr("Disconnect");
+                            clicked => { admin-disconnect-session(row.session-id); }
+                        }
+                        if !row.alive : CompactButton {
+                            text: "🔌  " + @tr("Reconnect");
+                            a11y-label: @tr("Reconnect");
+                            clicked => { admin-reconnect-session(row.session-id); }
                         }
                     }
                 }
@@ -5335,10 +5607,92 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                         }
                         CompactButton {
+                            text: "✏";
+                            a11y-label: @tr("Edit {}", row.label);
+                            clicked => {
+                                admin-edit-cred-user-id = row.user-id;
+                                admin-edit-cred-network-id = row.network-id;
+                                admin-edit-cred-label = row.label;
+                                admin-edit-cred-nick = row.nick;
+                                admin-edit-cred-ident = row.ident;
+                                admin-edit-cred-realname = row.realname;
+                                admin-edit-cred-sasl-user = row.sasl-user;
+                                admin-edit-cred-password = "";
+                            }
+                        }
+                        CompactButton {
                             text: "⛓  " + @tr("Unbind");
                             a11y-label: @tr("Unbind");
                             clicked => { admin-credential-unbind(row.user-id, row.network-id); }
                         }
+                    }
+                }
+                if admin-section == "credentials" && admin-edit-cred-user-id != "" : VerticalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: "✏  " + @tr("Edit {}", admin-edit-cred-label);
+                        font-weight: 600;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("Nickname");
+                            accessible-label: @tr("Nickname");
+                            text <=> admin-edit-cred-nick;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("Ident");
+                            accessible-label: @tr("Ident");
+                            text <=> admin-edit-cred-ident;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("Real name");
+                            accessible-label: @tr("Real name");
+                            text <=> admin-edit-cred-realname;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                        LineEdit {
+                            placeholder-text: @tr("SASL user");
+                            accessible-label: @tr("SASL user");
+                            text <=> admin-edit-cred-sasl-user;
+                            horizontal-stretch: 1;
+                            min-width: 80px;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            placeholder-text: @tr("New password (leave empty to keep it)");
+                            accessible-label: @tr("New password (leave empty to keep it)");
+                            input-type: InputType.password;
+                            text <=> admin-edit-cred-password;
+                            horizontal-stretch: 1;
+                            min-width: 120px;
+                        }
+                        CompactButton {
+                            text: "💾  " + @tr("Save");
+                            a11y-label: @tr("Save");
+                            enabled: admin-edit-cred-nick != "";
+                            clicked => { admin-credential-save(); }
+                        }
+                        CompactButton {
+                            text: @tr("Cancel");
+                            clicked => { admin-edit-cred-user-id = ""; }
+                        }
+                    }
+                    Text {
+                        text: @tr("A new password ends the account's live session on this network; it has to reconnect.");
+                        wrap: word-wrap;
+                        color: palette-muted;
                     }
                 }
 

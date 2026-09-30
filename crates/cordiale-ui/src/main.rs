@@ -191,6 +191,8 @@ enum WorkerCommand {
     SaveNotificationPrefs(NotificationToggles),
     AdminRefresh,
     AdminDisconnectSession(String),
+    AdminReconnectSession(String),
+    AdminTerminateSession(String),
     AdminUserToggleAdmin(String, bool),
     AdminUserDelete(String),
     AdminVisitorDelete(String),
@@ -246,6 +248,39 @@ enum WorkerCommand {
     AdminServerDelete {
         network_id: String,
         server_id: String,
+    },
+    AdminServerEdit {
+        network_id: String,
+        server_id: String,
+        host: String,
+        port: String,
+        tls: bool,
+        enabled: bool,
+    },
+    AdminFeaturedAdd {
+        network_id: String,
+        name: String,
+        description: String,
+    },
+    AdminFeaturedSet {
+        network_id: String,
+        featured_id: String,
+        enabled: bool,
+    },
+    AdminFeaturedDelete {
+        network_id: String,
+        featured_id: String,
+    },
+    /// How many messages deleting the network would take with it.
+    AdminNetworkCount(String),
+    AdminCredentialEdit {
+        user_id: String,
+        network_id: String,
+        nick: String,
+        ident: String,
+        realname: String,
+        sasl_user: String,
+        password: String,
     },
     AdminSettingsLoad,
     AdminSettingsSave(AdminSettingsForm),
@@ -1237,6 +1272,18 @@ fn main() -> Result<(), slint::PlatformError> {
         ));
     });
 
+    let tx_for_admin_reconnect = worker_tx.clone();
+    ui.on_admin_reconnect_session(move |session_id| {
+        let _ = tx_for_admin_reconnect
+            .send(WorkerCommand::AdminReconnectSession(session_id.to_string()));
+    });
+
+    let tx_for_admin_terminate = worker_tx.clone();
+    ui.on_admin_terminate_session(move |session_id| {
+        let _ = tx_for_admin_terminate
+            .send(WorkerCommand::AdminTerminateSession(session_id.to_string()));
+    });
+
     // Lazily created, reused across requests rather than spawning a new
     // OS window every click. Only ever touched from this callback, which
     // Slint guarantees runs on the UI thread — safe to be a plain `Rc`.
@@ -1343,6 +1390,77 @@ fn main() -> Result<(), slint::PlatformError> {
             let _ = tx_for_admin_server_delete.send(WorkerCommand::AdminServerDelete {
                 network_id: ui.get_admin_edit_network_id().to_string(),
                 server_id: server_id.to_string(),
+            });
+        }
+    });
+
+    let tx_for_admin_server_save = worker_tx.clone();
+    let weak_for_admin_server_save = ui.as_weak();
+    ui.on_admin_server_save(move || {
+        if let Some(ui) = weak_for_admin_server_save.upgrade() {
+            let _ = tx_for_admin_server_save.send(WorkerCommand::AdminServerEdit {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                server_id: ui.get_admin_edit_server_id().to_string(),
+                host: ui.get_admin_edit_server_host().to_string(),
+                port: ui.get_admin_edit_server_port().to_string(),
+                tls: ui.get_admin_edit_server_tls(),
+                enabled: ui.get_admin_edit_server_enabled(),
+            });
+        }
+    });
+
+    let tx_for_featured_add = worker_tx.clone();
+    let weak_for_featured_add = ui.as_weak();
+    ui.on_admin_featured_add(move || {
+        if let Some(ui) = weak_for_featured_add.upgrade() {
+            let _ = tx_for_featured_add.send(WorkerCommand::AdminFeaturedAdd {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                name: ui.get_admin_new_featured_name().to_string(),
+                description: ui.get_admin_new_featured_description().to_string(),
+            });
+        }
+    });
+
+    let tx_for_featured_set = worker_tx.clone();
+    let weak_for_featured_set = ui.as_weak();
+    ui.on_admin_featured_set(move |featured_id, enabled| {
+        if let Some(ui) = weak_for_featured_set.upgrade() {
+            let _ = tx_for_featured_set.send(WorkerCommand::AdminFeaturedSet {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                featured_id: featured_id.to_string(),
+                enabled,
+            });
+        }
+    });
+
+    let tx_for_featured_delete = worker_tx.clone();
+    let weak_for_featured_delete = ui.as_weak();
+    ui.on_admin_featured_delete(move |featured_id| {
+        if let Some(ui) = weak_for_featured_delete.upgrade() {
+            let _ = tx_for_featured_delete.send(WorkerCommand::AdminFeaturedDelete {
+                network_id: ui.get_admin_edit_network_id().to_string(),
+                featured_id: featured_id.to_string(),
+            });
+        }
+    });
+
+    let tx_for_network_count = worker_tx.clone();
+    ui.on_admin_network_count_requested(move |network_id| {
+        let _ = tx_for_network_count.send(WorkerCommand::AdminNetworkCount(network_id.to_string()));
+    });
+
+    let tx_for_credential_save = worker_tx.clone();
+    let weak_for_credential_save = ui.as_weak();
+    ui.on_admin_credential_save(move || {
+        if let Some(ui) = weak_for_credential_save.upgrade() {
+            let _ = tx_for_credential_save.send(WorkerCommand::AdminCredentialEdit {
+                user_id: ui.get_admin_edit_cred_user_id().to_string(),
+                network_id: ui.get_admin_edit_cred_network_id().to_string(),
+                nick: ui.get_admin_edit_cred_nick().to_string(),
+                ident: ui.get_admin_edit_cred_ident().to_string(),
+                realname: ui.get_admin_edit_cred_realname().to_string(),
+                sasl_user: ui.get_admin_edit_cred_sasl_user().to_string(),
+                password: ui.get_admin_edit_cred_password().to_string(),
             });
         }
     });
@@ -2731,6 +2849,14 @@ async fn run_worker(
                     Some(WorkerCommand::AdminDisconnectSession(session_id)) => {
                         handle_admin_disconnect_session(&state, &ui, session_id).await;
                     }
+                    Some(WorkerCommand::AdminReconnectSession(session_id)) => {
+                        handle_admin_write(&state, &ui, AdminWrite::ReconnectSession(session_id))
+                            .await;
+                    }
+                    Some(WorkerCommand::AdminTerminateSession(session_id)) => {
+                        handle_admin_write(&state, &ui, AdminWrite::TerminateSession(session_id))
+                            .await;
+                    }
                     Some(WorkerCommand::AdminUserToggleAdmin(user_id, is_admin)) => {
                         if let (Some(client), Some(token)) = (&state.client, &state.token) {
                             let _ = client
@@ -2858,7 +2984,120 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::AdminServersLoad(network_id)) => {
                         push_admin_servers(&state, &ui, &network_id).await;
+                        push_admin_featured(&state, &ui, &network_id).await;
                     }
+                    Some(WorkerCommand::AdminServerEdit {
+                        network_id,
+                        server_id,
+                        host,
+                        port,
+                        tls,
+                        enabled,
+                    }) => match cordiale_core::admin::admin_server_changes(&host, &port, tls, enabled)
+                    {
+                        Some(changes) => {
+                            handle_admin_write(
+                                &state,
+                                &ui,
+                                AdminWrite::EditServer {
+                                    network_id: network_id.clone(),
+                                    server_id,
+                                    changes,
+                                },
+                            )
+                            .await;
+                            push_admin_servers(&state, &ui, &network_id).await;
+                        }
+                        None => {
+                            let _ = ui.upgrade_in_event_loop(|ui| {
+                                ui.set_status_kind("admin-server-invalid".into());
+                            });
+                        }
+                    },
+                    Some(WorkerCommand::AdminFeaturedAdd {
+                        network_id,
+                        name,
+                        description,
+                    }) => {
+                        if let Some(body) =
+                            cordiale_core::admin::admin_featured_body(&name, &description)
+                        {
+                            handle_admin_write(
+                                &state,
+                                &ui,
+                                AdminWrite::AddFeatured {
+                                    network_id: network_id.clone(),
+                                    body,
+                                },
+                            )
+                            .await;
+                            push_admin_featured(&state, &ui, &network_id).await;
+                        }
+                    }
+                    Some(WorkerCommand::AdminFeaturedSet {
+                        network_id,
+                        featured_id,
+                        enabled,
+                    }) => {
+                        handle_admin_write(
+                            &state,
+                            &ui,
+                            AdminWrite::SetFeatured {
+                                network_id: network_id.clone(),
+                                featured_id,
+                                enabled,
+                            },
+                        )
+                        .await;
+                        push_admin_featured(&state, &ui, &network_id).await;
+                    }
+                    Some(WorkerCommand::AdminFeaturedDelete {
+                        network_id,
+                        featured_id,
+                    }) => {
+                        handle_admin_write(
+                            &state,
+                            &ui,
+                            AdminWrite::DeleteFeatured {
+                                network_id: network_id.clone(),
+                                featured_id,
+                            },
+                        )
+                        .await;
+                        push_admin_featured(&state, &ui, &network_id).await;
+                    }
+                    Some(WorkerCommand::AdminNetworkCount(network_id)) => {
+                        handle_admin_network_count(&state, &ui, network_id).await;
+                    }
+                    Some(WorkerCommand::AdminCredentialEdit {
+                        user_id,
+                        network_id,
+                        nick,
+                        ident,
+                        realname,
+                        sasl_user,
+                        password,
+                    }) => match cordiale_core::admin::admin_credential_changes(
+                        &nick, &ident, &realname, &sasl_user, &password,
+                    ) {
+                        Some(changes) => {
+                            handle_admin_write(
+                                &state,
+                                &ui,
+                                AdminWrite::EditCredential {
+                                    user_id,
+                                    network_id,
+                                    changes,
+                                },
+                            )
+                            .await;
+                        }
+                        None => {
+                            let _ = ui.upgrade_in_event_loop(|ui| {
+                                ui.set_status_kind("admin-credential-invalid".into());
+                            });
+                        }
+                    },
                     Some(WorkerCommand::AdminServerAdd {
                         network_id,
                         host,
@@ -6400,6 +6639,42 @@ enum AdminWrite {
         subject_id: String,
     },
     RevokeGrant(String),
+    ReconnectSession(String),
+    TerminateSession(String),
+    EditServer {
+        network_id: String,
+        server_id: String,
+        changes: Value,
+    },
+    AddFeatured {
+        network_id: String,
+        body: Value,
+    },
+    SetFeatured {
+        network_id: String,
+        featured_id: String,
+        enabled: bool,
+    },
+    DeleteFeatured {
+        network_id: String,
+        featured_id: String,
+    },
+    EditCredential {
+        user_id: String,
+        network_id: String,
+        changes: Value,
+    },
+}
+
+/// The status line for a refused admin write. 403 is a session without the
+/// admin console (not an administrator, or a per-client token), and a
+/// network delete answers 409 while accounts are still bound to it.
+fn admin_failure_kind(status: Option<u16>, network_delete: bool) -> &'static str {
+    match status {
+        Some(403) => "admin-forbidden",
+        Some(409) if network_delete => "admin-network-in-use",
+        _ => "admin-action-failed",
+    }
 }
 
 /// One `subject_search` row: `(type, id, network, nick)`, `network` empty
@@ -6549,6 +6824,64 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
         AdminWrite::RevokeGrant(grant_id) => {
             (client.revoke_admin_vhost_grant(token, grant_id).await, "")
         }
+        AdminWrite::ReconnectSession(session_id) => {
+            (client.reconnect_admin_session(token, session_id).await, "")
+        }
+        AdminWrite::TerminateSession(session_id) => {
+            (client.terminate_admin_session(token, session_id).await, "")
+        }
+        AdminWrite::EditServer {
+            network_id,
+            server_id,
+            changes,
+        } => (
+            client
+                .update_admin_server(token, network_id, server_id, changes)
+                .await,
+            "edit-server",
+        ),
+        AdminWrite::AddFeatured { network_id, body } => (
+            client
+                .add_admin_featured_channel(token, network_id, body)
+                .await,
+            "featured",
+        ),
+        AdminWrite::SetFeatured {
+            network_id,
+            featured_id,
+            enabled,
+        } => (
+            client
+                .update_admin_featured_channel(
+                    token,
+                    network_id,
+                    featured_id,
+                    &serde_json::json!({ "enabled": enabled }),
+                )
+                .await,
+            "",
+        ),
+        AdminWrite::DeleteFeatured {
+            network_id,
+            featured_id,
+        } => (
+            client
+                .delete_admin_featured_channel(token, network_id, featured_id)
+                .await,
+            "",
+        ),
+        AdminWrite::EditCredential {
+            user_id,
+            network_id,
+            changes,
+        } => match client
+            .update_admin_credential(token, user_id, network_id, changes)
+            .await
+        {
+            Ok(true) => (Ok(()), "edit-credential-stopped"),
+            Ok(false) => (Ok(()), "edit-credential"),
+            Err(err) => (Err(err), ""),
+        },
     };
     match result {
         Ok(()) => {
@@ -6571,9 +6904,23 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
                         ui.set_admin_new_server_host("".into());
                         ui.set_admin_new_server_port("6697".into());
                     }
+                    "edit-server" => ui.set_admin_edit_server_id("".into()),
+                    "featured" => {
+                        ui.set_admin_new_featured_name("".into());
+                        ui.set_admin_new_featured_description("".into());
+                    }
+                    "edit-credential" | "edit-credential-stopped" => {
+                        ui.set_admin_edit_cred_user_id("".into());
+                        ui.set_admin_edit_cred_password("".into());
+                    }
                     _ => {}
                 }
-                ui.set_status_kind("admin-action-done".into());
+                let done = if clears == "edit-credential-stopped" {
+                    "admin-credential-stopped"
+                } else {
+                    "admin-action-done"
+                };
+                ui.set_status_kind(done.into());
             });
         }
         Err(err) => {
@@ -6582,9 +6929,13 @@ async fn handle_admin_write(state: &WorkerState, ui: &slint::Weak<AppWindow>, wr
                 .map(|status| status.as_u16().to_string())
                 .unwrap_or_else(|| "network error".to_string());
             persistence::log_line(&format!("admin write failed: {status}"));
+            let kind = admin_failure_kind(
+                err.status().map(|status| status.as_u16()),
+                matches!(write, AdminWrite::DeleteNetwork(_)),
+            );
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_status_command_hint(status.into());
-                ui.set_status_kind("admin-action-failed".into());
+                ui.set_status_kind(kind.into());
             });
         }
     }
@@ -6808,7 +7159,7 @@ async fn push_admin_servers(state: &WorkerState, ui: &slint::Weak<AppWindow>, ne
             Vec::new()
         }
     };
-    let rows: Vec<(String, String)> = servers
+    let rows: Vec<AdminServerRow> = servers
         .iter()
         .map(|entry| {
             let id = entry
@@ -6816,18 +7167,85 @@ async fn push_admin_servers(state: &WorkerState, ui: &slint::Weak<AppWindow>, ne
                 .and_then(Value::as_i64)
                 .map(|id| id.to_string())
                 .unwrap_or_default();
-            (cordiale_core::admin::admin_server_label(entry), id)
+            let (host, port, tls, enabled) = cordiale_core::admin::admin_server_fields(entry);
+            AdminServerRow {
+                label: cordiale_core::admin::admin_server_label(entry).into(),
+                server_id: id.into(),
+                host: host.into(),
+                port: port.into(),
+                tls,
+                enabled,
+            }
         })
         .collect();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let rows: Vec<AdminServerRow> = rows
-            .into_iter()
-            .map(|(label, server_id)| AdminServerRow {
-                label: label.into(),
-                server_id: server_id.into(),
-            })
-            .collect();
         ui.set_admin_servers(Rc::new(slint::VecModel::from(rows)).into());
+    });
+}
+
+/// Loads the featured channels of the network being edited.
+async fn push_admin_featured(state: &WorkerState, ui: &slint::Weak<AppWindow>, network_id: &str) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let channels = match client
+        .fetch_admin_featured_channels(token, network_id)
+        .await
+    {
+        Ok(channels) => channels,
+        Err(err) => {
+            persistence::log_line(&format!("admin featured channels load failed: {err:?}"));
+            Vec::new()
+        }
+    };
+    let rows: Vec<AdminFeaturedRow> = channels
+        .iter()
+        .filter_map(|entry| {
+            let (featured_id, enabled) = cordiale_core::admin::admin_featured_state(entry)?;
+            Some(AdminFeaturedRow {
+                label: cordiale_core::admin::admin_featured_label(entry).into(),
+                featured_id: featured_id.into(),
+                enabled,
+            })
+        })
+        .collect();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_admin_featured(Rc::new(slint::VecModel::from(rows)).into());
+    });
+}
+
+/// Asks how many messages deleting a network would take with it, for the
+/// confirmation. A 404 or any failure is "can't say", never zero, and the
+/// answer is dropped if the confirmation moved on to another network.
+async fn handle_admin_network_count(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network_id: String,
+) {
+    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+        return;
+    };
+    let count = match client
+        .fetch_admin_network_message_count(token, &network_id)
+        .await
+    {
+        Ok(count) => count,
+        Err(err) => {
+            persistence::log_line(&format!("admin network message count failed: {err:?}"));
+            None
+        }
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        if ui.get_admin_network_confirm_id() != network_id.as_str() {
+            return;
+        }
+        match count {
+            Some(count) => {
+                ui.set_admin_network_count(count.to_string().into());
+                ui.set_admin_network_count_state("known".into());
+            }
+            None => ui.set_admin_network_count_state("unknown".into()),
+        }
     });
 }
 
@@ -6918,7 +7336,7 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         .unwrap_or_default();
     let vhost_view = client.fetch_admin_vhosts(token).await.unwrap_or_default();
     let (vhost_rows, grant_rows) = admin_vhost_rows(&vhost_view);
-    let credential_rows: Vec<(String, String, String)> = credentials
+    let credential_rows: Vec<AdminCredentialRow> = credentials
         .iter()
         .map(|entry| {
             let id = |key: &str| {
@@ -6930,11 +7348,17 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
                     })
                     .unwrap_or_default()
             };
-            (
-                cordiale_core::admin::admin_credential_label(entry),
-                id("user_id"),
-                id("network_id"),
-            )
+            let (nick, ident, realname, sasl_user) =
+                cordiale_core::admin::admin_credential_fields(entry);
+            AdminCredentialRow {
+                label: cordiale_core::admin::admin_credential_label(entry).into(),
+                user_id: id("user_id").into(),
+                network_id: id("network_id").into(),
+                nick: nick.into(),
+                ident: ident.into(),
+                realname: realname.into(),
+                sasl_user: sasl_user.into(),
+            }
         })
         .collect();
     let session_log = client
@@ -6952,6 +7376,7 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
             session_id: cordiale_core::admin::admin_session_id(entry)
                 .unwrap_or_default()
                 .into(),
+            is_user: cordiale_core::admin::admin_session_is_user(entry),
         })
         .collect();
 
@@ -6999,6 +7424,16 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         })
         .collect();
 
+    let visitor_session_rows: Vec<AdminVisitorSessionRow> = visitors
+        .iter()
+        .flat_map(cordiale_core::admin::admin_visitor_sessions)
+        .map(|session| AdminVisitorSessionRow {
+            label: session.label.into(),
+            session_id: session.session_id.into(),
+            alive: session.alive,
+        })
+        .collect();
+
     let session_log_lines: Vec<slint::SharedString> = session_log
         .iter()
         .map(|entry| cordiale_core::admin::admin_session_log_line(entry).into())
@@ -7017,14 +7452,6 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
         ui.set_admin_network_names(Rc::new(slint::VecModel::from(network_names)).into());
         ui.set_admin_users(Rc::new(slint::VecModel::from(user_rows)).into());
         ui.set_admin_networks(Rc::new(slint::VecModel::from(network_rows)).into());
-        let credential_rows: Vec<AdminCredentialRow> = credential_rows
-            .into_iter()
-            .map(|(label, user_id, network_id)| AdminCredentialRow {
-                label: label.into(),
-                user_id: user_id.into(),
-                network_id: network_id.into(),
-            })
-            .collect();
         ui.set_admin_credentials(Rc::new(slint::VecModel::from(credential_rows)).into());
         let vhost_names: Vec<slint::SharedString> = vhost_rows
             .iter()
@@ -7052,6 +7479,7 @@ async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
             .collect();
         ui.set_admin_grants(Rc::new(slint::VecModel::from(grant_rows)).into());
         ui.set_admin_visitors(Rc::new(slint::VecModel::from(visitor_rows)).into());
+        ui.set_admin_visitor_sessions(Rc::new(slint::VecModel::from(visitor_session_rows)).into());
         ui.set_admin_session_log(Rc::new(slint::VecModel::from(session_log_lines)).into());
     });
 }
@@ -21619,6 +22047,17 @@ mod tests {
         );
         form.sizes[0] = "-1".to_string();
         assert!(admin_settings_body(&form, Some(&loaded)).is_none());
+    }
+
+    #[test]
+    fn a_refused_admin_write_is_told_apart() {
+        assert_eq!(admin_failure_kind(Some(403), false), "admin-forbidden");
+        assert_eq!(admin_failure_kind(Some(403), true), "admin-forbidden");
+        assert_eq!(admin_failure_kind(Some(409), true), "admin-network-in-use");
+        // A 409 elsewhere is a duplicate, not a network in use.
+        assert_eq!(admin_failure_kind(Some(409), false), "admin-action-failed");
+        assert_eq!(admin_failure_kind(Some(422), false), "admin-action-failed");
+        assert_eq!(admin_failure_kind(None, true), "admin-action-failed");
     }
 
     #[test]
