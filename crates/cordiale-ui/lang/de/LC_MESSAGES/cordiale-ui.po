@@ -2829,6 +2829,98 @@ msgid "Couldn't create a share link."
 msgstr "Der Freigabe-Link konnte nicht erstellt werden."
 
 msgctxt "AppWindow"
+msgid "Profile saved."
+msgstr "Profil gespeichert."
+
+msgctxt "AppWindow"
+msgid "Profile fields must be one line and at most 100 bytes each."
+msgstr "Profilfelder müssen einzeilig sein und höchstens 100 Byte lang."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the profile."
+msgstr "Das Profil konnte nicht gespeichert werden."
+
+msgctxt "AppWindow"
+msgid "Avatar updated."
+msgstr "Avatar aktualisiert."
+
+msgctxt "AppWindow"
+msgid "Avatar removed."
+msgstr "Avatar entfernt."
+
+msgctxt "AppWindow"
+msgid "Couldn't remove the avatar."
+msgstr "Der Avatar konnte nicht entfernt werden."
+
+msgctxt "AppWindow"
+msgid "Network profile"
+msgstr "Netzwerkprofil"
+
+msgctxt "AppWindow"
+msgid "What other people see when they look you up. Each field holds at most 100 bytes; leave one empty to clear it."
+msgstr "Das sehen andere, wenn sie dich nachschlagen. Jedes Feld fasst höchstens 100 Byte; leer lassen, um es zu löschen."
+
+msgctxt "AppWindow"
+msgid "Age"
+msgstr "Alter"
+
+msgctxt "AppWindow"
+msgid "Gender: not set"
+msgstr "Geschlecht: nicht angegeben"
+
+msgctxt "AppWindow"
+msgid "Male"
+msgstr "Männlich"
+
+msgctxt "AppWindow"
+msgid "Female"
+msgstr "Weiblich"
+
+msgctxt "AppWindow"
+msgid "Non-binary"
+msgstr "Nichtbinär"
+
+msgctxt "AppWindow"
+msgid "Gender"
+msgstr "Geschlecht"
+
+msgctxt "AppWindow"
+msgid "Location"
+msgstr "Ort"
+
+msgctxt "AppWindow"
+msgid "Languages"
+msgstr "Sprachen"
+
+msgctxt "AppWindow"
+msgid "Custom"
+msgstr "Benutzerdefiniert"
+
+msgctxt "AppWindow"
+msgid "Save profile"
+msgstr "Profil speichern"
+
+msgctxt "AppWindow"
+msgid "You have an avatar on this network."
+msgstr "Du hast in diesem Netzwerk einen Avatar."
+
+msgctxt "AppWindow"
+msgid "You have no avatar on this network."
+msgstr "Du hast in diesem Netzwerk keinen Avatar."
+
+msgctxt "AppWindow"
+msgid "Choose avatar…"
+msgstr "Avatar wählen …"
+
+msgctxt "AppWindow"
+msgid "Choose avatar"
+msgstr "Avatar wählen"
+
+msgctxt "AppWindow"
+msgid "Remove avatar"
+msgstr "Avatar entfernen"
+
+msgctxt "AppWindow"
 msgid "This account's second factor is a passkey, which Cordiale can't use yet. Enter one of your recovery codes instead: each works only once. The request expires after five minutes."
 msgstr "Der zweite Faktor dieses Kontos ist ein Passkey, den Cordiale noch nicht verwenden kann. Gib stattdessen einen deiner Wiederherstellungscodes ein: Jeder gilt nur einmal. Die Anfrage läuft nach fünf Minuten ab."
 
