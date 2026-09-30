@@ -138,6 +138,15 @@ impl HomeState {
     }
 }
 
+/// Whether Settings > Security offers the account's second factors and
+/// passkeys for this session kind (`HomeState::session_kind`). Those
+/// belong to Grappa accounts: a guest or a registered visitor (whose
+/// password is an IRC-network one) has none and Grappa refuses the routes.
+/// An unknown kind keeps asking, as before.
+pub(crate) fn account_security_available(session_kind: &str) -> bool {
+    !matches!(session_kind, "visitor-guest" | "visitor-registered")
+}
+
 /// One attached network as the sidebar knows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HomeRowInput {
@@ -274,6 +283,14 @@ mod tests {
         assert_eq!(home.available, vec!["libera".to_string()]);
         assert!(home.recoverable.contains("azzurra"));
         assert_eq!(home.nicks.get("azzurra").map(String::as_str), Some("guest"));
+    }
+
+    #[test]
+    fn account_security_is_for_accounts_not_visitor_sessions() {
+        assert!(account_security_available("user"));
+        assert!(account_security_available(""));
+        assert!(!account_security_available("visitor-guest"));
+        assert!(!account_security_available("visitor-registered"));
     }
 
     #[test]

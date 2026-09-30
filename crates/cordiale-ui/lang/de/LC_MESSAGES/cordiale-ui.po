@@ -2979,3 +2979,11 @@ msgstr "Der Passkey konnte nicht gelöscht werden."
 msgctxt "AppWindow"
 msgid "Adding a passkey and changing how the account uses them still happen in Cicchetto: Cordiale can't talk to an authenticator yet. Client tokens and account deletion are managed there too."
 msgstr "Das Hinzufügen eines Passkeys und die Änderung, wie das Konto sie nutzt, erfolgen weiterhin in Cicchetto: Cordiale kann noch nicht mit einem Authenticator sprechen. Auch Client-Tokens und die Kontolöschung werden dort verwaltet."
+
+msgctxt "AppWindow"
+msgid "Two-factor authentication belongs to Grappa accounts. A guest or visitor session doesn't have one."
+msgstr "Die Zwei-Faktor-Authentifizierung gehört zu Grappa-Konten. Eine Gast- oder Besuchersitzung hat keine."
+
+msgctxt "AppWindow"
+msgid "Passkeys belong to Grappa accounts. A guest or visitor session doesn't have any."
+msgstr "Passkeys gehören zu Grappa-Konten. Eine Gast- oder Besuchersitzung hat keine."

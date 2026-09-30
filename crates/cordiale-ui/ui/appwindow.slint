@@ -883,7 +883,8 @@ export component AppWindow inherits Window {
     in property <bool> totp-recovery-only: false;
     // Settings > Security, TOTP (issue #118). `security-totp-state` is ""
     // (loading), `enabled`, `disabled`, `client-token` (a per-client token
-    // can't manage second factors) or `unavailable`; `security-totp-step`
+    // can't manage second factors), `visitor` (a guest or visitor session has
+    // no account, nothing is requested) or `unavailable`; `security-totp-step`
     // is "" , `enroll` (secret shown, waiting for the first code) or
     // `codes` (recovery codes shown once).
     in property <string> security-totp-state: "";
@@ -908,8 +909,8 @@ export component AppWindow inherits Window {
     in property <string> security-share-error: "";
     in property <bool> security-share-busy: false;
     // Settings > Security, passkeys (issue #147): list and delete only.
-    // `security-passkey-state` is "" (loading), `loaded`, `client-token` or
-    // `unavailable`; `security-passkey-mode` is Grappa's `disabled`,
+    // `security-passkey-state` is "" (loading), `loaded`, `client-token`,
+    // `visitor` (as for TOTP) or `unavailable`; `security-passkey-mode` is Grappa's `disabled`,
     // `second_factor` or `passwordless`.
     in property <string> security-passkey-state: "";
     in property <string> security-passkey-mode: "";
@@ -4197,6 +4198,7 @@ export component AppWindow inherits Window {
                 Text {
                     text: security-totp-state == "enabled" ? @tr("Enabled: signing in with the password also asks for a code from your authenticator app.")
                         : security-totp-state == "disabled" ? @tr("Not enabled.")
+                        : security-totp-state == "visitor" ? @tr("Two-factor authentication belongs to Grappa accounts. A guest or visitor session doesn't have one.")
                         : security-totp-state == "client-token" ? @tr("Cordiale is signed in with a per-client token, which Grappa keeps away from second factors. Sign in with your password to manage TOTP here, or use Cicchetto.")
                         : security-totp-state == "unavailable" ? @tr("Couldn't read the two-factor status.")
                         : @tr("Loading…");
@@ -4416,7 +4418,8 @@ export component AppWindow inherits Window {
                     font-weight: 600;
                 }
                 Text {
-                    text: security-passkey-state == "client-token" ? @tr("Cordiale is signed in with a per-client token, which Grappa keeps away from passkeys. Sign in with your password to see them here, or use Cicchetto.")
+                    text: security-passkey-state == "visitor" ? @tr("Passkeys belong to Grappa accounts. A guest or visitor session doesn't have any.")
+                        : security-passkey-state == "client-token" ? @tr("Cordiale is signed in with a per-client token, which Grappa keeps away from passkeys. Sign in with your password to see them here, or use Cicchetto.")
                         : security-passkey-state == "unavailable" ? @tr("Couldn't read the passkeys.")
                         : security-passkey-state != "loaded" ? @tr("Loading…")
                         : security-passkey-mode == "passwordless" ? @tr("Passwordless: this account signs in with a passkey alone, or with a recovery code.")
