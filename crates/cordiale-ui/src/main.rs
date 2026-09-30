@@ -44,8 +44,8 @@ use serde_json::{Number, Value};
 use tokio::sync::mpsc;
 
 use cordiale_core::bootstrap::{
-    bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, bootstrap_with_share_token,
-    bootstrap_with_totp, BootstrapError, BootstrapOutcome,
+    bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, bootstrap_with_recovery_code,
+    bootstrap_with_share_token, bootstrap_with_totp, BootstrapError, BootstrapOutcome,
 };
 use cordiale_core::client::{GrappaClient, GrappaClientError, LoginError};
 use cordiale_core::credentials::{
@@ -93,6 +93,14 @@ enum WorkerCommand {
     ShareConsume {
         server_url: String,
         input: String,
+    },
+    /// Connect screen: signs a passwordless account in with one of its
+    /// recovery codes. The code is a credential and only lives in this
+    /// message.
+    RecoverySignIn {
+        server_url: String,
+        identifier: String,
+        code: String,
     },
     /// Settings > Security: mints a share token for this session.
     SecurityShareMint,
@@ -615,6 +623,38 @@ fn main() -> Result<(), slint::PlatformError> {
                 ui.set_share_token_input("".into());
             }
             let screen = if open { "share" } else { "connect" };
+            ui.set_screen(screen.into());
+        }
+    });
+
+    let tx_for_recovery = worker_tx.clone();
+    let weak_for_recovery = ui.as_weak();
+    ui.on_recovery_sign_in_requested(move |server_url, identifier, code| {
+        let server_url = normalize_server_url(&server_url);
+        if let Some(ui) = weak_for_recovery.upgrade() {
+            ui.set_server_url(server_url.clone().into());
+            // The code is single use and a credential: it leaves the field
+            // as soon as it is sent.
+            ui.set_recovery_code_input("".into());
+            ui.set_connecting(true);
+            ui.set_status_kind("".into());
+            ui.set_status_message("".into());
+        }
+        let _ = tx_for_recovery.send(WorkerCommand::RecoverySignIn {
+            server_url,
+            identifier: identifier.to_string(),
+            code: code.to_string(),
+        });
+    });
+    let weak_for_recovery_screen = ui.as_weak();
+    ui.on_recovery_screen_requested(move |open| {
+        if let Some(ui) = weak_for_recovery_screen.upgrade() {
+            ui.set_status_kind("".into());
+            ui.set_status_message("".into());
+            if !open {
+                ui.set_recovery_code_input("".into());
+            }
+            let screen = if open { "recover" } else { "connect" };
             ui.set_screen(screen.into());
         }
     });
@@ -2780,6 +2820,30 @@ async fn run_worker(
                             handle_settings_network_refresh(&state, &ui).await;
                         }
                     }
+                    Some(WorkerCommand::RecoverySignIn {
+                        server_url,
+                        identifier,
+                        code,
+                    }) => {
+                        handle_recovery_sign_in(
+                            &mut state,
+                            &mut session_events,
+                            &ui,
+                            server_url,
+                            identifier,
+                            code,
+                        )
+                        .await;
+                        if let Some(network) = state.settings_network.clone() {
+                            let ui_for_network = ui.clone();
+                            let loaded_network = network.clone();
+                            let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
+                                ui.set_settings_network(network.into());
+                            });
+                            load_identity_settings(&mut state, &ui, &loaded_network).await;
+                            handle_settings_network_refresh(&state, &ui).await;
+                        }
+                    }
                     Some(WorkerCommand::SecurityShareMint) => {
                         handle_security_share_mint(&state, &ui).await;
                     }
@@ -4693,6 +4757,66 @@ async fn handle_share_consume(
         server_url,
         identifier,
         is_guest_attempt,
+        typed_password: None,
+        used_remembered_password: false,
+    };
+    finish_connect(state, session_events, ui, context, result).await;
+}
+
+/// The account name and recovery code as they go to Grappa: the name
+/// trimmed and the code without the whitespace a copy or a dash-grouped
+/// paste can carry. `None` when either is empty.
+fn recovery_input(identifier: &str, code: &str) -> Option<(String, String)> {
+    let identifier = identifier.trim();
+    let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    (!identifier.is_empty() && !code.is_empty()).then(|| (identifier.to_string(), code))
+}
+
+/// Status key for a refused `POST /auth/passkeys/recover`. Grappa answers a
+/// wrong, already used or unknown-account code with the same opaque 401
+/// (recovery codes don't expire), so one message covers them; a throttle
+/// and a busy server are told apart because waiting is the only fix.
+fn recovery_error_key(err: &GrappaClientError) -> &'static str {
+    match (err.status().map(|status| status.as_u16()), err.code()) {
+        (Some(429), _) | (_, Some("too_many_attempts")) => "totp-throttled",
+        (Some(503), _) | (_, Some("db_unavailable")) => "recovery-busy",
+        (Some(401), _) | (_, Some("invalid_two_factor")) => "recovery-invalid",
+        _ => "recovery-failed",
+    }
+}
+
+/// Signs a passwordless account in with a recovery code from the recovery
+/// screen, then finishes the session like any other sign-in. The code is
+/// spent by the server and is never logged or kept.
+async fn handle_recovery_sign_in(
+    state: &mut WorkerState,
+    session_events: &mut Option<mpsc::UnboundedReceiver<SessionEvent>>,
+    ui: &slint::Weak<AppWindow>,
+    server_url: String,
+    identifier: String,
+    code: String,
+) {
+    let Some((identifier, code)) = recovery_input(&identifier, &code) else {
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_connecting(false);
+            ui.set_status_kind("recovery-invalid".into());
+        });
+        return;
+    };
+    let server_url = normalize_server_url(&server_url);
+    remember_server_url(&server_url);
+
+    let client = GrappaClient::new(server_url.clone());
+    persistence::log_line(&format!(
+        "connect attempt: server={server_url} identifier={identifier} guest=false \
+         auth=recovery_code"
+    ));
+    let result = bootstrap_with_recovery_code(&client, &identifier, &code).await;
+    let context = ConnectContext {
+        client,
+        server_url,
+        identifier,
+        is_guest_attempt: false,
         typed_password: None,
         used_remembered_password: false,
     };
@@ -19032,6 +19156,9 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
         BootstrapError::TwoFactor(err) => {
             ui.set_status_kind(totp_error_key(err).into());
         }
+        BootstrapError::Recovery(err) => {
+            ui.set_status_kind(recovery_error_key(err).into());
+        }
         BootstrapError::ShareToken(err) => {
             ui.set_status_kind(share_consume_error_key(err).into());
         }
@@ -26363,6 +26490,42 @@ mod tests {
                 "wss://irc.sindro.me/socket/websocket?vsn=2.0.0&client_proto={CLIENT_PROTOCOL_VERSION}"
             )
         );
+    }
+
+    #[test]
+    fn recovery_input_trims_the_name_and_strips_whitespace_from_the_code() {
+        assert_eq!(
+            recovery_input("  vjt ", " abcd efgh\tijkl\n"),
+            Some(("vjt".to_string(), "abcdefghijkl".to_string()))
+        );
+        assert_eq!(recovery_input("vjt", "  "), None);
+        assert_eq!(recovery_input("  ", "abcd"), None);
+        assert_eq!(recovery_input("", ""), None);
+    }
+
+    #[test]
+    fn recovery_refusals_tell_a_bad_code_from_a_throttle_and_a_busy_server() {
+        let rejected = |status: u16, code: Option<&str>| GrappaClientError::Rejected {
+            status: cordiale_core::client::StatusCode::from_u16(status).expect("status"),
+            code: code.map(str::to_string),
+        };
+        assert_eq!(
+            recovery_error_key(&rejected(401, Some("invalid_two_factor"))),
+            "recovery-invalid"
+        );
+        assert_eq!(
+            recovery_error_key(&rejected(429, Some("too_many_attempts"))),
+            "totp-throttled"
+        );
+        assert_eq!(
+            recovery_error_key(&rejected(503, Some("db_unavailable"))),
+            "recovery-busy"
+        );
+        assert_eq!(
+            recovery_error_key(&rejected(400, Some("bad_request"))),
+            "recovery-failed"
+        );
+        assert_eq!(recovery_error_key(&rejected(500, None)), "recovery-failed");
     }
 
     #[test]
