@@ -28,6 +28,7 @@ mod admin_uploads;
 mod dates;
 mod debug_info;
 mod home;
+mod passkeys;
 mod player;
 mod reply;
 mod taskbar;
@@ -95,6 +96,13 @@ enum WorkerCommand {
     },
     /// Settings > Security: mints a share token for this session.
     SecurityShareMint,
+    /// Settings > Security: reads the passkey mode and list.
+    SecurityPasskeysRefresh,
+    /// Deletes a passkey (`id`) with the account password.
+    SecurityPasskeyDelete {
+        id: String,
+        password: String,
+    },
     Connect {
         server_url: String,
         identifier: String,
@@ -640,6 +648,17 @@ fn main() -> Result<(), slint::PlatformError> {
     let tx_for_security = worker_tx.clone();
     ui.on_security_totp_done(move || {
         let _ = tx_for_security.send(WorkerCommand::SecurityTotpDone);
+    });
+    let tx_for_security = worker_tx.clone();
+    ui.on_security_passkeys_requested(move || {
+        let _ = tx_for_security.send(WorkerCommand::SecurityPasskeysRefresh);
+    });
+    let tx_for_security = worker_tx.clone();
+    ui.on_security_passkey_delete(move |id, password| {
+        let _ = tx_for_security.send(WorkerCommand::SecurityPasskeyDelete {
+            id: id.to_string(),
+            password: password.to_string(),
+        });
     });
     ui.on_copy_text_requested(|text| copy_text(&text));
     let weak_for_codes = ui.as_weak();
@@ -2751,6 +2770,12 @@ async fn run_worker(
                             ui.set_security_totp_error("".into());
                         });
                     }
+                    Some(WorkerCommand::SecurityPasskeysRefresh) => {
+                        handle_security_passkeys_refresh(&state, &ui).await;
+                    }
+                    Some(WorkerCommand::SecurityPasskeyDelete { id, password }) => {
+                        handle_security_passkey_delete(&state, &ui, id, password).await;
+                    }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         write_back_read_cursor(&mut state);
                         handle_select_channel(&mut state, &ui, network, channel).await;
@@ -3925,6 +3950,10 @@ async fn finish_connect(
                 context,
                 challenge_token,
             });
+            // A passkey account without TOTP: only its recovery codes open
+            // this door, so the step asks for one of those.
+            let recovery_only = challenge.recovery_code_only();
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_totp_recovery_only(recovery_only));
             show_totp_step(ui, "");
             return;
         }
@@ -4378,6 +4407,93 @@ async fn handle_security_totp_disable(
             });
         }
         Err(err) => set_security_error(ui, &err),
+    }
+}
+
+/// Settings > Security: reads the passkey mode and list. A per-client token
+/// is refused (403 `client_token_scope`) and the page says so.
+async fn handle_security_passkeys_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    match client.fetch_passkeys(&token).await {
+        Ok(status) => {
+            let mode = passkeys::mode_key(status.mode);
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let rows: Vec<PasskeyRow> = status
+                    .passkeys
+                    .into_iter()
+                    .map(|passkey| PasskeyRow {
+                        id: passkey.id.into(),
+                        name: passkey.name.unwrap_or_default().into(),
+                        added: format_iso_timestamp(&passkey.inserted_at).into(),
+                        last_used: passkey
+                            .last_used_at
+                            .as_deref()
+                            .map(format_iso_timestamp)
+                            .unwrap_or_default()
+                            .into(),
+                    })
+                    .collect();
+                ui.set_security_passkeys(Rc::new(slint::VecModel::from(rows)).into());
+                ui.set_security_passkey_mode(mode.into());
+                ui.set_security_passkey_state("loaded".into());
+                ui.set_security_passkey_busy(false);
+            });
+        }
+        Err(err) => {
+            persistence::log_line(&format!("passkey status failed: {err:?}"));
+            let status = if passkeys::settings_error_key(&err) == "client-token" {
+                "client-token"
+            } else {
+                "unavailable"
+            };
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_security_passkeys(slint::ModelRc::default());
+                ui.set_security_passkey_state(status.into());
+                ui.set_security_passkey_busy(false);
+            });
+        }
+    }
+}
+
+/// Deletes a passkey after re-authenticating with the password, then
+/// reloads the list. The password field is cleared either way; a passkey
+/// that is already gone only refreshes the list.
+async fn handle_security_passkey_delete(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    id: String,
+    password: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_security_passkey_busy(true);
+        ui.set_security_passkey_error("".into());
+        ui.set_security_passkey_password("".into());
+    });
+    let key = match client.delete_passkey(&token, &id, &password).await {
+        Ok(()) => "",
+        Err(err) => {
+            persistence::log_line(&format!("passkey delete refused: {err:?}"));
+            match passkeys::settings_error_key(&err) {
+                "gone" => "",
+                key => key,
+            }
+        }
+    };
+    if key.is_empty() {
+        handle_security_passkeys_refresh(state, ui).await;
+    } else {
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_security_passkey_busy(false);
+            ui.set_security_passkey_error(key.into());
+            if key == "client-token" {
+                ui.set_security_passkey_state("client-token".into());
+            }
+        });
     }
 }
 

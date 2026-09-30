@@ -2509,10 +2509,6 @@ msgid "Couldn't update two-factor authentication."
 msgstr "Impossibile aggiornare l'autenticazione a due fattori."
 
 msgctxt "AppWindow"
-msgid "Passkeys, client tokens and account deletion are managed in Cicchetto."
-msgstr "Passkey, token client ed eliminazione dell'account si gestiscono in Cicchetto."
-
-msgctxt "AppWindow"
 msgid "listing…"
 msgstr "elenco in corso…"
 
@@ -2831,3 +2827,63 @@ msgstr "Una sessione ospite in incognito non può essere condivisa."
 msgctxt "AppWindow"
 msgid "Couldn't create a share link."
 msgstr "Impossibile creare un link di condivisione."
+
+msgctxt "AppWindow"
+msgid "This account's second factor is a passkey, which Cordiale can't use yet. Enter one of your recovery codes instead: each works only once. The request expires after five minutes."
+msgstr "Il secondo fattore di questo account è una passkey, che Cordiale non può ancora usare. Inserisci invece uno dei tuoi codici di recupero: ognuno vale una sola volta. La richiesta scade dopo cinque minuti."
+
+msgctxt "AppWindow"
+msgid "Passkeys"
+msgstr "Passkey"
+
+msgctxt "AppWindow"
+msgid "Cordiale is signed in with a per-client token, which Grappa keeps away from passkeys. Sign in with your password to see them here, or use Cicchetto."
+msgstr "Cordiale ha effettuato l'accesso con un token per client, che Grappa tiene lontano dalle passkey. Accedi con la password per vederle qui, oppure usa Cicchetto."
+
+msgctxt "AppWindow"
+msgid "Couldn't read the passkeys."
+msgstr "Impossibile leggere le passkey."
+
+msgctxt "AppWindow"
+msgid "Passwordless: this account signs in with a passkey alone, or with a recovery code."
+msgstr "Senza password: questo account accede con una sola passkey, o con un codice di recupero."
+
+msgctxt "AppWindow"
+msgid "Second factor: signing in with the password also asks for a passkey."
+msgstr "Secondo fattore: l'accesso con la password richiede anche una passkey."
+
+msgctxt "AppWindow"
+msgid "Not used for signing in."
+msgstr "Non usate per l'accesso."
+
+msgctxt "AppWindow"
+msgid "No passkeys registered."
+msgstr "Nessuna passkey registrata."
+
+msgctxt "AppWindow"
+msgid "{}: added {}, never used"
+msgstr "{}: aggiunta il {}, mai usata"
+
+msgctxt "AppWindow"
+msgid "{}: added {}, last used {}"
+msgstr "{}: aggiunta il {}, ultimo uso {}"
+
+msgctxt "AppWindow"
+msgid "Deleting a passkey asks for the account password."
+msgstr "Per eliminare una passkey serve la password dell'account."
+
+msgctxt "AppWindow"
+msgid "That's the last passkey and the account still signs in with it. Turn passkeys off or add another one in Cicchetto first."
+msgstr "È l'ultima passkey e l'account accede ancora con essa. Disattiva prima le passkey o aggiungine un'altra in Cicchetto."
+
+msgctxt "AppWindow"
+msgid "Grappa is busy right now. Try again in a moment."
+msgstr "Grappa è occupato al momento. Riprova tra poco."
+
+msgctxt "AppWindow"
+msgid "Couldn't delete the passkey."
+msgstr "Impossibile eliminare la passkey."
+
+msgctxt "AppWindow"
+msgid "Adding a passkey and changing how the account uses them still happen in Cicchetto: Cordiale can't talk to an authenticator yet. Client tokens and account deletion are managed there too."
+msgstr "Aggiungere una passkey e cambiare come l'account le usa si fa ancora in Cicchetto: Cordiale non sa ancora dialogare con un autenticatore. Lì si gestiscono anche i token client e l'eliminazione dell'account."

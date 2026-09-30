@@ -103,7 +103,10 @@ Cordiale also covers:
 - **Account security:** password sign-in can finish Grappa's TOTP challenge
   with an authenticator code or one-time recovery code. Full-session users
   can enable or disable TOTP in Settings > Security and see new recovery
-  codes once. Passkey-only sign-in still needs Cicchetto or a client token.
+  codes once. Passkey-only sign-in still needs a share link or client token
+  from Cicchetto; an account whose passkey is backed by recovery codes can
+  sign in with one of those. Settings > Security also lists the account's
+  passkeys and deletes them with the password.
 - **Session sharing:** Settings > Security makes a single-use link and QR
   code (valid ten minutes) that signs another device into the same account,
   and the connect screen signs in with such a link or token from another
@@ -169,8 +172,9 @@ Cordiale also covers:
 
 ## Known gaps
 
-- **Account security:** passkey creation/sign-in, creating or managing
-  client tokens, and account deletion still live in Cicchetto. TOTP works
+- **Account security:** passkey creation/sign-in and mode changes (Cordiale
+  can't run a WebAuthn ceremony yet, see `docs/passkey-spike.md`), creating
+  or managing client tokens, and account deletion still live in Cicchetto. TOTP works
   in Cordiale with a full password-backed session; a scoped client token
   cannot use Grappa's account-security endpoints.
 - **Platform limits:**

@@ -26,7 +26,7 @@
 //! first code and shows the recovery codes once; disabling asks for the
 //! password again. A per-client token can't touch any of it (Grappa answers
 //! 403 `client_token_scope`), which the page explains instead of offering a
-//! setup that would fail. Passkeys stay out of scope.
+//! setup that would fail. Passkeys have their own module, `passkeys.rs`.
 
 use cordiale_core::client::GrappaClientError;
 use qrcode::{Color, QrCode};

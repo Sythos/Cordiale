@@ -149,6 +149,15 @@ struct IgnoreRow {
     text-pattern: string,
 }
 
+// One registered passkey in Settings > Security; dates are already
+// rendered, `last-used` is "" for one never used.
+struct PasskeyRow {
+    id: string,
+    name: string,
+    added: string,
+    last-used: string,
+}
+
 struct NetworkGroup {
     network: string,
     connection-label: string,
@@ -869,6 +878,9 @@ export component AppWindow inherits Window {
     in-out property <string> password: "";
     // The code step of a two-factor sign-in (screen "totp").
     in-out property <string> totp-code: "";
+    // The account's factor is a passkey and TOTP isn't armed: the step
+    // takes only recovery codes.
+    in property <bool> totp-recovery-only: false;
     // Settings > Security, TOTP (issue #118). `security-totp-state` is ""
     // (loading), `enabled`, `disabled`, `client-token` (a per-client token
     // can't manage second factors) or `unavailable`; `security-totp-step`
@@ -895,6 +907,16 @@ export component AppWindow inherits Window {
     in property <string> security-share-expires: "";
     in property <string> security-share-error: "";
     in property <bool> security-share-busy: false;
+    // Settings > Security, passkeys (issue #147): list and delete only.
+    // `security-passkey-state` is "" (loading), `loaded`, `client-token` or
+    // `unavailable`; `security-passkey-mode` is Grappa's `disabled`,
+    // `second_factor` or `passwordless`.
+    in property <string> security-passkey-state: "";
+    in property <string> security-passkey-mode: "";
+    in property <[PasskeyRow]> security-passkeys: [];
+    in property <string> security-passkey-error: "";
+    in property <bool> security-passkey-busy: false;
+    in-out property <string> security-passkey-password: "";
     // Set only when this server/identifier has a non-empty returned bearer
     // in CredentialStore. The button compares both against the editable
     // server and identifier, hiding it as soon as either value changes.
@@ -1260,6 +1282,8 @@ export component AppWindow inherits Window {
     callback share-screen-requested(bool); // true opens the share sign-in, false leaves it
     callback security-share-requested();
     callback security-share-done();
+    callback security-passkeys-requested();
+    callback security-passkey-delete(string, string); // id, password
     callback copy-text-requested(string);
     callback security-copy-recovery-codes();
     callback saved-profile-connect-requested(string, string);
@@ -2309,7 +2333,9 @@ export component AppWindow inherits Window {
             horizontal-alignment: center;
         }
         Text {
-            text: @tr("Enter the 6-digit code from your authenticator app, or one of your recovery codes. The request expires after five minutes.");
+            text: totp-recovery-only
+                ? @tr("This account's second factor is a passkey, which Cordiale can't use yet. Enter one of your recovery codes instead: each works only once. The request expires after five minutes.")
+                : @tr("Enter the 6-digit code from your authenticator app, or one of your recovery codes. The request expires after five minutes.");
             wrap: word-wrap;
             horizontal-alignment: center;
         }
@@ -3685,6 +3711,7 @@ export component AppWindow inherits Window {
                 clicked => {
                     settings-section = "security";
                     security-totp-requested();
+                    security-passkeys-requested();
                 }
             }
             NavButton {
@@ -4280,7 +4307,70 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: @tr("Passkeys, client tokens and account deletion are managed in Cicchetto.");
+                    text: @tr("Passkeys");
+                    font-weight: 600;
+                }
+                Text {
+                    text: security-passkey-state == "client-token" ? @tr("Cordiale is signed in with a per-client token, which Grappa keeps away from passkeys. Sign in with your password to see them here, or use Cicchetto.")
+                        : security-passkey-state == "unavailable" ? @tr("Couldn't read the passkeys.")
+                        : security-passkey-state != "loaded" ? @tr("Loading…")
+                        : security-passkey-mode == "passwordless" ? @tr("Passwordless: this account signs in with a passkey alone, or with a recovery code.")
+                        : security-passkey-mode == "second_factor" ? @tr("Second factor: signing in with the password also asks for a passkey.")
+                        : @tr("Not used for signing in.");
+                    wrap: word-wrap;
+                }
+                if security-passkey-state == "loaded" && security-passkeys.length == 0 : Text {
+                    text: @tr("No passkeys registered.");
+                    color: palette-muted;
+                }
+                for passkey in security-passkeys : HorizontalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: passkey.last-used == ""
+                            ? @tr("{}: added {}, never used", passkey.name, passkey.added)
+                            : @tr("{}: added {}, last used {}", passkey.name, passkey.added, passkey.last-used);
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        wrap: word-wrap;
+                    }
+                    CompactButton {
+                        text: "🗑  " + @tr("Delete");
+                        a11y-label: @tr("Delete {}", passkey.name);
+                        enabled: !security-passkey-busy && security-passkey-password != "";
+                        clicked => { security-passkey-delete(passkey.id, security-passkey-password); }
+                    }
+                }
+                // Deleting re-authenticates with the account password.
+                if security-passkey-state == "loaded" && security-passkeys.length > 0 : VerticalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("Account password");
+                        accessible-label: @tr("Account password");
+                        text <=> security-passkey-password;
+                        input-type: InputType.password;
+                    }
+                    Text {
+                        text: @tr("Deleting a passkey asks for the account password.");
+                        wrap: word-wrap;
+                        color: palette-muted;
+                    }
+                }
+                if security-passkey-error != "" : Text {
+                    text: security-passkey-error == "wrong-password" ? @tr("Wrong password.")
+                        : security-passkey-error == "last-passkey" ? @tr("That's the last passkey and the account still signs in with it. Turn passkeys off or add another one in Cicchetto first.")
+                        : security-passkey-error == "client-token" ? @tr("A per-client token can't change second factors.")
+                        : security-passkey-error == "busy" ? @tr("Grappa is busy right now. Try again in a moment.")
+                        : security-passkey-error == "throttled" ? @tr("Too many attempts. Wait a few minutes before trying again.")
+                        : @tr("Couldn't delete the passkey.");
+                    wrap: word-wrap;
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+
+                Text {
+                    text: @tr("Adding a passkey and changing how the account uses them still happen in Cicchetto: Cordiale can't talk to an authenticator yet. Client tokens and account deletion are managed there too.");
                     wrap: word-wrap;
                     color: palette-muted;
                 }
