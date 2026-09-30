@@ -149,6 +149,8 @@ enum WorkerCommand {
         track: Option<cordiale_core::radio::Track>,
     },
     ArchiveClose,
+    /// Backfills the next channel queued after a reconnect, one at a time.
+    CatchUpNext,
     /// Flips one user mode of the network shown in the user-mode view.
     UmodeToggle(String),
     UmodeClose,
@@ -2177,6 +2179,10 @@ struct WorkerState {
     login_identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
+    /// Channels to backfill after a reconnect, with the highest message id
+    /// they held when the socket dropped (live rows arriving after the
+    /// rejoin must not move the anchor). Drained one channel at a time.
+    catch_up_anchors: std::collections::BTreeMap<(String, String), i64>,
     /// Lines of the live admin feed, newest first (capped).
     admin_events: Vec<String>,
     /// Last `GET /admin/settings`, to tell whether addressing was edited.
@@ -2410,6 +2416,7 @@ impl WorkerState {
             login_identifier: None,
             session: None,
             joined_topics: std::collections::HashSet::new(),
+            catch_up_anchors: std::collections::BTreeMap::new(),
             admin_events: Vec::new(),
             admin_settings: None,
             admin_uploads: None,
@@ -2692,6 +2699,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ArchiveClose) => {
                         state.archive = None;
+                    }
+                    Some(WorkerCommand::CatchUpNext) => {
+                        handle_catch_up_next(&mut state, &ui, &worker_self).await;
                     }
                     Some(WorkerCommand::UmodeToggle(letter)) => {
                         toggle_user_mode(&state, &letter);
@@ -3477,6 +3487,11 @@ async fn run_worker(
                             ui.set_status_message("".into());
                         });
                         request_watch_patterns(&mut state);
+                        // Grappa doesn't replay what a channel said while
+                        // the socket was down: backfill it over REST.
+                        if !state.catch_up_anchors.is_empty() {
+                            let _ = worker_self.send(WorkerCommand::CatchUpNext);
+                        }
                     }
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame).await;
@@ -3492,6 +3507,7 @@ async fn run_worker(
                     }
                     Some(SessionEvent::Disconnected { reason }) => {
                         persistence::log_line(&format!("session disconnected: {reason}"));
+                        note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
                         state.supported_user_modes_by_network.clear();
@@ -3507,6 +3523,7 @@ async fn run_worker(
                     }
                     Some(SessionEvent::Reconnecting { reason }) => {
                         persistence::log_line(&format!("session reconnecting: {reason}"));
+                        note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
                         state.supported_user_modes_by_network.clear();
@@ -3826,6 +3843,7 @@ async fn finish_connect(
             state.user_modes_by_network.clear();
             state.supported_user_modes_by_network.clear();
             state.own_listener_ready.clear();
+            state.catch_up_anchors.clear();
             state.current_query = false;
             state.current_query_ready = false;
             state.current_channel = None;
@@ -8954,13 +8972,16 @@ async fn handle_frame(
     let key = (network.clone(), channel.clone());
 
     let line = render_message(effective_payload, Some(&frame.event));
-    state
-        .messages
-        .entry(key.clone())
-        .or_default()
-        .push(line.clone());
+    let messages = state.messages.entry(key.clone()).or_default();
+    // A reconnect catch-up can already hold a row this push announces.
+    let already_shown = line
+        .message_id
+        .is_some_and(|id| messages.iter().any(|known| known.message_id == Some(id)));
+    if !already_shown {
+        messages.push(line.clone());
+    }
 
-    if state.current_channel.as_ref() == Some(&key) {
+    if !already_shown && state.current_channel.as_ref() == Some(&key) {
         let dark_theme = state.theme == Theme::Dark;
         refresh_mention_context(state);
         let members = state.members.get(&key).cloned().unwrap_or_default();
@@ -10680,6 +10701,190 @@ fn require_query_full_history_if_unready(state: &mut WorkerState, key: &(String,
 fn merge_query_history(state: &mut WorkerState, key: &(String, String), rows: &[Value]) {
     let messages = state.messages.entry(key.clone()).or_default();
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
+}
+
+/// Rows one catch-up page holds: Grappa's HTTP page ceiling, and the gap
+/// size past which Cicchetto stops paging forward.
+const CATCH_UP_PAGE: usize = 200;
+/// The gap probe only has to tell "within a page" from "beyond it", so it
+/// stops counting one row past the threshold.
+const CATCH_UP_PROBE_CAP: u64 = CATCH_UP_PAGE as u64 + 1;
+/// Pause between two channels' catch-up, so a session with many channels
+/// doesn't trip the reverse proxy's rate limit.
+const CATCH_UP_PACING: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatchUpPlan {
+    /// Nothing was said while the socket was down.
+    Nothing,
+    /// The gap fits in one page: read it with `?after=`.
+    PageForward,
+    /// Too far behind to page through: reload the tail, mark the hole.
+    ReloadTail,
+}
+
+fn catch_up_plan(gap: u64) -> CatchUpPlan {
+    if gap == 0 {
+        CatchUpPlan::Nothing
+    } else if gap > CATCH_UP_PAGE as u64 {
+        CatchUpPlan::ReloadTail
+    } else {
+        CatchUpPlan::PageForward
+    }
+}
+
+/// Notes, when the socket drops, the newest message id of every joined
+/// channel: the point its catch-up resumes from. An anchor already noted
+/// stays (a second drop before the catch-up ran must not skip rows).
+fn note_catch_up_anchors(state: &mut WorkerState) {
+    let anchors: Vec<((String, String), i64)> = state
+        .channel_entries
+        .iter()
+        .filter(|(network, channel, _)| {
+            state.window_states.get(&window_state_key(network, channel))
+                == Some(&ChannelWindowState::Joined)
+        })
+        .filter_map(|(network, channel, _)| {
+            let key = (network.clone(), channel.clone());
+            let id = query_high_water_id(state, &key)?;
+            Some((key, id))
+        })
+        .collect();
+    for (key, id) in anchors {
+        state.catch_up_anchors.entry(key).or_insert(id);
+    }
+}
+
+/// Backfills the next queued channel, then schedules the one after it: the
+/// requests go out one at a time and spaced out, never as a burst.
+async fn handle_catch_up_next(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    worker_self: &mpsc::UnboundedSender<WorkerCommand>,
+) {
+    if state.session.is_none() {
+        state.catch_up_anchors.clear();
+        return;
+    }
+    let Some((key, anchor)) = state.catch_up_anchors.pop_first() else {
+        return;
+    };
+    catch_up_channel(state, ui, &key, anchor).await;
+    if !state.catch_up_anchors.is_empty() {
+        let next = worker_self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(CATCH_UP_PACING).await;
+            let _ = next.send(WorkerCommand::CatchUpNext);
+        });
+    }
+}
+
+/// Fetches what `key` missed after message `anchor` while the socket was
+/// down. A gap of up to one page is read with `?after=`; a bigger one
+/// replaces the window with the newest page and leaves a note where the
+/// hole is, which scrolling up fills, like Cicchetto's far-behind reload.
+async fn catch_up_channel(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: &(String, String),
+    anchor: i64,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let plan = match client
+        .fetch_messages_count(&token, &key.0, &key.1, anchor, Some(CATCH_UP_PROBE_CAP))
+        .await
+    {
+        Ok(gap) => catch_up_plan(gap),
+        // A server without the probe still answers `?after=`.
+        Err(error) if error.status() == Some(cordiale_core::client::StatusCode::NOT_FOUND) => {
+            CatchUpPlan::PageForward
+        }
+        Err(error) => {
+            persistence::log_line(&format!(
+                "catch-up probe failed for {}/{}: {error:?}",
+                key.0, key.1
+            ));
+            return;
+        }
+    };
+    let rows = match plan {
+        CatchUpPlan::Nothing => return,
+        CatchUpPlan::PageForward => {
+            client
+                .fetch_messages(&token, &key.0, &key.1, Some(anchor), Some(CATCH_UP_PAGE))
+                .await
+        }
+        CatchUpPlan::ReloadTail => {
+            client
+                .fetch_messages(&token, &key.0, &key.1, None, Some(CATCH_UP_PAGE))
+                .await
+        }
+    };
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(error) => {
+            persistence::log_line(&format!(
+                "catch-up fetch failed for {}/{}: {error:?}",
+                key.0, key.1
+            ));
+            return;
+        }
+    };
+    // The awaits above can outlast the session or the channel membership.
+    if state.session.is_none()
+        || state.window_states.get(&window_state_key(&key.0, &key.1))
+            != Some(&ChannelWindowState::Joined)
+    {
+        return;
+    }
+    let incoming: Vec<RenderedMessage> = rows.iter().map(render_history_entry).collect();
+    if incoming.is_empty() {
+        return;
+    }
+    let messages = state.messages.entry(key.clone()).or_default();
+    if plan == CatchUpPlan::ReloadTail {
+        replace_with_history_tail(messages, incoming);
+        state.history_start_reached.remove(key);
+        state
+            .history_cursors_fetched
+            .retain(|(window, _)| window != key);
+    } else {
+        merge_rendered_messages(messages, incoming);
+    }
+    if !state.current_query && state.current_channel.as_ref() == Some(key) {
+        push_members_update(state, ui, key);
+        if plan == CatchUpPlan::ReloadTail {
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_history_start_reached(false));
+        }
+    }
+}
+
+/// Swaps a window's rows for the newest page, keeping the rows that came
+/// in live after it, and puts a note above the page where the skipped
+/// stretch is. The skipped rows are below what `?before=` pages from, so
+/// scrolling up fills them in.
+fn replace_with_history_tail(messages: &mut Vec<RenderedMessage>, tail: Vec<RenderedMessage>) {
+    let newest = tail.iter().filter_map(|message| message.message_id).max();
+    let first = tail
+        .iter()
+        .min_by(|a, b| compare_rendered_message_order(a, b));
+    let (Some(newest), Some(first)) = (newest, first) else {
+        return;
+    };
+    let note = RenderedMessage {
+        timestamp: first.timestamp.clone(),
+        nick: None,
+        text: format!(
+            "… more than {CATCH_UP_PAGE} messages were missed while disconnected; scroll up to load them"
+        ),
+        italic: true,
+        message_id: None,
+        server_time: first.server_time,
+    };
+    messages.retain(|message| message.message_id.is_some_and(|id| id > newest));
+    merge_rendered_messages(messages, tail.into_iter().chain(std::iter::once(note)));
 }
 
 fn merge_rendered_messages(
@@ -25121,6 +25326,92 @@ mod tests {
             read_cursor_to_write(&mut state),
             Some(("libera".to_string(), "#Rust".to_string(), 12))
         );
+    }
+
+    #[test]
+    fn catch_up_plan_pages_up_to_one_page_and_reloads_beyond_it() {
+        assert_eq!(catch_up_plan(0), CatchUpPlan::Nothing);
+        assert_eq!(catch_up_plan(1), CatchUpPlan::PageForward);
+        assert_eq!(catch_up_plan(200), CatchUpPlan::PageForward);
+        assert_eq!(catch_up_plan(201), CatchUpPlan::ReloadTail);
+        assert_eq!(catch_up_plan(CATCH_UP_PROBE_CAP), CatchUpPlan::ReloadTail);
+    }
+
+    #[test]
+    fn catch_up_anchors_cover_joined_channels_and_keep_the_first_one() {
+        let line = |id| RenderedMessage {
+            timestamp: "10:00".to_string(),
+            nick: Some("foo".to_string()),
+            text: "hi".to_string(),
+            italic: false,
+            message_id: Some(id),
+            server_time: Some(id),
+        };
+        let mut state = WorkerState::new();
+        let joined = ("libera".to_string(), "#rust".to_string());
+        let kicked = ("libera".to_string(), "#old".to_string());
+        let empty = ("libera".to_string(), "#new".to_string());
+        for key in [&joined, &kicked, &empty] {
+            state
+                .channel_entries
+                .push((key.0.clone(), key.1.clone(), key.1.clone()));
+            state
+                .window_states
+                .insert(window_state_key(&key.0, &key.1), ChannelWindowState::Joined);
+        }
+        state.window_states.insert(
+            window_state_key(&kicked.0, &kicked.1),
+            ChannelWindowState::Kicked,
+        );
+        state
+            .messages
+            .insert(joined.clone(), vec![line(5), line(9), line(7)]);
+        state.messages.insert(kicked.clone(), vec![line(3)]);
+
+        note_catch_up_anchors(&mut state);
+        assert_eq!(
+            state.catch_up_anchors.iter().collect::<Vec<_>>(),
+            vec![(&joined, &9)]
+        );
+
+        // A second drop before the catch-up ran keeps the older anchor.
+        state.messages.get_mut(&joined).unwrap().push(line(12));
+        note_catch_up_anchors(&mut state);
+        assert_eq!(state.catch_up_anchors.get(&joined), Some(&9));
+    }
+
+    #[test]
+    fn history_tail_replaces_old_rows_keeps_live_ones_and_marks_the_hole() {
+        let line = |id| RenderedMessage {
+            timestamp: "10:00".to_string(),
+            nick: Some("foo".to_string()),
+            text: format!("row {id}"),
+            italic: false,
+            message_id: Some(id),
+            server_time: Some(id),
+        };
+        let mut messages = vec![line(1), line(2), line(900)];
+        // The tail arrives newest first, like the default page.
+        replace_with_history_tail(&mut messages, vec![line(800), line(799), line(798)]);
+
+        let ids: Vec<Option<i64>> = messages.iter().map(|m| m.message_id).collect();
+        assert_eq!(ids, vec![None, Some(798), Some(799), Some(800), Some(900)]);
+        assert!(messages[0].italic && messages[0].nick.is_none());
+        assert_eq!(messages[0].server_time, Some(798));
+    }
+
+    #[test]
+    fn history_tail_without_rows_leaves_the_window_alone() {
+        let mut messages = vec![RenderedMessage {
+            timestamp: "10:00".to_string(),
+            nick: Some("foo".to_string()),
+            text: "hi".to_string(),
+            italic: false,
+            message_id: Some(4),
+            server_time: Some(4),
+        }];
+        replace_with_history_tail(&mut messages, Vec::new());
+        assert_eq!(messages.len(), 1);
     }
 
     #[test]

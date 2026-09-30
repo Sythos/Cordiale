@@ -47,7 +47,7 @@ use crate::profile::{
 use crate::rest::{
     ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
     DisplayPrefs, FeaturedChannel, FeaturedChannelsResponse, LoginRequest, LoginResponse,
-    MeResponse, SendMessageRequest, ThemeIndex, ThemeWire, UploadResponse,
+    MeResponse, MessageCountResponse, SendMessageRequest, ThemeIndex, ThemeWire, UploadResponse,
 };
 
 /// A Grappa server reached over REST, identified by its base URL.
@@ -565,6 +565,49 @@ impl GrappaClient {
             .await?
             .error_for_status()?;
         Ok(response.json::<Vec<Value>>().await?)
+    }
+
+    /// `GET /networks/:slug/channels/:channel/messages/count?after=<id>&cap=`
+    /// — how many rows sit after message `after_id`: the gap probe behind a
+    /// reconnect catch-up. With `cap` the server stops counting there (so
+    /// `count == cap` reads "at least `cap`"); a server that predates the
+    /// parameter ignores it and counts everything, which still answers the
+    /// threshold correctly.
+    pub async fn fetch_messages_count(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel_name: &str,
+        after_id: i64,
+        cap: Option<u64>,
+    ) -> Result<u64, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend([
+                "networks",
+                network_slug,
+                "channels",
+                channel_name,
+                "messages",
+                "count",
+            ]);
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("after", &after_id.to_string());
+            if let Some(cap) = cap {
+                query.append_pair("cap", &cap.to_string());
+            }
+        }
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<MessageCountResponse>().await?.count)
     }
 
     /// `DELETE /networks/:network_slug/channels/:channel` — parts from an
@@ -5075,6 +5118,67 @@ mod tests {
             .await
             .expect("older page");
         assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_count_sends_the_anchor_and_cap() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/%23rust/messages/count"))
+            .and(query_param("after", "812"))
+            .and(query_param("cap", "201"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"count": 42})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let count = client
+            .fetch_messages_count("abc123", "libera", "#rust", 812, Some(201))
+            .await
+            .expect("gap probe");
+        assert_eq!(count, 42);
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_count_reads_count_from_a_three_key_body() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/vjt/messages/count"))
+            .and(query_param("after", "7"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"count": 3, "messages": 2, "events": 1})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let count = client
+            .fetch_messages_count("t", "libera", "vjt", 7, None)
+            .await
+            .expect("uncapped gap probe");
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_count_reports_a_missing_route() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/%23rust/messages/count"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let err = client
+            .fetch_messages_count("t", "libera", "#rust", 1, Some(201))
+            .await
+            .expect_err("404");
+        assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
     }
 
     #[tokio::test]
