@@ -38,7 +38,7 @@ pub enum EventCarrier {
     Requester,
 }
 
-/// The complete set of 56 client event kinds documented by Grappa.
+/// The complete set of 57 client event kinds documented by Grappa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientEventKind {
     ArchiveChanged,
@@ -46,6 +46,7 @@ pub enum ClientEventKind {
     AutoAwayDebounceChanged,
     AutoAwayReasonChanged,
     AwayConfirmed,
+    AwayNickSuffixChanged,
     BanlistBundle,
     BundleHash,
     ChannelCreated,
@@ -114,6 +115,7 @@ impl ClientEventKind {
             "auto_away_debounce_changed" => Self::AutoAwayDebounceChanged,
             "auto_away_reason_changed" => Self::AutoAwayReasonChanged,
             "away_confirmed" => Self::AwayConfirmed,
+            "away_nick_suffix_changed" => Self::AwayNickSuffixChanged,
             "banlist_bundle" => Self::BanlistBundle,
             "bundle_hash" => Self::BundleHash,
             "channel_created" => Self::ChannelCreated,
@@ -176,6 +178,7 @@ impl ClientEventKind {
             Self::AutoAwayDebounceChanged => "auto_away_debounce_changed",
             Self::AutoAwayReasonChanged => "auto_away_reason_changed",
             Self::AwayConfirmed => "away_confirmed",
+            Self::AwayNickSuffixChanged => "away_nick_suffix_changed",
             Self::BanlistBundle => "banlist_bundle",
             Self::BundleHash => "bundle_hash",
             Self::ChannelCreated => "channel_created",
@@ -257,12 +260,13 @@ mod tests {
     use std::collections::HashSet;
 
     /// Every kind, to check the wire-name table end to end.
-    const ALL_CLIENT_EVENT_KINDS: [ClientEventKind; 56] = [
+    const ALL_CLIENT_EVENT_KINDS: [ClientEventKind; 57] = [
         ClientEventKind::ArchiveChanged,
         ClientEventKind::ArchivePurged,
         ClientEventKind::AutoAwayDebounceChanged,
         ClientEventKind::AutoAwayReasonChanged,
         ClientEventKind::AwayConfirmed,
+        ClientEventKind::AwayNickSuffixChanged,
         ClientEventKind::BanlistBundle,
         ClientEventKind::BundleHash,
         ClientEventKind::ChannelCreated,
@@ -317,13 +321,13 @@ mod tests {
     ];
 
     #[test]
-    fn inventory_has_56_unique_wire_names_and_round_trips() {
+    fn inventory_has_57_unique_wire_names_and_round_trips() {
         let names: HashSet<_> = ALL_CLIENT_EVENT_KINDS
             .iter()
             .map(|kind| kind.as_wire_name())
             .collect();
-        assert_eq!(ALL_CLIENT_EVENT_KINDS.len(), 56);
-        assert_eq!(names.len(), 56);
+        assert_eq!(ALL_CLIENT_EVENT_KINDS.len(), 57);
+        assert_eq!(names.len(), 57);
         for kind in ALL_CLIENT_EVENT_KINDS {
             assert_eq!(
                 ClientEventKind::from_wire_name(kind.as_wire_name()),

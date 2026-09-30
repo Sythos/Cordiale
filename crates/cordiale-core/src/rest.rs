@@ -420,7 +420,7 @@ impl SendMessageRequest {
 }
 
 /// Body of `GET`/`PUT /me/settings/display-prefs`, per
-/// `docs/protocol-notes.md` §1: 7 keys, absent-tolerant in both directions
+/// `docs/protocol-notes.md` §1: 8 keys (v29), absent-tolerant in both directions
 /// (a `GET` response may omit any of them, and a `PUT` only needs to carry
 /// the ones being changed). `time_format` and `presence_filter` aren't
 /// touched by Cordiale's Settings UI yet (their exact value shapes aren't
