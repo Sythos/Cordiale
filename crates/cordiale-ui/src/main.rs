@@ -53,6 +53,7 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::persistence::{self, Theme};
 use cordiale_core::profile::IgnoreEntry;
+use cordiale_core::protocol::CLIENT_PROTOCOL_VERSION;
 use cordiale_core::rest::{
     ActiveThemePair, ArchiveEntry, BootResponse, DateFormat, DirectoryPage, DisplayPrefs,
     LoginRequest, MeResponse, SendMessageRequest,
@@ -3284,6 +3285,22 @@ async fn run_worker(
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("session-refused".into());
                             ui.set_status_message(reason.into());
+                            ui.set_current_query_ready(false);
+                        });
+                    }
+                    Some(SessionEvent::UpgradeRequired {
+                        protocol_version,
+                        min_protocol_version,
+                    }) => {
+                        // Stopped for good: no retry helps until Cordiale is updated.
+                        persistence::log_line(&format!(
+                            "session upgrade required: declared client_proto={CLIENT_PROTOCOL_VERSION}, server protocol_version={protocol_version:?}, min_protocol_version={min_protocol_version:?}"
+                        ));
+                        state.session = None;
+                        session_events = None;
+                        let _ = ui.upgrade_in_event_loop(|ui| {
+                            ui.set_status_kind("upgrade-required".into());
+                            ui.set_status_message("".into());
                             ui.set_current_query_ready(false);
                         });
                     }
@@ -10486,7 +10503,8 @@ fn normalize_server_url(url: &str) -> String {
 }
 
 /// Turns an `https://`/`http://` base URL into the matching `wss://`/`ws://`
-/// Phoenix socket URL, per `docs/protocol-notes.md` §2.
+/// Phoenix socket URL, per `docs/protocol-notes.md` §2. `client_proto` is a
+/// plain integer: the server silently drops anything it can't read as one.
 fn to_ws_url(base_url: &str) -> String {
     let with_scheme = if let Some(rest) = base_url.strip_prefix("https://") {
         format!("wss://{rest}")
@@ -10496,7 +10514,7 @@ fn to_ws_url(base_url: &str) -> String {
         format!("wss://{base_url}")
     };
     format!(
-        "{}/socket/websocket?vsn=2.0.0",
+        "{}/socket/websocket?vsn=2.0.0&client_proto={CLIENT_PROTOCOL_VERSION}",
         with_scheme.trim_end_matches('/')
     )
 }
@@ -24761,7 +24779,9 @@ mod tests {
     fn to_ws_url_upgrades_https_to_wss() {
         assert_eq!(
             to_ws_url("https://irc.sindro.me"),
-            "wss://irc.sindro.me/socket/websocket?vsn=2.0.0"
+            format!(
+                "wss://irc.sindro.me/socket/websocket?vsn=2.0.0&client_proto={CLIENT_PROTOCOL_VERSION}"
+            )
         );
     }
 
@@ -24791,7 +24811,9 @@ mod tests {
     fn to_ws_url_upgrades_http_to_ws() {
         assert_eq!(
             to_ws_url("http://localhost:4000"),
-            "ws://localhost:4000/socket/websocket?vsn=2.0.0"
+            format!(
+                "ws://localhost:4000/socket/websocket?vsn=2.0.0&client_proto={CLIENT_PROTOCOL_VERSION}"
+            )
         );
     }
 

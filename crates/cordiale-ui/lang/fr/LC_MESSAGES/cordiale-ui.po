@@ -217,10 +217,6 @@ msgid "Wrong username or password/token."
 msgstr "Nom d'utilisateur ou mot de passe/jeton incorrect."
 
 msgctxt "AppWindow"
-msgid "This account has two-factor authentication enabled. Sign in from a browser instead."
-msgstr "Ce compte a l'authentification à deux facteurs activée. Connecte-toi plutôt depuis un navigateur."
-
-msgctxt "AppWindow"
 msgid "Too many attempts. Wait a bit before trying again."
 msgstr "Trop de tentatives. Attends un peu avant de réessayer."
 
@@ -1035,10 +1031,6 @@ msgstr "Gardez au moins une notification de message activée."
 msgctxt "AppWindow"
 msgid "Couldn't save the notification settings."
 msgstr "Impossible d'enregistrer les paramètres de notification."
-
-msgctxt "AppWindow"
-msgid "Two-factor authentication, passkeys, client tokens and account deletion are managed in Cicchetto: Grappa keeps them out of reach of a client token like the one Cordiale signs in with."
-msgstr "L'authentification à deux facteurs, les passkeys, les jetons de client et la suppression du compte se gèrent dans Cicchetto : Grappa les tient hors de portée d'un jeton client comme celui qu'utilise Cordiale."
 
 msgctxt "AppWindow"
 msgid "Push notifications Grappa sends to your devices (such as Cicchetto on a phone) while none of them is in use."
@@ -2651,3 +2643,7 @@ msgstr "Taille du texte : {} %"
 msgctxt "AppWindow"
 msgid "Reset"
 msgstr "Réinitialiser"
+
+msgctxt "AppWindow"
+msgid "This server no longer accepts this version of Cordiale. Please update Cordiale."
+msgstr "Ce serveur n'accepte plus cette version de Cordiale. Veuillez mettre à jour Cordiale."
