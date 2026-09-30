@@ -1656,14 +1656,18 @@ struct ChannelModes {
     params: HashMap<String, Option<String>>,
 }
 
-/// One open Grappa query window. `opened_at` is retained from the server's
-/// full snapshot so a unique stable opening can be matched across a nick
-/// rename without guessing from list position.
+/// One open Grappa query window. `dm_conversation_id` (protocol v34) names
+/// the conversation across a peer's nick change; it is `None` for servers
+/// older than v34 or when the server has no conversation for the window.
+/// `opened_at` is retained from the server's full snapshot so a unique
+/// stable opening can be matched across a rename when no id is available,
+/// without guessing from list position.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct QueryWindow {
     network: String,
     target_nick: String,
     opened_at: String,
+    dm_conversation_id: Option<i64>,
 }
 
 /// Stable per-window key used for server-provided unread counts. Channel
@@ -16992,6 +16996,9 @@ fn parse_query_windows_list(
                 network: network.clone(),
                 target_nick: target_nick.to_string(),
                 opened_at: opened_at.to_string(),
+                // Absent (server older than v34) and null both mean "no id":
+                // identity falls back to the nick.
+                dm_conversation_id: entry.get("dm_conversation_id").and_then(Value::as_i64),
             };
             if !seen.insert(query_window_key(&query.network, &query.target_nick)) {
                 return None;
@@ -17052,9 +17059,12 @@ fn same_rfc3339_instant(left: &str, right: &str) -> bool {
         && left.timestamp_subsec_nanos() == right.timestamp_subsec_nanos()
 }
 
-/// Infers only unambiguous renames: exactly one disappeared and one appeared
-/// on the same network with the same validated opening instant. No list
-/// ordering or nickname similarity is treated as identity.
+/// Infers only unambiguous renames among the windows that disappeared and
+/// appeared. A window keeps its `dm_conversation_id` under the new nick, so
+/// an id held by exactly one disappeared and one appeared window on the same
+/// network is a rename. Windows without an id (older server) fall back to
+/// the same validated opening instant. No list ordering or nickname
+/// similarity is treated as identity.
 fn query_window_renames(
     previous: &[QueryWindow],
     next: &[QueryWindow],
@@ -17070,11 +17080,27 @@ fn query_window_renames(
 
     let mut renames = Vec::new();
     for old in removed.iter().copied() {
+        if let Some(id) = old.dm_conversation_id {
+            let by_id: Vec<&QueryWindow> = added
+                .iter()
+                .copied()
+                .filter(|new| new.network == old.network && new.dm_conversation_id == Some(id))
+                .collect();
+            if let [new] = by_id.as_slice() {
+                renames.push((old.clone(), (*new).clone()));
+                continue;
+            }
+        }
         let candidates: Vec<&QueryWindow> = added
             .iter()
             .copied()
             .filter(|new| {
-                old.network == new.network && same_rfc3339_instant(&old.opened_at, &new.opened_at)
+                old.network == new.network
+                    // Two different ids are two different conversations.
+                    && (old.dm_conversation_id.is_none()
+                        || new.dm_conversation_id.is_none()
+                        || old.dm_conversation_id == new.dm_conversation_id)
+                    && same_rfc3339_instant(&old.opened_at, &new.opened_at)
             })
             .collect();
         if candidates.len() != 1 {
@@ -18475,6 +18501,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         });
         state
             .stale_query_topics
@@ -18560,6 +18587,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "OldNick".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         });
         let old_topic = own_nick_listener_topic("vjt", "libera", "OldNick");
         let new_topic = own_nick_listener_topic("vjt", "libera", "NewNick");
@@ -18685,6 +18713,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         }];
         let inbound = serde_json::json!({
             "kind": "privmsg",
@@ -18755,6 +18784,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         assert!(!apply_query_windows_snapshot(&mut state, vec![query]));
         drain_pending_own_nick_dms(&mut state);
@@ -18848,6 +18878,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let stale: std::collections::HashSet<(String, String)> =
             [query_window_key("libera", "oldpeer")]
@@ -18971,11 +19002,13 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "oldnick".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let renamed = QueryWindow {
             network: "libera".to_string(),
             target_nick: "newnick".to_string(),
             opened_at: "2026-09-21T12:00:00+02:00".to_string(),
+            dm_conversation_id: None,
         };
         let old_key = (old.network.clone(), old.target_nick.clone());
         let new_key = (renamed.network.clone(), renamed.target_nick.clone());
@@ -19033,11 +19066,13 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "foo".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let recased = QueryWindow {
             network: "libera".to_string(),
             target_nick: "Foo".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let old_key = (old.network.clone(), old.target_nick.clone());
         let recased_key = (recased.network.clone(), recased.target_nick.clone());
@@ -19090,24 +19125,75 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "old-one".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let old_two = QueryWindow {
             network: "libera".to_string(),
             target_nick: "old-two".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let new_one = QueryWindow {
             network: "libera".to_string(),
             target_nick: "new-one".to_string(),
             opened_at: "2026-09-21T12:00:00+02:00".to_string(),
+            dm_conversation_id: None,
         };
         let new_two = QueryWindow {
             network: "libera".to_string(),
             target_nick: "new-two".to_string(),
             opened_at: "2026-09-21T12:00:00+02:00".to_string(),
+            dm_conversation_id: None,
         };
 
         assert!(query_window_renames(&[old_one, old_two], &[new_one, new_two]).is_empty());
+    }
+
+    #[test]
+    fn query_window_rename_matching_uses_conversation_id_over_open_time() {
+        let window = |nick: &str, id: Option<i64>| QueryWindow {
+            network: "libera".to_string(),
+            target_nick: nick.to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: id,
+        };
+        // Same opening instant makes these ambiguous without ids.
+        let previous = [window("old-one", Some(1)), window("old-two", Some(2))];
+        let next = [window("new-one", Some(1)), window("new-two", Some(2))];
+        let renames = query_window_renames(&previous, &next);
+        assert_eq!(renames.len(), 2);
+        assert!(renames
+            .iter()
+            .any(|(old, new)| old.target_nick == "old-one" && new.target_nick == "new-one"));
+        assert!(renames
+            .iter()
+            .any(|(old, new)| old.target_nick == "old-two" && new.target_nick == "new-two"));
+
+        // A different id under the same opening instant is not a rename.
+        assert!(
+            query_window_renames(&[window("old", Some(1))], &[window("new", Some(2))]).is_empty()
+        );
+        // A window without an id still falls back to the opening instant.
+        assert_eq!(
+            query_window_renames(&[window("old", None)], &[window("new", Some(3))]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn query_windows_list_reads_optional_conversation_id() {
+        let network_slugs = HashMap::from([(1, "libera".to_string())]);
+        let payload = serde_json::json!({
+            "kind": "query_windows_list",
+            "windows": {"1": [
+                {"network_id": 1, "target_nick": "with", "opened_at": "2026-09-21T10:00:00Z", "dm_conversation_id": 42},
+                {"network_id": 1, "target_nick": "null", "opened_at": "2026-09-21T10:00:00Z", "dm_conversation_id": null},
+                {"network_id": 1, "target_nick": "absent", "opened_at": "2026-09-21T10:00:00Z"}
+            ]}
+        });
+        let queries = parse_query_windows_list(&payload, &network_slugs).unwrap();
+        let ids: Vec<Option<i64>> = queries.iter().map(|q| q.dm_conversation_id).collect();
+        assert_eq!(ids, vec![Some(42), None, None]);
     }
 
     #[test]
@@ -19116,6 +19202,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let identity = query_window_key(&query.network, &query.target_nick);
         let topic = query_topic("vjt", &query.network, &query.target_nick);
@@ -19156,6 +19243,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         };
         let identity = query_window_key(&query.network, &query.target_nick);
         let topic = query_topic("vjt", &query.network, &query.target_nick);
@@ -19451,6 +19539,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         }];
 
         let channel_payload = serde_json::json!({
@@ -19737,6 +19826,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         }];
         state
             .window_mentions
@@ -19963,6 +20053,7 @@ mod tests {
             network: "libera".to_string(),
             target_nick: "Peer".to_string(),
             opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
         }];
         state
             .window_mentions
@@ -24476,6 +24567,7 @@ mod tests {
             network: "deleted".to_string(),
             target_nick: "alice".to_string(),
             opened_at: "now".to_string(),
+            dm_conversation_id: None,
         });
         let obsolete_topic = channel_topic("sythos", "deleted", "alice");
         state.joined_topics.insert(obsolete_topic.clone());
