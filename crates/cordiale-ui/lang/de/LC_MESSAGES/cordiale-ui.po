@@ -3035,3 +3035,91 @@ msgstr "Ein Passkey antwortet nur für genau eine Origin. Für diesen Server ver
 msgctxt "AppWindow"
 msgid "Saved."
 msgstr "Gespeichert."
+
+msgctxt "AppWindow"
+msgid "The passkey request was cancelled, timed out, or found no passkey for this account."
+msgstr "Die Passkey-Anfrage wurde abgebrochen, ist abgelaufen oder hat keinen Passkey für dieses Konto gefunden."
+
+msgctxt "AppWindow"
+msgid "That account doesn't sign in with a passkey alone. Use its password instead."
+msgstr "Dieses Konto meldet sich nicht allein mit einem Passkey an. Verwende stattdessen sein Passwort."
+
+msgctxt "AppWindow"
+msgid "The passkey request failed."
+msgstr "Die Passkey-Anfrage ist fehlgeschlagen."
+
+msgctxt "AppWindow"
+msgid "This account's second factor is a passkey. Use it to finish signing in. The request expires after five minutes."
+msgstr "Der zweite Faktor dieses Kontos ist ein Passkey. Verwende ihn, um die Anmeldung abzuschließen. Die Anfrage läuft nach fünf Minuten ab."
+
+msgctxt "AppWindow"
+msgid "This account's second factor is a passkey. If you can't use it, enter one of your recovery codes instead: each works only once. The request expires after five minutes."
+msgstr "Der zweite Faktor dieses Kontos ist ein Passkey. Wenn du ihn nicht verwenden kannst, gib stattdessen einen deiner Wiederherstellungscodes ein: Jeder funktioniert nur einmal. Die Anfrage läuft nach fünf Minuten ab."
+
+msgctxt "AppWindow"
+msgid "Waiting for the passkey…"
+msgstr "Warte auf den Passkey …"
+
+msgctxt "AppWindow"
+msgid "Use a passkey"
+msgstr "Passkey verwenden"
+
+msgctxt "AppWindow"
+msgid "Sign in with a passkey"
+msgstr "Mit einem Passkey anmelden"
+
+msgctxt "AppWindow"
+msgid "Every change here asks for the account password; adding a passkey or changing the mode then asks for a passkey too."
+msgstr "Jede Änderung hier verlangt das Kontopasswort; einen Passkey hinzuzufügen oder den Modus zu ändern verlangt danach auch einen Passkey."
+
+msgctxt "AppWindow"
+msgid "Passkey name"
+msgstr "Name des Passkeys"
+
+msgctxt "AppWindow"
+msgid "Add a passkey"
+msgstr "Passkey hinzufügen"
+
+msgctxt "AppWindow"
+msgid "Ask for a passkey after the password"
+msgstr "Nach dem Passwort einen Passkey verlangen"
+
+msgctxt "AppWindow"
+msgid "Sign in with a passkey alone…"
+msgstr "Allein mit einem Passkey anmelden …"
+
+msgctxt "AppWindow"
+msgid "Turn off passkey sign-in"
+msgstr "Anmeldung mit Passkey ausschalten"
+
+msgctxt "AppWindow"
+msgid "Signing in with a passkey alone turns off the password and TOTP sign-in. Recovery codes come first, for when the passkey is lost."
+msgstr "Die Anmeldung allein mit einem Passkey schaltet die Anmeldung mit Passwort und TOTP aus. Zuerst bekommst du Wiederherstellungscodes für den Fall, dass der Passkey verloren geht."
+
+msgctxt "AppWindow"
+msgid "Save these recovery codes now: they won't be shown again. Once passwordless is on, each one signs you in once without the passkey."
+msgstr "Speichere diese Wiederherstellungscodes jetzt: Sie werden nicht noch einmal angezeigt. Sobald die passwortlose Anmeldung aktiv ist, meldet dich jeder einmal ohne den Passkey an."
+
+msgctxt "AppWindow"
+msgid "I've saved them, turn on passwordless"
+msgstr "Ich habe sie gespeichert, passwortlose Anmeldung einschalten"
+
+msgctxt "AppWindow"
+msgid "That's the last passkey and the account still signs in with it. Turn passkey sign-in off or add another passkey first."
+msgstr "Das ist der letzte Passkey, und das Konto meldet sich noch damit an. Schalte zuerst die Anmeldung mit Passkey aus oder füge einen weiteren Passkey hinzu."
+
+msgctxt "AppWindow"
+msgid "The recovery codes expired before passwordless was turned on. Start again."
+msgstr "Die Wiederherstellungscodes sind abgelaufen, bevor die passwortlose Anmeldung eingeschaltet wurde. Fang noch einmal an."
+
+msgctxt "AppWindow"
+msgid "Couldn't add the passkey."
+msgstr "Der Passkey konnte nicht hinzugefügt werden."
+
+msgctxt "AppWindow"
+msgid "Couldn't change how the account uses passkeys."
+msgstr "Konnte nicht ändern, wie das Konto Passkeys verwendet."
+
+msgctxt "AppWindow"
+msgid "Client tokens and account deletion are managed in Cicchetto."
+msgstr "Client-Tokens und das Löschen des Kontos werden in Cicchetto verwaltet."
