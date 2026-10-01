@@ -171,8 +171,8 @@ Limiti di piattaforma restanti: niente trascinamento di file su Wayland,
 badge solo su Windows, pulsanti e menu con lo stile dei widget di Slint;
 ident e realname non sono più esposti da Grappa.
 
-**Aggiornamento (2026-09-30) — allineamento a `protocol_version` 34.**
-Cordiale dichiara `client_proto=34` sull'URL del WebSocket e su un `426
+**Aggiornamento (2026-09-30) — allineamento a `protocol_version` 34 e 35.**
+Cordiale dichiara `client_proto=35` sull'URL del WebSocket e su un `426
 upgrade_required` si ferma invece di ritentare (non verificato contro un
 server che alzi il floor). Stato delle novità: quelle che parlano col server
 sono coperte da test con server simulato e dal suo sorgente, **non ancora
@@ -180,7 +180,8 @@ provate contro un server reale**:
 
 | Area | Stato in Cordiale | Note |
 |---|---|---|
-| `dm_conversation_id` (v34) | Implementato | Letto da `query_windows_list` e dalle righe di scrollback, usato per riconoscere la stessa finestra privata dopo un NICK del peer; il merge di due conversazioni non è rilevato |
+| `dm_conversation_id` (v34) | Implementato | Letto da `query_windows_list` (non dalle righe di scrollback), usato per riconoscere la stessa finestra privata dopo un NICK del peer; il merge di due conversazioni non è rilevato |
+| `dm_with` e `id` nelle menzioni (v35) | Parziale | `dm_with` etichetta la finestra di una menzione di DM (altrimenti `channel`, che per un DM in ingresso è il proprio nick); `id` non è letto, quindi il salto al messaggio non c'è. Non verificato contro un server v35 reale |
 | Catch-up dopo un reconnect | Implementato | Sonda `messages/count?after=<id>&cap=201` per canale; fino a 200 righe con `?after=`, oltre ricarica la coda e lascia una nota del buco |
 | Presenza in primo piano | Implementato | `visibility` ogni 30 s mentre la finestra è attiva, `client_closing` a chiusura e sign-out |
 | Profilo proprio per rete | Implementato | Campi CTCP USERINFO e avatar in Settings → General (`PATCH /networks/:slug/profile`, `PUT`/`DELETE .../avatar`) |
