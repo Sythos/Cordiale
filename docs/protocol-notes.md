@@ -178,7 +178,11 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
   `auto`). Absent-tolerant in entrambe le direzioni, ma non
   value-tolerant. Cordiale legge e scrive i cinque booleani e `date_format`
   (un valore non riconosciuto in lettura viene scartato senza perdere le
-  altre chiavi).
+  altre chiavi). `presence_filter` è la mappa `{"<slug> <canale in
+  minuscolo ASCII>": "show"|"hide"}` del Denoise per canale: la chiave
+  assente significa "nessuna scelta, segui la dimensione del canale" (da 200
+  membri in su nasconde), mai un terzo valore. Cordiale aggiunge la propria
+  chiave con GET + PUT dell'intero oggetto, senza toccare le altre.
 - `GET /api/server-settings`, `GET /admin/settings` — dalla v26 espone anche
   `per_user_cap_bytes` e `per_visitor_cap_bytes`, leggibili ma non
   azionabili (rifiuto quota = `507 insufficient_storage` generico).
@@ -971,10 +975,12 @@ letto in una spec:
    ricevuto fuori da un WHOIS (dentro un WHOIS resta nel campo
    `away_message` di `whois_bundle`). Cordiale lo mostra come banner
    sopra la finestra privata del peer.
-8. **`presence_filter` in `display_prefs`** — non chiaro se collegato
-   meccanicamente al join-param `{"presence": false}` (§2) o se siano due
-   funzionalità distinte; il documento non li mette mai in relazione
-   esplicita.
+8. **`presence_filter` in `display_prefs`** — chiarito dal sorgente del
+   server: è il Denoise per canale (join/part/quit/nick_change/mode, esclusi i
+   `mode` con `meta.structural`), distinto dal join-param `{"presence":
+   false}` (§2). Il server applica la stessa regola alle pagine di storico
+   REST: con "hide" omette quelle righe, quindi dopo un "show" Cordiale
+   rilegge l'ultima pagina.
 9. Alcune superfici (schema completo `/admin/*`, TOTP, passkey, recovery
    codes, upload) non sono (o non erano) nel contratto client documentato e
    sono lette dal sorgente server e da Cicchetto. Il perimetro è andato oltre

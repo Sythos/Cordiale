@@ -62,6 +62,9 @@ use cordiale_core::domain::{AuthMethod, Profile};
 use cordiale_core::isupport::{parse_isupport_changed, IsupportState};
 use cordiale_core::passkey_origin::{check_override, passkey_origin, OverrideCheck};
 use cordiale_core::persistence::{self, Theme};
+use cordiale_core::presence::{
+    is_presence_noise, presence_hidden, reconcile, toggled_pref, PresencePref,
+};
 use cordiale_core::profile::{gender_for_index, has_avatar, IgnoreEntry, ProfileFields};
 use cordiale_core::protocol::CLIENT_PROTOCOL_VERSION;
 use cordiale_core::rest::{
@@ -254,6 +257,8 @@ enum WorkerCommand {
     LoadNotificationPrefs,
     EditNotificationPrefs(NotificationEdit),
     MuteCurrentWindow(i32),
+    /// Turns Denoise on or off for the open channel.
+    ToggleDenoise,
     SaveNotificationPrefs(NotificationToggles),
     AdminRefresh,
     AdminDisconnectSession(String),
@@ -1569,6 +1574,11 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_mute_current.send(WorkerCommand::MuteCurrentWindow(seconds));
     });
 
+    let tx_for_denoise = worker_tx.clone();
+    ui.on_denoise_requested(move || {
+        let _ = tx_for_denoise.send(WorkerCommand::ToggleDenoise);
+    });
+
     let tx_for_notify_save = worker_tx.clone();
     let weak_for_notify = ui.as_weak();
     ui.on_notification_prefs_changed(move || {
@@ -2555,6 +2565,12 @@ struct WorkerState {
     /// they held when the socket dropped (live rows arriving after the
     /// rejoin must not move the anchor). Drained one channel at a time.
     catch_up_anchors: std::collections::BTreeMap<(String, String), i64>,
+    /// Channels where Denoise was turned on or off, in Grappa's key
+    /// spelling (`muted_key`); the rest follow their size. Kept in
+    /// `settings.json`.
+    presence_pins: std::collections::BTreeMap<String, PresencePref>,
+    /// Pins whose upload to Grappa isn't confirmed yet.
+    presence_unsynced: std::collections::BTreeSet<String>,
     /// Lines of the live admin feed, newest first (capped).
     admin_events: Vec<String>,
     /// Last `GET /admin/settings`, to tell whether addressing was edited.
@@ -2789,6 +2805,7 @@ struct WorkerState {
 
 impl WorkerState {
     fn new() -> Self {
+        let settings = persistence::load_settings().unwrap_or_default();
         WorkerState {
             client: None,
             token: None,
@@ -2798,6 +2815,8 @@ impl WorkerState {
             session: None,
             joined_topics: std::collections::HashSet::new(),
             catch_up_anchors: std::collections::BTreeMap::new(),
+            presence_pins: settings.presence_pins,
+            presence_unsynced: settings.presence_unsynced,
             admin_events: Vec::new(),
             admin_settings: None,
             admin_uploads: None,
@@ -2864,7 +2883,7 @@ impl WorkerState {
             web_bundle: None,
             watch_patterns: Vec::new(),
             pending_watchlist_ref: None,
-            theme: persistence::load_settings().unwrap_or_default().theme,
+            theme: settings.theme,
             theme_choices: builtin_theme_choices(),
             theme_pair: None,
             system_dark: false,
@@ -2874,6 +2893,18 @@ impl WorkerState {
             passwordless_recovery_token: None,
             home: home::HomeState::default(),
         }
+    }
+
+    /// Whether `key`'s transcript hides join/part/quit/nick-change/mode
+    /// lines: the channel's own choice, else its size.
+    fn denoise_active(&self, key: &(String, String)) -> bool {
+        let pref = self.presence_pins.get(&muted_key(&key.0, &key.1)).copied();
+        presence_hidden(pref, self.members.get(key).map(Vec::len))
+    }
+
+    /// Whether a line arriving live belongs in `key`'s open transcript.
+    fn transcript_shows(&self, key: &(String, String), line: &RenderedMessage) -> bool {
+        !(line.presence_noise && self.denoise_active(key))
     }
 }
 
@@ -3313,6 +3344,9 @@ async fn run_worker(
                             let edit = NotificationEdit::Mute(muted_key(&network, &target), until);
                             handle_notification_edit(&mut state, &ui, edit).await;
                         }
+                    }
+                    Some(WorkerCommand::ToggleDenoise) => {
+                        handle_toggle_denoise(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::LoadNotificationPrefs) => {
                         handle_load_notification_prefs(&mut state, &ui).await;
@@ -4439,6 +4473,8 @@ async fn finish_connect(
                 ));
             }
 
+            sync_presence_pins(state).await;
+
             let prefs_client = GrappaClient::new(server_url.clone());
             let prefs_token = token.clone();
             let ui_for_prefs = ui.clone();
@@ -5478,6 +5514,7 @@ async fn handle_select_channel(
     refresh_mention_context(state);
     let casemapping = network_casemapping(state, &network);
     let history_start = state.history_start_reached.contains(&key);
+    let denoise = state.denoise_active(&key);
 
     push_window_note(state, ui);
     let label = format!("{network} — {channel}");
@@ -5496,7 +5533,9 @@ async fn handle_select_channel(
         ui.set_history_start_reached(history_start);
         ui.set_history_loading(false);
         ui.set_history_failed(false);
-        let model = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
+        ui.set_current_denoise(denoise);
+        let model =
+            chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise);
         show_chat_lines(&ui, model);
         let member_rows = members_model(&members, dark_theme);
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
@@ -6853,6 +6892,7 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
             (
                 state.members.get(key).cloned().unwrap_or_default(),
                 network_casemapping(state, &key.0),
+                state.denoise_active(key),
             )
         });
 
@@ -6863,11 +6903,12 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
         ui.invoke_apply_color_scheme();
         if let Some(lines) = current_lines {
             let model = match current_roster {
-                Some((members, casemapping)) => chat_lines_model_with_roster(
+                Some((members, casemapping, denoise)) => chat_lines_model_with_roster(
                     &lines,
                     new_theme == Theme::Dark,
                     &members,
                     casemapping,
+                    denoise,
                 ),
                 None => chat_lines_model(&lines, new_theme == Theme::Dark),
             };
@@ -7370,8 +7411,135 @@ enum NotificationEdit {
     Sound(String),
 }
 
-/// Grappa's key for a muted conversation: the network slug and the
-/// channel or peer nick, ASCII-lowercased like Cicchetto's channel key.
+/// Writes the Denoise choices (and which ones Grappa hasn't confirmed) to
+/// `settings.json`.
+fn save_presence_settings(state: &WorkerState) {
+    let mut settings = persistence::load_settings().unwrap_or_default();
+    settings.presence_pins = state.presence_pins.clone();
+    settings.presence_unsynced = state.presence_unsynced.clone();
+    let _ = persistence::save_settings(&settings);
+}
+
+/// At sign-in the account's Denoise choices replace the local ones, except
+/// for a local change Grappa never confirmed, which is sent again. If the
+/// server can't be reached the local choices stay as they are.
+async fn sync_presence_pins(state: &mut WorkerState) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let server = match client.fetch_presence_pins(&token).await {
+        Ok(server) => server,
+        Err(error) => {
+            persistence::log_line(&format!("denoise choices fetch failed: {error:?}"));
+            return;
+        }
+    };
+    let reconciled = reconcile(&state.presence_pins, &state.presence_unsynced, &server);
+    state.presence_pins = reconciled.pins;
+    state.presence_unsynced.clear();
+    let upload = if reconciled.push.is_empty() {
+        None
+    } else {
+        Some(client.put_presence_pins(&token, &reconciled.push).await)
+    };
+    if let Some(Err(error)) = upload {
+        persistence::log_line(&format!("denoise choices upload failed: {error:?}"));
+        state.presence_unsynced.extend(reconciled.push.into_keys());
+    }
+    save_presence_settings(state);
+}
+
+/// Rebuilds the open channel's transcript (and the Denoise state shown in
+/// the Actions menu) from the stored history, without touching the roster.
+fn push_chat_lines_update(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: &(String, String),
+) {
+    let lines = state.messages.get(key).cloned().unwrap_or_default();
+    let members = state.members.get(key).cloned().unwrap_or_default();
+    let casemapping = network_casemapping(state, &key.0);
+    let denoise = state.denoise_active(key);
+    let dark_theme = state.theme == Theme::Dark;
+    refresh_mention_context(state);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_current_denoise(denoise);
+        let model =
+            chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise);
+        show_chat_lines(&ui, model);
+    });
+}
+
+/// Flips Denoise for the open channel. The transcript changes at once, then
+/// the choice goes to Grappa; a failed upload is kept and sent again at the
+/// next sign-in.
+async fn handle_toggle_denoise(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let Some(key) = state.current_channel.clone() else {
+        return;
+    };
+    if state.current_query || key.1 == SERVER_WINDOW_NAME {
+        return;
+    }
+    let pin_key = muted_key(&key.0, &key.1);
+    let pref = toggled_pref(state.denoise_active(&key));
+    state.presence_pins.insert(pin_key.clone(), pref);
+    state.presence_unsynced.insert(pin_key.clone());
+    save_presence_settings(state);
+    push_chat_lines_update(state, ui, &key);
+
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let pins = std::collections::BTreeMap::from([(pin_key.clone(), pref)]);
+    if let Err(error) = client.put_presence_pins(&token, &pins).await {
+        persistence::log_line(&format!(
+            "denoise save failed for {}/{}: {error:?}",
+            key.0, key.1
+        ));
+        return;
+    }
+    state.presence_unsynced.remove(&pin_key);
+    save_presence_settings(state);
+    if pref == PresencePref::Show {
+        reload_history_tail(state, ui, &key).await;
+    }
+}
+
+/// Grappa leaves presence rows out of the history pages it serves while a
+/// channel hides them, so a window loaded in that state has none to show
+/// when Denoise goes off. Reads the newest page again and merges it in.
+async fn reload_history_tail(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: &(String, String),
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let rows = match client
+        .fetch_messages(&token, &key.0, &key.1, None, Some(CATCH_UP_PAGE))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            persistence::log_line(&format!(
+                "history reload failed for {}/{}: {error:?}",
+                key.0, key.1
+            ));
+            return;
+        }
+    };
+    let messages = state.messages.entry(key.clone()).or_default();
+    merge_rendered_messages(messages, rows.iter().map(render_history_entry));
+    if !state.current_query && state.current_channel.as_ref() == Some(key) {
+        push_chat_lines_update(state, ui, key);
+    }
+}
+
+/// Grappa's key for a muted conversation or a channel's Denoise choice: the
+/// network slug and the channel or peer nick, ASCII-lowercased like
+/// Cicchetto's channel key.
 fn muted_key(network: &str, target: &str) -> String {
     format!("{network} {}", target.to_ascii_lowercase())
 }
@@ -7634,13 +7802,14 @@ async fn handle_load_older_history(state: &mut WorkerState, ui: &slint::Weak<App
         (
             state.members.get(&key).cloned().unwrap_or_default(),
             network_casemapping(state, &key.0),
+            state.denoise_active(&key),
         )
     });
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let model = match roster {
-            Some((members, casemapping)) => {
-                chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping)
+            Some((members, casemapping, denoise)) => {
+                chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise)
             }
             None => chat_lines_model(&lines, dark_theme),
         };
@@ -10308,7 +10477,11 @@ async fn handle_frame(
         messages.push(line.clone());
     }
 
-    if !already_shown && state.current_channel.as_ref() == Some(&key) {
+    // A Denoise line is kept above but never reaches the transcript.
+    if !already_shown
+        && state.current_channel.as_ref() == Some(&key)
+        && state.transcript_shows(&key, &line)
+    {
         let dark_theme = state.theme == Theme::Dark;
         refresh_mention_context(state);
         let members = state.members.get(&key).cloned().unwrap_or_default();
@@ -11611,13 +11784,16 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
     refresh_mention_context(state);
     let lines = state.messages.get(key).cloned().unwrap_or_default();
     let casemapping = network_casemapping(state, &key.0);
+    let denoise = state.denoise_active(key);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_can_moderate_members(can_moderate);
+        ui.set_current_denoise(denoise);
         let member_rows = members_model(&members, dark_theme);
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
-        let chat_lines = chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping);
+        let chat_lines =
+            chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise);
         show_chat_lines(&ui, chat_lines);
     });
 }
@@ -11831,6 +12007,9 @@ struct RenderedMessage {
     italic: bool,
     message_id: Option<i64>,
     server_time: Option<i64>,
+    /// A join/part/quit/nick-change/mode line that Denoise hides; it stays
+    /// in the stored history so toggling Denoise off brings it back.
+    presence_noise: bool,
 }
 
 /// Shared `from`/`nick`/`sender` + `body`/`message` extraction for both
@@ -11853,6 +12032,12 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
         .or_else(|| payload.get("message"))
         .and_then(Value::as_str);
     let kind = payload.get("kind").and_then(Value::as_str);
+    let structural = payload
+        .get("meta")
+        .and_then(|meta| meta.get("structural"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    let presence_noise = is_presence_noise(kind, structural);
     // Grappa stores the PART/QUIT/KICK reason in `body`; a top-level
     // `reason` is still honoured for older rows. An empty reason is none.
     let reason = body
@@ -11947,6 +12132,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             italic: true,
             message_id: message_id(payload),
             server_time: server_time(payload),
+            presence_noise,
         };
     }
 
@@ -11964,6 +12150,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             italic,
             message_id: message_id(payload),
             server_time: server_time(payload),
+            presence_noise,
         },
         (None, Some(body)) => RenderedMessage {
             timestamp,
@@ -11972,6 +12159,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             italic,
             message_id: message_id(payload),
             server_time: server_time(payload),
+            presence_noise,
         },
         _ => RenderedMessage {
             timestamp,
@@ -11982,6 +12170,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             italic: true,
             message_id: message_id(payload),
             server_time: server_time(payload),
+            presence_noise,
         },
     }
 }
@@ -12245,6 +12434,7 @@ fn replace_with_history_tail(messages: &mut Vec<RenderedMessage>, tail: Vec<Rend
         italic: true,
         message_id: None,
         server_time: first.server_time,
+        presence_noise: false,
     };
     messages.retain(|message| message.message_id.is_some_and(|id| id > newest));
     merge_rendered_messages(messages, tail.into_iter().chain(std::iter::once(note)));
@@ -13671,6 +13861,7 @@ fn chat_lines_model(messages: &[RenderedMessage], dark_theme: bool) -> Vec<ChatL
         dark_theme,
         &[],
         cordiale_core::isupport::CaseMapping::Rfc1459,
+        false,
     )
 }
 
@@ -13686,14 +13877,18 @@ fn member_prefix_for_nick<'a>(
         .unwrap_or("")
 }
 
+/// `hide_presence` leaves the Denoise lines out of the model only: they stay
+/// in `messages`, so turning Denoise off rebuilds the model with them back.
 fn chat_lines_model_with_roster(
     messages: &[RenderedMessage],
     dark_theme: bool,
     members: &[MemberEntry],
     casemapping: cordiale_core::isupport::CaseMapping,
+    hide_presence: bool,
 ) -> Vec<ChatLine> {
     messages
         .iter()
+        .filter(|message| !(hide_presence && message.presence_noise))
         .map(|message| {
             let prefix = message
                 .nick
@@ -14781,6 +14976,7 @@ fn apply_color_theme(
             (
                 state.members.get(key).cloned().unwrap_or_default(),
                 network_casemapping(state, &key.0),
+                state.denoise_active(key),
             )
         });
     let dark_theme = state.theme == Theme::Dark;
@@ -14790,14 +14986,18 @@ fn apply_color_theme(
         push_palette(&ui, choice.as_ref());
         if let Some(lines) = current_lines {
             let model = match &current_roster {
-                Some((members, casemapping)) => {
-                    chat_lines_model_with_roster(&lines, dark_theme, members, *casemapping)
-                }
+                Some((members, casemapping, denoise)) => chat_lines_model_with_roster(
+                    &lines,
+                    dark_theme,
+                    members,
+                    *casemapping,
+                    *denoise,
+                ),
                 None => chat_lines_model(&lines, dark_theme),
             };
             show_chat_lines(&ui, model);
         }
-        if let Some((members, _)) = current_roster {
+        if let Some((members, _, _)) = current_roster {
             let rows = members_model(&members, dark_theme);
             ui.set_channel_members(Rc::new(slint::VecModel::from(rows)).into());
         }
@@ -21139,6 +21339,7 @@ mod tests {
                 italic: false,
                 message_id: Some(1),
                 server_time: Some(1),
+                presence_noise: false,
             }],
         );
         state
@@ -23383,19 +23584,125 @@ mod tests {
         let mut members = vec![("[Alice]".to_string(), "@".to_string())];
         let original_nick = messages[0].nick.clone();
 
-        let op = chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Rfc1459);
+        let op =
+            chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Rfc1459, false);
         assert_eq!(op[0].nick.to_string(), "{alice}");
         assert_eq!(op[0].nick_prefix.to_string(), "@");
 
         members[0].1 = "+".to_string();
-        let voice = chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Rfc1459);
+        let voice =
+            chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Rfc1459, false);
         assert_eq!(voice[0].nick_prefix.to_string(), "+");
         assert_eq!(messages[0].nick, original_nick);
 
-        let ascii = chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Ascii);
+        let ascii =
+            chat_lines_model_with_roster(&messages, false, &members, CaseMapping::Ascii, false);
         assert_eq!(ascii[0].nick_prefix.to_string(), "");
         let query = chat_lines_model(&messages, false);
         assert_eq!(query[0].nick_prefix.to_string(), "");
+    }
+
+    fn presence_row(kind: &str) -> RenderedMessage {
+        render_message(
+            &serde_json::json!({"kind": kind, "sender": "alice", "body": "x", "id": 1}),
+            None,
+        )
+    }
+
+    #[test]
+    fn rendered_rows_know_whether_denoise_hides_them() {
+        for kind in ["join", "part", "quit", "nick_change", "mode"] {
+            assert!(presence_row(kind).presence_noise, "{kind}");
+        }
+        for kind in [
+            "privmsg",
+            "notice",
+            "action",
+            "topic",
+            "kick",
+            "server_event",
+        ] {
+            assert!(!presence_row(kind).presence_noise, "{kind}");
+        }
+        let structural = render_message(
+            &serde_json::json!({"kind": "mode", "sender": "op", "meta": {"modes": "+b", "structural": true}}),
+            None,
+        );
+        assert!(!structural.presence_noise);
+        let status = render_message(
+            &serde_json::json!({"kind": "mode", "sender": "op", "meta": {"modes": "+o", "structural": "yes"}}),
+            None,
+        );
+        assert!(status.presence_noise);
+    }
+
+    #[test]
+    fn denoise_leaves_the_lines_out_of_the_model_but_keeps_them_stored() {
+        use cordiale_core::isupport::CaseMapping;
+
+        let messages = vec![
+            presence_row("join"),
+            presence_row("privmsg"),
+            presence_row("quit"),
+        ];
+        let hidden =
+            chat_lines_model_with_roster(&messages, false, &[], CaseMapping::Rfc1459, true);
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].reply_body.to_string(), "x");
+        let shown =
+            chat_lines_model_with_roster(&messages, false, &[], CaseMapping::Rfc1459, false);
+        assert_eq!(shown.len(), 3);
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn denoise_follows_the_choice_then_the_channel_size() {
+        let mut state = WorkerState::new();
+        state.presence_pins.clear();
+        let key = ("libera".to_string(), "#Rust".to_string());
+        assert!(!state.denoise_active(&key));
+
+        state.members.insert(
+            key.clone(),
+            vec![
+                ("nick".to_string(), String::new());
+                cordiale_core::presence::LARGE_CHANNEL_THRESHOLD
+            ],
+        );
+        assert!(state.denoise_active(&key));
+
+        state
+            .presence_pins
+            .insert("libera #rust".to_string(), PresencePref::Show);
+        assert!(!state.denoise_active(&key));
+
+        state.members.remove(&key);
+        state
+            .presence_pins
+            .insert("libera #rust".to_string(), PresencePref::Hide);
+        assert!(state.denoise_active(&key));
+        assert!(!state.denoise_active(&("libera".to_string(), "#other".to_string())));
+    }
+
+    #[test]
+    fn a_live_presence_line_reaches_the_transcript_only_without_denoise() {
+        let mut state = WorkerState::new();
+        state.presence_pins.clear();
+        let key = ("libera".to_string(), "#rust".to_string());
+        let join = presence_row("join");
+        let chat = presence_row("privmsg");
+        assert!(state.transcript_shows(&key, &join));
+
+        state
+            .presence_pins
+            .insert("libera #rust".to_string(), PresencePref::Hide);
+        assert!(!state.transcript_shows(&key, &join));
+        assert!(state.transcript_shows(&key, &chat));
+
+        state
+            .presence_pins
+            .insert("libera #rust".to_string(), PresencePref::Show);
+        assert!(state.transcript_shows(&key, &join));
     }
 
     #[test]
@@ -26742,6 +27049,7 @@ mod tests {
             italic: false,
             message_id: Some(id),
             server_time: Some(id),
+            presence_noise: false,
         };
         assert_eq!(read_cursor_to_write(&mut state), None);
         state.current_channel = Some(key.clone());
@@ -26780,6 +27088,7 @@ mod tests {
             italic: false,
             message_id: Some(id),
             server_time: Some(id),
+            presence_noise: false,
         };
         let mut state = WorkerState::new();
         let joined = ("libera".to_string(), "#rust".to_string());
@@ -26823,6 +27132,7 @@ mod tests {
             italic: false,
             message_id: Some(id),
             server_time: Some(id),
+            presence_noise: false,
         };
         let mut messages = vec![line(1), line(2), line(900)];
         // The tail arrives newest first, like the default page.
@@ -26843,6 +27153,7 @@ mod tests {
             italic: false,
             message_id: Some(4),
             server_time: Some(4),
+            presence_noise: false,
         }];
         replace_with_history_tail(&mut messages, Vec::new());
         assert_eq!(messages.len(), 1);

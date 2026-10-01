@@ -26,6 +26,7 @@
 //! dependency here. `cordiale-ui` owns the tokio runtime and the thread
 //! this eventually runs on.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use reqwest::Client;
@@ -39,6 +40,7 @@ use crate::admin::{
     AdminSessionLogResponse, AdminSessionsResponse, AdminUploadsResponse, AdminUsersResponse,
     AdminVisitorsResponse,
 };
+use crate::presence::{PresencePins, PresencePref};
 use crate::profile::{
     AddIgnoreRequest, AliasesView, IgnoreEntry, IgnoreMutationResponse, IgnoresResponse,
     NetworkIdentityRequest, NetworkProfileRequest, NotifyAddRequest, PerformUpdateRequest,
@@ -940,10 +942,63 @@ impl GrappaClient {
         token: &str,
         prefs: &DisplayPrefs,
     ) -> Result<(), GrappaClientError> {
+        self.put_display_prefs_merged(token, |merged| {
+            if let Ok(Value::Object(changes)) = serde_json::to_value(prefs) {
+                merged.extend(changes);
+            }
+        })
+        .await
+    }
+
+    /// The channels the account pinned Denoise on or off for, from
+    /// `GET /me/settings/display-prefs`.
+    pub async fn fetch_presence_pins(
+        &self,
+        token: &str,
+    ) -> Result<PresencePins, GrappaClientError> {
         let url = format!("{}/me/settings/display-prefs", self.base_url);
-        // The PUT replaces the whole stored map (wrapped under
-        // `display_prefs`), so the keys Cordiale doesn't edit (time format,
-        // presence filter, ...) are read back first and sent unchanged.
+        let body = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        Ok(PresencePins::from_response(&body))
+    }
+
+    /// Adds `pins` to the account's `presence_filter` map and saves it.
+    /// Pins for other channels, possibly set from another device, stay.
+    pub async fn put_presence_pins(
+        &self,
+        token: &str,
+        pins: &BTreeMap<String, PresencePref>,
+    ) -> Result<(), GrappaClientError> {
+        self.put_display_prefs_merged(token, |merged| {
+            let mut filter = match merged.get("presence_filter") {
+                Some(Value::Object(map)) => map.clone(),
+                _ => serde_json::Map::new(),
+            };
+            for (key, pref) in pins {
+                filter.insert(key.clone(), Value::from(pref.as_str()));
+            }
+            merged.insert("presence_filter".to_string(), Value::Object(filter));
+        })
+        .await
+    }
+
+    /// Reads the stored display preferences, lets `change` edit them and
+    /// saves the result. The PUT replaces the whole stored map (wrapped under
+    /// `display_prefs`), so the keys a caller doesn't edit (time format,
+    /// presence filter, ...) are read back first and sent unchanged.
+    async fn put_display_prefs_merged(
+        &self,
+        token: &str,
+        change: impl FnOnce(&mut serde_json::Map<String, Value>),
+    ) -> Result<(), GrappaClientError> {
+        let url = format!("{}/me/settings/display-prefs", self.base_url);
         let current = self
             .http
             .get(&url)
@@ -957,9 +1012,7 @@ impl GrappaClient {
             Some(Value::Object(map)) => map.clone(),
             _ => serde_json::Map::new(),
         };
-        if let Ok(Value::Object(changes)) = serde_json::to_value(prefs) {
-            merged.extend(changes);
-        }
+        change(&mut merged);
         self.http
             .put(url)
             .bearer_auth(token)
@@ -4770,6 +4823,94 @@ mod tests {
             .update_display_prefs("tok", &prefs)
             .await
             .expect("update");
+    }
+
+    #[tokio::test]
+    async fn fetch_presence_pins_reads_the_map_and_whether_it_was_saved() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "display_prefs": {"presence_filter": {"libera #rust": "hide", "libera #x": 1}},
+                "persisted": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let pins = GrappaClient::new(mock_server.uri())
+            .fetch_presence_pins("tok")
+            .await
+            .expect("pins");
+        assert!(pins.persisted);
+        assert_eq!(
+            pins.pins,
+            BTreeMap::from([("libera #rust".to_string(), PresencePref::Hide)])
+        );
+    }
+
+    #[tokio::test]
+    async fn put_presence_pins_adds_to_the_stored_map_and_keeps_the_rest() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "display_prefs": {
+                    "bold_mentions": false,
+                    "presence_filter": {"libera #other": "hide", "libera #rust": "hide"}
+                },
+                "persisted": true
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/display-prefs"))
+            .and(body_json(serde_json::json!({
+                "display_prefs": {
+                    "bold_mentions": false,
+                    "presence_filter": {"libera #other": "hide", "libera #rust": "show"}
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let pins = BTreeMap::from([("libera #rust".to_string(), PresencePref::Show)]);
+        GrappaClient::new(mock_server.uri())
+            .put_presence_pins("tok", &pins)
+            .await
+            .expect("put");
+    }
+
+    #[tokio::test]
+    async fn put_presence_pins_starts_a_map_when_the_account_has_none() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/display-prefs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "display_prefs": {"time_format": "hms"},
+                "persisted": false
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/display-prefs"))
+            .and(body_json(serde_json::json!({
+                "display_prefs": {
+                    "time_format": "hms",
+                    "presence_filter": {"libera #rust": "hide"}
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let pins = BTreeMap::from([("libera #rust".to_string(), PresencePref::Hide)]);
+        GrappaClient::new(mock_server.uri())
+            .put_presence_pins("tok", &pins)
+            .await
+            .expect("put");
     }
 
     #[tokio::test]
