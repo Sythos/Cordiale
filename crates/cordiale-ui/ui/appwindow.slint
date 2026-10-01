@@ -609,6 +609,8 @@ component DirectoryEntry inherits Rectangle {
     in property <bool> featured;
     in property <bool> joined;
     in property <bool> dark;
+    // Secondary-text color, the window's `palette-muted`.
+    in property <color> muted;
     callback activated();
 
     border-radius: 5px;
@@ -665,7 +667,7 @@ component DirectoryEntry inherits Rectangle {
                 if root.featured : Text {
                     text: @tr("featured");
                     font-size: 11px * FontScale.percent / 100;
-                    color: #808080;
+                    color: root.muted;
                     vertical-alignment: center;
                 }
                 if root.joined : Rectangle {
@@ -689,7 +691,7 @@ component DirectoryEntry inherits Rectangle {
             if root.topic != "" : Text {
                 text: root.topic;
                 font-size: 12px * FontScale.percent / 100;
-                color: #808080;
+                color: root.muted;
                 wrap: word-wrap;
             }
         }
@@ -1207,7 +1209,8 @@ export component AppWindow inherits Window {
     in property <color> palette-bg-alt: #000000;
     in property <color> palette-fg: #ffffff;
     in property <color> palette-accent: #ffffff;
-    in property <color> palette-muted: #808080;
+    // Secondary text; `push_palette` sets it for classic mode and themes alike.
+    in property <color> palette-muted: #666666;
     in property <color> palette-border: #808080;
     in property <string> palette-font: "";
     // The theme's wallpaper, drawn behind every screen while a color theme
@@ -2515,7 +2518,7 @@ export component AppWindow inherits Window {
         }
         Text {
             text: status-text();
-            color: #cc3333;
+            color: theme == "dark" ? #e57373 : #c0392b;
             horizontal-alignment: center;
             wrap: word-wrap;
             accessible-role: AccessibleRole.text;
@@ -2571,7 +2574,7 @@ export component AppWindow inherits Window {
         }
         Text {
             text: status-text();
-            color: #cc3333;
+            color: theme == "dark" ? #e57373 : #c0392b;
             horizontal-alignment: center;
             wrap: word-wrap;
             accessible-role: AccessibleRole.text;
@@ -2633,7 +2636,7 @@ export component AppWindow inherits Window {
         }
         Text {
             text: status-text();
-            color: #cc3333;
+            color: theme == "dark" ? #e57373 : #c0392b;
             horizontal-alignment: center;
             wrap: word-wrap;
             accessible-role: AccessibleRole.text;
@@ -2724,7 +2727,7 @@ export component AppWindow inherits Window {
 
         Text {
             text: status-text();
-            color: #cc3333;
+            color: theme == "dark" ? #e57373 : #c0392b;
             horizontal-alignment: center;
             wrap: word-wrap;
             accessible-role: AccessibleRole.text;
@@ -3149,7 +3152,7 @@ export component AppWindow inherits Window {
                 }
                 if directory-status != "stale" : Text {
                     text: directory-age-text();
-                    color: #808080;
+                    color: palette-muted;
                     vertical-alignment: center;
                     accessible-role: AccessibleRole.text;
                     accessible-label: directory-captured-at == "" ? self.text : @tr("Listed {}", directory-captured-at);
@@ -3180,7 +3183,7 @@ export component AppWindow inherits Window {
                 spacing: 8px;
                 Text {
                     text: directory-error-text();
-                    color: #cc3333;
+                    color: theme == "dark" ? #e57373 : #c0392b;
                     wrap: word-wrap;
                     horizontal-stretch: 1;
                     vertical-alignment: center;
@@ -3195,7 +3198,7 @@ export component AppWindow inherits Window {
 
             if directory-empty-text() != "" : Text {
                 text: directory-empty-text();
-                color: #808080;
+                color: palette-muted;
                 wrap: word-wrap;
                 accessible-role: AccessibleRole.text;
             }
@@ -3209,6 +3212,7 @@ export component AppWindow inherits Window {
                     featured: row.featured;
                     joined: row.joined;
                     dark: theme == "dark";
+                    muted: palette-muted;
                     activated => { directory-channel-activated(row.name); }
                 }
             }
