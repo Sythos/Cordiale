@@ -476,6 +476,7 @@ fn main() -> Result<(), slint::PlatformError> {
     dates::set_language(settings.language);
     push_date_format_examples(&ui);
     ui.set_theme(theme_to_slint(settings.theme));
+    ui.set_palette_muted(slint_color(classic_muted(settings.theme == Theme::Dark)));
     ui.set_font_size_percent(i32::from(settings.effective_font_size_percent()));
     ui.invoke_apply_color_scheme();
     // A built-in color theme applies from the first screen; a Grappa one
@@ -14522,7 +14523,7 @@ fn push_palette(ui: &AppWindow, choice: Option<&ThemeChoice>) {
             ui.set_palette_bg_alt(slint_color(palette.bg_alt));
             ui.set_palette_fg(slint_color(palette.fg));
             ui.set_palette_accent(slint_color(palette.accent));
-            ui.set_palette_muted(slint_color(palette.muted));
+            ui.set_palette_muted(slint_color(palette.muted_text()));
             ui.set_palette_border(slint_color(palette.border));
             ui.set_palette_font(font_family_for(&choice.font_family).into());
             ui.set_palette_active(true);
@@ -14532,6 +14533,7 @@ fn push_palette(ui: &AppWindow, choice: Option<&ThemeChoice>) {
         None => {
             ui.set_palette_active(false);
             let theme = persistence::load_settings().unwrap_or_default().theme;
+            ui.set_palette_muted(slint_color(classic_muted(theme == Theme::Dark)));
             ui.set_theme(theme_to_slint(theme));
         }
     }
@@ -15144,16 +15146,22 @@ fn apply_color_theme(
     });
 }
 
+/// Secondary text in the classic look: at least 4.5:1 on the window
+/// background, on a section card and on a hover tint, in both schemes.
+fn classic_muted(dark_theme: bool) -> (u8, u8, u8) {
+    if dark_theme {
+        (0x96, 0x96, 0x96)
+    } else {
+        (0x66, 0x66, 0x66)
+    }
+}
+
 /// Timestamp-prefix color: readable but visually secondary against either
 /// theme's default text color.
 fn muted_color(dark_theme: bool) -> slint::Color {
-    if let Some(palette) = active_palette() {
-        return slint_color(palette.muted);
-    }
-    if dark_theme {
-        slint::Color::from_rgb_u8(150, 150, 150)
-    } else {
-        slint::Color::from_rgb_u8(110, 110, 110)
+    match active_palette() {
+        Some(palette) => slint_color(palette.muted_text()),
+        None => slint_color(classic_muted(dark_theme)),
     }
 }
 
