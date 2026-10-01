@@ -67,6 +67,7 @@ pub mod protocol;
 pub mod radio;
 pub mod release;
 pub mod rest;
+pub mod security_key;
 pub mod session;
 pub mod share;
 pub mod slash;
