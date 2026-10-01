@@ -140,6 +140,26 @@ pub fn is_channel(name: &str) -> bool {
     name.starts_with(['#', '&', '!', '+'])
 }
 
+/// Whether `target` looks like a channel addressed at one or more membership
+/// levels, using the usual IRC PREFIX symbols until the network snapshot is
+/// available. The UI worker re-checks the target against the network's actual
+/// PREFIX data before building the request; this predicate only keeps the
+/// pure `/msg` grammar from mistaking `@#channel` for a nick.
+pub fn is_statusmsg_target(target: &str) -> bool {
+    const DEFAULT_PREFIXES: [char; 5] = ['~', '&', '@', '%', '+'];
+
+    for (offset, character) in target.char_indices() {
+        if !DEFAULT_PREFIXES.contains(&character) {
+            break;
+        }
+        let remainder = &target[offset + character.len_utf8()..];
+        if is_channel(remainder) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Whether `nick` is an IRC services bot (`NickServ`, `ChanServ`, ...);
 /// messages to them don't open a private window.
 pub fn is_service_nick(nick: &str) -> bool {
@@ -232,7 +252,8 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
         "me" => Action(args.to_string()),
         "msg" => {
             let (target, text) = split_word(args);
-            if target.is_empty() || text.is_empty() || is_channel(target) {
+            let bare_channel_target = is_channel(target) && !is_statusmsg_target(target);
+            if target.is_empty() || text.is_empty() || bare_channel_target {
                 Usage("/msg <nick> <text>")
             } else {
                 Msg {
@@ -653,7 +674,25 @@ mod tests {
                 text: "hi there".to_string()
             })
         );
+        assert_eq!(
+            parse("/msg +#rust hi"),
+            Some(Msg {
+                target: "+#rust".to_string(),
+                text: "hi".to_string()
+            })
+        );
+        assert_eq!(
+            parse("/msg @+#rust hi"),
+            Some(Msg {
+                target: "@+#rust".to_string(),
+                text: "hi".to_string()
+            })
+        );
+        assert!(is_statusmsg_target("@#rust"));
+        assert!(is_statusmsg_target("@+#rust"));
+        assert!(!is_statusmsg_target("+rust"));
         assert!(matches!(parse("/msg #rust hi"), Some(Usage(_))));
+        assert!(matches!(parse("/msg +rust hi"), Some(Usage(_))));
         assert!(matches!(parse("/msg alice"), Some(Usage(_))));
         assert_eq!(
             parse("/notice #rust heads up"),

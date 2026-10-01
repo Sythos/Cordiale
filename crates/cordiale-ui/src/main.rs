@@ -6261,6 +6261,39 @@ fn attachment_error_status(status: Option<u16>) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StatusmsgTarget {
+    /// The channel window where Grappa delivers the message.
+    channel: String,
+    /// The complete membership-level run, for example `@+`.
+    level: String,
+}
+
+/// Peels the longest leading PREFIX run whose remainder is still a channel.
+/// `+` is both a voice marker and an IRC channel sigil, so a greedy peel must
+/// keep walking: `@+#chan` is `@+` over `#chan`, while `@+chan` is `@` over the
+/// modeless `+chan` channel. The server remains authoritative for STATUSMSG;
+/// accepting a PREFIX symbol that it does not advertise simply yields its
+/// normal 400 response.
+fn peel_statusmsg_target(target: &str, prefix_symbols: &[String]) -> Option<StatusmsgTarget> {
+    let mut best = None;
+    for (offset, character) in target.char_indices() {
+        let symbol = character.to_string();
+        if !prefix_symbols.iter().any(|prefix| prefix == &symbol) {
+            break;
+        }
+        let remainder_start = offset + character.len_utf8();
+        let channel = &target[remainder_start..];
+        if slash::is_channel(channel) {
+            best = Some(StatusmsgTarget {
+                channel: channel.to_string(),
+                level: target[..remainder_start].to_string(),
+            });
+        }
+    }
+    best
+}
+
 /// Runs a compose-line slash command (see `cordiale_core::slash`) against
 /// the open window's network. REST calls report failure in the status bar;
 /// WS verbs are fire-and-forget like the member context menu's, their
@@ -6296,17 +6329,29 @@ async fn run_slash_command(
             post_message(&client, &token, &network, &channel, request).await
         }
         SlashCommand::Msg { target, text } => {
-            // Services answer in the window the command was typed in.
-            if !slash::is_service_nick(&target) {
-                send_user_verb(
-                    state,
-                    &network,
-                    "open_query_window",
-                    serde_json::json!({ "target_nick": target }),
-                );
+            let prefix_symbols = cordiale_core::isupport::prefix_symbol_order(
+                state.isupport_by_network.get(&network),
+            );
+            if let Some(statusmsg) = peel_statusmsg_target(&target, &prefix_symbols) {
+                // STATUSMSG is delivered into the underlying channel window;
+                // it is not a query target and must not create a phantom nick
+                // row in the sidebar. The complete target is retained in the
+                // request so Grappa can validate the advertised level.
+                let request = SendMessageRequest::statusmsg(&target, text);
+                post_message(&client, &token, &network, &statusmsg.channel, request).await
+            } else {
+                // Services answer in the window the command was typed in.
+                if !slash::is_service_nick(&target) {
+                    send_user_verb(
+                        state,
+                        &network,
+                        "open_query_window",
+                        serde_json::json!({ "target_nick": target }),
+                    );
+                }
+                let request = SendMessageRequest::plain(text);
+                post_message(&client, &token, &network, &target, request).await
             }
-            let request = SendMessageRequest::plain(text);
-            post_message(&client, &token, &network, &target, request).await
         }
         SlashCommand::Notice { target, text } => {
             let mut request = SendMessageRequest::plain(text);
@@ -19979,6 +20024,35 @@ fn stale_guest_bearer(error: &BootstrapError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statusmsg_targets_peel_the_longest_prefix_run() {
+        let prefixes = cordiale_core::isupport::prefix_symbol_order(None);
+        assert_eq!(
+            peel_statusmsg_target("+#rust", &prefixes),
+            Some(StatusmsgTarget {
+                channel: "#rust".to_string(),
+                level: "+".to_string(),
+            })
+        );
+        assert_eq!(
+            peel_statusmsg_target("@#rust", &prefixes),
+            Some(StatusmsgTarget {
+                channel: "#rust".to_string(),
+                level: "@".to_string(),
+            })
+        );
+        assert_eq!(
+            peel_statusmsg_target("@+#rust", &prefixes),
+            Some(StatusmsgTarget {
+                channel: "#rust".to_string(),
+                level: "@+".to_string(),
+            })
+        );
+        assert_eq!(peel_statusmsg_target("+rust", &prefixes), None);
+        assert_eq!(peel_statusmsg_target("#rust", &prefixes), None);
+        assert_eq!(peel_statusmsg_target("alice", &prefixes), None);
+    }
 
     #[test]
     fn foreground_needs_focus_and_no_minimize() {
