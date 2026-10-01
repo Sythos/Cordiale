@@ -962,6 +962,7 @@ name = "cordiale-ui"
 version = "0.1.13"
 dependencies = [
  "arboard",
+ "base64 0.23.1",
  "chrono",
  "cordiale-core",
  "dark-light",

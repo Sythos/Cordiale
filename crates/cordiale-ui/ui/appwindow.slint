@@ -888,6 +888,10 @@ export component AppWindow inherits Window {
     // The account's factor is a passkey and TOTP isn't armed: the step
     // takes only recovery codes.
     in property <bool> totp-recovery-only: false;
+    // A passkey can finish this sign-in here (issue #160), and whether the
+    // code field is open too (not when a passkey is the only factor).
+    in property <bool> totp-passkey-offered: false;
+    in property <bool> totp-code-accepted: true;
     // Settings > Security, TOTP (issue #118). `security-totp-state` is ""
     // (loading), `enabled`, `disabled`, `client-token` (a per-client token
     // can't manage second factors), `visitor` (a guest or visitor session has
@@ -928,6 +932,12 @@ export component AppWindow inherits Window {
     in property <string> security-passkey-error: "";
     in property <bool> security-passkey-busy: false;
     in-out property <string> security-passkey-password: "";
+    // This platform can run a passkey ceremony (issue #160): sign-in with a
+    // passkey, adding one and changing the mode. The name of the passkey to
+    // add, and the recovery codes shown before passwordless is armed.
+    in property <bool> passkey-available: false;
+    in-out property <string> security-passkey-name: "";
+    in property <[string]> security-passwordless-codes: [];
     // Set only when this server/identifier has a non-empty returned bearer
     // in CredentialStore. The button compares both against the editable
     // server and identifier, hiding it as soon as either value changes.
@@ -1310,6 +1320,14 @@ export component AppWindow inherits Window {
     // The origin used for a server URL and an override text.
     pure callback passkey-origin-preview(string, string) -> string;
     callback security-passkey-delete(string, string); // id, password
+    callback passkey-second-factor-requested();
+    callback passkey-login-requested(string, string); // server URL, identifier
+    callback security-passkey-add(string, string); // name, password
+    callback security-passkey-mode-change(string, string); // "second_factor" or "disabled", password
+    callback security-passwordless-prepare(string); // password
+    callback security-passwordless-activate();
+    callback security-passwordless-cancel();
+    callback security-copy-passwordless-codes();
     callback copy-text-requested(string);
     callback security-copy-recovery-codes();
     callback saved-profile-connect-requested(string, string);
@@ -2122,6 +2140,14 @@ export component AppWindow inherits Window {
             return @tr("This account's second factor is a passkey, which Cordiale can't use yet. Sign in with a per-client token created in Cicchetto, or use Cicchetto.");
         } else if status-kind == "passkey-refused" {
             return @tr("The server refused the passkey. The authenticator may be the wrong one, or the server expects another origin than {}. If it does, enter it under Passkey origin.", passkey-origin-preview(server-url, passkey-origin));
+        } else if status-kind == "passkey-cancelled" {
+            return @tr("The passkey request was cancelled, timed out, or found no passkey for this account.");
+        } else if status-kind == "passkey-no-account" {
+            return @tr("That account doesn't sign in with a passkey alone. Use its password instead.");
+        } else if status-kind == "passkey-busy" {
+            return @tr("Grappa is busy right now. Try again in a moment.");
+        } else if status-kind == "passkey-failed" {
+            return @tr("The passkey request failed.");
         } else if status-kind == "totp-invalid" {
             return @tr("That code isn't valid. Check the clock on your device, or use one of your recovery codes.");
         } else if status-kind == "totp-expired" {
@@ -2382,13 +2408,22 @@ export component AppWindow inherits Window {
             horizontal-alignment: center;
         }
         Text {
-            text: totp-recovery-only
+            text: !totp-code-accepted
+                ? @tr("This account's second factor is a passkey. Use it to finish signing in. The request expires after five minutes.")
+                : totp-recovery-only && passkey-available
+                ? @tr("This account's second factor is a passkey. If you can't use it, enter one of your recovery codes instead: each works only once. The request expires after five minutes.")
+                : totp-recovery-only
                 ? @tr("This account's second factor is a passkey, which Cordiale can't use yet. Enter one of your recovery codes instead: each works only once. The request expires after five minutes.")
                 : @tr("Enter the 6-digit code from your authenticator app, or one of your recovery codes. The request expires after five minutes.");
             wrap: word-wrap;
             horizontal-alignment: center;
         }
-        totp-field := LineEdit {
+        if totp-passkey-offered : Button {
+            text: connecting ? @tr("Waiting for the passkey…") : @tr("Use a passkey");
+            enabled: !connecting;
+            clicked => { passkey-second-factor-requested(); }
+        }
+        if totp-code-accepted : LineEdit {
             placeholder-text: @tr("Code or recovery code");
             accessible-label: @tr("Code or recovery code");
             text <=> totp-code;
@@ -2396,7 +2431,7 @@ export component AppWindow inherits Window {
             init => { self.focus(); }
             accepted => { totp-verify-requested(totp-code); }
         }
-        Button {
+        if totp-code-accepted : Button {
             text: connecting ? @tr("Verifying…") : @tr("Verify");
             enabled: !connecting && totp-code != "";
             clicked => { totp-verify-requested(totp-code); }
@@ -2583,6 +2618,13 @@ export component AppWindow inherits Window {
             text: connecting ? @tr("Connecting…") : @tr("Connect");
             enabled: !connecting && passkey-origin-ok;
             clicked => { connect-requested(server-url, identifier, password); }
+        }
+
+        // A passwordless account: no password, a passkey for the server.
+        if passkey-available : Button {
+            text: @tr("Sign in with a passkey");
+            enabled: !connecting && passkey-origin-ok && identifier != "";
+            clicked => { passkey-login-requested(server-url, identifier); }
         }
 
         if saved-profile-identifier != "" && saved-profile-identifier == identifier && saved-profile-server-url == server-url : Button {
@@ -4555,8 +4597,8 @@ export component AppWindow inherits Window {
                         clicked => { security-passkey-delete(passkey.id, security-passkey-password); }
                     }
                 }
-                // Deleting re-authenticates with the account password.
-                if security-passkey-state == "loaded" && security-passkeys.length > 0 : VerticalLayout {
+                // Every change re-authenticates with the account password.
+                if security-passkey-state == "loaded" && (security-passkeys.length > 0 || passkey-available) && security-passwordless-codes.length == 0 : VerticalLayout {
                     spacing: 6px;
 
                     LineEdit {
@@ -4566,18 +4608,104 @@ export component AppWindow inherits Window {
                         input-type: InputType.password;
                     }
                     Text {
-                        text: @tr("Deleting a passkey asks for the account password.");
+                        text: passkey-available
+                            ? @tr("Every change here asks for the account password; adding a passkey or changing the mode then asks for a passkey too.")
+                            : @tr("Deleting a passkey asks for the account password.");
                         wrap: word-wrap;
                         color: palette-muted;
                     }
                 }
+                // Adding a passkey and switching the mode (issue #160).
+                if passkey-available && security-passkey-state == "loaded" && security-passwordless-codes.length == 0 : HorizontalLayout {
+                    spacing: 6px;
+
+                    LineEdit {
+                        placeholder-text: @tr("Passkey name");
+                        accessible-label: @tr("Passkey name");
+                        text <=> security-passkey-name;
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: @tr("Add a passkey");
+                        enabled: !security-passkey-busy && security-passkey-password != "" && security-passkey-name != "";
+                        clicked => { security-passkey-add(security-passkey-name, security-passkey-password); }
+                    }
+                }
+                if passkey-available && security-passkey-state == "loaded" && security-passkeys.length > 0 && security-passwordless-codes.length == 0 : VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+
+                        if security-passkey-mode != "second_factor" : Button {
+                            text: @tr("Ask for a passkey after the password");
+                            enabled: !security-passkey-busy && security-passkey-password != "";
+                            clicked => { security-passkey-mode-change("second_factor", security-passkey-password); }
+                        }
+                        if security-passkey-mode != "passwordless" : Button {
+                            text: @tr("Sign in with a passkey alone…");
+                            enabled: !security-passkey-busy && security-passkey-password != "";
+                            clicked => { security-passwordless-prepare(security-passkey-password); }
+                        }
+                        if security-passkey-mode != "disabled" : Button {
+                            text: @tr("Turn off passkey sign-in");
+                            enabled: !security-passkey-busy && security-passkey-password != "";
+                            clicked => { security-passkey-mode-change("disabled", security-passkey-password); }
+                        }
+                    }
+                    if security-passkey-mode != "passwordless" : Text {
+                        text: @tr("Signing in with a passkey alone turns off the password and TOTP sign-in. Recovery codes come first, for when the passkey is lost.");
+                        wrap: word-wrap;
+                        color: palette-muted;
+                    }
+                }
+                // Passwordless, step two: the codes are shown before it's armed.
+                if security-passwordless-codes.length > 0 : VerticalLayout {
+                    spacing: 6px;
+
+                    Text {
+                        text: @tr("Save these recovery codes now: they won't be shown again. Once passwordless is on, each one signs you in once without the passkey.");
+                        wrap: word-wrap;
+                        font-weight: 600;
+                    }
+                    for code in security-passwordless-codes : Text {
+                        text: code;
+                        font-family: "monospace";
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+
+                        CompactButton {
+                            text: "📋  " + @tr("Copy codes");
+                            clicked => { security-copy-passwordless-codes(); }
+                        }
+                        Button {
+                            text: @tr("I've saved them, turn on passwordless");
+                            enabled: !security-passkey-busy;
+                            clicked => { security-passwordless-activate(); }
+                        }
+                        Button {
+                            text: @tr("Cancel");
+                            enabled: !security-passkey-busy;
+                            clicked => { security-passwordless-cancel(); }
+                        }
+                    }
+                }
                 if security-passkey-error != "" : Text {
                     text: security-passkey-error == "wrong-password" ? @tr("Wrong password.")
+                        : security-passkey-error == "last-passkey" && passkey-available ? @tr("That's the last passkey and the account still signs in with it. Turn passkey sign-in off or add another passkey first.")
                         : security-passkey-error == "last-passkey" ? @tr("That's the last passkey and the account still signs in with it. Turn passkeys off or add another one in Cicchetto first.")
                         : security-passkey-error == "refused" ? @tr("The server refused the passkey. The authenticator may be the wrong one, or the server expects another origin than {}. If it does, enter it under Passkey origin.", passkey-origin-preview(server-url, passkey-origin))
                         : security-passkey-error == "client-token" ? @tr("A per-client token can't change second factors.")
                         : security-passkey-error == "busy" ? @tr("Grappa is busy right now. Try again in a moment.")
                         : security-passkey-error == "throttled" ? @tr("Too many attempts. Wait a few minutes before trying again.")
+                        : security-passkey-error == "passkey-cancelled" ? @tr("The passkey request was cancelled, timed out, or found no passkey for this account.")
+                        : security-passkey-error == "passkey-failed" ? @tr("The passkey request failed.")
+                        : security-passkey-error == "expired" ? @tr("The recovery codes expired before passwordless was turned on. Start again.")
+                        : security-passkey-error == "add-failed" ? @tr("Couldn't add the passkey.")
+                        : security-passkey-error == "mode-failed" ? @tr("Couldn't change how the account uses passkeys.")
                         : @tr("Couldn't delete the passkey.");
                     wrap: word-wrap;
                     color: theme == "dark" ? #e57373 : #c0392b;
@@ -4624,7 +4752,9 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: @tr("Adding a passkey and changing how the account uses them still happen in Cicchetto: Cordiale can't talk to an authenticator yet. Client tokens and account deletion are managed there too.");
+                    text: passkey-available
+                        ? @tr("Client tokens and account deletion are managed in Cicchetto.")
+                        : @tr("Adding a passkey and changing how the account uses them still happen in Cicchetto: Cordiale can't talk to an authenticator yet. Client tokens and account deletion are managed there too.");
                     wrap: word-wrap;
                     color: palette-muted;
                 }

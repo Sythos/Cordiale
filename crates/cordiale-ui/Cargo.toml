@@ -9,6 +9,8 @@ publish = false
 cordiale-core = { path = "../cordiale-core" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 serde_json = "1"
+# base64url for the WebAuthn wire bodies (already in the tree via the core).
+base64 = "0.23"
 qrcode = { version = "0.14.1", default-features = false }
 rfd = "0.17"
 # GIF, WebP and BMP let `slint::Image` (which decodes with this crate) load
@@ -44,14 +46,17 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "vorbis", "flac"] }
 
 # The taskbar overlay badge: the window handle and ITaskbarList3; the
-# keyboard layout for the Debug page.
+# keyboard layout for the Debug page; the passkey ceremony's structs from
+# webauthn.h, with webauthn.dll itself loaded at run time.
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Globalization",
     "Win32_Graphics_Gdi",
+    "Win32_Networking_WindowsWebServices",
     "Win32_System_Com",
+    "Win32_System_LibraryLoader",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

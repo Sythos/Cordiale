@@ -25,6 +25,7 @@
 slint::include_modules!();
 
 mod admin_uploads;
+mod ceremony;
 mod dates;
 mod debug_info;
 mod home;
@@ -33,6 +34,8 @@ mod player;
 mod reply;
 mod taskbar;
 mod totp;
+#[cfg(windows)]
+mod webauthn_windows;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -61,6 +64,7 @@ use cordiale_core::rest::{
     ActiveThemePair, ArchiveEntry, BootResponse, DateFormat, DirectoryPage, DisplayPrefs,
     LoginRequest, MeResponse, SendMessageRequest,
 };
+use cordiale_core::rest::{PasskeyMode, PasskeyOptions, PasskeyRequestOptions};
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::share;
 use cordiale_core::slash::{self, SlashCommand};
@@ -112,6 +116,25 @@ enum WorkerCommand {
         id: String,
         password: String,
     },
+    /// Signs in with a passkey (issue #160).
+    PasskeySignIn(PasskeySignIn),
+    /// Settings > Security: registers a passkey (name, password).
+    SecurityPasskeyAdd {
+        name: String,
+        password: String,
+    },
+    /// Switches the account to `second_factor` or `disabled`.
+    SecurityPasskeyMode {
+        mode: PasskeyMode,
+        password: String,
+    },
+    /// First step to passwordless: shows the recovery codes.
+    SecurityPasswordlessPrepare(String),
+    /// Arms passwordless once the codes were saved.
+    SecurityPasswordlessActivate,
+    /// Leaves the passwordless step, armed or not: forgets the codes and
+    /// their token.
+    SecurityPasswordlessCancel,
     Connect {
         server_url: String,
         identifier: String,
@@ -403,6 +426,17 @@ impl ConnectCredential {
     fn is_guest_attempt(&self) -> bool {
         matches!(self, Self::FormValue(value) if value.is_empty())
     }
+}
+
+/// Which passkey sign-in the user asked for.
+enum PasskeySignIn {
+    /// The passkey step of a pending password sign-in.
+    SecondFactor,
+    /// A passwordless account, from the connect screen.
+    Passwordless {
+        server_url: String,
+        identifier: String,
+    },
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -727,6 +761,76 @@ fn main() -> Result<(), slint::PlatformError> {
             id: id.to_string(),
             password: password.to_string(),
         });
+    });
+
+    // Passkey ceremonies (issue #160), where the platform can run one.
+    ui.set_passkey_available(ceremony::available());
+    let tx_for_passkey = worker_tx.clone();
+    let weak_for_passkey = ui.as_weak();
+    ui.on_passkey_second_factor_requested(move || {
+        if let Some(ui) = weak_for_passkey.upgrade() {
+            ui.set_connecting(true);
+            ui.set_status_kind("".into());
+        }
+        let _ = tx_for_passkey.send(WorkerCommand::PasskeySignIn(PasskeySignIn::SecondFactor));
+    });
+    let tx_for_passkey = worker_tx.clone();
+    let weak_for_passkey = ui.as_weak();
+    ui.on_passkey_login_requested(move |server_url, identifier| {
+        let server_url = normalize_server_url(&server_url);
+        if let Some(ui) = weak_for_passkey.upgrade() {
+            save_passkey_origin_field(&ui, &server_url);
+            ui.set_server_url(server_url.clone().into());
+            ui.set_connecting(true);
+            ui.set_status_kind("".into());
+            ui.set_status_message("".into());
+        }
+        let _ = tx_for_passkey.send(WorkerCommand::PasskeySignIn(PasskeySignIn::Passwordless {
+            server_url,
+            identifier: identifier.to_string(),
+        }));
+    });
+    let tx_for_passkey = worker_tx.clone();
+    ui.on_security_passkey_add(move |name, password| {
+        let _ = tx_for_passkey.send(WorkerCommand::SecurityPasskeyAdd {
+            name: name.trim().to_string(),
+            password: password.to_string(),
+        });
+    });
+    let tx_for_passkey = worker_tx.clone();
+    ui.on_security_passkey_mode_change(move |mode, password| {
+        if let Some(mode) = passkeys::settable_mode(&mode) {
+            let _ = tx_for_passkey.send(WorkerCommand::SecurityPasskeyMode {
+                mode,
+                password: password.to_string(),
+            });
+        }
+    });
+    let tx_for_passkey = worker_tx.clone();
+    ui.on_security_passwordless_prepare(move |password| {
+        let _ = tx_for_passkey.send(WorkerCommand::SecurityPasswordlessPrepare(
+            password.to_string(),
+        ));
+    });
+    let tx_for_passkey = worker_tx.clone();
+    ui.on_security_passwordless_activate(move || {
+        let _ = tx_for_passkey.send(WorkerCommand::SecurityPasswordlessActivate);
+    });
+    let tx_for_passkey = worker_tx.clone();
+    ui.on_security_passwordless_cancel(move || {
+        let _ = tx_for_passkey.send(WorkerCommand::SecurityPasswordlessCancel);
+    });
+    let weak_for_passkey = ui.as_weak();
+    ui.on_security_copy_passwordless_codes(move || {
+        if let Some(ui) = weak_for_passkey.upgrade() {
+            use slint::Model as _;
+            let codes: Vec<String> = ui
+                .get_security_passwordless_codes()
+                .iter()
+                .map(|code| code.to_string())
+                .collect();
+            copy_text(&codes.join("\n"));
+        }
     });
     ui.on_copy_text_requested(|text| copy_text(&text));
     let weak_for_codes = ui.as_weak();
@@ -2667,6 +2771,9 @@ struct WorkerState {
     pending_totp: Option<PendingTotp>,
     /// The token confirming a TOTP enrolment started in Settings.
     totp_enrollment: Option<String>,
+    /// The token proving the passwordless recovery codes were shown
+    /// (valid ten minutes). A credential: never logged nor on screen.
+    passwordless_recovery_token: Option<String>,
     /// The home page's own state (subject, available networks, row
     /// errors, featured channels); its rows come from the snapshots above.
     home: home::HomeState,
@@ -2756,6 +2863,7 @@ impl WorkerState {
             foreground: false,
             pending_totp: None,
             totp_enrollment: None,
+            passwordless_recovery_token: None,
             home: home::HomeState::default(),
         }
     }
@@ -2908,6 +3016,44 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SecurityPasskeyDelete { id, password }) => {
                         handle_security_passkey_delete(&state, &ui, id, password).await;
+                    }
+                    Some(WorkerCommand::PasskeySignIn(request)) => {
+                        handle_passkey_sign_in(&mut state, &mut session_events, &ui, request)
+                            .await;
+                        if let Some(network) = state.settings_network.clone() {
+                            let ui_for_network = ui.clone();
+                            let loaded_network = network.clone();
+                            let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
+                                ui.set_settings_network(network.into());
+                            });
+                            load_identity_settings(&mut state, &ui, &loaded_network).await;
+                            handle_settings_network_refresh(&state, &ui).await;
+                        }
+                    }
+                    Some(WorkerCommand::SecurityPasskeyAdd { name, password }) => {
+                        let change = PasskeyChange::Add { name, password };
+                        spawn_passkey_change(&state, &ui, &worker_self, change);
+                    }
+                    Some(WorkerCommand::SecurityPasskeyMode { mode, password }) => {
+                        let change = PasskeyChange::Mode { mode, password };
+                        spawn_passkey_change(&state, &ui, &worker_self, change);
+                    }
+                    Some(WorkerCommand::SecurityPasswordlessPrepare(password)) => {
+                        handle_security_passwordless_prepare(&mut state, &ui, password).await;
+                    }
+                    Some(WorkerCommand::SecurityPasswordlessActivate) => {
+                        // Kept until armed: a cancelled prompt can be tried again.
+                        if let Some(recovery_token) = state.passwordless_recovery_token.clone() {
+                            let change = PasskeyChange::Passwordless { recovery_token };
+                            spawn_passkey_change(&state, &ui, &worker_self, change);
+                        }
+                    }
+                    Some(WorkerCommand::SecurityPasswordlessCancel) => {
+                        state.passwordless_recovery_token = None;
+                        let _ = ui.upgrade_in_event_loop(|ui| {
+                            ui.set_security_passwordless_codes(slint::ModelRc::default());
+                            ui.set_security_passkey_error("".into());
+                        });
                     }
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         write_back_read_cursor(&mut state);
@@ -4066,10 +4212,15 @@ struct ConnectContext {
     used_remembered_password: bool,
 }
 
-/// A password sign-in waiting for its TOTP (or recovery) code.
+/// A password sign-in waiting for its second factor: a TOTP (or
+/// recovery) code, a passkey (issue #160), or either.
 struct PendingTotp {
     context: ConnectContext,
-    challenge_token: String,
+    /// `None` when a passkey is the only way to finish.
+    challenge_token: Option<String>,
+    /// The passkey ceremony Grappa offered, while this platform can run
+    /// it and it hasn't been spent on an answer.
+    passkey: Option<Box<PasskeyOptions<PasskeyRequestOptions>>>,
 }
 
 /// Completes a sign-in with Grappa's answer: the session on success, the
@@ -4083,19 +4234,32 @@ async fn finish_connect(
     result: Result<BootstrapOutcome, BootstrapError>,
 ) {
     if let Err(BootstrapError::Login(LoginError::TwoFactorRequired(challenge))) = &result {
-        if let Some(challenge_token) = challenge.challenge_token.clone() {
+        let passkey = challenge
+            .passkey_options
+            .clone()
+            .filter(|_| ceremony::available());
+        if challenge.challenge_token.is_some() || passkey.is_some() {
             persistence::log_line(&format!(
-                "connect needs a TOTP code: server={}",
-                context.server_url
+                "connect needs a second factor: server={} code={} passkey={}",
+                context.server_url,
+                challenge.challenge_token.is_some(),
+                passkey.is_some()
             ));
+            // A passkey account without TOTP: only its recovery codes open
+            // the code door, so the step asks for one of those.
+            let recovery_only = challenge.recovery_code_only();
+            let code_accepted = challenge.challenge_token.is_some();
+            let passkey_offered = passkey.is_some();
             state.pending_totp = Some(PendingTotp {
                 context,
-                challenge_token,
+                challenge_token: challenge.challenge_token.clone(),
+                passkey,
             });
-            // A passkey account without TOTP: only its recovery codes open
-            // this door, so the step asks for one of those.
-            let recovery_only = challenge.recovery_code_only();
-            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_totp_recovery_only(recovery_only));
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_totp_recovery_only(recovery_only);
+                ui.set_totp_code_accepted(code_accepted);
+                ui.set_totp_passkey_offered(passkey_offered);
+            });
             show_totp_step(ui, "");
             return;
         }
@@ -4656,6 +4820,165 @@ async fn handle_security_passkey_delete(
     }
 }
 
+/// A Settings > Security change that needs a passkey ceremony.
+enum PasskeyChange {
+    Add { name: String, password: String },
+    Mode { mode: PasskeyMode, password: String },
+    Passwordless { recovery_token: String },
+}
+
+/// Runs a passkey change in its own task: the system prompt can stay open
+/// for minutes, and the worker keeps serving the session meanwhile. The
+/// password field is cleared up front; the list is read again at the end.
+fn spawn_passkey_change(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    worker_self: &mpsc::UnboundedSender<WorkerCommand>,
+    change: PasskeyChange,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let ui = ui.clone();
+    let worker = worker_self.clone();
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_security_passkey_busy(true);
+        ui.set_security_passkey_error("".into());
+        ui.set_security_passkey_password("".into());
+    });
+    tokio::spawn(async move {
+        let passwordless = matches!(change, PasskeyChange::Passwordless { .. });
+        let key = match run_passkey_change(&client, &token, &ui, change).await {
+            Ok(()) => "",
+            Err(key) => key,
+        };
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_security_passkey_busy(false);
+            ui.set_security_passkey_error(key.into());
+            if key.is_empty() {
+                ui.set_security_passkey_name("".into());
+            }
+            if key == "client-token" {
+                ui.set_security_passkey_state("client-token".into());
+            }
+        });
+        // Armed: the recovery codes and their token are done with.
+        if passwordless && key.is_empty() {
+            let _ = worker.send(WorkerCommand::SecurityPasswordlessCancel);
+        }
+        let _ = worker.send(WorkerCommand::SecurityPasskeysRefresh);
+    });
+}
+
+/// Options, ceremony and answer for one change; the error is the page's
+/// `security-passkey-error` key.
+async fn run_passkey_change(
+    client: &GrappaClient,
+    token: &str,
+    ui: &slint::Weak<AppWindow>,
+    change: PasskeyChange,
+) -> Result<(), &'static str> {
+    let origin = ceremony_origin_for(client.base_url());
+    let options = match change {
+        PasskeyChange::Add { name, password } => {
+            let options = client
+                .start_passkey_registration(token, &password, &name)
+                .await
+                .map_err(|err| {
+                    passkey_change_refused("registration options", &err, "add-failed")
+                })?;
+            let credential =
+                ceremony::run_registration(&options, &origin, passkey_parent(ui).await)
+                    .await
+                    .map_err(|err| passkey_ceremony_failed(&err))?;
+            client
+                .finish_passkey_registration(token, &credential)
+                .await
+                .map_err(|err| passkey_change_refused("registration", &err, "add-failed"))?;
+            return Ok(());
+        }
+        PasskeyChange::Mode { mode, password } => client
+            .start_passkey_mode_change(token, &password, mode)
+            .await
+            .map_err(|err| passkey_change_refused("mode options", &err, "mode-failed"))?,
+        // A 401 here is the recovery token: bound to this session and good
+        // for ten minutes.
+        PasskeyChange::Passwordless { recovery_token } => client
+            .start_passwordless_activation(token, &recovery_token)
+            .await
+            .map_err(|err| {
+                match passkey_change_refused("passwordless options", &err, "mode-failed") {
+                    "refused" => "expired",
+                    key => key,
+                }
+            })?,
+    };
+    let assertion = ceremony::run_assertion(&options, &origin, passkey_parent(ui).await)
+        .await
+        .map_err(|err| passkey_ceremony_failed(&err))?;
+    client
+        .finish_passkey_mode_change(token, &assertion)
+        .await
+        .map_err(|err| passkey_change_refused("mode change", &err, "mode-failed"))?;
+    Ok(())
+}
+
+fn passkey_change_refused(
+    step: &str,
+    err: &GrappaClientError,
+    fallback: &'static str,
+) -> &'static str {
+    persistence::log_line(&format!("passkey {step} refused: {err:?}"));
+    match passkeys::settings_error_key(err) {
+        "failed" | "gone" => fallback,
+        key => key,
+    }
+}
+
+fn passkey_ceremony_failed(err: &ceremony::CeremonyError) -> &'static str {
+    persistence::log_line(&format!("passkey ceremony not run: {err}"));
+    passkeys::ceremony_error_key(err)
+}
+
+/// First step to passwordless: Grappa makes the recovery codes, shown
+/// before anything is armed. They start working only once the passkey
+/// assertion of the second step succeeds.
+async fn handle_security_passwordless_prepare(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    password: String,
+) {
+    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        return;
+    };
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_security_passkey_busy(true);
+        ui.set_security_passkey_error("".into());
+        ui.set_security_passkey_password("".into());
+    });
+    match client.prepare_passwordless(&token, &password).await {
+        Ok(recovery) => {
+            state.passwordless_recovery_token = Some(recovery.recovery_token);
+            let codes = recovery.recovery_codes;
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let codes: Vec<slint::SharedString> = codes.into_iter().map(Into::into).collect();
+                ui.set_security_passwordless_codes(Rc::new(slint::VecModel::from(codes)).into());
+                ui.set_security_passkey_busy(false);
+            });
+        }
+        Err(err) => {
+            let key = passkey_change_refused("passwordless recovery", &err, "mode-failed");
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_security_passkey_busy(false);
+                ui.set_security_passkey_error(key.into());
+                if key == "client-token" {
+                    ui.set_security_passkey_state("client-token".into());
+                }
+            });
+        }
+    }
+}
+
 /// Forgets a share link on screen: it is a credential, so it never outlives
 /// the moment the user is done with it.
 fn clear_share_link(ui: &AppWindow) {
@@ -4900,13 +5223,16 @@ async fn handle_totp_verify(
     let Some(pending) = state.pending_totp.take() else {
         return;
     };
+    let Some(challenge_token) = pending.challenge_token.clone() else {
+        state.pending_totp = Some(pending);
+        return;
+    };
     if code.is_empty() {
         state.pending_totp = Some(pending);
         show_totp_step(ui, "totp-invalid");
         return;
     }
-    let result =
-        bootstrap_with_totp(&pending.context.client, &pending.challenge_token, &code).await;
+    let result = bootstrap_with_totp(&pending.context.client, &challenge_token, &code).await;
     match result {
         Err(BootstrapError::TwoFactor(err)) => {
             persistence::log_line(&format!("totp verify refused: {err:?}"));
@@ -4928,6 +5254,163 @@ async fn handle_totp_verify(
             finish_connect(state, session_events, ui, pending.context, other).await;
         }
     }
+}
+
+/// Signs in with a passkey (issue #160). The options, the ceremony and
+/// the verify go through one client: Grappa binds a challenge to its
+/// caller's address.
+async fn handle_passkey_sign_in(
+    state: &mut WorkerState,
+    session_events: &mut Option<mpsc::UnboundedReceiver<SessionEvent>>,
+    ui: &slint::Weak<AppWindow>,
+    request: PasskeySignIn,
+) {
+    match request {
+        PasskeySignIn::SecondFactor => {
+            handle_passkey_second_factor(state, session_events, ui).await;
+        }
+        PasskeySignIn::Passwordless {
+            server_url,
+            identifier,
+        } => {
+            handle_passkey_login(state, session_events, ui, server_url, identifier).await;
+        }
+    }
+}
+
+/// Finishes the pending password sign-in with a passkey. A ceremony that
+/// didn't run leaves the challenge usable for another try; once Grappa has
+/// answered it is spent, and only the code door (if any) is left.
+async fn handle_passkey_second_factor(
+    state: &mut WorkerState,
+    session_events: &mut Option<mpsc::UnboundedReceiver<SessionEvent>>,
+    ui: &slint::Weak<AppWindow>,
+) {
+    let Some(mut pending) = state.pending_totp.take() else {
+        return;
+    };
+    let Some(options) = pending.passkey.take() else {
+        state.pending_totp = Some(pending);
+        show_totp_step(ui, "");
+        return;
+    };
+    let origin = ceremony_origin_for(&pending.context.server_url);
+    let parent = passkey_parent(ui).await;
+    let assertion = match ceremony::run_assertion(&options, &origin, parent).await {
+        Ok(assertion) => assertion,
+        Err(err) => {
+            persistence::log_line(&format!("passkey second factor not run: {err}"));
+            pending.passkey = Some(options);
+            state.pending_totp = Some(pending);
+            show_totp_step(ui, passkeys::ceremony_error_key(&err));
+            return;
+        }
+    };
+    let verified = pending
+        .context
+        .client
+        .verify_passkey_second_factor(&assertion)
+        .await;
+    match verified {
+        Ok(login) => {
+            let result = bootstrap_with_bearer(&pending.context.client, &login.token).await;
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_totp_code("".into()));
+            finish_connect(state, session_events, ui, pending.context, result).await;
+        }
+        Err(err) => {
+            persistence::log_line(&format!("passkey second factor refused: {err:?}"));
+            let key = passkeys::sign_in_error_key(&err);
+            if pending.challenge_token.is_some() {
+                state.pending_totp = Some(pending);
+                let _ = ui.upgrade_in_event_loop(|ui| ui.set_totp_passkey_offered(false));
+                show_totp_step(ui, key);
+            } else {
+                show_connect_error(ui, key);
+            }
+        }
+    }
+}
+
+/// Signs a passwordless account in from the connect screen: no password,
+/// just a discoverable passkey for the server's RP ID.
+async fn handle_passkey_login(
+    state: &mut WorkerState,
+    session_events: &mut Option<mpsc::UnboundedReceiver<SessionEvent>>,
+    ui: &slint::Weak<AppWindow>,
+    server_url: String,
+    identifier: String,
+) {
+    let server_url = normalize_server_url(&server_url);
+    remember_server_url(&server_url);
+    let identifier = identifier.trim().to_string();
+    let client = GrappaClient::new(server_url.clone());
+    persistence::log_line(&format!(
+        "connect attempt: server={server_url} identifier={identifier} guest=false auth=passkey"
+    ));
+    let options = match client.passkey_login_options(&identifier).await {
+        Ok(options) => options,
+        Err(err) => {
+            persistence::log_line(&format!("passkey sign-in options refused: {err:?}"));
+            show_connect_error(ui, passkeys::sign_in_error_key(&err));
+            return;
+        }
+    };
+    let origin = ceremony_origin_for(&server_url);
+    let parent = passkey_parent(ui).await;
+    let assertion = match ceremony::run_assertion(&options, &origin, parent).await {
+        Ok(assertion) => assertion,
+        Err(err) => {
+            persistence::log_line(&format!("passkey sign-in not run: {err}"));
+            show_connect_error(ui, passkeys::ceremony_error_key(&err));
+            return;
+        }
+    };
+    let verified = client.verify_passkey_login(&assertion).await;
+    let result = match verified {
+        Ok(login) => bootstrap_with_bearer(&client, &login.token).await,
+        Err(err) => {
+            persistence::log_line(&format!("passkey sign-in refused: {err:?}"));
+            show_connect_error(ui, passkeys::sign_in_error_key(&err));
+            return;
+        }
+    };
+    let context = ConnectContext {
+        client,
+        server_url,
+        identifier,
+        is_guest_attempt: false,
+        typed_password: None,
+        used_remembered_password: false,
+    };
+    finish_connect(state, session_events, ui, context, result).await;
+}
+
+/// The origin a ceremony with `server_url` claims: the per-server override
+/// when one is saved, else the one rebuilt from the URL (issue #163).
+fn ceremony_origin_for(server_url: &str) -> String {
+    let saved = persistence::load_passkey_origin_override(server_url);
+    passkey_origin(server_url, saved.as_deref())
+}
+
+/// Cordiale's window, read on the UI thread, for the system passkey
+/// dialog to sit on.
+async fn passkey_parent(ui: &slint::Weak<AppWindow>) -> Option<ceremony::ParentWindow> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let _ = sender.send(ceremony::parent_window(ui.window()));
+    });
+    receiver.await.ok().flatten()
+}
+
+/// Back to the connect screen with `key` under the form.
+fn show_connect_error(ui: &slint::Weak<AppWindow>, key: &'static str) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_connecting(false);
+        ui.set_totp_code("".into());
+        ui.set_screen("connect".into());
+        ui.set_status_message("".into());
+        ui.set_status_kind(key.into());
+    });
 }
 
 async fn handle_select_channel(
@@ -19207,7 +19690,7 @@ fn apply_bootstrap_error(ui: &AppWindow, err: &BootstrapError) {
             ui.set_status_kind("wrong-credentials".into());
         }
         // Only reached without a TOTP challenge: a passkey is the account's
-        // only second factor, which Cordiale doesn't perform.
+        // only second factor, and this platform can't run the ceremony.
         BootstrapError::Login(LoginError::TwoFactorRequired(_)) => {
             ui.set_status_kind("two-factor-passkey-only".into());
         }

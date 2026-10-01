@@ -3035,3 +3035,91 @@ msgstr "Una passkey risponde solo per un'origine esatta. Per questo server Cordi
 msgctxt "AppWindow"
 msgid "Saved."
 msgstr "Salvato."
+
+msgctxt "AppWindow"
+msgid "The passkey request was cancelled, timed out, or found no passkey for this account."
+msgstr "La richiesta della passkey è stata annullata, è scaduta o non ha trovato nessuna passkey per questo account."
+
+msgctxt "AppWindow"
+msgid "That account doesn't sign in with a passkey alone. Use its password instead."
+msgstr "Quell'account non accede con una sola passkey. Usa la sua password."
+
+msgctxt "AppWindow"
+msgid "The passkey request failed."
+msgstr "La richiesta della passkey non è riuscita."
+
+msgctxt "AppWindow"
+msgid "This account's second factor is a passkey. Use it to finish signing in. The request expires after five minutes."
+msgstr "Il secondo fattore di questo account è una passkey. Usala per completare l'accesso. La richiesta scade dopo cinque minuti."
+
+msgctxt "AppWindow"
+msgid "This account's second factor is a passkey. If you can't use it, enter one of your recovery codes instead: each works only once. The request expires after five minutes."
+msgstr "Il secondo fattore di questo account è una passkey. Se non puoi usarla, inserisci uno dei tuoi codici di recupero: ognuno funziona una sola volta. La richiesta scade dopo cinque minuti."
+
+msgctxt "AppWindow"
+msgid "Waiting for the passkey…"
+msgstr "In attesa della passkey…"
+
+msgctxt "AppWindow"
+msgid "Use a passkey"
+msgstr "Usa una passkey"
+
+msgctxt "AppWindow"
+msgid "Sign in with a passkey"
+msgstr "Accedi con una passkey"
+
+msgctxt "AppWindow"
+msgid "Every change here asks for the account password; adding a passkey or changing the mode then asks for a passkey too."
+msgstr "Ogni modifica qui chiede la password dell'account; aggiungere una passkey o cambiare la modalità chiede poi anche una passkey."
+
+msgctxt "AppWindow"
+msgid "Passkey name"
+msgstr "Nome della passkey"
+
+msgctxt "AppWindow"
+msgid "Add a passkey"
+msgstr "Aggiungi una passkey"
+
+msgctxt "AppWindow"
+msgid "Ask for a passkey after the password"
+msgstr "Chiedi una passkey dopo la password"
+
+msgctxt "AppWindow"
+msgid "Sign in with a passkey alone…"
+msgstr "Accedi con una sola passkey…"
+
+msgctxt "AppWindow"
+msgid "Turn off passkey sign-in"
+msgstr "Disattiva l'accesso con passkey"
+
+msgctxt "AppWindow"
+msgid "Signing in with a passkey alone turns off the password and TOTP sign-in. Recovery codes come first, for when the passkey is lost."
+msgstr "Accedere con una sola passkey disattiva l'accesso con password e TOTP. Prima ricevi i codici di recupero, per quando perdi la passkey."
+
+msgctxt "AppWindow"
+msgid "Save these recovery codes now: they won't be shown again. Once passwordless is on, each one signs you in once without the passkey."
+msgstr "Salva subito questi codici di recupero: non verranno mostrati di nuovo. Quando l'accesso senza password è attivo, ognuno ti fa accedere una volta senza la passkey."
+
+msgctxt "AppWindow"
+msgid "I've saved them, turn on passwordless"
+msgstr "Li ho salvati, attiva l'accesso senza password"
+
+msgctxt "AppWindow"
+msgid "That's the last passkey and the account still signs in with it. Turn passkey sign-in off or add another passkey first."
+msgstr "È l'ultima passkey e l'account accede ancora con essa. Prima disattiva l'accesso con passkey o aggiungi un'altra passkey."
+
+msgctxt "AppWindow"
+msgid "The recovery codes expired before passwordless was turned on. Start again."
+msgstr "I codici di recupero sono scaduti prima che l'accesso senza password fosse attivato. Ricomincia."
+
+msgctxt "AppWindow"
+msgid "Couldn't add the passkey."
+msgstr "Impossibile aggiungere la passkey."
+
+msgctxt "AppWindow"
+msgid "Couldn't change how the account uses passkeys."
+msgstr "Impossibile cambiare il modo in cui l'account usa le passkey."
+
+msgctxt "AppWindow"
+msgid "Client tokens and account deletion are managed in Cicchetto."
+msgstr "I token client e l'eliminazione dell'account si gestiscono in Cicchetto."

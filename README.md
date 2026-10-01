@@ -103,11 +103,16 @@ Cordiale also covers:
 - **Account security:** password sign-in can finish Grappa's TOTP challenge
   with an authenticator code or one-time recovery code. Full-session users
   can enable or disable TOTP in Settings > Security and see new recovery
-  codes once. Passkey-only sign-in still needs a share link or client token
-  from Cicchetto; an account whose passkey is backed by recovery codes can
-  sign in with one of those, and a passwordless account can sign in from
-  the connect screen with a one-time recovery code (not yet checked against
-  a live server). Settings > Security also lists the account's passkeys and
+  codes once. On Windows, Cordiale runs the passkey ceremony itself through
+  `webauthn.dll` (Windows Hello, security keys, a phone): passkey as second
+  factor, passwordless sign-in from the connect screen, and in Settings >
+  Security adding a passkey, changing the passkey mode and turning on
+  passwordless (not yet tried with a real authenticator). Elsewhere,
+  passkey-only sign-in still needs a share link or client token from
+  Cicchetto; an account whose passkey is backed by recovery codes can sign
+  in with one of those, and a passwordless account can sign in from the
+  connect screen with a one-time recovery code (not yet checked against a
+  live server). Settings > Security also lists the account's passkeys and
   deletes them with the password.
 - **Session sharing:** Settings > Security makes a single-use link and QR
   code (valid ten minutes) that signs another device into the same account,
@@ -185,13 +190,14 @@ Cordiale also covers:
 
 ## Known gaps
 
-- **Account security:** registering a passkey, signing in with one and
-  changing the passkey mode (Cordiale can't run a WebAuthn ceremony, see
-  `docs/passkey-spike.md`), creating or managing client tokens, and account
-  deletion still live in Cicchetto. TOTP, the passkey list and session
+- **Account security:** outside Windows, registering a passkey, signing in
+  with one and changing the passkey mode (no WebAuthn ceremony there yet,
+  see `docs/passkey-spike.md`), and everywhere creating or managing client
+  tokens and account deletion, still live in Cicchetto. TOTP, the passkey list and session
   sharing work in Cordiale with a full password-backed session; a scoped
   client token cannot use Grappa's account-security endpoints.
 - **Not yet tried against a live server:** passkey listing and deletion,
+  the Windows passkey ceremonies (no real authenticator either),
   session-sharing links, channel-history catch-up after a reconnect, the
   foreground presence reports, the `client_proto` declaration and its `426`
   handling, DM renames by conversation id, declining an invite, your own

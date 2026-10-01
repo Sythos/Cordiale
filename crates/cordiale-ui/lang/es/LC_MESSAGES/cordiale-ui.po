@@ -3035,3 +3035,91 @@ msgstr "Una passkey solo responde para un origen exacto. Para este servidor Cord
 msgctxt "AppWindow"
 msgid "Saved."
 msgstr "Guardado."
+
+msgctxt "AppWindow"
+msgid "The passkey request was cancelled, timed out, or found no passkey for this account."
+msgstr "La solicitud de passkey se canceló, caducó o no encontró ninguna passkey para esta cuenta."
+
+msgctxt "AppWindow"
+msgid "That account doesn't sign in with a passkey alone. Use its password instead."
+msgstr "Esa cuenta no inicia sesión solo con una passkey. Usa su contraseña."
+
+msgctxt "AppWindow"
+msgid "The passkey request failed."
+msgstr "La solicitud de passkey ha fallado."
+
+msgctxt "AppWindow"
+msgid "This account's second factor is a passkey. Use it to finish signing in. The request expires after five minutes."
+msgstr "El segundo factor de esta cuenta es una passkey. Úsala para terminar de iniciar sesión. La solicitud caduca a los cinco minutos."
+
+msgctxt "AppWindow"
+msgid "This account's second factor is a passkey. If you can't use it, enter one of your recovery codes instead: each works only once. The request expires after five minutes."
+msgstr "El segundo factor de esta cuenta es una passkey. Si no puedes usarla, introduce uno de tus códigos de recuperación: cada uno funciona una sola vez. La solicitud caduca a los cinco minutos."
+
+msgctxt "AppWindow"
+msgid "Waiting for the passkey…"
+msgstr "Esperando la passkey…"
+
+msgctxt "AppWindow"
+msgid "Use a passkey"
+msgstr "Usar una passkey"
+
+msgctxt "AppWindow"
+msgid "Sign in with a passkey"
+msgstr "Iniciar sesión con una passkey"
+
+msgctxt "AppWindow"
+msgid "Every change here asks for the account password; adding a passkey or changing the mode then asks for a passkey too."
+msgstr "Cada cambio aquí pide la contraseña de la cuenta; añadir una passkey o cambiar el modo pide además una passkey."
+
+msgctxt "AppWindow"
+msgid "Passkey name"
+msgstr "Nombre de la passkey"
+
+msgctxt "AppWindow"
+msgid "Add a passkey"
+msgstr "Añadir una passkey"
+
+msgctxt "AppWindow"
+msgid "Ask for a passkey after the password"
+msgstr "Pedir una passkey después de la contraseña"
+
+msgctxt "AppWindow"
+msgid "Sign in with a passkey alone…"
+msgstr "Iniciar sesión solo con una passkey…"
+
+msgctxt "AppWindow"
+msgid "Turn off passkey sign-in"
+msgstr "Desactivar el inicio de sesión con passkey"
+
+msgctxt "AppWindow"
+msgid "Signing in with a passkey alone turns off the password and TOTP sign-in. Recovery codes come first, for when the passkey is lost."
+msgstr "Iniciar sesión solo con una passkey desactiva el inicio de sesión con contraseña y TOTP. Primero recibes códigos de recuperación, por si pierdes la passkey."
+
+msgctxt "AppWindow"
+msgid "Save these recovery codes now: they won't be shown again. Once passwordless is on, each one signs you in once without the passkey."
+msgstr "Guarda ahora estos códigos de recuperación: no se volverán a mostrar. Cuando el modo sin contraseña esté activo, cada uno te permite iniciar sesión una vez sin la passkey."
+
+msgctxt "AppWindow"
+msgid "I've saved them, turn on passwordless"
+msgstr "Ya los guardé, activar el modo sin contraseña"
+
+msgctxt "AppWindow"
+msgid "That's the last passkey and the account still signs in with it. Turn passkey sign-in off or add another passkey first."
+msgstr "Es la última passkey y la cuenta todavía inicia sesión con ella. Primero desactiva el inicio de sesión con passkey o añade otra passkey."
+
+msgctxt "AppWindow"
+msgid "The recovery codes expired before passwordless was turned on. Start again."
+msgstr "Los códigos de recuperación caducaron antes de activar el modo sin contraseña. Empieza de nuevo."
+
+msgctxt "AppWindow"
+msgid "Couldn't add the passkey."
+msgstr "No se pudo añadir la passkey."
+
+msgctxt "AppWindow"
+msgid "Couldn't change how the account uses passkeys."
+msgstr "No se pudo cambiar cómo usa la cuenta las passkeys."
+
+msgctxt "AppWindow"
+msgid "Client tokens and account deletion are managed in Cicchetto."
+msgstr "Los tokens de cliente y la eliminación de la cuenta se gestionan en Cicchetto."

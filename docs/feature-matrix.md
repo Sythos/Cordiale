@@ -23,7 +23,7 @@ prima di pianificare.
 | Phoenix Channels realtime (user/network/channel topic) | Sì | Fase 1 | Vedi protocol-notes §2 |
 | network/channel/query, messaggi, stato realtime | Sì | Fase 1 | Perimetro Fase 1 |
 | TOTP (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | Login 202 → /auth/totp/verify; gestione /me/totp con sessione password piena; vedi protocol-notes.md §autenticazione e §superfici solo-account |
-| Passkey/WebAuthn (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto/Wax | Fase 2, parziale (issue #147) | Contratto tipizzato di tutte le route passkey con test su server simulato; Settings → Security mostra modo e passkey e le elimina con la password (sessione password piena). Nessuna ceremonia WebAuthn: aggiunta, cambio modo e login con passkey restano in Cicchetto. Fattibilità per piattaforma (Windows sì via `webauthn.dll`, macOS/Linux solo chiavette USB con PIN) in [`passkey-spike.md`](./passkey-spike.md); non provato su un'istanza reale |
+| Passkey/WebAuthn (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto/Wax | Fase 2, parziale (issue #147) | Contratto tipizzato di tutte le route passkey con test su server simulato; Settings → Security mostra modo e passkey e le elimina con la password (sessione password piena). Su Windows (issue #160, via `webauthn.dll`) anche login con passkey (secondo fattore e passwordless), aggiunta, cambio modo e attivazione passwordless; altrove restano in Cicchetto. Fattibilità per piattaforma in [`passkey-spike.md`](./passkey-spike.md); non provato su un'istanza reale né con un autenticatore |
 | Recovery codes | Verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | /auth/totp/verify accetta anche recovery code; codici nuovi mostrati una volta dopo /me/totp/enrollment/confirm; un account passwordless accede con un recovery code da `/auth/passkeys/recover` (schermata di connessione, issue #162; non provato su un'istanza reale); vedi protocol-notes.md |
 | Eliminazione account | Sì (`DELETE /me`) | — | Superficie solo-account, fuori scope token per-client |
 | Registrazione nuovo account | No / non documentato | — | Nessun endpoint di signup nel contratto; da chiarire (protocol-notes §6.4) |
@@ -165,7 +165,7 @@ scelta. Stato per area:
 | Menu Azioni | Fatto | Stanze, archivio, modi utente, silenzia conversazione, radio, cambia account |
 | Admin | Fatto | Compresi i grant dei vhost ai visitatori; tab Uploads (`GET /admin/uploads`, `DELETE /admin/uploads/:id`): registro con le righe eliminate come storico, budget globale, eliminazione anticipata di un upload attivo con conferma. Nessuna eliminazione per l’utente normale, nessun indicatore di quota personale. Issue #143: l'eliminazione di una rete chiede prima `GET /admin/networks/:id/message_count` (dalla v33 cancella anche tutto lo scrollback) e mostra il numero nella conferma, o dice che non può confermarlo (404 o errore), mai zero; terminate di una sessione account (`DELETE /admin/sessions/:id`) e reconnect di un visitatore (`POST /admin/sessions/:id/reconnect`); featured channels (elenco, aggiunta, abilita/disabilita, elimina); modifica di un server IRC (`PUT`) e di una credenziale (`PATCH`: nick, ident, realname, sasl_user, password). Tutto verificato contro i test wiremock e il sorgente del server, non contro un server reale |
 | Presentazione | Fatto | Avatar GIF/WebP/BMP, badge nativo sulla taskbar di Windows |
-| Token client, eliminazione account; registrazione di passkey, cambio modo e login con passkey | Lasciato a Cicchetto | Cicchetto è integrato in Grappa, Cordiale no. TOTP (con recovery code), condivisione di sessione ed elenco/eliminazione delle passkey ci sono (righe sopra); una passkey-only entra con un link di condivisione o un token client, o con un recovery code se ne ha. Nessuna ceremonia WebAuthn (#147, `passkey-spike.md`) |
+| Token client, eliminazione account; registrazione di passkey, cambio modo e login con passkey fuori da Windows | Lasciato a Cicchetto | Cicchetto è integrato in Grappa, Cordiale no. TOTP (con recovery code), condivisione di sessione ed elenco/eliminazione delle passkey ci sono (righe sopra); la ceremonia WebAuthn c'è solo su Windows (#160, non provata); altrove una passkey-only entra con un link di condivisione o un token client, o con un recovery code se ne ha (`passkey-spike.md`) |
 
 Limiti di piattaforma restanti: niente trascinamento di file su Wayland,
 badge solo su Windows, pulsanti e menu con lo stile dei widget di Slint;
@@ -186,7 +186,7 @@ provate contro un server reale**:
 | Profilo proprio per rete | Implementato | Campi CTCP USERINFO e avatar in Settings → General (`PATCH /networks/:slug/profile`, `PUT`/`DELETE .../avatar`) |
 | Rifiuto di un invito | Implementato | Vedi la riga Inviti sopra |
 | Condivisione di sessione | Implementato | Vedi la riga sopra |
-| Passkey | Parziale | Elenco ed eliminazione con la password; nessuna ceremonia WebAuthn, #147 aperta |
+| Passkey | Parziale | Elenco ed eliminazione con la password; ceremonia WebAuthn solo su Windows (#160, non provata con un autenticatore) |
 | Pagina Debug | Implementato | Vedi la tabella del 2026-09-25; da provare a mano su Windows, macOS e Linux |
 
 ## Voci ancora da chiarire prima di poter classificare

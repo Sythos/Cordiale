@@ -19,7 +19,7 @@ autenticatore a disposizione. Le verifiche sono tutte sul codice.
 
 | Piattaforma | Meccanismo | Verdetto |
 |---|---|---|
-| Windows 10 1903+ / 11 | API client di `webauthn.dll` (`WebAuthNAuthenticatorGetAssertion` / `MakeCredential`) | **Fattibile ora**: il crate `windows` 0.62 già nel progetto la espone, il chiamante fornisce il `clientDataJSON`. Non implementata in questo ramo (vedi "Perché Windows non è ancora implementato") |
+| Windows 10 1903+ / 11 | API client di `webauthn.dll` (`WebAuthNAuthenticatorGetAssertion` / `MakeCredential`) | **Implementata (issue #160), non provata**: strutture del crate `windows` 0.62, DLL caricata a runtime, il chiamante fornisce il `clientDataJSON` (vedi "Windows: com'è implementata") |
 | macOS, passkey di piattaforma/iCloud | AuthenticationServices | **Non fattibile**: richiede app firmata con Team ID Apple, entitlement `webcredentials:` e un file `apple-app-site-association` su **ogni** server Grappa |
 | macOS, chiavette USB | CTAP2 su HID diretto | **Fattibile con riserva**: solo chiavi fisiche con PIN, niente copertura CI su macOS |
 | Linux | CTAP2 su hidraw (nessuna API di sistema) | **Fattibile con riserva**: solo chiavi fisiche USB con PIN; passkey sincronizzate e telefono (hybrid) irraggiungibili |
@@ -273,34 +273,52 @@ simulato:
   (`totp_available: false`), il passo codice chiede un recovery code invece
   del codice dell'app.
 
-## Perché Windows non è ancora implementato
+## Windows: com'è implementata (issue #160)
 
-Il verdetto "fattibile ora" dice che la strada esiste e non richiede
-dipendenze nuove, non che sia prudente scriverla alla cieca:
+La ricetta di §a e §b, scritta senza compilatore locale (la compilazione la
+fa il CI su `windows-latest`) e **mai provata con un autenticatore reale**:
 
-- è FFI `unsafe` su strutture versionate (`dwVersion` di opzioni, client
-  data, asserzione e attestazione da scegliere in base a
-  `WebAuthNGetApiVersionNumber`), più il passaggio dell'`HWND` dal thread UI
-  e una chiamata bloccante da spostare fuori dal worker;
-- in questo ramo non c'erano né un compilatore funzionante né un
-  autenticatore: nessuna delle due metà (codice e comportamento di Windows)
-  sarebbe stata verificata;
-- l'origine va ricostruita (§a) e un'ipotesi sbagliata torna come `401
-  invalid_two_factor` opaco, indistinguibile da un errore dell'autenticatore;
-- il piano stesso dell'issue chiede prima una conferma contro un'istanza
-  reale con `GRAPPA_PASSKEY_ORIGIN` noto.
-
-La ricetta per il passo successivo è in §a e §b: `clientDataJSON` con
-`type`, `challenge` (base64url senza padding) e origine esatta; RP ID =
-`rp_id` delle opzioni; UV `REQUIRED`; attestazione `NONE` (e oggetto
-ricostruito in formato `none`); opzioni e verifica dalla stessa connessione.
+- **Separazione.** `crates/cordiale-ui/src/ceremony.rs` è la cucitura
+  indipendente dalla piattaforma: tipi di richiesta e risposta già
+  decodificati, `available()`, `get_assertion()` e `make_credential()` che
+  passano al backend della piattaforma (altrove rispondono `Unsupported`),
+  più le funzioni pure con i test che girano anche su Linux:
+  `clientDataJSON`, base64url, corpi JSON di Grappa e oggetto di
+  attestazione `none`. Tutto l'FFI `unsafe` sta in `webauthn_windows.rs`.
+- **Caricamento.** `webauthn.dll` è caricata a runtime da System32
+  (`LoadLibraryExW` + `GetProcAddress`), non collegata: con l'import diretto
+  del crate `windows` un sistema senza la DLL non avvierebbe Cordiale. Serve
+  `WebAuthNGetApiVersionNumber` (Windows 10 1903+); senza, i pulsanti passkey
+  non compaiono.
+- **Ceremonia.** `clientDataJSON` costruito da Cordiale (`type`,
+  `challenge` base64url senza padding, `origin`, `crossOrigin: false`); RP ID
+  = `rp_id` delle opzioni; UV `REQUIRED`; strutture di opzioni alla
+  versione più vecchia che basta (versione 4 di `MakeCredential` solo per
+  `bPreferResidentKey`, con API 3+); elenco `allow_credentials` vuoto sulla
+  porta passwordless (credenziale discoverable); attestazione
+  `NONE`, e l'oggetto inviato a Grappa è comunque ricostruito come
+  `{fmt: "none", attStmt: {}, authData}` dai `pbAuthenticatorData`.
+- **Origine.** Quella di §a (override per server se salvato, altrimenti
+  dall'URL); se il suo host non coincide con `rp_id` si usa
+  `https://<rp_id>`, perché un'origine con un altro host non può passare.
+- **Thread.** L'`HWND` della finestra è letto sul thread UI; la chiamata
+  bloccante gira con `spawn_blocking`. In Settings la ceremonia gira in un
+  task a parte, così la sessione continua mentre il dialogo è aperto.
+- **Flussi.** Secondo fattore (pulsante "Usa una passkey" nel passo del
+  codice, anche quando la passkey è l'unico fattore), login passwordless
+  dalla schermata di connessione, aggiunta di una passkey, cambio modo
+  (`second_factor`/`disabled`) e attivazione passwordless in due passi
+  (codici mostrati prima). Opzioni e verifica passano dallo stesso client.
+- **Errori.** Annullata, scaduta o "nessuna passkey qui" danno lo stesso
+  messaggio (Windows non li distingue in modo affidabile); il codice
+  `HRESULT` va nel log. Un `401 invalid_two_factor` resta opaco (§a).
 
 ## Cosa resta aperto
 
-1. **Ceremonia su Windows** via `webauthn.dll` (secondo fattore, passwordless,
-   registrazione, cambio modo, attivazione passwordless; vedi "Perché Windows
-   non è ancora implementato"), da provare contro un'istanza Grappa di prova
-   con `GRAPPA_PASSKEY_ORIGIN` noto e una chiave o Windows Hello reali.
+1. **Prova su Windows** della ceremonia (secondo fattore, passwordless,
+   registrazione, cambio modo, attivazione passwordless; vedi "Windows: com'è
+   implementata") contro un'istanza Grappa di prova con
+   `GRAPPA_PASSKEY_ORIGIN` noto, con Windows Hello e con una chiavetta USB.
 2. **Chiavette USB su Linux/macOS** con `ctap-hid-fido2`: PIN nell'interfaccia,
    ricodifica dell'attestazione in `none`, prova del build C di hidapi in CI.
 3. **Origine**: regola di ricostruzione e override per server fatti (§a);
