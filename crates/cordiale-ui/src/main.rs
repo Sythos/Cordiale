@@ -5509,7 +5509,8 @@ async fn handle_select_channel(
             .window_states
             .get(&window_state_key(&network, &channel))
             == Some(&ChannelWindowState::Joined);
-    let can_moderate = is_own_nick_an_op(&members, &identifier);
+    let ranking = MemberRanking::new(state.isupport_by_network.get(&network));
+    let can_moderate = is_own_nick_an_op(&members, &identifier, &ranking);
     let dark_theme = state.theme == Theme::Dark;
     refresh_mention_context(state);
     let casemapping = network_casemapping(state, &network);
@@ -5537,7 +5538,7 @@ async fn handle_select_channel(
         let model =
             chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise);
         show_chat_lines(&ui, model);
-        let member_rows = members_model(&members, dark_theme);
+        let member_rows = members_model(&members, dark_theme, &ranking);
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
@@ -5926,9 +5927,6 @@ fn remove_sidebar_channel_entry(
     entries.len() != previous_len
 }
 
-/// Whether `identifier` appears in `members` with the `@` (op) prefix —
-/// gates `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items, as
-/// accurate as `members` (snapshots plus live MODE changes).
 /// The subject label for the realtime topics: `/me`'s label when it gives
 /// one, otherwise `guest` for a guest sign-in and the typed name for an
 /// account (older servers).
@@ -5942,10 +5940,14 @@ fn realtime_identifier(me: &MeResponse, guest: bool, typed: &str) -> String {
     })
 }
 
-fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str) -> bool {
+/// Whether `identifier` appears in `members` holding op or any role the
+/// network ranks above it — gates `MemberContextMenu`'s
+/// Op/Deop/Voice/Devoice/Kick/Ban items, as accurate as `members`
+/// (snapshots plus live MODE changes).
+fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str, ranking: &MemberRanking) -> bool {
     members
         .iter()
-        .any(|(name, prefix)| name == identifier && prefix.contains('@'))
+        .any(|(name, prefix)| name == identifier && ranking.is_op_or_above(prefix))
 }
 
 async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
@@ -11801,13 +11803,13 @@ fn apply_members_seeded(state: &mut WorkerState, payload: &Value) -> Option<(Str
     let network = payload.get("network").and_then(Value::as_str)?.to_string();
     let channel = payload.get("channel").and_then(Value::as_str)?.to_string();
     let list = payload.get("members").and_then(Value::as_array)?;
-    let order =
-        cordiale_core::isupport::prefix_symbol_order(state.isupport_by_network.get(&network));
+    let isupport = state.isupport_by_network.get(&network);
+    let order = cordiale_core::isupport::prefix_symbol_order(isupport);
     let mut members: Vec<MemberEntry> = list
         .iter()
-        .filter_map(|entry| member_from_entry(entry, &order))
+        .filter_map(|entry| member_from_entry(entry, &order, isupport))
         .collect();
-    sort_members_by_rank(&mut members);
+    sort_members_by_rank(&mut members, &order);
     let key = (network, channel);
     state.members.insert(key.clone(), members);
     Some(key)
@@ -11821,10 +11823,11 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
         return;
     }
     let members = state.members.get(key).cloned().unwrap_or_default();
+    let ranking = MemberRanking::new(state.isupport_by_network.get(&key.0));
     let can_moderate = state
         .identifier
         .as_deref()
-        .is_some_and(|identifier| is_own_nick_an_op(&members, identifier));
+        .is_some_and(|identifier| is_own_nick_an_op(&members, identifier, &ranking));
     let dark_theme = state.theme == Theme::Dark;
     refresh_mention_context(state);
     let lines = state.messages.get(key).cloned().unwrap_or_default();
@@ -11834,7 +11837,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_can_moderate_members(can_moderate);
         ui.set_current_denoise(denoise);
-        let member_rows = members_model(&members, dark_theme);
+        let member_rows = members_model(&members, dark_theme, &ranking);
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
         let chat_lines =
@@ -11862,12 +11865,14 @@ fn update_members_from_frame(
     match kind {
         Some("join") => {
             let Some(nick) = nick else { return false };
+            let order =
+                cordiale_core::isupport::prefix_symbol_order(state.isupport_by_network.get(&key.0));
             let members = state.members.entry(key.clone()).or_default();
             if members.iter().any(|(name, _)| name == nick) {
                 return false;
             }
             members.push((nick.to_string(), String::new()));
-            sort_members_by_rank(members);
+            sort_members_by_rank(members, &order);
             true
         }
         Some("part") | Some("quit") => {
@@ -11889,6 +11894,8 @@ fn update_members_from_frame(
             ) else {
                 return false;
             };
+            let order =
+                cordiale_core::isupport::prefix_symbol_order(state.isupport_by_network.get(&key.0));
             let Some(members) = state.members.get_mut(key) else {
                 return false;
             };
@@ -11896,7 +11903,7 @@ fn update_members_from_frame(
                 return false;
             };
             entry.0 = new_nick.to_string();
-            sort_members_by_rank(members);
+            sort_members_by_rank(members, &order);
             true
         }
         // Real, observed shape (a screenshot caught this leaking as raw
@@ -11930,7 +11937,7 @@ fn update_members_from_frame(
                 changed = true;
             }
             if changed {
-                sort_members_by_rank(members);
+                sort_members_by_rank(members, &order);
             }
             changed
         }
@@ -12908,19 +12915,67 @@ fn highest_prefix(prefix: &str) -> &str {
 }
 type MembersByChannel = HashMap<(String, String), Vec<MemberEntry>>;
 
+/// Where a role symbol sits in the network's PREFIX, for sorting and for
+/// the moderation gate.
+struct MemberRanking {
+    /// The network's role symbols, highest first (`prefix_symbol_order`).
+    order: Vec<String>,
+    /// Index in `order` of the op symbol (the one the `o` mode grants), or
+    /// `None` when the network has no op level.
+    op_rank: Option<usize>,
+}
+
+impl MemberRanking {
+    fn new(isupport: Option<&IsupportState>) -> Self {
+        let order = cordiale_core::isupport::prefix_symbol_order(isupport);
+        let op_rank = cordiale_core::isupport::prefix_symbol_for_mode(isupport, "o")
+            .and_then(|op| order.iter().position(|symbol| *symbol == op));
+        Self { order, op_rank }
+    }
+
+    /// Whether `prefix` (a member's role symbols, highest first) holds op or
+    /// something the network ranks above it.
+    fn is_op_or_above(&self, prefix: &str) -> bool {
+        self.op_rank
+            .is_some_and(|op_rank| prefix_rank(prefix, &self.order) <= op_rank)
+    }
+}
+
+/// Index in `order` (highest first) of the highest symbol in `prefix`; a
+/// plain member or an unknown symbol ranks after every known one.
+fn prefix_rank(prefix: &str, order: &[String]) -> usize {
+    let top = highest_prefix(prefix);
+    if top.is_empty() {
+        return order.len();
+    }
+    order
+        .iter()
+        .position(|symbol| symbol.as_str() == top)
+        .unwrap_or(order.len())
+}
+
 /// Parses one member list entry: either a plain string with an optional
 /// leading role-prefix character (`"@nick"`, `"+nick"`, `"nick"`), or an
 /// object carrying a `nick`/`name` field plus either an explicit `prefix`
 /// string or a `modes` array. Grappa's real wire shape (`members_seeded`,
-/// `names_reply`) puts role sigils (`~`/`&`/`@`/`%`/`+`, taken from the
-/// network's ISUPPORT PREFIX) directly in `modes`, not mode letters —
-/// letters (`q`/`a`/`o`/`h`/`v`) are still accepted for backwards
-/// compatibility. `order` ranks the symbols highest first (see
-/// `prefix_symbol_order`), so a member holding several roles ends up
-/// stored with its highest one leading.
-fn member_from_entry(entry: &Value, order: &[String]) -> Option<MemberEntry> {
+/// `names_reply`) puts role sigils, taken from the network's ISUPPORT
+/// PREFIX, directly in `modes`, not mode letters — letters are still
+/// accepted for backwards compatibility and mapped through that same
+/// PREFIX (`isupport`; the usual `qaohv` ladder before its snapshot).
+/// `order` holds the network's symbols highest first (see
+/// `prefix_symbol_order`): it decides which symbols count as roles, and a
+/// member holding several ends up stored with its highest one leading.
+fn member_from_entry(
+    entry: &Value,
+    order: &[String],
+    isupport: Option<&IsupportState>,
+) -> Option<MemberEntry> {
     if let Some(raw) = entry.as_str() {
-        let name = raw.trim_start_matches(|c| "@%+&~".contains(c));
+        let name = raw.trim_start_matches(|c: char| {
+            order
+                .iter()
+                .any(|symbol| symbol.chars().eq(std::iter::once(c)))
+        });
         let prefix = raw[..raw.len() - name.len()].to_string();
         return Some((name.to_string(), prefix));
     }
@@ -12937,25 +12992,18 @@ fn member_from_entry(entry: &Value, order: &[String]) -> Option<MemberEntry> {
         .map(str::to_string)
         .or_else(|| {
             obj.get("modes").and_then(Value::as_array).map(|modes| {
-                let mut symbols: Vec<&str> = modes
+                let mut symbols: Vec<String> = modes
                     .iter()
                     .filter_map(Value::as_str)
-                    .filter_map(|held| match held {
-                        "~" | "&" | "@" | "%" | "+" => Some(held),
-                        "q" => Some("~"),
-                        "a" => Some("&"),
-                        "o" => Some("@"),
-                        "h" => Some("%"),
-                        "v" => Some("+"),
-                        _ => None,
+                    .filter_map(|held| {
+                        if order.iter().any(|symbol| symbol.as_str() == held) {
+                            Some(held.to_string())
+                        } else {
+                            cordiale_core::isupport::prefix_symbol_for_mode(isupport, held)
+                        }
                     })
                     .collect();
-                symbols.sort_by_key(|symbol| {
-                    order
-                        .iter()
-                        .position(|held| held.as_str() == *symbol)
-                        .unwrap_or(order.len())
-                });
+                symbols.sort_by_key(|symbol| prefix_rank(symbol, order));
                 symbols.concat()
             })
         })
@@ -12963,20 +13011,13 @@ fn member_from_entry(entry: &Value, order: &[String]) -> Option<MemberEntry> {
     Some((name, prefix))
 }
 
-/// Ops first, then halfops, then voice, then everyone else — each group
-/// alphabetical (case-insensitive) within itself.
-fn sort_members_by_rank(members: &mut [MemberEntry]) {
-    const RANK_ORDER: &str = "~&@%+";
-    let rank = |prefix: &str| {
-        prefix
-            .chars()
-            .next()
-            .and_then(|c| RANK_ORDER.find(c))
-            .unwrap_or(RANK_ORDER.len())
-    };
+/// Highest role first as the network's PREFIX ranks them (`order`, see
+/// `prefix_symbol_order`), then everyone else — each group alphabetical
+/// (case-insensitive) within itself.
+fn sort_members_by_rank(members: &mut [MemberEntry], order: &[String]) {
     members.sort_by(|(name_a, prefix_a), (name_b, prefix_b)| {
-        rank(prefix_a)
-            .cmp(&rank(prefix_b))
+        prefix_rank(prefix_a, order)
+            .cmp(&prefix_rank(prefix_b, order))
             .then_with(|| name_a.to_lowercase().cmp(&name_b.to_lowercase()))
     });
 }
@@ -14061,11 +14102,12 @@ fn members_average_probe(rows: &[MemberRow]) -> String {
     "n".repeat(total.div_ceil(rows.len()))
 }
 
-/// The color of a member's role marker: the theme's op, halfop or voice
-/// color, or the nick's own color on the classic look.
-fn role_color(prefix: &str, nick_rgb: (u8, u8, u8)) -> slint::Color {
+/// The color of a member's role marker: the theme's op color for op and
+/// anything the network ranks above it, then the halfop and voice colors,
+/// or the nick's own color on the classic look and for any other role.
+fn role_color(prefix: &str, nick_rgb: (u8, u8, u8), ranking: &MemberRanking) -> slint::Color {
     let rgb = match (active_palette(), prefix.chars().next()) {
-        (Some(palette), Some('~' | '&' | '@')) => palette.mode_op,
+        (Some(palette), _) if ranking.is_op_or_above(prefix) => palette.mode_op,
         (Some(palette), Some('%')) => palette.mode_halfop,
         (Some(palette), Some('+')) => palette.mode_voiced,
         _ => nick_rgb,
@@ -14073,13 +14115,17 @@ fn role_color(prefix: &str, nick_rgb: (u8, u8, u8)) -> slint::Color {
     slint_color(rgb)
 }
 
-fn members_model(members: &[MemberEntry], dark_theme: bool) -> Vec<MemberRow> {
+fn members_model(
+    members: &[MemberEntry],
+    dark_theme: bool,
+    ranking: &MemberRanking,
+) -> Vec<MemberRow> {
     members
         .iter()
         .map(|(name, prefix)| {
             let (r, g, b) = nick_color(name, dark_theme);
             MemberRow {
-                prefix_color: role_color(prefix, (r, g, b)),
+                prefix_color: role_color(prefix, (r, g, b), ranking),
                 name: name.clone().into(),
                 prefix: highest_prefix(prefix).into(),
                 color: slint::Color::from_rgb_u8(r, g, b),
@@ -15022,6 +15068,7 @@ fn apply_color_theme(
                 state.members.get(key).cloned().unwrap_or_default(),
                 network_casemapping(state, &key.0),
                 state.denoise_active(key),
+                MemberRanking::new(state.isupport_by_network.get(&key.0)),
             )
         });
     let dark_theme = state.theme == Theme::Dark;
@@ -15031,7 +15078,7 @@ fn apply_color_theme(
         push_palette(&ui, choice.as_ref());
         if let Some(lines) = current_lines {
             let model = match &current_roster {
-                Some((members, casemapping, denoise)) => chat_lines_model_with_roster(
+                Some((members, casemapping, denoise, _)) => chat_lines_model_with_roster(
                     &lines,
                     dark_theme,
                     members,
@@ -15042,8 +15089,8 @@ fn apply_color_theme(
             };
             show_chat_lines(&ui, model);
         }
-        if let Some((members, _, _)) = current_roster {
-            let rows = members_model(&members, dark_theme);
+        if let Some((members, _, _, ranking)) = current_roster {
+            let rows = members_model(&members, dark_theme, &ranking);
             ui.set_channel_members(Rc::new(slint::VecModel::from(rows)).into());
         }
     });
@@ -24200,7 +24247,7 @@ mod tests {
         assert_eq!(highest_prefix("@+"), "@");
         assert_eq!(highest_prefix(""), "");
         assert_eq!(
-            member_from_entry(&serde_json::json!("@+ada"), &order),
+            member_from_entry(&serde_json::json!("@+ada"), &order, None),
             Some(("ada".to_string(), "@+".to_string()))
         );
     }
@@ -24214,30 +24261,271 @@ mod tests {
         assert_eq!(
             member_from_entry(
                 &serde_json::json!({"nick": "bob", "modes": ["+", "@"]}),
-                &order
+                &order,
+                None
             ),
             Some(("bob".to_string(), "@+".to_string()))
         );
         assert_eq!(
-            member_from_entry(&serde_json::json!({"nick": "ann", "modes": []}), &order),
+            member_from_entry(
+                &serde_json::json!({"nick": "ann", "modes": []}),
+                &order,
+                None
+            ),
             Some(("ann".to_string(), String::new()))
         );
         assert_eq!(
-            member_from_entry(&serde_json::json!({"nick": "eve", "modes": ["~"]}), &order),
+            member_from_entry(
+                &serde_json::json!({"nick": "eve", "modes": ["~"]}),
+                &order,
+                None
+            ),
             Some(("eve".to_string(), "~".to_string()))
         );
         // Mode letters are still accepted for backwards compatibility.
         assert_eq!(
             member_from_entry(
                 &serde_json::json!({"nick": "cy", "modes": ["v", "o"]}),
-                &order
+                &order,
+                None
             ),
             Some(("cy".to_string(), "@+".to_string()))
         );
         // Unknown entries in `modes` are ignored rather than kept verbatim.
         assert_eq!(
-            member_from_entry(&serde_json::json!({"nick": "gus", "modes": ["x"]}), &order),
+            member_from_entry(
+                &serde_json::json!({"nick": "gus", "modes": ["x"]}),
+                &order,
+                None
+            ),
             Some(("gus".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn member_from_entry_maps_owner_and_admin_letters_before_a_snapshot() {
+        let order = cordiale_core::isupport::prefix_symbol_order(None);
+        assert_eq!(
+            member_from_entry(
+                &serde_json::json!({"nick": "own", "modes": ["o", "a", "q"]}),
+                &order,
+                None
+            ),
+            Some(("own".to_string(), "~&@".to_string()))
+        );
+    }
+
+    /// A snapshot whose PREFIX holds exactly these `(letter, symbol)` pairs,
+    /// highest first.
+    fn network_with_prefix(pairs: &[(&str, &str)]) -> IsupportState {
+        let mut state = parse_isupport_changed(&isupport_payload(7, "rfc1459", 4096))
+            .expect("valid snapshot")
+            .state;
+        state.prefix = pairs
+            .iter()
+            .map(|(letter, symbol)| (letter.to_string(), symbol.to_string()))
+            .collect();
+        state.prefix_order = pairs.iter().map(|(letter, _)| letter.to_string()).collect();
+        state
+    }
+
+    /// Seeds `entries` through `members_seeded` on a network with this
+    /// snapshot and returns the stored roster.
+    fn seeded_roster(isupport: &IsupportState, entries: Value) -> Vec<MemberEntry> {
+        let mut state = WorkerState::new();
+        state
+            .isupport_by_network
+            .insert("net".to_string(), isupport.clone());
+        let key = apply_members_seeded(
+            &mut state,
+            &serde_json::json!({"network": "net", "channel": "#c", "members": entries}),
+        )
+        .expect("members_seeded applies");
+        state.members.get(&key).cloned().unwrap_or_default()
+    }
+
+    fn roster(pairs: &[(&str, &str)]) -> Vec<MemberEntry> {
+        pairs
+            .iter()
+            .map(|(name, prefix)| (name.to_string(), prefix.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn member_roles_on_a_full_prefix_ladder() {
+        let network =
+            network_with_prefix(&[("q", "~"), ("a", "&"), ("o", "@"), ("h", "%"), ("v", "+")]);
+        let members = seeded_roster(
+            &network,
+            serde_json::json!([
+                {"nick": "zed", "modes": []},
+                {"nick": "vic", "modes": ["+"]},
+                {"nick": "hal", "modes": ["h"]},
+                {"nick": "opy", "modes": ["+", "o"]},
+                {"nick": "adm", "modes": ["&"]},
+                {"nick": "own", "modes": ["q"]},
+            ]),
+        );
+        assert_eq!(
+            members,
+            roster(&[
+                ("own", "~"),
+                ("adm", "&"),
+                ("opy", "@+"),
+                ("hal", "%"),
+                ("vic", "+"),
+                ("zed", ""),
+            ])
+        );
+        let ranking = MemberRanking::new(Some(&network));
+        for (nick, can_moderate) in [
+            ("own", true),
+            ("adm", true),
+            ("opy", true),
+            ("hal", false),
+            ("vic", false),
+            ("zed", false),
+        ] {
+            assert_eq!(
+                is_own_nick_an_op(&members, nick, &ranking),
+                can_moderate,
+                "{nick}"
+            );
+        }
+        let shown: Vec<&str> = members
+            .iter()
+            .map(|(_, prefix)| highest_prefix(prefix))
+            .collect();
+        assert_eq!(shown, ["~", "&", "@", "%", "+", ""]);
+    }
+
+    #[test]
+    fn member_roles_on_an_ohv_network_drop_levels_it_lacks() {
+        let network = network_with_prefix(&[("o", "@"), ("h", "%"), ("v", "+")]);
+        let members = seeded_roster(
+            &network,
+            serde_json::json!([
+                {"nick": "own", "modes": ["~"]},
+                {"nick": "qq", "modes": ["q"]},
+                {"nick": "hal", "modes": ["%"]},
+                {"nick": "opy", "modes": ["o"]},
+            ]),
+        );
+        assert_eq!(
+            members,
+            roster(&[("opy", "@"), ("hal", "%"), ("own", ""), ("qq", "")])
+        );
+        let ranking = MemberRanking::new(Some(&network));
+        assert!(is_own_nick_an_op(&members, "opy", &ranking));
+        assert!(!is_own_nick_an_op(&members, "hal", &ranking));
+        assert!(!is_own_nick_an_op(&members, "own", &ranking));
+    }
+
+    #[test]
+    fn member_roles_on_an_ov_network() {
+        let network = network_with_prefix(&[("o", "@"), ("v", "+")]);
+        let members = seeded_roster(
+            &network,
+            serde_json::json!([
+                {"nick": "cy", "modes": ["h"]},
+                {"nick": "ann", "modes": ["v"]},
+                {"nick": "bob", "modes": ["@"]},
+            ]),
+        );
+        assert_eq!(members, roster(&[("bob", "@"), ("ann", "+"), ("cy", "")]));
+        let ranking = MemberRanking::new(Some(&network));
+        assert!(is_own_nick_an_op(&members, "bob", &ranking));
+        assert!(!is_own_nick_an_op(&members, "ann", &ranking));
+        // `~` is not a role here, so it never reaches the moderation gate.
+        assert!(!ranking.is_op_or_above("~"));
+        let order = cordiale_core::isupport::prefix_symbol_order(Some(&network));
+        assert_eq!(
+            member_from_entry(&serde_json::json!("~@ada"), &order, Some(&network)),
+            Some(("~@ada".to_string(), String::new()))
+        );
+    }
+
+    #[test]
+    fn member_roles_on_a_network_with_an_extra_sigil() {
+        let network = network_with_prefix(&[
+            ("Y", "!"),
+            ("q", "~"),
+            ("a", "&"),
+            ("o", "@"),
+            ("h", "%"),
+            ("v", "+"),
+        ]);
+        let members = seeded_roster(
+            &network,
+            serde_json::json!([
+                {"nick": "plain", "modes": []},
+                {"nick": "vic", "modes": ["+"]},
+                {"nick": "opy", "modes": ["@"]},
+                {"nick": "own", "modes": ["q"]},
+                {"nick": "boss", "modes": ["~", "!"]},
+                {"nick": "lord", "modes": ["Y"]},
+                {"nick": "odd", "modes": ["x"]},
+            ]),
+        );
+        assert_eq!(
+            members,
+            roster(&[
+                ("boss", "!~"),
+                ("lord", "!"),
+                ("own", "~"),
+                ("opy", "@"),
+                ("vic", "+"),
+                ("odd", ""),
+                ("plain", ""),
+            ])
+        );
+        assert_eq!(highest_prefix(&members[0].1), "!");
+        let ranking = MemberRanking::new(Some(&network));
+        assert!(is_own_nick_an_op(&members, "boss", &ranking));
+        assert!(is_own_nick_an_op(&members, "lord", &ranking));
+        assert!(is_own_nick_an_op(&members, "opy", &ranking));
+        assert!(!is_own_nick_an_op(&members, "vic", &ranking));
+        assert!(!ranking.is_op_or_above("x"));
+
+        let order = cordiale_core::isupport::prefix_symbol_order(Some(&network));
+        assert_eq!(
+            member_from_entry(&serde_json::json!("!~@ada"), &order, Some(&network)),
+            Some(("ada".to_string(), "!~@".to_string()))
+        );
+
+        // A live MODE grants the extra level and the member sorts above the ops.
+        let key = ("net".to_string(), "#c".to_string());
+        let mut state = WorkerState::new();
+        state.isupport_by_network.insert("net".to_string(), network);
+        state
+            .members
+            .insert(key.clone(), roster(&[("opy", "@"), ("vic", "+")]));
+        let mode = serde_json::json!({
+            "kind": "mode",
+            "meta": {"modes": "+Y", "args": ["vic"]}
+        });
+        assert!(update_members_from_frame(&mut state, &key, &mode));
+        assert_eq!(
+            state.members.get(&key),
+            Some(&roster(&[("vic", "!+"), ("opy", "@")]))
+        );
+    }
+
+    #[test]
+    fn live_mode_grants_owner_before_a_snapshot() {
+        let key = ("net".to_string(), "#c".to_string());
+        let mut state = WorkerState::new();
+        state
+            .members
+            .insert(key.clone(), roster(&[("ann", ""), ("bob", "@")]));
+        let mode = serde_json::json!({
+            "kind": "mode",
+            "meta": {"modes": "+q", "args": ["ann"]}
+        });
+        assert!(update_members_from_frame(&mut state, &key, &mode));
+        assert_eq!(
+            state.members.get(&key),
+            Some(&roster(&[("ann", "~"), ("bob", "@")]))
         );
     }
 
@@ -24252,7 +24540,8 @@ mod tests {
             ("root".to_string(), "~".to_string()),
             ("Amy".to_string(), String::new()),
         ];
-        sort_members_by_rank(&mut members);
+        let order = cordiale_core::isupport::prefix_symbol_order(None);
+        sort_members_by_rank(&mut members, &order);
         let names: Vec<&str> = members.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["root", "ada", "Zoe", "Hal", "cy", "Amy", "bob"]);
     }
