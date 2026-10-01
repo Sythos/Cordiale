@@ -5534,12 +5534,16 @@ export component AppWindow inherits Window {
                     spacing: 16px;
 
                     // The Rectangle gives the brand image a bounded, shrinkable
-                    // column; the image keeps its ratio, centred on the text.
+                    // column; the image keeps its ratio. 720x405 is the ratio of
+                    // the 782x440 image, and the preferred height makes the row
+                    // tall enough for it (the row would otherwise take the
+                    // text's height and shrink the image).
                     Rectangle {
                         horizontal-stretch: 0;
                         min-width: 96px;
-                        preferred-width: 240px;
-                        max-width: 240px;
+                        preferred-width: 720px;
+                        max-width: 720px;
+                        preferred-height: 405px;
 
                         Image {
                             width: 100%;
@@ -5552,6 +5556,7 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         horizontal-stretch: 1;
                         spacing: 8px;
+                        alignment: center;
 
                         Text {
                             text: "Cordiale";
