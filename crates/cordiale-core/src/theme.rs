@@ -141,6 +141,71 @@ impl ThemePalette {
     pub fn nick_color(&self, hash: u32) -> Rgb {
         self.nicks[(hash % 16) as usize]
     }
+
+    /// The theme's `muted` color as secondary text: nudged toward the
+    /// foreground until it reads at 4.5:1 on the background, and left
+    /// alone when it already does. A foreground that cannot reach 4.5:1
+    /// itself is replaced as the target by white or black, so the muted
+    /// text is still legible (if no longer dimmer than the body text).
+    pub fn muted_text(&self) -> Rgb {
+        let target = if contrast_ratio(self.fg, self.bg) >= MIN_TEXT_CONTRAST {
+            self.fg
+        } else if self.is_dark() {
+            (255, 255, 255)
+        } else {
+            (0, 0, 0)
+        };
+        nudge_for_contrast(self.muted, target, self.bg, MIN_TEXT_CONTRAST)
+    }
+}
+
+/// The WCAG AA contrast floor for normal-size text.
+pub const MIN_TEXT_CONTRAST: f64 = 4.5;
+
+/// WCAG 2.1 relative luminance of an sRGB color, `0.0` (black) to `1.0`.
+fn relative_luminance((r, g, b): Rgb) -> f64 {
+    let linear = |channel: u8| {
+        let value = f64::from(channel) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// WCAG 2.1 contrast ratio of two colors, `1.0` (identical) to `21.0`
+/// (black on white), whichever one is lighter.
+pub fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
+    let (la, lb) = (relative_luminance(a), relative_luminance(b));
+    let (lighter, darker) = if la >= lb { (la, lb) } else { (lb, la) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+/// `color` itself when it already reaches `min_ratio` on `background`;
+/// otherwise the nearest color on the way to `toward` that does, or
+/// `toward` when even that falls short. Never moves away from `toward`.
+pub fn nudge_for_contrast(color: Rgb, toward: Rgb, background: Rgb, min_ratio: f64) -> Rgb {
+    if contrast_ratio(color, background) >= min_ratio {
+        return color;
+    }
+    const STEPS: u32 = 100;
+    let blend = |from: u8, to: u8, amount: f64| {
+        (f64::from(from) + (f64::from(to) - f64::from(from)) * amount).round() as u8
+    };
+    for step in 1..=STEPS {
+        let amount = f64::from(step) / f64::from(STEPS);
+        let candidate = (
+            blend(color.0, toward.0, amount),
+            blend(color.1, toward.1, amount),
+            blend(color.2, toward.2, amount),
+        );
+        if contrast_ratio(candidate, background) >= min_ratio {
+            return candidate;
+        }
+    }
+    toward
 }
 
 /// Parses `#rgb` or `#rrggbb` (case-insensitive).
@@ -341,5 +406,110 @@ mod tests {
 
         colors.remove("nick_15");
         assert_eq!(ThemePalette::from_colors(&colors), None);
+    }
+
+    fn assert_ratio(a: Rgb, b: Rgb, expected: f64) {
+        let ratio = contrast_ratio(a, b);
+        assert!(
+            (ratio - expected).abs() < 0.01,
+            "{a:?} on {b:?}: {ratio} != {expected}"
+        );
+    }
+
+    #[test]
+    fn contrast_ratio_matches_known_values() {
+        assert_ratio((0, 0, 0), (255, 255, 255), 21.0);
+        assert_ratio((255, 255, 255), (0, 0, 0), 21.0);
+        assert_ratio((0x80, 0x80, 0x80), (0x1c, 0x1c, 0x1c), 4.32);
+        assert_ratio((0x80, 0x80, 0x80), (0xfa, 0xfa, 0xfa), 3.78);
+        assert_ratio((0x78, 0x78, 0x78), (0x0a, 0x0a, 0x0a), 4.48);
+        assert_ratio((0x70, 0x70, 0x70), (0x0a, 0x0a, 0x0a), 4.00);
+        assert_ratio((0x7f, 0x7f, 0x7f), (0xff, 0xff, 0xff), 4.00);
+        assert_ratio((0x33, 0x33, 0x33), (0x33, 0x33, 0x33), 1.0);
+    }
+
+    #[test]
+    fn nudge_leaves_a_passing_color_alone() {
+        let color = (0x96, 0x96, 0x96);
+        let background = (0x1c, 0x1c, 0x1c);
+        assert_eq!(
+            nudge_for_contrast(color, (255, 255, 255), background, MIN_TEXT_CONTRAST),
+            color
+        );
+    }
+
+    #[test]
+    fn nudge_reaches_the_floor_without_overshooting() {
+        let background = (0x0a, 0x0a, 0x0a);
+        let nudged = nudge_for_contrast(
+            (0x78, 0x78, 0x78),
+            (0xe0, 0xe0, 0xe0),
+            background,
+            MIN_TEXT_CONTRAST,
+        );
+        assert!(contrast_ratio(nudged, background) >= MIN_TEXT_CONTRAST);
+        assert!(nudged.0 > 0x78 && nudged.0 < 0xe0);
+        assert!(nudged.0 < 0x90, "moved further than needed: {nudged:?}");
+
+        let background = (0xff, 0xff, 0xff);
+        let nudged =
+            nudge_for_contrast((0x7f, 0x7f, 0x7f), (0, 0, 0), background, MIN_TEXT_CONTRAST);
+        assert!(contrast_ratio(nudged, background) >= MIN_TEXT_CONTRAST);
+        assert!(nudged.0 < 0x7f);
+    }
+
+    #[test]
+    fn nudge_never_moves_away_from_its_target() {
+        let cases = [
+            ((0x40, 0x90, 0x50), (0xd0, 0x30, 0xe0), (0x10, 0x20, 0x30)),
+            ((0x70, 0x70, 0x70), (0xe0, 0xe0, 0xe0), (0x0a, 0x0a, 0x0a)),
+            ((0x93, 0xa1, 0xa1), (0x00, 0x00, 0x00), (0xfd, 0xf6, 0xe3)),
+            ((0x20, 0x20, 0x20), (0xff, 0xff, 0xff), (0x00, 0x00, 0x00)),
+        ];
+        for (color, toward, background) in cases {
+            let nudged = nudge_for_contrast(color, toward, background, MIN_TEXT_CONTRAST);
+            assert!(nudged.0.abs_diff(toward.0) <= color.0.abs_diff(toward.0));
+            assert!(nudged.1.abs_diff(toward.1) <= color.1.abs_diff(toward.1));
+            assert!(nudged.2.abs_diff(toward.2) <= color.2.abs_diff(toward.2));
+        }
+    }
+
+    #[test]
+    fn nudge_stops_at_the_target_when_the_floor_is_out_of_reach() {
+        let background = (0x80, 0x80, 0x80);
+        let toward = (0x90, 0x90, 0x90);
+        assert_eq!(
+            nudge_for_contrast((0x84, 0x84, 0x84), toward, background, MIN_TEXT_CONTRAST),
+            toward
+        );
+    }
+
+    #[test]
+    fn muted_text_is_legible_on_every_builtin_theme() {
+        for theme in &BUILTIN_THEMES {
+            let palette = theme.palette();
+            let muted = palette.muted_text();
+            assert!(
+                contrast_ratio(muted, palette.bg) >= MIN_TEXT_CONTRAST,
+                "{}: {muted:?}",
+                theme.name
+            );
+        }
+    }
+
+    #[test]
+    fn muted_text_keeps_a_legible_color_and_stays_dimmer_than_the_body() {
+        let sux = builtin_theme("sux").expect("sux").palette();
+        assert_eq!(sux.muted_text(), sux.muted);
+
+        for name in ["irssi-dark", "mirc-light"] {
+            let palette = builtin_theme(name).expect(name).palette();
+            let muted = palette.muted_text();
+            assert_ne!(muted, palette.muted, "{name}");
+            assert!(
+                contrast_ratio(muted, palette.bg) < contrast_ratio(palette.fg, palette.bg),
+                "{name}"
+            );
+        }
     }
 }
