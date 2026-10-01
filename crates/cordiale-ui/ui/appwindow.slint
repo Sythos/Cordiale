@@ -865,6 +865,19 @@ export component AppWindow inherits Window {
     // Slint has no `else`/`else if`: mutually exclusive `if` blocks are
     // the documented pattern for multi-screen navigation.
     in-out property <string> screen: "splash";
+    // Leaving the chat for a screen it is expected to come back from
+    // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
+    // disconnect) start it afresh, and so does coming back with no window
+    // selected.
+    changed screen => {
+        if screen == "connected" {
+            if !has-selected-channel {
+                chat-resume = false;
+            }
+        } else {
+            chat-resume = screen == "media" || screen == "settings" || screen == "links" || screen == "archive" || screen == "reply" || screen == "umodes" || screen == "radio" || screen == "debug";
+        }
+    }
     // Set once by Rust before the window is shown: where the splash
     // screen hands off to once its animation finishes ("language" on
     // first launch, "connect" otherwise).
@@ -1019,6 +1032,17 @@ export component AppWindow inherits Window {
     in-out property <length> chat-scroll-y: 0px;
     out property <length> chat-content-height: 0px;
     in-out property <bool> chat-follow-bottom: true;
+    // What lets a chat pane that is torn down and rebuilt (the reader went
+    // to the media viewer, Settings...) come back where it was: the number
+    // of lines `chat-content-height` was measured for, and the window the
+    // saved position belongs to. `chat-resume` is set when the pane is left
+    // for one of those screens and consumed by the rebuilt pane; Rust turns
+    // the saved position into the line to go back to.
+    out property <int> chat-content-rows: 0;
+    private property <string> chat-pane-label: "";
+    private property <bool> chat-resume: false;
+    callback chat-resume-requested() -> bool;
+    callback chat-resume-landed();
     // PgUp/PgDown in the compose box page the chat pane: the direction
     // (-1 up, 1 down) and a counter bumped on every press.
     in-out property <int> chat-page-direction: 0;
@@ -3544,8 +3568,25 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // A fresh pane opens on the newest line, unless it is the
+                // same window's pane coming back from another screen with
+                // the reader scrolled up: then Rust picks the line to go
+                // back to, and `changed content-height` below puts it back
+                // once the rows are measured. Until then the pane sits at
+                // the top, so that first layout doesn't depend on the old
+                // scroll position.
+                property <bool> resuming: false;
                 init => {
-                    chat-follow-bottom = true;
+                    if chat-resume && chat-pane-label == current-channel-label {
+                        resuming = chat-resume-requested();
+                    }
+                    if resuming {
+                        chat-scroll-y = 0px;
+                    } else {
+                        chat-follow-bottom = true;
+                    }
+                    chat-resume = false;
+                    chat-pane-label = current-channel-label;
                 }
 
                 // A programmatic jump to the top (PgUp) makes the `ListView`
@@ -3595,7 +3636,11 @@ export component AppWindow inherits Window {
                 // estimate settles the next change is a no-op.
                 changed content-height => {
                     chat-content-height = self.content-height;
-                    if self.follow-bottom {
+                    chat-content-rows = chat-lines.length;
+                    if resuming {
+                        resuming = false;
+                        chat-resume-landed();
+                    } else if self.follow-bottom {
                         self.content-y = min(0px, self.visible-height - self.content-height);
                     }
                     if self.content-height <= self.visible-height {
@@ -3617,6 +3662,8 @@ export component AppWindow inherits Window {
                 // like this) is a valid `changed` target.
                 property <string> window-label: current-channel-label;
                 changed window-label => {
+                    chat-pane-label = window-label;
+                    resuming = false;
                     self.follow-bottom = true;
                     older-armed = true;
                     self.content-y = min(0px, self.visible-height - self.content-height);

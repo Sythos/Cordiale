@@ -930,6 +930,46 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_older_history.send(WorkerCommand::LoadOlderHistory);
     });
 
+    // A chat pane rebuilt after a round trip through another screen (the
+    // media viewer, settings...) asks here where the reader was. The line
+    // is picked from the saved scroll state right away, but only put back
+    // once the new `ListView` has measured its rows (`chat-resume-landed`).
+    let pending_resume = Rc::new(std::cell::Cell::new(None::<ChatAnchor>));
+    let weak_for_resume = ui.as_weak();
+    let pending_for_request = pending_resume.clone();
+    ui.on_chat_resume_requested(move || {
+        use slint::Model as _;
+        let Some(ui) = weak_for_resume.upgrade() else {
+            return false;
+        };
+        let anchor = resume_scroll_anchor(
+            ui.get_chat_follow_bottom(),
+            ui.get_chat_scroll_y(),
+            ui.get_chat_content_height(),
+            usize::try_from(ui.get_chat_content_rows()).unwrap_or(0),
+            ui.get_chat_lines().row_count(),
+        );
+        pending_for_request.set(anchor);
+        anchor.is_some()
+    });
+    let weak_for_landed = ui.as_weak();
+    ui.on_chat_resume_landed(move || {
+        use slint::Model as _;
+        let Some(ui) = weak_for_landed.upgrade() else {
+            return;
+        };
+        let Some(mut anchor) = pending_resume.take() else {
+            return;
+        };
+        let rows = ui.get_chat_lines().row_count();
+        let content_height = ui.get_chat_content_height();
+        if rows == 0 || content_height <= 0.0 {
+            return;
+        }
+        anchor.row_height = content_height / rows as f32;
+        restore_chat_anchor(&ui, anchor);
+    });
+
     let tx_for_home = worker_tx.clone();
     let weak_for_home = ui.as_weak();
     ui.on_home_requested(move || {
@@ -7903,25 +7943,70 @@ struct ChatAnchor {
 /// (`content-height / rows`, see `update_visible_instances` in Slint's
 /// `internal/core/model/repeater.rs`), laying out real row heights only
 /// around the viewport. So the top line is the row at `-scroll_y` over that
-/// average, and it moves down by `prepended` rows.
+/// average. `measured_rows` is the row count `content_height` was measured
+/// for, `rows` how many there are now (the result is kept inside them).
+fn top_line_anchor(
+    scroll_y: f32,
+    content_height: f32,
+    measured_rows: usize,
+    rows: usize,
+) -> Option<ChatAnchor> {
+    if measured_rows == 0 || rows == 0 || content_height <= 0.0 {
+        return None;
+    }
+    let row_height = content_height / measured_rows as f32;
+    let scrolled = (-scroll_y).max(0.0);
+    let line = (scrolled / row_height + 1e-3).floor() as usize;
+    let top = line.min(rows - 1);
+    // Past the end (a stale position): the last line, flush.
+    let offset = if line > top {
+        0.0
+    } else {
+        (scrolled - top as f32 * row_height).max(0.0)
+    };
+    Some(ChatAnchor {
+        row: top,
+        offset,
+        row_height,
+    })
+}
+
+/// The top line moves down by `prepended` rows when that many older lines
+/// go in above the `old_rows` the pane had.
 fn prepend_scroll_anchor(
     scroll_y: f32,
     content_height: f32,
     old_rows: usize,
     prepended: usize,
 ) -> Option<ChatAnchor> {
-    if prepended == 0 || old_rows == 0 || content_height <= 0.0 {
+    if prepended == 0 {
         return None;
     }
-    let row_height = content_height / old_rows as f32;
-    let scrolled = (-scroll_y).max(0.0);
-    let top = ((scrolled / row_height + 1e-3).floor() as usize).min(old_rows - 1);
-    let offset = (scrolled - top as f32 * row_height).max(0.0);
+    let anchor = top_line_anchor(scroll_y, content_height, old_rows, old_rows)?;
     Some(ChatAnchor {
-        row: top + prepended,
-        offset,
-        row_height,
+        row: anchor.row + prepended,
+        ..anchor
     })
+}
+
+/// Where a chat pane that is rebuilt (the reader went to the media viewer
+/// or another screen and came back) has to scroll to, or `None` when it
+/// should just open on the newest line: it was following it, or there is
+/// nothing saved to go by. `scroll_y` and `content_height` are the pane's
+/// last measures, taken with `measured_rows` lines; `rows` is how many
+/// lines it holds now. Lines that arrived in the meantime go in after the
+/// reader's, so the line they were on keeps its index.
+fn resume_scroll_anchor(
+    follow_bottom: bool,
+    scroll_y: f32,
+    content_height: f32,
+    measured_rows: usize,
+    rows: usize,
+) -> Option<ChatAnchor> {
+    if follow_bottom {
+        return None;
+    }
+    top_line_anchor(scroll_y, content_height, measured_rows, rows)
 }
 
 /// Scrolls the chat pane so `anchor.row` is back at its top. A jump that
@@ -28350,6 +28435,48 @@ mod tests {
         // Exactly on a row boundary despite float rounding.
         let anchor = prepend_scroll_anchor(-60.0 + 1e-4, 4000.0, 200, 10).unwrap();
         assert_eq!(anchor.row, 13);
+    }
+
+    #[test]
+    fn resume_anchor_keeps_the_line_a_scrolled_up_reader_was_on() {
+        // 200 rows averaging 20px, scrolled 105px down: row 5, 5px into it.
+        let anchor = resume_scroll_anchor(false, -105.0, 4000.0, 200, 200).unwrap();
+        assert_eq!(anchor.row, 5);
+        assert!((anchor.offset - 5.0).abs() < 1e-3);
+        assert!((anchor.row_height - 20.0).abs() < 1e-3);
+
+        // Flush with the top of the first line.
+        let anchor = resume_scroll_anchor(false, 0.0, 4000.0, 200, 200).unwrap();
+        assert_eq!((anchor.row, anchor.offset), (0, 0.0));
+    }
+
+    #[test]
+    fn resume_anchor_ignores_lines_that_arrived_meanwhile() {
+        // 30 lines came in at the tail while the reader was away.
+        let anchor = resume_scroll_anchor(false, -105.0, 4000.0, 200, 230).unwrap();
+        assert_eq!(anchor.row, 5);
+        assert!((anchor.offset - 5.0).abs() < 1e-3);
+        assert!((anchor.row_height - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn resume_anchor_leaves_a_pane_at_the_tail_alone() {
+        assert_eq!(resume_scroll_anchor(true, -3900.0, 4000.0, 200, 200), None);
+        assert_eq!(resume_scroll_anchor(true, 0.0, 0.0, 0, 0), None);
+    }
+
+    #[test]
+    fn resume_anchor_needs_something_saved() {
+        assert_eq!(resume_scroll_anchor(false, -50.0, 0.0, 200, 200), None);
+        assert_eq!(resume_scroll_anchor(false, -50.0, 4000.0, 0, 200), None);
+        assert_eq!(resume_scroll_anchor(false, -50.0, 4000.0, 200, 0), None);
+    }
+
+    #[test]
+    fn resume_anchor_clamps_to_the_lines_there_are() {
+        // The saved position is past the end of a shorter window.
+        let anchor = resume_scroll_anchor(false, -3000.0, 4000.0, 200, 10).unwrap();
+        assert_eq!((anchor.row, anchor.offset), (9, 0.0));
     }
 
     #[test]
