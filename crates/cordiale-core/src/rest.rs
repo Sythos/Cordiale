@@ -417,6 +417,16 @@ impl SendMessageRequest {
             statusmsg_target: None,
         }
     }
+
+    /// A channel message addressed to a membership level such as `@#ops`.
+    pub fn statusmsg(target: impl Into<String>, body: impl Into<String>) -> Self {
+        SendMessageRequest {
+            body: body.into(),
+            ctcp_target: None,
+            notice_target: None,
+            statusmsg_target: Some(target.into()),
+        }
+    }
 }
 
 /// Body of `GET`/`PUT /me/settings/display-prefs`, per
@@ -867,6 +877,19 @@ mod tests {
     fn send_message_request_ctcp_frames_the_body_without_args() {
         let request = SendMessageRequest::ctcp("vjt", "VERSION", None);
         assert_eq!(request.body, "\u{1}VERSION\u{1}");
+    }
+
+    #[test]
+    fn send_message_request_statusmsg_sets_only_the_status_target() {
+        let request = SendMessageRequest::statusmsg("@+#rust", "hello ops and voices");
+        let json = serde_json::to_string(&request).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"body":"hello ops and voices","statusmsg_target":"@+#rust"}"#
+        );
+        assert_eq!(request.statusmsg_target.as_deref(), Some("@+#rust"));
+        assert!(request.ctcp_target.is_none());
+        assert!(request.notice_target.is_none());
     }
 
     #[test]
