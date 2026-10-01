@@ -62,6 +62,15 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Passkeys on USB security keys (CTAP2 over HID) on Linux and macOS. Off by
+# default: it builds hidapi's C code (libudev headers on Linux), which only
+# the release builds would have to provide.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+ctap-hid-fido2 = { version = "3.6", optional = true }
+
+[features]
+ctap-hid = ["dep:ctap-hid-fido2"]
+
 [build-dependencies]
 slint-build = "1"
 winresource = "0.1"

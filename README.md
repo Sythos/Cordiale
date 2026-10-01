@@ -107,7 +107,10 @@ Cordiale also covers:
   `webauthn.dll` (Windows Hello, security keys, a phone): passkey as second
   factor, passwordless sign-in from the connect screen, and in Settings >
   Security adding a passkey, changing the passkey mode and turning on
-  passwordless (not yet tried with a real authenticator). Elsewhere,
+  passwordless (not yet tried with a real authenticator). Builds made with
+  the optional `ctap-hid` cargo feature do the same on Linux and macOS with
+  a USB security key and its PIN (not tried with a real key yet; the
+  release packages leave it off). Elsewhere,
   passkey-only sign-in still needs a share link or client token from
   Cicchetto; an account whose passkey is backed by recovery codes can sign
   in with one of those, and a passwordless account can sign in from the
@@ -191,8 +194,9 @@ Cordiale also covers:
 ## Known gaps
 
 - **Account security:** outside Windows, registering a passkey, signing in
-  with one and changing the passkey mode (no WebAuthn ceremony there yet,
-  see `docs/passkey-spike.md`), and everywhere creating or managing client
+  with one and changing the passkey mode (no WebAuthn ceremony there unless
+  built with the `ctap-hid` feature for USB keys, see
+  `docs/passkey-spike.md`), and everywhere creating or managing client
   tokens and account deletion, still live in Cicchetto. TOTP, the passkey list and session
   sharing work in Cordiale with a full password-backed session; a scoped
   client token cannot use Grappa's account-security endpoints.

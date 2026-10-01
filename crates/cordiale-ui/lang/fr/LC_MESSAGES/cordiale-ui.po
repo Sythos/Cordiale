@@ -3123,3 +3123,83 @@ msgstr "Impossible de changer la façon dont le compte utilise les passkeys."
 msgctxt "AppWindow"
 msgid "Client tokens and account deletion are managed in Cicchetto."
 msgstr "Les jetons client et la suppression du compte se gèrent dans Cicchetto."
+
+msgctxt "AppWindow"
+msgid "No security key found. Plug it in and try again."
+msgstr "Aucune clé de sécurité trouvée. Branche-la et réessaie."
+
+msgctxt "AppWindow"
+msgid "More than one security key is plugged in. Leave just one and try again."
+msgstr "Plus d'une clé de sécurité est branchée. N'en laisse qu'une et réessaie."
+
+msgctxt "AppWindow"
+msgid "Wrong PIN."
+msgstr "PIN incorrect."
+
+msgctxt "AppWindow"
+msgid "Wrong PIN. Attempts left before the key locks: {}."
+msgstr "PIN incorrect. Essais restants avant que la clé se bloque : {}."
+
+msgctxt "AppWindow"
+msgid "Too many wrong PINs in a row. Unplug the key, plug it back in and try again."
+msgstr "Trop de PIN incorrects d'affilée. Débranche la clé, rebranche-la et réessaie."
+
+msgctxt "AppWindow"
+msgid "The key's PIN is blocked. Only resetting the key, which erases its passkeys, unblocks it."
+msgstr "Le PIN de la clé est bloqué. Seule une réinitialisation de la clé, qui efface ses passkeys, le débloque."
+
+msgctxt "AppWindow"
+msgid "A security key PIN has 4 to 63 characters."
+msgstr "Le PIN d'une clé de sécurité compte de 4 à 63 caractères."
+
+msgctxt "AppWindow"
+msgid "This key has no PIN, and Grappa requires one. Set a PIN on the key first, for example in a browser's security key settings."
+msgstr "Cette clé n'a pas de PIN, et Grappa en exige un. Définis d'abord un PIN sur la clé, par exemple dans les réglages des clés de sécurité d'un navigateur."
+
+msgctxt "AppWindow"
+msgid "This key can't confirm it's you with a PIN or a fingerprint, which Grappa requires."
+msgstr "Cette clé ne peut pas confirmer que c'est toi avec un PIN ou une empreinte, ce que Grappa exige."
+
+msgctxt "AppWindow"
+msgid "This security key doesn't hold a passkey for this account."
+msgstr "Cette clé de sécurité ne contient pas de passkey pour ce compte."
+
+msgctxt "AppWindow"
+msgid "The key wasn't touched in time, or the request was refused on the key."
+msgstr "La clé n'a pas été touchée à temps, ou la demande a été refusée sur la clé."
+
+msgctxt "AppWindow"
+msgid "The security key has no room left for another passkey."
+msgstr "La clé de sécurité n'a plus de place pour une autre passkey."
+
+msgctxt "AppWindow"
+msgid "Grappa asked for a kind of passkey this security key can't create."
+msgstr "Grappa a demandé un type de passkey que cette clé de sécurité ne sait pas créer."
+
+msgctxt "AppWindow"
+msgid "The security key didn't answer as expected. Try again."
+msgstr "La clé de sécurité n'a pas répondu comme prévu. Réessaie."
+
+msgctxt "AppWindow"
+msgid "Security key"
+msgstr "Clé de sécurité"
+
+msgctxt "AppWindow"
+msgid "Touch your security key when it blinks."
+msgstr "Touche ta clé de sécurité quand elle clignote."
+
+msgctxt "AppWindow"
+msgid "Enter the PIN of your security key."
+msgstr "Saisis le PIN de ta clé de sécurité."
+
+msgctxt "AppWindow"
+msgid "Security key PIN"
+msgstr "PIN de la clé de sécurité"
+
+msgctxt "AppWindow"
+msgid "Try again"
+msgstr "Réessayer"
+
+msgctxt "AppWindow"
+msgid "Continue"
+msgstr "Continuer"

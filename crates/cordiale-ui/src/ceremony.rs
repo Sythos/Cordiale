@@ -22,8 +22,9 @@
 
 //! The WebAuthn ceremony behind a platform-neutral seam: `available`,
 //! `get_assertion` and `make_credential` dispatch to the platform's
-//! backend (`webauthn.dll` on Windows, issue #160); elsewhere they answer
-//! `Unsupported` until a backend exists.
+//! backend (`webauthn.dll` on Windows, issue #160; USB security keys over
+//! CTAP2 on Linux and macOS with the `ctap-hid` cargo feature, issue #161);
+//! elsewhere they answer `Unsupported`.
 //!
 //! Everything that doesn't touch an authenticator lives here as plain
 //! functions, the same on every platform: the `clientDataJSON` Cordiale
@@ -146,7 +147,15 @@ pub fn available() -> bool {
     crate::webauthn_windows::available()
 }
 
-#[cfg(not(windows))]
+#[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
+pub fn available() -> bool {
+    true
+}
+
+#[cfg(not(any(
+    windows,
+    all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos"))
+)))]
 pub fn available() -> bool {
     false
 }
@@ -161,7 +170,18 @@ pub fn get_assertion(
     crate::webauthn_windows::get_assertion(request, parent)
 }
 
-#[cfg(not(windows))]
+#[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
+pub fn get_assertion(
+    request: &AssertionRequest,
+    _parent: Option<ParentWindow>,
+) -> Result<AssertionResponse, CeremonyError> {
+    crate::ceremony_ctap::get_assertion(request)
+}
+
+#[cfg(not(any(
+    windows,
+    all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos"))
+)))]
 pub fn get_assertion(
     _request: &AssertionRequest,
     _parent: Option<ParentWindow>,
@@ -179,7 +199,18 @@ pub fn make_credential(
     crate::webauthn_windows::make_credential(request, parent)
 }
 
-#[cfg(not(windows))]
+#[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
+pub fn make_credential(
+    request: &CredentialRequest,
+    _parent: Option<ParentWindow>,
+) -> Result<CredentialResponse, CeremonyError> {
+    crate::ceremony_ctap::make_credential(request)
+}
+
+#[cfg(not(any(
+    windows,
+    all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos"))
+)))]
 pub fn make_credential(
     _request: &CredentialRequest,
     _parent: Option<ParentWindow>,
@@ -626,7 +657,10 @@ mod tests {
         assert_eq!(body.transports, vec!["internal".to_string()]);
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(
+        windows,
+        all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos"))
+    )))]
     #[test]
     fn without_a_backend_every_ceremony_is_unsupported() {
         assert!(!available());

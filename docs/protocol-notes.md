@@ -65,7 +65,8 @@ Molti endpoint sono citati per nome/scopo senza schema JSON integrale.
     senza, spiega che serve un token per-client o Cicchetto. Con passkey e
     `totp_available: false` il `challenge_token` accetta solo recovery code,
     e il passo codice lo dice (issue #147). Su Windows `passkey_options`
-    apre la ceremonia (issue #160) e la risposta va a
+    apre la ceremonia (issue #160), e così su Linux e macOS nei build con
+    la feature `ctap-hid` (chiavette USB, issue #161); la risposta va a
     `POST /auth/passkeys/second-factor`, anche senza `challenge_token`;
     altrove non è usato (vedi [`passkey-spike.md`](./passkey-spike.md)).
 - **`POST /auth/totp/verify`** — `{challenge_token, code}` → `200 {token,
@@ -233,8 +234,9 @@ richiedono un autenticatore:
   passwordless, quindi la schermata di connessione offre sempre l'entrata.
 - Registrazione, cambio modo, attivazione passwordless e le porte di login
   passkey richiedono una ceremonia WebAuthn: su Windows Cordiale le fa via
-  `webauthn.dll` (issue #160, non provato con un autenticatore), altrove
-  restano in Cicchetto; non esiste un endpoint di rinomina. Dettagli, controllo esatto
+  `webauthn.dll` (issue #160), su Linux e macOS con una chiavetta USB nei
+  build con la feature `ctap-hid` (issue #161), nessuno dei due provato con
+  un autenticatore; altrove restano in Cicchetto; non esiste un endpoint di rinomina. Dettagli, controllo esatto
   dell'origine e fattibilità per piattaforma in
   [`passkey-spike.md`](./passkey-spike.md).
 

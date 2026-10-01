@@ -21,8 +21,8 @@ autenticatore a disposizione. Le verifiche sono tutte sul codice.
 |---|---|---|
 | Windows 10 1903+ / 11 | API client di `webauthn.dll` (`WebAuthNAuthenticatorGetAssertion` / `MakeCredential`) | **Implementata (issue #160), non provata**: strutture del crate `windows` 0.62, DLL caricata a runtime, il chiamante fornisce il `clientDataJSON` (vedi "Windows: com'è implementata") |
 | macOS, passkey di piattaforma/iCloud | AuthenticationServices | **Non fattibile**: richiede app firmata con Team ID Apple, entitlement `webcredentials:` e un file `apple-app-site-association` su **ogni** server Grappa |
-| macOS, chiavette USB | CTAP2 su HID diretto | **Fattibile con riserva**: solo chiavi fisiche con PIN, niente copertura CI su macOS |
-| Linux | CTAP2 su hidraw (nessuna API di sistema) | **Fattibile con riserva**: solo chiavi fisiche USB con PIN; passkey sincronizzate e telefono (hybrid) irraggiungibili |
+| macOS, chiavette USB | CTAP2 su HID diretto | **Implementata dietro la feature cargo `ctap-hid` (issue #161), non provata**: solo chiavi fisiche con PIN, niente copertura CI su macOS (vedi "Linux e macOS: chiavette USB") |
+| Linux | CTAP2 su hidraw (nessuna API di sistema) | **Implementata dietro la feature cargo `ctap-hid` (issue #161), non provata**: solo chiavi fisiche USB con PIN; passkey sincronizzate e telefono (hybrid) irraggiungibili |
 | Tutte | Gestione senza autenticatore (elenco, eliminazione) e contratto tipizzato | **Fatto in questo ramo** |
 
 ## a) Origine e RP ID: come li controlla Grappa
@@ -215,7 +215,7 @@ controller].** Tutti i binari in base64url senza padding:
 | Crate | Versione / licenza | Note |
 |---|---|---|
 | `ctap-hid-fido2` | 3.6.0 (2026-09-05), MIT | **Candidato.** Sincrono, crypto `ring` (già nel grafo via rustls). **[verificato]** calcola `clientDataHash = SHA-256(challenge)` sull'argomento `challenge`: passandogli i byte del `clientDataJSON` si ottiene l'hash corretto. Restituisce `auth_data` grezzo, firma, id credenziale; gestisce PIN e resident key. Dipende da `hidapi` con `linux-static-hidraw` (compila il C di hidapi, richiede gli header di libudev) |
-| `authenticator` (Mozilla) | 0.5.0 (2025-10), MPL-2.0 | Accetta `client_data_hash` diretto, feature `crypto_rust` pura Rust; su Linux usa `libudev`, su Windows `winapi` (inutile senza admin). Valida alternativa |
+| `authenticator` (Mozilla) | 0.5.0 (2025-10), MPL-2.0 | Accetta `client_data_hash` diretto, feature `crypto_rust` pura Rust; su Linux usa `libudev`, su Windows `winapi` (inutile senza admin). Scartato in #161: crypto NSS di default, API a macchina di stati con callback, e tira `serde_cbor` (non più mantenuto) più copie vecchie di `base64`, `rand`, `bitflags` e `bytes` |
 | `webauthn-authenticator-rs` (kanidm) | 0.5.5 (2026-04), MPL-2.0 | Costruisce il `clientDataJSON` da sé, ma `ctap2` tira `openssl` (su Windows richiede OpenSSL installato), `usb` tira `fido-hid-rs` con `bindgen` (libclang) e `udev`, `win10` usa `windows` 0.41 (duplicato). Troppo pesante |
 | `libfido2-sys` / `fido2-rs` | 0.5.1 / 0.6.0, MIT | Richiedono libfido2 di sistema (o compilarla su Windows). Sconsigliati |
 
@@ -313,14 +313,64 @@ fa il CI su `windows-latest`) e **mai provata con un autenticatore reale**:
   messaggio (Windows non li distingue in modo affidabile); il codice
   `HRESULT` va nel log. Un `401 invalid_two_factor` resta opaco (§a).
 
+## Linux e macOS: chiavette USB (issue #161)
+
+Scritta senza compilatore locale e **mai provata con una chiave reale**;
+il CI di default non la compila (vedi sotto).
+
+- **Crate.** `ctap-hid-fido2` 3.6.0, sorgente letto: API sincrona,
+  `GetAssertionArgsBuilder` / `MakeCredentialArgsBuilder` con PIN, allow
+  list e resident key; riceve i byte del `clientDataJSON` della cucitura e
+  ne firma lo SHA-256; restituisce `auth_data` grezzo, firma, id della
+  credenziale e `user.id`. Crea chiavi ES256 (-7), che Grappa accetta.
+- **Feature spenta di default.** Dipendenza **opzionale**, solo per Linux e
+  macOS, dietro la feature cargo `ctap-hid`: il build normale, il CI e i
+  pacchetti di rilascio non cambiano. Nel `Cargo.lock` entrano 22 pacchetti
+  nuovi senza che cambi la versione di quelli esistenti; l'advisory DB di
+  RustSec non ha avvisi aperti per quelle versioni (`anyhow` 1.0.104 e
+  `time` 0.3.55 sono già oltre le correzioni). Per compilarla serve il C di
+  `hidapi`: su Linux gli header di libudev (`libudev-dev`, via
+  `pkg-config`) e a runtime `libudev.so.1`; su macOS i framework IOKit e
+  CoreFoundation. Si attiva con
+  `cargo build --release --package cordiale-ui --features ctap-hid`.
+- **Aggancio.** Il backend (`ceremony_ctap.rs`) si innesta in
+  `ceremony.rs` come terzo ramo del `cfg`: `available()` diventa vero e i
+  flussi di #160 (secondo fattore, passwordless, aggiunta, cambio modo,
+  attivazione passwordless) lo usano senza modifiche. Il backend riceve
+  richieste già decodificate e restituisce byte grezzi; `clientDataJSON`,
+  attestazione `none` e corpi di Grappa restano della cucitura, con i suoi
+  test.
+- **PIN e tocco.** Non c'è un dialogo di sistema, quindi Cordiale mostra un
+  riquadro suo (`key_prompt.rs`): "tocca la chiave" quando aspetta, il
+  campo PIN quando la chiave ne ha uno (UV è obbligatorio), l'errore con
+  "Riprova". Il primo tentativo va senza PIN: se la chiave lo chiede, si
+  rifà con le stesse opzioni (Grappa le consuma solo alla verifica). Le
+  risposte del riquadro vanno dritte al thread della ceremonia, non al
+  worker, che intanto aspetta; ogni domanda scade dopo 5 minuti (la vita
+  della challenge) come un annullamento.
+- **Decisioni testate nel CI di default** (`cordiale-core/src/security_key.rs`):
+  PIN o verifica integrata dalle opzioni `clientPin`/`uv`, regole del PIN
+  (4-63 caratteri), protocollo PIN 1 o 2, flag UP e UV della risposta,
+  credenziale omessa con allow list di un solo elemento, resident key
+  richiesta o preferita, e lettura degli stati CTAP2 (PIN errato con i
+  tentativi rimasti, bloccato, chiave non registrata, tempo scaduto...).
+- **[dedotto] Limiti.** Una sola chiave inserita alla volta; mentre la
+  chiave lampeggia la ceremonia non si può annullare (il crate rinuncia
+  dopo circa un minuto); sulla porta passwordless, con più passkey dello
+  stesso server sulla chiave, risponde la prima; il nome dell'RP non viene
+  passato alla chiave (il crate non lo prevede).
+
 ## Cosa resta aperto
 
 1. **Prova su Windows** della ceremonia (secondo fattore, passwordless,
    registrazione, cambio modo, attivazione passwordless; vedi "Windows: com'è
    implementata") contro un'istanza Grappa di prova con
    `GRAPPA_PASSKEY_ORIGIN` noto, con Windows Hello e con una chiavetta USB.
-2. **Chiavette USB su Linux/macOS** con `ctap-hid-fido2`: PIN nell'interfaccia,
-   ricodifica dell'attestazione in `none`, prova del build C di hidapi in CI.
+2. **Chiavette USB su Linux/macOS** (#161): fatte dietro la feature
+   `ctap-hid` (vedi "Linux e macOS: chiavette USB"); restano la prova con
+   una chiave reale con PIN contro un Grappa con origine nota, e un job CI
+   che compili la feature (Linux con `libudev-dev`, macOS) prima di
+   accenderla nei pacchetti.
 3. **Origine**: regola di ricostruzione e override per server fatti (§a);
    resta da chiedere a Grappa di esporla, così l'override non servirebbe.
 4. **Login con recovery code** per gli account passwordless (non richiede

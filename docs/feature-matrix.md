@@ -23,7 +23,7 @@ prima di pianificare.
 | Phoenix Channels realtime (user/network/channel topic) | Sì | Fase 1 | Vedi protocol-notes §2 |
 | network/channel/query, messaggi, stato realtime | Sì | Fase 1 | Perimetro Fase 1 |
 | TOTP (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | Login 202 → /auth/totp/verify; gestione /me/totp con sessione password piena; vedi protocol-notes.md §autenticazione e §superfici solo-account |
-| Passkey/WebAuthn (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto/Wax | Fase 2, parziale (issue #147) | Contratto tipizzato di tutte le route passkey con test su server simulato; Settings → Security mostra modo e passkey e le elimina con la password (sessione password piena). Su Windows (issue #160, via `webauthn.dll`) anche login con passkey (secondo fattore e passwordless), aggiunta, cambio modo e attivazione passwordless; altrove restano in Cicchetto. Fattibilità per piattaforma in [`passkey-spike.md`](./passkey-spike.md); non provato su un'istanza reale né con un autenticatore |
+| Passkey/WebAuthn (2FA) | Parziale nel documento, schema verificato nel sorgente Grappa/Cicchetto/Wax | Fase 2, parziale (issue #147) | Contratto tipizzato di tutte le route passkey con test su server simulato; Settings → Security mostra modo e passkey e le elimina con la password (sessione password piena). Su Windows (issue #160, via `webauthn.dll`) anche login con passkey (secondo fattore e passwordless), aggiunta, cambio modo e attivazione passwordless; gli stessi flussi su Linux e macOS con chiavette USB e PIN nei build con la feature cargo `ctap-hid` (spenta di default, issue #161); altrove restano in Cicchetto. Fattibilità per piattaforma in [`passkey-spike.md`](./passkey-spike.md); non provato su un'istanza reale né con un autenticatore |
 | Recovery codes | Verificato nel sorgente Grappa/Cicchetto | Fase 2, implementato | /auth/totp/verify accetta anche recovery code; codici nuovi mostrati una volta dopo /me/totp/enrollment/confirm; un account passwordless accede con un recovery code da `/auth/passkeys/recover` (schermata di connessione, issue #162; non provato su un'istanza reale); vedi protocol-notes.md |
 | Eliminazione account | Sì (`DELETE /me`) | — | Superficie solo-account, fuori scope token per-client |
 | Registrazione nuovo account | No / non documentato | — | Nessun endpoint di signup nel contratto; da chiarire (protocol-notes §6.4) |
@@ -186,7 +186,7 @@ provate contro un server reale**:
 | Profilo proprio per rete | Implementato | Campi CTCP USERINFO e avatar in Settings → General (`PATCH /networks/:slug/profile`, `PUT`/`DELETE .../avatar`) |
 | Rifiuto di un invito | Implementato | Vedi la riga Inviti sopra |
 | Condivisione di sessione | Implementato | Vedi la riga sopra |
-| Passkey | Parziale | Elenco ed eliminazione con la password; ceremonia WebAuthn solo su Windows (#160, non provata con un autenticatore) |
+| Passkey | Parziale | Elenco ed eliminazione con la password; ceremonia WebAuthn su Windows (#160) e, con la feature `ctap-hid`, con chiavette USB su Linux e macOS (#161); nessuna delle due provata con un autenticatore |
 | Pagina Debug | Implementato | Vedi la tabella del 2026-09-25; da provare a mano su Windows, macOS e Linux |
 
 ## Voci ancora da chiarire prima di poter classificare

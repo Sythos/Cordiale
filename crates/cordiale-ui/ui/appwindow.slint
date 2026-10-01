@@ -888,6 +888,15 @@ export component AppWindow inherits Window {
     // The account's factor is a passkey and TOTP isn't armed: the step
     // takes only recovery codes.
     in property <bool> totp-recovery-only: false;
+    // The security key prompt of the USB backend (issue #161), drawn over
+    // whatever screen started a passkey ceremony: `key-prompt-step` is
+    // "touch" while the key waits for a touch, "pin" for its PIN, "error"
+    // with a retry, "" when hidden; `key-prompt-error` a `key-*` reason and
+    // `key-prompt-retries` the PIN attempts left (-1 when unknown).
+    in property <string> key-prompt-step: "";
+    in property <string> key-prompt-error: "";
+    in property <int> key-prompt-retries: -1;
+    in-out property <string> key-prompt-pin: "";
     // A passkey can finish this sign-in here (issue #160), and whether the
     // code field is open too (not when a passkey is the only factor).
     in property <bool> totp-passkey-offered: false;
@@ -1301,6 +1310,9 @@ export component AppWindow inherits Window {
 
     callback connect-requested(string, string, string);
     callback totp-verify-requested(string);
+    callback key-prompt-submit(string); // the security key's PIN
+    callback key-prompt-retry();
+    callback key-prompt-cancel();
     callback totp-cancel-requested();
     callback security-totp-requested();
     callback security-totp-start(string); // password
@@ -2045,6 +2057,38 @@ export component AppWindow inherits Window {
         } else {
             return directory-error;
         }
+    }
+
+    // Why a security key gave no answer (`key-prompt-error`).
+    function key-prompt-text(reason: string) -> string {
+        if reason == "key-missing" {
+            return @tr("No security key found. Plug it in and try again.");
+        } else if reason == "key-several" {
+            return @tr("More than one security key is plugged in. Leave just one and try again.");
+        } else if reason == "key-pin-invalid" {
+            return key-prompt-retries < 0 ? @tr("Wrong PIN.") : @tr("Wrong PIN. Attempts left before the key locks: {}.", key-prompt-retries);
+        } else if reason == "key-pin-auth-blocked" {
+            return @tr("Too many wrong PINs in a row. Unplug the key, plug it back in and try again.");
+        } else if reason == "key-pin-blocked" {
+            return @tr("The key's PIN is blocked. Only resetting the key, which erases its passkeys, unblocks it.");
+        } else if reason == "key-pin-policy" {
+            return @tr("A security key PIN has 4 to 63 characters.");
+        } else if reason == "key-pin-not-set" {
+            return @tr("This key has no PIN, and Grappa requires one. Set a PIN on the key first, for example in a browser's security key settings.");
+        } else if reason == "key-no-uv" {
+            return @tr("This key can't confirm it's you with a PIN or a fingerprint, which Grappa requires.");
+        } else if reason == "key-not-registered" {
+            return @tr("This security key doesn't hold a passkey for this account.");
+        } else if reason == "key-denied" {
+            return @tr("The key wasn't touched in time, or the request was refused on the key.");
+        } else if reason == "key-full" {
+            return @tr("The security key has no room left for another passkey.");
+        } else if reason == "key-unsupported" {
+            return @tr("Grappa asked for a kind of passkey this security key can't create.");
+        } else if reason == "key-failed" {
+            return @tr("The security key didn't answer as expected. Try again.");
+        }
+        return "";
     }
 
     function status-text() -> string {
@@ -7131,6 +7175,82 @@ export component AppWindow inherits Window {
                             update-release-open();
                             available-update-version = "";
                         }
+                    }
+                }
+            }
+        }
+    }
+    // The security key prompt (see `key-prompt-step`). Its buttons answer
+    // the ceremony directly, so they don't depend on `connecting`; there is
+    // no cancel while the key waits for a touch, which can't be stopped.
+    if key-prompt-step != "" : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        Rectangle {
+            width: min(460px, parent.width - 32px);
+            height: min(300px, parent.height - 32px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-width: 1px;
+            border-radius: 8px;
+            border-color: #8080806a;
+            background: theme == "dark" ? #242424 : white;
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                alignment: start;
+
+                Text {
+                    text: @tr("Security key");
+                    font-size: 18px * FontScale.percent / 100;
+                    font-weight: 600;
+                }
+                Text {
+                    text: key-prompt-step == "touch" ? @tr("Touch your security key when it blinks.")
+                        : key-prompt-step == "pin" ? @tr("Enter the PIN of your security key.")
+                        : key-prompt-text(key-prompt-error);
+                    wrap: word-wrap;
+                }
+                if key-prompt-step == "pin" : LineEdit {
+                    placeholder-text: @tr("Security key PIN");
+                    accessible-label: @tr("Security key PIN");
+                    text <=> key-prompt-pin;
+                    input-type: InputType.password;
+                    init => { self.focus(); }
+                    accepted => {
+                        if key-prompt-pin != "" { key-prompt-submit(key-prompt-pin); }
+                    }
+                }
+                if key-prompt-step == "pin" && key-prompt-error != "" : Text {
+                    text: key-prompt-text(key-prompt-error);
+                    wrap: word-wrap;
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+                if key-prompt-step != "touch" : HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    Button {
+                        text: @tr("Cancel");
+                        clicked => { key-prompt-cancel(); }
+                    }
+                    if key-prompt-step == "error" : Button {
+                        text: @tr("Try again");
+                        clicked => { key-prompt-retry(); }
+                    }
+                    if key-prompt-step == "pin" : Button {
+                        text: @tr("Continue");
+                        enabled: key-prompt-pin != "";
+                        clicked => { key-prompt-submit(key-prompt-pin); }
                     }
                 }
             }

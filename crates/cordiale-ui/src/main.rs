@@ -26,9 +26,13 @@ slint::include_modules!();
 
 mod admin_uploads;
 mod ceremony;
+#[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
+mod ceremony_ctap;
 mod dates;
 mod debug_info;
 mod home;
+#[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
+mod key_prompt;
 mod passkeys;
 mod player;
 mod reply;
@@ -765,6 +769,10 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // Passkey ceremonies (issue #160), where the platform can run one.
     ui.set_passkey_available(ceremony::available());
+    // USB security keys have no system dialog: Cordiale's own prompt asks
+    // for the PIN and the touch (issue #161).
+    #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
+    key_prompt::install(&ui);
     let tx_for_passkey = worker_tx.clone();
     let weak_for_passkey = ui.as_weak();
     ui.on_passkey_second_factor_requested(move || {
