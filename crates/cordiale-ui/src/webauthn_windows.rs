@@ -197,13 +197,13 @@ pub fn get_assertion(
     if result.is_err() {
         return Err(ceremony_error(result));
     }
-    if assertion.is_null() {
-        return Err(CeremonyError::Failed("no assertion returned".into()));
-    }
-    // SAFETY: a successful call returns a valid assertion, read here and
-    // then freed once with the DLL's own function.
+    // SAFETY: a non-null pointer from a successful call points to a valid
+    // assertion until the DLL's free function runs. It is freed exactly once
+    // below, after the last read; the null case has nothing to free.
     let response = unsafe {
-        let answer = &*assertion;
+        let Some(answer) = assertion.as_ref() else {
+            return Err(CeremonyError::Failed("no assertion returned".into()));
+        };
         let user_handle = copy_bytes(answer.pbUserId, answer.cbUserId);
         let response = AssertionResponse {
             credential_id: copy_bytes(answer.Credential.pbId, answer.Credential.cbId),
@@ -290,14 +290,14 @@ pub fn make_credential(
     if result.is_err() {
         return Err(ceremony_error(result));
     }
-    if attestation.is_null() {
-        return Err(CeremonyError::Failed("no credential returned".into()));
-    }
-    // SAFETY: a successful call returns a valid attestation, read here
-    // and then freed once with the DLL's own function. `dwUsedTransport`
-    // only exists from version 3 of the struct.
+    // SAFETY: a non-null pointer from a successful call points to a valid
+    // attestation until the DLL's free function runs. It is freed exactly
+    // once below, after the last read; the null case has nothing to free.
+    // `dwUsedTransport` only exists from version 3 of the struct.
     let response = unsafe {
-        let answer = &*attestation;
+        let Some(answer) = attestation.as_ref() else {
+            return Err(CeremonyError::Failed("no credential returned".into()));
+        };
         let transport = if answer.dwVersion >= WEBAUTHN_CREDENTIAL_ATTESTATION_VERSION_3 {
             transport_name(answer.dwUsedTransport)
         } else {
