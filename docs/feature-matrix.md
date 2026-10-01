@@ -240,3 +240,14 @@ storico. La riga che chi legge aveva in cima resta al suo posto, allo stesso
 scostamento. Se una pagina fallisce si riprova solo tornando in cima (o con
 PgSu), mai in un ciclo. Il bottone "Carica messaggi più vecchi" non c'è
 più; PgSu/PgGiù dal campo di scrittura scorrono la chat di una schermata.
+
+**Aggiornamento (2026-10-01)**: una riga di canale espulso (kick), in attesa
+di join, invitata o con join rifiutato non sparisce più dalla sidebar quando
+Grappa manda `channels_changed` o dopo un attach/detach di rete (issue #184).
+`GET /networks/:slug/channels` non elenca un canale non-autojoin da cui si è
+stati espulsi, quindi la sostituzione dell'elenco lo perdeva subito dopo il
+banner "kicked". Ora la riga resta, grigia, con chi ha espulso e il motivo,
+insieme alla sua sottoscrizione al topic, finché non la chiudi con la x o
+non rientri; dopo un refresh di rete si conservano anche stato e metadati
+delle finestre delle reti che restano, a meno che `/boot` non le dia di nuovo
+come entrate.

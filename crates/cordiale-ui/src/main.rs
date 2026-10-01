@@ -12764,13 +12764,61 @@ fn channel_topic_is_owned_elsewhere(state: &WorkerState, user: &str, topic: &str
             .any(|(network, nick)| own_nick_listener_topic(user, network, nick) == topic)
 }
 
+/// Window states Grappa's channel list never reports: a window waiting for
+/// its join, an invitation, a rejected join and a kick all describe a
+/// channel the account is not in (and that may not be an autojoin channel
+/// either), so it is missing from `GET /networks/:slug/channels` until the
+/// user rejoins or dismisses it.
+fn is_unlisted_window_state(window_state: &ChannelWindowState) -> bool {
+    matches!(
+        window_state,
+        ChannelWindowState::Pending
+            | ChannelWindowState::Invited
+            | ChannelWindowState::Failed
+            | ChannelWindowState::Kicked
+    )
+}
+
 /// Replaces only the server-owned channel projection. Message history,
-/// cursors, query windows, and listener ownership remain untouched.
+/// cursors, query windows, and listener ownership remain untouched. A row
+/// whose window is pending, invited, failed or kicked outlives the
+/// replacement, together with its topic subscription: the server list can't
+/// show it, and only rejoining or dismissing it removes the row.
 fn reconcile_channel_entries(
     state: &mut WorkerState,
     user: &str,
     entries: Vec<(String, String, String)>,
 ) -> Vec<ChannelTopicAction> {
+    let known_networks: std::collections::HashSet<String> =
+        state.network_ids.keys().cloned().collect();
+    reconcile_channel_entries_in(state, user, entries, &known_networks)
+}
+
+/// `reconcile_channel_entries` for the networks in `known_networks`, which a
+/// refresh that is about to replace `state.network_ids` passes explicitly.
+fn reconcile_channel_entries_in(
+    state: &mut WorkerState,
+    user: &str,
+    mut entries: Vec<(String, String, String)>,
+    known_networks: &std::collections::HashSet<String>,
+) -> Vec<ChannelTopicAction> {
+    for (network, channel, label) in &state.channel_entries {
+        let key = window_state_key(network, channel);
+        let unlisted = state
+            .window_states
+            .get(&key)
+            .is_some_and(is_unlisted_window_state);
+        if !unlisted
+            || !known_networks.contains(network)
+            || entries.iter().any(|(entry_network, entry_channel, _)| {
+                window_state_key(entry_network, entry_channel) == key
+            })
+        {
+            continue;
+        }
+        entries.push((network.clone(), channel.clone(), label.clone()));
+    }
+
     let next_topics = channel_topics_for_entries(user, &entries);
     let previous_topics = std::mem::replace(&mut state.channel_topics, next_topics.clone());
     let mut actions = Vec::new();
@@ -15855,7 +15903,9 @@ fn apply_network_rest_refresh(
     let next_network_ids = network_ids_from_entries(&boot.networks);
     let mut entries = channel_entries_from_channels(&boot.channels);
     entries.retain(|(network, _, _)| next_network_ids.contains_key(network));
-    let channel_actions = reconcile_channel_entries(state, identifier, entries);
+    let known_networks: std::collections::HashSet<String> =
+        next_network_ids.keys().cloned().collect();
+    let channel_actions = reconcile_channel_entries_in(state, identifier, entries, &known_networks);
 
     // The account's /boot network list is authoritative. A removed network
     // must not be recreated by an old query row or a late channel snapshot.
@@ -15881,10 +15931,33 @@ fn apply_network_rest_refresh(
         .recent_channels
         .retain(|(network, _)| next_network_ids.contains_key(network));
 
+    // `/boot` only knows the joined windows. A pending, invited, failed or
+    // kicked one on a network that stays keeps its state and its metadata
+    // (kick actor and reason, failure reason, inviter) unless `/boot` now
+    // reports that window as joined.
+    let previous_states = std::mem::take(&mut state.window_states);
+    let mut previous_failures = std::mem::take(&mut state.window_failures);
+    let mut previous_kicks = std::mem::take(&mut state.window_kicks);
+    let mut previous_invites = std::mem::take(&mut state.invited_by);
     state.window_states = joined_window_states_from_boot_channels(&boot.channels);
-    state.window_failures.clear();
-    state.window_kicks.clear();
-    state.invited_by.clear();
+    for (key, window_state) in previous_states {
+        if !is_unlisted_window_state(&window_state)
+            || !next_network_ids.contains_key(&key.0)
+            || state.window_states.contains_key(&key)
+        {
+            continue;
+        }
+        if let Some(failure) = previous_failures.remove(&key) {
+            state.window_failures.insert(key.clone(), failure);
+        }
+        if let Some(kick) = previous_kicks.remove(&key) {
+            state.window_kicks.insert(key.clone(), kick);
+        }
+        if let Some(inviter) = previous_invites.remove(&key) {
+            state.invited_by.insert(key.clone(), inviter);
+        }
+        state.window_states.insert(key, window_state);
+    }
     state.window_mentions = window_mentions_from_me(&me.unread_counts);
     state.window_messages = window_messages_from_me(&me.unread_counts);
     // `/boot` carries neither topics nor rosters: both are re-seeded on
@@ -23451,6 +23524,249 @@ mod tests {
         assert_eq!(state.current_channel, Some(key.clone()));
         assert_eq!(state.recent_channels, vec![key.clone()]);
         assert!(state.members.contains_key(&key));
+    }
+
+    fn channel_row(network: &str, channel: &str) -> (String, String, String) {
+        (
+            network.to_string(),
+            channel.to_string(),
+            channel.to_string(),
+        )
+    }
+
+    fn empty_me() -> MeResponse {
+        MeResponse {
+            read_cursors: serde_json::json!({}),
+            unread_counts: serde_json::json!({}),
+            badge_count: serde_json::json!(0),
+            is_admin: false,
+            kind: None,
+            id: None,
+            name: None,
+            registered: None,
+            home_data: None,
+        }
+    }
+
+    #[test]
+    fn kicked_row_survives_a_channel_list_refresh_until_dismissed() {
+        let user = "sythos";
+        let mut state = WorkerState::new();
+        state.network_ids.insert("libera".to_string(), 7);
+        let kicked_topic = channel_topic(user, "libera", "#Cordiale");
+        reconcile_channel_entries(
+            &mut state,
+            user,
+            vec![
+                channel_row("libera", "#alpha"),
+                channel_row("libera", "#Cordiale"),
+            ],
+        );
+        set_joined_window_state(
+            &mut state.window_states,
+            &mut state.window_failures,
+            &mut state.window_kicks,
+            &mut state.invited_by,
+            "libera",
+            "#Cordiale",
+        );
+
+        // Grappa pushes `kicked`, then `channels_changed`, and the REST list
+        // no longer has the channel: it was not an autojoin one.
+        let kick = WindowKick {
+            by: Some("ChanServ".to_string()),
+            reason: Some("policy".to_string()),
+        };
+        set_kicked_window_state(
+            &mut state.window_states,
+            &mut state.window_failures,
+            &mut state.window_kicks,
+            &mut state.invited_by,
+            "libera",
+            "#cordiale",
+            kick.clone(),
+        );
+        let actions =
+            reconcile_channel_entries(&mut state, user, vec![channel_row("libera", "#alpha")]);
+
+        assert!(actions.is_empty(), "no topic is left for a kicked row");
+        assert_eq!(
+            state.channel_entries,
+            vec![
+                channel_row("libera", "#alpha"),
+                channel_row("libera", "#Cordiale")
+            ]
+        );
+        let key = window_state_key("libera", "#cordiale");
+        assert_eq!(
+            state.window_states.get(&key),
+            Some(&ChannelWindowState::Kicked)
+        );
+        assert_eq!(state.window_kicks.get(&key), Some(&kick));
+        assert!(state.channel_topics.contains(&kicked_topic));
+        assert!(state.joined_topics.contains(&kicked_topic));
+        let groups = network_groups_data(
+            &state.channel_entries,
+            &state.query_windows,
+            &state.expanded_networks,
+            &state.network_connection_states,
+            &state.network_ids,
+        );
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].2,
+            vec![
+                ("#Cordiale".to_string(), "#Cordiale".to_string()),
+                ("#alpha".to_string(), "#alpha".to_string()),
+            ]
+        );
+
+        // A second refresh changes nothing.
+        assert!(
+            reconcile_channel_entries(&mut state, user, vec![channel_row("libera", "#alpha")],)
+                .is_empty()
+        );
+        assert_eq!(state.channel_entries.len(), 2);
+
+        // The x removes the row; the next refresh then drops its topic.
+        assert_eq!(
+            dismiss_kicked_window_locally(&mut state, "libera", "#cordiale"),
+            Some(false)
+        );
+        assert_eq!(state.channel_entries, vec![channel_row("libera", "#alpha")]);
+        assert_eq!(
+            reconcile_channel_entries(&mut state, user, vec![channel_row("libera", "#alpha")]),
+            vec![ChannelTopicAction::Leave(kicked_topic)]
+        );
+        assert_eq!(state.channel_entries, vec![channel_row("libera", "#alpha")]);
+    }
+
+    #[test]
+    fn pending_invited_and_failed_rows_survive_a_channel_list_refresh() {
+        let user = "sythos";
+        let mut state = WorkerState::new();
+        state.network_ids.insert("libera".to_string(), 7);
+        for (channel, window_state) in [
+            ("#pending", ChannelWindowState::Pending),
+            ("#invited", ChannelWindowState::Invited),
+            ("#failed", ChannelWindowState::Failed),
+            ("#joined", ChannelWindowState::Joined),
+        ] {
+            state.channel_entries.push(channel_row("libera", channel));
+            state
+                .window_states
+                .insert(window_state_key("libera", channel), window_state);
+        }
+        // A row of a network the account no longer has is not kept.
+        state.channel_entries.push(channel_row("gone", "#failed"));
+        state.window_states.insert(
+            window_state_key("gone", "#failed"),
+            ChannelWindowState::Failed,
+        );
+
+        reconcile_channel_entries(&mut state, user, vec![channel_row("libera", "#alpha")]);
+
+        assert_eq!(
+            state.channel_entries,
+            vec![
+                channel_row("libera", "#alpha"),
+                channel_row("libera", "#pending"),
+                channel_row("libera", "#invited"),
+                channel_row("libera", "#failed"),
+            ]
+        );
+    }
+
+    #[test]
+    fn network_refresh_keeps_kicked_failed_and_invited_windows_of_remaining_networks() {
+        let user = "sythos";
+        let mut state = WorkerState::new();
+        state.identifier = Some(user.to_string());
+        state.network_ids.insert("libera".to_string(), 7);
+        state.network_ids.insert("gone".to_string(), 9);
+        let kicked = window_state_key("libera", "#kicked");
+        let failed = window_state_key("libera", "#failed");
+        let invited = window_state_key("libera", "#invited");
+        let rejoined = window_state_key("libera", "#rejoined");
+        let gone = window_state_key("gone", "#kicked");
+        let kick = WindowKick {
+            by: Some("ChanServ".to_string()),
+            reason: Some("policy".to_string()),
+        };
+        let failure = WindowFailure {
+            reason: Some("banned".to_string()),
+            numeric: None,
+        };
+        for (key, window_state) in [
+            (&kicked, ChannelWindowState::Kicked),
+            (&failed, ChannelWindowState::Failed),
+            (&invited, ChannelWindowState::Invited),
+            (&rejoined, ChannelWindowState::Kicked),
+            (&gone, ChannelWindowState::Kicked),
+        ] {
+            state.window_states.insert(key.clone(), window_state);
+            state.channel_entries.push(channel_row(&key.0, &key.1));
+        }
+        state.window_kicks.insert(kicked.clone(), kick.clone());
+        state.window_kicks.insert(rejoined.clone(), kick.clone());
+        state.window_kicks.insert(gone.clone(), kick.clone());
+        state
+            .window_failures
+            .insert(failed.clone(), failure.clone());
+        state
+            .invited_by
+            .insert(invited.clone(), "alice".to_string());
+        let boot = BootResponse {
+            networks: vec![serde_json::json!({"id": 7, "slug": "libera", "nick": "sythos"})],
+            channels: HashMap::from([(
+                "libera".to_string(),
+                vec![serde_json::json!({"name": "#rejoined", "joined": true})],
+            )]),
+            heads: HashMap::new(),
+        };
+
+        apply_network_rest_refresh(&mut state, user, &boot, &empty_me());
+
+        assert_eq!(
+            state.window_states.get(&kicked),
+            Some(&ChannelWindowState::Kicked)
+        );
+        assert_eq!(state.window_kicks.get(&kicked), Some(&kick));
+        assert_eq!(
+            state.window_states.get(&failed),
+            Some(&ChannelWindowState::Failed)
+        );
+        assert_eq!(state.window_failures.get(&failed), Some(&failure));
+        assert_eq!(
+            state.window_states.get(&invited),
+            Some(&ChannelWindowState::Invited)
+        );
+        assert_eq!(state.invited_by.get(&invited), Some(&"alice".to_string()));
+        // The boot snapshot has the channel joined again: it wins.
+        assert_eq!(
+            state.window_states.get(&rejoined),
+            Some(&ChannelWindowState::Joined)
+        );
+        assert!(!state.window_kicks.contains_key(&rejoined));
+        // A removed network takes its windows with it.
+        assert!(!state.window_states.contains_key(&gone));
+        assert!(!state.window_kicks.contains_key(&gone));
+        let mut rows = state.channel_entries.clone();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                channel_row("libera", "#failed"),
+                channel_row("libera", "#invited"),
+                channel_row("libera", "#kicked"),
+                channel_row("libera", "#rejoined"),
+            ]
+        );
+        for channel in ["#kicked", "#failed", "#invited"] {
+            assert!(state
+                .channel_topics
+                .contains(&channel_topic(user, "libera", channel)));
+        }
     }
 
     #[test]
