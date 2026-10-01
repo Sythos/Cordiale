@@ -129,7 +129,7 @@ Cordiale also covers:
   device, for example one made in Cicchetto after a passkey sign-in. Not yet
   checked against a live server.
 - **Connection and presence:** Cordiale declares the protocol revision it
-  was checked against (`client_proto=34`) and, if Grappa refuses the
+  was checked against (`client_proto=35`) and, if Grappa refuses the
   upgrade with `426`, stops and asks you to update instead of retrying.
   After a reconnect it catches up each channel's missed messages (a short gap
   is paged in, a long one reloads the latest messages and leaves a note where

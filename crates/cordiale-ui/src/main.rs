@@ -17722,9 +17722,17 @@ fn parse_mentions_bundle(
         } else {
             format!("<{sender}> {body}")
         };
+        // An inbound DM is stored at our own nick, so `channel` alone would
+        // label it with ourselves; from protocol v35 `dm_with` names the peer
+        // (raw nick, null off a DM, absent on older servers).
+        let window = message
+            .get("dm_with")
+            .and_then(Value::as_str)
+            .filter(|peer| !peer.is_empty())
+            .unwrap_or(channel);
         rows.push((
             String::new(),
-            format!("{} {channel} {text}", format_epoch_millis(server_time)),
+            format!("{} {window} {text}", format_epoch_millis(server_time)),
         ));
     }
     if messages.is_empty() {
@@ -25988,6 +25996,50 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn parse_mentions_bundle_labels_a_dm_mention_with_the_peer() {
+        let row = |channel: &str, sender: &str, extra: Value| {
+            let mut row = serde_json::json!({
+                "server_time": 1790000000000_i64,
+                "channel": channel,
+                "sender": sender,
+                "body": "hi",
+                "kind": "privmsg"
+            });
+            if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+                row.extend(extra.clone());
+            }
+            row
+        };
+        let payload = serde_json::json!({
+            "kind": "mentions_bundle",
+            "network": "libera",
+            "away_started_at": "2026-09-23T08:00:00Z",
+            "away_ended_at": "2026-09-23T09:00:00Z",
+            "away_reason": null,
+            "messages": [
+                // Inbound DM: `channel` is our own nick, `dm_with` the peer.
+                row("vjt", "Alice", serde_json::json!({"id": 7, "dm_with": "Alice"})),
+                // Channel row on a v35 server: `dm_with` is null.
+                row("#rust", "bob", serde_json::json!({"id": 8, "dm_with": null})),
+                // A server older than v35 sends neither key.
+                row("#rust", "carol", serde_json::json!({})),
+                // An empty or non-string `dm_with` falls back to `channel`.
+                row("#rust", "dave", serde_json::json!({"dm_with": ""})),
+                row("#rust", "erin", serde_json::json!({"dm_with": 5}))
+            ]
+        });
+        let view = parse_mentions_bundle(&payload, "grappa:user:vjt", "vjt").expect("valid bundle");
+        // Away period row first, then one row per message in order.
+        assert_eq!(view.rows.len(), 6);
+        assert!(view.rows[1].1.ends_with(" Alice <Alice> hi"));
+        assert!(!view.rows[1].1.contains(" vjt <"));
+        assert!(view.rows[2].1.ends_with(" #rust <bob> hi"));
+        assert!(view.rows[3].1.ends_with(" #rust <carol> hi"));
+        assert!(view.rows[4].1.ends_with(" #rust <dave> hi"));
+        assert!(view.rows[5].1.ends_with(" #rust <erin> hi"));
     }
 
     #[test]

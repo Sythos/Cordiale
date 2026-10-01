@@ -47,7 +47,10 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// after re-checking the wire contract at the newer version. It must stay a
 /// plain integer: the server silently discards a value it can't read as one
 /// and still accepts the connect.
-pub const CLIENT_PROTOCOL_VERSION: u32 = 34;
+///
+/// 35 is the revision that adds `id` and `dm_with` to the rows of
+/// `mentions_bundle`; Cordiale reads `dm_with` to label a DM mention.
+pub const CLIENT_PROTOCOL_VERSION: u32 = 35;
 
 /// The bootstrap compatibility fields from `GET /api/config`, and echoed
 /// again in the WebSocket user-topic join response.
