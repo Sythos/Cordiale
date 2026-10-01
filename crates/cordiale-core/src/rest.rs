@@ -422,10 +422,10 @@ impl SendMessageRequest {
 /// Body of `GET`/`PUT /me/settings/display-prefs`, per
 /// `docs/protocol-notes.md` §1: 8 keys (v29), absent-tolerant in both directions
 /// (a `GET` response may omit any of them, and a `PUT` only needs to carry
-/// the ones being changed). `time_format` and `presence_filter` aren't
-/// touched by Cordiale's Settings UI yet (their exact value shapes aren't
-/// confirmed — see §7 open point 8), so this struct only round-trips the
-/// five boolean prefs Cordiale actually reads and writes.
+/// the ones being changed). `time_format` isn't touched by Cordiale's
+/// Settings UI yet, and `presence_filter` (a per-channel map) is handled
+/// by the `presence` module, so this struct only round-trips the
+/// five boolean prefs and the date format Cordiale actually reads and writes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DisplayPrefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]

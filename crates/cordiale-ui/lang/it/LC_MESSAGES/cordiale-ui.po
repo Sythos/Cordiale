@@ -3203,3 +3203,7 @@ msgstr "Riprova"
 msgctxt "AppWindow"
 msgid "Continue"
 msgstr "Continua"
+
+msgctxt "AppWindow"
+msgid "Denoise"
+msgstr "Nascondi il rumore"

@@ -3203,3 +3203,7 @@ msgstr "Noch einmal versuchen"
 msgctxt "AppWindow"
 msgid "Continue"
 msgstr "Weiter"
+
+msgctxt "AppWindow"
+msgid "Denoise"
+msgstr "Rauschen ausblenden"

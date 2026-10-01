@@ -62,6 +62,7 @@ pub mod media;
 pub mod passkey_origin;
 pub mod persistence;
 pub mod phoenix;
+pub mod presence;
 pub mod profile;
 pub mod protocol;
 pub mod radio;

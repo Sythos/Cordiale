@@ -27,7 +27,7 @@
 //! `servers.json`. Actual credentials never land in either file — see
 //! `CredentialStore` (Phase 1, item 3).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{Profile, Server};
 use crate::passkey_origin::{passkey_origin, OverrideCheck};
+use crate::presence::PresencePref;
 
 const CONFIG_DIR_NAME: &str = ".cordiale";
 const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -100,6 +101,17 @@ pub struct Settings {
     /// Radio volume, 0 to 100.
     #[serde(default = "default_radio_volume")]
     pub radio_volume: u8,
+    /// Channels where the user chose to hide or show join/part/quit/nick/
+    /// mode lines (Denoise), keyed like Grappa's `presence_filter`:
+    /// `"<network> <channel>"`, the channel ASCII-lowercased. A channel
+    /// without an entry follows its size.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub presence_pins: BTreeMap<String, PresencePref>,
+    /// The keys of `presence_pins` whose upload to Grappa is not confirmed
+    /// yet: sent again at the next sign-in instead of being overwritten by
+    /// the server's older value.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub presence_unsynced: BTreeSet<String>,
 }
 
 /// A radio station added in Settings > Radio.
@@ -140,6 +152,8 @@ impl Default for Settings {
             color_theme: None,
             radio_stations: Vec::new(),
             radio_volume: default_radio_volume(),
+            presence_pins: BTreeMap::new(),
+            presence_unsynced: BTreeSet::new(),
         }
     }
 }
@@ -461,12 +475,24 @@ mod tests {
                 codec: "vorbis".to_string(),
             }],
             radio_volume: 55,
+            presence_pins: BTreeMap::from([("libera #rust".to_string(), PresencePref::Hide)]),
+            presence_unsynced: BTreeSet::from(["libera #rust".to_string()]),
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");
         let decoded: Settings = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(settings, decoded);
+    }
+
+    #[test]
+    fn settings_without_denoise_choices_default_to_none() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
+        assert!(decoded.presence_pins.is_empty());
+        assert!(decoded.presence_unsynced.is_empty());
+        let json = serde_json::to_value(Settings::default()).expect("serialize");
+        assert!(json.get("presence_pins").is_none());
     }
 
     #[test]

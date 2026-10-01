@@ -37,7 +37,13 @@ pattern, as a whole word) gets the mention background, and is bold unless
 "bold mentions" is off in Settings > Display. Scrolling up (or PgUp in
 the message box) past the oldest loaded line fetches the previous page of
 history from Grappa, page by page, keeping the line you were reading in
-place.
+place. On a channel window the Actions menu has a **Denoise** toggle that
+leaves join, part, quit, nick-change and mode lines out of that channel's
+transcript (a mode that changes the channel itself, like a ban, stays); the
+events are still kept, so turning it off brings them back. The choice is
+saved per network and channel, synced with Grappa's `presence_filter`
+preference, and a channel with 200 or more members starts denoised until you
+pick, as in Cicchetto.
 
 Right-click a sender in the chat and **Reply** drops a Cicchetto-style quote
 into that window's draft, ready to edit before sending; the same nick menu in
