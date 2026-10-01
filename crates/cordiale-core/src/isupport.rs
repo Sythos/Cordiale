@@ -76,14 +76,28 @@ pub struct IsupportState {
     pub frame_budget_base: u64,
 }
 
-/// Member prefixes assumed before a network's ISUPPORT snapshot arrives.
-const DEFAULT_PREFIXES: [(&str, &str); 3] = [("o", "@"), ("h", "%"), ("v", "+")];
+/// Member prefixes assumed before a network's ISUPPORT snapshot arrives,
+/// highest first (the same ladder as the default of `prefix_symbol_order`).
+const DEFAULT_PREFIXES: [(&str, &str); 5] =
+    [("q", "~"), ("a", "&"), ("o", "@"), ("h", "%"), ("v", "+")];
+
+/// The member-prefix symbol a channel mode letter grants on this network:
+/// from its PREFIX, or the usual `qaohv` ladder before its snapshot.
+pub fn prefix_symbol_for_mode(isupport: Option<&IsupportState>, letter: &str) -> Option<String> {
+    match isupport {
+        Some(state) => state.prefix.get(letter).cloned(),
+        None => DEFAULT_PREFIXES
+            .iter()
+            .find(|(mode, _)| *mode == letter)
+            .map(|(_, symbol)| symbol.to_string()),
+    }
+}
 
 /// Member-prefix changes in a channel MODE, as `(adding, symbol, nick)`.
 /// Parameters are lined up per ISUPPORT: prefix, list (CHANMODES A) and
 /// always-parameter (B) modes take one, set-only (C) modes only when set,
 /// flags (D) and unknown letters none. Without a snapshot, RFC 1459-style
-/// defaults apply (`ohv` prefixes, `beI` lists, `k`, `l`).
+/// defaults apply (`qaohv` prefixes, `beI` lists, `k`, `l`).
 pub fn prefix_mode_changes(
     modes: &str,
     args: &[String],
@@ -98,14 +112,7 @@ pub fn prefix_mode_changes(
             '-' => adding = false,
             _ => {
                 let letter = ch.to_string();
-                let symbol = match isupport {
-                    Some(state) => state.prefix.get(&letter).cloned(),
-                    None => DEFAULT_PREFIXES
-                        .iter()
-                        .find(|(mode, _)| *mode == letter)
-                        .map(|(_, symbol)| symbol.to_string()),
-                };
-                if let Some(symbol) = symbol {
+                if let Some(symbol) = prefix_symbol_for_mode(isupport, &letter) {
                     if let Some(nick) = args.next() {
                         changes.push((adding, symbol, nick.clone()));
                     }
@@ -298,6 +305,45 @@ mod tests {
         );
         assert_eq!(prefix_symbol_order(Some(&state)), vec!["@", "+"]);
         assert_eq!(prefix_symbol_order(None), vec!["~", "&", "@", "%", "+"]);
+    }
+
+    #[test]
+    fn prefix_symbols_default_to_the_full_ladder_before_a_snapshot() {
+        let args = |list: &[&str]| -> Vec<String> { list.iter().map(|a| a.to_string()).collect() };
+        assert_eq!(
+            prefix_mode_changes("+qa-ov", &args(&["ann", "bob", "cy", "di"]), None),
+            vec![
+                (true, "~".to_string(), "ann".to_string()),
+                (true, "&".to_string(), "bob".to_string()),
+                (false, "@".to_string(), "cy".to_string()),
+                (false, "+".to_string(), "di".to_string()),
+            ]
+        );
+        for (letter, symbol) in [("q", "~"), ("a", "&"), ("o", "@"), ("h", "%"), ("v", "+")] {
+            assert_eq!(
+                prefix_symbol_for_mode(None, letter).as_deref(),
+                Some(symbol)
+            );
+        }
+        assert_eq!(prefix_symbol_for_mode(None, "x"), None);
+    }
+
+    #[test]
+    fn prefix_symbols_follow_the_network_prefix() {
+        let mut payload = valid_payload();
+        payload["prefix"] = serde_json::json!({"Y": "!", "q": "~", "o": "@", "v": "+"});
+        payload["prefix_order"] = serde_json::json!(["Y", "q", "o", "v"]);
+        let state = parse_isupport_changed(&payload)
+            .expect("valid snapshot")
+            .state;
+        assert_eq!(
+            prefix_symbol_for_mode(Some(&state), "Y").as_deref(),
+            Some("!")
+        );
+        // `a` and `h` are not part of this network's PREFIX.
+        assert_eq!(prefix_symbol_for_mode(Some(&state), "a"), None);
+        assert_eq!(prefix_symbol_for_mode(Some(&state), "h"), None);
+        assert_eq!(prefix_symbol_order(Some(&state)), vec!["!", "~", "@", "+"]);
     }
 
     #[test]
