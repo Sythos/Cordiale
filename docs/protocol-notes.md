@@ -430,26 +430,41 @@ il resto della sezione Sicurezza resta in Cicchetto:
   Flood sostenuto → `web_session_severed` `{"code": "rate_limit_flood"}` sul
   topic utente → bearer revocato → socket chiuso. La sessione IRC (bouncer)
   non viene toccata, solo quella web. Cordiale gestisce
-  `web_session_severed` e il `429 too_many_attempts` del login, ma non
-  interpreta `rate_limited` (né `retry_after_ms`): una scrittura rifiutata per
-  budget è un errore come un altro, senza backoff dedicato.
+  `web_session_severed` e il `429 too_many_attempts` del login. Su un invio
+  rifiutato per budget (`429` sulla scrittura REST, `rate_limited` come
+  risposta a un verbo WS) legge il `Retry-After` (secondi o data HTTP) o, in
+  mancanza, `retry_after_ms`, e lo mostra come attesa nella barra di stato;
+  non ritenta da sola e non accoda nulla. Le altre scritture REST rifiutate
+  per budget restano un errore come un altro. Non verificato contro un
+  server reale.
 - **Boot e reconnect (§6a del contratto)**: il budget sopra misura solo le
   scritture, quindi non protegge da un fan-out di `GET`. Quello che lo ferma è
   di solito un proxy con `limit_req`, che risponde `503` (non `429`), senza
   `retry_after_ms` né `Retry-After`. Cordiale fa il boot con `GET /boot` +
   `GET /me` (due richieste, piatte rispetto alla dimensione dell'account) e il
   recupero dopo un reconnect va un canale alla volta con una pausa di 250 ms
-  (vedi §1). Un `503` del proxy non ha un trattamento dedicato, e il refresh
+  (vedi §1). Un `503` (o `429`) sull'upgrade del WebSocket con `Retry-After`
+  allunga l'attesa prima del tentativo successivo (vedi sotto); senza
+  l'header vale solo il backoff. Gli altri `503` del proxy non hanno un
+  trattamento dedicato, e il refresh
   dopo `channels_changed` rilegge i canali di ogni rete in parallelo: non è
   limitato dalla dimensione dell'account. Non verificato contro un proxy reale.
 
 ### Heartbeat / riconnessione
 - **Non specificato esplicitamente** nel documento: nessun intervallo di
   heartbeat Phoenix né policy di backoff dichiarata. Cordiale attualmente
-  invia il heartbeat ogni 30 secondi e attende 5 secondi prima di un nuovo
-  tentativo (`crates/cordiale-core/src/session.rs`); sono parametri del client,
-  non prescrizioni del server, e vanno validati su condizioni di rete e
-  istanze differenti. Il recupero dello scrollback resta distinto dalla
+  invia il heartbeat ogni 30 secondi e riconnette con backoff esponenziale:
+  1 s, 2 s, 4 s... fino a 60 s, ogni attesa variata di ±25% a caso perché i
+  client caduti insieme non tornino sullo stesso battito
+  (`crates/cordiale-core/src/backoff.rs`, `session.rs`). La crescita riparte
+  solo dopo una connessione rimasta agganciata (topic utente joinato) per
+  almeno 30 s, non subito dopo l'handshake. Un `Retry-After` su `429`/`503`
+  dell'upgrade (secondi o data HTTP, al massimo 5 minuti) è un minimo
+  sotto cui l'attesa non scende. Gli stati terminali (`426`, bearer rifiutato,
+  certificato non fidato) non ritentano. La barra di stato mostra tra quanti
+  secondi parte il prossimo tentativo. Sono parametri del client, non
+  prescrizioni del server, e vanno validati su condizioni di rete e istanze
+  differenti. Il recupero dello scrollback resta distinto dalla
   riconnessione del socket e segue la paginazione documentata in §4.
 
 ### Presenza in primo piano (`visibility`, `client_closing`)
@@ -1043,9 +1058,11 @@ letto in una spec:
 
 1. **Parametri di heartbeat e riconnessione WebSocket** — il contratto
    Grappa non prescrive intervalli o backoff. Cordiale implementa un
-   heartbeat Phoenix ogni 30 secondi e un ritardo fisso di riconnessione di
-   5 secondi (`crates/cordiale-core/src/session.rs`); sono scelte del client, non
-   garanzie del server, da validare su altre condizioni di rete/istanze.
+   heartbeat Phoenix ogni 30 secondi e una riconnessione con backoff
+   esponenziale da 1 a 60 secondi, con jitter di ±25% e rispetto di
+   `Retry-After` (`crates/cordiale-core/src/backoff.rs`, `session.rs`); sono
+   scelte del client, non garanzie del server, da validare su altre
+   condizioni di rete/istanze.
 2. **Portabilità del login guest/visitor** — il contratto non definisce un
    flusso universale; `guest`/`guest` è stato verificato solo su
    `irc.sindro.me`. La password vuota attiva quel tentativo in Cordiale,

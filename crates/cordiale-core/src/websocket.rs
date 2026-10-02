@@ -37,6 +37,7 @@
 //! actual socket (the handshake header).
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
@@ -45,13 +46,14 @@ use rustls_platform_verifier::BuilderVerifierExt;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::error::TlsError;
-use tokio_tungstenite::tungstenite::http::header::USER_AGENT;
+use tokio_tungstenite::tungstenite::http::header::{RETRY_AFTER, USER_AGENT};
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{
     connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream,
 };
 
+use crate::backoff::parse_retry_after;
 use crate::phoenix::PhoenixMessage;
 use crate::GRAPPA_USER_AGENT;
 
@@ -135,6 +137,24 @@ impl PhoenixSocketError {
             }
             _ => None,
         }
+    }
+
+    /// How long the server asked to wait when it refused the upgrade as
+    /// overloaded or rate-limited (`429`, `503`) with a `Retry-After` header,
+    /// in seconds or as a date counted from `now`. A proxy that throttles
+    /// often leaves the header out: then there is no hint, and the ordinary
+    /// back-off applies.
+    pub fn retry_after(&self, now: SystemTime) -> Option<Duration> {
+        let PhoenixSocketError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) =
+            self
+        else {
+            return None;
+        };
+        if !matches!(response.status().as_u16(), 429 | 503) {
+            return None;
+        }
+        let value = response.headers().get(RETRY_AFTER)?.to_str().ok()?;
+        parse_retry_after(value, now)
     }
 }
 
@@ -363,6 +383,54 @@ mod tests {
     fn other_refusals_are_not_upgrade_refusals() {
         assert_eq!(refused_upgrade(403, None).upgrade_required(), None);
         assert_eq!(refused_upgrade(500, None).upgrade_required(), None);
+    }
+
+    fn refused_with_retry_after(status: u16, retry_after: &str) -> PhoenixSocketError {
+        let response = tokio_tungstenite::tungstenite::http::Response::builder()
+            .status(status)
+            .header("Retry-After", retry_after)
+            .body(None)
+            .expect("response");
+        PhoenixSocketError::Connect(tokio_tungstenite::tungstenite::Error::Http(Box::new(
+            response,
+        )))
+    }
+
+    #[test]
+    fn a_throttled_upgrade_exposes_its_retry_after() {
+        let now = SystemTime::UNIX_EPOCH;
+        for status in [429, 503] {
+            assert_eq!(
+                refused_with_retry_after(status, "12").retry_after(now),
+                Some(Duration::from_secs(12)),
+                "{status}"
+            );
+        }
+        let date = "Thu, 01 Jan 1970 00:01:00 GMT";
+        assert_eq!(
+            refused_with_retry_after(503, date).retry_after(now),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn retry_after_is_only_read_from_throttling_refusals() {
+        let now = SystemTime::UNIX_EPOCH;
+        // No header (the usual proxy `503`), or one that doesn't parse.
+        assert_eq!(refused_upgrade(503, None).retry_after(now), None);
+        assert_eq!(refused_with_retry_after(503, "soon").retry_after(now), None);
+        // Other statuses follow their own path, header or not.
+        for status in [401, 403, 426, 500, 502] {
+            assert_eq!(
+                refused_with_retry_after(status, "12").retry_after(now),
+                None,
+                "{status}"
+            );
+        }
+        assert_eq!(
+            PhoenixSocketError::InvalidRequest("x".to_string()).retry_after(now),
+            None
+        );
     }
 
     fn handshake_failure(cause: rustls::Error) -> PhoenixSocketError {

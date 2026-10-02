@@ -1016,6 +1016,10 @@ export component AppWindow inherits Window {
     // fill the `{}` placeholders of the templates that need a number.
     in property <string> status-kind: "";
     in property <string> status-message: "";
+    // Seconds left before the next reconnect attempt (`reconnecting` and
+    // `disconnected`), counted down below; also the wait a `rate-limited`
+    // answer asked for.
+    in-out property <int> status-retry-secs: 0;
     in property <int> status-network-count: 0;
     in property <int> status-channel-count: 0;
     // Fill the `invite-sent` template (341 RPL_INVITING acknowledgement).
@@ -2370,12 +2374,14 @@ export component AppWindow inherits Window {
             return @tr("Caps must be whole numbers, or empty for unlimited.");
         } else if status-kind == "send-failed" {
             return @tr("Couldn't send that message.");
+        } else if status-kind == "rate-limited" {
+            return @tr("Too many requests. Try again in about {} s.", status-retry-secs);
         } else if status-kind == "part-failed" {
             return @tr("Couldn't leave the channel. Please try again.");
         } else if status-kind == "invite-decline-failed" {
             return @tr("Couldn't decline the invite. Please try again.");
         } else if status-kind == "disconnected" {
-            return status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
+            return status-retry-secs > 0 ? @tr("Disconnected. Reconnecting in {} s… ({})", status-retry-secs, status-message) : status-message == "" ? @tr("Disconnected. Reconnecting…") : @tr("Disconnected. Reconnecting… ({})", status-message);
         } else if status-kind == "session-refused" {
             return @tr("Grappa refused the realtime session ({}). Sign out and in again; if it keeps happening, please report it.", status-message);
         } else if status-kind == "certificate-untrusted" {
@@ -2383,7 +2389,7 @@ export component AppWindow inherits Window {
         } else if status-kind == "upgrade-required" {
             return @tr("This server no longer accepts this version of Cordiale. Please update Cordiale.");
         } else if status-kind == "reconnecting" {
-            return status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
+            return status-retry-secs > 0 ? @tr("Reconnecting in {} s… ({})", status-retry-secs, status-message) : status-message == "" ? @tr("Reconnecting…") : @tr("Reconnecting… ({})", status-message);
         } else if status-kind == "presence-online" {
             return @tr("{} is now online on {}.", status-presence-nick, status-presence-network);
         } else if status-kind == "presence-offline" {
@@ -2878,6 +2884,13 @@ export component AppWindow inherits Window {
         interval: 15s;
         running: current-mute-active && current-mute-until != "";
         triggered => { mute-countdown-tick(); }
+    }
+
+    // Counts down the wait before the next reconnect attempt.
+    Timer {
+        interval: 1s;
+        running: (status-kind == "reconnecting" || status-kind == "disconnected") && status-retry-secs > 0;
+        triggered => { status-retry-secs -= 1; }
     }
 
     if screen == "connected" : HorizontalBox {

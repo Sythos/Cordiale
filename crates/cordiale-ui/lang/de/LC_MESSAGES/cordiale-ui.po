@@ -3251,3 +3251,15 @@ msgstr "Dieser Passkey-Origin verwendet einfaches http:// auf einem Host, der ni
 msgctxt "CleartextNotice"
 msgid "Send it unencrypted anyway"
 msgstr "Trotzdem unverschlüsselt senden"
+
+msgctxt "AppWindow"
+msgid "Too many requests. Try again in about {} s."
+msgstr "Zu viele Anfragen. Versuche es in etwa {} s erneut."
+
+msgctxt "AppWindow"
+msgid "Disconnected. Reconnecting in {} s… ({})"
+msgstr "Verbindung getrennt. Verbinde in {} s erneut… ({})"
+
+msgctxt "AppWindow"
+msgid "Reconnecting in {} s… ({})"
+msgstr "Verbinde in {} s erneut… ({})"
