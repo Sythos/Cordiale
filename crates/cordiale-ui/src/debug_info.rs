@@ -24,6 +24,7 @@
 //! and only shown on screen; `cordiale_core::diagnostics` lays the text out.
 //! Whatever the platform can't tell reliably stays `None` ("Not available").
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use chrono::Local;
@@ -35,6 +36,23 @@ use sysinfo::{CpuRefreshKind, MemoryRefreshKind, System};
 
 /// The renderer Slint ended up with, known once the first frame is set up.
 static RENDERER: OnceLock<&'static str> = OnceLock::new();
+
+/// Chat rows held in memory, as last reported by the worker; `usize::MAX`
+/// until it has reported.
+static CHAT_ROWS_TOTAL: AtomicUsize = AtomicUsize::new(usize::MAX);
+static CHAT_ROWS_LARGEST: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// Records how many chat rows are held over all windows and in the largest
+/// one, for the report.
+pub(crate) fn note_chat_rows(total: usize, largest: usize) {
+    CHAT_ROWS_TOTAL.store(total, Ordering::Relaxed);
+    CHAT_ROWS_LARGEST.store(largest, Ordering::Relaxed);
+}
+
+/// A count the worker has reported, if it has.
+fn reported(count: &AtomicUsize) -> Option<usize> {
+    Some(count.load(Ordering::Relaxed)).filter(|rows| *rows != usize::MAX)
+}
 
 /// Starts noting which renderer draws the window. Call before the window is
 /// shown: the OpenGL renderer reports when its context is ready, the
@@ -84,6 +102,8 @@ pub(crate) fn report(window: &slint::Window, app_language: Option<&str>) -> Stri
         cpu_cores,
         memory_total: Some(system.total_memory()).filter(|bytes| *bytes > 0),
         memory_available: Some(system.available_memory()).filter(|bytes| *bytes > 0),
+        chat_rows_total: reported(&CHAT_ROWS_TOTAL),
+        chat_rows_largest: reported(&CHAT_ROWS_LARGEST),
         display_size,
         scale_factor: Some(window.scale_factor()),
         windowing_system: windowing_system.map(str::to_string),

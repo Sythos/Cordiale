@@ -63,8 +63,8 @@ device only.
 
 The Debug page (the bug icon before Settings, or the Actions menu) shows
 selectable, copyable details about your system: Cordiale version and build,
-operating system, CPU, RAM, display, locale, time zone, and where Cordiale
-keeps its files. Paste them into a bug report. They are generated locally
+operating system, CPU, RAM, how many chat rows Cordiale holds in memory,
+display, locale, time zone, and where Cordiale keeps its files. Paste them into a bug report. They are generated locally
 and never uploaded, and the text leaves out account names, server addresses,
 tokens and your user name in paths. Anything the platform can't report
 reliably says "Not available"; the keyboard layout is only read on Windows,
