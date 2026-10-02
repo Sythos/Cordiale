@@ -4139,6 +4139,18 @@ async fn run_worker(
                             ui.set_current_query_ready(false);
                         });
                     }
+                    Some(SessionEvent::CertificateRejected { reason }) => {
+                        // Stopped for good: the server's certificate stays
+                        // untrusted until the store or the server changes.
+                        persistence::log_line(&format!("session certificate rejected: {reason}"));
+                        state.session = None;
+                        session_events = None;
+                        let _ = ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_status_kind("certificate-untrusted".into());
+                            ui.set_status_message(reason.into());
+                            ui.set_current_query_ready(false);
+                        });
+                    }
                     Some(SessionEvent::UpgradeRequired {
                         protocol_version,
                         min_protocol_version,

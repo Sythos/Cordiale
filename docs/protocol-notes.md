@@ -272,6 +272,14 @@ il resto della sezione Sicurezza resta in Cicchetto:
 - **Autenticazione**: il bearer viaggia nell'header `Sec-WebSocket-Protocol`
   come `base64url.bearer.phx.<token>` — non nell'URL, per tenerlo fuori dagli
   access log. Bearer mancante/invalido → `403`.
+- **Fiducia TLS**: REST e WebSocket verificano il certificato del server con
+  lo stesso verificatore di piattaforma (archivio di fiducia del sistema
+  operativo), non con un elenco di radici incorporato: un server dietro una
+  CA privata o aziendale funziona su entrambi se la CA è nell'archivio di
+  sistema. Un certificato non fidato sul WebSocket ferma la sessione e mostra
+  l'errore nella barra di stato, invece di ritentare all'infinito (non
+  verificato contro un server con CA privata reale; un test sul grafo delle
+  dipendenze impedisce che i due trasporti tornino a divergere).
 - **Versione protocollo**: dichiarata via query param `client_proto`
   sull'URL di upgrade (va messo nei `params` del `Socket`, non nel path).
   - Sotto `min_protocol_version` → `426 Upgrade Required`, body

@@ -27,21 +27,30 @@
 //! the wire format from `crate::phoenix` over it. Plain `async fn`s only:
 //! no runtime is started here, `cordiale-ui` owns that.
 //!
+//! TLS trust comes from the same place as the REST client's: the platform
+//! verifier (the OS store), see `tls_config`.
+//!
 //! Exercised against a real Grappa server as of 2026-09-20 (the bearer
 //! subprotocol needed base64-encoding the token, not sending it raw —
 //! see `bearer_subprotocol`'s own doc comment); still no mocked-server
 //! test harness, so the unit tests here only cover what doesn't need an
 //! actual socket (the handshake header).
 
+use std::sync::Arc;
+
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
+use rustls_platform_verifier::BuilderVerifierExt;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::TlsError;
 use tokio_tungstenite::tungstenite::http::header::USER_AGENT;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream,
+};
 
 use crate::phoenix::PhoenixMessage;
 use crate::GRAPPA_USER_AGENT;
@@ -91,6 +100,25 @@ impl PhoenixSocketError {
             }
             _ => false,
         }
+    }
+
+    /// The certificate failure behind a refused TLS handshake, when the
+    /// server's certificate isn't trusted by this machine (unknown issuer,
+    /// expired, wrong name, ...). Retrying can't help until the trust store
+    /// or the server changes, unlike a network error or a 5xx.
+    pub fn certificate_error(&self) -> Option<&rustls::Error> {
+        use tokio_tungstenite::tungstenite::Error;
+        let PhoenixSocketError::Connect(err) = self else {
+            return None;
+        };
+        // The handshake failure comes back wrapped in an `io::Error`;
+        // `Error::Tls` is the shape for errors raised before it starts.
+        let cause = match err {
+            Error::Io(io) => io.get_ref()?.downcast_ref::<rustls::Error>()?,
+            Error::Tls(TlsError::Rustls(cause)) => &**cause,
+            _ => return None,
+        };
+        matches!(cause, rustls::Error::InvalidCertificate(_)).then_some(cause)
     }
 
     /// The refusal details when Grappa answered the upgrade with `426`
@@ -147,6 +175,20 @@ fn bearer_subprotocol(token: &str) -> String {
     format!("base64url.bearer.phx.{}", STANDARD_NO_PAD.encode(token))
 }
 
+/// The TLS settings of the socket: the platform verifier, which is also what
+/// `reqwest`'s `rustls` backend uses for the REST calls. The OS store (not
+/// a bundled Mozilla list) decides who is trusted, so a server behind a
+/// private or corporate CA works on both transports (issue #198). Built per
+/// connect, so a CA installed meanwhile is picked up on the next attempt.
+fn tls_config() -> Result<Arc<rustls::ClientConfig>, rustls::Error> {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_platform_verifier()?
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
 pub struct PhoenixSocket {
     stream: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }
@@ -180,7 +222,17 @@ impl PhoenixSocket {
             .headers_mut()
             .insert(USER_AGENT, HeaderValue::from_static(GRAPPA_USER_AGENT));
 
-        let (stream, _response) = connect_async(request)
+        // Only `wss` needs a TLS config; building it reads the OS trust
+        // store, which a plain `ws` connection (tests, local servers) skips.
+        let connector = if request.uri().scheme_str() == Some("wss") {
+            let config = tls_config()
+                .map_err(|err| PhoenixSocketError::Connect(TlsError::from(err).into()))?;
+            Some(Connector::Rustls(config))
+        } else {
+            None
+        };
+
+        let (stream, _response) = connect_async_tls_with_config(request, None, false, connector)
             .await
             .map_err(PhoenixSocketError::Connect)?;
 
@@ -311,6 +363,94 @@ mod tests {
     fn other_refusals_are_not_upgrade_refusals() {
         assert_eq!(refused_upgrade(403, None).upgrade_required(), None);
         assert_eq!(refused_upgrade(500, None).upgrade_required(), None);
+    }
+
+    fn handshake_failure(cause: rustls::Error) -> PhoenixSocketError {
+        // What tokio-rustls hands back for a failed handshake.
+        let io = std::io::Error::new(std::io::ErrorKind::InvalidData, cause);
+        PhoenixSocketError::Connect(tokio_tungstenite::tungstenite::Error::Io(io))
+    }
+
+    #[test]
+    fn an_untrusted_certificate_is_told_apart_from_other_connect_failures() {
+        let untrusted = handshake_failure(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ));
+        assert!(matches!(
+            untrusted.certificate_error(),
+            Some(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer
+            ))
+        ));
+
+        let wrapped = PhoenixSocketError::Connect(tokio_tungstenite::tungstenite::Error::Tls(
+            TlsError::Rustls(Box::new(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Expired,
+            ))),
+        ));
+        assert!(wrapped.certificate_error().is_some());
+
+        // Network trouble, other TLS failures and HTTP refusals keep
+        // retrying (or follow their own path), they aren't certificate errors.
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        let refused =
+            PhoenixSocketError::Connect(tokio_tungstenite::tungstenite::Error::Io(refused));
+        for err in [
+            refused,
+            handshake_failure(rustls::Error::General("boom".to_string())),
+            refused_upgrade(403, None),
+            PhoenixSocketError::InvalidRequest("x".to_string()),
+        ] {
+            assert!(err.certificate_error().is_none(), "{err}");
+        }
+    }
+
+    /// The `dependencies` of the `Cargo.lock` package called `package`, by
+    /// crate name only.
+    fn locked_dependencies(lock: &str, package: &str) -> Vec<String> {
+        let lock = lock.replace("\r\n", "\n");
+        let header = format!("name = \"{package}\"");
+        let block = lock
+            .split("\n\n")
+            .find(|block| block.lines().any(|line| line == header))
+            .unwrap_or_else(|| panic!("{package} is missing from Cargo.lock"));
+        block
+            .lines()
+            .skip_while(|line| *line != "dependencies = [")
+            .skip(1)
+            .take_while(|line| *line != "]")
+            .map(|line| {
+                let entry = line.trim().trim_matches(|c: char| c == '"' || c == ',');
+                entry.split(' ').next().unwrap_or_default().to_string()
+            })
+            .collect()
+    }
+
+    // Issue #198: REST and the socket once verified against different roots
+    // (the OS store vs a bundled Mozilla list), so a server behind a private
+    // CA signed in fine and then never got a realtime connection. Both go
+    // through `rustls-platform-verifier` now; this pins that in the resolved
+    // dependency graph so neither side can drift back unnoticed.
+    #[test]
+    fn rest_and_websocket_verify_certificates_with_the_same_platform_verifier() {
+        let lock = include_str!("../../../Cargo.lock");
+        let verifier = "rustls-platform-verifier";
+
+        // `reqwest`'s `rustls` backend verifies through it...
+        assert!(locked_dependencies(lock, "reqwest").contains(&verifier.to_string()));
+        // ...and so does the connector this crate hands to the socket.
+        assert!(locked_dependencies(lock, "cordiale-core").contains(&verifier.to_string()));
+        // A single locked version, so both really are the same verifier.
+        let header = format!("name = \"{verifier}\"");
+        let versions = lock
+            .replace("\r\n", "\n")
+            .lines()
+            .filter(|line| *line == header)
+            .count();
+        assert_eq!(versions, 1, "{verifier} is locked in more than one version");
+        // The socket library carries no list of roots of its own.
+        let socket = locked_dependencies(lock, "tokio-tungstenite");
+        assert!(!socket.iter().any(|name| name.starts_with("webpki-roots")));
     }
 
     #[test]
