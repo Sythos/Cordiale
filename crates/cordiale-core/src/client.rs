@@ -27,7 +27,7 @@
 //! this eventually runs on.
 
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use reqwest::Client;
 /// HTTP status of a refusal, re-exported for `GrappaClientError` users.
@@ -40,6 +40,7 @@ use crate::admin::{
     AdminSessionLogResponse, AdminSessionsResponse, AdminUploadsResponse, AdminUsersResponse,
     AdminVisitorsResponse,
 };
+use crate::backoff::rate_limit_wait;
 use crate::presence::{PresencePins, PresencePref};
 use crate::profile::{
     AddIgnoreRequest, AliasesView, IgnoreEntry, IgnoreMutationResponse, IgnoresResponse,
@@ -71,6 +72,9 @@ pub enum GrappaClientError {
     Rejected {
         status: StatusCode,
         code: Option<String>,
+        /// How long the server asked to wait before trying again: its
+        /// `Retry-After` header, else the body's `retry_after_ms`.
+        retry_after: Option<Duration>,
     },
 }
 
@@ -95,6 +99,15 @@ impl GrappaClientError {
             _ => None,
         }
     }
+
+    /// The wait the server asked for with a refusal (`Rejected`), when it
+    /// gave one: a rate-limited write says how long to hold off.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            GrappaClientError::Rejected { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
 }
 
 /// Turns a non-success response into `Rejected` with its `error` code;
@@ -106,12 +119,21 @@ async fn reject_with_code(
     if status.is_success() {
         return Ok(response);
     }
-    let code = response
-        .json::<Value>()
-        .await
-        .ok()
+    let header = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let body = response.json::<Value>().await.ok();
+    let code = body
+        .as_ref()
         .and_then(|body| body.get("error")?.as_str().map(str::to_string));
-    Err(GrappaClientError::Rejected { status, code })
+    let retry_after = rate_limit_wait(header.as_deref(), body.as_ref(), SystemTime::now());
+    Err(GrappaClientError::Rejected {
+        status,
+        code,
+        retry_after,
+    })
 }
 
 impl From<reqwest::Error> for GrappaClientError {
@@ -729,8 +751,8 @@ impl GrappaClient {
             .bearer_auth(token)
             .json(request)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        let response = reject_with_code(response).await?;
         Ok(response.json::<Value>().await?)
     }
 
@@ -4171,6 +4193,76 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    async fn send_hello(mock_server: &MockServer) -> GrappaClientError {
+        let client = GrappaClient::new(mock_server.uri());
+        let request = crate::rest::SendMessageRequest::plain("hello");
+        client
+            .send_message("abc123", "libera", "#rust", &request)
+            .await
+            .expect_err("should be refused")
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_write_exposes_the_wait_the_server_asks_for() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels/%23rust/messages"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "3")
+                    .set_body_json(serde_json::json!({
+                        "error": "rate_limited",
+                        "retry_after_ms": 1500
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let error = send_hello(&mock_server).await;
+
+        assert_eq!(error.status(), Some(StatusCode::TOO_MANY_REQUESTS));
+        assert_eq!(error.code(), Some("rate_limited"));
+        // The header wins over the body's milliseconds.
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_write_without_a_header_falls_back_to_the_body() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels/%23rust/messages"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+                "error": "rate_limited",
+                "retry_after_ms": 1500
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let error = send_hello(&mock_server).await;
+
+        assert_eq!(error.retry_after(), Some(Duration::from_millis(1500)));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_without_a_wait_hint_has_no_retry_after() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels/%23rust/messages"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("<html>busy</html>"))
+            .mount(&mock_server)
+            .await;
+
+        let error = send_hello(&mock_server).await;
+
+        assert_eq!(error.status(), Some(StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(error.retry_after(), None);
+        // Transport and URL errors have none either.
+        assert_eq!(
+            GrappaClientError::InvalidUrl("x".to_string()).retry_after(),
+            None
+        );
     }
 
     #[tokio::test]

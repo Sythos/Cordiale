@@ -201,7 +201,8 @@ provate contro un server reale**:
   restano da confermare, come dettagliato in `protocol-notes.md` §5.
 - Assegnazione ruolo admin: nessuna procedura documentata.
 - Heartbeat/backoff WebSocket: il contratto non fissa intervalli; Cordiale
-  usa un heartbeat da 30 s e un ritardo fisso di riconnessione da 5 s.
+  usa un heartbeat da 30 s e una riconnessione con backoff esponenziale
+  (1 s, 2 s, 4 s... fino a 60 s, jitter ±25%, `Retry-After` rispettato).
   Restano parametri scelti dal client da verificare su altre istanze e
   condizioni di rete (`protocol-notes.md` §2 e §6).
 

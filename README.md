@@ -140,8 +140,13 @@ Cordiale also covers:
 - **Connection and presence:** Cordiale declares the protocol revision it
   was checked against (`client_proto=37`) and, if Grappa refuses the
   upgrade with `426`, stops and asks you to update instead of retrying.
-  After a reconnect it catches up each channel's missed messages (a short gap
-  is paged in, a long one reloads the latest messages and leaves a note where
+  A dropped connection is retried after 1 s, then 2 s, 4 s and so on up to
+  a minute (each wait varied by up to a quarter, so clients that dropped
+  together don't return together), honouring a `Retry-After` from the server;
+  the status bar says when the next attempt is due, and a rate-limited send
+  says how long to wait. After a reconnect it catches up each channel's
+  missed messages (a short gap is paged in, a long one reloads the latest
+  messages and leaves a note where
   the hole is), and it tells Grappa while the window is in the foreground so
   auto-away and push notifications follow. A channel invite offers Join and
   Decline. On a server that renames private windows itself (protocol 34 to
@@ -224,6 +229,7 @@ Cordiale also covers:
 - **Not yet tried against a live server:** passkey listing and deletion,
   the Windows passkey ceremonies (no real authenticator either),
   session-sharing links, channel-history catch-up after a reconnect, the
+  reconnect back-off and the `Retry-After` handling, the
   foreground presence reports, the `client_proto` declaration and its `426`
   handling, DM renames by conversation id (servers below protocol 37), the
   coexisting old and new private windows after a peer's nick change on

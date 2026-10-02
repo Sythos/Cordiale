@@ -27,8 +27,9 @@
 //! 30s on the dedicated `"phoenix"` topic; not Grappa-specific, and not
 //! spelled out in `docs/protocol-notes.md`, which flags heartbeat/backoff
 //! as undocumented — see its §6.1/§7), lets callers join and leave
-//! additional topics (network/channel), and reconnects with a fixed delay
-//! on disconnect, rejoining whatever was joined before.
+//! additional topics (network/channel), and reconnects on disconnect with an
+//! exponential, jittered back-off (see `crate::backoff`) that honours the
+//! server's `Retry-After`, rejoining whatever was joined before.
 //!
 //! Runs as a plain `tokio::spawn`ed task, talking to its caller over two
 //! channels, so `cordiale-ui` never has to hold the socket itself.
@@ -36,16 +37,16 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
+use crate::backoff::{random_unit, Backoff};
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
 use crate::websocket::{PhoenixSocket, PhoenixSocketError};
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
-const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 /// How often a foreground report is repeated. Grappa stops trusting a
 /// `visible` report after about 60 s, so this has to stay at or under half
 /// of that.
@@ -99,6 +100,8 @@ struct JoinedTopic {
 }
 
 /// Something the running session wants the UI side to know about.
+/// `Disconnected` and `Reconnecting` carry in `retry_in` how long the session
+/// waits before it connects again.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
     /// The user-topic join succeeded; echoes `protocol_version` again per
@@ -116,9 +119,11 @@ pub enum SessionEvent {
     /// translated or pretty.
     Disconnected {
         reason: String,
+        retry_in: Duration,
     },
     Reconnecting {
         reason: String,
+        retry_in: Duration,
     },
     /// Terminal: Grappa refused the user-topic join for good (`forbidden`,
     /// `unknown_topic`): retrying with the same topic can't succeed, so the
@@ -276,15 +281,21 @@ fn tracked_ref(counter: &AtomicU64) -> String {
 
 /// Waits out the reconnect delay. Returns `false` when the session was shut
 /// down, or its handle dropped, in the meantime: no further reconnect then.
-async fn wait_before_reconnect(shutdown: &mut watch::Receiver<bool>) -> bool {
+async fn wait_before_reconnect(delay: Duration, shutdown: &mut watch::Receiver<bool>) -> bool {
     if *shutdown.borrow() {
         return false;
     }
     let stopped = tokio::select! {
-        _ = sleep(RECONNECT_DELAY) => false,
+        _ = sleep(delay) => false,
         _ = shutdown.changed() => true,
     };
     !stopped && !*shutdown.borrow()
+}
+
+/// How long the last connection stayed joined: zero when it never got that
+/// far.
+fn uptime(joined_at: Option<Instant>) -> Duration {
+    joined_at.map_or(Duration::ZERO, |at| at.elapsed())
 }
 
 /// What the session knows about the window's foreground state, and whether
@@ -374,12 +385,19 @@ async fn run_session(
     // Outlives reconnects: the window's state doesn't change because the
     // socket did.
     let mut presence = Presence::default();
+    // Grows with every attempt that fails; a connection that stays joined
+    // long enough starts it over.
+    let mut backoff = Backoff::default();
 
     'reconnect: loop {
         if *shutdown.borrow() {
             return;
         }
         presence.topic_lost();
+        // Set once the user topic is joined: the back-off only resets for a
+        // connection that stayed up, not for one that was dropped right after
+        // the handshake.
+        let mut joined_at: Option<Instant> = None;
         let mut socket = match PhoenixSocket::connect(&ws_url, &token).await {
             Ok(socket) => socket,
             Err(err) if err.is_auth_rejection() => {
@@ -402,10 +420,16 @@ async fn run_session(
                     });
                     return;
                 }
+                let retry_in = backoff.next_delay(
+                    Duration::ZERO,
+                    err.retry_after(SystemTime::now()),
+                    random_unit(),
+                );
                 let _ = events.send(SessionEvent::Reconnecting {
                     reason: format!("connect failed: {err}"),
+                    retry_in,
                 });
-                if !wait_before_reconnect(&mut shutdown).await {
+                if !wait_before_reconnect(retry_in, &mut shutdown).await {
                     return;
                 }
                 continue 'reconnect;
@@ -417,10 +441,12 @@ async fn run_session(
         let user_join_ref = match join(&mut socket, &mut refs, &user_topic, true).await {
             Ok(join_ref) => join_ref,
             Err(err) => {
+                let retry_in = backoff.next_delay(Duration::ZERO, None, random_unit());
                 let _ = events.send(SessionEvent::Reconnecting {
                     reason: format!("user topic join failed: {err}"),
+                    retry_in,
                 });
-                if !wait_before_reconnect(&mut shutdown).await {
+                if !wait_before_reconnect(retry_in, &mut shutdown).await {
                     return;
                 }
                 continue 'reconnect;
@@ -465,10 +491,13 @@ async fn run_session(
                         payload: serde_json::json!({}),
                     };
                     if let Err(err) = socket.send(&heartbeat_msg).await {
+                        let retry_in =
+                            backoff.next_delay(uptime(joined_at), None, random_unit());
                         let _ = events.send(SessionEvent::Disconnected {
                             reason: format!("heartbeat send failed: {err}"),
+                            retry_in,
                         });
-                        if !wait_before_reconnect(&mut shutdown).await {
+                        if !wait_before_reconnect(retry_in, &mut shutdown).await {
                             return;
                         }
                         continue 'reconnect;
@@ -541,6 +570,7 @@ async fn run_session(
                         Ok(Some(message)) => {
                             match user_join_outcome(&message, &user_topic, &user_join_ref) {
                                 Some(Ok(protocol_version)) => {
+                                    joined_at = Some(Instant::now());
                                     let _ = events.send(SessionEvent::Connected { protocol_version });
                                     let visible = presence.topic_joined();
                                     let report = visibility_message(
@@ -556,10 +586,13 @@ async fn run_session(
                                     return;
                                 }
                                 Some(Err(reason)) => {
+                                    let retry_in =
+                                        backoff.next_delay(uptime(joined_at), None, random_unit());
                                     let _ = events.send(SessionEvent::Reconnecting {
                                         reason: format!("user topic join rejected: {reason}"),
+                                        retry_in,
                                     });
-                                    if !wait_before_reconnect(&mut shutdown).await {
+                                    if !wait_before_reconnect(retry_in, &mut shutdown).await {
                                         return;
                                     }
                                     continue 'reconnect;
@@ -569,19 +602,25 @@ async fn run_session(
                             let _ = events.send(SessionEvent::Frame(message));
                         }
                         Ok(None) => {
+                            let retry_in =
+                                backoff.next_delay(uptime(joined_at), None, random_unit());
                             let _ = events.send(SessionEvent::Disconnected {
                                 reason: "socket closed".to_string(),
+                                retry_in,
                             });
-                            if !wait_before_reconnect(&mut shutdown).await {
+                            if !wait_before_reconnect(retry_in, &mut shutdown).await {
                                 return;
                             }
                             continue 'reconnect;
                         }
                         Err(err) => {
+                            let retry_in =
+                                backoff.next_delay(uptime(joined_at), None, random_unit());
                             let _ = events.send(SessionEvent::Disconnected {
                                 reason: format!("read failed: {err}"),
+                                retry_in,
                             });
-                            if !wait_before_reconnect(&mut shutdown).await {
+                            if !wait_before_reconnect(retry_in, &mut shutdown).await {
                                 return;
                             }
                             continue 'reconnect;
@@ -801,14 +840,27 @@ mod tests {
     async fn reconnect_wait_stops_immediately_once_shut_down() {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         shutdown_tx.send(true).expect("receiver alive");
-        assert!(!wait_before_reconnect(&mut shutdown_rx).await);
+        assert!(!wait_before_reconnect(Duration::from_secs(60), &mut shutdown_rx).await);
     }
 
     #[tokio::test]
     async fn reconnect_wait_stops_when_the_handle_is_dropped() {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         drop(shutdown_tx);
-        assert!(!wait_before_reconnect(&mut shutdown_rx).await);
+        assert!(!wait_before_reconnect(Duration::from_secs(60), &mut shutdown_rx).await);
+    }
+
+    #[tokio::test]
+    async fn reconnect_wait_runs_its_course_while_the_session_stays_up() {
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        assert!(wait_before_reconnect(Duration::from_millis(10), &mut shutdown_rx).await);
+    }
+
+    #[test]
+    fn uptime_is_zero_before_the_user_topic_is_joined() {
+        assert_eq!(uptime(None), Duration::ZERO);
+        let joined = Instant::now();
+        assert!(uptime(Some(joined)) < Duration::from_secs(30));
     }
 
     #[test]

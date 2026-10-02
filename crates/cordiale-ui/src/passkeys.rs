@@ -106,6 +106,7 @@ mod tests {
         GrappaClientError::Rejected {
             status: StatusCode::from_u16(status).expect("status"),
             code: code.map(str::to_string),
+            retry_after: None,
         }
     }
 

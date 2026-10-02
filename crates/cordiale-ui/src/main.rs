@@ -4097,6 +4097,7 @@ async fn run_worker(
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_status_kind("signed-in".into());
                             ui.set_status_message("".into());
+                            ui.set_status_retry_secs(0);
                         });
                         request_watch_patterns(&mut state);
                         // Grappa doesn't replay what a channel said while
@@ -4108,17 +4109,19 @@ async fn run_worker(
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame).await;
                     }
-                    Some(SessionEvent::Disconnected { reason }) if state.session.is_none() => {
+                    Some(SessionEvent::Disconnected { reason, .. }) if state.session.is_none() => {
                         // A deliberately ended session (sign-out, revoked
                         // bearer) still reports its final socket close; it
                         // must not overwrite the sign-in screen's status.
                         persistence::log_line(&format!("ended session closed: {reason}"));
                     }
-                    Some(SessionEvent::Reconnecting { reason }) if state.session.is_none() => {
+                    Some(SessionEvent::Reconnecting { reason, .. }) if state.session.is_none() => {
                         persistence::log_line(&format!("ended session not reconnecting: {reason}"));
                     }
-                    Some(SessionEvent::Disconnected { reason }) => {
-                        persistence::log_line(&format!("session disconnected: {reason}"));
+                    Some(SessionEvent::Disconnected { reason, retry_in }) => {
+                        persistence::log_line(&format!(
+                            "session disconnected: {reason}, retrying in {retry_in:?}"
+                        ));
                         note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
@@ -4127,14 +4130,18 @@ async fn run_worker(
                             state.connecting_networks.clear();
                             refresh_network_groups(&state, &ui);
                         }
+                        let retry_secs = wait_secs(retry_in);
                         let _ = ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_status_retry_secs(retry_secs);
                             ui.set_status_kind("disconnected".into());
                             ui.set_status_message(reason.into());
                             ui.set_current_query_ready(false);
                         });
                     }
-                    Some(SessionEvent::Reconnecting { reason }) => {
-                        persistence::log_line(&format!("session reconnecting: {reason}"));
+                    Some(SessionEvent::Reconnecting { reason, retry_in }) => {
+                        persistence::log_line(&format!(
+                            "session reconnecting: {reason}, retrying in {retry_in:?}"
+                        ));
                         note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
@@ -4143,7 +4150,9 @@ async fn run_worker(
                             state.connecting_networks.clear();
                             refresh_network_groups(&state, &ui);
                         }
+                        let retry_secs = wait_secs(retry_in);
                         let _ = ui.upgrade_in_event_loop(move |ui| {
+                            ui.set_status_retry_secs(retry_secs);
                             ui.set_status_kind("reconnecting".into());
                             ui.set_status_message(reason.into());
                             ui.set_current_query_ready(false);
@@ -6141,15 +6150,37 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     }
 
     let request = SendMessageRequest::plain(body);
-    if client
-        .send_message(token, network, channel, &request)
-        .await
-        .is_err()
-    {
-        let ui = ui.clone();
-        let _ = ui.upgrade_in_event_loop(|ui| {
-            ui.set_status_kind("send-failed".into());
-        });
+    if let Err(err) = client.send_message(token, network, channel, &request).await {
+        set_send_failed_status(ui, &err);
+    }
+}
+
+/// The status bar's wait, in whole seconds (at least 1).
+fn wait_secs(wait: std::time::Duration) -> i32 {
+    i32::try_from(cordiale_core::backoff::display_seconds(wait)).unwrap_or(i32::MAX)
+}
+
+/// Tells the user how long the server asked them to hold off.
+fn set_rate_limited_status(ui: &slint::Weak<AppWindow>, wait: std::time::Duration) {
+    let secs = wait_secs(wait);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_retry_secs(secs);
+        ui.set_status_kind("rate-limited".into());
+    });
+}
+
+/// Reports a message post that failed: the wait a throttle (`429`) asked
+/// for when it gave one, the generic failure otherwise.
+fn set_send_failed_status(ui: &slint::Weak<AppWindow>, err: &GrappaClientError) {
+    match err.retry_after() {
+        Some(wait) if err.status().is_some_and(|status| status.as_u16() == 429) => {
+            set_rate_limited_status(ui, wait);
+        }
+        _ => {
+            let _ = ui.upgrade_in_event_loop(|ui| {
+                ui.set_status_kind("send-failed".into());
+            });
+        }
     }
 }
 
@@ -10032,15 +10063,8 @@ async fn handle_member_ctcp(
         return;
     };
     let request = SendMessageRequest::ctcp(nick, &verb, None);
-    if client
-        .send_message(token, network, channel, &request)
-        .await
-        .is_err()
-    {
-        let ui = ui.clone();
-        let _ = ui.upgrade_in_event_loop(|ui| {
-            ui.set_status_kind("send-failed".into());
-        });
+    if let Err(err) = client.send_message(token, network, channel, &request).await {
+        set_send_failed_status(ui, &err);
     }
 }
 
@@ -10243,10 +10267,23 @@ async fn handle_frame(
             .and_then(|identifier| command_error_reason(&frame, identifier))
         {
             persistence::log_line(&format!("command refused: {reason}"));
-            let _ = ui.upgrade_in_event_loop(move |ui| {
-                ui.set_status_command_hint(reason.into());
-                ui.set_status_kind("command-refused".into());
-            });
+            let wait = (reason == "rate_limited")
+                .then(|| {
+                    cordiale_core::backoff::rate_limit_wait(
+                        None,
+                        frame.payload.get("response"),
+                        SystemTime::now(),
+                    )
+                })
+                .flatten();
+            if let Some(wait) = wait {
+                set_rate_limited_status(ui, wait);
+            } else {
+                let _ = ui.upgrade_in_event_loop(move |ui| {
+                    ui.set_status_command_hint(reason.into());
+                    ui.set_status_kind("command-refused".into());
+                });
+            }
         }
         return;
     }
@@ -25764,6 +25801,7 @@ mod tests {
         let rejected = |code: Option<&str>| GrappaClientError::Rejected {
             status: cordiale_core::client::StatusCode::UNPROCESSABLE_ENTITY,
             code: code.map(str::to_string),
+            retry_after: None,
         };
         assert_eq!(
             ignore_error_key(&rejected(Some("invalid_text_pattern"))),
@@ -28705,6 +28743,7 @@ mod tests {
         let rejected = |status: u16, code: Option<&str>| GrappaClientError::Rejected {
             status: cordiale_core::client::StatusCode::from_u16(status).expect("status"),
             code: code.map(str::to_string),
+            retry_after: None,
         };
         assert_eq!(
             recovery_error_key(&rejected(401, Some("invalid_two_factor"))),
@@ -28730,6 +28769,7 @@ mod tests {
         let rejected = |status: u16, code: Option<&str>| GrappaClientError::Rejected {
             status: cordiale_core::client::StatusCode::from_u16(status).expect("status"),
             code: code.map(str::to_string),
+            retry_after: None,
         };
         assert_eq!(
             share_consume_error_key(&rejected(410, Some("share_token_expired"))),
@@ -28806,6 +28846,7 @@ mod tests {
         let rejected = |status: u16, code: Option<&str>| GrappaClientError::Rejected {
             status: cordiale_core::client::StatusCode::from_u16(status).expect("status"),
             code: code.map(str::to_string),
+            retry_after: None,
         };
         assert_eq!(
             totp_error_key(&rejected(401, Some("invalid_two_factor"))),
