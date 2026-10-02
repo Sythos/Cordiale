@@ -1794,6 +1794,17 @@ export component AppWindow inherits Window {
     callback notification-sound-changed();
     // Mutes the open window for this many seconds, 0 for good.
     callback mute-current-requested(int);
+    // The mute of the open conversation, for the bar above the compose box
+    // (`current-mute-since` is "HH:MM" or "" when unknown; the unix end of
+    // a timed mute is in `current-mute-until`, "" for a permanent one; the
+    // time left is re-derived by `mute-countdown-tick` while the bar shows).
+    in property <bool> current-mute-active: false;
+    in property <string> current-mute-key: "";
+    in property <string> current-mute-since: "";
+    in property <string> current-mute-until: "";
+    in property <int> current-mute-hours: 0;
+    in property <int> current-mute-minutes: 0;
+    callback mute-countdown-tick();
     callback denoise-requested();
     callback notification-prefs-changed();
     callback settings-network-selected(string);
@@ -2052,6 +2063,28 @@ export component AppWindow inherits Window {
         }
     }
 
+    function mute-remaining-text() -> string {
+        if current-mute-hours > 0 && current-mute-minutes > 0 {
+            return @tr("{} h {} min", current-mute-hours, current-mute-minutes);
+        } else if current-mute-hours > 0 {
+            return @tr("{} h", current-mute-hours);
+        } else {
+            return @tr("{} min", current-mute-minutes);
+        }
+    }
+
+    function mute-bar-text() -> string {
+        if current-mute-until == "" {
+            return current-mute-since == ""
+                ? @tr("Channel muted")
+                : @tr("Channel muted at {}", current-mute-since);
+        } else {
+            return current-mute-since == ""
+                ? @tr("Channel muted - expires in {}", mute-remaining-text())
+                : @tr("Channel muted at {} - expires in {}", current-mute-since, mute-remaining-text());
+        }
+    }
+
     function directory-empty-text() -> string {
         if directory-rows.length > 0 {
             return "";
@@ -2163,8 +2196,6 @@ export component AppWindow inherits Window {
             return @tr("Modes of {}", status-command-hint);
         } else if status-kind == "command-no-modes" {
             return @tr("No modes known for {} yet.", status-command-hint);
-        } else if status-kind == "conversation-muted" {
-            return @tr("Conversation muted: other devices won't be notified about it.");
         } else if status-kind == "beep-current" {
             return @tr("Notification sound: {}", status-command-hint);
         } else if status-kind == "beep-set" {
@@ -2772,6 +2803,13 @@ export component AppWindow inherits Window {
         interval: 30s;
         running: directory-open && directory-captured-epoch != "";
         triggered => { directory-age-tick(); }
+    }
+
+    // Keeps the time left on a timed mute current while its bar is shown.
+    Timer {
+        interval: 15s;
+        running: current-mute-active && current-mute-until != "";
+        triggered => { mute-countdown-tick(); }
     }
 
     if screen == "connected" : HorizontalBox {
@@ -3758,6 +3796,40 @@ export component AppWindow inherits Window {
                     text: "⏹";
                     a11y-label: @tr("Stop the radio");
                     clicked => { radio-stop(); }
+                }
+            }
+
+            // The open conversation is muted: when and, for a timed mute,
+            // when it ends, with a button to lift it now.
+            if has-selected-channel && current-mute-active : HorizontalLayout {
+                spacing: 6px;
+                padding-left: 6px;
+                padding-right: 6px;
+
+                TopMenuButton {
+                    icon: "🔔";
+                    label: @tr("Unmute now");
+                    dark: theme == "dark";
+                    clicked => { notification-unmute(current-mute-key); }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: #8080806a;
+                    background: #8080800d;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+
+                        Text {
+                            text: "🔕  " + mute-bar-text();
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
                 }
             }
 

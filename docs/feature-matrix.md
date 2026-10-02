@@ -154,7 +154,7 @@ scelta. Stato per area:
 |---|---|---|
 | Temi | Fatto | Galleria, abbinamento giorno/notte che segue lo schema del sistema, sfondi (built-in e caricati), colori dei ruoli, editor dei 27 colori con anteprima, copia, eliminazione, pubblicazione |
 | Impostazioni sincronizzate | Fatto | Nick di rete riletto, watchlist di parole chiave dal server, comandi on-connect multilinea |
-| Notifiche push | Fatto | Interruttori, liste per canale/nick, conversazioni silenziate con durata, suono e `/beep` |
+| Notifiche push | Fatto | Interruttori, liste per canale/nick, conversazioni silenziate con durata, suono e `/beep`; sopra il campo messaggio una barra mostra la silenziazione della conversazione aperta (con orario locale e tempo residuo) e un pulsante per toglierla subito. Grappa conserva solo la scadenza, non l'ora della silenziazione: quella vive in `settings.json` di questo dispositivo, quindi le silenziazioni fatte altrove mostrano la barra senza orario. Non verificato contro un server reale |
 | Upload | Fatto | Graffetta, trascinamento file (non su Wayland), incolla immagini, testo lungo come `paste.txt` |
 | Link e visualizzatore media | Fatto | Link cliccabili come il linkify di Cicchetto; immagini e testo nel visualizzatore, audio nel player, il resto nel browser; nessuna anteprima inline, come Cicchetto |
 | Radio | Fatto | Stazioni di Cicchetto più stazioni personalizzate salvate solo in locale; MP3, Ogg Vorbis, FLAC; `/np` |

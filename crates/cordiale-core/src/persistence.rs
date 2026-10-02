@@ -126,6 +126,12 @@ pub struct Settings {
     /// the server's older value.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub presence_unsynced: BTreeSet<String>,
+    /// When the user muted a conversation from this device, as unix
+    /// seconds, keyed like Grappa's `muted_targets`. Grappa keeps only the
+    /// `until` of a mute and drops any other field, so the "muted at" time
+    /// shown above the compose box lives here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mute_since: BTreeMap<String, i64>,
 }
 
 /// A radio station added in Settings > Radio.
@@ -168,6 +174,7 @@ impl Default for Settings {
             radio_volume: default_radio_volume(),
             presence_pins: BTreeMap::new(),
             presence_unsynced: BTreeSet::new(),
+            mute_since: BTreeMap::new(),
         }
     }
 }
@@ -1059,6 +1066,7 @@ mod tests {
             radio_volume: 55,
             presence_pins: BTreeMap::from([("libera #rust".to_string(), PresencePref::Hide)]),
             presence_unsynced: BTreeSet::from(["libera #rust".to_string()]),
+            mute_since: BTreeMap::from([("libera #rust".to_string(), 1_700_000_000)]),
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");
@@ -1075,6 +1083,15 @@ mod tests {
         assert!(decoded.presence_unsynced.is_empty());
         let json = serde_json::to_value(Settings::default()).expect("serialize");
         assert!(json.get("presence_pins").is_none());
+    }
+
+    #[test]
+    fn settings_without_mute_times_default_to_none() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
+        assert!(decoded.mute_since.is_empty());
+        let json = serde_json::to_value(Settings::default()).expect("serialize");
+        assert!(json.get("mute_since").is_none());
     }
 
     #[test]

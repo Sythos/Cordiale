@@ -172,7 +172,10 @@ Cordiale also covers:
   On-Connect Commands take one IRC command per line. Settings >
   Notifications edits the push switches, the per-channel and per-nick lists,
   muted conversations (muted from the Actions menu, for an hour, eight hours
-  or for good) and the sound other devices play, also set with `/beep`.
+  or for good) and the sound other devices play, also set with `/beep`. A
+  muted conversation shows a bar above the compose box with the time it was
+  muted at (when this device did it) and the time left, plus a button to
+  unmute it right away.
 - **Uploads and attachments:** the paperclip uploads a picked file through
   Grappa (`POST /api/uploads`) and posts its link with the category emoji,
   as Cicchetto does, after checking the file type and the advertised size

@@ -1616,6 +1616,13 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = tx_for_mute_current.send(WorkerCommand::MuteCurrentWindow(seconds));
     });
 
+    let weak_for_mute_tick = ui.as_weak();
+    ui.on_mute_countdown_tick(move || {
+        if let Some(ui) = weak_for_mute_tick.upgrade() {
+            update_mute_countdown(&ui, chrono::Utc::now().timestamp());
+        }
+    });
+
     let tx_for_denoise = worker_tx.clone();
     ui.on_denoise_requested(move || {
         let _ = tx_for_denoise.send(WorkerCommand::ToggleDenoise);
@@ -2614,6 +2621,10 @@ struct WorkerState {
     presence_pins: std::collections::BTreeMap<String, PresencePref>,
     /// Pins whose upload to Grappa isn't confirmed yet.
     presence_unsynced: std::collections::BTreeSet<String>,
+    /// When this device muted each conversation (unix seconds, Grappa's key
+    /// spelling): Grappa stores no "muted at", only the end of the mute.
+    /// Kept in `settings.json`.
+    mute_since: std::collections::BTreeMap<String, i64>,
     /// Lines of the live admin feed, newest first (capped).
     admin_events: Vec<String>,
     /// Last `GET /admin/settings`, to tell whether addressing was edited.
@@ -2864,6 +2875,7 @@ impl WorkerState {
             catch_up_anchors: std::collections::BTreeMap::new(),
             presence_pins: settings.presence_pins,
             presence_unsynced: settings.presence_unsynced,
+            mute_since: settings.mute_since,
             admin_events: Vec::new(),
             admin_settings: None,
             admin_uploads: None,
@@ -4471,6 +4483,7 @@ async fn finish_connect(
             state.supported_user_modes_by_network.clear();
             state.own_listener_ready.clear();
             state.catch_up_anchors.clear();
+            state.notification_prefs = None;
             state.current_query = false;
             state.current_query_ready = false;
             state.current_channel = None;
@@ -4540,6 +4553,7 @@ async fn finish_connect(
             }
 
             sync_presence_pins(state).await;
+            handle_load_notification_prefs(state, ui).await;
 
             let prefs_client = GrappaClient::new(server_url.clone());
             let prefs_token = token.clone();
@@ -5560,6 +5574,7 @@ async fn handle_select_channel(
     state.current_query = false;
     state.current_query_ready = false;
     state.current_channel = Some(key.clone());
+    push_mute_bar(state, ui);
 
     let mut settings = persistence::load_settings().unwrap_or_default();
     settings.last_channel = Some(key.clone());
@@ -5754,6 +5769,7 @@ async fn handle_select_query(
     state.current_query = true;
     state.current_query_ready = state.query_ready.contains(&identity);
     state.current_channel = Some(key.clone());
+    push_mute_bar(state, ui);
     show_query_window(state, ui, &query, &key);
 
     // Cicchetto loads the latest page when a query is selected, independently
@@ -7088,6 +7104,7 @@ async fn handle_load_notification_prefs(state: &mut WorkerState, ui: &slint::Wea
             push_notification_toggles(ui, NotificationToggles::from_prefs(&prefs));
             push_notification_lists(ui, &prefs);
             state.notification_prefs = Some(prefs);
+            sync_mute_bar(state, ui);
         }
         Err(err) => persistence::log_line(&format!("notification prefs load failed: {err:?}")),
     }
@@ -7791,6 +7808,150 @@ fn push_notification_lists(ui: &slint::Weak<AppWindow>, prefs: &serde_json::Map<
     });
 }
 
+/// The mute of the open conversation, as the bar above the compose box
+/// shows it.
+#[derive(Debug, PartialEq, Eq)]
+struct MuteBar {
+    /// Key of the mute in the stored map, for the Unmute button.
+    key: String,
+    /// Unix seconds the user muted at, when this device knows it.
+    since: Option<i64>,
+    /// Unix seconds the mute ends, `None` for a permanent one.
+    until: Option<i64>,
+}
+
+/// The live mute of `key` in the stored prefs. An entry with no `until` is
+/// permanent, as Grappa reads it; a malformed or elapsed one is no mute.
+/// `since` is this device's own record (Grappa keeps no "muted at"), left
+/// out when it can't be right: in the future, or not before the mute ends.
+fn current_mute(
+    prefs: &serde_json::Map<String, Value>,
+    key: &str,
+    since: &std::collections::BTreeMap<String, i64>,
+    now: i64,
+) -> Option<MuteBar> {
+    let entry = prefs
+        .get("muted_targets")?
+        .as_object()?
+        .get(key)?
+        .as_object()?;
+    let until = match entry.get("until") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_i64().filter(|until| *until > 0)?),
+    };
+    if until.is_some_and(|until| until <= now) {
+        return None;
+    }
+    let since = since
+        .get(key)
+        .copied()
+        .filter(|since| *since <= now && until.is_none_or(|until| *since < until));
+    Some(MuteBar {
+        key: key.to_string(),
+        since,
+        until,
+    })
+}
+
+/// Time left on a timed mute as `(hours, minutes)`, rounded up to the
+/// minute; `None` once it is over. Up to an hour it is minutes alone.
+fn mute_remaining(until: i64, now: i64) -> Option<(i32, i32)> {
+    let seconds = until.saturating_sub(now);
+    if seconds <= 0 {
+        return None;
+    }
+    let minutes = i32::try_from(seconds.saturating_add(59) / 60).unwrap_or(i32::MAX);
+    Some(if minutes <= 60 {
+        (0, minutes)
+    } else {
+        (minutes / 60, minutes % 60)
+    })
+}
+
+/// `HH:MM` of a unix time in the local zone.
+fn local_clock_time(unix: i64) -> String {
+    chrono::DateTime::from_timestamp(unix, 0)
+        .map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+/// Drops the "muted at" records of conversations the stored map no longer
+/// mutes; `true` when any went.
+fn forget_lifted_mutes(
+    since: &mut std::collections::BTreeMap<String, i64>,
+    prefs: &serde_json::Map<String, Value>,
+) -> bool {
+    let muted = prefs.get("muted_targets").and_then(Value::as_object);
+    let before = since.len();
+    since.retain(|key, _| muted.is_some_and(|muted| muted.contains_key(key)));
+    since.len() != before
+}
+
+/// Writes the "muted at" records to `settings.json`.
+fn save_mute_settings(state: &WorkerState) {
+    let mut settings = persistence::load_settings().unwrap_or_default();
+    settings.mute_since = state.mute_since.clone();
+    let _ = persistence::save_settings(&settings);
+}
+
+/// Shows the mute bar for the open conversation, from the stored prefs.
+fn push_mute_bar(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let now = chrono::Utc::now().timestamp();
+    let mute = state
+        .current_channel
+        .as_ref()
+        .zip(state.notification_prefs.as_ref())
+        .and_then(|((network, target), prefs)| {
+            current_mute(prefs, &muted_key(network, target), &state.mute_since, now)
+        });
+    let _ = ui.upgrade_in_event_loop(move |ui| apply_mute_bar(&ui, mute.as_ref(), now));
+}
+
+/// Drops the "muted at" records of lifted mutes, then refreshes the bar.
+fn sync_mute_bar(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    if let Some(prefs) = &state.notification_prefs {
+        if forget_lifted_mutes(&mut state.mute_since, prefs) {
+            save_mute_settings(state);
+        }
+    }
+    push_mute_bar(state, ui);
+}
+
+fn apply_mute_bar(ui: &AppWindow, mute: Option<&MuteBar>, now: i64) {
+    let Some(mute) = mute else {
+        ui.set_current_mute_active(false);
+        return;
+    };
+    let since = mute.since.map(local_clock_time).unwrap_or_default();
+    let until = mute.until.map(|until| until.to_string());
+    ui.set_current_mute_key(mute.key.clone().into());
+    ui.set_current_mute_since(since.into());
+    ui.set_current_mute_until(until.unwrap_or_default().into());
+    ui.set_current_mute_hours(0);
+    ui.set_current_mute_minutes(0);
+    ui.set_current_mute_active(true);
+    update_mute_countdown(ui, now);
+}
+
+/// Refreshes the time left on a timed mute; the bar goes away when it is
+/// over. A permanent mute (no `until`) is left alone.
+fn update_mute_countdown(ui: &AppWindow, now: i64) {
+    let Ok(until) = ui.get_current_mute_until().parse::<i64>() else {
+        return;
+    };
+    match mute_remaining(until, now) {
+        Some((hours, minutes)) => {
+            ui.set_current_mute_hours(hours);
+            ui.set_current_mute_minutes(minutes);
+        }
+        None => ui.set_current_mute_active(false),
+    }
+}
+
 /// Applies one notification edit over the stored map (read first when
 /// needed) and saves the whole map, as Grappa's PUT requires.
 async fn handle_notification_edit(
@@ -7816,10 +7977,13 @@ async fn handle_notification_edit(
         Ok(()) => {
             push_notification_lists(ui, &prefs);
             state.notification_prefs = Some(prefs);
-            if matches!(edit, NotificationEdit::Mute(..)) {
-                let _ =
-                    ui.upgrade_in_event_loop(|ui| ui.set_status_kind("conversation-muted".into()));
+            if let NotificationEdit::Mute(key, _) = &edit {
+                state
+                    .mute_since
+                    .insert(key.clone(), chrono::Utc::now().timestamp());
+                save_mute_settings(state);
             }
+            sync_mute_bar(state, ui);
         }
         Err(err) => {
             persistence::log_line(&format!("notification prefs save failed: {err:?}"));
@@ -25206,6 +25370,126 @@ mod tests {
         let fallback = umode_rows(&[], &[]);
         assert_eq!(fallback.len(), KNOWN_UMODES.len());
         assert!(fallback[..SETTABLE_UMODES.len()].iter().all(|row| row.1));
+    }
+
+    #[test]
+    fn current_mute_reads_permanent_and_timed_entries() {
+        let prefs = serde_json::json!({
+            "muted_targets": {
+                "libera #rust": {"until": null},
+                "libera #slint": {"until": 5_000},
+                "libera #bare": {},
+                "libera #old": {"until": 900},
+                "libera #bad": {"until": "soon"},
+                "libera #flat": null
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let none = std::collections::BTreeMap::new();
+        let mute = |key: &str| current_mute(&prefs, key, &none, 1_000);
+        assert_eq!(
+            mute("libera #rust"),
+            Some(MuteBar {
+                key: "libera #rust".to_string(),
+                since: None,
+                until: None
+            })
+        );
+        assert_eq!(mute("libera #slint").unwrap().until, Some(5_000));
+        assert_eq!(mute("libera #bare").unwrap().until, None);
+        assert_eq!(mute("libera #old"), None);
+        assert_eq!(mute("libera #bad"), None);
+        assert_eq!(mute("libera #flat"), None);
+        assert_eq!(mute("libera #missing"), None);
+        assert_eq!(
+            current_mute(&serde_json::Map::new(), "libera #rust", &none, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn current_mute_uses_the_local_record_only_when_it_fits() {
+        let prefs = serde_json::json!({
+            "muted_targets": {
+                "libera #rust": {"until": null},
+                "libera #slint": {"until": 5_000}
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let since = |key: &str, at: i64| std::collections::BTreeMap::from([(key.to_string(), at)]);
+        let found = |key: &str, at: i64| current_mute(&prefs, key, &since(key, at), 1_000);
+        assert_eq!(found("libera #rust", 400).unwrap().since, Some(400));
+        assert_eq!(found("libera #slint", 400).unwrap().since, Some(400));
+        // From the future, or not before the end of the mute: not believed.
+        assert_eq!(found("libera #rust", 1_001).unwrap().since, None);
+        assert_eq!(found("libera #slint", 5_000).unwrap().since, None);
+        // The record of another conversation is not this one's.
+        assert_eq!(
+            current_mute(&prefs, "libera #rust", &since("libera #slint", 400), 1_000)
+                .unwrap()
+                .since,
+            None
+        );
+    }
+
+    #[test]
+    fn mute_lookup_folds_the_target_like_the_stored_key() {
+        let prefs = serde_json::json!({"muted_targets": {"libera #rust": {"until": null}}})
+            .as_object()
+            .cloned()
+            .unwrap();
+        let none = std::collections::BTreeMap::new();
+        let key = muted_key("libera", "#RUST");
+        assert_eq!(key, "libera #rust");
+        assert!(current_mute(&prefs, &key, &none, 1).is_some());
+    }
+
+    #[test]
+    fn mute_remaining_rounds_up_and_switches_to_hours_after_an_hour() {
+        assert_eq!(mute_remaining(100, 100), None);
+        assert_eq!(mute_remaining(100, 200), None);
+        assert_eq!(mute_remaining(101, 100), Some((0, 1)));
+        assert_eq!(mute_remaining(160, 100), Some((0, 1)));
+        assert_eq!(mute_remaining(161, 100), Some((0, 2)));
+        assert_eq!(mute_remaining(3_599 + 100, 100), Some((0, 60)));
+        assert_eq!(mute_remaining(3_600 + 100, 100), Some((0, 60)));
+        assert_eq!(mute_remaining(3_601 + 100, 100), Some((1, 1)));
+        assert_eq!(mute_remaining(7_200 + 100, 100), Some((2, 0)));
+        assert_eq!(mute_remaining(28_800 + 100, 100), Some((8, 0)));
+        assert_eq!(
+            mute_remaining(i64::MAX, 0),
+            Some((i32::MAX / 60, i32::MAX % 60))
+        );
+    }
+
+    #[test]
+    fn local_clock_time_is_hours_and_minutes() {
+        let text = local_clock_time(1_700_000_000);
+        assert_eq!(text.len(), 5);
+        assert_eq!(text.as_bytes()[2], b':');
+        assert_eq!(local_clock_time(i64::MAX), "");
+    }
+
+    #[test]
+    fn lifted_mutes_lose_their_local_record() {
+        let prefs = serde_json::json!({"muted_targets": {"libera #rust": {"until": null}}})
+            .as_object()
+            .cloned()
+            .unwrap();
+        let mut since = std::collections::BTreeMap::from([
+            ("libera #rust".to_string(), 10),
+            ("libera #gone".to_string(), 20),
+        ]);
+        assert!(forget_lifted_mutes(&mut since, &prefs));
+        assert_eq!(since.len(), 1);
+        assert!(since.contains_key("libera #rust"));
+        assert!(!forget_lifted_mutes(&mut since, &prefs));
+        assert!(forget_lifted_mutes(&mut since, &serde_json::Map::new()));
+        assert!(since.is_empty());
     }
 
     #[test]
