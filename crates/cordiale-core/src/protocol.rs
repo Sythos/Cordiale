@@ -48,9 +48,12 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// plain integer: the server silently discards a value it can't read as one
 /// and still accepts the connect.
 ///
-/// 35 is the revision that adds `id` and `dm_with` to the rows of
-/// `mentions_bundle`; Cordiale reads `dm_with` to label a DM mention.
-pub const CLIENT_PROTOCOL_VERSION: u32 = 35;
+/// 35 adds `id` and `dm_with` to the rows of `mentions_bundle` (Cordiale
+/// reads `dm_with` to label a DM mention); 36 adds `dm_with` to every
+/// scrollback row; 37 removes `dm_conversation_id` from scrollback rows and
+/// `query_windows_list` entries, and a nick change moves nothing server-side
+/// any more (a renamed peer's next message opens a new window).
+pub const CLIENT_PROTOCOL_VERSION: u32 = 37;
 
 /// The bootstrap compatibility fields from `GET /api/config`, and echoed
 /// again in the WebSocket user-topic join response.

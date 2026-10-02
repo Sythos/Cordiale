@@ -2199,9 +2199,10 @@ struct ChannelModes {
     params: HashMap<String, Option<String>>,
 }
 
-/// One open Grappa query window. `dm_conversation_id` (protocol v34) names
-/// the conversation across a peer's nick change; it is `None` for servers
-/// older than v34 or when the server has no conversation for the window.
+/// One open Grappa query window. `dm_conversation_id` (protocol v34 to v36)
+/// names the conversation across a peer's nick change; it is `None` for
+/// servers older than v34, for v37 and later (which dropped it) or when the
+/// server has no conversation for the window.
 /// `opened_at` is retained from the server's full snapshot so a unique
 /// stable opening can be matched across a rename when no id is available,
 /// without guessing from list position.
@@ -2678,6 +2679,10 @@ struct WorkerState {
     /// Full replacement from `query_windows_list`; query rows live beside
     /// channel rows while retaining their own window identity.
     query_windows: Vec<QueryWindow>,
+    /// The server's `protocol_version`, from `/api/config` at sign-in and
+    /// again from the user-topic join reply. `None` until known; see
+    /// `rename_inference_applies`.
+    server_protocol_version: Option<u32>,
     /// Own-nick DMs can precede the authoritative query snapshot that Grappa
     /// emits after opening a sender's query. Hold only a small FIFO until that
     /// snapshot either confirms the query or proves it should be discarded.
@@ -2880,6 +2885,7 @@ impl WorkerState {
             aliases: None,
             channel_topics: std::collections::HashSet::new(),
             query_windows: Vec::new(),
+            server_protocol_version: None,
             pending_own_nick_dms: VecDeque::new(),
             query_joined: std::collections::HashSet::new(),
             query_ready: std::collections::HashSet::new(),
@@ -4058,6 +4064,11 @@ async fn run_worker(
                         persistence::log_line(&format!(
                             "session connected, protocol_version={protocol_version:?}"
                         ));
+                        // A reconnect can land on an upgraded server; a join
+                        // reply without the field keeps what sign-in learned.
+                        if protocol_version.is_some() {
+                            state.server_protocol_version = protocol_version;
+                        }
                         // Without this, a status set to "disconnected" or
                         // "reconnecting" by an earlier drop just sits
                         // there forever once the session actually comes
@@ -4395,6 +4406,7 @@ async fn finish_connect(
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
             state.query_windows.clear();
+            state.server_protocol_version = Some(outcome.compatibility.protocol_version);
             state.pending_own_nick_dms.clear();
             state.query_joined.clear();
             state.query_ready.clear();
@@ -19477,8 +19489,8 @@ fn parse_query_windows_list(
                 network: network.clone(),
                 target_nick: target_nick.to_string(),
                 opened_at: opened_at.to_string(),
-                // Absent (server older than v34) and null both mean "no id":
-                // identity falls back to the nick.
+                // Absent (server older than v34 or from v37 on) and null both
+                // mean "no id": identity falls back to the nick.
                 dm_conversation_id: entry.get("dm_conversation_id").and_then(Value::as_i64),
             };
             if !seen.insert(query_window_key(&query.network, &query.target_nick)) {
@@ -19538,6 +19550,20 @@ fn same_rfc3339_instant(left: &str, right: &str) -> bool {
     };
     left.timestamp() == right.timestamp()
         && left.timestamp_subsec_nanos() == right.timestamp_subsec_nanos()
+}
+
+/// First protocol version where a nick change moves nothing server-side: a
+/// renamed peer's next message opens a new query window and the old one
+/// keeps its history, so there is no rename to infer.
+const NICK_CHANGE_MOVES_NOTHING_PROTOCOL: u32 = 37;
+
+/// Whether a window that disappears while another appears may be a peer's
+/// nick change. Servers below v37 rename the query window themselves; from
+/// v37 on the old and the new window coexist, and inferring a rename would
+/// at worst fuse two unrelated windows that share an opening instant. An
+/// unknown version keeps the inference, like a pre-v37 server.
+fn rename_inference_applies(server_protocol_version: Option<u32>) -> bool {
+    server_protocol_version.is_none_or(|version| version < NICK_CHANGE_MOVES_NOTHING_PROTOCOL)
 }
 
 /// Infers only unambiguous renames among the windows that disappeared and
@@ -19624,7 +19650,8 @@ fn move_query_window_cache(state: &mut WorkerState, old: &QueryWindow, new: &Que
 
 /// Replaces local query state from a complete server snapshot. Returns true
 /// only when the currently selected query was closed rather than retained or
-/// unambiguously renamed.
+/// unambiguously renamed. Renames are inferred only for servers that still
+/// rename query windows themselves (`rename_inference_applies`).
 fn apply_query_windows_snapshot(state: &mut WorkerState, snapshot: Vec<QueryWindow>) -> bool {
     let previous = state.query_windows.clone();
     // A case-only nick change retains the same query identity and topic, but
@@ -19638,7 +19665,11 @@ fn apply_query_windows_snapshot(state: &mut WorkerState, snapshot: Vec<QueryWind
             }
         }
     }
-    let renames = query_window_renames(&previous, &snapshot);
+    let renames = if rename_inference_applies(state.server_protocol_version) {
+        query_window_renames(&previous, &snapshot)
+    } else {
+        Vec::new()
+    };
     for (old, new) in &renames {
         move_query_window_cache(state, old, new);
     }
@@ -21721,6 +21752,183 @@ mod tests {
             query_window_renames(&[window("old", None)], &[window("new", Some(3))]).len(),
             1
         );
+    }
+
+    #[test]
+    fn rename_inference_applies_below_protocol_37_and_when_unknown() {
+        assert!(rename_inference_applies(None));
+        assert!(rename_inference_applies(Some(1)));
+        assert!(rename_inference_applies(Some(34)));
+        assert!(rename_inference_applies(Some(36)));
+        assert!(!rename_inference_applies(Some(37)));
+        assert!(!rename_inference_applies(Some(38)));
+    }
+
+    /// A state holding one selected query for `old_nick` with a cached line
+    /// and a draft, as the snapshot tests below start from.
+    fn state_with_selected_query(
+        old: &QueryWindow,
+        server_protocol_version: Option<u32>,
+    ) -> WorkerState {
+        let old_key = (old.network.clone(), old.target_nick.clone());
+        let mut state = WorkerState::new();
+        state.server_protocol_version = server_protocol_version;
+        state.query_windows = vec![old.clone()];
+        state.current_query = true;
+        state.current_channel = Some(old_key.clone());
+        state.messages.insert(
+            old_key.clone(),
+            vec![RenderedMessage {
+                timestamp: "10:00".to_string(),
+                nick: Some(old.target_nick.clone()),
+                text: "history under the old nick".to_string(),
+                italic: false,
+                message_id: Some(1),
+                server_time: Some(1),
+                presence_noise: false,
+            }],
+        );
+        state.drafts.insert(old_key, "unsent draft".to_string());
+        state
+    }
+
+    #[test]
+    fn protocol_37_snapshot_keeps_old_and_new_window_of_a_renamed_peer() {
+        let window = |nick: &str, id: Option<i64>| QueryWindow {
+            network: "libera".to_string(),
+            target_nick: nick.to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: id,
+        };
+        // Even with the same opening instant (and a stray id) that would
+        // read as a rename on an older server, nothing moves from v37 on.
+        let old = window("alice", Some(7));
+        let new = window("alice_", Some(7));
+        let old_key = ("libera".to_string(), "alice".to_string());
+        let new_key = ("libera".to_string(), "alice_".to_string());
+        let mut state = state_with_selected_query(&old, Some(37));
+
+        assert!(!apply_query_windows_snapshot(
+            &mut state,
+            vec![old.clone(), new.clone()]
+        ));
+        assert_eq!(state.query_windows, vec![old, new]);
+        assert_eq!(state.current_channel, Some(old_key.clone()));
+        assert!(state.current_query);
+        assert_eq!(
+            state.messages[&old_key][0].text,
+            "history under the old nick"
+        );
+        assert!(!state.messages.contains_key(&new_key));
+        assert_eq!(
+            state.drafts.get(&old_key).map(String::as_str),
+            Some("unsent draft")
+        );
+        assert!(!state.drafts.contains_key(&new_key));
+    }
+
+    #[test]
+    fn protocol_37_snapshot_does_not_follow_a_vanished_selection_to_a_new_window() {
+        let window = |nick: &str| QueryWindow {
+            network: "libera".to_string(),
+            target_nick: nick.to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
+        };
+        let old = window("alice");
+        let mut state = state_with_selected_query(&old, Some(37));
+
+        // The old window is really closed and another one opens in the same
+        // second: a real close, so the selection is dropped, not moved.
+        assert!(apply_query_windows_snapshot(
+            &mut state,
+            vec![window("bob")]
+        ));
+        assert_eq!(state.current_channel, None);
+        assert!(!state.current_query);
+        let bob_key = ("libera".to_string(), "bob".to_string());
+        assert!(!state.messages.contains_key(&bob_key));
+        assert!(!state.drafts.contains_key(&bob_key));
+    }
+
+    #[test]
+    fn protocol_37_snapshot_still_moves_a_case_only_change() {
+        let window = |nick: &str| QueryWindow {
+            network: "libera".to_string(),
+            target_nick: nick.to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
+        };
+        let old = window("foo");
+        let recased_key = ("libera".to_string(), "Foo".to_string());
+        let mut state = state_with_selected_query(&old, Some(37));
+
+        assert!(!apply_query_windows_snapshot(
+            &mut state,
+            vec![window("Foo")]
+        ));
+        assert_eq!(state.current_channel, Some(recased_key.clone()));
+        assert_eq!(
+            state.messages[&recased_key][0].text,
+            "history under the old nick"
+        );
+        assert_eq!(
+            state.drafts.get(&recased_key).map(String::as_str),
+            Some("unsent draft")
+        );
+    }
+
+    #[test]
+    fn pre_37_and_unknown_servers_still_follow_an_id_based_rename() {
+        let window = |nick: &str, id: Option<i64>, opened_at: &str| QueryWindow {
+            network: "libera".to_string(),
+            target_nick: nick.to_string(),
+            opened_at: opened_at.to_string(),
+            dm_conversation_id: id,
+        };
+        for version in [None, Some(34), Some(36)] {
+            let old = window("alice", Some(7), "2026-09-21T10:00:00Z");
+            // A different opening instant: only the id ties the two together.
+            let new = window("alice_", Some(7), "2026-09-21T10:30:00Z");
+            let new_key = ("libera".to_string(), "alice_".to_string());
+            let mut state = state_with_selected_query(&old, version);
+
+            assert!(!apply_query_windows_snapshot(&mut state, vec![new.clone()]));
+            assert_eq!(state.query_windows, vec![new]);
+            assert_eq!(state.current_channel, Some(new_key.clone()));
+            assert_eq!(
+                state.messages[&new_key][0].text,
+                "history under the old nick"
+            );
+            assert_eq!(
+                state.drafts.get(&new_key).map(String::as_str),
+                Some("unsent draft")
+            );
+        }
+    }
+
+    #[test]
+    fn pre_37_and_unknown_servers_still_fall_back_to_the_opening_instant() {
+        let window = |nick: &str| QueryWindow {
+            network: "libera".to_string(),
+            target_nick: nick.to_string(),
+            opened_at: "2026-09-21T10:00:00Z".to_string(),
+            dm_conversation_id: None,
+        };
+        for version in [None, Some(33), Some(35)] {
+            let old = window("alice");
+            let new = window("alice_");
+            let new_key = ("libera".to_string(), "alice_".to_string());
+            let mut state = state_with_selected_query(&old, version);
+
+            assert!(!apply_query_windows_snapshot(&mut state, vec![new.clone()]));
+            assert_eq!(state.current_channel, Some(new_key.clone()));
+            assert_eq!(state.messages[&new_key].len(), 1);
+            assert_eq!(
+                state.drafts.get(&new_key).map(String::as_str),
+                Some("unsent draft")
+            );
+        }
     }
 
     #[test]
