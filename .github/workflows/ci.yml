@@ -65,6 +65,17 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
+      # The release packages declare their Linux dependencies from the same
+      # script, so a new shared library has to fail here, not at release
+      # time. `cargo test` builds no binary for this crate, hence the build.
+      - name: Build binary for the dependency check
+        if: runner.os == 'Linux'
+        run: cargo build --package cordiale-ui
+
+      - name: Check Linux runtime dependencies
+        if: runner.os == 'Linux'
+        run: bash packaging/check-linux-deps.sh target/debug/cordiale-ui
+
       - name: Install cargo-audit
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
