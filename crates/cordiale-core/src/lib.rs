@@ -51,6 +51,7 @@ pub const EXTERNAL_USER_AGENT: &str = concat!("Cordiale/", env!("CARGO_PKG_VERSI
 
 pub mod admin;
 pub mod bootstrap;
+pub mod cleartext;
 pub mod client;
 pub mod credentials;
 pub mod diagnostics;

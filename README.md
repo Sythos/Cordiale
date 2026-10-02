@@ -123,6 +123,15 @@ Cordiale also covers:
   connect screen with a one-time recovery code (not yet checked against a
   live server). Settings > Security also lists the account's passkeys and
   deletes them with the password.
+- **Cleartext warning:** an `http://` server address that isn't this device
+  (anything but `localhost`, `*.localhost`, `127.0.0.0/8` and `::1`) shows a
+  warning on the connect, share-token and recovery-code screens and keeps the
+  sign-in buttons disabled until you confirm sending your credentials
+  unencrypted. The confirmation is kept only in memory and is asked again
+  when the address changes; a remembered `http://` server also skips the
+  automatic sign-in at launch. A passkey origin override with the same kind
+  of address gets the same warning. Local development servers are never
+  blocked.
 - **Session sharing:** Settings > Security makes a single-use link and QR
   code (valid ten minutes) that signs another device into the same account,
   and the connect screen signs in with such a link or token from another

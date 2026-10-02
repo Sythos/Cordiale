@@ -280,6 +280,20 @@ il resto della sezione Sicurezza resta in Cicchetto:
   l'errore nella barra di stato, invece di ritentare all'infinito (non
   verificato contro un server con CA privata reale; un test sul grafo delle
   dipendenze impedisce che i due trasporti tornino a divergere).
+- **Testo in chiaro (`http://`)**: `normalize_server_url` accetta `http://` e
+  `to_ws_url` lo mappa su `ws://`; con `http://` la password viaggia in
+  chiaro al login e poi il bearer a ogni richiesta e nell'handshake. Non si
+  blocca (un server locale o di sviluppo è legittimo), ma se l'host non è
+  loopback (`localhost`, `*.localhost`, `127.0.0.0/8`, `::1`; nessun nome
+  viene risolto, quindi gli indirizzi LAN privati contano come remoti) la
+  schermata di connessione, quella del token di condivisione e quella del
+  recovery code mostrano un avviso e tengono disattivati i pulsanti di
+  accesso finché non si conferma esplicitamente. La conferma vale solo in
+  memoria per quell'origine (schema, host, porta): se l'indirizzo cambia si
+  richiede di nuovo. Lo stesso vale per l'override dell'origine passkey, che
+  può essere `http://`; un server `http://` remoto ricordato salta
+  l'accesso automatico all'avvio. La logica pura è in `cleartext.rs` di
+  `cordiale-core` (issue #201; non provato su un server reale).
 - **Versione protocollo**: dichiarata via query param `client_proto`
   sull'URL di upgrade (va messo nei `params` del `Socket`, non nel path).
   - Sotto `min_protocol_version` → `426 Upgrade Required`, body
