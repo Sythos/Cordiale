@@ -912,7 +912,7 @@ fn log_line_to(path: &Path, message: &str) {
 /// Whether the write numbered `writes_before` (from 0 in each run) checks the
 /// log's size: the first one, then every `LOG_CHECK_EVERY`.
 fn size_check_due(writes_before: u64) -> bool {
-    writes_before % LOG_CHECK_EVERY == 0
+    writes_before.is_multiple_of(LOG_CHECK_EVERY)
 }
 
 /// Writes the line, first rotating the log when `rotate_over` is a size it
