@@ -25,6 +25,10 @@ jobs:
         os:
           - ubuntu-26.04
           - windows-latest
+          # macOS compiles the target_os = "macos" code before a release tag
+          # does. Its runners are slower than Linux's (and billed at a higher
+          # rate on private repos), so this leg is not a required check.
+          - macos-latest
 
     steps:
       - name: Checkout client
@@ -92,3 +96,40 @@ jobs:
         with:
           name: Cargo.lock
           path: Cargo.lock
+
+  # The ctap-hid feature (USB security keys on Linux and macOS) is off in the
+  # default build, so the verify job never compiles it. It builds hidapi's C
+  # code. macOS runners are slower than Linux's, same note as in verify.
+  ctap-hid:
+    name: ctap-hid (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-26.04
+          - macos-latest
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes             libasound2-dev             libfontconfig1-dev             libgl1-mesa-dev             libudev-dev             libxcb1-dev             libxcb-render0-dev             libxcb-shape0-dev             libxcb-xfixes0-dev             libxkbcommon-dev             libxkbcommon-x11-dev
+
+      - name: Lint with Clippy (ctap-hid)
+        run: cargo clippy --package cordiale-ui --all-targets --features ctap-hid -- -D warnings
+
+      - name: Run tests (ctap-hid)
+        run: cargo test --package cordiale-ui --features ctap-hid

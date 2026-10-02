@@ -21,7 +21,7 @@ autenticatore a disposizione. Le verifiche sono tutte sul codice.
 |---|---|---|
 | Windows 10 1903+ / 11 | API client di `webauthn.dll` (`WebAuthNAuthenticatorGetAssertion` / `MakeCredential`) | **Implementata (issue #160), non provata**: strutture del crate `windows` 0.62, DLL caricata a runtime, il chiamante fornisce il `clientDataJSON` (vedi "Windows: com'è implementata") |
 | macOS, passkey di piattaforma/iCloud | AuthenticationServices | **Non fattibile**: richiede app firmata con Team ID Apple, entitlement `webcredentials:` e un file `apple-app-site-association` su **ogni** server Grappa |
-| macOS, chiavette USB | CTAP2 su HID diretto | **Implementata dietro la feature cargo `ctap-hid` (issue #161), non provata**: solo chiavi fisiche con PIN, niente copertura CI su macOS (vedi "Linux e macOS: chiavette USB") |
+| macOS, chiavette USB | CTAP2 su HID diretto | **Implementata dietro la feature cargo `ctap-hid` (issue #161), non provata**: solo chiavi fisiche con PIN; il CI compila e prova la feature su macOS (vedi "Linux e macOS: chiavette USB") |
 | Linux | CTAP2 su hidraw (nessuna API di sistema) | **Implementata dietro la feature cargo `ctap-hid` (issue #161), non provata**: solo chiavi fisiche USB con PIN; passkey sincronizzate e telefono (hybrid) irraggiungibili |
 | Tutte | Gestione senza autenticatore (elenco, eliminazione) e contratto tipizzato | **Fatto in questo ramo** |
 
@@ -316,7 +316,7 @@ fa il CI su `windows-latest`) e **mai provata con un autenticatore reale**:
 ## Linux e macOS: chiavette USB (issue #161)
 
 Scritta senza compilatore locale e **mai provata con una chiave reale**;
-il CI di default non la compila (vedi sotto).
+il job `verify` del CI non la compila: lo fa il job `ctap-hid` (vedi sotto).
 
 - **Crate.** `ctap-hid-fido2` 3.6.0, sorgente letto: API sincrona,
   `GetAssertionArgsBuilder` / `MakeCredentialArgsBuilder` con PIN, allow
@@ -324,9 +324,10 @@ il CI di default non la compila (vedi sotto).
   ne firma lo SHA-256; restituisce `auth_data` grezzo, firma, id della
   credenziale e `user.id`. Crea chiavi ES256 (-7), che Grappa accetta.
 - **Feature spenta di default.** Dipendenza **opzionale**, solo per Linux e
-  macOS, dietro la feature cargo `ctap-hid`: il build normale, il CI e i
-  pacchetti di rilascio non cambiano. Nel `Cargo.lock` entrano 22 pacchetti
-  nuovi senza che cambi la versione di quelli esistenti; l'advisory DB di
+  macOS, dietro la feature cargo `ctap-hid`: il build normale, il job `verify`
+  del CI e i pacchetti di rilascio non cambiano; il job `ctap-hid` del CI
+  (Linux con `libudev-dev`, macOS) esegue clippy e i test con la feature. Nel `Cargo.lock` entrano 22
+  pacchetti nuovi senza che cambi la versione di quelli esistenti; l'advisory DB di
   RustSec non ha avvisi aperti per quelle versioni (`anyhow` 1.0.104 e
   `time` 0.3.55 sono già oltre le correzioni). Per compilarla serve il C di
   `hidapi`: su Linux gli header di libudev (`libudev-dev`, via
@@ -367,10 +368,10 @@ il CI di default non la compila (vedi sotto).
    implementata") contro un'istanza Grappa di prova con
    `GRAPPA_PASSKEY_ORIGIN` noto, con Windows Hello e con una chiavetta USB.
 2. **Chiavette USB su Linux/macOS** (#161): fatte dietro la feature
-   `ctap-hid` (vedi "Linux e macOS: chiavette USB"); restano la prova con
-   una chiave reale con PIN contro un Grappa con origine nota, e un job CI
-   che compili la feature (Linux con `libudev-dev`, macOS) prima di
-   accenderla nei pacchetti.
+   `ctap-hid` (vedi "Linux e macOS: chiavette USB"); resta la prova con
+   una chiave reale con PIN contro un Grappa con origine nota, prima di
+   accenderla nei pacchetti (il job CI `ctap-hid` compila e prova già la
+   feature su Linux con `libudev-dev` e su macOS).
 3. **Origine**: regola di ricostruzione e override per server fatti (§a);
    resta da chiedere a Grappa di esporla, così l'override non servirebbe.
 4. **Login con recovery code** per gli account passwordless (non richiede
