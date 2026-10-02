@@ -1385,10 +1385,6 @@ msgid "On-connect commands"
 msgstr "Comandos al conectar"
 
 msgctxt "AppWindow"
-msgid "Conversation muted: other devices won't be notified about it."
-msgstr "Conversación silenciada: los demás dispositivos no recibirán avisos."
-
-msgctxt "AppWindow"
 msgid "Notification sound: {}"
 msgstr "Sonido de notificación: {}"
 
@@ -3211,3 +3207,35 @@ msgstr "Ocultar el ruido"
 msgctxt "AppWindow"
 msgid "This computer doesn't trust the server's certificate ({}). Add the server's certificate authority to the system trust store, then sign in again."
 msgstr "Este equipo no confía en el certificado del servidor ({}). Añade la autoridad de certificación del servidor al almacén de confianza del sistema y vuelve a iniciar sesión."
+
+msgctxt "AppWindow"
+msgid "{} h {} min"
+msgstr "{} h {} min"
+
+msgctxt "AppWindow"
+msgid "{} h"
+msgstr "{} h"
+
+msgctxt "AppWindow"
+msgid "{} min"
+msgstr "{} min"
+
+msgctxt "AppWindow"
+msgid "Channel muted"
+msgstr "Canal silenciado"
+
+msgctxt "AppWindow"
+msgid "Channel muted at {}"
+msgstr "Canal silenciado a las {}"
+
+msgctxt "AppWindow"
+msgid "Channel muted - expires in {}"
+msgstr "Canal silenciado - caduca en {}"
+
+msgctxt "AppWindow"
+msgid "Channel muted at {} - expires in {}"
+msgstr "Canal silenciado a las {} - caduca en {}"
+
+msgctxt "AppWindow"
+msgid "Unmute now"
+msgstr "Reactivar ahora"
