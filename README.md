@@ -129,13 +129,16 @@ Cordiale also covers:
   device, for example one made in Cicchetto after a passkey sign-in. Not yet
   checked against a live server.
 - **Connection and presence:** Cordiale declares the protocol revision it
-  was checked against (`client_proto=35`) and, if Grappa refuses the
+  was checked against (`client_proto=37`) and, if Grappa refuses the
   upgrade with `426`, stops and asks you to update instead of retrying.
   After a reconnect it catches up each channel's missed messages (a short gap
   is paged in, a long one reloads the latest messages and leaves a note where
   the hole is), and it tells Grappa while the window is in the foreground so
   auto-away and push notifications follow. A channel invite offers Join and
-  Decline, and a peer's nick change keeps the same private window.
+  Decline. On a server that renames private windows itself (protocol 34 to
+  36) a peer's nick change keeps the same window; from protocol 37 a nick
+  change moves nothing and the peer's next message opens a new window beside
+  the old one.
 - **Channel directory:** each network's Channels entry (or `/list`) opens
   its channel list beside the sidebar: search, Refresh, the channel count
   and how old the list is, then name, topic and user count per channel.
@@ -210,7 +213,9 @@ Cordiale also covers:
   the Windows passkey ceremonies (no real authenticator either),
   session-sharing links, channel-history catch-up after a reconnect, the
   foreground presence reports, the `client_proto` declaration and its `426`
-  handling, DM renames by conversation id, declining an invite, your own
+  handling, DM renames by conversation id (servers below protocol 37), the
+  coexisting old and new private windows after a peer's nick change on
+  protocol 37, declining an invite, your own
   profile and avatar, and the newer admin operations. They follow the server's
   source and pass tests against a mock server; expect rough edges.
 - **Platform limits:**

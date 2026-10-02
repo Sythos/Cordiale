@@ -12,9 +12,9 @@ Fonti:
 - **Riferimento funzionale (solo funzionalità, non architettura):**
   <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
 
-Ultimo allineamento (2026-10-01): `protocol_version` 35,
+Ultimo allineamento (2026-10-02): `protocol_version` 37,
 `min_protocol_version` 1 (letti dal sorgente server in `lib/grappa/protocol.ex`);
-Cordiale dichiara `client_proto=35` (§2).
+Cordiale dichiara `client_proto=37` (§2).
 
 Convenzione: "la documentazione dice" = contenuto verificato del
 `CLIENT_PROTOCOL.md`; "sto inferendo" = deduzione non scritta esplicitamente
@@ -282,7 +282,7 @@ il resto della sezione Sicurezza resta in Cicchetto:
   - Nessun limite superiore: non esiste (né esisterà) un
     `max_protocol_version`.
   - Il controllo versione avviene **prima** dell'autenticazione.
-  - **Cordiale** dichiara `client_proto=35` (intero semplice, la revisione
+  - **Cordiale** dichiara `client_proto=37` (intero semplice, la revisione
     del protocollo contro cui è stato verificato leggendo il sorgente del
     server: `CLIENT_PROTOCOL_VERSION` in `protocol.rs`, da alzare solo dopo
     aver riverificato il contratto). Su un `426` la sessione si ferma senza
@@ -305,13 +305,35 @@ il resto della sezione Sicurezza resta in Cicchetto:
   **diversi**; il casing non-ASCII (`#CAFÉ` vs `#café`) **non** viene
   foldato.
 - Una finestra query/DM usa come segmento il nick del peer, foldato allo
-  stesso modo. Dal v34 righe di scrollback e voci di `query_windows_list`
-  portano anche `dm_conversation_id` (intero, `null` o assente su server
-  più vecchi): Cordiale lo legge, solo da `query_windows_list` (non dalle
-  righe di scrollback), come `Option<i64>` e lo usa solo per
-  riconoscere la stessa finestra dopo un NICK del peer, altrimenti ricade
-  sul nick. Non verificato contro un server v34 reale; il merge di due
-  conversazioni non è rilevato dall'id.
+  stesso modo. Dal v34 al v36 righe di scrollback e voci di
+  `query_windows_list` portano anche `dm_conversation_id` (intero, `null` o
+  assente su server più vecchi): Cordiale lo legge, solo da
+  `query_windows_list` (non dalle righe di scrollback), come `Option<i64>` e
+  lo usa solo per riconoscere la stessa finestra dopo un NICK del peer,
+  altrimenti ricade sul nick (stesso istante di apertura). Non verificato
+  contro un server v34 reale; il merge di due conversazioni non è rilevato
+  dall'id.
+- Dal v36 ogni riga di scrollback (push `message`, pagine REST, head di
+  `GET /boot`) porta `dm_with`: il nick del peer, RAW, su ogni riga di una
+  conversazione DM (in ingresso e in uscita), `null` sulle altre; assente su
+  server più vecchi (allora vale `channel` == proprio nick). Per decidere se
+  una riga è un DM si guarda prima `sender` contro il proprio nick, poi
+  `dm_with`. Cordiale non ne ha bisogno oggi: instrada le righe per topic e
+  per mittente e non confronta mai `channel` col proprio nick per
+  classificare un DM; `dm_with` è letto solo nelle menzioni (v35).
+- Dal v37 `dm_conversation_id` sparisce da righe e `query_windows_list`, e
+  un NICK (del peer o proprio) non sposta più nulla lato server: la finestra
+  query del vecchio nick resta con la sua storia, il prossimo messaggio del
+  peer col nuovo nick ne apre una **nuova**, e `query_windows_list` non
+  emette nulla per il rename. Cordiale quindi applica l'inferenza del rename
+  (`dm_conversation_id`, poi istante di apertura) solo contro server sotto
+  v37 o dalla versione sconosciuta: la versione arriva da `GET /api/config`
+  e dalla risposta di join del topic utente. Da v37 le due finestre
+  coesistono così come arrivano, senza migrazione di cache o bozze e senza
+  seguire la selezione; silenziamenti e cursori di lettura non passano dal
+  vecchio al nuovo nick (scelta accettata a monte). Il caso di sola
+  maiuscola/minuscola resta una stessa finestra. Non verificato contro un
+  server v37 reale.
 - Dal v35 le righe di `mentions_bundle.messages` portano anche `id` e
   `dm_with` (entrambi opzionali: assenti su server più vecchi). Su un DM in
   ingresso `channel` è il **proprio** nick: la finestra di una menzione è
