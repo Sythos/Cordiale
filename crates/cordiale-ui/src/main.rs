@@ -54,6 +54,7 @@ use cordiale_core::bootstrap::{
     bootstrap, bootstrap_with_bearer, bootstrap_with_login_bearer, bootstrap_with_recovery_code,
     bootstrap_with_share_token, bootstrap_with_totp, BootstrapError, BootstrapOutcome,
 };
+use cordiale_core::cleartext;
 use cordiale_core::client::{GrappaClient, GrappaClientError, LoginError};
 use cordiale_core::credentials::{
     resolve_credential_store, CredentialStore, KeyringCredentialStore,
@@ -465,7 +466,11 @@ fn main() -> Result<(), slint::PlatformError> {
     load_passkey_origin_field(&ui, &remembered_server_url);
 
     let settings = persistence::load_settings().unwrap_or_default();
-    let auto_connect = settings.auto_connect && settings.language.is_some();
+    // A remembered http:// server that isn't this device waits for the
+    // connect screen, where the cleartext warning asks for a confirmation.
+    let auto_connect = settings.auto_connect
+        && settings.language.is_some()
+        && !cleartext::is_cleartext_remote(&remembered_server_url);
     ui.set_next_screen(if settings.language.is_none() {
         "language".into()
     } else {
@@ -619,6 +624,9 @@ fn main() -> Result<(), slint::PlatformError> {
         passkey_origin(&server_url, Some(origin.as_str())).into()
     });
     ui.on_passkey_origin_valid(|origin| !matches!(check_override(&origin), OverrideCheck::Invalid));
+    ui.on_cleartext_key(|server_url, origin| {
+        cleartext::confirmation_key(&server_url, &origin).into()
+    });
     let weak_for_origin = ui.as_weak();
     ui.on_passkey_origin_reload(move |server_url| {
         if let Some(ui) = weak_for_origin.upgrade() {

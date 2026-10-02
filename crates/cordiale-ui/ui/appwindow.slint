@@ -809,6 +809,40 @@ component SectionCard inherits Rectangle {
     }
 }
 
+// The warning for a sign-in that would send credentials over plain http://
+// to a host that isn't this device (issue #201). `blocked` also offers the
+// confirmation the sign-in buttons wait for.
+component CleartextNotice {
+    in property <bool> dark;
+    in property <bool> server-cleartext;
+    in property <bool> origin-cleartext;
+    in property <bool> blocked;
+    callback confirm();
+
+    VerticalLayout {
+        spacing: 8px;
+
+        if root.server-cleartext : Text {
+            text: @tr("This server address uses plain http://, so your password and session token cross the network unencrypted and anyone on the way can read them. Use https:// unless you trust the whole network between you and the server.");
+            wrap: word-wrap;
+            color: root.dark ? #ffb74d : #a05a00;
+            accessible-role: AccessibleRole.text;
+            accessible-live-region: AccessibleLiveness.polite;
+        }
+        if root.origin-cleartext : Text {
+            text: @tr("This passkey origin uses plain http:// on a host that isn't this device. Use it only if your server is really set up with it.");
+            wrap: word-wrap;
+            color: root.dark ? #ffb74d : #a05a00;
+            accessible-role: AccessibleRole.text;
+            accessible-live-region: AccessibleLiveness.polite;
+        }
+        if root.blocked : CompactButton {
+            text: @tr("Send it unencrypted anyway");
+            clicked => { root.confirm(); }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     in-out property <int> font-size-percent: 100;
     callback font-size-changed(int);
@@ -896,6 +930,14 @@ export component AppWindow inherits Window {
     // Set after Settings > Security saved the field; any edit clears it.
     in-out property <bool> passkey-origin-saved: false;
     property <bool> passkey-origin-ok: passkey-origin-valid(passkey-origin);
+    // Plain http:// to a host that isn't this device (issue #201). The key
+    // names the cleartext origins in use ("" when there are none); a sign-in
+    // waits until the user confirmed the current key, and the confirmation
+    // lives only in memory, so a changed address asks again.
+    pure callback cleartext-key(string, string) -> string; // server URL, passkey origin
+    property <string> cleartext-current: cleartext-key(server-url, passkey-origin);
+    property <string> cleartext-confirmed: "";
+    property <bool> cleartext-blocked: cleartext-current != "" && cleartext-current != cleartext-confirmed;
     in-out property <string> identifier: "";
     in-out property <string> password: "";
     // The code step of a two-factor sign-in (screen "totp").
@@ -2593,11 +2635,20 @@ export component AppWindow inherits Window {
             input-type: InputType.password;
             enabled: !connecting;
             init => { self.focus(); }
-            accepted => { share-consume-requested(server-url, share-token-input); }
+            accepted => {
+                if !cleartext-blocked { share-consume-requested(server-url, share-token-input); }
+            }
+        }
+        if cleartext-current != "" : CleartextNotice {
+            dark: theme == "dark";
+            server-cleartext: cleartext-key(server-url, "") != "";
+            origin-cleartext: cleartext-key("", passkey-origin) != "";
+            blocked: cleartext-blocked;
+            confirm => { cleartext-confirmed = cleartext-current; }
         }
         Button {
             text: connecting ? @tr("Connecting…") : @tr("Sign in");
-            enabled: !connecting && share-token-input != "";
+            enabled: !connecting && share-token-input != "" && !cleartext-blocked;
             clicked => { share-consume-requested(server-url, share-token-input); }
         }
         Button {
@@ -2655,11 +2706,20 @@ export component AppWindow inherits Window {
             input-type: InputType.password;
             enabled: !connecting;
             init => { self.focus(); }
-            accepted => { recovery-sign-in-requested(server-url, identifier, recovery-code-input); }
+            accepted => {
+                if !cleartext-blocked { recovery-sign-in-requested(server-url, identifier, recovery-code-input); }
+            }
+        }
+        if cleartext-current != "" : CleartextNotice {
+            dark: theme == "dark";
+            server-cleartext: cleartext-key(server-url, "") != "";
+            origin-cleartext: cleartext-key("", passkey-origin) != "";
+            blocked: cleartext-blocked;
+            confirm => { cleartext-confirmed = cleartext-current; }
         }
         Button {
             text: connecting ? @tr("Connecting…") : @tr("Sign in");
-            enabled: !connecting && identifier != "" && recovery-code-input != "";
+            enabled: !connecting && identifier != "" && recovery-code-input != "" && !cleartext-blocked;
             clicked => { recovery-sign-in-requested(server-url, identifier, recovery-code-input); }
         }
         Button {
@@ -2722,22 +2782,30 @@ export component AppWindow inherits Window {
             accessible-live-region: AccessibleLiveness.polite;
         }
 
+        if cleartext-current != "" : CleartextNotice {
+            dark: theme == "dark";
+            server-cleartext: cleartext-key(server-url, "") != "";
+            origin-cleartext: cleartext-key("", passkey-origin) != "";
+            blocked: cleartext-blocked;
+            confirm => { cleartext-confirmed = cleartext-current; }
+        }
+
         Button {
             text: connecting ? @tr("Connecting…") : @tr("Connect");
-            enabled: !connecting && passkey-origin-ok;
+            enabled: !connecting && passkey-origin-ok && !cleartext-blocked;
             clicked => { connect-requested(server-url, identifier, password); }
         }
 
         // A passwordless account: no password, a passkey for the server.
         if passkey-available : Button {
             text: @tr("Sign in with a passkey");
-            enabled: !connecting && passkey-origin-ok && identifier != "";
+            enabled: !connecting && passkey-origin-ok && !cleartext-blocked && identifier != "";
             clicked => { passkey-login-requested(server-url, identifier); }
         }
 
         if saved-profile-identifier != "" && saved-profile-identifier == identifier && saved-profile-server-url == server-url : Button {
             text: @tr("Sign in with saved profile");
-            enabled: !connecting;
+            enabled: !connecting && !cleartext-blocked;
             clicked => { saved-profile-connect-requested(server-url, identifier); }
         }
 
@@ -4921,6 +4989,10 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                     color: theme == "dark" ? #e57373 : #c0392b;
                     accessible-live-region: AccessibleLiveness.polite;
+                }
+                if cleartext-key("", passkey-origin) != "" : CleartextNotice {
+                    dark: theme == "dark";
+                    origin-cleartext: true;
                 }
                 if passkey-origin-saved : Text {
                     text: @tr("Saved.");

@@ -3239,3 +3239,15 @@ msgstr "Kanal stummgeschaltet um {} - läuft ab in {}"
 msgctxt "AppWindow"
 msgid "Unmute now"
 msgstr "Stummschaltung jetzt aufheben"
+
+msgctxt "CleartextNotice"
+msgid "This server address uses plain http://, so your password and session token cross the network unencrypted and anyone on the way can read them. Use https:// unless you trust the whole network between you and the server."
+msgstr "Diese Serveradresse verwendet einfaches http://, daher laufen dein Passwort und dein Sitzungstoken unverschlüsselt durchs Netz und jeder auf dem Weg kann sie lesen. Nutze https://, außer du vertraust dem gesamten Netzwerk zwischen dir und dem Server."
+
+msgctxt "CleartextNotice"
+msgid "This passkey origin uses plain http:// on a host that isn't this device. Use it only if your server is really set up with it."
+msgstr "Dieser Passkey-Origin verwendet einfaches http:// auf einem Host, der nicht dieses Gerät ist. Nutze ihn nur, wenn dein Server wirklich so eingerichtet ist."
+
+msgctxt "CleartextNotice"
+msgid "Send it unencrypted anyway"
+msgstr "Trotzdem unverschlüsselt senden"

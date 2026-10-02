@@ -3239,3 +3239,15 @@ msgstr "Canale silenziato alle {} - scade tra {}"
 msgctxt "AppWindow"
 msgid "Unmute now"
 msgstr "Riattiva ora"
+
+msgctxt "CleartextNotice"
+msgid "This server address uses plain http://, so your password and session token cross the network unencrypted and anyone on the way can read them. Use https:// unless you trust the whole network between you and the server."
+msgstr "Questo indirizzo del server usa http:// semplice, quindi la tua password e il token di sessione attraversano la rete senza cifratura e chiunque sul percorso può leggerli. Usa https:// a meno che tu non ti fidi di tutta la rete tra te e il server."
+
+msgctxt "CleartextNotice"
+msgid "This passkey origin uses plain http:// on a host that isn't this device. Use it only if your server is really set up with it."
+msgstr "Questa origine della passkey usa http:// semplice su un host che non è questo dispositivo. Usala solo se il tuo server è davvero configurato così."
+
+msgctxt "CleartextNotice"
+msgid "Send it unencrypted anyway"
+msgstr "Invia comunque senza cifratura"
