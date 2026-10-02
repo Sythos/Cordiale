@@ -29,7 +29,13 @@ sudo apt install ./Cordiale_Debian_13_<amd64|arm64>.deb
 sudo apt install ./Cordiale_Ubuntu_26.04_<amd64|arm64>.deb
 ```
 
-(`apt install ./file.deb` resolves dependencies; plain `dpkg -i` doesn't.)
+The package depends on the libraries Cordiale needs (see the table under
+"Any other Linux distro" for what each one is for): `libasound2t64` (or
+`libasound2` on releases that predate the rename), `libfontconfig1`,
+`libgcc-s1`, `libxkbcommon0`, `libxkbcommon-x11-0`, `libxcb1`, `libx11-6`,
+`libx11-xcb1`, `libxcursor1`, `libxi6`, `libgl1`, `libegl1`,
+`libwayland-client0` and `libwayland-egl1`. `apt install ./file.deb`
+installs whatever of them is missing; plain `dpkg -i` doesn't.
 
 ## AlmaLinux / other RHEL-based distros (x64 / ARM64)
 
@@ -37,11 +43,20 @@ sudo apt install ./Cordiale_Ubuntu_26.04_<amd64|arm64>.deb
 sudo dnf install ./Cordiale_AlmaLinux_10_<x86_64|aarch64>.rpm
 ```
 
+`dnf` pulls in the packages the `.rpm` requires: `alsa-lib`, `fontconfig`,
+`libgcc`, `libxkbcommon`, `libxkbcommon-x11`, `libxcb`, `libX11`,
+`libX11-xcb`, `libXcursor`, `libXi`, `libglvnd-glx`, `libglvnd-egl`,
+`libwayland-client` and `libwayland-egl`.
+
 ## Arch Linux (x64 / ARM64)
 
 ```bash
 sudo pacman -U Cordiale_Arch_rolling_<x86_64|aarch64>.pkg.tar.zst
 ```
+
+`pacman` installs the packages the file depends on: `alsa-lib`,
+`fontconfig`, `gcc-libs`, `libxkbcommon`, `libxkbcommon-x11`, `libxcb`,
+`libx11`, `libxcursor`, `libxi`, `libglvnd` and `wayland`.
 
 ## Any other Linux distro (x64 / ARM64)
 
@@ -50,9 +65,27 @@ tar -xzf cordiale-linux-<amd64|arm64>-<version>.tar.gz
 ./cordiale-ui
 ```
 
-No installer, no package manager integration — just the binary. Requires
-fontconfig, Mesa/OpenGL, XCB and xkbcommon to already be on the system
-(present on effectively any desktop Linux install).
+No installer, no package manager integration — just the binary, so nothing
+installs its libraries for you. These have to be on the system already:
+
+| Library | Debian / Ubuntu | AlmaLinux / RHEL | Arch | Used for |
+|-|-|-|-|-|
+| `libasound.so.2` | `libasound2t64` (`libasound2` before the rename) | `alsa-lib` | `alsa-lib` | radio player audio |
+| `libfontconfig.so.1` | `libfontconfig1` | `fontconfig` | `fontconfig` | finding system fonts |
+| `libgcc_s.so.1` | `libgcc-s1` | `libgcc` | `gcc-libs` | Rust runtime |
+| `libxkbcommon.so.0`, `libxkbcommon-x11.so.0` | `libxkbcommon0`, `libxkbcommon-x11-0` | `libxkbcommon`, `libxkbcommon-x11` | `libxkbcommon`, `libxkbcommon-x11` | keyboard layouts |
+| `libxcb.so.1`, `libX11.so.6`, `libX11-xcb.so.1`, `libXcursor.so.1`, `libXi.so.6` | `libxcb1`, `libx11-6`, `libx11-xcb1`, `libxcursor1`, `libxi6` | `libxcb`, `libX11`, `libX11-xcb`, `libXcursor`, `libXi` | `libxcb`, `libx11`, `libxcursor`, `libxi` | the window on X11 |
+| `libwayland-client.so.0`, `libwayland-egl.so.1` | `libwayland-client0`, `libwayland-egl1` | `libwayland-client`, `libwayland-egl` | `wayland` | the window on Wayland |
+| `libGL.so.1`, `libEGL.so.1` | `libgl1`, `libegl1` | `libglvnd-glx`, `libglvnd-egl` | `libglvnd` | OpenGL rendering |
+
+`libasound` and `libfontconfig` are linked when the program is built, so
+without them it won't start at all. The others are loaded at run time,
+when the window system and OpenGL are set up, so they don't stop the binary
+from loading but a missing one breaks the window. You also need a working
+OpenGL driver, normally Mesa, which any desktop install has. The same list,
+with the packages each distro's `.deb`, `.rpm` and `.pkg.tar.zst` declare,
+lives in `packaging/check-linux-deps.sh`; CI fails when the binary links a
+library that list doesn't cover.
 
 ## macOS (Apple Silicon and Intel)
 
@@ -103,7 +136,7 @@ cargo build --release --package cordiale-ui
 
 Requires a stable Rust toolchain ([rustup.rs](https://rustup.rs)) and, on
 Linux, the same system packages listed in `.github/workflows/ci.yml`
-(`libfontconfig1-dev`, `libgl1-mesa-dev`, `libxcb1-dev`,
+(`libasound2-dev`, `libfontconfig1-dev`, `libgl1-mesa-dev`, `libxcb1-dev`,
 `libxcb-render0-dev`, `libxcb-shape0-dev`, `libxcb-xfixes0-dev`,
 `libxkbcommon-dev`, `libxkbcommon-x11-dev` — names as they appear in Debian
 Trixie/Ubuntu Resolute's `apt`; adjust for your distro's package manager).

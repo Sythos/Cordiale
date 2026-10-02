@@ -208,6 +208,14 @@ jobs:
             $stream.Dispose()
           }
 
+      # Fails if the binary links a shared library that the package
+      # dependency table in the script doesn't know (readelf comes with the
+      # runner's build tools).
+      - name: Check Linux runtime dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash packaging/check-linux-deps.sh "target/${{ matrix.target }}/release/cordiale-ui"
+
       - name: Install fpm and Linux packaging dependencies
         if: runner.os == 'Linux'
         shell: bash
@@ -250,7 +258,21 @@ jobs:
           # RPM/pacman version fields reject "-"; deb accepts it fine.
           RPM_VERSION="${PACKAGE_VERSION//-/_}"
 
+          # Fills DEP_ARGS with one --depends per package of that distro,
+          # taken from the table in check-linux-deps.sh. The script runs in
+          # a plain assignment so a failure stops the step.
+          dep_args() {
+            local deps pkg
+            deps="$(bash packaging/check-linux-deps.sh "target/${TARGET}/release/cordiale-ui" "$1")"
+            DEP_ARGS=()
+            while IFS= read -r pkg; do
+              DEP_ARGS+=(--depends "${pkg}")
+            done <<< "${deps}"
+          }
+
+          dep_args debian
           fpm -s dir -t deb -n cordiale -v "${PACKAGE_VERSION}" -a "${DEB_ARCH}" \
+            "${DEP_ARGS[@]}" \
             --maintainer "Sythos <sythos@gmail.com>" \
             --description "Native desktop client for Grappa" \
             --url "https://github.com/Sythos/Cordiale" \
@@ -260,15 +282,19 @@ jobs:
           # format, dependencies and target glibc floor.
           cp "dist/Cordiale_Debian_13_${DEB_ARCH}.deb" "dist/Cordiale_Ubuntu_26.04_${DEB_ARCH}.deb"
 
+          dep_args almalinux
           fpm -s dir -t rpm -n cordiale -v "${RPM_VERSION}" -a "${RPM_ARCH}" \
+            "${DEP_ARGS[@]}" \
             --maintainer "Sythos <sythos@gmail.com>" \
             --description "Native desktop client for Grappa" \
             --url "https://github.com/Sythos/Cordiale" \
             --license MIT \
             -C stage -p "dist/Cordiale_AlmaLinux_10_${RPM_ARCH}.rpm" .
 
+          dep_args arch
           fpm -s dir -t pacman -n cordiale -v "${RPM_VERSION}" -a "${RPM_ARCH}" \
             --pacman-compression zstd \
+            "${DEP_ARGS[@]}" \
             --maintainer "Sythos <sythos@gmail.com>" \
             --description "Native desktop client for Grappa" \
             --url "https://github.com/Sythos/Cordiale" \
