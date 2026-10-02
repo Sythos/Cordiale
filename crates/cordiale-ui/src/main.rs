@@ -449,6 +449,7 @@ enum PasskeySignIn {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    persistence::tighten_config_permissions();
     let ui = AppWindow::new()?;
     debug_info::watch_renderer(ui.window());
 

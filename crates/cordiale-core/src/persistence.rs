@@ -30,7 +30,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -269,12 +272,118 @@ pub fn log_file_display() -> String {
     format!("~/{CONFIG_DIR_NAME}/{LOG_FILE_NAME}")
 }
 
-fn load_json<T: Default + for<'de> Deserialize<'de>>(
-    file_name: &str,
-) -> Result<T, PersistenceError> {
-    let dir = config_dir().ok_or(PersistenceError::NoConfigDir)?;
-    let path = dir.join(file_name);
+/// Creates `dir` and its missing parents. On Unix the new directories are
+/// private (0700); on Windows they inherit the user profile's ACLs.
+pub(crate) fn create_private_dir_all(dir: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(dir)
+}
 
+/// A sibling of `path` that no other writer, thread or process uses.
+fn temp_path_for(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(".{name}.{}-{serial}.tmp", std::process::id()))
+}
+
+/// Writes `contents` to a new file at `path` (0600 on Unix) and flushes it to
+/// disk.
+fn write_synced(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
+}
+
+fn rename_file(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
+}
+
+/// Replaces the file at `path` with `contents` all at once: a reader, or a
+/// crash, sees the old file or the new one, never a half-written one. The
+/// data goes to a temp file in the same directory (so the rename stays on one
+/// filesystem), is synced, then renamed over the target; on any failure the
+/// target is left as it was and the temp file is removed. On Unix the result
+/// is private (0600), also when the target already existed with another mode.
+pub(crate) fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
+    write_atomic_with(path, contents, rename_file)
+}
+
+fn write_atomic_with(
+    path: &Path,
+    contents: &[u8],
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let temp = temp_path_for(path);
+    let result = write_synced(&temp, contents).and_then(|()| rename(&temp, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Tightens what an older version created with the default umask: the
+/// config directory to 0700 and the files in it to 0600. Best-effort, like
+/// every other write here: a failure is logged and never stops the app.
+/// Nothing to do on Windows, where the directory inherits the user
+/// profile's ACLs.
+#[cfg(unix)]
+pub fn tighten_config_permissions() {
+    let Some(dir) = config_dir() else {
+        return;
+    };
+    for failure in tighten_permissions_in(&dir) {
+        log_line(&failure);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn tighten_config_permissions() {}
+
+/// Sets `dir` to 0700 and each regular file directly in it to 0600 (links
+/// are not followed). Returns one message per failure, without file contents.
+#[cfg(unix)]
+fn tighten_permissions_in(dir: &Path) -> Vec<String> {
+    let mut failures = Vec::new();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return failures,
+        Err(err) => {
+            failures.push(format!("config folder not tightened: {err}"));
+            return failures;
+        }
+    };
+    if let Err(err) = fs::set_permissions(dir, fs::Permissions::from_mode(0o700)) {
+        failures.push(format!("config folder not tightened: {err}"));
+    }
+    for entry in entries.flatten() {
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if !is_file {
+            continue;
+        }
+        if let Err(err) = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o600)) {
+            failures.push(format!(
+                "{} not tightened: {err}",
+                entry.file_name().to_string_lossy()
+            ));
+        }
+    }
+    failures
+}
+
+fn load_json_from<T: Default + for<'de> Deserialize<'de>>(
+    path: &Path,
+) -> Result<T, PersistenceError> {
     if !path.exists() {
         return Ok(T::default());
     }
@@ -283,12 +392,47 @@ fn load_json<T: Default + for<'de> Deserialize<'de>>(
     Ok(serde_json::from_str(&contents)?)
 }
 
+/// Moves a file that no longer parses aside as `<name>.corrupt` (replacing an
+/// older one), so the default the callers fall back to is not saved over the
+/// only copy of the user's settings or servers.
+fn quarantine_corrupt(path: &Path) -> io::Result<PathBuf> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".corrupt");
+    let kept = path.with_file_name(name);
+    fs::rename(path, &kept)?;
+    Ok(kept)
+}
+
+/// Reads a config file. When it can't be parsed it is set aside with
+/// `quarantine_corrupt` and the error is returned; the next load then finds
+/// no file and yields the default.
+fn load_json<T: Default + for<'de> Deserialize<'de>>(
+    file_name: &str,
+) -> Result<T, PersistenceError> {
+    let dir = config_dir().ok_or(PersistenceError::NoConfigDir)?;
+    let path = dir.join(file_name);
+
+    let result = load_json_from(&path);
+    if let Err(PersistenceError::Json(err)) = &result {
+        // Only where the parse failed: the message could quote the content.
+        let (line, column) = (err.line(), err.column());
+        match quarantine_corrupt(&path) {
+            Ok(_) => log_line(&format!(
+                "{file_name} is not valid JSON (line {line}, column {column}), kept as {file_name}.corrupt"
+            )),
+            Err(io_err) => log_line(&format!(
+                "{file_name} is not valid JSON (line {line}, column {column}) and could not be set aside: {io_err}"
+            )),
+        }
+    }
+    result
+}
+
 fn save_json<T: Serialize>(file_name: &str, value: &T) -> Result<(), PersistenceError> {
     let dir = config_dir().ok_or(PersistenceError::NoConfigDir)?;
-    fs::create_dir_all(&dir)?;
-    let path = dir.join(file_name);
+    create_private_dir_all(&dir)?;
     let contents = serde_json::to_string_pretty(value)?;
-    fs::write(path, contents)?;
+    write_atomic(&dir.join(file_name), contents.as_bytes())?;
     Ok(())
 }
 
@@ -351,13 +495,17 @@ pub fn log_line(message: &str) {
     }
 }
 
-fn log_line_to(path: &std::path::Path, message: &str) {
+fn log_line_to(path: &Path, message: &str) {
     if let Some(parent) = path.parent() {
-        if fs::create_dir_all(parent).is_err() {
+        if create_private_dir_all(parent).is_err() {
             return;
         }
     }
-    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) else {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let Ok(mut file) = options.open(path) else {
         return;
     };
     let timestamp = SystemTime::now()
@@ -644,5 +792,164 @@ mod tests {
             redact_secrets(message),
             "token=[redacted] retry token=[redacted]"
         );
+    }
+
+    /// An empty, uniquely named folder under the system temp dir.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cordiale-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn entry_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn write_atomic_creates_then_replaces_a_file_without_leftovers() {
+        let dir = scratch_dir("atomic-replace");
+        let path = dir.join("settings.json");
+
+        write_atomic(&path, b"one").expect("first write");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "one");
+        write_atomic(&path, b"two").expect("second write");
+        assert_eq!(fs::read_to_string(&path).expect("read"), "two");
+        assert_eq!(entry_names(&dir), ["settings.json"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_keeps_the_old_file_when_the_rename_fails() {
+        let dir = scratch_dir("atomic-rename-fails");
+        let path = dir.join("servers.json");
+        fs::write(&path, "old").expect("seed file");
+
+        let result = write_atomic_with(&path, b"new", |_, _| {
+            Err(io::Error::other("rename refused"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).expect("read"), "old");
+        assert_eq!(entry_names(&dir), ["servers.json"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_removes_its_temp_file_when_the_target_cannot_be_replaced() {
+        let dir = scratch_dir("atomic-target-is-dir");
+        let path = dir.join("settings.json");
+        fs::create_dir(&path).expect("directory in the way");
+
+        assert!(write_atomic(&path, b"data").is_err());
+        assert!(path.is_dir());
+        assert_eq!(entry_names(&dir), ["settings.json"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).expect("metadata").permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_makes_the_file_private_even_over_a_looser_one() {
+        let dir = scratch_dir("atomic-mode");
+        let path = dir.join("credentials.json");
+        fs::write(&path, "old").expect("seed file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("loosen");
+
+        write_atomic(&path, b"new").expect("write");
+
+        assert_eq!(mode_of(&path), 0o600);
+        let fresh = dir.join("fresh.json");
+        write_atomic(&fresh, b"data").expect("write new file");
+        assert_eq!(mode_of(&fresh), 0o600);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_all_makes_every_new_level_private() {
+        let dir = scratch_dir("private-dir");
+        let nested = dir.join("a").join("b");
+
+        create_private_dir_all(&nested).expect("create");
+        create_private_dir_all(&nested).expect("create again");
+
+        assert_eq!(mode_of(&dir.join("a")), 0o700);
+        assert_eq!(mode_of(&nested), 0o700);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_line_to_creates_a_private_log_file() {
+        let dir = scratch_dir("private-log");
+        let path = dir.join("cordiale.log");
+
+        log_line_to(&path, "hello");
+
+        assert_eq!(mode_of(&path), 0o600);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tighten_permissions_in_fixes_an_existing_folder_and_its_files() {
+        let dir = scratch_dir("tighten");
+        let file = dir.join("credentials.json");
+        fs::write(&file, "{}").expect("seed file");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("loosen file");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("loosen dir");
+
+        let failures = tighten_permissions_in(&dir);
+
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(mode_of(&dir), 0o700);
+        assert_eq!(mode_of(&file), 0o600);
+        assert!(tighten_permissions_in(&dir.join("missing")).is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_corrupt_file_is_set_aside_instead_of_being_lost() {
+        let dir = scratch_dir("corrupt");
+        let path = dir.join("settings.json");
+        fs::write(&path, "{\"theme\": \"da").expect("seed a truncated file");
+
+        assert!(matches!(
+            load_json_from::<Settings>(&path),
+            Err(PersistenceError::Json(_))
+        ));
+        let kept = quarantine_corrupt(&path).expect("set aside");
+
+        assert_eq!(kept, dir.join("settings.json.corrupt"));
+        assert_eq!(fs::read_to_string(&kept).expect("read"), "{\"theme\": \"da");
+        assert_eq!(
+            load_json_from::<Settings>(&path).expect("default"),
+            Settings::default()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

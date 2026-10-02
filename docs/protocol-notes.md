@@ -644,6 +644,16 @@ trattare ogni voce di `boot.channels` come un canale selezionabile e la
 joina in modo lazy al click, comportamento già corretto sia per un
 canale già joined sia per uno solo in autojoin.
 
+**File locali in `~/.cordiale/`** (`settings.json`, `servers.json`, `credentials.json`
+del fallback offuscato, `cordiale.log`): su Unix la cartella è creata con modo 0700
+e i file con 0600 (all'avvio Cordiale restringe anche quelli lasciati da una
+versione precedente; su Windows valgono le ACL del profilo utente). Ogni
+scrittura di configurazione è atomica: file temporaneo nella stessa cartella,
+`fsync`, poi `rename` sul file finale, così un crash o un disco pieno lasciano
+il file vecchio intatto. Un file che non è più JSON valido non viene
+sovrascritto dal default: al caricamento è rinominato in `<nome>.corrupt`
+(l'ultimo sostituisce quello precedente) e l'app riparte dai valori di default.
+
 ## 4ter. `/admin/*` e comandi slash — contratto reale (2026-09-19)
 
 Fonte: lettura diretta del sorgente Elixir di `grappa-irc` (commit

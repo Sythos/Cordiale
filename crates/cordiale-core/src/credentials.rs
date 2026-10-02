@@ -29,7 +29,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use crate::persistence::config_dir;
+use crate::persistence::{config_dir, create_private_dir_all, write_atomic};
 
 const CREDENTIALS_FILE_NAME: &str = "credentials.json";
 const PROBE_SERVICE: &str = "cordiale-probe";
@@ -136,7 +136,8 @@ impl CredentialStore for KeyringCredentialStore {
 /// publicly-known XOR pattern purely to avoid storing them as plain
 /// readable text, protecting against nothing beyond a casual glance.
 /// Anyone with read access to `credentials.json` and the Cordiale source
-/// can recover every secret. Stored separately from `settings.json`.
+/// can recover every secret. Stored separately from `settings.json`, in a
+/// file only its owner can read (Unix) and replaced atomically on every save.
 pub struct ObfuscatedCredentialStore {
     file_path: PathBuf,
 }
@@ -188,10 +189,10 @@ impl ObfuscatedCredentialStore {
 
     fn save(&self, map: &ObfuscatedMap) -> Result<(), CredentialError> {
         if let Some(parent) = self.file_path.parent() {
-            fs::create_dir_all(parent)?;
+            create_private_dir_all(parent)?;
         }
         let contents = serde_json::to_string_pretty(map)?;
-        fs::write(&self.file_path, contents)?;
+        write_atomic(&self.file_path, contents.as_bytes())?;
         Ok(())
     }
 }
@@ -292,5 +293,29 @@ mod tests {
         );
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn obfuscated_store_file_is_private_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "cordiale-test-credentials-private-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("credentials.json");
+        let store = ObfuscatedCredentialStore::with_file_path(path.clone());
+
+        store.set_secret("server-a", "alice", "one").unwrap();
+        store.set_secret("server-a", "alice", "two").unwrap();
+
+        let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
