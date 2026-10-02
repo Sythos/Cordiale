@@ -626,7 +626,7 @@ documento ufficiale, non perché sostituisce il contratto.
 
 **Conseguenze per Cordiale**: conferma diretta (non più solo inferenza
 dalla direttiva "BNC-like" dell'utente) che l'architettura scelta è
-corretta — `~/.cordiale/` deve restare limitato a preferenze locali di
+corretta — le cartelle locali di Cordiale (percorsi qui sotto) devono restare limitate a preferenze locali di
 comodo (lingua, tema — già così) più credenziali via `CredentialStore`
 (scelta più sicura di un token in chiaro, non un problema: Cordiale è un
 client nativo con accesso al keychain di sistema, non una PWA in
@@ -643,6 +643,50 @@ la disciplina "mai un campo non confermato", quindi Cordiale continua a
 trattare ogni voce di `boot.channels` come un canale selezionabile e la
 joina in modo lazy al click, comportamento già corretto sia per un
 canale già joined sia per uno solo in autojoin.
+
+**File locali, nelle cartelle standard di ogni piattaforma** (un solo punto,
+`persistence.rs`, decide i percorsi; con le variabili `XDG_*` su Linux):
+
+| | `settings.json`, `servers.json` | `credentials.json` (fallback offuscato) | `cordiale.log`, `cordiale.log.1` |
+|-|-|-|-|
+| Linux | `~/.config/cordiale` | `~/.local/share/cordiale` | `~/.local/state/cordiale` |
+| Windows | `%APPDATA%\Cordiale` | `%LOCALAPPDATA%\Cordiale` | `%LOCALAPPDATA%\Cordiale` |
+| macOS | `~/Library/Application Support/Cordiale` | `~/Library/Application Support/Cordiale` | `~/Library/Logs/Cordiale` |
+
+Le credenziali stanno nella cartella dati *locale* perché non devono mai
+roamare su un dominio Windows; su macOS non esiste una cartella di stato, il
+log va in `~/Library/Logs`. Nei report (pagina Debug) la home è scritta `~`,
+come `%APPDATA%` e `%LOCALAPPDATA%` su Windows, così il nome utente non compare
+mai.
+
+Su Unix le cartelle sono create con modo 0700 e i file con 0600 (all'avvio
+Cordiale restringe anche quelli lasciati da una versione precedente; su
+Windows valgono le ACL del profilo utente). Ogni scrittura di configurazione è
+atomica: file temporaneo nella stessa cartella, `fsync`, poi `rename` sul file
+finale, così un crash o un disco pieno lasciano il file vecchio intatto. Un
+file che non è più JSON valido non viene sovrascritto dal default: al
+caricamento è rinominato in `<nome>.corrupt` (l'ultimo sostituisce quello
+precedente) e l'app riparte dai valori di default.
+
+**Log limitato.** `cordiale.log` oltre 1 MiB è rinominato in `cordiale.log.1`
+(sostituendo il precedente) e ne parte uno nuovo: in tutto al massimo circa due
+volte il limite, con le righe appena prima di un crash. La dimensione è
+controllata alla prima scrittura di ogni avvio e poi ogni 50 scritture, non a
+ogni riga. La pagina Debug mostra entrambi i file.
+
+**Migrazione da `~/.cordiale/`** (le versioni precedenti tenevano tutto lì).
+All'avvio, se la vecchia cartella esiste, ogni file noto (`settings.json`,
+`servers.json`, i loro `.corrupt`, `credentials.json`, `cordiale.log`) è
+copiato nella nuova posizione e riletto per verifica; solo quando tutte le
+copie sono a posto i vecchi file sono cancellati (e la cartella, se resta
+vuota), e l'esito va nel log. Se un file nella nuova posizione esiste già e
+differisce, vince quello nuovo e il vecchio resta dov'è; se uno stesso file è
+già identico (migrazione interrotta a metà) viene solo cancellato dal vecchio.
+Se la migrazione fallisce, le copie fatte sono rimosse, Cordiale continua a
+usare `~/.cordiale/` per tutto e lo dice nella pagina Debug ("Storage note"),
+senza ripartire da zero in silenzio; riprova al prossimo avvio. In lettura, un
+file mancante nella posizione nuova ma presente in `~/.cordiale/` viene letto
+da lì.
 
 ## 4ter. `/admin/*` e comandi slash — contratto reale (2026-09-19)
 

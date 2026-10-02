@@ -29,7 +29,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use crate::persistence::config_dir;
+use crate::persistence::{create_private_dir_all, data_dir, legacy_file, read_path, write_atomic};
 
 const CREDENTIALS_FILE_NAME: &str = "credentials.json";
 const PROBE_SERVICE: &str = "cordiale-probe";
@@ -136,9 +136,14 @@ impl CredentialStore for KeyringCredentialStore {
 /// publicly-known XOR pattern purely to avoid storing them as plain
 /// readable text, protecting against nothing beyond a casual glance.
 /// Anyone with read access to `credentials.json` and the Cordiale source
-/// can recover every secret. Stored separately from `settings.json`.
+/// can recover every secret. Stored separately from `settings.json`, in the
+/// local data folder (never a roaming one), in a file only its owner can read
+/// (Unix) and replaced atomically on every save.
 pub struct ObfuscatedCredentialStore {
     file_path: PathBuf,
+    /// The same file in the old `~/.cordiale`, read when the new one is
+    /// missing.
+    fallback_path: Option<PathBuf>,
 }
 
 type ObfuscatedMap = HashMap<String, Vec<u8>>;
@@ -170,28 +175,36 @@ fn deobfuscate(bytes: &[u8]) -> Result<String, CredentialError> {
 
 impl ObfuscatedCredentialStore {
     pub fn new() -> Result<Self, CredentialError> {
-        let dir = config_dir().ok_or(CredentialError::NoConfigDir)?;
-        Ok(Self::with_file_path(dir.join(CREDENTIALS_FILE_NAME)))
+        let dir = data_dir().ok_or(CredentialError::NoConfigDir)?;
+        Ok(ObfuscatedCredentialStore {
+            file_path: dir.join(CREDENTIALS_FILE_NAME),
+            fallback_path: legacy_file(CREDENTIALS_FILE_NAME),
+        })
     }
 
+    #[cfg(test)]
     fn with_file_path(file_path: PathBuf) -> Self {
-        ObfuscatedCredentialStore { file_path }
+        ObfuscatedCredentialStore {
+            file_path,
+            fallback_path: None,
+        }
     }
 
     fn load(&self) -> Result<ObfuscatedMap, CredentialError> {
-        if !self.file_path.exists() {
+        let path = read_path(&self.file_path, self.fallback_path.as_deref());
+        if !path.exists() {
             return Ok(ObfuscatedMap::new());
         }
-        let contents = fs::read_to_string(&self.file_path)?;
+        let contents = fs::read_to_string(&path)?;
         Ok(serde_json::from_str(&contents)?)
     }
 
     fn save(&self, map: &ObfuscatedMap) -> Result<(), CredentialError> {
         if let Some(parent) = self.file_path.parent() {
-            fs::create_dir_all(parent)?;
+            create_private_dir_all(parent)?;
         }
         let contents = serde_json::to_string_pretty(map)?;
-        fs::write(&self.file_path, contents)?;
+        write_atomic(&self.file_path, contents.as_bytes())?;
         Ok(())
     }
 }
@@ -292,5 +305,64 @@ mod tests {
         );
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn obfuscated_store_reads_the_old_folder_until_it_saves_to_the_new_one() {
+        let dir = std::env::temp_dir().join(format!(
+            "cordiale-test-credentials-fallback-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let old = dir.join("old").join("credentials.json");
+        let new = dir.join("new").join("credentials.json");
+        let seed = ObfuscatedCredentialStore::with_file_path(old.clone());
+        seed.set_secret("server-a", "alice", "one").unwrap();
+
+        let store = ObfuscatedCredentialStore {
+            file_path: new.clone(),
+            fallback_path: Some(old.clone()),
+        };
+        assert_eq!(
+            store.get_secret("server-a", "alice").unwrap(),
+            Some("one".to_string())
+        );
+
+        store.set_secret("server-b", "alice", "two").unwrap();
+        assert!(new.exists());
+        assert_eq!(
+            store.get_secret("server-a", "alice").unwrap(),
+            Some("one".to_string())
+        );
+        assert_eq!(
+            store.get_secret("server-b", "alice").unwrap(),
+            Some("two".to_string())
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn obfuscated_store_file_is_private_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "cordiale-test-credentials-private-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let path = dir.join("nested").join("credentials.json");
+        let store = ObfuscatedCredentialStore::with_file_path(path.clone());
+
+        store.set_secret("server-a", "alice", "one").unwrap();
+        store.set_secret("server-a", "alice", "two").unwrap();
+
+        let mode = |p: &std::path::Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

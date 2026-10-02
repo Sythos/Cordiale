@@ -58,9 +58,14 @@ pub struct Diagnostics {
     pub input_method: Option<String>,
     pub local_time: Option<String>,
     pub time_zone: Option<String>,
-    /// Where Cordiale keeps its files, home folder written as `~`.
+    /// Where Cordiale keeps its settings: the home folder is written `~`
+    /// (`%APPDATA%` on Windows).
     pub data_dir: String,
     pub log_file: String,
+    /// The log as it was before the last rotation.
+    pub previous_log_file: String,
+    /// A problem with where the files are kept, when there is one.
+    pub storage_note: Option<String>,
 }
 
 impl Diagnostics {
@@ -136,6 +141,10 @@ impl Diagnostics {
         out.push('\n');
         line(&mut out, "Data folder", Some(&self.data_dir));
         line(&mut out, "Log file", Some(&self.log_file));
+        line(&mut out, "Previous log file", Some(&self.previous_log_file));
+        if let Some(note) = &self.storage_note {
+            line(&mut out, "Storage note", Some(note));
+        }
 
         // No trailing newline: what gets copied is exactly the lines.
         out.truncate(out.trim_end().len());
@@ -213,8 +222,10 @@ mod tests {
             input_method: Some("ibus".into()),
             local_time: Some("2026-09-30 14:03:05 +02:00".into()),
             time_zone: Some("Europe/Rome".into()),
-            data_dir: "~/.cordiale".into(),
-            log_file: "~/.cordiale/cordiale.log".into(),
+            data_dir: "~/.config/cordiale".into(),
+            log_file: "~/.local/state/cordiale/cordiale.log".into(),
+            previous_log_file: "~/.local/state/cordiale/cordiale.log.1".into(),
+            storage_note: None,
         }
     }
 
@@ -247,9 +258,26 @@ Input method: ibus
 Local time: 2026-09-30 14:03:05 +02:00
 Time zone: Europe/Rome
 
-Data folder: ~/.cordiale
-Log file: ~/.cordiale/cordiale.log";
+Data folder: ~/.config/cordiale
+Log file: ~/.local/state/cordiale/cordiale.log
+Previous log file: ~/.local/state/cordiale/cordiale.log.1";
         assert_eq!(full().render(), expected);
+    }
+
+    #[test]
+    fn a_storage_problem_is_listed_after_the_log_files() {
+        let report = Diagnostics {
+            storage_note: Some("Could not move ~/.cordiale (disk full).".into()),
+            ..full()
+        }
+        .render();
+        assert!(
+            report.ends_with(
+                "Previous log file: ~/.local/state/cordiale/cordiale.log.1\n\
+Storage note: Could not move ~/.cordiale (disk full)."
+            ),
+            "{report}"
+        );
     }
 
     #[test]
@@ -258,8 +286,9 @@ Log file: ~/.cordiale/cordiale.log";
             version: "0.1.13".into(),
             build: "0".into(),
             executable: "windows x86_64".into(),
-            data_dir: "~/.cordiale".into(),
-            log_file: "~/.cordiale/cordiale.log".into(),
+            data_dir: "%APPDATA%\\Cordiale".into(),
+            log_file: "%LOCALAPPDATA%\\Cordiale\\cordiale.log".into(),
+            previous_log_file: "%LOCALAPPDATA%\\Cordiale\\cordiale.log.1".into(),
             ..Diagnostics::default()
         }
         .render();
@@ -290,8 +319,9 @@ Input method: Not available
 Local time: Not available
 Time zone: Not available
 
-Data folder: ~/.cordiale
-Log file: ~/.cordiale/cordiale.log";
+Data folder: %APPDATA%\\Cordiale
+Log file: %LOCALAPPDATA%\\Cordiale\\cordiale.log
+Previous log file: %LOCALAPPDATA%\\Cordiale\\cordiale.log.1";
         assert_eq!(report, expected);
     }
 
