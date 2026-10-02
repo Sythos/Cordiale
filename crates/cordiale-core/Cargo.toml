@@ -16,7 +16,13 @@ dirs = "7"
 keyring = "4.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls", "http2", "charset", "multipart"] }
 tokio = { version = "1", features = ["net", "macros", "rt", "time", "sync"] }
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# The WebSocket must trust what REST (reqwest) trusts: the OS store through
+# the platform verifier, so a server behind a private CA works on both. The
+# `rustls-tls-native-roots` feature only switches the rustls support on; the
+# connector is always built with the platform verifier (see `websocket.rs`).
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
 futures-util = { version = "0.3", features = ["sink"] }
 
 [dev-dependencies]

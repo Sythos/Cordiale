@@ -3207,3 +3207,7 @@ msgstr "Continuer"
 msgctxt "AppWindow"
 msgid "Denoise"
 msgstr "Masquer le bruit"
+
+msgctxt "AppWindow"
+msgid "This computer doesn't trust the server's certificate ({}). Add the server's certificate authority to the system trust store, then sign in again."
+msgstr "Cet ordinateur ne fait pas confiance au certificat du serveur ({}). Ajoute l'autorité de certification du serveur au magasin de confiance du système, puis reconnecte-toi."

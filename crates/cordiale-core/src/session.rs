@@ -132,6 +132,14 @@ pub enum SessionEvent {
     AuthRejected {
         reason: String,
     },
+    /// Terminal: the TLS handshake failed on the server's certificate (not
+    /// trusted by this machine's store, expired, wrong name, ...). The REST
+    /// calls use the same trust, so retrying can't help until the store or
+    /// the server changes: the session has stopped. `reason` is the short
+    /// cause (e.g. `invalid peer certificate: UnknownIssuer`).
+    CertificateRejected {
+        reason: String,
+    },
     /// Terminal: the WebSocket upgrade was refused with 426, the server's
     /// `client_proto` floor is above what this build declares. The session
     /// has stopped: only an updated Cordiale can connect.
@@ -381,6 +389,12 @@ async fn run_session(
                 return;
             }
             Err(err) => {
+                if let Some(cause) = err.certificate_error() {
+                    let _ = events.send(SessionEvent::CertificateRejected {
+                        reason: cause.to_string(),
+                    });
+                    return;
+                }
                 if let Some(refusal) = err.upgrade_required() {
                     let _ = events.send(SessionEvent::UpgradeRequired {
                         protocol_version: refusal.protocol_version,
