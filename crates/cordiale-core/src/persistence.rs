@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Local persistence under `~/.cordiale/`.
+//! Local persistence in each platform's standard folders (see `Layout`).
 //!
 //! No `localStorage`, no single monolithic file: non-sensitive preferences
 //! live in `settings.json`, servers/profiles/selection live in
@@ -34,6 +34,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -42,10 +43,20 @@ use crate::domain::{Profile, Server};
 use crate::passkey_origin::{passkey_origin, OverrideCheck};
 use crate::presence::PresencePref;
 
-const CONFIG_DIR_NAME: &str = ".cordiale";
+/// The folder every version before the standard-folders change used, in the
+/// home directory.
+const LEGACY_DIR_NAME: &str = ".cordiale";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const SERVERS_FILE_NAME: &str = "servers.json";
 const LOG_FILE_NAME: &str = "cordiale.log";
+/// The log is rotated once it passes this size; with the previous file kept
+/// (`cordiale.log.1`) the two stay under about twice this.
+const LOG_MAX_BYTES: u64 = 1024 * 1024;
+/// The log's size is checked on the first write of a run, then once every
+/// this many writes, not on every line.
+const LOG_CHECK_EVERY: u64 = 50;
+/// Appended to the log's name for the file rotation moves it to.
+const PREVIOUS_LOG_SUFFIX: &str = ".1";
 
 /// One of the languages Cordiale ships translations for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,20 +267,403 @@ impl From<serde_json::Error> for PersistenceError {
     }
 }
 
-/// `~/.cordiale/`, Cordiale's local config directory.
-pub fn config_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(CONFIG_DIR_NAME))
+/// The platforms Cordiale picks standard folders for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Platform {
+    Linux,
+    Windows,
+    MacOs,
 }
 
-/// `config_dir()` as shown to the user and put in bug reports: the home
-/// folder is written `~`, so the user name never appears.
+impl Platform {
+    fn current() -> Self {
+        if cfg!(windows) {
+            Platform::Windows
+        } else if cfg!(target_os = "macos") {
+            Platform::MacOs
+        } else {
+            Platform::Linux
+        }
+    }
+
+    /// The name of Cordiale's folder inside each base folder, spelled the way
+    /// the platform does it.
+    fn app_folder(self) -> &'static str {
+        match self {
+            Platform::Linux => "cordiale",
+            Platform::Windows | Platform::MacOs => "Cordiale",
+        }
+    }
+}
+
+/// The base folders the standard locations hang off. They come from the
+/// system in `Bases::from_system`, and from a scratch folder in tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Bases {
+    home: PathBuf,
+    /// Settings and servers: `$XDG_CONFIG_HOME` on Linux, `%APPDATA%` on
+    /// Windows, `~/Library/Application Support` on macOS.
+    config: PathBuf,
+    /// Per-machine data that must not roam: `$XDG_DATA_HOME` on Linux,
+    /// `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS.
+    data_local: PathBuf,
+    /// `$XDG_STATE_HOME`; only Linux has one.
+    state: Option<PathBuf>,
+}
+
+impl Bases {
+    fn from_system() -> Option<Self> {
+        Some(Bases {
+            home: dirs::home_dir()?,
+            config: dirs::config_dir()?,
+            data_local: dirs::data_local_dir()?,
+            state: dirs::state_dir(),
+        })
+    }
+}
+
+/// The three folders Cordiale writes to. This is the only place that decides
+/// where they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Layout {
+    /// `settings.json` and `servers.json`.
+    config: PathBuf,
+    /// The credentials fallback.
+    data: PathBuf,
+    /// `cordiale.log` and `cordiale.log.1`.
+    log: PathBuf,
+}
+
+/// Which of the `Layout` folders a file belongs in.
+#[derive(Debug, Clone, Copy)]
+enum Place {
+    Config,
+    Data,
+    Log,
+}
+
+impl Layout {
+    /// The platform's standard folders:
+    ///
+    /// | | config | credentials fallback | log |
+    /// |-|-|-|-|
+    /// | Linux | `~/.config/cordiale` | `~/.local/share/cordiale` | `~/.local/state/cordiale` |
+    /// | Windows | `%APPDATA%\Cordiale` | `%LOCALAPPDATA%\Cordiale` | `%LOCALAPPDATA%\Cordiale` |
+    /// | macOS | `~/Library/Application Support/Cordiale` | same | `~/Library/Logs/Cordiale` |
+    fn standard(platform: Platform, bases: &Bases) -> Self {
+        let folder = platform.app_folder();
+        let log_base = match platform {
+            Platform::MacOs => bases.home.join("Library").join("Logs"),
+            Platform::Linux | Platform::Windows => bases
+                .state
+                .clone()
+                .unwrap_or_else(|| bases.data_local.clone()),
+        };
+        Layout {
+            config: bases.config.join(folder),
+            data: bases.data_local.join(folder),
+            log: log_base.join(folder),
+        }
+    }
+
+    /// Everything in one folder: the old `~/.cordiale`, still used when its
+    /// files could not be moved.
+    fn single(dir: PathBuf) -> Self {
+        Layout {
+            config: dir.clone(),
+            data: dir.clone(),
+            log: dir,
+        }
+    }
+
+    fn dir(&self, place: Place) -> &Path {
+        match place {
+            Place::Config => &self.config,
+            Place::Data => &self.data,
+            Place::Log => &self.log,
+        }
+    }
+}
+
+/// What the old folder held that is worth moving, and where each file goes.
+const MIGRATED_FILES: &[(&str, Place)] = &[
+    (SETTINGS_FILE_NAME, Place::Config),
+    (SERVERS_FILE_NAME, Place::Config),
+    ("settings.json.corrupt", Place::Config),
+    ("servers.json.corrupt", Place::Config),
+    ("credentials.json", Place::Data),
+    (LOG_FILE_NAME, Place::Log),
+];
+
+/// What `migrate_legacy` did.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MigrationSummary {
+    /// Files written to their new place.
+    copied: usize,
+    /// Old files deleted after their copy was checked.
+    removed: usize,
+    /// Old files left where they were, because the new place already holds a
+    /// different file of the same name.
+    kept: usize,
+}
+
+impl MigrationSummary {
+    /// The line for the log, or `None` when nothing happened.
+    fn log_message(&self) -> Option<String> {
+        (self.copied > 0 || self.removed > 0).then(|| {
+            format!(
+                "moved files from ~/{LEGACY_DIR_NAME} to the standard folders: {} copied, {} old copies removed, {} left in place",
+                self.copied, self.removed, self.kept
+            )
+        })
+    }
+}
+
+/// Moves what the old folder `old` holds into the folders of `target`. Every
+/// file is copied and read back first; only when all of them are in place are
+/// the old ones deleted, so a failure leaves `old` as it was (the copies made
+/// in this run are removed again). It can be run again after a crash: a file
+/// whose copy is already there and identical is just deleted from `old`, and
+/// one that differs from the new place's file is left alone.
+fn migrate_legacy(old: &Path, target: &Layout) -> Result<MigrationSummary, String> {
+    let mut summary = MigrationSummary::default();
+    let mut created = Vec::new();
+    let mut verified = Vec::new();
+    if let Err(reason) = copy_legacy_files(old, target, &mut summary, &mut created, &mut verified) {
+        for path in &created {
+            let _ = fs::remove_file(path);
+        }
+        return Err(reason);
+    }
+    for path in &verified {
+        if fs::remove_file(path).is_ok() {
+            summary.removed += 1;
+        }
+    }
+    // Only goes through when nothing else is left in it.
+    let _ = fs::remove_dir(old);
+    Ok(summary)
+}
+
+/// First half of `migrate_legacy`. `created` gets the new files written and
+/// `verified` the old files whose copy is known to be complete.
+fn copy_legacy_files(
+    old: &Path,
+    target: &Layout,
+    summary: &mut MigrationSummary,
+    created: &mut Vec<PathBuf>,
+    verified: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    for &(name, place) in MIGRATED_FILES {
+        let from = old.join(name);
+        let contents = match fs::read(&from) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(format!("{name} could not be read: {err}")),
+        };
+        let dir = target.dir(place);
+        let to = dir.join(name);
+        match fs::read(&to) {
+            Ok(existing) if existing == contents => verified.push(from),
+            Ok(_) => summary.kept += 1,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                create_private_dir_all(dir)
+                    .map_err(|err| format!("the folder for {name} could not be created: {err}"))?;
+                write_atomic(&to, &contents)
+                    .map_err(|err| format!("{name} could not be copied: {err}"))?;
+                created.push(to.clone());
+                match fs::read(&to) {
+                    Ok(copy) if copy == contents => {}
+                    Ok(_) => return Err(format!("the copy of {name} differs from the original")),
+                    Err(err) => return Err(format!("the copy of {name} could not be read: {err}")),
+                }
+                summary.copied += 1;
+                verified.push(from);
+            }
+            Err(err) => return Err(format!("{name} could not be checked: {err}")),
+        }
+    }
+    Ok(())
+}
+
+/// Where the files are, decided once per run.
+struct Storage {
+    platform: Platform,
+    bases: Bases,
+    layout: Layout,
+    /// The old `~/.cordiale`, read from when a file is missing in its new
+    /// place; `None` when it is the folder in use.
+    legacy: Option<PathBuf>,
+    /// Shown on the Debug page when the old folder could not be moved.
+    note: Option<String>,
+}
+
+impl Storage {
+    fn log_file(&self) -> PathBuf {
+        self.layout.log.join(LOG_FILE_NAME)
+    }
+
+    fn legacy_file(&self, name: &str) -> Option<PathBuf> {
+        self.legacy.as_ref().map(|dir| dir.join(name))
+    }
+
+    fn display(&self, path: &Path) -> String {
+        display_path(self.platform, &self.bases, path)
+    }
+
+    /// Every folder Cordiale keeps files in, each once, the old one included
+    /// while it is around.
+    #[cfg(unix)]
+    fn dirs_to_tighten(&self) -> Vec<&Path> {
+        let mut dirs: Vec<&Path> = Vec::new();
+        let in_use = [
+            self.layout.config.as_path(),
+            self.layout.data.as_path(),
+            self.layout.log.as_path(),
+        ];
+        for dir in in_use.into_iter().chain(self.legacy.as_deref()) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        dirs
+    }
+}
+
+/// Picks the folders to use and, when the old `~/.cordiale` exists, moves its
+/// files into them. If that fails the old folder stays in use, so nothing
+/// starts from scratch, and the reason is kept for the Debug page. The
+/// outcome goes to the log (the one in the folders in use).
+fn resolve(platform: Platform, bases: Bases) -> Storage {
+    let mut layout = Layout::standard(platform, &bases);
+    let old = bases.home.join(LEGACY_DIR_NAME);
+    let mut legacy = None;
+    let mut note = None;
+    if old.is_dir() {
+        match migrate_legacy(&old, &layout) {
+            Ok(summary) => {
+                if let Some(message) = summary.log_message() {
+                    write_log_line(&layout.log.join(LOG_FILE_NAME), &message, None);
+                }
+                legacy = Some(old);
+            }
+            Err(reason) => {
+                let shown = display_path(platform, &bases, &old);
+                layout = Layout::single(old);
+                write_log_line(
+                    &layout.log.join(LOG_FILE_NAME),
+                    &format!(
+                        "could not move {shown} to the standard folders: {reason}; still using it"
+                    ),
+                    None,
+                );
+                note = Some(format!(
+                    "Could not move {shown} to the standard folders ({reason}); Cordiale keeps using it."
+                ));
+            }
+        }
+    }
+    Storage {
+        platform,
+        bases,
+        layout,
+        legacy,
+        note,
+    }
+}
+
+/// The folders in use. The first call settles them (and may move the old
+/// folder's files), so it must not log through `log_line`.
+fn storage() -> Option<&'static Storage> {
+    static STORAGE: OnceLock<Option<Storage>> = OnceLock::new();
+    STORAGE
+        .get_or_init(|| Bases::from_system().map(|bases| resolve(Platform::current(), bases)))
+        .as_ref()
+}
+
+/// `path` as shown to the user and put in bug reports: the home folder is
+/// written `~` (and `%APPDATA%`, `%LOCALAPPDATA%` on Windows), so the user
+/// name never appears. A path outside all of them is shown as it is.
+fn display_path(platform: Platform, bases: &Bases, path: &Path) -> String {
+    if platform == Platform::Windows {
+        let windows_bases = [
+            ("%APPDATA%", &bases.config),
+            ("%LOCALAPPDATA%", &bases.data_local),
+        ];
+        for (name, base) in windows_bases {
+            if let Some(shown) = shown_under(name, "\\", base, path) {
+                return shown;
+            }
+        }
+    }
+    shown_under("~", "/", &bases.home, path).unwrap_or_else(|| path.display().to_string())
+}
+
+/// `path` with `base` replaced by `name`, parts joined by `separator`.
+fn shown_under(name: &str, separator: &str, base: &Path, path: &Path) -> Option<String> {
+    let rest = path.strip_prefix(base).ok()?;
+    let mut shown = name.to_string();
+    for part in rest.components() {
+        shown.push_str(separator);
+        shown.push_str(&part.as_os_str().to_string_lossy());
+    }
+    Some(shown)
+}
+
+/// Where `settings.json` and `servers.json` live: Cordiale's config folder.
+pub fn config_dir() -> Option<PathBuf> {
+    storage().map(|storage| storage.layout.config.clone())
+}
+
+/// Where the credentials fallback lives: a folder that never roams.
+pub(crate) fn data_dir() -> Option<PathBuf> {
+    storage().map(|storage| storage.layout.data.clone())
+}
+
+/// `name` in the old `~/.cordiale`, when that is not the folder in use.
+pub(crate) fn legacy_file(name: &str) -> Option<PathBuf> {
+    storage()?.legacy_file(name)
+}
+
+/// The file to read: `primary`, or `fallback` (the same file in the old
+/// folder) when only that one exists.
+pub(crate) fn read_path(primary: &Path, fallback: Option<&Path>) -> PathBuf {
+    match fallback {
+        Some(old) if !primary.exists() && old.exists() => old.to_path_buf(),
+        _ => primary.to_path_buf(),
+    }
+}
+
+/// `config_dir()` as shown to the user and put in bug reports.
 pub fn config_dir_display() -> String {
-    format!("~/{CONFIG_DIR_NAME}")
+    storage()
+        .map(|storage| storage.display(&storage.layout.config))
+        .unwrap_or_default()
 }
 
 /// The log file's location, written like `config_dir_display()`.
 pub fn log_file_display() -> String {
-    format!("~/{CONFIG_DIR_NAME}/{LOG_FILE_NAME}")
+    storage()
+        .map(|storage| storage.display(&storage.log_file()))
+        .unwrap_or_default()
+}
+
+/// The previous log (`cordiale.log.1`), written like `log_file_display()`.
+pub fn previous_log_file_display() -> String {
+    storage()
+        .map(|storage| {
+            storage.display(&sibling_with_suffix(
+                &storage.log_file(),
+                PREVIOUS_LOG_SUFFIX,
+            ))
+        })
+        .unwrap_or_default()
+}
+
+/// A problem with where the files are kept, for the Debug page: the old
+/// folder could not be moved and is still in use.
+pub fn storage_note() -> Option<String> {
+    storage()?.note.clone()
 }
 
 /// Creates `dir` and its missing parents. On Unix the new directories are
@@ -332,23 +726,28 @@ fn write_atomic_with(
     result
 }
 
-/// Tightens what an older version created with the default umask: the
-/// config directory to 0700 and the files in it to 0600. Best-effort, like
-/// every other write here: a failure is logged and never stops the app.
-/// Nothing to do on Windows, where the directory inherits the user
-/// profile's ACLs.
+/// Settles where the files live (moving an old `~/.cordiale` folder's files
+/// to the standard folders, see `migrate_legacy`) and, on Unix, tightens what
+/// an older version created with the default umask: each folder to 0700 and
+/// the files in it to 0600. Best-effort, like every other write here: a
+/// failure is logged and never stops the app. Nothing to tighten on Windows,
+/// where the folders inherit the user profile's ACLs.
 #[cfg(unix)]
-pub fn tighten_config_permissions() {
-    let Some(dir) = config_dir() else {
+pub fn init_storage() {
+    let Some(storage) = storage() else {
         return;
     };
-    for failure in tighten_permissions_in(&dir) {
-        log_line(&failure);
+    for dir in storage.dirs_to_tighten() {
+        for failure in tighten_permissions_in(dir) {
+            log_line(&failure);
+        }
     }
 }
 
 #[cfg(not(unix))]
-pub fn tighten_config_permissions() {}
+pub fn init_storage() {
+    let _ = storage();
+}
 
 /// Sets `dir` to 0700 and each regular file directly in it to 0600 (links
 /// are not followed). Returns one message per failure, without file contents.
@@ -359,12 +758,12 @@ fn tighten_permissions_in(dir: &Path) -> Vec<String> {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return failures,
         Err(err) => {
-            failures.push(format!("config folder not tightened: {err}"));
+            failures.push(format!("a folder was not tightened: {err}"));
             return failures;
         }
     };
     if let Err(err) = fs::set_permissions(dir, fs::Permissions::from_mode(0o700)) {
-        failures.push(format!("config folder not tightened: {err}"));
+        failures.push(format!("a folder was not tightened: {err}"));
     }
     for entry in entries.flatten() {
         let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
@@ -392,25 +791,32 @@ fn load_json_from<T: Default + for<'de> Deserialize<'de>>(
     Ok(serde_json::from_str(&contents)?)
 }
 
+/// `path` with `suffix` added to the file name, in the same folder.
+fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
 /// Moves a file that no longer parses aside as `<name>.corrupt` (replacing an
 /// older one), so the default the callers fall back to is not saved over the
 /// only copy of the user's settings or servers.
 fn quarantine_corrupt(path: &Path) -> io::Result<PathBuf> {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".corrupt");
-    let kept = path.with_file_name(name);
+    let kept = sibling_with_suffix(path, ".corrupt");
     fs::rename(path, &kept)?;
     Ok(kept)
 }
 
-/// Reads a config file. When it can't be parsed it is set aside with
+/// Reads a config file, from the old `~/.cordiale` when it is missing in the
+/// config folder (a downgrade or a half-finished move must not look like a
+/// fresh start). When it can't be parsed it is set aside with
 /// `quarantine_corrupt` and the error is returned; the next load then finds
 /// no file and yields the default.
 fn load_json<T: Default + for<'de> Deserialize<'de>>(
     file_name: &str,
 ) -> Result<T, PersistenceError> {
     let dir = config_dir().ok_or(PersistenceError::NoConfigDir)?;
-    let path = dir.join(file_name);
+    let path = read_path(&dir.join(file_name), legacy_file(file_name).as_deref());
 
     let result = load_json_from(&path);
     if let Err(PersistenceError::Json(err)) = &result {
@@ -484,22 +890,41 @@ pub fn save_passkey_origin_override(
     Ok(())
 }
 
-/// Appends one line to `~/.cordiale/cordiale.log`, prefixed with a Unix
+/// Appends one line to `cordiale.log` in the log folder, prefixed with a Unix
 /// timestamp — a plain-text trail a field tester can attach to a bug
-/// report. Best-effort like every other write in this module: a failure
-/// here is silently swallowed rather than surfaced, since diagnostics must
-/// never be the reason the app itself breaks.
+/// report. The log is bounded: past `LOG_MAX_BYTES` it moves to
+/// `cordiale.log.1` (replacing the previous one) and a new one starts.
+/// Best-effort like every other write in this module: a failure here is
+/// silently swallowed rather than surfaced, since diagnostics must never be
+/// the reason the app itself breaks.
 pub fn log_line(message: &str) {
-    if let Some(dir) = config_dir() {
-        log_line_to(&dir.join(LOG_FILE_NAME), message);
+    if let Some(storage) = storage() {
+        log_line_to(&storage.log_file(), message);
     }
 }
 
 fn log_line_to(path: &Path, message: &str) {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let check_size = size_check_due(WRITES.fetch_add(1, Ordering::Relaxed));
+    write_log_line(path, message, check_size.then_some(LOG_MAX_BYTES));
+}
+
+/// Whether the write numbered `writes_before` (from 0 in each run) checks the
+/// log's size: the first one, then every `LOG_CHECK_EVERY`.
+fn size_check_due(writes_before: u64) -> bool {
+    writes_before % LOG_CHECK_EVERY == 0
+}
+
+/// Writes the line, first rotating the log when `rotate_over` is a size it
+/// has grown past.
+fn write_log_line(path: &Path, message: &str, rotate_over: Option<u64>) {
     if let Some(parent) = path.parent() {
         if create_private_dir_all(parent).is_err() {
             return;
         }
+    }
+    if let Some(max_bytes) = rotate_over {
+        rotate_log_if_over(path, max_bytes);
     }
     let mut options = fs::OpenOptions::new();
     options.create(true).append(true);
@@ -514,6 +939,15 @@ fn log_line_to(path: &Path, message: &str) {
         .unwrap_or(0);
     let message = redact_secrets(message);
     let _ = writeln!(file, "[{timestamp}] {message}");
+}
+
+/// Moves the log to `<name>.1`, replacing the previous one, when it is bigger
+/// than `max_bytes`. The next write starts a new file.
+fn rotate_log_if_over(path: &Path, max_bytes: u64) {
+    let too_big = fs::metadata(path).is_ok_and(|meta| meta.len() > max_bytes);
+    if too_big {
+        let _ = fs::rename(path, sibling_with_suffix(path, PREVIOUS_LOG_SUFFIX));
+    }
 }
 
 /// Keys whose value is redacted wherever they appear as `key<punctuation>value`
@@ -732,12 +1166,6 @@ mod tests {
     }
 
     #[test]
-    fn displayed_locations_spell_the_home_folder_as_a_tilde() {
-        assert_eq!(config_dir_display(), "~/.cordiale");
-        assert_eq!(log_file_display(), "~/.cordiale/cordiale.log");
-    }
-
-    #[test]
     fn redact_secrets_masks_the_ws_bearer_subprotocol() {
         let message = "connect failed: base64url.bearer.phx.abcDEF123-_.xyz stuff";
         assert_eq!(
@@ -949,6 +1377,380 @@ mod tests {
             load_json_from::<Settings>(&path).expect("default"),
             Settings::default()
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Base folders shaped like Linux's, under a fake home that is never touched.
+    fn linux_bases() -> Bases {
+        Bases {
+            home: PathBuf::from("/home/alice"),
+            config: PathBuf::from("/home/alice/.config"),
+            data_local: PathBuf::from("/home/alice/.local/share"),
+            state: Some(PathBuf::from("/home/alice/.local/state")),
+        }
+    }
+
+    fn windows_bases() -> Bases {
+        Bases {
+            home: PathBuf::from("/home/alice"),
+            config: PathBuf::from("/home/alice/AppData/Roaming"),
+            data_local: PathBuf::from("/home/alice/AppData/Local"),
+            state: None,
+        }
+    }
+
+    fn macos_bases() -> Bases {
+        Bases {
+            home: PathBuf::from("/home/alice"),
+            config: PathBuf::from("/home/alice/Library/Application Support"),
+            data_local: PathBuf::from("/home/alice/Library/Application Support"),
+            state: None,
+        }
+    }
+
+    #[test]
+    fn linux_keeps_config_data_and_state_apart_in_lowercase_folders() {
+        let layout = Layout::standard(Platform::Linux, &linux_bases());
+        assert_eq!(layout.config, PathBuf::from("/home/alice/.config/cordiale"));
+        assert_eq!(
+            layout.data,
+            PathBuf::from("/home/alice/.local/share/cordiale")
+        );
+        assert_eq!(
+            layout.log,
+            PathBuf::from("/home/alice/.local/state/cordiale")
+        );
+    }
+
+    #[test]
+    fn linux_follows_the_xdg_overrides_it_is_given() {
+        let bases = Bases {
+            home: PathBuf::from("/home/alice"),
+            config: PathBuf::from("/srv/cfg"),
+            data_local: PathBuf::from("/srv/data"),
+            state: Some(PathBuf::from("/srv/state")),
+        };
+        let layout = Layout::standard(Platform::Linux, &bases);
+        assert_eq!(layout.config, PathBuf::from("/srv/cfg/cordiale"));
+        assert_eq!(layout.data, PathBuf::from("/srv/data/cordiale"));
+        assert_eq!(layout.log, PathBuf::from("/srv/state/cordiale"));
+        // Outside the home folder there is nothing to abbreviate.
+        assert_eq!(
+            display_path(Platform::Linux, &bases, &layout.config),
+            layout.config.display().to_string()
+        );
+    }
+
+    #[test]
+    fn windows_puts_the_credentials_and_the_log_in_the_local_folder() {
+        let layout = Layout::standard(Platform::Windows, &windows_bases());
+        assert_eq!(
+            layout.config,
+            PathBuf::from("/home/alice/AppData/Roaming/Cordiale")
+        );
+        assert_eq!(
+            layout.data,
+            PathBuf::from("/home/alice/AppData/Local/Cordiale")
+        );
+        assert_eq!(layout.log, layout.data);
+    }
+
+    #[test]
+    fn macos_logs_go_to_library_logs() {
+        let layout = Layout::standard(Platform::MacOs, &macos_bases());
+        let support = PathBuf::from("/home/alice/Library/Application Support/Cordiale");
+        assert_eq!(layout.config, support);
+        assert_eq!(layout.data, support);
+        assert_eq!(
+            layout.log,
+            PathBuf::from("/home/alice/Library/Logs/Cordiale")
+        );
+    }
+
+    #[test]
+    fn displayed_locations_hide_the_user_name_on_every_platform() {
+        let cases = [
+            (
+                Platform::Linux,
+                linux_bases(),
+                "~/.config/cordiale",
+                "~/.local/state/cordiale/cordiale.log",
+            ),
+            (
+                Platform::Windows,
+                windows_bases(),
+                "%APPDATA%\\Cordiale",
+                "%LOCALAPPDATA%\\Cordiale\\cordiale.log",
+            ),
+            (
+                Platform::MacOs,
+                macos_bases(),
+                "~/Library/Application Support/Cordiale",
+                "~/Library/Logs/Cordiale/cordiale.log",
+            ),
+        ];
+        for (platform, bases, config, log) in cases {
+            let layout = Layout::standard(platform, &bases);
+            let shown_config = display_path(platform, &bases, &layout.config);
+            let shown_log = display_path(platform, &bases, &layout.log.join(LOG_FILE_NAME));
+            assert_eq!(shown_config, config);
+            assert_eq!(shown_log, log);
+            assert!(!shown_config.contains("alice") && !shown_log.contains("alice"));
+        }
+    }
+
+    #[test]
+    fn the_old_folder_is_still_written_with_a_tilde() {
+        let bases = windows_bases();
+        let old = bases.home.join(LEGACY_DIR_NAME).join(LOG_FILE_NAME);
+        assert_eq!(
+            display_path(Platform::Windows, &bases, &old),
+            "~/.cordiale/cordiale.log"
+        );
+    }
+
+    /// A scratch home with an old `.cordiale` folder in it, and Linux-style
+    /// bases hanging off that home. Returns the scratch root to clean up.
+    fn scratch_home(name: &str) -> (PathBuf, Bases) {
+        let root = scratch_dir(name);
+        let home = root.join("home");
+        let bases = Bases {
+            home: home.clone(),
+            config: home.join(".config"),
+            data_local: home.join(".local").join("share"),
+            state: Some(home.join(".local").join("state")),
+        };
+        fs::create_dir_all(home.join(LEGACY_DIR_NAME)).expect("create old folder");
+        (root, bases)
+    }
+
+    fn write_files(dir: &Path, files: &[(&str, &str)]) {
+        fs::create_dir_all(dir).expect("create folder");
+        for (name, body) in files {
+            fs::write(dir.join(name), body).expect("write file");
+        }
+    }
+
+    fn read(path: &Path) -> String {
+        fs::read_to_string(path).expect("read file")
+    }
+
+    #[test]
+    fn the_old_folder_moves_to_the_standard_folders() {
+        let (root, bases) = scratch_home("migrate-clean");
+        let old = bases.home.join(LEGACY_DIR_NAME);
+        write_files(
+            &old,
+            &[
+                ("settings.json", r#"{"theme":"dark"}"#),
+                ("servers.json", r#"{"servers":[]}"#),
+                ("credentials.json", "{}"),
+                ("cordiale.log", "[1] an old line\n"),
+            ],
+        );
+
+        let storage = resolve(Platform::Linux, bases.clone());
+
+        let standard = Layout::standard(Platform::Linux, &bases);
+        assert_eq!(storage.layout, standard);
+        assert_eq!(storage.note, None);
+        assert_eq!(
+            read(&standard.config.join("settings.json")),
+            r#"{"theme":"dark"}"#
+        );
+        assert_eq!(
+            read(&standard.config.join("servers.json")),
+            r#"{"servers":[]}"#
+        );
+        assert_eq!(read(&standard.data.join("credentials.json")), "{}");
+        let log = read(&standard.log.join(LOG_FILE_NAME));
+        assert!(log.contains("an old line"), "{log}");
+        assert!(log.contains("moved files from ~/.cordiale"), "{log}");
+        assert!(!old.exists(), "the emptied old folder is removed");
+        #[cfg(unix)]
+        {
+            assert_eq!(mode_of(&standard.config), 0o700);
+            assert_eq!(mode_of(&standard.config.join("settings.json")), 0o600);
+            assert_eq!(mode_of(&standard.data.join("credentials.json")), 0o600);
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_half_finished_move_is_completed() {
+        let (root, bases) = scratch_home("migrate-half");
+        let old = bases.home.join(LEGACY_DIR_NAME);
+        let standard = Layout::standard(Platform::Linux, &bases);
+        write_files(&old, &[("settings.json", "S"), ("servers.json", "V")]);
+        // An earlier run got as far as copying the settings.
+        write_files(&standard.config, &[("settings.json", "S")]);
+
+        let storage = resolve(Platform::Linux, bases);
+
+        assert_eq!(storage.layout, standard);
+        assert_eq!(read(&standard.config.join("settings.json")), "S");
+        assert_eq!(read(&standard.config.join("servers.json")), "V");
+        assert!(!old.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_newer_file_in_the_new_folder_is_never_overwritten() {
+        let (root, bases) = scratch_home("migrate-newer");
+        let old = bases.home.join(LEGACY_DIR_NAME);
+        let standard = Layout::standard(Platform::Linux, &bases);
+        write_files(&old, &[("settings.json", "older"), ("servers.json", "V")]);
+        write_files(&standard.config, &[("settings.json", "newer")]);
+
+        let storage = resolve(Platform::Linux, bases);
+
+        assert_eq!(storage.layout, standard);
+        assert_eq!(read(&standard.config.join("settings.json")), "newer");
+        assert_eq!(read(&standard.config.join("servers.json")), "V");
+        assert_eq!(read(&old.join("settings.json")), "older");
+        assert!(!old.join("servers.json").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failed_move_keeps_the_old_folder_in_use_and_undoes_its_copies() {
+        let (root, bases) = scratch_home("migrate-fails");
+        let old = bases.home.join(LEGACY_DIR_NAME);
+        write_files(
+            &old,
+            &[("settings.json", "S"), ("credentials.json", "secret")],
+        );
+        // A file where the credentials folder has to go: that copy fails
+        // after the settings were already copied.
+        write_files(&bases.data_local, &[("cordiale", "in the way")]);
+
+        let storage = resolve(Platform::Linux, bases.clone());
+
+        assert_eq!(storage.layout, Layout::single(old.clone()));
+        assert_eq!(storage.legacy, None);
+        let note = storage.note.expect("the Debug page is told");
+        assert!(note.contains("~/.cordiale"), "{note}");
+        assert!(note.contains("keeps using it"), "{note}");
+        assert_eq!(read(&old.join("settings.json")), "S");
+        assert_eq!(read(&old.join("credentials.json")), "secret");
+        let standard = Layout::standard(Platform::Linux, &bases);
+        assert!(!standard.config.join("settings.json").exists());
+        assert!(read(&old.join(LOG_FILE_NAME)).contains("could not move"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nothing_to_move_changes_nothing() {
+        let (root, bases) = scratch_home("migrate-nothing");
+        let standard = Layout::standard(Platform::Linux, &bases);
+
+        let storage = resolve(Platform::Linux, bases);
+
+        assert_eq!(storage.layout, standard);
+        assert_eq!(storage.note, None);
+        assert!(!standard.config.exists());
+        assert_eq!(MigrationSummary::default().log_message(), None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_missing_in_the_new_folder_is_read_from_the_old_one() {
+        let dir = scratch_dir("read-fallback");
+        let new = dir.join("new.json");
+        let old = dir.join("old.json");
+        fs::write(&old, "old").expect("seed old file");
+
+        assert_eq!(read_path(&new, Some(&old)), old);
+        assert_eq!(read_path(&new, None), new);
+        fs::write(&new, "new").expect("seed new file");
+        assert_eq!(read_path(&new, Some(&old)), new);
+        fs::remove_file(&old).expect("remove old file");
+        assert_eq!(read_path(&new, Some(&old)), new);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotation_moves_a_log_past_the_limit_and_replaces_the_previous_one() {
+        let dir = scratch_dir("log-rotate");
+        let log = dir.join("cordiale.log");
+        let previous = dir.join("cordiale.log.1");
+        fs::write(&previous, "ancient").expect("seed previous log");
+        fs::write(&log, "0123456789").expect("seed log");
+
+        rotate_log_if_over(&log, 10);
+        assert_eq!(read(&log), "0123456789", "at the limit is not past it");
+        assert_eq!(read(&previous), "ancient");
+
+        rotate_log_if_over(&log, 9);
+        assert!(!log.exists());
+        assert_eq!(read(&previous), "0123456789");
+        rotate_log_if_over(&log, 9);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_log_stays_bounded_and_keeps_the_newest_lines() {
+        let dir = scratch_dir("log-bounded");
+        let log = dir.join("cordiale.log");
+        let previous = dir.join("cordiale.log.1");
+
+        for index in 0..40 {
+            write_log_line(&log, &format!("line {index:02}"), Some(100));
+        }
+
+        let (current, before) = (read(&log), read(&previous));
+        assert!(current.contains("line 39"), "{current}");
+        assert!(!format!("{before}{current}").contains("line 00"));
+        for contents in [&current, &before] {
+            // The limit plus the one line that tipped it over.
+            assert!(contents.len() <= 100 + 30, "{}", contents.len());
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_write_that_does_not_check_the_size_never_rotates() {
+        let dir = scratch_dir("log-unchecked");
+        let log = dir.join("cordiale.log");
+        fs::write(&log, "x".repeat(500)).expect("seed log");
+
+        write_log_line(&log, "one more", None);
+
+        assert!(!dir.join("cordiale.log.1").exists());
+        assert!(read(&log).ends_with("one more\n"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_size_is_checked_first_and_then_once_every_so_many_writes() {
+        assert!(size_check_due(0));
+        assert!(!size_check_due(1));
+        assert!(!size_check_due(LOG_CHECK_EVERY - 1));
+        assert!(size_check_due(LOG_CHECK_EVERY));
+        assert!(!size_check_due(LOG_CHECK_EVERY + 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rotated_log_and_its_replacement_are_both_private() {
+        let dir = scratch_dir("log-rotate-private");
+        let log = dir.join("cordiale.log");
+
+        write_log_line(&log, "first", Some(1));
+        write_log_line(&log, "second", Some(1));
+
+        assert_eq!(mode_of(&log), 0o600);
+        assert_eq!(mode_of(&dir.join("cordiale.log.1")), 0o600);
 
         let _ = fs::remove_dir_all(&dir);
     }

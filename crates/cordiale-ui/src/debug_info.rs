@@ -96,6 +96,8 @@ pub(crate) fn report(window: &slint::Window, app_language: Option<&str>) -> Stri
         time_zone: iana_time_zone::get_timezone().ok(),
         data_dir: persistence::config_dir_display(),
         log_file: persistence::log_file_display(),
+        previous_log_file: persistence::previous_log_file_display(),
+        storage_note: persistence::storage_note(),
     }
     .render()
 }

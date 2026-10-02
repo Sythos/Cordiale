@@ -70,6 +70,24 @@ Prefer a plain binary? Grab `cordiale-macos-arm64-<version>.tar.gz` (or
 `cordiale-macos-x64-<version>.tar.gz` on Intel) instead and run
 `./cordiale-ui` from a terminal.
 
+## Where Cordiale keeps its files
+
+Cordiale uses each platform's standard folders (on Linux they follow
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_STATE_HOME` when set):
+
+| | Settings and servers | Credentials fallback (only without a keyring) | Log |
+|-|-|-|-|
+| Linux | `~/.config/cordiale` | `~/.local/share/cordiale` | `~/.local/state/cordiale` |
+| Windows | `%APPDATA%\Cordiale` | `%LOCALAPPDATA%\Cordiale` | `%LOCALAPPDATA%\Cordiale` |
+| macOS | `~/Library/Application Support/Cordiale` | `~/Library/Application Support/Cordiale` | `~/Library/Logs/Cordiale` |
+
+The files are `settings.json` and `servers.json`, `credentials.json`, and
+`cordiale.log` plus `cordiale.log.1` (the log is capped at about 1 MiB and
+the previous one is kept). The **Debug** page shows these locations and has an
+Open data folder button. Older versions kept everything in `~/.cordiale`;
+Cordiale moves those files to the folders above the first time it starts, and
+keeps using `~/.cordiale` (and says so on the Debug page) if that fails.
+
 ## Building from source
 
 Every release also ships `Cordiale_src.tar.gz`: a plain snapshot of the
