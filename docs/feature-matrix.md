@@ -255,3 +255,17 @@ insieme alla sua sottoscrizione al topic, finché non la chiudi con la x o
 non rientri; dopo un refresh di rete si conservano anche stato e metadati
 delle finestre delle reti che restano, a meno che `/boot` non le dia di nuovo
 come entrate.
+
+**Aggiornamento (2026-10-02)**: le righe di chat tenute in memoria per
+finestra hanno un tetto (issue #205). Una finestra non aperta (o lasciata)
+oltre 5.500 righe torna a 5.000 scartando le più vecchie; quella aperta lo
+fa solo mentre il pannello segue l'ultima riga, quindi chi sta rileggendo lo
+storico non perde niente sotto gli occhi. Dopo lo scarto lo storico non è
+più "arrivato all'inizio" e i cursori già chiesti sono dimenticati, così
+scorrere in alto ricarica le righe scartate con `?before=` come prima. Un
+messaggio privato in tempo reale che si ordina per ultimo si aggiunge come
+una riga sola, come nei canali, invece di ricostruire tutto il pannello; il
+pannello si ricostruisce solo se l'ordine cambia o se non corrisponde più
+alle righe salvate. La pagina Debug mostra le righe tenute (totale e
+finestra più grande). Non misurato su una finestra da 50k righe e mai
+provato a mano contro un server reale.

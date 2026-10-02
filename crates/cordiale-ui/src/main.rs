@@ -410,6 +410,14 @@ enum WorkerCommand {
     Disconnect,
     GoHome,
     LoadOlderHistory,
+    /// Rebuilds the open window's rows from the stored history, trimming
+    /// its oldest rows first when `trim` is set. The chat pane asks for it:
+    /// only the pane knows whether the reader follows the newest line, and
+    /// whether its rows still match the stored history.
+    RebuildChat {
+        key: (String, String),
+        trim: bool,
+    },
     MemberModeAction {
         verb: String,
         nick: String,
@@ -2722,6 +2730,9 @@ struct WorkerState {
     /// `?before=` cursors already fetched per window: the same page is
     /// never asked for twice.
     history_cursors_fetched: std::collections::HashSet<((String, String), i64)>,
+    /// How the open chat pane's update asks the worker for a rebuild
+    /// (`WorkerCommand::RebuildChat`); `None` until the worker runs.
+    chat_rebuild_tx: Option<mpsc::UnboundedSender<WorkerCommand>>,
     /// Query keys removed/renamed by a later full snapshot. Since Grappa
     /// shares the channel-shaped Phoenix topic for channels and queries,
     /// remember these identities so their late frames are ignored without
@@ -2913,6 +2924,7 @@ impl WorkerState {
             query_full_history_required: std::collections::HashSet::new(),
             history_start_reached: std::collections::HashSet::new(),
             history_cursors_fetched: std::collections::HashSet::new(),
+            chat_rebuild_tx: None,
             stale_query_topics: std::collections::HashSet::new(),
             recent_channels: Vec::new(),
             current_query: false,
@@ -2987,6 +2999,7 @@ async fn run_worker(
     ui: slint::Weak<AppWindow>,
 ) {
     let mut state = WorkerState::new();
+    state.chat_rebuild_tx = Some(worker_self.clone());
     let radio_events = worker_self.clone();
     let radio = player::RadioPlayer::spawn(move |generation, event| {
         let _ = radio_events.send(WorkerCommand::RadioEvent(generation, event));
@@ -4014,6 +4027,7 @@ async fn run_worker(
                         let system_dark = state.system_dark;
                         let foreground = state.foreground;
                         state = WorkerState::new();
+                        state.chat_rebuild_tx = Some(worker_self.clone());
                         state.system_dark = system_dark;
                         state.foreground = foreground;
                         push_home(&state, &ui);
@@ -4030,10 +4044,15 @@ async fn run_worker(
                     Some(WorkerCommand::LoadOlderHistory) => {
                         handle_load_older_history(&mut state, &ui).await;
                     }
+                    Some(WorkerCommand::RebuildChat { key, trim }) => {
+                        handle_rebuild_chat(&mut state, &ui, &key, trim);
+                    }
                     Some(WorkerCommand::GoHome) => {
                         write_back_read_cursor(&mut state);
                         close_directory(&mut state, &ui);
-                        state.current_channel = None;
+                        if let Some(previous) = state.current_channel.take() {
+                            trim_window_history(&mut state, &previous);
+                        }
                         state.current_query = false;
                         state.current_query_ready = false;
                     }
@@ -5590,7 +5609,7 @@ async fn handle_select_channel(
     state.recent_channels.insert(0, key.clone());
     state.current_query = false;
     state.current_query_ready = false;
-    state.current_channel = Some(key.clone());
+    open_window(state, &key);
     push_mute_bar(state, ui);
 
     let mut settings = persistence::load_settings().unwrap_or_default();
@@ -5785,7 +5804,7 @@ async fn handle_select_query(
     let identity = query_window_key(&query.network, &query.target_nick);
     state.current_query = true;
     state.current_query_ready = state.query_ready.contains(&identity);
-    state.current_channel = Some(key.clone());
+    open_window(state, &key);
     push_mute_bar(state, ui);
     show_query_window(state, ui, &query, &key);
 
@@ -8107,6 +8126,7 @@ async fn handle_load_older_history(state: &mut WorkerState, ui: &slint::Weak<App
     if start_reached {
         state.history_start_reached.insert(key.clone());
     }
+    publish_held_rows(state);
     // The user may have switched window while the page was loading.
     if state.current_channel.as_ref() != Some(&key) {
         return;
@@ -10591,18 +10611,10 @@ async fn handle_frame(
         {
             if let Some(key) = own_nick_dm_query_key(state, &network, effective_payload) {
                 require_query_full_history_if_unready(state, &key);
-                if append_query_live_message(state, &key, effective_payload, Some(&frame.event))
-                    && state.current_query
-                    && state.current_channel.as_ref() == Some(&key)
+                if let Some(insert) =
+                    append_query_live_message(state, &key, effective_payload, Some(&frame.event))
                 {
-                    let lines = state.messages[&key].clone();
-                    let dark_theme = state.theme == Theme::Dark;
-                    refresh_mention_context(state);
-                    let ui = ui.clone();
-                    let _ = ui.upgrade_in_event_loop(move |ui| {
-                        let model = chat_lines_model(&lines, dark_theme);
-                        show_chat_lines(&ui, model);
-                    });
+                    show_live_query_message(state, ui, &key, insert);
                 }
             } else {
                 buffer_pending_own_nick_dm(state, &network, effective_payload, &frame.event);
@@ -10800,17 +10812,10 @@ async fn handle_frame(
         ) {
             QueryTopicResolution::Active(query) => {
                 let key = (query.network.clone(), query.target_nick.clone());
-                append_query_live_message(state, &key, effective_payload, Some(&frame.event));
-
-                if state.current_query && state.current_channel.as_ref() == Some(&key) {
-                    let lines = state.messages[&key].clone();
-                    let dark_theme = state.theme == Theme::Dark;
-                    refresh_mention_context(state);
-                    let ui = ui.clone();
-                    let _ = ui.upgrade_in_event_loop(move |ui| {
-                        let model = chat_lines_model(&lines, dark_theme);
-                        show_chat_lines(&ui, model);
-                    });
+                if let Some(insert) =
+                    append_query_live_message(state, &key, effective_payload, Some(&frame.event))
+                {
+                    show_live_query_message(state, ui, &key, insert);
                 }
                 return;
             }
@@ -10843,12 +10848,25 @@ async fn handle_frame(
     if !already_shown {
         messages.push(line.clone());
     }
+    let rows = messages.len();
+    let open = state.current_channel.as_ref() == Some(&key);
+    // A window nobody has open is trimmed at once; the open one only when
+    // its pane asks for it (below), as only the pane knows whether the
+    // reader is following the newest line.
+    if !already_shown && !open {
+        trim_window_history(state, &key);
+    }
+    publish_held_rows(state);
+    let rebuild_worker =
+        if open && history_excess(rows, CHAT_HISTORY_CAP, CHAT_HISTORY_TRIM_SLACK) > 0 {
+            state.chat_rebuild_tx.clone()
+        } else {
+            None
+        };
 
     // A Denoise line is kept above but never reaches the transcript.
-    if !already_shown
-        && state.current_channel.as_ref() == Some(&key)
-        && state.transcript_shows(&key, &line)
-    {
+    if !already_shown && open && state.transcript_shows(&key, &line) {
+        let rebuild_key = key.clone();
         let dark_theme = state.theme == Theme::Dark;
         refresh_mention_context(state);
         let members = state.members.get(&key).cloned().unwrap_or_default();
@@ -10864,6 +10882,9 @@ async fn handle_frame(
                 .map(|nick| member_prefix_for_nick(&members, nick, casemapping))
                 .unwrap_or("");
             append_chat_line(&ui, chat_line_from_message(&line, dark_theme, prefix));
+            if let Some(worker) = rebuild_worker.filter(|_| ui.get_chat_follow_bottom()) {
+                request_chat_rebuild(&worker, &rebuild_key, true);
+            }
         });
     }
 
@@ -12831,12 +12852,44 @@ fn merge_rendered_messages(
     messages.sort_by(compare_rendered_message_order);
 }
 
+/// Where a live message went in a window's stored rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveInsert {
+    /// After every row there was: the pane can just add one row at its end.
+    Appended,
+    /// The rows had to be put back in order: the pane rebuilds them all.
+    Reordered,
+}
+
+/// Adds a live message to a window's rows in `(server_time, id)` order. It
+/// only counts as appended when the rows were already in order and the new
+/// one sorts last (equal keys stay behind what was there, like the stable
+/// sort does); otherwise the rows are sorted again, as before.
+fn insert_live_message(
+    messages: &mut Vec<RenderedMessage>,
+    message: RenderedMessage,
+) -> LiveInsert {
+    let in_order = |left: &RenderedMessage, right: &RenderedMessage| {
+        compare_rendered_message_order(left, right) != std::cmp::Ordering::Greater
+    };
+    let appended = messages.is_sorted_by(in_order)
+        && messages.last().is_none_or(|last| in_order(last, &message));
+    messages.push(message);
+    if appended {
+        LiveInsert::Appended
+    } else {
+        messages.sort_by(compare_rendered_message_order);
+        LiveInsert::Reordered
+    }
+}
+
+/// Stores a live DM line; `None` when the window already has it.
 fn append_query_live_message(
     state: &mut WorkerState,
     key: &(String, String),
     payload: &Value,
     event_fallback: Option<&str>,
-) -> bool {
+) -> Option<LiveInsert> {
     let message = render_message(payload, event_fallback);
     let messages = state.messages.entry(key.clone()).or_default();
     if message.message_id.is_some_and(|id| {
@@ -12844,11 +12897,203 @@ fn append_query_live_message(
             .iter()
             .any(|existing| existing.message_id == Some(id))
     }) {
+        return None;
+    }
+    Some(insert_live_message(messages, message))
+}
+
+/// Rows a window keeps in memory once it is trimmed. Generous on purpose:
+/// it is many screens of even a busy channel, and what the reader pages
+/// back through (`?before=`) stays for as long as the pane isn't following
+/// the newest line.
+const CHAT_HISTORY_CAP: usize = 5_000;
+/// How far past `CHAT_HISTORY_CAP` a window may grow before it is trimmed,
+/// so the rows are dropped (and the pane rebuilt) once per few hundred
+/// messages instead of on every one.
+const CHAT_HISTORY_TRIM_SLACK: usize = 500;
+
+/// How many rows to drop from the old end of a window holding `len` rows:
+/// none until it is more than `slack` past `cap`, then back down to `cap`.
+fn history_excess(len: usize, cap: usize, slack: usize) -> usize {
+    if len > cap.saturating_add(slack) {
+        len - cap
+    } else {
+        0
+    }
+}
+
+/// Drops a window's oldest rows (see `history_excess`) and returns how many
+/// went. Nothing is dropped unless a row with a Grappa id is left: that id
+/// is the `?before=` cursor the dropped rows are paged back in from.
+fn trim_oldest_rows(messages: &mut Vec<RenderedMessage>, cap: usize, slack: usize) -> usize {
+    let excess = history_excess(messages.len(), cap, slack);
+    if excess == 0
+        || !messages[excess..]
+            .iter()
+            .any(|message| message.message_id.is_some())
+    {
+        return 0;
+    }
+    messages.drain(..excess);
+    excess
+}
+
+/// Trims one window's stored rows to `CHAT_HISTORY_CAP` when it is well past
+/// it. The rows dropped are older than any left, so the window's history
+/// paging state is reset: its start has not been reached any more, and a
+/// cursor already fetched may now be the oldest row still held. Returns
+/// whether anything was dropped.
+fn trim_window_history(state: &mut WorkerState, key: &(String, String)) -> bool {
+    let Some(messages) = state.messages.get_mut(key) else {
+        return false;
+    };
+    if trim_oldest_rows(messages, CHAT_HISTORY_CAP, CHAT_HISTORY_TRIM_SLACK) == 0 {
         return false;
     }
-    messages.push(message);
-    messages.sort_by(compare_rendered_message_order);
+    state.history_start_reached.remove(key);
+    state
+        .history_cursors_fetched
+        .retain(|(window, _)| window != key);
     true
+}
+
+/// Makes `key` the open window. The one it replaces is trimmed: nobody is
+/// reading it back any more.
+fn open_window(state: &mut WorkerState, key: &(String, String)) {
+    let previous = state.current_channel.replace(key.clone());
+    if let Some(previous) = previous.filter(|previous| previous != key) {
+        trim_window_history(state, &previous);
+    }
+    publish_held_rows(state);
+}
+
+/// Rows held across all windows, and in the largest one.
+fn held_rows(messages: &MessagesByChannel) -> (usize, usize) {
+    let total: usize = messages.values().map(Vec::len).sum();
+    let largest = messages.values().map(Vec::len).max().unwrap_or(0);
+    (total, largest)
+}
+
+/// Hands the Debug page the current row counts.
+fn publish_held_rows(state: &WorkerState) {
+    let (total, largest) = held_rows(&state.messages);
+    debug_info::note_chat_rows(total, largest);
+}
+
+/// Asks the worker (from the UI thread, where the pane's follow state can
+/// be read) for a `WorkerCommand::RebuildChat`.
+fn request_chat_rebuild(
+    worker: &mpsc::UnboundedSender<WorkerCommand>,
+    key: &(String, String),
+    trim: bool,
+) {
+    let _ = worker.send(WorkerCommand::RebuildChat {
+        key: key.clone(),
+        trim,
+    });
+}
+
+/// Rebuilds the open window's rows after a `WorkerCommand::RebuildChat`; a
+/// window that is no longer open is only trimmed. `trim` is set only when
+/// the pane followed the newest line when it asked, and the rows are swapped
+/// only if it still does: a reader who has scrolled back since keeps the
+/// pane as it is.
+fn handle_rebuild_chat(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: &(String, String),
+    trim: bool,
+) {
+    let trimmed = trim && trim_window_history(state, key);
+    publish_held_rows(state);
+    // Requests queued while rows were still being added find nothing left
+    // to drop: the pane already has what the first one gave it.
+    if (trim && !trimmed) || state.current_channel.as_ref() != Some(key) {
+        return;
+    }
+    let lines = state.messages.get(key).cloned().unwrap_or_default();
+    let dark_theme = state.theme == Theme::Dark;
+    refresh_mention_context(state);
+    let roster = (!state.current_query).then(|| {
+        (
+            state.members.get(key).cloned().unwrap_or_default(),
+            network_casemapping(state, &key.0),
+            state.denoise_active(key),
+        )
+    });
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        if trimmed {
+            // Older rows can be paged in again.
+            ui.set_history_start_reached(false);
+            if !ui.get_chat_follow_bottom() {
+                return;
+            }
+        }
+        let model = match roster {
+            Some((members, casemapping, denoise)) => {
+                chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise)
+            }
+            None => chat_lines_model(&lines, dark_theme),
+        };
+        show_chat_lines(&ui, model);
+    });
+}
+
+/// Shows a stored live DM line in the open query window, or just keeps the
+/// stored rows in bounds when another window is open. A line that sorts
+/// last is added to the pane as one row; anything else (or a pane whose
+/// rows don't match the stored ones) rebuilds it, as every line used to.
+fn show_live_query_message(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: &(String, String),
+    insert: LiveInsert,
+) {
+    let open = state.current_query && state.current_channel.as_ref() == Some(key);
+    if !open {
+        trim_window_history(state, key);
+    }
+    publish_held_rows(state);
+    if !open {
+        return;
+    }
+    let dark_theme = state.theme == Theme::Dark;
+    refresh_mention_context(state);
+    let ui = ui.clone();
+    if insert == LiveInsert::Reordered {
+        let lines = state.messages.get(key).cloned().unwrap_or_default();
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            show_chat_lines(&ui, chat_lines_model(&lines, dark_theme));
+        });
+        return;
+    }
+    let rows = state.messages.get(key).map_or(0, Vec::len);
+    let Some(line) = state
+        .messages
+        .get(key)
+        .and_then(|rows| rows.last())
+        .cloned()
+    else {
+        return;
+    };
+    let over_cap = history_excess(rows, CHAT_HISTORY_CAP, CHAT_HISTORY_TRIM_SLACK) > 0;
+    let worker = state.chat_rebuild_tx.clone();
+    let key = key.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        use slint::Model as _;
+        // The pane holds every stored row but this one; if it doesn't, it
+        // has drifted from the stored rows and the worker rebuilds it.
+        if ui.get_chat_lines().row_count() + 1 != rows {
+            if let Some(worker) = &worker {
+                request_chat_rebuild(worker, &key, false);
+            }
+            return;
+        }
+        append_chat_line(&ui, chat_line_from_message(&line, dark_theme, ""));
+        if let Some(worker) = worker.filter(|_| over_cap && ui.get_chat_follow_bottom()) {
+            request_chat_rebuild(&worker, &key, true);
+        }
+    });
 }
 
 /// Local `HH:MM:SS` for a message. `server_time` (epoch milliseconds) is
@@ -14394,9 +14639,9 @@ fn show_chat_lines(ui: &AppWindow, lines: Vec<ChatLine>) {
 /// model — a plain `row_added` notification, gentler still than the
 /// `set_vec` reset `show_chat_lines` triggers. Only correct when the
 /// caller knows the new row truly belongs at the very end, e.g. a live
-/// channel message; query/DM history gets re-sorted on arrival
-/// (`append_query_live_message`), so those go through `show_chat_lines`
-/// instead.
+/// channel message, or a DM line that sorts last (`insert_live_message`);
+/// a DM line that has to be put back in order goes through
+/// `show_chat_lines` instead.
 fn append_chat_line(ui: &AppWindow, line: ChatLine) {
     with_chat_lines_model(ui, |model| model.push(line));
 }
@@ -21521,12 +21766,7 @@ mod tests {
         assert_eq!(key, ("libera".to_string(), "Peer".to_string()));
         let identity = query_window_key(&key.0, &key.1);
         require_query_full_history_if_unready(&mut state, &key);
-        assert!(append_query_live_message(
-            &mut state,
-            &key,
-            &inbound,
-            Some("message")
-        ));
+        assert!(append_query_live_message(&mut state, &key, &inbound, Some("message")).is_some());
         assert_eq!(
             state.messages.get(&key).unwrap()[0].text.as_str(),
             "inbound DM"
@@ -22297,7 +22537,10 @@ mod tests {
             "sender": "peer",
             "body": "third"
         });
-        assert!(append_query_live_message(&mut state, &key, &live, None));
+        assert_eq!(
+            append_query_live_message(&mut state, &key, &live, None),
+            Some(LiveInsert::Appended)
+        );
         let after = vec![
             live,
             serde_json::json!({
@@ -29040,5 +29283,229 @@ mod tests {
         // Past the end (a stale position) clamps to the last row.
         let anchor = prepend_scroll_anchor(-9000.0, 4000.0, 200, 100).unwrap();
         assert_eq!(anchor.row, 299);
+    }
+
+    fn history_row(id: Option<i64>, server_time: Option<i64>) -> RenderedMessage {
+        RenderedMessage {
+            timestamp: String::new(),
+            nick: None,
+            text: format!("row {id:?}"),
+            italic: false,
+            message_id: id,
+            server_time,
+            presence_noise: false,
+        }
+    }
+
+    fn row_ids(messages: &[RenderedMessage]) -> Vec<Option<i64>> {
+        messages.iter().map(|message| message.message_id).collect()
+    }
+
+    #[test]
+    fn nothing_is_trimmed_until_the_window_is_past_the_slack() {
+        assert_eq!(history_excess(0, 10, 3), 0);
+        assert_eq!(history_excess(10, 10, 3), 0);
+        assert_eq!(history_excess(13, 10, 3), 0);
+        assert_eq!(history_excess(14, 10, 3), 4);
+        assert_eq!(history_excess(100, 10, 3), 90);
+        assert_eq!(history_excess(usize::MAX, usize::MAX, 3), 0);
+    }
+
+    #[test]
+    fn trimming_drops_the_oldest_rows_and_keeps_the_newest() {
+        let mut messages: Vec<_> = (1..=14).map(|id| history_row(Some(id), Some(id))).collect();
+        assert_eq!(trim_oldest_rows(&mut messages, 10, 3), 4);
+        assert_eq!(messages.len(), 10);
+        assert_eq!(messages.first().and_then(|m| m.message_id), Some(5));
+        assert_eq!(messages.last().and_then(|m| m.message_id), Some(14));
+    }
+
+    #[test]
+    fn a_window_within_the_cap_is_left_alone() {
+        let mut messages: Vec<_> = (1..=13).map(|id| history_row(Some(id), Some(id))).collect();
+        assert_eq!(trim_oldest_rows(&mut messages, 10, 3), 0);
+        assert_eq!(messages.len(), 13);
+        let mut empty: Vec<RenderedMessage> = Vec::new();
+        assert_eq!(trim_oldest_rows(&mut empty, 10, 3), 0);
+    }
+
+    #[test]
+    fn rows_are_kept_when_none_left_could_page_the_dropped_ones_back() {
+        // Without a Grappa id left there is no `?before=` cursor.
+        let mut messages: Vec<_> = (1..=14)
+            .map(|id| history_row((id <= 4).then_some(id), Some(id)))
+            .collect();
+        assert_eq!(trim_oldest_rows(&mut messages, 10, 3), 0);
+        assert_eq!(messages.len(), 14);
+    }
+
+    #[test]
+    fn trimming_a_window_resets_its_paging_state_only() {
+        let key = ("libera".to_string(), "#busy".to_string());
+        let other = ("libera".to_string(), "#quiet".to_string());
+        let mut state = WorkerState::new();
+        let total = (CHAT_HISTORY_CAP + CHAT_HISTORY_TRIM_SLACK + 1) as i64;
+        state.messages.insert(
+            key.clone(),
+            (1..=total)
+                .map(|id| history_row(Some(id), Some(id)))
+                .collect(),
+        );
+        state
+            .messages
+            .insert(other.clone(), vec![history_row(Some(1), Some(1))]);
+        state.history_start_reached.insert(key.clone());
+        state.history_start_reached.insert(other.clone());
+        state.history_cursors_fetched.insert((key.clone(), 1));
+        state.history_cursors_fetched.insert((other.clone(), 1));
+
+        assert!(trim_window_history(&mut state, &key));
+        assert_eq!(state.messages[&key].len(), CHAT_HISTORY_CAP);
+        assert_eq!(
+            state.messages[&key].last().and_then(|m| m.message_id),
+            Some(total)
+        );
+        assert!(!state.history_start_reached.contains(&key));
+        assert!(!state.history_cursors_fetched.contains(&(key.clone(), 1)));
+        // The oldest id left is the cursor older rows are paged from.
+        assert_eq!(
+            state.messages[&key]
+                .iter()
+                .filter_map(|m| m.message_id)
+                .min(),
+            Some(total - CHAT_HISTORY_CAP as i64 + 1)
+        );
+        assert!(state.history_start_reached.contains(&other));
+        assert!(state.history_cursors_fetched.contains(&(other.clone(), 1)));
+
+        // Already within the cap: nothing more to drop, nothing reset.
+        state.history_start_reached.insert(key.clone());
+        assert!(!trim_window_history(&mut state, &key));
+        assert!(state.history_start_reached.contains(&key));
+        let unknown = ("libera".to_string(), "#none".to_string());
+        assert!(!trim_window_history(&mut state, &unknown));
+    }
+
+    #[test]
+    fn held_rows_count_every_window_and_the_largest() {
+        let mut messages: MessagesByChannel = HashMap::new();
+        assert_eq!(held_rows(&messages), (0, 0));
+        messages.insert(
+            ("n".to_string(), "#a".to_string()),
+            vec![history_row(Some(1), None); 3],
+        );
+        messages.insert(
+            ("n".to_string(), "#b".to_string()),
+            vec![history_row(Some(2), None); 5],
+        );
+        assert_eq!(held_rows(&messages), (8, 5));
+    }
+
+    #[test]
+    fn a_live_line_that_sorts_last_is_appended() {
+        let mut messages = vec![
+            history_row(Some(1), Some(100)),
+            history_row(Some(2), Some(200)),
+        ];
+        assert_eq!(
+            insert_live_message(&mut messages, history_row(Some(3), Some(300))),
+            LiveInsert::Appended
+        );
+        assert_eq!(row_ids(&messages), vec![Some(1), Some(2), Some(3)]);
+
+        let mut empty = Vec::new();
+        assert_eq!(
+            insert_live_message(&mut empty, history_row(Some(1), Some(1))),
+            LiveInsert::Appended
+        );
+        assert_eq!(empty.len(), 1);
+    }
+
+    #[test]
+    fn a_live_line_with_the_same_time_follows_by_id() {
+        let mut messages = vec![history_row(Some(5), Some(200))];
+        assert_eq!(
+            insert_live_message(&mut messages, history_row(Some(6), Some(200))),
+            LiveInsert::Appended
+        );
+        // A lower id at the same time sorts before the last row.
+        assert_eq!(
+            insert_live_message(&mut messages, history_row(Some(4), Some(200))),
+            LiveInsert::Reordered
+        );
+        assert_eq!(row_ids(&messages), vec![Some(4), Some(5), Some(6)]);
+    }
+
+    #[test]
+    fn equal_keys_stay_in_arrival_order() {
+        let mut messages = vec![history_row(None, Some(200))];
+        let mut second = history_row(None, Some(200));
+        second.text = "second".to_string();
+        assert_eq!(
+            insert_live_message(&mut messages, second),
+            LiveInsert::Appended
+        );
+        assert_eq!(messages[1].text, "second");
+    }
+
+    #[test]
+    fn an_out_of_order_live_line_is_put_back_in_place() {
+        let mut messages = vec![
+            history_row(Some(1), Some(100)),
+            history_row(Some(3), Some(300)),
+        ];
+        assert_eq!(
+            insert_live_message(&mut messages, history_row(Some(2), Some(200))),
+            LiveInsert::Reordered
+        );
+        assert_eq!(row_ids(&messages), vec![Some(1), Some(2), Some(3)]);
+    }
+
+    #[test]
+    fn rows_that_were_not_in_order_are_sorted_by_the_next_live_line() {
+        // Newest first, as a history page arrives: appending would leave
+        // the pane's rows out of order.
+        let mut messages = vec![
+            history_row(Some(3), Some(300)),
+            history_row(Some(1), Some(100)),
+        ];
+        assert_eq!(
+            insert_live_message(&mut messages, history_row(Some(4), Some(400))),
+            LiveInsert::Reordered
+        );
+        assert_eq!(row_ids(&messages), vec![Some(1), Some(3), Some(4)]);
+    }
+
+    #[test]
+    fn a_duplicate_dm_line_is_not_stored_twice() {
+        let key = ("libera".to_string(), "peer".to_string());
+        let mut state = WorkerState::new();
+        let payload = serde_json::json!({
+            "id": 7,
+            "server_time": 100,
+            "kind": "privmsg",
+            "sender": "peer",
+            "body": "hello"
+        });
+        assert_eq!(
+            append_query_live_message(&mut state, &key, &payload, None),
+            Some(LiveInsert::Appended)
+        );
+        assert_eq!(
+            append_query_live_message(&mut state, &key, &payload, None),
+            None
+        );
+        let earlier = serde_json::json!({
+            "id": 6,
+            "server_time": 50,
+            "kind": "privmsg",
+            "sender": "peer",
+            "body": "earlier"
+        });
+        assert_eq!(
+            append_query_live_message(&mut state, &key, &earlier, None),
+            Some(LiveInsert::Reordered)
+        );
+        assert_eq!(state.messages[&key].len(), 2);
     }
 }

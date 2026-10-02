@@ -48,6 +48,10 @@ pub struct Diagnostics {
     pub cpu_cores: Option<usize>,
     pub memory_total: Option<u64>,
     pub memory_available: Option<u64>,
+    /// Chat rows Cordiale holds in memory, over all windows.
+    pub chat_rows_total: Option<usize>,
+    /// Chat rows in the window that holds the most.
+    pub chat_rows_largest: Option<usize>,
     /// Width and height of the display, in physical pixels.
     pub display_size: Option<(u32, u32)>,
     pub scale_factor: Option<f32>,
@@ -96,6 +100,18 @@ impl Diagnostics {
             &mut out,
             "Memory available",
             self.memory_available.map(format_memory).as_deref(),
+        );
+        line(
+            &mut out,
+            "Chat rows held (all windows)",
+            self.chat_rows_total.map(|rows| rows.to_string()).as_deref(),
+        );
+        line(
+            &mut out,
+            "Chat rows held (largest window)",
+            self.chat_rows_largest
+                .map(|rows| rows.to_string())
+                .as_deref(),
         );
 
         out.push('\n');
@@ -213,6 +229,8 @@ mod tests {
             cpu_cores: Some(8),
             memory_total: Some(16 << 30),
             memory_available: Some(10 << 30),
+            chat_rows_total: Some(12_345),
+            chat_rows_largest: Some(5_000),
             display_size: Some((2560, 1440)),
             scale_factor: Some(1.5),
             windowing_system: Some("Wayland".into()),
@@ -243,6 +261,8 @@ CPU model: Example CPU @ 3.00GHz
 CPU logical cores: 8
 Memory total: 16.0 GiB
 Memory available: 10.0 GiB
+Chat rows held (all windows): 12345
+Chat rows held (largest window): 5000
 
 Display resolution: 2560x1440 px
 Display scale factor: 1.5
@@ -304,6 +324,8 @@ CPU model: Not available
 CPU logical cores: Not available
 Memory total: Not available
 Memory available: Not available
+Chat rows held (all windows): Not available
+Chat rows held (largest window): Not available
 
 Display resolution: Not available
 Display scale factor: Not available
