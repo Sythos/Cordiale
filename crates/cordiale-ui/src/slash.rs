@@ -45,7 +45,7 @@ pub(crate) async fn run_slash_command(
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
-    let in_channel = !state.current_query && slash::is_channel(&channel);
+    let in_channel = !state.windows.current_query && slash::is_channel(&channel);
     let open_channel = || in_channel.then(|| channel.clone());
     if channel == SERVER_WINDOW_NAME
         && matches!(&command, SlashCommand::Say(_) | SlashCommand::Action(_))
@@ -103,7 +103,7 @@ pub(crate) async fn run_slash_command(
             );
             Ok(())
         }
-        SlashCommand::Query(None) if state.current_query => {
+        SlashCommand::Query(None) if state.windows.current_query => {
             send_user_verb(
                 state,
                 &network,
@@ -503,11 +503,13 @@ pub(crate) async fn run_slash_command(
 /// Joined channels of `network`, for `/ame` and `/amsg`.
 pub(crate) fn joined_channels(state: &WorkerState, network: &str) -> Vec<String> {
     state
+        .windows
         .channel_entries
         .iter()
         .filter(|(entry_network, channel, _)| {
             entry_network == network
                 && state
+                    .windows
                     .window_states
                     .get(&window_state_key(entry_network, channel))
                     == Some(&ChannelWindowState::Joined)

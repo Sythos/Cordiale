@@ -28,8 +28,8 @@ pub(crate) async fn handle_select_query(
 
     let key = (query.network.clone(), query.target_nick.clone());
     let identity = query_window_key(&query.network, &query.target_nick);
-    state.current_query = true;
-    state.current_query_ready = state.transcript.query_ready.contains(&identity);
+    state.windows.current_query = true;
+    state.windows.current_query_ready = state.transcript.query_ready.contains(&identity);
     open_window(state, &key);
     push_mute_bar(state, ui);
     show_query_window(state, ui, &query, &key);
@@ -68,7 +68,7 @@ pub(crate) fn show_query_window(
         .unwrap_or_default();
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
-    let query_ready = state.current_query_ready;
+    let query_ready = state.windows.current_query_ready;
     let history_start = state.transcript.history_start_reached.contains(key);
     let label = format!("{} — {}", query.network, query.target_nick);
     let window_status = window_status_for(state);
@@ -142,20 +142,21 @@ pub(crate) fn mark_query_ready_after_history(state: &mut WorkerState, identity: 
         return;
     }
     state.transcript.query_ready.insert(identity.clone());
-    if state.current_query
+    if state.windows.current_query
         && state
+            .windows
             .current_channel
             .as_ref()
             .is_some_and(|(network, nick)| &query_window_key(network, nick) == identity)
     {
-        state.current_query_ready = true;
+        state.windows.current_query_ready = true;
     }
 }
 
 pub(crate) fn reset_query_session_readiness(state: &mut WorkerState) {
     state.transcript.query_joined.clear();
     state.transcript.query_ready.clear();
-    state.current_query_ready = false;
+    state.windows.current_query_ready = false;
 }
 
 /// Merges a query history page into the local conversation by the server's
