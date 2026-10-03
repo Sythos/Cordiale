@@ -25,6 +25,8 @@
 //! upload, or on an https image elsewhere, opens the in-app viewer, and
 //! anything else goes to the browser.
 
+use std::error::Error as _;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::Range;
 
 /// A link found in a message: where its text is, and the URL to open.
@@ -198,9 +200,154 @@ pub fn link_target(href: &str, server_base: &str) -> LinkTarget {
     LinkTarget::Browser
 }
 
-/// Whether the system browser may be asked to open `href`.
-pub fn is_openable(href: &str) -> bool {
-    reqwest::Url::parse(href).is_ok_and(|url| matches!(url.scheme(), "http" | "https" | "ftp"))
+/// Longest link the browser or the downloader is given; the Windows shell
+/// stops at about this length.
+const MAX_LINK_LEN: usize = 2048;
+
+/// Why a link isn't opened or downloaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkRefusal {
+    TooLong,
+    /// Whitespace or a control character anywhere in the text.
+    UnsafeCharacters,
+    Invalid,
+    /// Anything but `http`, `https` and `ftp`.
+    Scheme,
+    /// A user name or password in front of the host.
+    Credentials,
+}
+
+impl std::fmt::Display for LinkRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TooLong => "link too long",
+            Self::UnsafeCharacters => "link has spaces or control characters",
+            Self::Invalid => "not a valid link",
+            Self::Scheme => "only http, https and ftp links are opened",
+            Self::Credentials => "link carries a user name or password",
+        })
+    }
+}
+
+/// The URL `href` stands for, when it is fit to hand to the system browser
+/// or to download: `http`, `https` or `ftp` only, no whitespace or control
+/// characters, no user name or password, at most 2048 bytes.
+/// What gets opened or fetched is the returned (normalised) URL, never the
+/// original text, so the string that was checked is the string that is used.
+pub fn validated_url(href: &str) -> Result<reqwest::Url, LinkRefusal> {
+    if href.len() > MAX_LINK_LEN {
+        return Err(LinkRefusal::TooLong);
+    }
+    if href.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+        return Err(LinkRefusal::UnsafeCharacters);
+    }
+    let url = reqwest::Url::parse(href).map_err(|_| LinkRefusal::Invalid)?;
+    if !matches!(url.scheme(), "http" | "https" | "ftp") {
+        return Err(LinkRefusal::Scheme);
+    }
+    if has_userinfo(&url) {
+        return Err(LinkRefusal::Credentials);
+    }
+    Ok(url)
+}
+
+fn has_userinfo(url: &reqwest::Url) -> bool {
+    !url.username().is_empty() || url.password().is_some()
+}
+
+/// Most redirects a download follows.
+const MAX_REDIRECTS: usize = 5;
+
+/// Why a redirect isn't followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectRefusal {
+    TooMany,
+    /// From `https` to `http`.
+    Downgrade,
+    Scheme,
+    Credentials,
+    /// From a public host to a loopback, private or link-local address.
+    LocalHost,
+}
+
+impl std::fmt::Display for RedirectRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TooMany => "too many redirects",
+            Self::Downgrade => "redirect from https to http refused",
+            Self::Scheme => "redirect to a scheme other than http or https refused",
+            Self::Credentials => "redirect to an address with a user name or password refused",
+            Self::LocalHost => "redirect to a local address refused",
+        })
+    }
+}
+
+impl std::error::Error for RedirectRefusal {}
+
+/// Whether a download may follow a redirect to `next`, given the URLs
+/// already requested (the first one included, as reqwest reports them).
+/// A relative `Location` has already been resolved against the last URL.
+pub fn redirect_decision(
+    previous: &[reqwest::Url],
+    next: &reqwest::Url,
+) -> Result<(), RedirectRefusal> {
+    if previous.len() > MAX_REDIRECTS {
+        return Err(RedirectRefusal::TooMany);
+    }
+    if !matches!(next.scheme(), "http" | "https") {
+        return Err(RedirectRefusal::Scheme);
+    }
+    if has_userinfo(next) {
+        return Err(RedirectRefusal::Credentials);
+    }
+    if let Some(last) = previous.last() {
+        if last.scheme() == "https" && next.scheme() == "http" {
+            return Err(RedirectRefusal::Downgrade);
+        }
+        // A link the user clicked may point at a LAN host on purpose, but a
+        // public host must not bounce the request into the local network.
+        if is_local_host(next) && !is_local_host(last) {
+            return Err(RedirectRefusal::LocalHost);
+        }
+    }
+    Ok(())
+}
+
+/// Whether the host of `url`, as `Url::host_str` writes it, is `localhost`
+/// (or a name under it) or an IP literal that is loopback, private,
+/// link-local, shared (CGNAT) or unspecified. Nothing is resolved, so a name
+/// that merely points at such an address isn't caught.
+fn is_local_host(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return true;
+    };
+    let host = host.trim_end_matches('.');
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    match host.trim_matches(['[', ']']).parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => is_local_v4(ip),
+        Ok(IpAddr::V6(ip)) => ip
+            .to_ipv4_mapped()
+            .map_or_else(|| is_local_v6(ip), is_local_v4),
+        Err(_) => false,
+    }
+}
+
+fn is_local_v4(ip: Ipv4Addr) -> bool {
+    let [first, second, ..] = ip.octets();
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || first == 0
+        || (first == 100 && second & 0xc0 == 64)
+}
+
+fn is_local_v6(ip: Ipv6Addr) -> bool {
+    let first = ip.segments()[0];
+    ip.is_loopback() || ip.is_unspecified() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
 }
 
 /// Largest image and text the viewer downloads.
@@ -216,23 +363,51 @@ pub enum FetchError {
     Failed(String),
 }
 
+/// The reason a request failed, without the URL reqwest would add (a
+/// redirect target can carry credentials) and with the refused redirect's own
+/// reason when that is what stopped it.
+fn fetch_error(err: reqwest::Error) -> FetchError {
+    let err = err.without_url();
+    let mut source = err.source();
+    while let Some(inner) = source {
+        if let Some(refusal) = inner.downcast_ref::<RedirectRefusal>() {
+            return FetchError::Failed(refusal.to_string());
+        }
+        source = inner.source();
+    }
+    FetchError::Failed(err.to_string())
+}
+
 /// Downloads a file from a host other than Grappa, without credentials,
 /// up to `max_bytes`; a text file over the limit is cut there (`true`).
+/// `href` must pass [`validated_url`] (and be http or https) and every redirect
+/// [`redirect_decision`], so the download can't be led to another scheme,
+/// down from https to http, or from a public host into the local network.
 pub async fn fetch_public(
     href: &str,
     max_bytes: usize,
     cut_when_larger: bool,
 ) -> Result<(Vec<u8>, Option<String>, bool), FetchError> {
+    let url = validated_url(href).map_err(|refusal| FetchError::Failed(refusal.to_string()))?;
+    if url.scheme() == "ftp" {
+        return Err(FetchError::Failed(
+            "only http and https can be downloaded".to_string(),
+        ));
+    }
+    let redirects = reqwest::redirect::Policy::custom(|attempt| {
+        let decision = redirect_decision(attempt.previous(), attempt.url());
+        match decision {
+            Ok(()) => attempt.follow(),
+            Err(refusal) => attempt.error(refusal),
+        }
+    });
     let http = reqwest::Client::builder()
         .user_agent(crate::EXTERNAL_USER_AGENT)
         .timeout(std::time::Duration::from_secs(60))
+        .redirect(redirects)
         .build()
-        .map_err(|err| FetchError::Failed(err.to_string()))?;
-    let mut response = http
-        .get(href)
-        .send()
-        .await
-        .map_err(|err| FetchError::Failed(err.to_string()))?;
+        .map_err(|err| FetchError::Failed(err.without_url().to_string()))?;
+    let mut response = http.get(url).send().await.map_err(fetch_error)?;
     let status = response.status().as_u16();
     if status == 404 || status == 410 {
         return Err(FetchError::Gone);
@@ -246,11 +421,7 @@ pub async fn fetch_public(
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| FetchError::Failed(err.to_string()))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(fetch_error)? {
         bytes.extend_from_slice(&chunk);
         if bytes.len() > max_bytes {
             if cut_when_larger {
@@ -352,8 +523,341 @@ mod tests {
         );
         let spaced = "a\u{3000}https://x.io/p";
         assert_eq!(find_links(spaced)[0].range, 4..spaced.len());
-        assert!(is_openable("ftp://a.b/c"));
-        assert!(!is_openable("javascript:alert(1)"));
-        assert!(!is_openable("file:///etc/passwd"));
+    }
+
+    fn url(text: &str) -> reqwest::Url {
+        reqwest::Url::parse(text).expect("test URL")
+    }
+
+    fn checked(href: &str) -> Result<String, LinkRefusal> {
+        validated_url(href).map(String::from)
+    }
+
+    #[test]
+    fn valid_links_come_back_normalised() {
+        assert_eq!(
+            checked("https://example.org/a%20b"),
+            Ok("https://example.org/a%20b".to_string())
+        );
+        assert_eq!(
+            checked("https://example.org"),
+            Ok("https://example.org/".to_string())
+        );
+        assert_eq!(
+            checked("HTTPS://Example.ORG:443/Path?q=1#frag"),
+            Ok("https://example.org/Path?q=1#frag".to_string())
+        );
+        assert_eq!(
+            checked("http://example.org:8080/x"),
+            Ok("http://example.org:8080/x".to_string())
+        );
+        assert_eq!(
+            checked("https://example.org\\@evil.test/x"),
+            Ok("https://example.org/@evil.test/x".to_string())
+        );
+    }
+
+    #[test]
+    fn ftp_links_are_accepted_and_normalised() {
+        assert_eq!(
+            checked("FTP://Files.Example.org:21/pub/a.txt"),
+            Ok("ftp://files.example.org/pub/a.txt".to_string())
+        );
+        assert_eq!(
+            checked("ftp://user:pw@files.example.org/a"),
+            Err(LinkRefusal::Credentials)
+        );
+    }
+
+    #[test]
+    fn internationalised_hosts_become_punycode() {
+        assert_eq!(
+            checked("https://bücher.example/ä"),
+            Ok("https://xn--bcher-kva.example/%C3%A4".to_string())
+        );
+    }
+
+    #[test]
+    fn links_with_whitespace_or_control_characters_are_refused() {
+        for href in [
+            " https://example.org/",
+            "https://example.org/ ",
+            "https://exa mple.org/",
+            "https://example.org/\tx",
+            "https://example.org/\nx",
+            "https://example.org/\rx",
+            "https://example.org/\u{0}x",
+            "https://example.org/\u{7f}x",
+            "https://example.org/\u{3000}x",
+            "java\nscript:alert(1)",
+        ] {
+            assert_eq!(
+                checked(href),
+                Err(LinkRefusal::UnsafeCharacters),
+                "{href:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn links_with_credentials_are_refused() {
+        for href in [
+            "https://user@example.org/",
+            "https://user:secret@example.org/",
+            "https://:secret@example.org/",
+            "http://user:@example.org/",
+        ] {
+            assert_eq!(checked(href), Err(LinkRefusal::Credentials), "{href}");
+        }
+    }
+
+    #[test]
+    fn only_http_https_and_ftp_links_are_accepted() {
+        for href in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,<b>x</b>",
+            "mailto:someone@example.org",
+            "vscode://open",
+            "about:blank",
+        ] {
+            assert_eq!(checked(href), Err(LinkRefusal::Scheme), "{href}");
+        }
+    }
+
+    #[test]
+    fn garbage_and_oversized_links_are_refused() {
+        for href in [
+            "",
+            "not a url",
+            "example.org/path",
+            "https://",
+            "http://[::1",
+        ] {
+            assert!(checked(href).is_err(), "{href}");
+        }
+        let long_path = "a".repeat(MAX_LINK_LEN);
+        assert_eq!(
+            checked(&format!("https://example.org/{long_path}")),
+            Err(LinkRefusal::TooLong)
+        );
+        let fits = "a".repeat(MAX_LINK_LEN - "https://example.org/".len());
+        assert!(checked(&format!("https://example.org/{fits}")).is_ok());
+    }
+
+    #[test]
+    fn redirects_keep_https_and_never_downgrade() {
+        let from_https = [url("https://a.example/x.png")];
+        let from_http = [url("http://a.example/x.png")];
+        assert_eq!(
+            redirect_decision(&from_https, &url("https://b.example/y.png")),
+            Ok(())
+        );
+        assert_eq!(
+            redirect_decision(&from_http, &url("https://b.example/y.png")),
+            Ok(())
+        );
+        assert_eq!(
+            redirect_decision(&from_http, &url("http://b.example/y.png")),
+            Ok(())
+        );
+        assert_eq!(
+            redirect_decision(&from_https, &url("http://b.example/y.png")),
+            Err(RedirectRefusal::Downgrade)
+        );
+        // Same host, other scheme: still a downgrade.
+        assert_eq!(
+            redirect_decision(&from_https, &url("http://a.example/x.png")),
+            Err(RedirectRefusal::Downgrade)
+        );
+    }
+
+    #[test]
+    fn redirects_stop_after_five_hops() {
+        let chain = |count: usize| -> Vec<reqwest::Url> {
+            (0..count)
+                .map(|n| url(&format!("https://a.example/{n}")))
+                .collect()
+        };
+        let next = url("https://a.example/next");
+        // `previous` holds the first request plus every redirect followed.
+        assert_eq!(redirect_decision(&chain(1), &next), Ok(()));
+        assert_eq!(redirect_decision(&chain(5), &next), Ok(()));
+        assert_eq!(
+            redirect_decision(&chain(6), &next),
+            Err(RedirectRefusal::TooMany)
+        );
+    }
+
+    #[test]
+    fn relative_redirects_resolve_against_the_last_url() {
+        let first = url("https://a.example/dir/x.png");
+        let previous = [first.clone()];
+        for location in ["y.png", "/y.png", "../y.png", "//b.example/y.png", "?v=2"] {
+            let next = first.join(location).expect("relative location");
+            assert_eq!(next.scheme(), "https", "{location}");
+            assert_eq!(redirect_decision(&previous, &next), Ok(()), "{location}");
+        }
+        let downgraded = first.join("http://a.example/y.png").expect("absolute");
+        assert_eq!(
+            redirect_decision(&previous, &downgraded),
+            Err(RedirectRefusal::Downgrade)
+        );
+    }
+
+    #[test]
+    fn redirects_to_other_schemes_or_with_credentials_are_refused() {
+        let previous = [url("https://a.example/x.png")];
+        for next in [
+            "ftp://b.example/y.png",
+            "file:///etc/passwd",
+            "data:text/plain,x",
+        ] {
+            assert_eq!(
+                redirect_decision(&previous, &url(next)),
+                Err(RedirectRefusal::Scheme),
+                "{next}"
+            );
+        }
+        for next in [
+            "https://user@b.example/y.png",
+            "https://user:secret@b.example/y.png",
+        ] {
+            assert_eq!(
+                redirect_decision(&previous, &url(next)),
+                Err(RedirectRefusal::Credentials),
+                "{next}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_public_host_cannot_redirect_into_the_local_network() {
+        let public = [url("https://a.example/x.png")];
+        for next in [
+            "https://localhost/y.png",
+            "https://cam.localhost/y.png",
+            "https://127.0.0.1/y.png",
+            "https://127.1/y.png",
+            "https://2130706433/y.png",
+            "https://10.0.0.5/y.png",
+            "https://172.16.3.4/y.png",
+            "https://192.168.1.1/y.png",
+            "https://169.254.169.254/latest",
+            "https://100.64.0.1/y.png",
+            "https://0.0.0.0/y.png",
+            "https://[::1]/y.png",
+            "https://[fe80::1]/y.png",
+            "https://[fd00::1]/y.png",
+            "https://[::ffff:127.0.0.1]/y.png",
+            "https://[::ffff:10.1.2.3]/y.png",
+        ] {
+            assert_eq!(
+                redirect_decision(&public, &url(next)),
+                Err(RedirectRefusal::LocalHost),
+                "{next}"
+            );
+        }
+        for next in [
+            "https://8.8.8.8/y.png",
+            "https://172.32.0.1/y.png",
+            "https://100.128.0.1/y.png",
+            "https://[2001:4860:4860::8888]/y.png",
+            "https://b.example/y.png",
+        ] {
+            assert_eq!(redirect_decision(&public, &url(next)), Ok(()), "{next}");
+        }
+    }
+
+    #[test]
+    fn a_link_to_the_local_network_may_stay_there() {
+        let lan = [url("https://192.168.1.10/x.png")];
+        assert_eq!(
+            redirect_decision(&lan, &url("https://192.168.1.11/y.png")),
+            Ok(())
+        );
+        assert_eq!(
+            redirect_decision(&lan, &url("https://localhost/y.png")),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_follows_a_relative_redirect() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/old.png"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/new.png"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/new.png"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![1u8, 2, 3]),
+            )
+            .mount(&server)
+            .await;
+
+        let (bytes, content_type, cut) =
+            fetch_public(&format!("{}/old.png", server.uri()), 1024, false)
+                .await
+                .expect("fetch");
+        assert_eq!(bytes, [1u8, 2, 3]);
+        assert_eq!(content_type.as_deref(), Some("image/png"));
+        assert!(!cut);
+    }
+
+    #[tokio::test]
+    async fn fetch_gives_up_on_a_redirect_loop() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/loop.png"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/loop.png"))
+            .mount(&server)
+            .await;
+
+        let result = fetch_public(&format!("{}/loop.png", server.uri()), 1024, false).await;
+        assert!(
+            matches!(&result, Err(FetchError::Failed(reason)) if reason == "too many redirects"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_redirect_to_another_scheme() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/a.png"))
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "ftp://files.example/a.png"),
+            )
+            .mount(&server)
+            .await;
+
+        let result = fetch_public(&format!("{}/a.png", server.uri()), 1024, false).await;
+        assert!(
+            matches!(&result, Err(FetchError::Failed(reason)) if reason.contains("scheme")),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_link_with_credentials_before_connecting() {
+        let result = fetch_public("https://user:secret@example.org/a.png", 1024, false).await;
+        assert!(
+            matches!(&result, Err(FetchError::Failed(reason)) if !reason.contains("secret")),
+            "{result:?}"
+        );
+        let result = fetch_public("ftp://example.org/a.png", 1024, false).await;
+        assert!(matches!(result, Err(FetchError::Failed(_))));
     }
 }
