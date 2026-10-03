@@ -311,7 +311,7 @@ fn session_identity_changed_rejects_unknown_network_and_invalid_fields() {
 fn session_identity_changed_is_user_carrier_scoped_and_per_network() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
-    state.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+    state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
     let message_key = ("libera".to_string(), "#rust".to_string());
@@ -334,7 +334,7 @@ fn session_identity_changed_is_user_carrier_scoped_and_per_network() {
         "grappa:user:vjt/network:libera/channel:#rust",
         &identified_without_account,
     );
-    assert!(state.session_identities.is_empty());
+    assert!(state.networks.session_identities.is_empty());
 
     handle_session_identity_changed(
         &mut state,
@@ -346,7 +346,7 @@ fn session_identity_changed_is_user_carrier_scoped_and_per_network() {
             "account": "unknown"
         }),
     );
-    assert!(state.session_identities.is_empty());
+    assert!(state.networks.session_identities.is_empty());
 
     handle_session_identity_changed(&mut state, "grappa:user:vjt", &identified_without_account);
     handle_session_identity_changed(
@@ -361,14 +361,14 @@ fn session_identity_changed_is_user_carrier_scoped_and_per_network() {
     );
 
     assert_eq!(
-        state.session_identities.get("libera"),
+        state.networks.session_identities.get("libera"),
         Some(&SessionIdentity {
             identified: true,
             account: None,
         })
     );
     assert_eq!(
-        state.session_identities.get("azzurra"),
+        state.networks.session_identities.get("azzurra"),
         Some(&SessionIdentity {
             identified: false,
             account: Some("descriptive-account".to_string()),
@@ -403,7 +403,7 @@ fn isupport_payload(network_id: i64, casemapping: &str, frame_budget_base: u64) 
 fn isupport_changed_is_user_carrier_scoped_and_replaces_only_its_network() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
-    state.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+    state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
 
@@ -418,6 +418,7 @@ fn isupport_changed_is_user_carrier_scoped_and_replaces_only_its_network() {
         &isupport_payload(9, "ascii", 2048),
     );
     let azzurra = state
+        .networks
         .isupport_by_network
         .get("azzurra")
         .expect("second network snapshot")
@@ -431,19 +432,23 @@ fn isupport_changed_is_user_carrier_scoped_and_replaces_only_its_network() {
 
     assert_eq!(
         state
+            .networks
             .isupport_by_network
             .get("libera")
             .map(|state| state.frame_budget_base),
         Some(8192)
     );
-    assert_eq!(state.isupport_by_network.get("azzurra"), Some(&azzurra));
+    assert_eq!(
+        state.networks.isupport_by_network.get("azzurra"),
+        Some(&azzurra)
+    );
 }
 
 #[test]
 fn isupport_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
-    state.network_ids = [("libera".to_string(), 7)].into_iter().collect();
+    state.networks.network_ids = [("libera".to_string(), 7)].into_iter().collect();
 
     handle_isupport_changed(
         &mut state,
@@ -461,26 +466,26 @@ fn isupport_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
         &isupport_payload(7, "unicode", 4096),
     );
 
-    assert!(state.isupport_by_network.is_empty());
+    assert!(state.networks.isupport_by_network.is_empty());
 
     handle_isupport_changed(
         &mut state,
         "grappa:user:vjt",
         &isupport_payload(7, "rfc1459", 4096),
     );
-    let accepted = state.isupport_by_network.clone();
+    let accepted = state.networks.isupport_by_network.clone();
     let mut invalid = isupport_payload(7, "rfc1459", 4096);
     invalid["maxlist"] = serde_json::json!({"b": 0});
     handle_isupport_changed(&mut state, "grappa:user:vjt", &invalid);
 
-    assert_eq!(state.isupport_by_network, accepted);
+    assert_eq!(state.networks.isupport_by_network, accepted);
 }
 
 #[test]
 fn umode_changed_preserves_ordered_set_and_replays_as_replacement() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
-    state.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+    state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
 
@@ -502,9 +507,12 @@ fn umode_changed_preserves_ordered_set_and_replays_as_replacement() {
         }),
     );
 
-    assert_eq!(state.user_modes_by_network.len(), 2);
-    assert_eq!(state.user_modes_by_network["libera"], ["i", "w", "s"]);
-    assert_eq!(state.user_modes_by_network["azzurra"], ["w", "i"]);
+    assert_eq!(state.networks.user_modes_by_network.len(), 2);
+    assert_eq!(
+        state.networks.user_modes_by_network["libera"],
+        ["i", "w", "s"]
+    );
+    assert_eq!(state.networks.user_modes_by_network["azzurra"], ["w", "i"]);
 
     handle_umode_changed(
         &mut state,
@@ -515,15 +523,15 @@ fn umode_changed_preserves_ordered_set_and_replays_as_replacement() {
             "modes": []
         }),
     );
-    assert!(state.user_modes_by_network["libera"].is_empty());
-    assert_eq!(state.user_modes_by_network["azzurra"], ["w", "i"]);
+    assert!(state.networks.user_modes_by_network["libera"].is_empty());
+    assert_eq!(state.networks.user_modes_by_network["azzurra"], ["w", "i"]);
 }
 
 #[test]
 fn umode_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
-    state.network_ids = [("libera".to_string(), 7)].into_iter().collect();
+    state.networks.network_ids = [("libera".to_string(), 7)].into_iter().collect();
     let accepted = serde_json::json!({
         "kind": "umode_changed",
         "network_id": 7,
@@ -535,10 +543,10 @@ fn umode_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
         "grappa:user:vjt/network:libera/channel:#rust",
         &accepted,
     );
-    assert!(state.user_modes_by_network.is_empty());
+    assert!(state.networks.user_modes_by_network.is_empty());
 
     handle_umode_changed(&mut state, "grappa:user:vjt", &accepted);
-    let original = state.user_modes_by_network.clone();
+    let original = state.networks.user_modes_by_network.clone();
     for invalid in [
         serde_json::json!({"kind": "umode_changed", "network_id": 99, "modes": ["i"]}),
         serde_json::json!({"kind": "umode_changed", "network_id": 0, "modes": ["i"]}),
@@ -551,7 +559,7 @@ fn umode_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
         serde_json::json!({"kind": "other_kind", "network_id": 7, "modes": ["s"]}),
     ] {
         handle_umode_changed(&mut state, "grappa:user:vjt", &invalid);
-        assert_eq!(state.user_modes_by_network, original);
+        assert_eq!(state.networks.user_modes_by_network, original);
     }
 }
 
@@ -559,7 +567,7 @@ fn umode_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
 fn supported_umodes_changed_is_separate_ordered_per_network_and_replays_as_replacement() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
-    state.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+    state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
 
@@ -590,13 +598,16 @@ fn supported_umodes_changed_is_separate_ordered_per_network_and_replays_as_repla
         }),
     );
 
-    assert_eq!(state.supported_user_modes_by_network.len(), 2);
+    assert_eq!(state.networks.supported_user_modes_by_network.len(), 2);
     assert_eq!(
-        state.supported_user_modes_by_network["libera"],
+        state.networks.supported_user_modes_by_network["libera"],
         ["i", "w", "s"]
     );
-    assert_eq!(state.supported_user_modes_by_network["azzurra"], ["w", "i"]);
-    assert_eq!(state.user_modes_by_network["libera"], ["i"]);
+    assert_eq!(
+        state.networks.supported_user_modes_by_network["azzurra"],
+        ["w", "i"]
+    );
+    assert_eq!(state.networks.user_modes_by_network["libera"], ["i"]);
 
     handle_supported_umodes_changed(
         &mut state,
@@ -607,16 +618,19 @@ fn supported_umodes_changed_is_separate_ordered_per_network_and_replays_as_repla
             "modes": []
         }),
     );
-    assert!(state.supported_user_modes_by_network["libera"].is_empty());
-    assert_eq!(state.supported_user_modes_by_network["azzurra"], ["w", "i"]);
-    assert_eq!(state.user_modes_by_network["libera"], ["i"]);
+    assert!(state.networks.supported_user_modes_by_network["libera"].is_empty());
+    assert_eq!(
+        state.networks.supported_user_modes_by_network["azzurra"],
+        ["w", "i"]
+    );
+    assert_eq!(state.networks.user_modes_by_network["libera"], ["i"]);
 }
 
 #[test]
 fn supported_umodes_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
-    state.network_ids = [("libera".to_string(), 7)].into_iter().collect();
+    state.networks.network_ids = [("libera".to_string(), 7)].into_iter().collect();
     let accepted = serde_json::json!({
         "kind": "supported_umodes_changed",
         "network_id": 7,
@@ -628,10 +642,10 @@ fn supported_umodes_changed_rejects_bad_carrier_network_and_payload_without_muta
         "grappa:user:vjt/network:libera/channel:#rust",
         &accepted,
     );
-    assert!(state.supported_user_modes_by_network.is_empty());
+    assert!(state.networks.supported_user_modes_by_network.is_empty());
 
     handle_supported_umodes_changed(&mut state, "grappa:user:vjt", &accepted);
-    let original = state.supported_user_modes_by_network.clone();
+    let original = state.networks.supported_user_modes_by_network.clone();
     for invalid in [
         serde_json::json!({"kind": "supported_umodes_changed", "network_id": 99, "modes": ["i"]}),
         serde_json::json!({"kind": "supported_umodes_changed", "network_id": 0, "modes": ["i"]}),
@@ -645,7 +659,7 @@ fn supported_umodes_changed_rejects_bad_carrier_network_and_payload_without_muta
         serde_json::json!({"kind": "other_kind", "network_id": 7, "modes": ["s"]}),
     ] {
         handle_supported_umodes_changed(&mut state, "grappa:user:vjt", &invalid);
-        assert_eq!(state.supported_user_modes_by_network, original);
+        assert_eq!(state.networks.supported_user_modes_by_network, original);
     }
 }
 
@@ -653,10 +667,11 @@ fn supported_umodes_changed_rejects_bad_carrier_network_and_payload_without_muta
 fn late_away_confirmation_updates_one_network_without_resetting_other_state() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
-    state.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
+    state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
     state
+        .networks
         .away_states
         .insert("azzurra".to_string(), AwayStatus::Present);
 
@@ -681,12 +696,18 @@ fn late_away_confirmation_updates_one_network_without_resetting_other_state() {
         "grappa:user:vjt/network:libera/channel:#rust",
         &away_payload,
     );
-    assert!(!state.away_states.contains_key("libera"));
+    assert!(!state.networks.away_states.contains_key("libera"));
 
     handle_away_confirmed(&mut state, "grappa:user:vjt", &away_payload);
 
-    assert_eq!(state.away_states.get("libera"), Some(&AwayStatus::Away));
-    assert_eq!(state.away_states.get("azzurra"), Some(&AwayStatus::Present));
+    assert_eq!(
+        state.networks.away_states.get("libera"),
+        Some(&AwayStatus::Away)
+    );
+    assert_eq!(
+        state.networks.away_states.get("azzurra"),
+        Some(&AwayStatus::Present)
+    );
     assert_eq!(
         state.messages.get(&message_key).map(Vec::len),
         Some(existing_messages.len())
@@ -703,16 +724,19 @@ fn late_away_confirmation_updates_one_network_without_resetting_other_state() {
     // A late repeat is idempotent; a later server-confirmed return to
     // present is a normal per-network state transition.
     assert!(!apply_away_confirmed(
-        &mut state.away_states,
+        &mut state.networks.away_states,
         "libera",
         AwayStatus::Away
     ));
     assert!(apply_away_confirmed(
-        &mut state.away_states,
+        &mut state.networks.away_states,
         "libera",
         AwayStatus::Present
     ));
-    assert_eq!(state.away_states.get("libera"), Some(&AwayStatus::Present));
+    assert_eq!(
+        state.networks.away_states.get("libera"),
+        Some(&AwayStatus::Present)
+    );
     assert_eq!(
         state.messages.get(&message_key).map(Vec::len),
         Some(existing_messages.len())
@@ -802,6 +826,7 @@ fn channels_changed_keeps_topics_owned_by_queries_and_own_nick_listener() {
         .stale_query_topics
         .insert(query_window_key("libera", "FormerPeer"));
     state
+        .networks
         .own_nicks
         .insert("libera".to_string(), "OwnNick".to_string());
 
@@ -832,9 +857,11 @@ fn channels_changed_keeps_topics_owned_by_queries_and_own_nick_listener() {
 fn own_nick_rename_leaves_old_topic_before_joining_new_topic() {
     let mut state = WorkerState::new();
     state
+        .networks
         .own_nicks
         .insert("libera".to_string(), "OldNick".to_string());
     state
+        .networks
         .own_nicks
         .insert("azzurra".to_string(), "AwayNick".to_string());
     let old_topic = own_nick_listener_topic("vjt", "libera", "OldNick");
@@ -862,11 +889,11 @@ fn own_nick_rename_leaves_old_topic_before_joining_new_topic() {
     assert!(state.joined_topics.contains(&other_topic));
     assert!(state.own_listener_ready.contains(&other_topic));
     assert_eq!(
-        state.own_nicks.get("libera").map(String::as_str),
+        state.networks.own_nicks.get("libera").map(String::as_str),
         Some("NewNick")
     );
     assert_eq!(
-        state.own_nicks.get("azzurra").map(String::as_str),
+        state.networks.own_nicks.get("azzurra").map(String::as_str),
         Some("AwayNick")
     );
 }
@@ -875,6 +902,7 @@ fn own_nick_rename_leaves_old_topic_before_joining_new_topic() {
 fn own_nick_rename_keeps_old_topic_when_an_open_query_owns_it() {
     let mut state = WorkerState::new();
     state
+        .networks
         .own_nicks
         .insert("libera".to_string(), "OldNick".to_string());
     state.identifier = Some("vjt".to_string());
@@ -923,6 +951,7 @@ fn own_nick_rename_keeps_old_topic_when_an_open_query_owns_it() {
 fn own_nick_case_only_change_updates_spelling_without_rejoining() {
     let mut state = WorkerState::new();
     state
+        .networks
         .own_nicks
         .insert("libera".to_string(), "Foo".to_string());
     let topic = own_nick_listener_topic("vjt", "libera", "Foo");
@@ -933,7 +962,7 @@ fn own_nick_case_only_change_updates_spelling_without_rejoining() {
 
     assert!(actions.is_empty());
     assert_eq!(
-        state.own_nicks.get("libera").map(String::as_str),
+        state.networks.own_nicks.get("libera").map(String::as_str),
         Some("fOO")
     );
     assert!(state.joined_topics.contains(&topic));
@@ -945,6 +974,7 @@ fn own_nick_listener_readiness_requires_ack_and_fails_closed_without_it() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
     state
+        .networks
         .own_nicks
         .insert("libera".to_string(), "OldNick".to_string());
     let old_topic = own_nick_listener_topic("vjt", "libera", "OldNick");
@@ -2195,6 +2225,7 @@ fn window_counts_seed_from_channel_query_and_own_nick_join_replies() {
     let mut state = WorkerState::new();
     state.identifier = Some("sythos".to_string());
     state
+        .networks
         .own_nicks
         .insert("libera".to_string(), "Sythos".to_string());
     state
@@ -2289,6 +2320,7 @@ fn window_counts_on_own_nick_listener_updates_only_own_nick_window() {
     let mut state = WorkerState::new();
     state.identifier = Some("sythos".to_string());
     state
+        .networks
         .own_nicks
         .insert("libera".to_string(), "Sythos".to_string());
     state.query_windows = vec![QueryWindow {
@@ -2511,6 +2543,7 @@ fn window_counts_preserves_mentions_when_severity_is_missing_or_unknown() {
 fn window_counts_removes_closed_query_counters_but_keeps_channels() {
     let mut state = WorkerState::new();
     state
+        .networks
         .own_nicks
         .insert("libera".to_string(), "Sythos".to_string());
     state.channel_entries = vec![(
@@ -3700,7 +3733,7 @@ fn empty_me() -> MeResponse {
 fn kicked_row_survives_a_channel_list_refresh_until_dismissed() {
     let user = "sythos";
     let mut state = WorkerState::new();
-    state.network_ids.insert("libera".to_string(), 7);
+    state.networks.network_ids.insert("libera".to_string(), 7);
     let kicked_topic = channel_topic(user, "libera", "#Cordiale");
     reconcile_channel_entries(
         &mut state,
@@ -3757,8 +3790,8 @@ fn kicked_row_survives_a_channel_list_refresh_until_dismissed() {
         &state.channel_entries,
         &state.query_windows,
         &state.expanded_networks,
-        &state.network_connection_states,
-        &state.network_ids,
+        &state.networks.network_connection_states,
+        &state.networks.network_ids,
     );
     assert_eq!(groups.len(), 1);
     assert_eq!(
@@ -3793,7 +3826,7 @@ fn kicked_row_survives_a_channel_list_refresh_until_dismissed() {
 fn pending_invited_and_failed_rows_survive_a_channel_list_refresh() {
     let user = "sythos";
     let mut state = WorkerState::new();
-    state.network_ids.insert("libera".to_string(), 7);
+    state.networks.network_ids.insert("libera".to_string(), 7);
     for (channel, window_state) in [
         ("#pending", ChannelWindowState::Pending),
         ("#invited", ChannelWindowState::Invited),
@@ -3830,8 +3863,8 @@ fn network_refresh_keeps_kicked_failed_and_invited_windows_of_remaining_networks
     let user = "sythos";
     let mut state = WorkerState::new();
     state.identifier = Some(user.to_string());
-    state.network_ids.insert("libera".to_string(), 7);
-    state.network_ids.insert("gone".to_string(), 9);
+    state.networks.network_ids.insert("libera".to_string(), 7);
+    state.networks.network_ids.insert("gone".to_string(), 9);
     let kicked = window_state_key("libera", "#kicked");
     let failed = window_state_key("libera", "#failed");
     let invited = window_state_key("libera", "#invited");
@@ -4666,6 +4699,7 @@ fn network_with_prefix(pairs: &[(&str, &str)]) -> IsupportState {
 fn seeded_roster(isupport: &IsupportState, entries: Value) -> Vec<MemberEntry> {
     let mut state = WorkerState::new();
     state
+        .networks
         .isupport_by_network
         .insert("net".to_string(), isupport.clone());
     let key = apply_members_seeded(
@@ -4828,7 +4862,10 @@ fn member_roles_on_a_network_with_an_extra_sigil() {
     // A live MODE grants the extra level and the member sorts above the ops.
     let key = ("net".to_string(), "#c".to_string());
     let mut state = WorkerState::new();
-    state.isupport_by_network.insert("net".to_string(), network);
+    state
+        .networks
+        .isupport_by_network
+        .insert("net".to_string(), network);
     state
         .members
         .insert(key.clone(), roster(&[("opy", "@"), ("vic", "+")]));
@@ -5349,6 +5386,7 @@ fn window_status_line_joins_network_and_window_with_their_flags() {
 fn window_status_follows_the_active_window_and_never_leaks_flags() {
     let mut state = WorkerState::new();
     state
+        .networks
         .user_modes_by_network
         .insert("azzurra".into(), vec!["i".into(), "r".into()]);
     state.channel_modes.insert(
@@ -7146,6 +7184,7 @@ fn away_nick_suffix_push_updates_the_setting_and_never_the_nick() {
     let mut state = WorkerState::new();
     state.identifier = Some("vjt".to_string());
     state
+        .networks
         .own_nicks
         .insert("libera".to_string(), "vjt".to_string());
     let topic = "grappa:user:vjt";
@@ -7158,7 +7197,7 @@ fn away_nick_suffix_push_updates_the_setting_and_never_the_nick() {
     );
     // ...and the nick stays the one the nick events reported.
     assert_eq!(
-        state.own_nicks.get("libera").map(String::as_str),
+        state.networks.own_nicks.get("libera").map(String::as_str),
         Some("vjt")
     );
     // The same value again is no change.
@@ -7784,15 +7823,18 @@ fn network_attached_rest_refresh_is_idempotent() {
         (&state.window_messages, &state.window_mentions),
         (&first_counts.0, &first_counts.1)
     );
-    assert_eq!(state.network_ids.get("libera"), Some(&7));
-    assert_eq!(state.own_nicks.get("libera"), Some(&"sythos".to_string()));
+    assert_eq!(state.networks.network_ids.get("libera"), Some(&7));
+    assert_eq!(
+        state.networks.own_nicks.get("libera"),
+        Some(&"sythos".to_string())
+    );
 }
 
 #[test]
 fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
     let mut state = WorkerState::new();
     state.identifier = Some("sythos".to_string());
-    state.network_ids.insert("deleted".to_string(), 9);
+    state.networks.network_ids.insert("deleted".to_string(), 9);
     state.query_windows.push(QueryWindow {
         network: "deleted".to_string(),
         target_nick: "alice".to_string(),
@@ -7851,7 +7893,7 @@ fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
         "libera",
         SERVER_WINDOW_NAME
     ))));
-    assert!(!state.network_ids.contains_key("deleted"));
+    assert!(!state.networks.network_ids.contains_key("deleted"));
     assert!(!state
         .messages
         .contains_key(&("deleted".to_string(), SERVER_WINDOW_NAME.to_string())));
@@ -7876,8 +7918,8 @@ fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
         &state.channel_entries,
         &state.query_windows,
         &state.expanded_networks,
-        &state.network_connection_states,
-        &state.network_ids,
+        &state.networks.network_connection_states,
+        &state.networks.network_ids,
     );
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].0, "libera");

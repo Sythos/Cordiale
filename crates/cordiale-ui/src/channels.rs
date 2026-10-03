@@ -11,7 +11,7 @@ pub(crate) async fn handle_select_channel(
     };
     close_directory(state, ui);
     let server_window = channel == SERVER_WINDOW_NAME;
-    if server_window && !state.network_ids.contains_key(&network) {
+    if server_window && !state.networks.network_ids.contains_key(&network) {
         return;
     }
     let topic = channel_topic(&identifier, &network, &channel);
@@ -53,7 +53,7 @@ pub(crate) async fn handle_select_channel(
             .window_states
             .get(&window_state_key(&network, &channel))
             == Some(&ChannelWindowState::Joined);
-    let ranking = MemberRanking::new(state.isupport_by_network.get(&network));
+    let ranking = MemberRanking::new(state.networks.isupport_by_network.get(&network));
     let can_moderate = is_own_nick_an_op(&members, &identifier, &ranking);
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
@@ -226,7 +226,7 @@ pub(crate) async fn handle_dismiss_kicked_channel(
         return;
     }
 
-    if state.network_ids.contains_key(&network) {
+    if state.networks.network_ids.contains_key(&network) {
         handle_select_channel(state, ui, network, SERVER_WINDOW_NAME.to_string()).await;
         return;
     }
@@ -369,6 +369,7 @@ pub(crate) fn channel_topic_is_owned_elsewhere(
             .iter()
             .any(|(network, nick)| query_topic(user, network, nick) == topic)
         || state
+            .networks
             .own_nicks
             .iter()
             .any(|(network, nick)| own_nick_listener_topic(user, network, nick) == topic)
@@ -400,7 +401,7 @@ pub(crate) fn reconcile_channel_entries(
     entries: Vec<(String, String, String)>,
 ) -> Vec<ChannelTopicAction> {
     let known_networks: std::collections::HashSet<String> =
-        state.network_ids.keys().cloned().collect();
+        state.networks.network_ids.keys().cloned().collect();
     reconcile_channel_entries_in(state, user, entries, &known_networks)
 }
 
