@@ -288,10 +288,10 @@ pub(crate) async fn handle_frame(
             ));
         }
         handle_query_join_reply(state, ui, &frame.topic, status).await;
-        if frame.message_ref.is_some() && frame.message_ref == state.pending_watchlist_ref {
-            state.pending_watchlist_ref = None;
+        if frame.message_ref.is_some() && frame.message_ref == state.prefs.pending_watchlist_ref {
+            state.prefs.pending_watchlist_ref = None;
             if let Some(patterns) = watch_patterns_from_reply(&frame.payload) {
-                state.watch_patterns = patterns;
+                state.prefs.watch_patterns = patterns;
                 push_watch_patterns(state, ui);
             }
             return;
@@ -890,7 +890,7 @@ pub(crate) async fn handle_frame(
     // A Denoise line is kept above but never reaches the transcript.
     if !already_shown && open && state.transcript_shows(&key, &line) {
         let rebuild_key = key.clone();
-        let dark_theme = state.theme == Theme::Dark;
+        let dark_theme = state.prefs.theme == Theme::Dark;
         refresh_mention_context(state);
         let members = state.members.get(&key).cloned().unwrap_or_default();
         let casemapping = network_casemapping(state, &network);
@@ -2188,7 +2188,7 @@ fn show_live_query_message(
     if !open {
         return;
     }
-    let dark_theme = state.theme == Theme::Dark;
+    let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let ui = ui.clone();
     if insert == LiveInsert::Reordered {
@@ -3594,10 +3594,10 @@ fn handle_auto_away_debounce_changed(
         persistence::log_line("auto_away_debounce_changed rejected: invalid carrier or payload");
         return;
     };
-    if state.auto_away_debounce == Some(debounce) {
+    if state.prefs.auto_away_debounce == Some(debounce) {
         return;
     }
-    state.auto_away_debounce = Some(debounce);
+    state.prefs.auto_away_debounce = Some(debounce);
     let text = debounce.edit_text();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -3645,10 +3645,10 @@ fn handle_quit_part_reason_changed(
         persistence::log_line("quit_part_reason_changed rejected: invalid carrier or payload");
         return;
     };
-    if state.quit_part_reason.as_ref() == Some(&reason) {
+    if state.prefs.quit_part_reason.as_ref() == Some(&reason) {
         return;
     }
-    state.quit_part_reason = Some(reason.clone());
+    state.prefs.quit_part_reason = Some(reason.clone());
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_edit_leave_message(reason.unwrap_or_default().into());
@@ -3676,10 +3676,10 @@ fn handle_auto_away_reason_changed(
         persistence::log_line("auto_away_reason_changed rejected: invalid carrier or payload");
         return;
     };
-    if state.auto_away_reason.as_ref() == Some(&reason) {
+    if state.prefs.auto_away_reason.as_ref() == Some(&reason) {
         return;
     }
-    state.auto_away_reason = Some(reason.clone());
+    state.prefs.auto_away_reason = Some(reason.clone());
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_edit_away_message(reason.unwrap_or_default().into());
@@ -3707,10 +3707,10 @@ pub(crate) fn apply_away_nick_suffix_changed(
         persistence::log_line("away_nick_suffix_changed rejected: invalid carrier or payload");
         return None;
     };
-    if state.away_nick_suffix.as_ref() == Some(&suffix) {
+    if state.prefs.away_nick_suffix.as_ref() == Some(&suffix) {
         return None;
     }
-    state.away_nick_suffix = Some(suffix.clone());
+    state.prefs.away_nick_suffix = Some(suffix.clone());
     Some(suffix)
 }
 
@@ -4414,7 +4414,7 @@ fn handle_server_settings_changed(
         persistence::log_line("server_settings_changed rejected: invalid carrier or payload");
         return;
     };
-    if state.upload_limits.as_ref() == Some(&limits) {
+    if state.prefs.upload_limits.as_ref() == Some(&limits) {
         return;
     }
     let row = UploadLimitsRow {
@@ -4429,7 +4429,7 @@ fn handle_server_settings_changed(
         document: format_file_size(limits.document_bytes).into(),
         audio: format_file_size(limits.audio_bytes).into(),
     };
-    state.upload_limits = Some(limits);
+    state.prefs.upload_limits = Some(limits);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_server_upload_limits(row);
@@ -4474,7 +4474,7 @@ fn handle_bundle_hash(state: &mut WorkerState, carrier_topic: &str, payload: &Va
         persistence::log_line("bundle_hash rejected: invalid carrier or payload");
         return;
     };
-    if state.web_bundle.as_ref() == Some(&bundle) {
+    if state.prefs.web_bundle.as_ref() == Some(&bundle) {
         return;
     }
     persistence::log_line(&format!(
@@ -4482,7 +4482,7 @@ fn handle_bundle_hash(state: &mut WorkerState, carrier_topic: &str, payload: &Va
         bundle.0,
         bundle.1.as_deref().unwrap_or("-")
     ));
-    state.web_bundle = Some(bundle);
+    state.prefs.web_bundle = Some(bundle);
 }
 
 /// Validates `mentions_bundle` on the exact user topic and renders it as a

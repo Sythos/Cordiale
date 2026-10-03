@@ -4118,7 +4118,7 @@ fn denoise_leaves_the_lines_out_of_the_model_but_keeps_them_stored() {
 #[test]
 fn denoise_follows_the_choice_then_the_channel_size() {
     let mut state = WorkerState::new();
-    state.presence_pins.clear();
+    state.prefs.presence_pins.clear();
     let key = ("libera".to_string(), "#Rust".to_string());
     assert!(!state.denoise_active(&key));
 
@@ -4129,12 +4129,14 @@ fn denoise_follows_the_choice_then_the_channel_size() {
     assert!(state.denoise_active(&key));
 
     state
+        .prefs
         .presence_pins
         .insert("libera #rust".to_string(), PresencePref::Show);
     assert!(!state.denoise_active(&key));
 
     state.members.remove(&key);
     state
+        .prefs
         .presence_pins
         .insert("libera #rust".to_string(), PresencePref::Hide);
     assert!(state.denoise_active(&key));
@@ -4144,19 +4146,21 @@ fn denoise_follows_the_choice_then_the_channel_size() {
 #[test]
 fn a_live_presence_line_reaches_the_transcript_only_without_denoise() {
     let mut state = WorkerState::new();
-    state.presence_pins.clear();
+    state.prefs.presence_pins.clear();
     let key = ("libera".to_string(), "#rust".to_string());
     let join = presence_row("join");
     let chat = presence_row("privmsg");
     assert!(state.transcript_shows(&key, &join));
 
     state
+        .prefs
         .presence_pins
         .insert("libera #rust".to_string(), PresencePref::Hide);
     assert!(!state.transcript_shows(&key, &join));
     assert!(state.transcript_shows(&key, &chat));
 
     state
+        .prefs
         .presence_pins
         .insert("libera #rust".to_string(), PresencePref::Show);
     assert!(state.transcript_shows(&key, &join));
@@ -7185,7 +7189,7 @@ fn away_nick_suffix_push_updates_the_setting_and_never_the_nick() {
         ),
         None
     );
-    assert_eq!(state.away_nick_suffix, Some(None));
+    assert_eq!(state.prefs.away_nick_suffix, Some(None));
 }
 
 #[test]

@@ -143,7 +143,7 @@ pub(crate) async fn handle_load_older_history(
         return;
     }
     let lines = state.messages.get(&key).cloned().unwrap_or_default();
-    let dark_theme = state.theme == Theme::Dark;
+    let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let roster = (!state.current_query).then(|| {
         (
