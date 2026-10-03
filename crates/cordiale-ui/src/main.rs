@@ -2861,15 +2861,7 @@ struct SessionState {
     passwordless_recovery_token: Option<String>,
 }
 
-struct WorkerState {
-    /// Connection handles and session identity.
-    conn: SessionState,
-    /// Per-window message content, history paging and query-window bookkeeping.
-    transcript: TranscriptState,
-    /// Caches of account settings and local preferences.
-    prefs: SettingsState,
-    /// Screens and pending requests fed by slash commands and server pushes.
-    panels: PanelState,
+struct WindowState {
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
     /// transitions.
     window_states: HashMap<(String, String), ChannelWindowState>,
@@ -2910,6 +2902,19 @@ struct WorkerState {
     current_query: bool,
     current_query_ready: bool,
     current_channel: Option<(String, String)>,
+}
+
+struct WorkerState {
+    /// Connection handles and session identity.
+    conn: SessionState,
+    /// Per-window message content, history paging and query-window bookkeeping.
+    transcript: TranscriptState,
+    /// Caches of account settings and local preferences.
+    prefs: SettingsState,
+    /// Screens and pending requests fed by slash commands and server pushes.
+    panels: PanelState,
+    /// Window lifecycle, counts and selection.
+    windows: WindowState,
     /// Per-network caches keyed by network slug or id.
     networks: NetworkState,
     /// The home page's own state (subject, available networks, row
@@ -2988,21 +2993,23 @@ impl WorkerState {
                 archive: None,
                 mentions_bundles: HashMap::new(),
             },
-            window_states: HashMap::new(),
-            window_failures: HashMap::new(),
-            window_kicks: HashMap::new(),
-            invited_by: HashMap::new(),
-            window_mentions: HashMap::new(),
-            window_messages: HashMap::new(),
-            read_cursors: HashMap::new(),
-            badge_count: 0,
-            expanded_networks: HashMap::new(),
-            channel_entries: Vec::new(),
-            channel_topics: std::collections::HashSet::new(),
-            recent_channels: Vec::new(),
-            current_query: false,
-            current_query_ready: false,
-            current_channel: None,
+            windows: WindowState {
+                window_states: HashMap::new(),
+                window_failures: HashMap::new(),
+                window_kicks: HashMap::new(),
+                invited_by: HashMap::new(),
+                window_mentions: HashMap::new(),
+                window_messages: HashMap::new(),
+                read_cursors: HashMap::new(),
+                badge_count: 0,
+                expanded_networks: HashMap::new(),
+                channel_entries: Vec::new(),
+                channel_topics: std::collections::HashSet::new(),
+                recent_channels: Vec::new(),
+                current_query: false,
+                current_query_ready: false,
+                current_channel: None,
+            },
             networks: NetworkState {
                 network_ids: HashMap::new(),
                 network_connection_states: HashMap::new(),
@@ -3361,7 +3368,7 @@ async fn run_worker(
                         let initially_expanded = !state.networks.network_connection_states.get(&network).is_some_and(
                             |snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked),
                         );
-                        let expanded = state.expanded_networks.entry(network).or_insert(initially_expanded);
+                        let expanded = state.windows.expanded_networks.entry(network).or_insert(initially_expanded);
                         *expanded = !*expanded;
                         refresh_network_groups(&state, &ui);
                     }
@@ -3382,12 +3389,12 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
                         handle_send_message(&mut state, &ui, body).await;
-                        if let Some(key) = state.current_channel.clone() {
+                        if let Some(key) = state.windows.current_channel.clone() {
                             state.transcript.drafts.remove(&key);
                         }
                     }
                     Some(WorkerCommand::ComposeTextChanged(text)) => {
-                        if let Some(key) = state.current_channel.clone() {
+                        if let Some(key) = state.windows.current_channel.clone() {
                             if text.is_empty() {
                                 state.transcript.drafts.remove(&key);
                             } else {
@@ -3469,7 +3476,7 @@ async fn run_worker(
                         handle_notification_edit(&mut state, &ui, edit).await;
                     }
                     Some(WorkerCommand::MuteCurrentWindow(seconds)) => {
-                        if let Some((network, target)) = state.current_channel.clone() {
+                        if let Some((network, target)) = state.windows.current_channel.clone() {
                             let until = (seconds > 0).then(|| {
                                 chrono::Utc::now().timestamp() + i64::from(seconds)
                             });
@@ -3491,7 +3498,7 @@ async fn run_worker(
                             BOLD_MENTIONS.store(bold, std::sync::atomic::Ordering::Relaxed);
                         }
                         handle_save_display_prefs(&state, &ui, prefs).await;
-                        if let Some(key) = state.current_channel.clone() {
+                        if let Some(key) = state.windows.current_channel.clone() {
                             push_members_update(&state, &ui, &key);
                         }
                     }
@@ -4101,11 +4108,11 @@ async fn run_worker(
                     Some(WorkerCommand::GoHome) => {
                         write_back_read_cursor(&mut state);
                         close_directory(&mut state, &ui);
-                        if let Some(previous) = state.current_channel.take() {
+                        if let Some(previous) = state.windows.current_channel.take() {
                             trim_window_history(&mut state, &previous);
                         }
-                        state.current_query = false;
-                        state.current_query_ready = false;
+                        state.windows.current_query = false;
+                        state.windows.current_query_ready = false;
                     }
                     Some(WorkerCommand::HomeDisconnect(network)) => {
                         home_set_connection_state(&mut state, &ui, network, "parked").await;
@@ -4516,7 +4523,7 @@ async fn finish_connect(
             };
 
             let entries = channel_entries_from_boot(&outcome);
-            state.channel_entries = entries.clone();
+            state.windows.channel_entries = entries.clone();
             state.transcript.query_windows.clear();
             state.conn.server_protocol_version = Some(outcome.compatibility.protocol_version);
             state.transcript.pending_own_nick_dms.clear();
@@ -4524,13 +4531,14 @@ async fn finish_connect(
             state.transcript.query_ready.clear();
             state.transcript.query_full_history_required.clear();
             state.transcript.stale_query_topics.clear();
-            state.window_states = joined_window_states_from_boot_channels(&outcome.boot.channels);
-            state.window_failures.clear();
-            state.window_kicks.clear();
-            state.invited_by.clear();
-            state.window_mentions = window_mentions_from_me(&outcome.me.unread_counts);
-            state.window_messages = window_messages_from_me(&outcome.me.unread_counts);
-            state.recent_channels.clear();
+            state.windows.window_states =
+                joined_window_states_from_boot_channels(&outcome.boot.channels);
+            state.windows.window_failures.clear();
+            state.windows.window_kicks.clear();
+            state.windows.invited_by.clear();
+            state.windows.window_mentions = window_mentions_from_me(&outcome.me.unread_counts);
+            state.windows.window_messages = window_messages_from_me(&outcome.me.unread_counts);
+            state.windows.recent_channels.clear();
             state.transcript.topics.clear();
             // Mode snapshots are replayed on each subscribed channel topic,
             // not included in `/boot`; never carry them across identities.
@@ -4538,8 +4546,8 @@ async fn finish_connect(
             // `/me` is the cold seed for the server-authoritative read cursor
             // and account-wide badge; replace prior identity state before
             // opening the new Phoenix session.
-            state.read_cursors = read_cursors_from_me(&outcome.me.read_cursors);
-            state.badge_count = normalize_badge_count(Some(&outcome.me.badge_count));
+            state.windows.read_cursors = read_cursors_from_me(&outcome.me.read_cursors);
+            state.windows.badge_count = normalize_badge_count(Some(&outcome.me.badge_count));
             state.transcript.members.clear();
             state.transcript.messages = messages_from_boot(&outcome);
             state.networks.network_ids = network_ids_from_boot(&outcome);
@@ -4571,9 +4579,9 @@ async fn finish_connect(
             state.conn.own_listener_ready.clear();
             state.transcript.catch_up_anchors.clear();
             state.prefs.notification_prefs = None;
-            state.current_query = false;
-            state.current_query_ready = false;
-            state.current_channel = None;
+            state.windows.current_query = false;
+            state.windows.current_query_ready = false;
+            state.windows.current_channel = None;
             state.home = home::HomeState::default();
             state.home.apply_me(&outcome.me);
             // The Grappa login `subject` is opaque (and absent when reusing
@@ -4630,7 +4638,8 @@ async fn finish_connect(
                     SERVER_WINDOW_NAME,
                 ));
             }
-            state.channel_topics = channel_topics_for_entries(&session_identifier, &entries);
+            state.windows.channel_topics =
+                channel_topics_for_entries(&session_identifier, &entries);
             for (network, nick) in &state.networks.own_nicks {
                 state.conn.joined_topics.insert(own_nick_listener_topic(
                     &session_identifier,
@@ -4673,13 +4682,13 @@ async fn finish_connect(
             let groups_data = network_groups_data(
                 &entries,
                 &state.transcript.query_windows,
-                &state.expanded_networks,
+                &state.windows.expanded_networks,
                 &state.networks.network_connection_states,
                 &state.networks.network_ids,
             );
-            let window_states = state.window_states.clone();
-            let window_mentions = state.window_mentions.clone();
-            let window_messages = state.window_messages.clone();
+            let window_states = state.windows.window_states.clone();
+            let window_mentions = state.windows.window_mentions.clone();
+            let window_messages = state.windows.window_messages.clone();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
                 ui.set_is_admin(is_admin);
@@ -5652,7 +5661,7 @@ fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str, ranking: &Member
 }
 
 async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
-    if state.current_query && !state.current_query_ready {
+    if state.windows.current_query && !state.windows.current_query_ready {
         return;
     }
     let body = if body.trim_start().starts_with('/') {
@@ -5670,7 +5679,7 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     let (Some(client), Some(token), Some((network, channel))) = (
         &state.conn.client,
         &state.conn.token,
-        &state.current_channel,
+        &state.windows.current_channel,
     ) else {
         let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("no-active-network".into()));
         return;
@@ -5810,11 +5819,12 @@ async fn handle_attach_file(
             ui.set_status_kind(kind.into());
         });
     };
-    if state.current_channel.is_none() {
+    if state.windows.current_channel.is_none() {
         set_status("attach-no-window", filename);
         return;
     }
     if state
+        .windows
         .current_channel
         .as_ref()
         .is_some_and(|(_, channel)| channel == SERVER_WINDOW_NAME)
@@ -6051,14 +6061,16 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     // stop being legible the instant the background flips, and shouldn't
     // have to wait for a channel reselect to catch up.
     let current_lines = state
+        .windows
         .current_channel
         .as_ref()
         .and_then(|key| state.transcript.messages.get(key))
         .cloned();
     let current_roster = state
+        .windows
         .current_channel
         .as_ref()
-        .filter(|_| !state.current_query)
+        .filter(|_| !state.windows.current_query)
         .map(|key| {
             (
                 state
@@ -6630,10 +6642,10 @@ fn push_chat_lines_update(
 /// the choice goes to Grappa; a failed upload is kept and sent again at the
 /// next sign-in.
 async fn handle_toggle_denoise(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    let Some(key) = state.current_channel.clone() else {
+    let Some(key) = state.windows.current_channel.clone() else {
         return;
     };
-    if state.current_query || key.1 == SERVER_WINDOW_NAME {
+    if state.windows.current_query || key.1 == SERVER_WINDOW_NAME {
         return;
     }
     let pin_key = muted_key(&key.0, &key.1);
@@ -6896,6 +6908,7 @@ fn save_mute_settings(state: &WorkerState) {
 fn push_mute_bar(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let now = chrono::Utc::now().timestamp();
     let mute = state
+        .windows
         .current_channel
         .as_ref()
         .zip(state.prefs.notification_prefs.as_ref())
@@ -7887,12 +7900,12 @@ fn send_user_verb(state: &WorkerState, network: &str, verb: &str, mut payload: V
 /// network's id hasn't been resolved yet) — every caller just does
 /// nothing in that case, same as `handle_request_links` already does.
 fn user_topic_channel_network(state: &WorkerState) -> Option<(&SessionHandle, String, i64, &str)> {
-    if state.current_query {
+    if state.windows.current_query {
         return None;
     }
     let session = state.conn.session.as_ref()?;
     let identifier = state.conn.identifier.as_ref()?;
-    let (network, channel) = state.current_channel.as_ref()?;
+    let (network, channel) = state.windows.current_channel.as_ref()?;
     let network_id = *state.networks.network_ids.get(network)?;
     Some((
         session,
@@ -7998,7 +8011,7 @@ async fn handle_member_ctcp(
     let (Some(client), Some(token), Some((network, channel))) = (
         &state.conn.client,
         &state.conn.token,
-        &state.current_channel,
+        &state.windows.current_channel,
     ) else {
         return;
     };
@@ -8135,7 +8148,7 @@ fn window_status_line(
 
 /// The status line of the window on screen, "" when none is (home).
 fn window_status_for(state: &WorkerState) -> String {
-    let Some((network, window)) = state.current_channel.as_ref() else {
+    let Some((network, window)) = state.windows.current_channel.as_ref() else {
         return String::new();
     };
     let user_modes = state
@@ -8143,7 +8156,7 @@ fn window_status_for(state: &WorkerState) -> String {
         .user_modes_by_network
         .get(network)
         .map(Vec::as_slice);
-    let channel_modes = if state.current_query || window == SERVER_WINDOW_NAME {
+    let channel_modes = if state.windows.current_query || window == SERVER_WINDOW_NAME {
         None
     } else {
         state
@@ -8201,17 +8214,18 @@ fn normalize_badge_count(value: Option<&Value>) -> u64 {
 /// if that is past the known cursor. The local cursor advances at once
 /// (forward-only), as in Cicchetto; the `read_cursor_set` push confirms it.
 fn read_cursor_to_write(state: &mut WorkerState) -> Option<(String, String, i64)> {
-    let (network, target) = state.current_channel.clone()?;
+    let (network, target) = state.windows.current_channel.clone()?;
     let newest = query_high_water_id(state, &(network.clone(), target.clone()))?;
     let key = window_state_key(&network, &target);
     if state
+        .windows
         .read_cursors
         .get(&key)
         .is_some_and(|&cursor| cursor >= newest)
     {
         return None;
     }
-    state.read_cursors.insert(key, newest);
+    state.windows.read_cursors.insert(key, newest);
     Some((network, target, newest))
 }
 
@@ -8316,7 +8330,7 @@ fn window_is_invited(
 /// — shared by every member-list mutation path (`members_seeded`,
 /// incremental join/part/nick_change, channel selection).
 fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(String, String)) {
-    if state.current_query {
+    if state.windows.current_query {
         return;
     }
     let members = state
@@ -8630,7 +8644,7 @@ const CHAT_HISTORY_TRIM_SLACK: usize = 500;
 /// Makes `key` the open window. The one it replaces is trimmed: nobody is
 /// reading it back any more.
 fn open_window(state: &mut WorkerState, key: &(String, String)) {
-    let previous = state.current_channel.replace(key.clone());
+    let previous = state.windows.current_channel.replace(key.clone());
     if let Some(previous) = previous.filter(|previous| previous != key) {
         trim_window_history(state, &previous);
     }
@@ -8652,7 +8666,7 @@ fn handle_rebuild_chat(
     publish_held_rows(state);
     // Requests queued while rows were still being added find nothing left
     // to drop: the pane already has what the first one gave it.
-    if (trim && !trimmed) || state.current_channel.as_ref() != Some(key) {
+    if (trim && !trimmed) || state.windows.current_channel.as_ref() != Some(key) {
         return;
     }
     let lines = state
@@ -8663,7 +8677,7 @@ fn handle_rebuild_chat(
         .unwrap_or_default();
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
-    let roster = (!state.current_query).then(|| {
+    let roster = (!state.windows.current_query).then(|| {
         (
             state
                 .transcript
@@ -9062,21 +9076,22 @@ fn network_groups_model(
 /// reason text.
 fn window_note(state: &WorkerState) -> (&'static str, String, String) {
     let Some((network, channel)) = state
+        .windows
         .current_channel
         .as_ref()
-        .filter(|_| !state.current_query)
+        .filter(|_| !state.windows.current_query)
     else {
         return ("", String::new(), String::new());
     };
     let key = window_state_key(network, channel);
-    if let Some(kick) = state.window_kicks.get(&key) {
+    if let Some(kick) = state.windows.window_kicks.get(&key) {
         return (
             "kicked",
             kick.by.clone().unwrap_or_default(),
             kick.reason.clone().unwrap_or_default(),
         );
     }
-    if let Some(failure) = state.window_failures.get(&key) {
+    if let Some(failure) = state.windows.window_failures.get(&key) {
         let reason = failure
             .reason
             .clone()
@@ -9097,23 +9112,23 @@ fn push_window_note(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 }
 
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let unread_badge = i32::try_from(state.badge_count).unwrap_or(i32::MAX);
+    let unread_badge = i32::try_from(state.windows.badge_count).unwrap_or(i32::MAX);
     {
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| ui.set_unread_badge(unread_badge));
     }
     push_window_note(state, ui);
     let mut data = network_groups_data(
-        &state.channel_entries,
+        &state.windows.channel_entries,
         &state.transcript.query_windows,
-        &state.expanded_networks,
+        &state.windows.expanded_networks,
         &state.networks.network_connection_states,
         &state.networks.network_ids,
     );
     apply_connecting_labels(&mut data, &state.networks.connecting_networks);
-    let window_states = state.window_states.clone();
-    let window_mentions = state.window_mentions.clone();
-    let window_messages = state.window_messages.clone();
+    let window_states = state.windows.window_states.clone();
+    let window_mentions = state.windows.window_mentions.clone();
+    let window_messages = state.windows.window_messages.clone();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let groups = network_groups_model(data, window_states, window_mentions, window_messages);
@@ -9344,7 +9359,10 @@ async fn home_open_featured(
     }
     state.home.featured_errors.remove(&network);
     let joined = matches!(
-        state.window_states.get(&(network.clone(), channel.clone())),
+        state
+            .windows
+            .window_states
+            .get(&(network.clone(), channel.clone())),
         Some(ChannelWindowState::Joined)
     );
     if !joined {
@@ -9390,6 +9408,7 @@ static BOLD_MENTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// Points the mention check at the open window's network.
 fn refresh_mention_context(state: &WorkerState) {
     let own_nick = state
+        .windows
         .current_channel
         .as_ref()
         .and_then(|(network, _)| state.networks.own_nicks.get(network))
@@ -10860,14 +10879,16 @@ fn apply_color_theme(
     };
     push_theme_choices(state, ui, choice.as_ref().map(|choice| choice.key.as_str()));
     let current_lines = state
+        .windows
         .current_channel
         .as_ref()
         .and_then(|key| state.transcript.messages.get(key))
         .cloned();
     let current_roster = state
+        .windows
         .current_channel
         .as_ref()
-        .filter(|_| !state.current_query)
+        .filter(|_| !state.windows.current_query)
         .map(|key| {
             (
                 state
@@ -11590,10 +11611,10 @@ fn peer_away_key(state: &WorkerState, network: &str, peer: &str) -> (String, Str
 
 /// The peer-away key of the open private window, if one is open.
 fn current_peer_away_key(state: &WorkerState) -> Option<(String, String)> {
-    if !state.current_query {
+    if !state.windows.current_query {
         return None;
     }
-    let (network, nick) = state.current_channel.as_ref()?;
+    let (network, nick) = state.windows.current_channel.as_ref()?;
     Some(peer_away_key(state, network, nick))
 }
 
@@ -11604,6 +11625,7 @@ fn push_peer_away_banner(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         .and_then(|key| {
             let message = state.networks.peer_away.get(&key)?.clone();
             let peer = state
+                .windows
                 .current_channel
                 .as_ref()
                 .map(|(_, nick)| nick.clone())
@@ -11688,6 +11710,7 @@ async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
     // The directory keeps the server's `LIST` spelling; window states are
     // keyed ASCII-folded, like Cicchetto's `channelKey`.
     let joined = state
+        .windows
         .window_states
         .get(&window_state_key(&network, &channel))
         == Some(&ChannelWindowState::Joined);
@@ -11708,6 +11731,7 @@ async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
     // Focus the sidebar's own spelling of the window when it has one.
     let key = window_state_key(&network, &channel);
     let channel = state
+        .windows
         .channel_entries
         .iter()
         .find(|(known_network, known_channel, _)| {
@@ -11869,7 +11893,7 @@ fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) 
     let failed_reason = view.failed_reason.clone().unwrap_or_default();
     let (rows, status, total, captured_at, captured_epoch, has_more) = match &view.page {
         Some(page) => (
-            directory_rows(page, &network, &state.window_states),
+            directory_rows(page, &network, &state.windows.window_states),
             page.status.clone(),
             page.total.to_string(),
             page.captured_at

@@ -151,13 +151,14 @@ pub(crate) fn reset_query_join_failure(
     state.transcript.query_joined.remove(identity);
     state.transcript.query_ready.remove(identity);
     state.conn.joined_topics.remove(topic);
-    let selected = state.current_query
+    let selected = state.windows.current_query
         && state
+            .windows
             .current_channel
             .as_ref()
             .is_some_and(|(network, nick)| &query_window_key(network, nick) == identity);
     if selected {
-        state.current_query_ready = false;
+        state.windows.current_query_ready = false;
     }
     selected
 }
@@ -223,13 +224,13 @@ async fn handle_query_join_reply(
         .remove(&identity);
     mark_query_ready_after_history(state, &identity);
 
-    let selected = state.current_query
-        && state
-            .current_channel
-            .as_ref()
-            .is_some_and(|(current_network, current_nick)| {
-                query_window_key(current_network, current_nick) == identity
-            });
+    let selected =
+        state.windows.current_query
+            && state.windows.current_channel.as_ref().is_some_and(
+                |(current_network, current_nick)| {
+                    query_window_key(current_network, current_nick) == identity
+                },
+            );
     if selected {
         show_query_window(state, ui, &query, &key);
     }
@@ -516,9 +517,10 @@ pub(crate) async fn handle_frame(
     if payload_kind == "isupport_changed" {
         handle_isupport_changed(state, &frame.topic, &frame.payload);
         if let Some(key) = state
+            .windows
             .current_channel
             .as_ref()
-            .filter(|_| !state.current_query)
+            .filter(|_| !state.windows.current_query)
         {
             push_members_update(state, ui, key);
         }
@@ -594,7 +596,7 @@ pub(crate) async fn handle_frame(
                     "members_seeded applied: {}/{} -> {count} member(s)",
                     key.0, key.1
                 ));
-                if state.current_channel.as_ref() == Some(&key) {
+                if state.windows.current_channel.as_ref() == Some(&key) {
                     push_members_update(state, ui, &key);
                 }
             }
@@ -672,7 +674,7 @@ pub(crate) async fn handle_frame(
     // `members_seeded`, but the payload contract matches byte for byte).
     if payload_kind == "names_reply" {
         if let Some(key) = apply_members_seeded(state, &frame.payload) {
-            if state.current_channel.as_ref() == Some(&key) {
+            if state.windows.current_channel.as_ref() == Some(&key) {
                 push_members_update(state, ui, &key);
             }
         }
@@ -693,23 +695,24 @@ pub(crate) async fn handle_frame(
             return;
         };
         let state_changed = set_joined_window_state(
-            &mut state.window_states,
-            &mut state.window_failures,
-            &mut state.window_kicks,
-            &mut state.invited_by,
+            &mut state.windows.window_states,
+            &mut state.windows.window_failures,
+            &mut state.windows.window_kicks,
+            &mut state.windows.invited_by,
             &network,
             &channel,
         );
-        let selected_window_joined =
-            state
-                .current_channel
-                .as_ref()
-                .is_some_and(|(current_network, current_channel)| {
-                    window_state_key(current_network, current_channel)
-                        == window_state_key(&network, &channel)
-                });
-        let sidebar_changed =
-            upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
+        let selected_window_joined = state.windows.current_channel.as_ref().is_some_and(
+            |(current_network, current_channel)| {
+                window_state_key(current_network, current_channel)
+                    == window_state_key(&network, &channel)
+            },
+        );
+        let sidebar_changed = upsert_channel_entry(
+            &mut state.windows.channel_entries,
+            network.clone(),
+            channel.clone(),
+        );
         if selected_window_joined {
             let ui = ui.clone();
             let _ = ui.upgrade_in_event_loop(|ui| ui.set_current_window_is_joined(true));
@@ -736,24 +739,25 @@ pub(crate) async fn handle_frame(
         };
 
         let state_changed = set_failed_window_state(
-            &mut state.window_states,
-            &mut state.window_failures,
-            &mut state.window_kicks,
-            &mut state.invited_by,
+            &mut state.windows.window_states,
+            &mut state.windows.window_failures,
+            &mut state.windows.window_kicks,
+            &mut state.windows.invited_by,
             &network,
             &channel,
             failure,
         );
-        let sidebar_changed =
-            upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
-        let selected_window_failed =
-            state
-                .current_channel
-                .as_ref()
-                .is_some_and(|(current_network, current_channel)| {
-                    window_state_key(current_network, current_channel)
-                        == window_state_key(&network, &channel)
-                });
+        let sidebar_changed = upsert_channel_entry(
+            &mut state.windows.channel_entries,
+            network.clone(),
+            channel.clone(),
+        );
+        let selected_window_failed = state.windows.current_channel.as_ref().is_some_and(
+            |(current_network, current_channel)| {
+                window_state_key(current_network, current_channel)
+                    == window_state_key(&network, &channel)
+            },
+        );
 
         if selected_window_failed {
             let ui = ui.clone();
@@ -784,16 +788,19 @@ pub(crate) async fn handle_frame(
         };
 
         let state_changed = set_kicked_window_state(
-            &mut state.window_states,
-            &mut state.window_failures,
-            &mut state.window_kicks,
-            &mut state.invited_by,
+            &mut state.windows.window_states,
+            &mut state.windows.window_failures,
+            &mut state.windows.window_kicks,
+            &mut state.windows.invited_by,
             &network,
             &channel,
             kick,
         );
-        let sidebar_changed =
-            upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
+        let sidebar_changed = upsert_channel_entry(
+            &mut state.windows.channel_entries,
+            network.clone(),
+            channel.clone(),
+        );
         let key = window_state_key(&network, &channel);
         state
             .transcript
@@ -801,13 +808,11 @@ pub(crate) async fn handle_frame(
             .retain(|(known_network, known_channel), _| {
                 window_state_key(known_network, known_channel) != key
             });
-        let selected_window_kicked =
-            state
-                .current_channel
-                .as_ref()
-                .is_some_and(|(current_network, current_channel)| {
-                    window_state_key(current_network, current_channel) == key
-                });
+        let selected_window_kicked = state.windows.current_channel.as_ref().is_some_and(
+            |(current_network, current_channel)| {
+                window_state_key(current_network, current_channel) == key
+            },
+        );
 
         if selected_window_kicked {
             let ui = ui.clone();
@@ -885,7 +890,7 @@ pub(crate) async fn handle_frame(
         messages.push(line.clone());
     }
     let rows = messages.len();
-    let open = state.current_channel.as_ref() == Some(&key);
+    let open = state.windows.current_channel.as_ref() == Some(&key);
     // A window nobody has open is trimmed at once; the open one only when
     // its pane asks for it (below), as only the pane knows whether the
     // reader is following the newest line.
@@ -930,7 +935,7 @@ pub(crate) async fn handle_frame(
     }
 
     let members_changed = update_members_from_frame(state, &key, effective_payload);
-    if members_changed && state.current_channel.as_ref() == Some(&key) {
+    if members_changed && state.windows.current_channel.as_ref() == Some(&key) {
         push_members_update(state, ui, &key);
     }
 }
@@ -948,7 +953,7 @@ fn handle_topic_changed(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, pa
     };
 
     state.transcript.topics.insert(key.clone(), text.clone());
-    if state.current_channel.as_ref() == Some(&key) {
+    if state.windows.current_channel.as_ref() == Some(&key) {
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
             ui.set_current_topic(text.into());
@@ -979,7 +984,7 @@ fn handle_channel_modes_changed(
     let Some((key, _label)) = apply_channel_modes_changed(state, topic, payload) else {
         return;
     };
-    if state.current_channel.as_ref() == Some(&key) && !state.current_query {
+    if state.windows.current_channel.as_ref() == Some(&key) && !state.windows.current_query {
         push_window_status(state, ui);
     }
 }
@@ -1098,6 +1103,7 @@ pub(crate) fn apply_window_counts(state: &mut WorkerState, topic: &str, payload:
         return false;
     };
     let known_window = state
+        .windows
         .channel_entries
         .iter()
         .any(|(network, channel, _)| window_counts_key(network, channel) == key)
@@ -1172,9 +1178,9 @@ fn apply_window_count_snapshot(
     counts: WindowCountSnapshot,
 ) -> bool {
     let mentions_changed = apply_window_mention_count(state, key.clone(), counts.mentions);
-    let messages_changed = state.window_messages.get(&key) != Some(&counts.messages);
+    let messages_changed = state.windows.window_messages.get(&key) != Some(&counts.messages);
     if messages_changed {
-        state.window_messages.insert(key, counts.messages);
+        state.windows.window_messages.insert(key, counts.messages);
     }
     mentions_changed || messages_changed
 }
@@ -1185,12 +1191,12 @@ fn apply_window_mention_count(
     mentions: u64,
 ) -> bool {
     if mentions == 0 {
-        return state.window_mentions.remove(&key).is_some();
+        return state.windows.window_mentions.remove(&key).is_some();
     }
-    if state.window_mentions.get(&key) == Some(&mentions) {
+    if state.windows.window_mentions.get(&key) == Some(&mentions) {
         return false;
     }
-    state.window_mentions.insert(key, mentions);
+    state.windows.window_mentions.insert(key, mentions);
     true
 }
 
@@ -1211,6 +1217,7 @@ pub(crate) fn retain_window_counts_for_open_windows(state: &mut WorkerState) {
     let mut retained = std::collections::HashSet::new();
     retained.extend(
         state
+            .windows
             .channel_entries
             .iter()
             .map(|(network, channel, _)| window_counts_key(network, channel)),
@@ -1230,9 +1237,11 @@ pub(crate) fn retain_window_counts_for_open_windows(state: &mut WorkerState) {
             .map(|(network, nick)| window_counts_key(network, nick)),
     );
     state
+        .windows
         .window_mentions
         .retain(|key, _| retained.contains(key));
     state
+        .windows
         .window_messages
         .retain(|key, _| retained.contains(key));
 }
@@ -1399,10 +1408,11 @@ pub(crate) fn apply_read_cursor_set(
         return false;
     };
 
-    let cursor_changed = state.read_cursors.get(&key).copied() != Some(last_read_message_id);
-    let badge_changed = state.badge_count != badge_count;
-    state.read_cursors.insert(key, last_read_message_id);
-    state.badge_count = badge_count;
+    let cursor_changed =
+        state.windows.read_cursors.get(&key).copied() != Some(last_read_message_id);
+    let badge_changed = state.windows.badge_count != badge_count;
+    state.windows.read_cursors.insert(key, last_read_message_id);
+    state.windows.badge_count = badge_count;
     cursor_changed || badge_changed
 }
 
@@ -1479,20 +1489,23 @@ fn handle_window_pending(
     }
 
     let state_changed = set_pending_window_state(
-        &mut state.window_states,
-        &mut state.window_failures,
-        &mut state.window_kicks,
-        &mut state.invited_by,
+        &mut state.windows.window_states,
+        &mut state.windows.window_failures,
+        &mut state.windows.window_kicks,
+        &mut state.windows.invited_by,
         &network,
         &channel,
     );
-    let sidebar_changed =
-        upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
+    let sidebar_changed = upsert_channel_entry(
+        &mut state.windows.channel_entries,
+        network.clone(),
+        channel.clone(),
+    );
 
     let topic = channel_topic(&identifier, &network, &channel);
     let subscription_added = register_pending_channel_topic(
         &mut state.conn.joined_topics,
-        &mut state.channel_topics,
+        &mut state.windows.channel_topics,
         topic.clone(),
     );
     if let (true, Some(handle)) = (subscription_added, state.conn.session.as_ref()) {
@@ -1501,6 +1514,7 @@ fn handle_window_pending(
 
     let selected_window_pending =
         state
+            .windows
             .current_channel
             .as_ref()
             .is_some_and(|(current_network, current_channel)| {
@@ -1579,6 +1593,7 @@ pub(crate) fn set_invited_window_state(
 /// event never steals focus from the user's current window.
 fn refresh_invite_banner(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let banner = state
+        .windows
         .invited_by
         .iter()
         .min_by(|(left, _), (right, _)| left.cmp(right))
@@ -1629,21 +1644,24 @@ fn handle_window_invited(
     }
 
     let state_changed = set_invited_window_state(
-        &mut state.window_states,
-        &mut state.window_failures,
-        &mut state.window_kicks,
-        &mut state.invited_by,
+        &mut state.windows.window_states,
+        &mut state.windows.window_failures,
+        &mut state.windows.window_kicks,
+        &mut state.windows.invited_by,
         &network,
         &channel,
         inviter,
     );
-    let sidebar_changed =
-        upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
+    let sidebar_changed = upsert_channel_entry(
+        &mut state.windows.channel_entries,
+        network.clone(),
+        channel.clone(),
+    );
 
     let topic = channel_topic(&identifier, &network, &channel);
     let subscription_added = register_pending_channel_topic(
         &mut state.conn.joined_topics,
-        &mut state.channel_topics,
+        &mut state.windows.channel_topics,
         topic.clone(),
     );
     if let (true, Some(handle)) = (subscription_added, state.conn.session.as_ref()) {
@@ -1654,6 +1672,7 @@ fn handle_window_invited(
     // window is already selected, keep the roster hidden until `joined`.
     let selected_window_invited =
         state
+            .windows
             .current_channel
             .as_ref()
             .is_some_and(|(current_network, current_channel)| {
@@ -1727,15 +1746,15 @@ pub(crate) fn remove_declined_window(
     channel: &str,
 ) -> bool {
     let lifecycle_changed = clear_declined_window_state(
-        &mut state.window_states,
-        &mut state.window_failures,
-        &mut state.window_kicks,
-        &mut state.invited_by,
+        &mut state.windows.window_states,
+        &mut state.windows.window_failures,
+        &mut state.windows.window_kicks,
+        &mut state.windows.invited_by,
         network,
         channel,
     );
     let sidebar_changed =
-        remove_sidebar_channel_entry(&mut state.channel_entries, network, channel);
+        remove_sidebar_channel_entry(&mut state.windows.channel_entries, network, channel);
     lifecycle_changed || sidebar_changed
 }
 
@@ -1752,6 +1771,7 @@ pub(crate) fn remove_declined_channel_subscription(
     let topic_is_owned_elsewhere =
         channel_topic_is_owned_elsewhere(state, identifier, &canonical_topic);
     let matching_channel_topics: Vec<String> = state
+        .windows
         .channel_topics
         .iter()
         .filter(|topic| channel_topic_matches(identifier, topic, network, channel))
@@ -1759,7 +1779,7 @@ pub(crate) fn remove_declined_channel_subscription(
         .collect();
     let channel_topic_removed = !matching_channel_topics.is_empty();
     for topic in matching_channel_topics {
-        state.channel_topics.remove(&topic);
+        state.windows.channel_topics.remove(&topic);
     }
 
     let matching_joined_topics: Vec<String> = if topic_is_owned_elsewhere {
@@ -2212,7 +2232,7 @@ fn show_live_query_message(
     key: &(String, String),
     insert: LiveInsert,
 ) {
-    let open = state.current_query && state.current_channel.as_ref() == Some(key);
+    let open = state.windows.current_query && state.windows.current_channel.as_ref() == Some(key);
     if !open {
         trim_window_history(state, key);
     }
@@ -2486,6 +2506,7 @@ fn return_home_if_network_selected(
     network: &str,
 ) {
     let selected_network_matches = state
+        .windows
         .current_channel
         .as_ref()
         .is_some_and(|(selected_network, _)| selected_network == network);
@@ -2493,9 +2514,9 @@ fn return_home_if_network_selected(
         return;
     }
 
-    state.current_channel = None;
-    state.current_query = false;
-    state.current_query_ready = false;
+    state.windows.current_channel = None;
+    state.windows.current_query = false;
+    state.windows.current_query_ready = false;
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_screen("connected".into());
@@ -2521,7 +2542,11 @@ fn collapse_if_parked(state: &mut WorkerState, network: &str) -> bool {
         .get(network)
         .is_some_and(|snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked))
     {
-        return state.expanded_networks.insert(network.to_string(), false) != Some(false);
+        return state
+            .windows
+            .expanded_networks
+            .insert(network.to_string(), false)
+            != Some(false);
     }
     false
 }
@@ -3111,6 +3136,7 @@ pub(crate) fn apply_network_rest_refresh(
         .query_windows
         .retain(|query| next_network_ids.contains_key(&query.network));
     state
+        .windows
         .expanded_networks
         .retain(|network, _| next_network_ids.contains_key(network));
     state
@@ -3130,6 +3156,7 @@ pub(crate) fn apply_network_rest_refresh(
         .stale_query_topics
         .retain(|(network, _)| next_network_ids.contains_key(network));
     state
+        .windows
         .recent_channels
         .retain(|(network, _)| next_network_ids.contains_key(network));
 
@@ -3137,31 +3164,31 @@ pub(crate) fn apply_network_rest_refresh(
     // kicked one on a network that stays keeps its state and its metadata
     // (kick actor and reason, failure reason, inviter) unless `/boot` now
     // reports that window as joined.
-    let previous_states = std::mem::take(&mut state.window_states);
-    let mut previous_failures = std::mem::take(&mut state.window_failures);
-    let mut previous_kicks = std::mem::take(&mut state.window_kicks);
-    let mut previous_invites = std::mem::take(&mut state.invited_by);
-    state.window_states = joined_window_states_from_boot_channels(&boot.channels);
+    let previous_states = std::mem::take(&mut state.windows.window_states);
+    let mut previous_failures = std::mem::take(&mut state.windows.window_failures);
+    let mut previous_kicks = std::mem::take(&mut state.windows.window_kicks);
+    let mut previous_invites = std::mem::take(&mut state.windows.invited_by);
+    state.windows.window_states = joined_window_states_from_boot_channels(&boot.channels);
     for (key, window_state) in previous_states {
         if !is_unlisted_window_state(&window_state)
             || !next_network_ids.contains_key(&key.0)
-            || state.window_states.contains_key(&key)
+            || state.windows.window_states.contains_key(&key)
         {
             continue;
         }
         if let Some(failure) = previous_failures.remove(&key) {
-            state.window_failures.insert(key.clone(), failure);
+            state.windows.window_failures.insert(key.clone(), failure);
         }
         if let Some(kick) = previous_kicks.remove(&key) {
-            state.window_kicks.insert(key.clone(), kick);
+            state.windows.window_kicks.insert(key.clone(), kick);
         }
         if let Some(inviter) = previous_invites.remove(&key) {
-            state.invited_by.insert(key.clone(), inviter);
+            state.windows.invited_by.insert(key.clone(), inviter);
         }
-        state.window_states.insert(key, window_state);
+        state.windows.window_states.insert(key, window_state);
     }
-    state.window_mentions = window_mentions_from_me(&me.unread_counts);
-    state.window_messages = window_messages_from_me(&me.unread_counts);
+    state.windows.window_mentions = window_mentions_from_me(&me.unread_counts);
+    state.windows.window_messages = window_messages_from_me(&me.unread_counts);
     // `/boot` carries neither topics nor rosters: both are re-seeded on
     // each channel's Phoenix topic.
     state.transcript.topics.clear();
@@ -3181,8 +3208,8 @@ pub(crate) fn apply_network_rest_refresh(
         }
     }
     state.transcript.messages = messages;
-    state.read_cursors = read_cursors_from_me(&me.read_cursors);
-    state.badge_count = normalize_badge_count(Some(&me.badge_count));
+    state.windows.read_cursors = read_cursors_from_me(&me.read_cursors);
+    state.windows.badge_count = normalize_badge_count(Some(&me.badge_count));
     state.home.apply_me(me);
     state
         .home
@@ -4155,8 +4182,8 @@ async fn handle_archive_purged(
         .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459);
     let purged = |key: &(String, String)| is_purged_window(key, &network, &target, casemapping);
     state.transcript.messages.retain(|key, _| !purged(key));
-    state.window_messages.retain(|key, _| !purged(key));
-    state.window_mentions.retain(|key, _| !purged(key));
+    state.windows.window_messages.retain(|key, _| !purged(key));
+    state.windows.window_mentions.retain(|key, _| !purged(key));
     if state
         .panels
         .archive
@@ -5804,8 +5831,8 @@ pub(crate) fn apply_query_windows_snapshot(
     }
 
     let mut selected_closed = false;
-    if state.current_query {
-        if let Some((network, nick)) = state.current_channel.clone() {
+    if state.windows.current_query {
+        if let Some((network, nick)) = state.windows.current_channel.clone() {
             let selected = find_query_window(&snapshot, &network, &nick)
                 .cloned()
                 .or_else(|| {
@@ -5821,14 +5848,14 @@ pub(crate) fn apply_query_windows_snapshot(
                 if let Some(old) = find_query_window(&previous, &network, &nick) {
                     move_query_window_cache(state, old, &query);
                 }
-                state.current_channel = Some((query.network, query.target_nick));
+                state.windows.current_channel = Some((query.network, query.target_nick));
             } else {
-                state.current_channel = None;
-                state.current_query = false;
+                state.windows.current_channel = None;
+                state.windows.current_query = false;
                 selected_closed = true;
             }
         } else {
-            state.current_query = false;
+            state.windows.current_query = false;
             selected_closed = true;
         }
     }
@@ -5871,8 +5898,9 @@ pub(crate) fn reconcile_query_topic_tracking(state: &mut WorkerState, previous: 
             .stale_query_topics
             .remove(&query_window_key(&query.network, &query.target_nick));
     }
-    state.current_query_ready = state.current_query
+    state.windows.current_query_ready = state.windows.current_query
         && state
+            .windows
             .current_channel
             .as_ref()
             .is_some_and(|(network, nick)| {
@@ -5921,8 +5949,8 @@ fn handle_query_windows_list(
     }
 
     refresh_network_groups(state, ui);
-    if state.current_query {
-        if let Some((network, nick)) = state.current_channel.as_ref() {
+    if state.windows.current_query {
+        if let Some((network, nick)) = state.windows.current_channel.as_ref() {
             if let Some(query) =
                 find_query_window(&state.transcript.query_windows, network, nick).cloned()
             {

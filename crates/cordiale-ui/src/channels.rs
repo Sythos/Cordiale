@@ -29,13 +29,14 @@ pub(crate) async fn handle_select_channel(
 
     let key = (network.clone(), channel.clone());
     state
+        .windows
         .recent_channels
         .retain(|(known_network, known_channel)| {
             window_state_key(known_network, known_channel) != window_state_key(&network, &channel)
         });
-    state.recent_channels.insert(0, key.clone());
-    state.current_query = false;
-    state.current_query_ready = false;
+    state.windows.recent_channels.insert(0, key.clone());
+    state.windows.current_query = false;
+    state.windows.current_query_ready = false;
     open_window(state, &key);
     push_mute_bar(state, ui);
 
@@ -70,6 +71,7 @@ pub(crate) async fn handle_select_channel(
         .unwrap_or_default();
     let window_is_joined = !server_window
         && state
+            .windows
             .window_states
             .get(&window_state_key(&network, &channel))
             == Some(&ChannelWindowState::Joined);
@@ -119,8 +121,9 @@ pub(crate) async fn handle_part_channel(
     reason: Option<String>,
 ) {
     let key = window_state_key(&network, &channel);
-    if state.window_states.get(&key) != Some(&ChannelWindowState::Joined)
+    if state.windows.window_states.get(&key) != Some(&ChannelWindowState::Joined)
         || !state
+            .windows
             .channel_entries
             .iter()
             .any(|(entry_network, entry_channel, _)| {
@@ -149,12 +152,14 @@ pub(crate) async fn handle_part_channel(
 
     let selected =
         state
+            .windows
             .current_channel
             .as_ref()
             .is_some_and(|(current_network, current_channel)| {
-                !state.current_query && window_state_key(current_network, current_channel) == key
+                !state.windows.current_query
+                    && window_state_key(current_network, current_channel) == key
             });
-    let mut remaining_entries = state.channel_entries.clone();
+    let mut remaining_entries = state.windows.channel_entries.clone();
     remove_sidebar_channel_entry(&mut remaining_entries, &network, &channel);
     let actions = reconcile_channel_entries(state, &identifier, remaining_entries);
     if let Some(session) = state.conn.session.as_ref() {
@@ -164,10 +169,10 @@ pub(crate) async fn handle_part_channel(
             }
         }
     }
-    state.window_states.remove(&key);
-    state.window_failures.remove(&key);
-    state.window_kicks.remove(&key);
-    state.invited_by.remove(&key);
+    state.windows.window_states.remove(&key);
+    state.windows.window_failures.remove(&key);
+    state.windows.window_kicks.remove(&key);
+    state.windows.invited_by.remove(&key);
     state.transcript.channel_modes.remove(&key);
     state
         .transcript
@@ -186,6 +191,7 @@ pub(crate) async fn handle_part_channel(
         .drafts
         .remove(&(network.clone(), channel.clone()));
     state
+        .windows
         .recent_channels
         .retain(|(recent_network, recent_channel)| {
             window_state_key(recent_network, recent_channel) != key
@@ -213,7 +219,7 @@ pub(crate) async fn handle_dismiss_kicked_channel(
     network: String,
     channel: String,
 ) {
-    if !window_is_kicked(&state.window_states, &network, &channel) {
+    if !window_is_kicked(&state.windows.window_states, &network, &channel) {
         return;
     }
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
@@ -241,10 +247,12 @@ pub(crate) async fn handle_dismiss_kicked_channel(
     }
 
     let next_channel = state
+        .windows
         .recent_channels
         .iter()
         .find(|(recent_network, recent_channel)| {
             state
+                .windows
                 .channel_entries
                 .iter()
                 .any(|(entry_network, entry_channel, _)| {
@@ -263,7 +271,7 @@ pub(crate) async fn handle_dismiss_kicked_channel(
         return;
     }
 
-    state.current_channel = None;
+    state.windows.current_channel = None;
     let mut settings = persistence::load_settings().unwrap_or_default();
     settings.last_channel = None;
     let _ = persistence::save_settings(&settings);
@@ -291,15 +299,15 @@ pub(crate) fn force_parted_kicked_window(
     network: &str,
     channel: &str,
 ) -> bool {
-    if !window_is_kicked(&state.window_states, network, channel) {
+    if !window_is_kicked(&state.windows.window_states, network, channel) {
         return false;
     }
 
     let key = window_state_key(network, channel);
-    state.window_states.remove(&key);
-    state.window_failures.remove(&key);
-    state.window_kicks.remove(&key);
-    state.invited_by.remove(&key);
+    state.windows.window_states.remove(&key);
+    state.windows.window_failures.remove(&key);
+    state.windows.window_kicks.remove(&key);
+    state.windows.invited_by.remove(&key);
     state
         .transcript
         .channel_modes
@@ -320,6 +328,7 @@ pub(crate) fn dismiss_kicked_window_locally(
     let key = window_state_key(network, channel);
     let selected =
         state
+            .windows
             .current_channel
             .as_ref()
             .is_some_and(|(current_network, current_channel)| {
@@ -328,7 +337,7 @@ pub(crate) fn dismiss_kicked_window_locally(
     if !force_parted_kicked_window(state, network, channel) {
         return None;
     }
-    remove_sidebar_channel_entry(&mut state.channel_entries, network, channel);
+    remove_sidebar_channel_entry(&mut state.windows.channel_entries, network, channel);
     Some(selected)
 }
 
@@ -448,9 +457,10 @@ pub(crate) fn reconcile_channel_entries_in(
     mut entries: Vec<(String, String, String)>,
     known_networks: &std::collections::HashSet<String>,
 ) -> Vec<ChannelTopicAction> {
-    for (network, channel, label) in &state.channel_entries {
+    for (network, channel, label) in &state.windows.channel_entries {
         let key = window_state_key(network, channel);
         let unlisted = state
+            .windows
             .window_states
             .get(&key)
             .is_some_and(is_unlisted_window_state);
@@ -466,7 +476,7 @@ pub(crate) fn reconcile_channel_entries_in(
     }
 
     let next_topics = channel_topics_for_entries(user, &entries);
-    let previous_topics = std::mem::replace(&mut state.channel_topics, next_topics.clone());
+    let previous_topics = std::mem::replace(&mut state.windows.channel_topics, next_topics.clone());
     let mut actions = Vec::new();
 
     let mut removed_topics: Vec<String> =
@@ -489,7 +499,7 @@ pub(crate) fn reconcile_channel_entries_in(
         }
     }
 
-    state.channel_entries = entries;
+    state.windows.channel_entries = entries;
     actions
 }
 

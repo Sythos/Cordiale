@@ -57,7 +57,7 @@ pub(crate) async fn reload_history_tail(
     };
     let messages = state.transcript.messages.entry(key.clone()).or_default();
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
-    if !state.current_query && state.current_channel.as_ref() == Some(key) {
+    if !state.windows.current_query && state.windows.current_channel.as_ref() == Some(key) {
         push_chat_lines_update(state, ui, key);
     }
 }
@@ -86,7 +86,7 @@ pub(crate) async fn handle_load_older_history(
     let (Some(client), Some(token), Some(key)) = (
         state.conn.client.clone(),
         state.conn.token.clone(),
-        state.current_channel.clone(),
+        state.windows.current_channel.clone(),
     ) else {
         finish(true, false);
         return;
@@ -115,7 +115,7 @@ pub(crate) async fn handle_load_older_history(
         Ok(rows) => rows,
         Err(err) => {
             persistence::log_line(&format!("older history fetch failed: {err:?}"));
-            if state.current_channel.as_ref() == Some(&key) {
+            if state.windows.current_channel.as_ref() == Some(&key) {
                 finish(true, false);
             }
             return;
@@ -144,7 +144,7 @@ pub(crate) async fn handle_load_older_history(
     }
     publish_held_rows(state);
     // The user may have switched window while the page was loading.
-    if state.current_channel.as_ref() != Some(&key) {
+    if state.windows.current_channel.as_ref() != Some(&key) {
         return;
     }
     let lines = state
@@ -155,7 +155,7 @@ pub(crate) async fn handle_load_older_history(
         .unwrap_or_default();
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
-    let roster = (!state.current_query).then(|| {
+    let roster = (!state.windows.current_query).then(|| {
         (
             state
                 .transcript
@@ -250,10 +250,14 @@ pub(crate) fn catch_up_plan(gap: u64) -> CatchUpPlan {
 /// stays (a second drop before the catch-up ran must not skip rows).
 pub(crate) fn note_catch_up_anchors(state: &mut WorkerState) {
     let anchors: Vec<((String, String), i64)> = state
+        .windows
         .channel_entries
         .iter()
         .filter(|(network, channel, _)| {
-            state.window_states.get(&window_state_key(network, channel))
+            state
+                .windows
+                .window_states
+                .get(&window_state_key(network, channel))
                 == Some(&ChannelWindowState::Joined)
         })
         .filter_map(|(network, channel, _)| {
@@ -346,7 +350,10 @@ async fn catch_up_channel(
     };
     // The awaits above can outlast the session or the channel membership.
     if state.conn.session.is_none()
-        || state.window_states.get(&window_state_key(&key.0, &key.1))
+        || state
+            .windows
+            .window_states
+            .get(&window_state_key(&key.0, &key.1))
             != Some(&ChannelWindowState::Joined)
     {
         return;
@@ -366,7 +373,7 @@ async fn catch_up_channel(
     } else {
         merge_rendered_messages(messages, incoming);
     }
-    if !state.current_query && state.current_channel.as_ref() == Some(key) {
+    if !state.windows.current_query && state.windows.current_channel.as_ref() == Some(key) {
         push_members_update(state, ui, key);
         if plan == CatchUpPlan::ReloadTail {
             let _ = ui.upgrade_in_event_loop(|ui| ui.set_history_start_reached(false));
