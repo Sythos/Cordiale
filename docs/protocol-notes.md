@@ -12,9 +12,15 @@ Fonti:
 - **Riferimento funzionale (solo funzionalità, non architettura):**
   <https://github.com/vjt/grappa-irc/tree/main/cicchetto>.
 
-Ultimo allineamento (2026-10-02): `protocol_version` 37,
-`min_protocol_version` 1 (letti dal sorgente server in `lib/grappa/protocol.ex`);
-Cordiale dichiara `client_proto=37` (§2).
+Ultimo allineamento (2026-10-03): riletto contro il tag `v1.5.12` di Grappa
+(commit `c26c77bc`), la prima release che porta il protocollo 37:
+`protocol_version` 37, `min_protocol_version` 1 (letti dal sorgente server in
+`lib/grappa/protocol.ex` al tag; `GET /api/config` del server dell'autore
+risponde `version` 1.5.12 e protocollo 37). Cordiale dichiara
+`client_proto=37` (§2). Le forme di riga di scrollback (`dm_with` opzionale),
+di `query_windows_list` (`network_id`, `target_nick`, `opened_at`) e di
+`mentions_bundle` (`id` e `dm_with` opzionali) sono state controllate sul
+sorgente del tag; i flussi in una sessione reale restano da provare a mano.
 
 Convenzione: "la documentazione dice" = contenuto verificato del
 `CLIENT_PROTOCOL.md`; "sto inferendo" = deduzione non scritta esplicitamente
@@ -354,15 +360,44 @@ il resto della sezione Sicurezza resta in Cicchetto:
   coesistono così come arrivano, senza migrazione di cache o bozze e senza
   seguire la selezione; silenziamenti e cursori di lettura non passano dal
   vecchio al nuovo nick (scelta accettata a monte). Il caso di sola
-  maiuscola/minuscola resta una stessa finestra. Non verificato contro un
-  server v37 reale.
+  maiuscola/minuscola resta una stessa finestra. Forma verificata sul
+  sorgente del tag `v1.5.12`; non provato in una sessione reale.
 - Dal v35 le righe di `mentions_bundle.messages` portano anche `id` e
   `dm_with` (entrambi opzionali: assenti su server più vecchi). Su un DM in
   ingresso `channel` è il **proprio** nick: la finestra di una menzione è
   `dm_with` (nick del peer, RAW) quando non è `null`, altrimenti `channel`.
   Cordiale usa `dm_with` come etichetta nel riepilogo delle menzioni; `id`
-  non è letto (servirebbe solo per saltare al messaggio). Non verificato
-  contro un server v35 reale.
+  non è letto (servirebbe solo per saltare al messaggio, issue 238). Forma
+  verificata sul sorgente del tag `v1.5.12`; non provato in una sessione
+  reale.
+- **Conteggi della finestra di sé dopo un cambio nick proprio (v37).** Il
+  listener sul topic del proprio nick riceve `window_counts` con `channel`
+  uguale al segmento del topic, cioè al nick con cui il listener è stato
+  joinato (`lib/grappa/window_counts/pusher.ex`). Cicchetto non guarda
+  `channel`: assegna il conteggio alla chiave `(rete, nick corrente)`
+  (`cicchetto/src/lib/subscribe.ts`, caso `window_counts`). Cordiale
+  riconosce il listener solo se il topic corrisponde al nick corrente e poi
+  confronta `channel` con quel nick; dopo un `own_nick_changed` il listener
+  viene rijoinato col nick nuovo, quindi il confronto torna e il conteggio
+  della finestra di sé segue il nick. Un push arrivato sul vecchio topic prima
+  del rejoin viene scartato, dove Cicchetto lo assegnerebbe al nick nuovo:
+  differenza transitoria, senza effetti oltre il rejoin, lasciata com'è. Il
+  conteggio non classifica righe, quindi `dm_with` non serve qui.
+- **Self-KICK (Grappa 2321, tag `v1.5.12`).** Un KICK subito dal proprio
+  utente non toglie più il canale dallo snapshot di rientro
+  (`last_joined_channels`): alla riconnessione il canale viene rientrato,
+  e un 474 (ban) lo porta in `join_failed` invece di farlo sparire. Solo
+  server: sul wire non cambia niente. Cordiale tratta `kicked`, `joined` e
+  `join_failed` come stati di finestra, con riga sbiadita nella sidebar
+  anche quando l'evento arriva come snapshot di riconnessione sul topic del
+  canale (`upsert` della voce di sidebar), quindi il canale non sparisce.
+- **Righe larghe (Cicchetto 2310).** Cicchetto ritaglia (`overflow-x: clip`)
+  le righe oltre la larghezza del pannello, tipicamente block art mIRC, invece
+  di lasciare scorrere il pannello di lato. Le righe di Cordiale sono
+  `StyledText` con a-capo automatico dentro una `ListView`; non c'è un
+  ritaglio esplicito. Senza una build locale non ho potuto provare una riga
+  lunga senza spazi: da controllare a occhio su desktop (vedi
+  `docs/feature-matrix.md`).
 - I `kind` di evento non riconosciuti vanno ignorati (regola
   additive-only, §3).
 
