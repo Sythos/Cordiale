@@ -2728,6 +2728,57 @@ struct SettingsState {
     foreground: bool,
 }
 
+struct NetworkState {
+    /// Network slug -> Grappa's own integer `network_id`, read from
+    /// `boot.networks`. WS commands like `/links` need the integer id,
+    /// never the slug — see `docs/protocol-notes.md` §4ter for why this
+    /// isn't just string-vs-int bikeshedding: the server hard-rejects a
+    /// non-integer `network_id` (`is_integer/1` guard), no slug fallback.
+    network_ids: HashMap<String, i64>,
+    /// Last server-confirmed IRC connection state per network. This is
+    /// separate from the Phoenix socket's reconnect state and is refreshed
+    /// from `/networks` after a `connection_state_changed` push.
+    network_connection_states: HashMap<String, NetworkConnectionSnapshot>,
+    /// Networks whose upstream IRC connect attempt is in flight, per the last
+    /// live `connection_progress`. Shown as a transient sidebar badge only;
+    /// cleared by `connected` and whenever the Phoenix socket drops, since
+    /// the event is never replayed and a missed `connected` would otherwise
+    /// leave the badge stuck.
+    connecting_networks: std::collections::HashSet<String>,
+    /// Current IRC nick for each network, seeded from `/boot.networks` and
+    /// replaced by `own_nick_changed` on the matching network only.
+    own_nicks: HashMap<String, String>,
+    /// Last server-confirmed self away state, kept independently per network
+    /// so a late away ACK cannot reset other per-network or message state.
+    away_states: HashMap<String, AwayStatus>,
+    /// Last server-confirmed services identity for each network. Snapshot and
+    /// live `session_identity_changed` events share this same replacement
+    /// path; `identified` remains authoritative when `account` is `None`.
+    session_identities: HashMap<String, SessionIdentity>,
+    /// Last complete IRC ISUPPORT snapshot for each known network. Live and
+    /// replayed `isupport_changed` events replace only their own network.
+    isupport_by_network: HashMap<String, IsupportState>,
+    /// Ordered set of active IRC user modes for each known network. Live and
+    /// replayed `umode_changed` snapshots replace only their own network.
+    user_modes_by_network: HashMap<String, Vec<String>>,
+    /// Ordered set of IRC user modes advertised as supported by each known
+    /// network. This is intentionally separate from the active modes above;
+    /// live and replayed `supported_umodes_changed` snapshots replace only
+    /// their own network.
+    supported_user_modes_by_network: HashMap<String, Vec<String>>,
+    /// Network whose user modes are on screen (bare `/umode`).
+    umode_view_network: Option<String>,
+    /// Presence watchlist nicks per network ID, replaced whole by every
+    /// `notify_list` snapshot (sent after join and after each change).
+    notify_lists: HashMap<i64, Vec<String>>,
+    /// Watched-nick presence per network ID, keyed by ASCII-folded nick.
+    /// A nick missing here reads as `unknown`.
+    presence_by_network: HashMap<i64, HashMap<String, Presence>>,
+    /// Last standalone away message (301) per `(network, folded peer)`,
+    /// shown above that peer's private window until dismissed.
+    peer_away: HashMap<(String, String), String>,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -2839,57 +2890,11 @@ struct WorkerState {
     current_query: bool,
     current_query_ready: bool,
     current_channel: Option<(String, String)>,
-    /// Network slug -> Grappa's own integer `network_id`, read from
-    /// `boot.networks`. WS commands like `/links` need the integer id,
-    /// never the slug — see `docs/protocol-notes.md` §4ter for why this
-    /// isn't just string-vs-int bikeshedding: the server hard-rejects a
-    /// non-integer `network_id` (`is_integer/1` guard), no slug fallback.
-    network_ids: HashMap<String, i64>,
-    /// Last server-confirmed IRC connection state per network. This is
-    /// separate from the Phoenix socket's reconnect state and is refreshed
-    /// from `/networks` after a `connection_state_changed` push.
-    network_connection_states: HashMap<String, NetworkConnectionSnapshot>,
-    /// Networks whose upstream IRC connect attempt is in flight, per the last
-    /// live `connection_progress`. Shown as a transient sidebar badge only;
-    /// cleared by `connected` and whenever the Phoenix socket drops, since
-    /// the event is never replayed and a missed `connected` would otherwise
-    /// leave the badge stuck.
-    connecting_networks: std::collections::HashSet<String>,
-    /// Current IRC nick for each network, seeded from `/boot.networks` and
-    /// replaced by `own_nick_changed` on the matching network only.
-    own_nicks: HashMap<String, String>,
-    /// Last server-confirmed self away state, kept independently per network
-    /// so a late away ACK cannot reset other per-network or message state.
-    away_states: HashMap<String, AwayStatus>,
-    /// Last server-confirmed services identity for each network. Snapshot and
-    /// live `session_identity_changed` events share this same replacement
-    /// path; `identified` remains authoritative when `account` is `None`.
-    session_identities: HashMap<String, SessionIdentity>,
-    /// Last complete IRC ISUPPORT snapshot for each known network. Live and
-    /// replayed `isupport_changed` events replace only their own network.
-    isupport_by_network: HashMap<String, IsupportState>,
-    /// Ordered set of active IRC user modes for each known network. Live and
-    /// replayed `umode_changed` snapshots replace only their own network.
-    user_modes_by_network: HashMap<String, Vec<String>>,
-    /// Ordered set of IRC user modes advertised as supported by each known
-    /// network. This is intentionally separate from the active modes above;
-    /// live and replayed `supported_umodes_changed` snapshots replace only
-    /// their own network.
-    supported_user_modes_by_network: HashMap<String, Vec<String>>,
-    /// Network whose user modes are on screen (bare `/umode`).
-    umode_view_network: Option<String>,
+    /// Per-network caches keyed by network slug or id.
+    networks: NetworkState,
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
-    /// Presence watchlist nicks per network ID, replaced whole by every
-    /// `notify_list` snapshot (sent after join and after each change).
-    notify_lists: HashMap<i64, Vec<String>>,
-    /// Watched-nick presence per network ID, keyed by ASCII-folded nick.
-    /// A nick missing here reads as `unknown`.
-    presence_by_network: HashMap<i64, HashMap<String, Presence>>,
-    /// Last standalone away message (301) per `(network, folded peer)`,
-    /// shown above that peer's private window until dismissed.
-    peer_away: HashMap<(String, String), String>,
     /// A sign-in waiting for its second factor (issue #118).
     pending_totp: Option<PendingTotp>,
     /// The token confirming a TOTP enrolment started in Settings.
@@ -2980,20 +2985,22 @@ impl WorkerState {
             current_query: false,
             current_query_ready: false,
             current_channel: None,
-            network_ids: HashMap::new(),
-            network_connection_states: HashMap::new(),
-            connecting_networks: std::collections::HashSet::new(),
-            own_nicks: HashMap::new(),
-            away_states: HashMap::new(),
-            session_identities: HashMap::new(),
-            isupport_by_network: HashMap::new(),
-            user_modes_by_network: HashMap::new(),
-            supported_user_modes_by_network: HashMap::new(),
-            umode_view_network: None,
+            networks: NetworkState {
+                network_ids: HashMap::new(),
+                network_connection_states: HashMap::new(),
+                connecting_networks: std::collections::HashSet::new(),
+                own_nicks: HashMap::new(),
+                away_states: HashMap::new(),
+                session_identities: HashMap::new(),
+                isupport_by_network: HashMap::new(),
+                user_modes_by_network: HashMap::new(),
+                supported_user_modes_by_network: HashMap::new(),
+                umode_view_network: None,
+                notify_lists: HashMap::new(),
+                presence_by_network: HashMap::new(),
+                peer_away: HashMap::new(),
+            },
             own_listener_ready: std::collections::HashSet::new(),
-            notify_lists: HashMap::new(),
-            presence_by_network: HashMap::new(),
-            peer_away: HashMap::new(),
             pending_totp: None,
             totp_enrollment: None,
             passwordless_recovery_token: None,
@@ -3210,7 +3217,7 @@ async fn run_worker(
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::SelectNetwork(network)) => {
-                        if state.network_ids.contains_key(&network) {
+                        if state.networks.network_ids.contains_key(&network) {
                             write_back_read_cursor(&mut state);
                             handle_select_channel(
                                 &mut state,
@@ -3261,7 +3268,7 @@ async fn run_worker(
                         close_directory(&mut state, &ui);
                     }
                     Some(WorkerCommand::DirectoryOpen(network)) => {
-                        if state.network_ids.contains_key(&network) {
+                        if state.networks.network_ids.contains_key(&network) {
                             let reopen = state
                                 .panels.directory
                                 .as_ref()
@@ -3328,16 +3335,16 @@ async fn run_worker(
                         toggle_user_mode(&state, &letter);
                     }
                     Some(WorkerCommand::UmodeClose) => {
-                        state.umode_view_network = None;
+                        state.networks.umode_view_network = None;
                     }
                     Some(WorkerCommand::DismissPeerAway) => {
                         if let Some(key) = current_peer_away_key(&state) {
-                            state.peer_away.remove(&key);
+                            state.networks.peer_away.remove(&key);
                         }
                         push_peer_away_banner(&state, &ui);
                     }
                     Some(WorkerCommand::ToggleNetwork(network)) => {
-                        let initially_expanded = !state.network_connection_states.get(&network).is_some_and(
+                        let initially_expanded = !state.networks.network_connection_states.get(&network).is_some_and(
                             |snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked),
                         );
                         let expanded = state.expanded_networks.entry(network).or_insert(initially_expanded);
@@ -3952,14 +3959,14 @@ async fn run_worker(
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.prefs.settings_network)
                         {
-                            let network_id = state.network_ids.get(network).copied();
+                            let network_id = state.networks.network_ids.get(network).copied();
                             if client
                                 .add_notify_nicks(token, network, vec![nick.clone()])
                                 .await
                                 .is_ok()
                             {
                                 if let Some(network_id) = network_id {
-                                    let nicks = state.notify_lists.entry(network_id).or_default();
+                                    let nicks = state.networks.notify_lists.entry(network_id).or_default();
                                     if !nicks.contains(&nick) {
                                         nicks.push(nick);
                                     }
@@ -3972,10 +3979,10 @@ async fn run_worker(
                         if let (Some(client), Some(token), Some(network)) =
                             (&state.client, &state.token, &state.prefs.settings_network)
                         {
-                            let network_id = state.network_ids.get(network).copied();
+                            let network_id = state.networks.network_ids.get(network).copied();
                             if client.remove_notify_nick(token, network, &nick).await.is_ok() {
                                 if let Some(nicks) =
-                                    network_id.and_then(|id| state.notify_lists.get_mut(&id))
+                                    network_id.and_then(|id| state.networks.notify_lists.get_mut(&id))
                                 {
                                     nicks.retain(|existing| existing != &nick);
                                 }
@@ -4096,7 +4103,7 @@ async fn run_worker(
                         home_remove_network(&mut state, &ui, network).await;
                     }
                     Some(WorkerCommand::HomeRecover(network)) => {
-                        if state.network_ids.contains_key(&network) {
+                        if state.networks.network_ids.contains_key(&network) {
                             send_user_network_verb(&state, &network, "recover");
                         }
                     }
@@ -4174,9 +4181,9 @@ async fn run_worker(
                         note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
-                        state.supported_user_modes_by_network.clear();
-                        if !state.connecting_networks.is_empty() {
-                            state.connecting_networks.clear();
+                        state.networks.supported_user_modes_by_network.clear();
+                        if !state.networks.connecting_networks.is_empty() {
+                            state.networks.connecting_networks.clear();
                             refresh_network_groups(&state, &ui);
                         }
                         let retry_secs = wait_secs(retry_in);
@@ -4194,9 +4201,9 @@ async fn run_worker(
                         note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
                         state.own_listener_ready.clear();
-                        state.supported_user_modes_by_network.clear();
-                        if !state.connecting_networks.is_empty() {
-                            state.connecting_networks.clear();
+                        state.networks.supported_user_modes_by_network.clear();
+                        if !state.networks.connecting_networks.is_empty() {
+                            state.networks.connecting_networks.clear();
                             refresh_network_groups(&state, &ui);
                         }
                         let retry_secs = wait_secs(retry_in);
@@ -4521,9 +4528,9 @@ async fn finish_connect(
             state.badge_count = normalize_badge_count(Some(&outcome.me.badge_count));
             state.members.clear();
             state.messages = messages_from_boot(&outcome);
-            state.network_ids = network_ids_from_boot(&outcome);
-            state.network_connection_states = connection_states;
-            state.connecting_networks.clear();
+            state.networks.network_ids = network_ids_from_boot(&outcome);
+            state.networks.network_connection_states = connection_states;
+            state.networks.connecting_networks.clear();
             state.panels.recover_panel = None;
             state.panels.reply_view = None;
             state.panels.whois_card = None;
@@ -4535,18 +4542,18 @@ async fn finish_connect(
             close_directory(state, ui);
             state.panels.dcc_offers.clear();
             state.panels.archive = None;
-            state.notify_lists.clear();
-            state.presence_by_network.clear();
-            state.peer_away.clear();
+            state.networks.notify_lists.clear();
+            state.networks.presence_by_network.clear();
+            state.networks.peer_away.clear();
             state.panels.mentions_bundles.clear();
             state.prefs.upload_limits = None;
             state.prefs.web_bundle = None;
-            state.own_nicks = network_nicks_from_boot(&outcome);
-            state.away_states.clear();
-            state.session_identities.clear();
-            state.isupport_by_network.clear();
-            state.user_modes_by_network.clear();
-            state.supported_user_modes_by_network.clear();
+            state.networks.own_nicks = network_nicks_from_boot(&outcome);
+            state.networks.away_states.clear();
+            state.networks.session_identities.clear();
+            state.networks.isupport_by_network.clear();
+            state.networks.user_modes_by_network.clear();
+            state.networks.supported_user_modes_by_network.clear();
             state.own_listener_ready.clear();
             state.catch_up_anchors.clear();
             state.prefs.notification_prefs = None;
@@ -4575,7 +4582,7 @@ async fn finish_connect(
             let ws_url = to_ws_url(&server_url);
             let (handle, events) = spawn_session(ws_url, token.clone(), session_identifier.clone());
             handle.set_foreground(state.prefs.foreground);
-            for network in state.network_ids.keys() {
+            for network in state.networks.network_ids.keys() {
                 handle.join_topic(
                     channel_topic(&session_identifier, network, SERVER_WINDOW_NAME),
                     false,
@@ -4584,7 +4591,7 @@ async fn finish_connect(
             for entry in &entries {
                 handle.join_topic(channel_topic(&session_identifier, &entry.0, &entry.1), true);
             }
-            for (network, nick) in &state.own_nicks {
+            for (network, nick) in &state.networks.own_nicks {
                 handle.join_topic(
                     own_nick_listener_topic(&session_identifier, network, nick),
                     false,
@@ -4602,7 +4609,7 @@ async fn finish_connect(
                 .iter()
                 .map(|(network, channel, _)| channel_topic(&session_identifier, network, channel))
                 .collect();
-            for network in state.network_ids.keys() {
+            for network in state.networks.network_ids.keys() {
                 state.joined_topics.insert(channel_topic(
                     &session_identifier,
                     network,
@@ -4610,7 +4617,7 @@ async fn finish_connect(
                 ));
             }
             state.channel_topics = channel_topics_for_entries(&session_identifier, &entries);
-            for (network, nick) in &state.own_nicks {
+            for (network, nick) in &state.networks.own_nicks {
                 state.joined_topics.insert(own_nick_listener_topic(
                     &session_identifier,
                     network,
@@ -4643,7 +4650,8 @@ async fn finish_connect(
             });
 
             let ui = ui.clone();
-            let mut distinct_networks: Vec<String> = state.network_ids.keys().cloned().collect();
+            let mut distinct_networks: Vec<String> =
+                state.networks.network_ids.keys().cloned().collect();
             distinct_networks.sort();
             state.prefs.settings_network = distinct_networks.first().cloned();
             let network_count = distinct_networks.len();
@@ -4652,8 +4660,8 @@ async fn finish_connect(
                 &entries,
                 &state.query_windows,
                 &state.expanded_networks,
-                &state.network_connection_states,
-                &state.network_ids,
+                &state.networks.network_connection_states,
+                &state.networks.network_ids,
             );
             let window_states = state.window_states.clone();
             let window_mentions = state.window_mentions.clone();
@@ -4703,8 +4711,9 @@ async fn finish_connect(
                 .last_channel
                 .filter(|(network, channel)| {
                     (channel == SERVER_WINDOW_NAME
-                        && state.network_ids.contains_key(network)
+                        && state.networks.network_ids.contains_key(network)
                         && !state
+                            .networks
                             .network_connection_states
                             .get(network)
                             .is_some_and(|snapshot| {
@@ -4718,10 +4727,12 @@ async fn finish_connect(
             if let Some((network, channel)) = restore_channel {
                 handle_select_channel(state, &ui, network, channel).await;
             } else if let Some(network) = state
+                .networks
                 .network_ids
                 .keys()
                 .filter(|network| {
                     !state
+                        .networks
                         .network_connection_states
                         .get(*network)
                         .is_some_and(|snapshot| {
@@ -7507,11 +7518,11 @@ fn push_notify_nicks(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         .prefs
         .settings_network
         .as_ref()
-        .and_then(|network| state.network_ids.get(network))
+        .and_then(|network| state.networks.network_ids.get(network))
         .copied();
-    let presence = network_id.and_then(|id| state.presence_by_network.get(&id));
+    let presence = network_id.and_then(|id| state.networks.presence_by_network.get(&id));
     let rows: Vec<(String, &'static str)> = network_id
-        .and_then(|id| state.notify_lists.get(&id))
+        .and_then(|id| state.networks.notify_lists.get(&id))
         .into_iter()
         .flatten()
         .map(|nick| {
@@ -7816,7 +7827,7 @@ fn send_user_verb(state: &WorkerState, network: &str, verb: &str, mut payload: V
     // guard server-side, no slug fallback) — see
     // `docs/protocol-notes.md` §4ter. Silently do nothing rather than
     // send a request guaranteed to be rejected if the id isn't known.
-    let Some(&network_id) = state.network_ids.get(network) else {
+    let Some(&network_id) = state.networks.network_ids.get(network) else {
         return;
     };
     let Value::Object(fields) = &mut payload else {
@@ -7842,7 +7853,7 @@ fn user_topic_channel_network(state: &WorkerState) -> Option<(&SessionHandle, St
     let session = state.session.as_ref()?;
     let identifier = state.identifier.as_ref()?;
     let (network, channel) = state.current_channel.as_ref()?;
-    let network_id = *state.network_ids.get(network)?;
+    let network_id = *state.networks.network_ids.get(network)?;
     Some((
         session,
         format!("grappa:user:{identifier}"),
@@ -8085,7 +8096,11 @@ fn window_status_for(state: &WorkerState) -> String {
     let Some((network, window)) = state.current_channel.as_ref() else {
         return String::new();
     };
-    let user_modes = state.user_modes_by_network.get(network).map(Vec::as_slice);
+    let user_modes = state
+        .networks
+        .user_modes_by_network
+        .get(network)
+        .map(Vec::as_slice);
     let channel_modes = if state.current_query || window == SERVER_WINDOW_NAME {
         None
     } else {
@@ -8261,7 +8276,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
         return;
     }
     let members = state.members.get(key).cloned().unwrap_or_default();
-    let ranking = MemberRanking::new(state.isupport_by_network.get(&key.0));
+    let ranking = MemberRanking::new(state.networks.isupport_by_network.get(&key.0));
     let can_moderate = state
         .identifier
         .as_deref()
@@ -9027,10 +9042,10 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         &state.channel_entries,
         &state.query_windows,
         &state.expanded_networks,
-        &state.network_connection_states,
-        &state.network_ids,
+        &state.networks.network_connection_states,
+        &state.networks.network_ids,
     );
-    apply_connecting_labels(&mut data, &state.connecting_networks);
+    apply_connecting_labels(&mut data, &state.networks.connecting_networks);
     let window_states = state.window_states.clone();
     let window_mentions = state.window_mentions.clone();
     let window_messages = state.window_messages.clone();
@@ -9049,16 +9064,18 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 /// only the home page shows.
 fn push_home(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let inputs: Vec<home::HomeRowInput> = state
+        .networks
         .network_ids
         .keys()
         .map(|network| {
-            let snapshot = state.network_connection_states.get(network);
+            let snapshot = state.networks.network_connection_states.get(network);
             home::HomeRowInput {
                 network: network.clone(),
-                nick: state.own_nicks.get(network).cloned(),
+                nick: state.networks.own_nicks.get(network).cloned(),
                 state: snapshot.map_or("connected", |snapshot| snapshot.status.wire_name()),
                 reason: snapshot.and_then(|snapshot| snapshot.reason.clone()),
                 identified: state
+                    .networks
                     .session_identities
                     .get(network)
                     .is_some_and(|identity| identity.identified),
@@ -9129,6 +9146,7 @@ async fn load_featured_channels(state: &mut WorkerState, ui: &slint::Weak<AppWin
         return;
     };
     let mut missing: Vec<String> = state
+        .networks
         .network_ids
         .keys()
         .filter(|network| !state.home.featured.contains_key(*network))
@@ -9146,7 +9164,7 @@ async fn load_featured_channels(state: &mut WorkerState, ui: &slint::Weak<AppWin
                 Vec::new()
             }
         };
-        if state.network_ids.contains_key(&network) {
+        if state.networks.network_ids.contains_key(&network) {
             state.home.featured.insert(network, channels);
         }
     }
@@ -9165,7 +9183,7 @@ async fn home_set_connection_state(
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
         return;
     };
-    if !state.network_ids.contains_key(&network) {
+    if !state.networks.network_ids.contains_key(&network) {
         return;
     }
     let reconnect = target == "connected";
@@ -9201,7 +9219,7 @@ async fn home_remove_network(
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
         return;
     };
-    if !state.network_ids.contains_key(&network) {
+    if !state.networks.network_ids.contains_key(&network) {
         return;
     }
     state.home.row_errors.remove(&network);
@@ -9256,7 +9274,7 @@ async fn home_open_featured(
     network: String,
     channel: String,
 ) {
-    if !state.network_ids.contains_key(&network) {
+    if !state.networks.network_ids.contains_key(&network) {
         return;
     }
     state.home.featured_errors.remove(&network);
@@ -9308,7 +9326,7 @@ fn refresh_mention_context(state: &WorkerState) {
     let own_nick = state
         .current_channel
         .as_ref()
-        .and_then(|(network, _)| state.own_nicks.get(network))
+        .and_then(|(network, _)| state.networks.own_nicks.get(network))
         .cloned();
     if let Ok(mut context) = MENTION_CONTEXT.write() {
         *context = Some(MentionContext {
@@ -9741,6 +9759,7 @@ fn show_chat_lines(ui: &AppWindow, lines: Vec<ChatLine>) {
 
 fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isupport::CaseMapping {
     state
+        .networks
         .isupport_by_network
         .get(network)
         .map(|isupport| isupport.casemapping)
@@ -10784,7 +10803,7 @@ fn apply_color_theme(
                 state.members.get(key).cloned().unwrap_or_default(),
                 network_casemapping(state, &key.0),
                 state.denoise_active(key),
-                MemberRanking::new(state.isupport_by_network.get(&key.0)),
+                MemberRanking::new(state.networks.isupport_by_network.get(&key.0)),
             )
         });
     let dark_theme = state.prefs.theme == Theme::Dark;
@@ -11028,12 +11047,17 @@ fn umode_rows(active: &[String], supported: &[String]) -> Vec<(String, bool, boo
 
 /// Refreshes the user-mode view, switching to it when `open`.
 fn push_umode_view(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
-    let Some(network) = state.umode_view_network.clone() else {
+    let Some(network) = state.networks.umode_view_network.clone() else {
         return;
     };
     let empty = Vec::new();
-    let active = state.user_modes_by_network.get(&network).unwrap_or(&empty);
+    let active = state
+        .networks
+        .user_modes_by_network
+        .get(&network)
+        .unwrap_or(&empty);
     let supported = state
+        .networks
         .supported_user_modes_by_network
         .get(&network)
         .unwrap_or(&empty);
@@ -11058,13 +11082,14 @@ fn push_umode_view(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool)
 /// Sends `+x` or `-x` for a settable mode; the view updates when Grappa
 /// pushes the new modes back.
 fn toggle_user_mode(state: &WorkerState, letter: &str) {
-    let Some(network) = state.umode_view_network.as_deref() else {
+    let Some(network) = state.networks.umode_view_network.as_deref() else {
         return;
     };
     if !SETTABLE_UMODES.contains(&letter) {
         return;
     }
     let active = state
+        .networks
         .user_modes_by_network
         .get(network)
         .is_some_and(|modes| modes.iter().any(|mode| mode == letter));
@@ -11478,6 +11503,7 @@ struct PresenceChange {
 /// casemapping, so `Alice` and `alice` share one message.
 fn peer_away_key(state: &WorkerState, network: &str, peer: &str) -> (String, String) {
     let casemapping = state
+        .networks
         .isupport_by_network
         .get(network)
         .map(|isupport| isupport.casemapping)
@@ -11499,7 +11525,7 @@ fn current_peer_away_key(state: &WorkerState) -> Option<(String, String)> {
 fn push_peer_away_banner(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let (peer, message) = current_peer_away_key(state)
         .and_then(|key| {
-            let message = state.peer_away.get(&key)?.clone();
+            let message = state.networks.peer_away.get(&key)?.clone();
             let peer = state
                 .current_channel
                 .as_ref()
@@ -11579,7 +11605,7 @@ async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
     else {
         return;
     };
-    if !state.network_ids.contains_key(&network) {
+    if !state.networks.network_ids.contains_key(&network) {
         return;
     }
     // The directory keeps the server's `LIST` spelling; window states are

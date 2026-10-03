@@ -66,7 +66,7 @@ pub(crate) async fn run_slash_command(
         }
         SlashCommand::Msg { target, text } => {
             let prefix_symbols = cordiale_core::isupport::prefix_symbol_order(
-                state.isupport_by_network.get(&network),
+                state.networks.isupport_by_network.get(&network),
             );
             if let Some(statusmsg) = peel_statusmsg_target(&target, &prefix_symbols) {
                 // STATUSMSG is delivered into the underlying channel window;
@@ -300,7 +300,7 @@ pub(crate) async fn run_slash_command(
             post_message(&client, &token, &network, &channel, request).await
         }
         SlashCommand::UmodeShow => {
-            state.umode_view_network = Some(network.clone());
+            state.networks.umode_view_network = Some(network.clone());
             push_umode_view(state, ui, true);
             return;
         }
@@ -372,7 +372,7 @@ pub(crate) async fn run_slash_command(
         // Parks every network (a failure on one doesn't stop the others,
         // as in Cicchetto), then signs out like the Disconnect button.
         SlashCommand::Quit(reason) => {
-            let networks: Vec<String> = state.network_ids.keys().cloned().collect();
+            let networks: Vec<String> = state.networks.network_ids.keys().cloned().collect();
             for target in networks {
                 if let Err(err) = client
                     .set_connection_state(&token, &target, "parked", reason.as_deref())
@@ -526,7 +526,7 @@ fn start_kickban(
     let (Some(session), Some(identifier), Some(&network_id)) = (
         &state.session,
         &state.identifier,
-        state.network_ids.get(network),
+        state.networks.network_ids.get(network),
     ) else {
         return;
     };

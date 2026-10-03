@@ -1055,7 +1055,7 @@ fn parse_own_nick_window_counts(
     }
     let counts = parse_window_count_snapshot(payload)?;
     let network = own_nick_listener_network_for_topic(state, topic)?;
-    let own_nick = state.own_nicks.get(&network)?;
+    let own_nick = state.networks.own_nicks.get(&network)?;
     if ascii_fold_channel(channel) != ascii_fold_channel(own_nick) {
         return None;
     }
@@ -1203,6 +1203,7 @@ pub(crate) fn retain_window_counts_for_open_windows(state: &mut WorkerState) {
     );
     retained.extend(
         state
+            .networks
             .own_nicks
             .iter()
             .map(|(network, nick)| window_counts_key(network, nick)),
@@ -1452,7 +1453,7 @@ fn handle_window_pending(
     };
     // The event identifies a window on an already bootstrapped network. Do
     // not invent a new network from an unsolicited or stale payload.
-    if !state.network_ids.contains_key(&network) {
+    if !state.networks.network_ids.contains_key(&network) {
         return;
     }
 
@@ -1602,7 +1603,7 @@ fn handle_window_invited(
     };
     // Do not manufacture a sidebar/network entry from an invite for a stale
     // or unknown network; the bootstrap snapshot remains authoritative.
-    if !state.network_ids.contains_key(&network) {
+    if !state.networks.network_ids.contains_key(&network) {
         return;
     }
 
@@ -1776,7 +1777,7 @@ fn handle_window_invite_declined(
     };
     // Bootstrap remains authoritative for known networks; malformed or stale
     // network names must not remove an unrelated row or lifecycle entry.
-    if !state.network_ids.contains_key(&network) {
+    if !state.networks.network_ids.contains_key(&network) {
         return;
     }
 
@@ -1880,7 +1881,7 @@ pub(crate) fn apply_members_seeded(
     let network = payload.get("network").and_then(Value::as_str)?.to_string();
     let channel = payload.get("channel").and_then(Value::as_str)?.to_string();
     let list = payload.get("members").and_then(Value::as_array)?;
-    let isupport = state.isupport_by_network.get(&network);
+    let isupport = state.networks.isupport_by_network.get(&network);
     let order = cordiale_core::isupport::prefix_symbol_order(isupport);
     let mut members: Vec<MemberEntry> = list
         .iter()
@@ -1911,8 +1912,9 @@ pub(crate) fn update_members_from_frame(
     match kind {
         Some("join") => {
             let Some(nick) = nick else { return false };
-            let order =
-                cordiale_core::isupport::prefix_symbol_order(state.isupport_by_network.get(&key.0));
+            let order = cordiale_core::isupport::prefix_symbol_order(
+                state.networks.isupport_by_network.get(&key.0),
+            );
             let members = state.members.entry(key.clone()).or_default();
             if members.iter().any(|(name, _)| name == nick) {
                 return false;
@@ -1940,8 +1942,9 @@ pub(crate) fn update_members_from_frame(
             ) else {
                 return false;
             };
-            let order =
-                cordiale_core::isupport::prefix_symbol_order(state.isupport_by_network.get(&key.0));
+            let order = cordiale_core::isupport::prefix_symbol_order(
+                state.networks.isupport_by_network.get(&key.0),
+            );
             let Some(members) = state.members.get_mut(key) else {
                 return false;
             };
@@ -1963,7 +1966,7 @@ pub(crate) fn update_members_from_frame(
                 .and_then(|meta| meta.get("modes"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let isupport = state.isupport_by_network.get(&key.0);
+            let isupport = state.networks.isupport_by_network.get(&key.0);
             let prefix_changes =
                 cordiale_core::isupport::prefix_mode_changes(modes, &mode_args(payload), isupport);
             let order = cordiale_core::isupport::prefix_symbol_order(isupport);
@@ -2246,7 +2249,7 @@ pub(crate) fn own_nick_listener_network_for_topic(
     topic: &str,
 ) -> Option<String> {
     let user = state.identifier.as_deref()?;
-    state.own_nicks.iter().find_map(|(network, nick)| {
+    state.networks.own_nicks.iter().find_map(|(network, nick)| {
         (own_nick_listener_topic(user, network, nick) == topic).then(|| network.clone())
     })
 }
@@ -2472,6 +2475,7 @@ fn return_home_if_network_selected(
 
 fn collapse_if_parked(state: &mut WorkerState, network: &str) -> bool {
     if state
+        .networks
         .network_connection_states
         .get(network)
         .is_some_and(|snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked))
@@ -2593,11 +2597,11 @@ pub(crate) fn handle_away_confirmed(state: &mut WorkerState, carrier_topic: &str
     if carrier_topic != format!("grappa:user:{user}") {
         return;
     }
-    let Some((network, status)) = parse_away_confirmed(payload, &state.network_ids) else {
+    let Some((network, status)) = parse_away_confirmed(payload, &state.networks.network_ids) else {
         persistence::log_line("away_confirmed rejected: invalid state or unknown network");
         return;
     };
-    if apply_away_confirmed(&mut state.away_states, &network, status) {
+    if apply_away_confirmed(&mut state.networks.away_states, &network, status) {
         persistence::log_line(&format!("away_confirmed applied: {network}={status:?}"));
     }
 }
@@ -2637,7 +2641,7 @@ pub(crate) fn handle_session_identity_changed(
     if carrier_topic != format!("grappa:user:{user}") {
         return;
     }
-    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+    let Some(network_slugs) = network_slugs_by_id(&state.networks.network_ids) else {
         persistence::log_line("session_identity_changed rejected: invalid network map");
         return;
     };
@@ -2647,7 +2651,7 @@ pub(crate) fn handle_session_identity_changed(
         );
         return;
     };
-    state.session_identities.insert(network, identity);
+    state.networks.session_identities.insert(network, identity);
 }
 
 pub(crate) fn handle_isupport_changed(
@@ -2665,7 +2669,7 @@ pub(crate) fn handle_isupport_changed(
         persistence::log_line("isupport_changed rejected: invalid payload");
         return;
     };
-    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+    let Some(network_slugs) = network_slugs_by_id(&state.networks.network_ids) else {
         persistence::log_line("isupport_changed rejected: invalid network map");
         return;
     };
@@ -2674,6 +2678,7 @@ pub(crate) fn handle_isupport_changed(
         return;
     };
     state
+        .networks
         .isupport_by_network
         .insert(network.clone(), event.state);
 }
@@ -2710,7 +2715,7 @@ pub(crate) fn handle_umode_changed(state: &mut WorkerState, carrier_topic: &str,
     if carrier_topic != format!("grappa:user:{user}") {
         return;
     }
-    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+    let Some(network_slugs) = network_slugs_by_id(&state.networks.network_ids) else {
         persistence::log_line("umode_changed rejected: invalid network map");
         return;
     };
@@ -2718,7 +2723,7 @@ pub(crate) fn handle_umode_changed(state: &mut WorkerState, carrier_topic: &str,
         persistence::log_line("umode_changed rejected: invalid payload or unknown network");
         return;
     };
-    state.user_modes_by_network.insert(network, modes);
+    state.networks.user_modes_by_network.insert(network, modes);
 }
 
 fn parse_supported_umodes_changed(
@@ -2757,7 +2762,7 @@ pub(crate) fn handle_supported_umodes_changed(
     if carrier_topic != format!("grappa:user:{user}") {
         return;
     }
-    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+    let Some(network_slugs) = network_slugs_by_id(&state.networks.network_ids) else {
         persistence::log_line("supported_umodes_changed rejected: invalid network map");
         return;
     };
@@ -2767,7 +2772,10 @@ pub(crate) fn handle_supported_umodes_changed(
         );
         return;
     };
-    state.supported_user_modes_by_network.insert(network, modes);
+    state
+        .networks
+        .supported_user_modes_by_network
+        .insert(network, modes);
 }
 
 pub(crate) fn apply_own_nick_change(
@@ -2777,6 +2785,7 @@ pub(crate) fn apply_own_nick_change(
     nick: &str,
 ) -> Vec<OwnNickListenerAction> {
     let previous = state
+        .networks
         .own_nicks
         .insert(network.to_string(), nick.to_string());
     let new_topic = own_nick_listener_topic(user, network, nick);
@@ -2838,7 +2847,7 @@ fn handle_own_nick_changed(state: &mut WorkerState, carrier_topic: &str, payload
     if carrier_topic != format!("grappa:user:{user}") {
         return;
     }
-    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+    let Some(network_slugs) = network_slugs_by_id(&state.networks.network_ids) else {
         persistence::log_line("own_nick_changed rejected: ambiguous network ID map");
         return;
     };
@@ -2879,7 +2888,7 @@ async fn handle_channels_changed(
         return;
     };
 
-    let mut networks: Vec<String> = state.network_ids.keys().cloned().collect();
+    let mut networks: Vec<String> = state.networks.network_ids.keys().cloned().collect();
     networks.sort();
     let mut requests = tokio::task::JoinSet::new();
     for network in networks {
@@ -3004,7 +3013,7 @@ fn reconcile_own_nick_listener_topics(
     user: &str,
     next_own_nicks: HashMap<String, String>,
 ) -> Vec<OwnNickListenerAction> {
-    let previous = std::mem::replace(&mut state.own_nicks, next_own_nicks.clone());
+    let previous = std::mem::replace(&mut state.networks.own_nicks, next_own_nicks.clone());
     let mut actions = Vec::new();
 
     for (network, old_nick) in previous {
@@ -3131,8 +3140,9 @@ pub(crate) fn apply_network_rest_refresh(
     state
         .home
         .retain_networks(&next_network_ids.keys().map(String::as_str).collect());
-    state.network_ids = next_network_ids;
-    state.network_connection_states = network_connection_states_from_entries(&boot.networks);
+    state.networks.network_ids = next_network_ids;
+    state.networks.network_connection_states =
+        network_connection_states_from_entries(&boot.networks);
 
     let listener_actions = reconcile_own_nick_listener_topics(
         state,
@@ -3143,31 +3153,41 @@ pub(crate) fn apply_network_rest_refresh(
     // The refresh is authoritative for per-network transient snapshots too;
     // discard entries for networks no longer present while preserving the
     // latest values for networks that remain attached/parked.
-    let known_networks: std::collections::HashSet<&str> =
-        state.network_ids.keys().map(String::as_str).collect();
+    let known_networks: std::collections::HashSet<&str> = state
+        .networks
+        .network_ids
+        .keys()
+        .map(String::as_str)
+        .collect();
     state
+        .networks
         .away_states
         .retain(|network, _| known_networks.contains(network.as_str()));
     state
+        .networks
         .session_identities
         .retain(|network, _| known_networks.contains(network.as_str()));
     state
+        .networks
         .isupport_by_network
         .retain(|network, _| known_networks.contains(network.as_str()));
     state
+        .networks
         .user_modes_by_network
         .retain(|network, _| known_networks.contains(network.as_str()));
     state
+        .networks
         .supported_user_modes_by_network
         .retain(|network, _| known_networks.contains(network.as_str()));
     state
+        .networks
         .connecting_networks
         .retain(|network| known_networks.contains(network.as_str()));
 
     let mut actions = channel_actions;
     // The server window exists per network even when no IRC channel is joined.
     // It shares the channel topic shape, but is not part of boot.channels.
-    let mut server_networks: Vec<String> = state.network_ids.keys().cloned().collect();
+    let mut server_networks: Vec<String> = state.networks.network_ids.keys().cloned().collect();
     server_networks.sort();
     for network in server_networks {
         let topic = channel_topic(identifier, &network, SERVER_WINDOW_NAME);
@@ -3186,7 +3206,7 @@ pub(crate) fn apply_network_rest_refresh(
         .iter()
         .filter(|topic| {
             query_from_topic(identifier, topic)
-                .is_some_and(|(network, _)| !state.network_ids.contains_key(&network))
+                .is_some_and(|(network, _)| !state.networks.network_ids.contains_key(&network))
         })
         .cloned()
         .collect();
@@ -3216,14 +3236,14 @@ async fn handle_connection_state_changed(
     else {
         return;
     };
-    if state.network_ids.get(&transition.network_slug) != Some(&transition.network_id) {
+    if state.networks.network_ids.get(&transition.network_slug) != Some(&transition.network_id) {
         persistence::log_line("connection_state_changed rejected: unknown or stale network");
         return;
     }
 
     let network_slug = transition.network_slug.clone();
     let (snapshot_changed, return_home) = record_network_connection_state(
-        &mut state.network_connection_states,
+        &mut state.networks.network_connection_states,
         &network_slug,
         transition.snapshot.clone(),
     );
@@ -3268,7 +3288,7 @@ async fn reconcile_network_connection_states(
     let refreshed_states = network_connection_states_from_entries(&networks);
     let mut state_changed = false;
     for (slug, snapshot) in refreshed_states {
-        let Some(expected_id) = state.network_ids.get(&slug) else {
+        let Some(expected_id) = state.networks.network_ids.get(&slug) else {
             continue;
         };
         if refreshed_ids
@@ -3277,8 +3297,11 @@ async fn reconcile_network_connection_states(
         {
             continue;
         }
-        let (row_changed, return_home) =
-            record_network_connection_state(&mut state.network_connection_states, &slug, snapshot);
+        let (row_changed, return_home) = record_network_connection_state(
+            &mut state.networks.network_connection_states,
+            &slug,
+            snapshot,
+        );
         if row_changed {
             state_changed |= collapse_if_parked(state, &slug);
         }
@@ -3340,9 +3363,12 @@ async fn handle_connection_progress(
     let Some(identifier) = state.identifier.clone() else {
         return;
     };
-    let Some((network, progress)) =
-        parse_connection_progress(payload, carrier_topic, &identifier, &state.network_ids)
-    else {
+    let Some((network, progress)) = parse_connection_progress(
+        payload,
+        carrier_topic,
+        &identifier,
+        &state.networks.network_ids,
+    ) else {
         persistence::log_line("connection_progress rejected: invalid payload or unknown network");
         return;
     };
@@ -3351,7 +3377,7 @@ async fn handle_connection_progress(
     if progress == ConnectionProgressState::Connecting {
         state.panels.lusers_requested.remove(&network);
     }
-    if apply_connection_progress(&mut state.connecting_networks, &network, progress) {
+    if apply_connection_progress(&mut state.networks.connecting_networks, &network, progress) {
         refresh_network_groups(state, ui);
     }
     if progress == ConnectionProgressState::Connected {
@@ -4074,6 +4100,7 @@ async fn handle_archive_purged(
         return;
     };
     let casemapping = state
+        .networks
         .isupport_by_network
         .get(&network)
         .map(|isupport| isupport.casemapping)
@@ -4136,7 +4163,7 @@ fn handle_notify_list(
         persistence::log_line("notify_list rejected: invalid carrier or payload");
         return;
     };
-    state.notify_lists = lists;
+    state.networks.notify_lists = lists;
     push_notify_nicks(state, ui);
 }
 
@@ -4180,7 +4207,7 @@ fn handle_presence_snapshot(
         persistence::log_line("presence_snapshot rejected: invalid carrier or payload");
         return;
     };
-    state.presence_by_network.insert(network_id, nicks);
+    state.networks.presence_by_network.insert(network_id, nicks);
     push_notify_nicks(state, ui);
 }
 
@@ -4238,6 +4265,7 @@ fn handle_presence_changed(
         return;
     };
     state
+        .networks
         .presence_by_network
         .entry(change.network_id)
         .or_default()
@@ -4246,7 +4274,7 @@ fn handle_presence_changed(
     if change.initial {
         return;
     }
-    let network = network_slugs_by_id(&state.network_ids)
+    let network = network_slugs_by_id(&state.networks.network_ids)
         .and_then(|slugs| slugs.get(&change.network_id).cloned())
         .unwrap_or_else(|| change.network_id.to_string());
     let status = if change.presence == Presence::Online {
@@ -4305,7 +4333,7 @@ fn handle_presence_error(
     persistence::log_line(&format!(
         "presence error on network {network_id}: reason={reason}"
     ));
-    let network = network_slugs_by_id(&state.network_ids)
+    let network = network_slugs_by_id(&state.networks.network_ids)
         .and_then(|slugs| slugs.get(&network_id).cloned())
         .unwrap_or_else(|| network_id.to_string());
     let status = if reason == "list_full" {
@@ -4362,7 +4390,7 @@ fn handle_peer_away(
     };
     let key = peer_away_key(state, &network, &peer);
     let shown = current_peer_away_key(state).as_ref() == Some(&key);
-    state.peer_away.insert(key, message);
+    state.networks.peer_away.insert(key, message);
     if shown {
         push_peer_away_banner(state, ui);
     }
@@ -5363,6 +5391,7 @@ fn handle_whois_avatar_ready(
     // IRC's default mapping applies until the network's ISUPPORT says
     // otherwise.
     let casemapping = state
+        .networks
         .isupport_by_network
         .get(&network)
         .map(|isupport| isupport.casemapping)
@@ -5413,7 +5442,7 @@ async fn handle_network_lifecycle(
     // its identity is checked against the refreshed authoritative snapshot
     // below instead.
     if lifecycle == NetworkLifecycleKind::Detached
-        && state.network_ids.get(&network_slug) != Some(&network_id)
+        && state.networks.network_ids.get(&network_slug) != Some(&network_id)
     {
         persistence::log_line(&format!(
             "{} rejected: unknown or stale network",
@@ -5464,7 +5493,7 @@ async fn handle_network_lifecycle(
                 ChannelTopicAction::Join(topic) => {
                     let is_own_listener =
                         own_nick_listener_network_for_topic(state, &topic).is_some();
-                    let is_server_window = state.network_ids.keys().any(|network| {
+                    let is_server_window = state.networks.network_ids.keys().any(|network| {
                         topic == channel_topic(&identifier, network, SERVER_WINDOW_NAME)
                     });
                     session.join_topic(topic, !(is_own_listener || is_server_window));
@@ -5474,13 +5503,14 @@ async fn handle_network_lifecycle(
     }
 
     let is_parked = state
+        .networks
         .network_connection_states
         .get(&network_slug)
         .is_some_and(|snapshot| matches!(snapshot.status, NetworkConnectionStatus::Parked));
     if is_parked {
         collapse_if_parked(state, &network_slug);
     }
-    if !state.network_ids.contains_key(&network_slug) || is_parked {
+    if !state.networks.network_ids.contains_key(&network_slug) || is_parked {
         return_home_if_network_selected(state, ui, &network_slug);
     }
 
@@ -5807,7 +5837,7 @@ fn handle_query_windows_list(
     if carrier_topic != format!("grappa:user:{identifier}") {
         return;
     }
-    let Some(network_slugs) = network_slugs_by_id(&state.network_ids) else {
+    let Some(network_slugs) = network_slugs_by_id(&state.networks.network_ids) else {
         persistence::log_line("query_windows_list rejected: ambiguous network ID map");
         return;
     };
