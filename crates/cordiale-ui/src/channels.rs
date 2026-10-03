@@ -6,7 +6,7 @@ pub(crate) async fn handle_select_channel(
     network: String,
     channel: String,
 ) {
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     close_directory(state, ui);
@@ -15,8 +15,8 @@ pub(crate) async fn handle_select_channel(
         return;
     }
     let topic = channel_topic(&identifier, &network, &channel);
-    if let Some(handle) = &state.session {
-        if state.joined_topics.insert(topic.clone()) {
+    if let Some(handle) = &state.conn.session {
+        if state.conn.joined_topics.insert(topic.clone()) {
             handle.join_topic(topic, !server_window);
         }
     }
@@ -130,9 +130,9 @@ pub(crate) async fn handle_part_channel(
         return;
     }
     let (Some(client), Some(token), Some(identifier)) = (
-        state.client.clone(),
-        state.token.clone(),
-        state.identifier.clone(),
+        state.conn.client.clone(),
+        state.conn.token.clone(),
+        state.conn.identifier.clone(),
     ) else {
         return;
     };
@@ -157,7 +157,7 @@ pub(crate) async fn handle_part_channel(
     let mut remaining_entries = state.channel_entries.clone();
     remove_sidebar_channel_entry(&mut remaining_entries, &network, &channel);
     let actions = reconcile_channel_entries(state, &identifier, remaining_entries);
-    if let Some(session) = state.session.as_ref() {
+    if let Some(session) = state.conn.session.as_ref() {
         for action in actions {
             if let ChannelTopicAction::Leave(topic) = action {
                 session.leave_topic(topic);
@@ -216,7 +216,7 @@ pub(crate) async fn handle_dismiss_kicked_channel(
     if !window_is_kicked(&state.window_states, &network, &channel) {
         return;
     }
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
 
@@ -476,7 +476,7 @@ pub(crate) fn reconcile_channel_entries_in(
         if channel_topic_is_owned_elsewhere(state, user, &topic) {
             continue;
         }
-        if state.joined_topics.remove(&topic) {
+        if state.conn.joined_topics.remove(&topic) {
             actions.push(ChannelTopicAction::Leave(topic));
         }
     }
@@ -484,7 +484,7 @@ pub(crate) fn reconcile_channel_entries_in(
     let mut desired_topics: Vec<String> = next_topics.into_iter().collect();
     desired_topics.sort();
     for topic in desired_topics {
-        if state.joined_topics.insert(topic.clone()) {
+        if state.conn.joined_topics.insert(topic.clone()) {
             actions.push(ChannelTopicAction::Join(topic));
         }
     }

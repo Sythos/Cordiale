@@ -310,7 +310,7 @@ fn session_identity_changed_rejects_unknown_network_and_invalid_fields() {
 #[test]
 fn session_identity_changed_is_user_carrier_scoped_and_per_network() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
@@ -405,7 +405,7 @@ fn isupport_payload(network_id: i64, casemapping: &str, frame_budget_base: u64) 
 #[test]
 fn isupport_changed_is_user_carrier_scoped_and_replaces_only_its_network() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
@@ -450,7 +450,7 @@ fn isupport_changed_is_user_carrier_scoped_and_replaces_only_its_network() {
 #[test]
 fn isupport_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state.networks.network_ids = [("libera".to_string(), 7)].into_iter().collect();
 
     handle_isupport_changed(
@@ -487,7 +487,7 @@ fn isupport_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
 #[test]
 fn umode_changed_preserves_ordered_set_and_replays_as_replacement() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
@@ -533,7 +533,7 @@ fn umode_changed_preserves_ordered_set_and_replays_as_replacement() {
 #[test]
 fn umode_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state.networks.network_ids = [("libera".to_string(), 7)].into_iter().collect();
     let accepted = serde_json::json!({
         "kind": "umode_changed",
@@ -569,7 +569,7 @@ fn umode_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
 #[test]
 fn supported_umodes_changed_is_separate_ordered_per_network_and_replays_as_replacement() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
@@ -632,7 +632,7 @@ fn supported_umodes_changed_is_separate_ordered_per_network_and_replays_as_repla
 #[test]
 fn supported_umodes_changed_rejects_bad_carrier_network_and_payload_without_mutation() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state.networks.network_ids = [("libera".to_string(), 7)].into_iter().collect();
     let accepted = serde_json::json!({
         "kind": "supported_umodes_changed",
@@ -669,7 +669,7 @@ fn supported_umodes_changed_rejects_bad_carrier_network_and_payload_without_muta
 #[test]
 fn late_away_confirmation_updates_one_network_without_resetting_other_state() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state.networks.network_ids = [("libera".to_string(), 7), ("azzurra".to_string(), 9)]
         .into_iter()
         .collect();
@@ -847,16 +847,16 @@ fn channels_changed_keeps_topics_owned_by_queries_and_own_nick_listener() {
         own_topic.clone(),
         channel_only_topic.clone(),
     ]);
-    state.joined_topics = state.channel_topics.clone();
+    state.conn.joined_topics = state.channel_topics.clone();
 
     assert_eq!(
         reconcile_channel_entries(&mut state, user, Vec::new()),
         vec![ChannelTopicAction::Leave(channel_only_topic.clone())]
     );
-    assert!(state.joined_topics.contains(&active_query_topic));
-    assert!(state.joined_topics.contains(&stale_query_topic));
-    assert!(state.joined_topics.contains(&own_topic));
-    assert!(!state.joined_topics.contains(&channel_only_topic));
+    assert!(state.conn.joined_topics.contains(&active_query_topic));
+    assert!(state.conn.joined_topics.contains(&stale_query_topic));
+    assert!(state.conn.joined_topics.contains(&own_topic));
+    assert!(!state.conn.joined_topics.contains(&channel_only_topic));
     assert!(state.channel_topics.is_empty());
 }
 
@@ -875,10 +875,11 @@ fn own_nick_rename_leaves_old_topic_before_joining_new_topic() {
     let new_topic = own_nick_listener_topic("vjt", "libera", "NewNick");
     let other_topic = own_nick_listener_topic("vjt", "azzurra", "AwayNick");
     state
+        .conn
         .joined_topics
         .extend([old_topic.clone(), other_topic.clone()]);
-    state.own_listener_ready.insert(old_topic.clone());
-    state.own_listener_ready.insert(other_topic.clone());
+    state.conn.own_listener_ready.insert(old_topic.clone());
+    state.conn.own_listener_ready.insert(other_topic.clone());
 
     let actions = apply_own_nick_change(&mut state, "vjt", "libera", "NewNick");
 
@@ -889,12 +890,12 @@ fn own_nick_rename_leaves_old_topic_before_joining_new_topic() {
             OwnNickListenerAction::Join(new_topic.clone()),
         ]
     );
-    assert!(!state.joined_topics.contains(&old_topic));
-    assert!(state.joined_topics.contains(&new_topic));
-    assert!(!state.own_listener_ready.contains(&old_topic));
-    assert!(!state.own_listener_ready.contains(&new_topic));
-    assert!(state.joined_topics.contains(&other_topic));
-    assert!(state.own_listener_ready.contains(&other_topic));
+    assert!(!state.conn.joined_topics.contains(&old_topic));
+    assert!(state.conn.joined_topics.contains(&new_topic));
+    assert!(!state.conn.own_listener_ready.contains(&old_topic));
+    assert!(!state.conn.own_listener_ready.contains(&new_topic));
+    assert!(state.conn.joined_topics.contains(&other_topic));
+    assert!(state.conn.own_listener_ready.contains(&other_topic));
     assert_eq!(
         state.networks.own_nicks.get("libera").map(String::as_str),
         Some("NewNick")
@@ -912,7 +913,7 @@ fn own_nick_rename_keeps_old_topic_when_an_open_query_owns_it() {
         .networks
         .own_nicks
         .insert("libera".to_string(), "OldNick".to_string());
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state.transcript.query_windows.push(QueryWindow {
         network: "libera".to_string(),
         target_nick: "OldNick".to_string(),
@@ -922,8 +923,8 @@ fn own_nick_rename_keeps_old_topic_when_an_open_query_owns_it() {
     let old_topic = own_nick_listener_topic("vjt", "libera", "OldNick");
     let new_topic = own_nick_listener_topic("vjt", "libera", "NewNick");
     let old_query = query_window_key("libera", "OldNick");
-    state.joined_topics.insert(old_topic.clone());
-    state.own_listener_ready.insert(old_topic.clone());
+    state.conn.joined_topics.insert(old_topic.clone());
+    state.conn.own_listener_ready.insert(old_topic.clone());
     state.transcript.query_joined.insert(old_query.clone());
     state.transcript.query_ready.insert(old_query.clone());
 
@@ -933,10 +934,10 @@ fn own_nick_rename_keeps_old_topic_when_an_open_query_owns_it() {
         actions,
         vec![OwnNickListenerAction::Join(new_topic.clone())]
     );
-    assert!(state.joined_topics.contains(&old_topic));
-    assert!(!state.own_listener_ready.contains(&old_topic));
-    assert!(state.joined_topics.contains(&new_topic));
-    assert!(!state.own_listener_ready.contains(&new_topic));
+    assert!(state.conn.joined_topics.contains(&old_topic));
+    assert!(!state.conn.own_listener_ready.contains(&old_topic));
+    assert!(state.conn.joined_topics.contains(&new_topic));
+    assert!(!state.conn.own_listener_ready.contains(&new_topic));
     assert!(state.transcript.query_joined.contains(&old_query));
     assert!(state.transcript.query_ready.contains(&old_query));
     assert_eq!(
@@ -962,8 +963,8 @@ fn own_nick_case_only_change_updates_spelling_without_rejoining() {
         .own_nicks
         .insert("libera".to_string(), "Foo".to_string());
     let topic = own_nick_listener_topic("vjt", "libera", "Foo");
-    state.joined_topics.insert(topic.clone());
-    state.own_listener_ready.insert(topic.clone());
+    state.conn.joined_topics.insert(topic.clone());
+    state.conn.own_listener_ready.insert(topic.clone());
 
     let actions = apply_own_nick_change(&mut state, "vjt", "libera", "fOO");
 
@@ -972,22 +973,22 @@ fn own_nick_case_only_change_updates_spelling_without_rejoining() {
         state.networks.own_nicks.get("libera").map(String::as_str),
         Some("fOO")
     );
-    assert!(state.joined_topics.contains(&topic));
-    assert!(state.own_listener_ready.contains(&topic));
+    assert!(state.conn.joined_topics.contains(&topic));
+    assert!(state.conn.own_listener_ready.contains(&topic));
 }
 
 #[test]
 fn own_nick_listener_readiness_requires_ack_and_fails_closed_without_it() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state
         .networks
         .own_nicks
         .insert("libera".to_string(), "OldNick".to_string());
     let old_topic = own_nick_listener_topic("vjt", "libera", "OldNick");
     let new_topic = own_nick_listener_topic("vjt", "libera", "NewNick");
-    state.joined_topics.insert(old_topic.clone());
-    state.own_listener_ready.insert(old_topic.clone());
+    state.conn.joined_topics.insert(old_topic.clone());
+    state.conn.own_listener_ready.insert(old_topic.clone());
 
     assert_eq!(
         apply_own_nick_change(&mut state, "vjt", "libera", "NewNick"),
@@ -998,27 +999,27 @@ fn own_nick_listener_readiness_requires_ack_and_fails_closed_without_it() {
     );
     // A join with no reply (including a timeout) never reaches the
     // positive-ACK transition and must remain unusable for DM routing.
-    assert!(!state.own_listener_ready.contains(&new_topic));
+    assert!(!state.conn.own_listener_ready.contains(&new_topic));
     assert_eq!(
         handle_own_nick_listener_join_reply(&mut state, &new_topic, Some("error")),
         OwnNickListenerJoinReply::Rejected
     );
-    assert!(!state.own_listener_ready.contains(&new_topic));
+    assert!(!state.conn.own_listener_ready.contains(&new_topic));
     assert_eq!(
         handle_own_nick_listener_join_reply(&mut state, &new_topic, None),
         OwnNickListenerJoinReply::Rejected
     );
-    assert!(!state.own_listener_ready.contains(&new_topic));
+    assert!(!state.conn.own_listener_ready.contains(&new_topic));
     assert_eq!(
         handle_own_nick_listener_join_reply(&mut state, &new_topic, Some("ok")),
         OwnNickListenerJoinReply::Accepted
     );
-    assert!(state.own_listener_ready.contains(&new_topic));
+    assert!(state.conn.own_listener_ready.contains(&new_topic));
     assert_eq!(
         handle_own_nick_listener_join_reply(&mut state, &old_topic, Some("ok")),
         OwnNickListenerJoinReply::Untracked
     );
-    assert!(!state.own_listener_ready.contains(&old_topic));
+    assert!(!state.conn.own_listener_ready.contains(&old_topic));
 }
 
 #[test]
@@ -1441,7 +1442,7 @@ fn query_windows_snapshot_migrates_cache_on_case_only_nick_change() {
     state.transcript.query_windows = vec![old.clone()];
     state.transcript.query_joined.insert(identity.clone());
     state.transcript.query_ready.insert(identity.clone());
-    state.joined_topics.insert(topic.clone());
+    state.conn.joined_topics.insert(topic.clone());
     state.transcript.messages.insert(
         old_key.clone(),
         vec![RenderedMessage {
@@ -1483,7 +1484,7 @@ fn query_windows_snapshot_migrates_cache_on_case_only_nick_change() {
     );
     assert!(state.transcript.query_joined.contains(&identity));
     assert!(state.transcript.query_ready.contains(&identity));
-    assert!(state.joined_topics.contains(&topic));
+    assert!(state.conn.joined_topics.contains(&topic));
     assert!(!state.transcript.stale_query_topics.contains(&identity));
 }
 
@@ -1564,7 +1565,7 @@ fn state_with_selected_query(
 ) -> WorkerState {
     let old_key = (old.network.clone(), old.target_nick.clone());
     let mut state = WorkerState::new();
-    state.server_protocol_version = server_protocol_version;
+    state.conn.server_protocol_version = server_protocol_version;
     state.transcript.query_windows = vec![old.clone()];
     state.current_query = true;
     state.current_channel = Some(old_key.clone());
@@ -1758,7 +1759,7 @@ fn closing_and_reopening_query_reuses_join_but_reloads_tail_before_ready() {
     let topic = query_topic("vjt", &query.network, &query.target_nick);
     let mut state = WorkerState::new();
     state.transcript.query_windows = vec![query.clone()];
-    state.joined_topics.insert(topic.clone());
+    state.conn.joined_topics.insert(topic.clone());
     record_query_join_success(&mut state, &identity);
     state.transcript.query_ready.insert(identity.clone());
 
@@ -1766,7 +1767,7 @@ fn closing_and_reopening_query_reuses_join_but_reloads_tail_before_ready() {
     assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
     reconcile_query_topic_tracking(&mut state, &previous);
     assert!(state.transcript.stale_query_topics.contains(&identity));
-    assert!(state.joined_topics.contains(&topic));
+    assert!(state.conn.joined_topics.contains(&topic));
     assert!(state.transcript.query_joined.contains(&identity));
     assert!(!state.transcript.query_ready.contains(&identity));
 
@@ -1777,7 +1778,7 @@ fn closing_and_reopening_query_reuses_join_but_reloads_tail_before_ready() {
     ));
     reconcile_query_topic_tracking(&mut state, &previous);
     assert!(!state.transcript.stale_query_topics.contains(&identity));
-    assert!(state.joined_topics.contains(&topic));
+    assert!(state.conn.joined_topics.contains(&topic));
     assert!(state.transcript.query_joined.contains(&identity));
     assert!(!state.transcript.query_ready.contains(&identity));
     state.current_query = true;
@@ -1799,7 +1800,7 @@ fn reopening_query_after_reconnect_waits_for_ack_and_history_again() {
     let topic = query_topic("vjt", &query.network, &query.target_nick);
     let mut state = WorkerState::new();
     state.transcript.query_windows = vec![query.clone()];
-    state.joined_topics.insert(topic);
+    state.conn.joined_topics.insert(topic);
     record_query_join_success(&mut state, &identity);
     state.transcript.query_ready.insert(identity.clone());
 
@@ -1831,7 +1832,7 @@ fn failed_query_join_clears_readiness_and_allows_a_retry() {
     let identity = query_window_key("libera", "peer");
     let topic = query_topic("vjt", "libera", "peer");
     let mut state = WorkerState::new();
-    state.joined_topics.insert(topic.clone());
+    state.conn.joined_topics.insert(topic.clone());
     state.transcript.query_joined.insert(identity.clone());
     state.transcript.query_ready.insert(identity.clone());
     state.current_query = true;
@@ -1841,7 +1842,7 @@ fn failed_query_join_clears_readiness_and_allows_a_retry() {
     assert!(reset_query_join_failure(&mut state, &identity, &topic));
     assert!(!state.transcript.query_joined.contains(&identity));
     assert!(!state.transcript.query_ready.contains(&identity));
-    assert!(!state.joined_topics.contains(&topic));
+    assert!(!state.conn.joined_topics.contains(&topic));
     assert!(!state.current_query_ready);
 }
 
@@ -2089,7 +2090,7 @@ fn channel_modes_changed_requires_the_matching_channel_topic() {
 #[test]
 fn window_counts_updates_messages_and_mentions_for_each_known_window() {
     let mut state = WorkerState::new();
-    state.identifier = Some("sythos".to_string());
+    state.conn.identifier = Some("sythos".to_string());
     state.channel_entries = vec![(
         "libera".to_string(),
         "#Cordiale".to_string(),
@@ -2284,7 +2285,7 @@ fn window_counts_from_me_seeds_channel_and_query_counts() {
 #[test]
 fn window_counts_seed_from_channel_query_and_own_nick_join_replies() {
     let mut state = WorkerState::new();
-    state.identifier = Some("sythos".to_string());
+    state.conn.identifier = Some("sythos".to_string());
     state
         .networks
         .own_nicks
@@ -2379,7 +2380,7 @@ fn window_counts_seed_from_channel_query_and_own_nick_join_replies() {
 #[test]
 fn window_counts_on_own_nick_listener_updates_only_own_nick_window() {
     let mut state = WorkerState::new();
-    state.identifier = Some("sythos".to_string());
+    state.conn.identifier = Some("sythos".to_string());
     state
         .networks
         .own_nicks
@@ -2442,7 +2443,7 @@ fn window_counts_on_own_nick_listener_updates_only_own_nick_window() {
 #[test]
 fn window_counts_rejects_invalid_or_unrelated_snapshots() {
     let mut state = WorkerState::new();
-    state.identifier = Some("sythos".to_string());
+    state.conn.identifier = Some("sythos".to_string());
     state.channel_entries = vec![(
         "libera".to_string(),
         "#cordiale".to_string(),
@@ -2533,7 +2534,7 @@ fn window_counts_rejects_invalid_or_unrelated_snapshots() {
 #[test]
 fn window_counts_preserves_mentions_when_severity_is_missing_or_unknown() {
     let mut state = WorkerState::new();
-    state.identifier = Some("sythos".to_string());
+    state.conn.identifier = Some("sythos".to_string());
     state.channel_entries = vec![
         (
             "libera".to_string(),
@@ -3031,7 +3032,7 @@ fn declined_window_removes_invited_and_pending_state_and_sidebar_row() {
         .insert(key.clone(), "topic".to_string());
     let topic = channel_topic("sythos", "libera", "#cordiale");
     state.channel_topics.insert(topic.clone());
-    state.joined_topics.insert(topic.clone());
+    state.conn.joined_topics.insert(topic.clone());
 
     assert!(remove_declined_window(&mut state, "libera", "#CoRdIaLe"));
     assert!(!state.window_states.contains_key(&key));
@@ -3057,7 +3058,7 @@ fn declined_window_removes_invited_and_pending_state_and_sidebar_row() {
         "#CoRdIaLe"
     ));
     assert!(state.channel_topics.is_empty());
-    assert!(state.joined_topics.is_empty());
+    assert!(state.conn.joined_topics.is_empty());
 
     assert!(!remove_declined_window(&mut state, "libera", "#cordiale"));
     assert!(!remove_declined_channel_subscription(
@@ -3873,7 +3874,7 @@ fn kicked_row_survives_a_channel_list_refresh_until_dismissed() {
     );
     assert_eq!(state.window_kicks.get(&key), Some(&kick));
     assert!(state.channel_topics.contains(&kicked_topic));
-    assert!(state.joined_topics.contains(&kicked_topic));
+    assert!(state.conn.joined_topics.contains(&kicked_topic));
     let groups = network_groups_data(
         &state.channel_entries,
         &state.transcript.query_windows,
@@ -3950,7 +3951,7 @@ fn pending_invited_and_failed_rows_survive_a_channel_list_refresh() {
 fn network_refresh_keeps_kicked_failed_and_invited_windows_of_remaining_networks() {
     let user = "sythos";
     let mut state = WorkerState::new();
-    state.identifier = Some(user.to_string());
+    state.conn.identifier = Some(user.to_string());
     state.networks.network_ids.insert("libera".to_string(), 7);
     state.networks.network_ids.insert("gone".to_string(), 9);
     let kicked = window_state_key("libera", "#kicked");
@@ -7277,7 +7278,7 @@ fn parse_lusers_bundle_shows_unknown_counters_without_dropping_the_rest() {
 #[test]
 fn away_nick_suffix_push_updates_the_setting_and_never_the_nick() {
     let mut state = WorkerState::new();
-    state.identifier = Some("vjt".to_string());
+    state.conn.identifier = Some("vjt".to_string());
     state
         .networks
         .own_nicks
@@ -7864,10 +7865,10 @@ fn network_attached_rest_refresh_is_idempotent() {
     };
 
     let mut state = WorkerState::new();
-    state.identifier = Some("sythos".to_string());
+    state.conn.identifier = Some("sythos".to_string());
     let first_actions = apply_network_rest_refresh(&mut state, "sythos", &boot, &me);
     let first_channel_entries = state.channel_entries.clone();
-    let first_joined_topics = state.joined_topics.clone();
+    let first_joined_topics = state.conn.joined_topics.clone();
     let message_snapshot = |messages: &HashMap<(String, String), Vec<RenderedMessage>>| {
         let mut snapshot = messages
             .iter()
@@ -7910,7 +7911,7 @@ fn network_attached_rest_refresh_is_idempotent() {
     );
     assert!(second_actions.is_empty());
     assert_eq!(state.channel_entries, first_channel_entries);
-    assert_eq!(state.joined_topics, first_joined_topics);
+    assert_eq!(state.conn.joined_topics, first_joined_topics);
     assert_eq!(message_snapshot(&state.transcript.messages), first_messages);
     assert_eq!(state.transcript.members, first_members);
     assert_eq!(state.read_cursors, first_cursors);
@@ -7928,7 +7929,7 @@ fn network_attached_rest_refresh_is_idempotent() {
 #[test]
 fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
     let mut state = WorkerState::new();
-    state.identifier = Some("sythos".to_string());
+    state.conn.identifier = Some("sythos".to_string());
     state.networks.network_ids.insert("deleted".to_string(), 9);
     state.transcript.query_windows.push(QueryWindow {
         network: "deleted".to_string(),
@@ -7937,9 +7938,12 @@ fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
         dm_conversation_id: None,
     });
     let obsolete_topic = channel_topic("sythos", "deleted", "alice");
-    state.joined_topics.insert(obsolete_topic.clone());
+    state.conn.joined_topics.insert(obsolete_topic.clone());
     let obsolete_server_topic = channel_topic("sythos", "deleted", SERVER_WINDOW_NAME);
-    state.joined_topics.insert(obsolete_server_topic.clone());
+    state
+        .conn
+        .joined_topics
+        .insert(obsolete_server_topic.clone());
     let server_row = serde_json::json!({
         "id": 21, "server_time": 100, "kind": "notice",
         "sender": "NickServ", "body": "Welcome"
@@ -8006,7 +8010,7 @@ fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
     assert!(state.transcript.query_windows.is_empty());
     assert!(state.transcript.query_ready.is_empty());
     assert_eq!(
-        state.joined_topics,
+        state.conn.joined_topics,
         std::collections::HashSet::from([
             channel_topic("sythos", "libera", "sythos"),
             channel_topic("sythos", "libera", SERVER_WINDOW_NAME),
@@ -8194,7 +8198,7 @@ fn read_cursor_set_is_scoped_to_its_channel_shaped_topic_and_clamps_badge() {
 fn read_cursor_set_is_last_write_wins_even_when_cursor_moves_backward() {
     let topic = channel_topic("sythos", "libera", "#rust");
     let mut state = WorkerState::new();
-    state.identifier = Some("sythos".to_string());
+    state.conn.identifier = Some("sythos".to_string());
 
     let newer = serde_json::json!({
         "kind": "read_cursor_set",
@@ -8248,7 +8252,7 @@ fn read_cursors_are_seeded_from_me_without_fabricating_invalid_entries() {
 fn malformed_or_foreign_read_cursor_events_leave_state_unchanged() {
     let topic = channel_topic("sythos", "libera", "#rust");
     let mut state = WorkerState::new();
-    state.identifier = Some("sythos".to_string());
+    state.conn.identifier = Some("sythos".to_string());
     state
         .read_cursors
         .insert(window_state_key("libera", "#rust"), 101);

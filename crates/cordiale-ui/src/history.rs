@@ -3,7 +3,7 @@ use super::*;
 /// The synthetic server window is absent from `boot.channels`; like Cicchetto,
 /// load its scrollback explicitly and merge it with any already received push.
 pub(crate) async fn fetch_server_window_history(state: &mut WorkerState, network: &str) -> bool {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return false;
     };
     let key = (network.to_string(), SERVER_WINDOW_NAME.to_string());
@@ -39,7 +39,7 @@ pub(crate) async fn reload_history_tail(
     ui: &slint::Weak<AppWindow>,
     key: &(String, String),
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let rows = match client
@@ -84,8 +84,8 @@ pub(crate) async fn handle_load_older_history(
         });
     };
     let (Some(client), Some(token), Some(key)) = (
-        state.client.clone(),
-        state.token.clone(),
+        state.conn.client.clone(),
+        state.conn.token.clone(),
         state.current_channel.clone(),
     ) else {
         finish(true, false);
@@ -274,7 +274,7 @@ pub(crate) async fn handle_catch_up_next(
     ui: &slint::Weak<AppWindow>,
     worker_self: &mpsc::UnboundedSender<WorkerCommand>,
 ) {
-    if state.session.is_none() {
+    if state.conn.session.is_none() {
         state.transcript.catch_up_anchors.clear();
         return;
     }
@@ -301,7 +301,7 @@ async fn catch_up_channel(
     key: &(String, String),
     anchor: i64,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let plan = match client
@@ -345,7 +345,7 @@ async fn catch_up_channel(
         }
     };
     // The awaits above can outlast the session or the channel membership.
-    if state.session.is_none()
+    if state.conn.session.is_none()
         || state.window_states.get(&window_state_key(&key.0, &key.1))
             != Some(&ChannelWindowState::Joined)
     {

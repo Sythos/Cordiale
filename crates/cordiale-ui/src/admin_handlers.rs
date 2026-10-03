@@ -31,7 +31,7 @@ pub(crate) async fn handle_admin_subject_search(
     ui: &slint::Weak<AppWindow>,
     query: &str,
 ) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     match client.search_admin_subjects(token, query).await {
@@ -74,7 +74,7 @@ pub(crate) async fn handle_admin_write(
     ui: &slint::Weak<AppWindow>,
     write: AdminWrite,
 ) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     let (result, clears) = match &write {
@@ -385,7 +385,7 @@ pub(crate) async fn handle_admin_settings_load(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let settings = match client.fetch_admin_settings(&token).await {
@@ -473,7 +473,7 @@ pub(crate) async fn push_admin_servers(
     ui: &slint::Weak<AppWindow>,
     network_id: &str,
 ) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     let servers = match client.fetch_admin_servers(token, network_id).await {
@@ -513,7 +513,7 @@ pub(crate) async fn push_admin_featured(
     ui: &slint::Weak<AppWindow>,
     network_id: &str,
 ) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     let channels = match client
@@ -550,7 +550,7 @@ pub(crate) async fn handle_admin_network_count(
     ui: &slint::Weak<AppWindow>,
     network_id: String,
 ) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     let count = match client
@@ -589,7 +589,7 @@ pub(crate) fn admin_overview_text(overview: &cordiale_core::admin::AdminOverview
 }
 
 pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
 
@@ -762,7 +762,7 @@ pub(crate) async fn handle_admin_uploads_refresh(
     ui: &slint::Weak<AppWindow>,
     error: Option<&'static str>,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let (view, load_error) = match client.fetch_admin_uploads(&token).await {
@@ -818,7 +818,7 @@ pub(crate) async fn handle_admin_upload_delete(
     ui: &slint::Weak<AppWindow>,
     upload_id: String,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     if !admin_uploads::can_delete(state.panels.admin_uploads.as_ref(), &upload_id) {
@@ -842,7 +842,7 @@ pub(crate) async fn handle_admin_disconnect_session(
     ui: &slint::Weak<AppWindow>,
     session_id: String,
 ) {
-    if let (Some(client), Some(token)) = (&state.client, &state.token) {
+    if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
         let _ = client.disconnect_admin_session(token, &session_id).await;
     }
     handle_admin_refresh(state, ui).await;

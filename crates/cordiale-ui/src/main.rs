@@ -2831,7 +2831,7 @@ struct TranscriptState {
     stale_query_topics: std::collections::HashSet<(String, String)>,
 }
 
-struct WorkerState {
+struct SessionState {
     client: Option<GrappaClient>,
     token: Option<String>,
     guest_session: bool,
@@ -2842,6 +2842,28 @@ struct WorkerState {
     login_identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
+    /// The server's `protocol_version`, from `/api/config` at sign-in and
+    /// again from the user-topic join reply. `None` until known; see
+    /// `rename_inference_applies`.
+    server_protocol_version: Option<u32>,
+    /// How the open chat pane's update asks the worker for a rebuild
+    /// (`WorkerCommand::RebuildChat`); `None` until the worker runs.
+    chat_rebuild_tx: Option<mpsc::UnboundedSender<WorkerCommand>>,
+    /// Own-nick listener topics become usable only after a successful
+    /// Phoenix join reply. Keys are canonical topic strings.
+    own_listener_ready: std::collections::HashSet<String>,
+    /// A sign-in waiting for its second factor (issue #118).
+    pending_totp: Option<PendingTotp>,
+    /// The token confirming a TOTP enrolment started in Settings.
+    totp_enrollment: Option<String>,
+    /// The token proving the passwordless recovery codes were shown
+    /// (valid ten minutes). A credential: never logged nor on screen.
+    passwordless_recovery_token: Option<String>,
+}
+
+struct WorkerState {
+    /// Connection handles and session identity.
+    conn: SessionState,
     /// Per-window message content, history paging and query-window bookkeeping.
     transcript: TranscriptState,
     /// Caches of account settings and local preferences.
@@ -2881,13 +2903,6 @@ struct WorkerState {
     /// This stays separate because `joined_topics` also includes query and
     /// own-nick listeners that may share the same channel-shaped topic.
     channel_topics: std::collections::HashSet<String>,
-    /// The server's `protocol_version`, from `/api/config` at sign-in and
-    /// again from the user-topic join reply. `None` until known; see
-    /// `rename_inference_applies`.
-    server_protocol_version: Option<u32>,
-    /// How the open chat pane's update asks the worker for a rebuild
-    /// (`WorkerCommand::RebuildChat`); `None` until the worker runs.
-    chat_rebuild_tx: Option<mpsc::UnboundedSender<WorkerCommand>>,
     /// Channel-selection MRU, used when a dismissed pseudo-window was open.
     recent_channels: Vec<(String, String)>,
     /// `current_channel` is the active window's `(network, target)` key;
@@ -2897,16 +2912,6 @@ struct WorkerState {
     current_channel: Option<(String, String)>,
     /// Per-network caches keyed by network slug or id.
     networks: NetworkState,
-    /// Own-nick listener topics become usable only after a successful
-    /// Phoenix join reply. Keys are canonical topic strings.
-    own_listener_ready: std::collections::HashSet<String>,
-    /// A sign-in waiting for its second factor (issue #118).
-    pending_totp: Option<PendingTotp>,
-    /// The token confirming a TOTP enrolment started in Settings.
-    totp_enrollment: Option<String>,
-    /// The token proving the passwordless recovery codes were shown
-    /// (valid ten minutes). A credential: never logged nor on screen.
-    passwordless_recovery_token: Option<String>,
     /// The home page's own state (subject, available networks, row
     /// errors, featured channels); its rows come from the snapshots above.
     home: home::HomeState,
@@ -2916,13 +2921,21 @@ impl WorkerState {
     fn new() -> Self {
         let settings = persistence::load_settings().unwrap_or_default();
         WorkerState {
-            client: None,
-            token: None,
-            guest_session: false,
-            identifier: None,
-            login_identifier: None,
-            session: None,
-            joined_topics: std::collections::HashSet::new(),
+            conn: SessionState {
+                client: None,
+                token: None,
+                guest_session: false,
+                identifier: None,
+                login_identifier: None,
+                session: None,
+                joined_topics: std::collections::HashSet::new(),
+                server_protocol_version: None,
+                chat_rebuild_tx: None,
+                own_listener_ready: std::collections::HashSet::new(),
+                pending_totp: None,
+                totp_enrollment: None,
+                passwordless_recovery_token: None,
+            },
             transcript: TranscriptState {
                 catch_up_anchors: std::collections::BTreeMap::new(),
                 messages: HashMap::new(),
@@ -2986,8 +2999,6 @@ impl WorkerState {
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
             channel_topics: std::collections::HashSet::new(),
-            server_protocol_version: None,
-            chat_rebuild_tx: None,
             recent_channels: Vec::new(),
             current_query: false,
             current_query_ready: false,
@@ -3007,10 +3018,6 @@ impl WorkerState {
                 presence_by_network: HashMap::new(),
                 peer_away: HashMap::new(),
             },
-            own_listener_ready: std::collections::HashSet::new(),
-            pending_totp: None,
-            totp_enrollment: None,
-            passwordless_recovery_token: None,
             home: home::HomeState::default(),
         }
     }
@@ -3043,7 +3050,7 @@ async fn run_worker(
     ui: slint::Weak<AppWindow>,
 ) {
     let mut state = WorkerState::new();
-    state.chat_rebuild_tx = Some(worker_self.clone());
+    state.conn.chat_rebuild_tx = Some(worker_self.clone());
     let radio_events = worker_self.clone();
     let radio = player::RadioPlayer::spawn(move |generation, event| {
         let _ = radio_events.send(WorkerCommand::RadioEvent(generation, event));
@@ -3144,7 +3151,7 @@ async fn run_worker(
                         handle_security_share_mint(&state, &ui).await;
                     }
                     Some(WorkerCommand::TotpCancel) => {
-                        state.pending_totp = None;
+                        state.conn.pending_totp = None;
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_connecting(false);
                             ui.set_totp_code("".into());
@@ -3164,7 +3171,7 @@ async fn run_worker(
                         handle_security_totp_disable(&state, &ui, password).await;
                     }
                     Some(WorkerCommand::SecurityTotpDone) => {
-                        state.totp_enrollment = None;
+                        state.conn.totp_enrollment = None;
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_security_totp_step("".into());
                             ui.set_security_totp_secret("".into());
@@ -3207,13 +3214,13 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SecurityPasswordlessActivate) => {
                         // Kept until armed: a cancelled prompt can be tried again.
-                        if let Some(recovery_token) = state.passwordless_recovery_token.clone() {
+                        if let Some(recovery_token) = state.conn.passwordless_recovery_token.clone() {
                             let change = PasskeyChange::Passwordless { recovery_token };
                             spawn_passkey_change(&state, &ui, &worker_self, change);
                         }
                     }
                     Some(WorkerCommand::SecurityPasswordlessCancel) => {
-                        state.passwordless_recovery_token = None;
+                        state.conn.passwordless_recovery_token = None;
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_security_passwordless_codes(slint::ModelRc::default());
                             ui.set_security_passkey_error("".into());
@@ -3362,7 +3369,7 @@ async fn run_worker(
                         handle_attach_file(&mut state, &ui, path, expire).await;
                     }
                     Some(WorkerCommand::UploadPrefsChanged { ttl, confirm }) => {
-                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                        if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
                             if let Err(err) = client.set_upload_ttl(token, ttl).await {
                                 persistence::log_line(&format!("upload ttl save failed: {err:?}"));
                             }
@@ -3405,21 +3412,21 @@ async fn run_worker(
                         save_theme(&mut state, &ui, theme_id, &name, &payload).await;
                     }
                     Some(WorkerCommand::ThemeDelete(theme_id)) => {
-                        if let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) {
+                        if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
                             let result = client.delete_theme(&token, theme_id).await;
                             report_theme_action(&ui, result.err());
                             load_color_themes(&mut state, &ui).await;
                         }
                     }
                     Some(WorkerCommand::ThemePublish(theme_id, published)) => {
-                        if let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) {
+                        if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
                             let result = client.set_theme_published(&token, theme_id, published).await;
                             report_theme_action(&ui, result.err());
                             load_color_themes(&mut state, &ui).await;
                         }
                     }
                     Some(WorkerCommand::ThemeCopy(theme_id)) => {
-                        if let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) {
+                        if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
                             match client.copy_theme(&token, theme_id).await {
                                 Ok(copy) => {
                                     load_color_themes(&mut state, &ui).await;
@@ -3448,12 +3455,12 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::Foreground(foreground)) => {
                         state.prefs.foreground = foreground;
-                        if let Some(session) = &state.session {
+                        if let Some(session) = &state.conn.session {
                             session.set_foreground(foreground);
                         }
                     }
                     Some(WorkerCommand::Quit(done)) => {
-                        if let Some(handle) = state.session.take() {
+                        if let Some(handle) = state.conn.session.take() {
                             let _ = handle.close().await;
                         }
                         let _ = done.send(());
@@ -3492,8 +3499,8 @@ async fn run_worker(
                         // The live feed needs a full web session, like the
                         // rest of /admin; a refused join just leaves it empty.
                         let topic = cordiale_core::admin::ADMIN_EVENTS_TOPIC.to_string();
-                        if let Some(session) = &state.session {
-                            if state.joined_topics.insert(topic.clone()) {
+                        if let Some(session) = &state.conn.session {
+                            if state.conn.joined_topics.insert(topic.clone()) {
                                 session.join_topic(topic, false);
                             }
                         }
@@ -3518,7 +3525,7 @@ async fn run_worker(
                             .await;
                     }
                     Some(WorkerCommand::AdminUserToggleAdmin(user_id, is_admin)) => {
-                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                        if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
                             let _ = client
                                 .set_admin_user_is_admin(token, &user_id, is_admin)
                                 .await;
@@ -3526,19 +3533,19 @@ async fn run_worker(
                         handle_admin_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::AdminUserDelete(user_id)) => {
-                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                        if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
                             let _ = client.delete_admin_user(token, &user_id).await;
                         }
                         handle_admin_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::AdminVisitorDelete(visitor_id)) => {
-                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                        if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
                             let _ = client.delete_admin_visitor(token, &visitor_id).await;
                         }
                         handle_admin_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::AdminNetworkResetCircuit(network_id)) => {
-                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                        if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
                             let _ = client.reset_admin_circuit(token, &network_id).await;
                         }
                         handle_admin_refresh(&state, &ui).await;
@@ -3859,7 +3866,7 @@ async fn run_worker(
                         }
                     }
                     Some(WorkerCommand::AdminReaperRun) => {
-                        if let (Some(client), Some(token)) = (&state.client, &state.token) {
+                        if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
                             let _ = client.run_admin_reaper(token).await;
                         }
                         handle_admin_refresh(&state, &ui).await;
@@ -3906,7 +3913,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::DccAutoAcceptToggle(enabled)) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.prefs.settings_network)
+                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
                         {
                             if let Err(err) =
                                 client.set_dcc_auto_accept(token, network, enabled).await
@@ -3919,7 +3926,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::IgnoreAdd { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.prefs.settings_network)
+                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
                         {
                             let result = client
                                 .add_ignore(token, network, &mask, text_pattern.as_deref())
@@ -3929,7 +3936,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::IgnoreRemove { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.prefs.settings_network)
+                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
                         {
                             let result = client
                                 .remove_ignore(token, network, &mask, text_pattern.as_deref())
@@ -3939,7 +3946,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::PerformSave(text)) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.prefs.settings_network)
+                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
                         {
                             let request = cordiale_core::profile::PerformUpdateRequest {
                                 perform_list: Some(text),
@@ -3964,7 +3971,7 @@ async fn run_worker(
                     // it arrives.
                     Some(WorkerCommand::NotifyAdd(nick)) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.prefs.settings_network)
+                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
                         {
                             let network_id = state.networks.network_ids.get(network).copied();
                             if client
@@ -3984,7 +3991,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::NotifyRemove(nick)) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.prefs.settings_network)
+                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
                         {
                             let network_id = state.networks.network_ids.get(network).copied();
                             if client.remove_notify_nick(token, network, &nick).await.is_ok() {
@@ -3999,7 +4006,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::WatchPatternAdd(pattern)) => {
                         if let (Some(session), Some(identifier)) =
-                            (&state.session, &state.identifier)
+                            (&state.conn.session, &state.conn.identifier)
                         {
                             session.send_command(
                                 format!("grappa:user:{identifier}"),
@@ -4014,7 +4021,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::WatchPatternRemove(pattern)) => {
                         if let (Some(session), Some(identifier)) =
-                            (&state.session, &state.identifier)
+                            (&state.conn.session, &state.conn.identifier)
                         {
                             session.send_command(
                                 format!("grappa:user:{identifier}"),
@@ -4032,14 +4039,14 @@ async fn run_worker(
                         set_auto_connect(false);
                         // Before a guest logout revokes the bearer, so the
                         // "leaving" hint still reaches Grappa.
-                        if let Some(handle) = state.session.take() {
+                        if let Some(handle) = state.conn.session.take() {
                             drop(handle.close());
                         }
-                        let guest_logout_failed = if state.guest_session {
+                        let guest_logout_failed = if state.conn.guest_session {
                             if let (Some(client), Some(token), Some(identifier)) = (
-                                state.client.as_ref(),
-                                state.token.as_deref(),
-                                state.login_identifier.as_deref(),
+                                state.conn.client.as_ref(),
+                                state.conn.token.as_deref(),
+                                state.conn.login_identifier.as_deref(),
                             ) {
                                 match client.logout(token).await {
                                     Ok(()) => {
@@ -4071,7 +4078,7 @@ async fn run_worker(
                         let system_dark = state.prefs.system_dark;
                         let foreground = state.prefs.foreground;
                         state = WorkerState::new();
-                        state.chat_rebuild_tx = Some(worker_self.clone());
+                        state.conn.chat_rebuild_tx = Some(worker_self.clone());
                         state.prefs.system_dark = system_dark;
                         state.prefs.foreground = foreground;
                         push_home(&state, &ui);
@@ -4151,7 +4158,7 @@ async fn run_worker(
                         // A reconnect can land on an upgraded server; a join
                         // reply without the field keeps what sign-in learned.
                         if protocol_version.is_some() {
-                            state.server_protocol_version = protocol_version;
+                            state.conn.server_protocol_version = protocol_version;
                         }
                         // Without this, a status set to "disconnected" or
                         // "reconnecting" by an earlier drop just sits
@@ -4172,13 +4179,13 @@ async fn run_worker(
                     Some(SessionEvent::Frame(frame)) => {
                         handle_frame(&mut state, &ui, frame).await;
                     }
-                    Some(SessionEvent::Disconnected { reason, .. }) if state.session.is_none() => {
+                    Some(SessionEvent::Disconnected { reason, .. }) if state.conn.session.is_none() => {
                         // A deliberately ended session (sign-out, revoked
                         // bearer) still reports its final socket close; it
                         // must not overwrite the sign-in screen's status.
                         persistence::log_line(&format!("ended session closed: {reason}"));
                     }
-                    Some(SessionEvent::Reconnecting { reason, .. }) if state.session.is_none() => {
+                    Some(SessionEvent::Reconnecting { reason, .. }) if state.conn.session.is_none() => {
                         persistence::log_line(&format!("ended session not reconnecting: {reason}"));
                     }
                     Some(SessionEvent::Disconnected { reason, retry_in }) => {
@@ -4187,7 +4194,7 @@ async fn run_worker(
                         ));
                         note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
-                        state.own_listener_ready.clear();
+                        state.conn.own_listener_ready.clear();
                         state.networks.supported_user_modes_by_network.clear();
                         if !state.networks.connecting_networks.is_empty() {
                             state.networks.connecting_networks.clear();
@@ -4207,7 +4214,7 @@ async fn run_worker(
                         ));
                         note_catch_up_anchors(&mut state);
                         reset_query_session_readiness(&mut state);
-                        state.own_listener_ready.clear();
+                        state.conn.own_listener_ready.clear();
                         state.networks.supported_user_modes_by_network.clear();
                         if !state.networks.connecting_networks.is_empty() {
                             state.networks.connecting_networks.clear();
@@ -4224,7 +4231,7 @@ async fn run_worker(
                     Some(SessionEvent::JoinRefused { reason }) => {
                         // Stopped for good: retrying the same topics can't work.
                         persistence::log_line(&format!("session join refused: {reason}"));
-                        state.session = None;
+                        state.conn.session = None;
                         session_events = None;
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("session-refused".into());
@@ -4236,7 +4243,7 @@ async fn run_worker(
                         // Stopped for good: the server's certificate stays
                         // untrusted until the store or the server changes.
                         persistence::log_line(&format!("session certificate rejected: {reason}"));
-                        state.session = None;
+                        state.conn.session = None;
                         session_events = None;
                         let _ = ui.upgrade_in_event_loop(move |ui| {
                             ui.set_status_kind("certificate-untrusted".into());
@@ -4252,7 +4259,7 @@ async fn run_worker(
                         persistence::log_line(&format!(
                             "session upgrade required: declared client_proto={CLIENT_PROTOCOL_VERSION}, server protocol_version={protocol_version:?}, min_protocol_version={min_protocol_version:?}"
                         ));
-                        state.session = None;
+                        state.conn.session = None;
                         session_events = None;
                         let _ = ui.upgrade_in_event_loop(|ui| {
                             ui.set_status_kind("upgrade-required".into());
@@ -4449,7 +4456,7 @@ async fn finish_connect(
             let recovery_only = challenge.recovery_code_only();
             let code_accepted = challenge.challenge_token.is_some();
             let passkey_offered = passkey.is_some();
-            state.pending_totp = Some(PendingTotp {
+            state.conn.pending_totp = Some(PendingTotp {
                 context,
                 challenge_token: challenge.challenge_token.clone(),
                 passkey,
@@ -4511,7 +4518,7 @@ async fn finish_connect(
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
             state.transcript.query_windows.clear();
-            state.server_protocol_version = Some(outcome.compatibility.protocol_version);
+            state.conn.server_protocol_version = Some(outcome.compatibility.protocol_version);
             state.transcript.pending_own_nick_dms.clear();
             state.transcript.query_joined.clear();
             state.transcript.query_ready.clear();
@@ -4561,7 +4568,7 @@ async fn finish_connect(
             state.networks.isupport_by_network.clear();
             state.networks.user_modes_by_network.clear();
             state.networks.supported_user_modes_by_network.clear();
-            state.own_listener_ready.clear();
+            state.conn.own_listener_ready.clear();
             state.transcript.catch_up_anchors.clear();
             state.prefs.notification_prefs = None;
             state.current_query = false;
@@ -4606,18 +4613,18 @@ async fn finish_connect(
             }
             *session_events = Some(events);
 
-            state.client = Some(client);
-            state.token = Some(token.clone());
-            state.guest_session = is_guest_attempt;
-            state.identifier = Some(session_identifier.clone());
-            state.login_identifier = Some(identifier.clone());
-            state.session = Some(handle);
-            state.joined_topics = entries
+            state.conn.client = Some(client);
+            state.conn.token = Some(token.clone());
+            state.conn.guest_session = is_guest_attempt;
+            state.conn.identifier = Some(session_identifier.clone());
+            state.conn.login_identifier = Some(identifier.clone());
+            state.conn.session = Some(handle);
+            state.conn.joined_topics = entries
                 .iter()
                 .map(|(network, channel, _)| channel_topic(&session_identifier, network, channel))
                 .collect();
             for network in state.networks.network_ids.keys() {
-                state.joined_topics.insert(channel_topic(
+                state.conn.joined_topics.insert(channel_topic(
                     &session_identifier,
                     network,
                     SERVER_WINDOW_NAME,
@@ -4625,7 +4632,7 @@ async fn finish_connect(
             }
             state.channel_topics = channel_topics_for_entries(&session_identifier, &entries);
             for (network, nick) in &state.networks.own_nicks {
-                state.joined_topics.insert(own_nick_listener_topic(
+                state.conn.joined_topics.insert(own_nick_listener_topic(
                     &session_identifier,
                     network,
                     nick,
@@ -4783,7 +4790,7 @@ fn copy_text(text: &str) {
 /// refused (403 `client_token_scope`) and the page says so; a visitor
 /// session has no account, so it asks nothing and the page says that.
 async fn handle_security_totp_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     if !home::account_security_available(state.home.session_kind()) {
@@ -4839,14 +4846,14 @@ async fn handle_security_totp_start(
     ui: &slint::Weak<AppWindow>,
     password: String,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     set_security_busy(ui, true);
     let _ = ui.upgrade_in_event_loop(|ui| ui.set_security_password("".into()));
     match client.start_totp_enrollment(&token, &password).await {
         Ok(enrollment) => {
-            state.totp_enrollment = Some(enrollment.enrollment_token.clone());
+            state.conn.totp_enrollment = Some(enrollment.enrollment_token.clone());
             let qr = totp::qr_rgb(&enrollment.provisioning_uri);
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 let image = qr
@@ -4880,9 +4887,9 @@ async fn handle_security_totp_confirm(
     code: String,
 ) {
     let (Some(client), Some(token), Some(enrollment)) = (
-        state.client.clone(),
-        state.token.clone(),
-        state.totp_enrollment.clone(),
+        state.conn.client.clone(),
+        state.conn.token.clone(),
+        state.conn.totp_enrollment.clone(),
     ) else {
         return;
     };
@@ -4893,7 +4900,7 @@ async fn handle_security_totp_confirm(
         .await
     {
         Ok(codes) => {
-            state.totp_enrollment = None;
+            state.conn.totp_enrollment = None;
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 let codes: Vec<slint::SharedString> = codes.into_iter().map(Into::into).collect();
                 ui.set_security_recovery_codes(Rc::new(slint::VecModel::from(codes)).into());
@@ -4916,7 +4923,7 @@ async fn handle_security_totp_disable(
     ui: &slint::Weak<AppWindow>,
     password: String,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     set_security_busy(ui, true);
@@ -4936,7 +4943,7 @@ async fn handle_security_totp_disable(
 /// is refused (403 `client_token_scope`) and the page says so; a visitor
 /// session has no account, so it asks nothing and the page says that.
 async fn handle_security_passkeys_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     if !home::account_security_available(state.home.session_kind()) {
@@ -4997,7 +5004,7 @@ async fn handle_security_passkey_delete(
     id: String,
     password: String,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let _ = ui.upgrade_in_event_loop(|ui| {
@@ -5044,7 +5051,7 @@ fn spawn_passkey_change(
     worker_self: &mpsc::UnboundedSender<WorkerCommand>,
     change: PasskeyChange,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let ui = ui.clone();
@@ -5156,7 +5163,7 @@ async fn handle_security_passwordless_prepare(
     ui: &slint::Weak<AppWindow>,
     password: String,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let _ = ui.upgrade_in_event_loop(|ui| {
@@ -5166,7 +5173,7 @@ async fn handle_security_passwordless_prepare(
     });
     match client.prepare_passwordless(&token, &password).await {
         Ok(recovery) => {
-            state.passwordless_recovery_token = Some(recovery.recovery_token);
+            state.conn.passwordless_recovery_token = Some(recovery.recovery_token);
             let codes = recovery.recovery_codes;
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 let codes: Vec<slint::SharedString> = codes.into_iter().map(Into::into).collect();
@@ -5202,7 +5209,7 @@ fn clear_share_link(ui: &AppWindow) {
 /// ever lives in the UI properties (never in the log) and is dropped by
 /// `clear_share_link`.
 async fn handle_security_share_mint(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let _ = ui.upgrade_in_event_loop(|ui| {
@@ -5428,15 +5435,15 @@ async fn handle_totp_verify(
     code: String,
 ) {
     let code: String = code.chars().filter(|c| !c.is_whitespace()).collect();
-    let Some(pending) = state.pending_totp.take() else {
+    let Some(pending) = state.conn.pending_totp.take() else {
         return;
     };
     let Some(challenge_token) = pending.challenge_token.clone() else {
-        state.pending_totp = Some(pending);
+        state.conn.pending_totp = Some(pending);
         return;
     };
     if code.is_empty() {
-        state.pending_totp = Some(pending);
+        state.conn.pending_totp = Some(pending);
         show_totp_step(ui, "totp-invalid");
         return;
     }
@@ -5453,7 +5460,7 @@ async fn handle_totp_verify(
                     ui.set_status_kind("totp-expired".into());
                 });
             } else {
-                state.pending_totp = Some(pending);
+                state.conn.pending_totp = Some(pending);
                 show_totp_step(ui, key);
             }
         }
@@ -5494,11 +5501,11 @@ async fn handle_passkey_second_factor(
     session_events: &mut Option<mpsc::UnboundedReceiver<SessionEvent>>,
     ui: &slint::Weak<AppWindow>,
 ) {
-    let Some(mut pending) = state.pending_totp.take() else {
+    let Some(mut pending) = state.conn.pending_totp.take() else {
         return;
     };
     let Some(options) = pending.passkey.take() else {
-        state.pending_totp = Some(pending);
+        state.conn.pending_totp = Some(pending);
         show_totp_step(ui, "");
         return;
     };
@@ -5509,7 +5516,7 @@ async fn handle_passkey_second_factor(
         Err(err) => {
             persistence::log_line(&format!("passkey second factor not run: {err}"));
             pending.passkey = Some(options);
-            state.pending_totp = Some(pending);
+            state.conn.pending_totp = Some(pending);
             show_totp_step(ui, passkeys::ceremony_error_key(&err));
             return;
         }
@@ -5529,7 +5536,7 @@ async fn handle_passkey_second_factor(
             persistence::log_line(&format!("passkey second factor refused: {err:?}"));
             let key = passkeys::sign_in_error_key(&err);
             if pending.challenge_token.is_some() {
-                state.pending_totp = Some(pending);
+                state.conn.pending_totp = Some(pending);
                 let _ = ui.upgrade_in_event_loop(|ui| ui.set_totp_passkey_offered(false));
                 show_totp_step(ui, key);
             } else {
@@ -5660,9 +5667,11 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     } else {
         body
     };
-    let (Some(client), Some(token), Some((network, channel))) =
-        (&state.client, &state.token, &state.current_channel)
-    else {
+    let (Some(client), Some(token), Some((network, channel))) = (
+        &state.conn.client,
+        &state.conn.token,
+        &state.current_channel,
+    ) else {
         let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("no-active-network".into()));
         return;
     };
@@ -5819,7 +5828,7 @@ async fn handle_attach_file(
         set_status("attach-unsupported-type", filename);
         return;
     };
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let bytes = match std::fs::read(&path) {
@@ -5991,7 +6000,7 @@ struct StatusmsgTarget {
 /// The account's aliases, fetched once and cached until they change.
 async fn user_aliases(state: &mut WorkerState) -> HashMap<String, String> {
     if state.prefs.aliases.is_none() {
-        if let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) {
+        if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
             match client.fetch_aliases(&token).await {
                 Ok(aliases) => state.prefs.aliases = Some(aliases),
                 Err(err) => persistence::log_line(&format!("aliases fetch failed: {err:?}")),
@@ -6134,7 +6143,7 @@ fn push_notification_toggles(ui: &slint::Weak<AppWindow>, toggles: NotificationT
 }
 
 async fn handle_load_notification_prefs(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     match client.fetch_notification_prefs(&token).await {
@@ -6157,8 +6166,8 @@ async fn handle_save_notification_prefs(
     toggles: NotificationToggles,
 ) {
     let (Some(client), Some(token), Some(stored)) = (
-        state.client.clone(),
-        state.token.clone(),
+        state.conn.client.clone(),
+        state.conn.token.clone(),
         state.prefs.notification_prefs.clone(),
     ) else {
         return;
@@ -6400,6 +6409,7 @@ fn tune_radio(
 /// The decoder hint when a clicked link is audio the player takes.
 fn audio_link(state: &WorkerState, href: &str) -> Option<&'static str> {
     let base = state
+        .conn
         .client
         .as_ref()
         .map(|client| client.base_url().to_string())
@@ -6552,7 +6562,7 @@ fn save_presence_settings(state: &WorkerState) {
 /// for a local change Grappa never confirmed, which is sent again. If the
 /// server can't be reached the local choices stay as they are.
 async fn sync_presence_pins(state: &mut WorkerState) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let server = match client.fetch_presence_pins(&token).await {
@@ -6633,7 +6643,7 @@ async fn handle_toggle_denoise(state: &mut WorkerState, ui: &slint::Weak<AppWind
     save_presence_settings(state);
     push_chat_lines_update(state, ui, &key);
 
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let pins = std::collections::BTreeMap::from([(pin_key.clone(), pref)]);
@@ -6952,8 +6962,8 @@ async fn handle_notification_edit(
         handle_load_notification_prefs(state, ui).await;
     }
     let (Some(client), Some(token), Some(stored)) = (
-        state.client.clone(),
-        state.token.clone(),
+        state.conn.client.clone(),
+        state.conn.token.clone(),
         state.prefs.notification_prefs.clone(),
     ) else {
         return;
@@ -7078,7 +7088,7 @@ async fn handle_save_display_prefs(
     ui: &slint::Weak<AppWindow>,
     prefs: DisplayPrefs,
 ) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     if prefs.date_format.is_some() {
@@ -7220,7 +7230,7 @@ const ADMIN_EVENTS_CAP: usize = 200;
 /// `state.settings_network` (empty if none picked yet), plus the
 /// account-scoped Aliases/Vhost — see `docs/protocol-notes.md` §4quater.
 async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
 
@@ -7411,7 +7421,7 @@ async fn handle_personal_prefs_save(
     show_peer_profiles: bool,
     away_nick_suffix: Option<String>,
 ) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     let set_status = |kind: &'static str| {
@@ -7467,9 +7477,11 @@ fn non_empty(value: String) -> Option<String> {
 }
 
 async fn handle_identity_save(state: &WorkerState, nick: String, ident: String, realname: String) {
-    let (Some(client), Some(token), Some(network)) =
-        (&state.client, &state.token, &state.prefs.settings_network)
-    else {
+    let (Some(client), Some(token), Some(network)) = (
+        &state.conn.client,
+        &state.conn.token,
+        &state.prefs.settings_network,
+    ) else {
         return;
     };
     let request = cordiale_core::profile::NetworkIdentityRequest {
@@ -7490,7 +7502,7 @@ async fn handle_alias_upsert(
     ui: &slint::Weak<AppWindow>,
     new_entry: Option<(String, String)>,
 ) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     let mut aliases = client.fetch_aliases(token).await.unwrap_or_default();
@@ -7504,7 +7516,7 @@ async fn handle_alias_upsert(
 }
 
 async fn handle_alias_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>, command: String) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     let mut aliases = client.fetch_aliases(token).await.unwrap_or_default();
@@ -7517,7 +7529,7 @@ async fn handle_alias_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>, c
 /// also replaces the whole selection, so this reads the current one,
 /// flips the one address, and writes it back.
 async fn handle_vhost_toggle(state: &WorkerState, ui: &slint::Weak<AppWindow>, address: String) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     let Ok(current) = client.fetch_vhost_settings(token).await else {
@@ -7607,7 +7619,7 @@ fn presence_key(nick: &str) -> String {
 /// `action: "list"`), so the list reflects what other clients changed too;
 /// the reply is matched by its ref.
 fn request_watch_patterns(state: &mut WorkerState) {
-    let (Some(session), Some(identifier)) = (&state.session, &state.identifier) else {
+    let (Some(session), Some(identifier)) = (&state.conn.session, &state.conn.identifier) else {
         return;
     };
     let message_ref = session.send_tracked_command(
@@ -7642,7 +7654,7 @@ async fn load_identity_settings(
     ui: &slint::Weak<AppWindow>,
     network: &str,
 ) {
-    let (Some(client), Some(token)) = (&state.client, &state.token) else {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
     let Ok(networks) = client.fetch_networks(token).await else {
@@ -7689,9 +7701,11 @@ async fn handle_profile_save(
     ui: &slint::Weak<AppWindow>,
     edited: ProfileFields,
 ) {
-    let (Some(client), Some(token), Some(network)) =
-        (&state.client, &state.token, &state.prefs.settings_network)
-    else {
+    let (Some(client), Some(token), Some(network)) = (
+        &state.conn.client,
+        &state.conn.token,
+        &state.prefs.settings_network,
+    ) else {
         return;
     };
     let set_status = |kind: &'static str| {
@@ -7743,9 +7757,11 @@ async fn handle_avatar_upload(
             ui.set_status_kind(kind.into());
         });
     };
-    let (Some(client), Some(token), Some(network)) =
-        (&state.client, &state.token, &state.prefs.settings_network)
-    else {
+    let (Some(client), Some(token), Some(network)) = (
+        &state.conn.client,
+        &state.conn.token,
+        &state.prefs.settings_network,
+    ) else {
         return;
     };
     let Some((mime, UploadCategory::Image)) = mime_for_filename(&filename) else {
@@ -7791,9 +7807,11 @@ async fn handle_avatar_upload(
 
 /// Removes the Settings network's own avatar.
 async fn handle_avatar_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token), Some(network)) =
-        (&state.client, &state.token, &state.prefs.settings_network)
-    else {
+    let (Some(client), Some(token), Some(network)) = (
+        &state.conn.client,
+        &state.conn.token,
+        &state.prefs.settings_network,
+    ) else {
         return;
     };
     match client.delete_network_avatar(token, network).await {
@@ -7842,7 +7860,7 @@ fn send_user_network_verb(state: &WorkerState, network: &str, verb: &str) {
 /// Pushes `verb` on the user topic with `payload` plus the network's integer
 /// `network_id`. `payload` must be a JSON object.
 fn send_user_verb(state: &WorkerState, network: &str, verb: &str, mut payload: Value) {
-    let (Some(session), Some(identifier)) = (&state.session, &state.identifier) else {
+    let (Some(session), Some(identifier)) = (&state.conn.session, &state.conn.identifier) else {
         return;
     };
     // Grappa hard-rejects a non-integer `network_id` (`is_integer/1`
@@ -7872,8 +7890,8 @@ fn user_topic_channel_network(state: &WorkerState) -> Option<(&SessionHandle, St
     if state.current_query {
         return None;
     }
-    let session = state.session.as_ref()?;
-    let identifier = state.identifier.as_ref()?;
+    let session = state.conn.session.as_ref()?;
+    let identifier = state.conn.identifier.as_ref()?;
     let (network, channel) = state.current_channel.as_ref()?;
     let network_id = *state.networks.network_ids.get(network)?;
     Some((
@@ -7977,9 +7995,11 @@ async fn handle_member_ctcp(
     nick: String,
     verb: String,
 ) {
-    let (Some(client), Some(token), Some((network, channel))) =
-        (&state.client, &state.token, &state.current_channel)
-    else {
+    let (Some(client), Some(token), Some((network, channel))) = (
+        &state.conn.client,
+        &state.conn.token,
+        &state.current_channel,
+    ) else {
         return;
     };
     let request = SendMessageRequest::ctcp(nick, &verb, None);
@@ -8199,7 +8219,7 @@ fn read_cursor_to_write(state: &mut WorkerState) -> Option<(String, String, i64)
 /// focus-leave). Fire-and-forget: a failure only leaves the unread count as
 /// the server has it.
 fn write_back_read_cursor(state: &mut WorkerState) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let Some((network, target, message_id)) = read_cursor_to_write(state) else {
@@ -8240,7 +8260,8 @@ async fn decline_invite(
     network: &str,
     channel: &str,
 ) {
-    let (Some(client), Some(token)) = (state.client.as_ref(), state.token.as_deref()) else {
+    let (Some(client), Some(token)) = (state.conn.client.as_ref(), state.conn.token.as_deref())
+    else {
         return;
     };
     let Err(err) = client.decline_invite(token, network, channel).await else {
@@ -8306,6 +8327,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
         .unwrap_or_default();
     let ranking = MemberRanking::new(state.networks.isupport_by_network.get(&key.0));
     let can_moderate = state
+        .conn
         .identifier
         .as_deref()
         .is_some_and(|identifier| is_own_nick_an_op(&members, identifier, &ranking));
@@ -9185,7 +9207,7 @@ fn push_home(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 /// yet. A failure leaves the section empty rather than breaking the page,
 /// as in Cicchetto; only a user-initiated join reports its error.
 async fn load_featured_channels(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let mut missing: Vec<String> = state
@@ -9223,7 +9245,7 @@ async fn home_set_connection_state(
     network: String,
     target: &'static str,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     if !state.networks.network_ids.contains_key(&network) {
@@ -9259,7 +9281,7 @@ async fn home_remove_network(
     ui: &slint::Weak<AppWindow>,
     network: String,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     if !state.networks.network_ids.contains_key(&network) {
@@ -9283,7 +9305,7 @@ async fn home_connect_network(
     ui: &slint::Weak<AppWindow>,
     network: String,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     if state.home.connecting.is_some() || !state.home.available.contains(&network) {
@@ -9326,7 +9348,8 @@ async fn home_open_featured(
         Some(ChannelWindowState::Joined)
     );
     if !joined {
-        let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone())
+        else {
             return;
         };
         if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
@@ -9579,7 +9602,7 @@ fn open_folder(dir: &std::path::Path) {
 /// any credential.
 fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
     use cordiale_core::media::{self, FetchError, LinkTarget};
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         open_in_browser(&href);
         return;
     };
@@ -10167,9 +10190,11 @@ fn load_theme_background(
 ) {
     use std::sync::atomic::Ordering;
     let generation = THEME_BACKGROUND_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let (Some(background), Some(client), Some(token)) =
-        (background, state.client.clone(), state.token.clone())
-    else {
+    let (Some(background), Some(client), Some(token)) = (
+        background,
+        state.conn.client.clone(),
+        state.conn.token.clone(),
+    ) else {
         let _ = ui.upgrade_in_event_loop(|ui| ui.set_palette_background_set(false));
         return;
     };
@@ -10330,7 +10355,7 @@ fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected
 /// After sign-in: loads Grappa's theme gallery (falling back to the
 /// built-in copies) and re-applies the saved color theme choice.
 async fn load_color_themes(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let mut server_choices: Vec<ThemeChoice> = match client.fetch_themes(&token).await {
@@ -10403,7 +10428,7 @@ fn editor_background_menu(
 /// Opens the editor on `key` (an owned Grappa theme) or, for "", on a new
 /// theme starting from the one in use.
 async fn open_theme_editor(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &str) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let source = if key.is_empty() {
@@ -10571,7 +10596,7 @@ async fn save_theme(
     name: &str,
     payload: &Value,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let saved = match client.save_theme(&token, theme_id, name, payload).await {
@@ -10625,7 +10650,7 @@ async fn upload_theme_background(
     ui: &slint::Weak<AppWindow>,
     path: &std::path::Path,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let filename = path
@@ -10720,7 +10745,7 @@ fn watch_system_scheme(tx: mpsc::UnboundedSender<WorkerCommand>) {
 /// Settings > Themes night pick: `server:<id>` becomes the night theme next
 /// to the day one in use, "" goes back to the day theme at all hours.
 async fn select_night_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, key: &str) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let Some(light) = state
@@ -10765,9 +10790,11 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         settings.color_theme = None;
         None
     } else if let Some(id) = key.strip_prefix("server:") {
-        let (Some(client), Some(token), Ok(id)) =
-            (state.client.clone(), state.token.clone(), id.parse::<i64>())
-        else {
+        let (Some(client), Some(token), Ok(id)) = (
+            state.conn.client.clone(),
+            state.conn.token.clone(),
+            id.parse::<i64>(),
+        ) else {
             return;
         };
         let night = state
@@ -11208,19 +11235,20 @@ enum NetworkLifecycleKind {
 /// of it, and returns to the sign-in screen through the normal disconnect
 /// path. No IRC QUIT is sent — the bouncer's IRC session is unaffected.
 fn end_revoked_session(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, flood: bool) {
-    if let Some(handle) = state.session.take() {
+    if let Some(handle) = state.conn.session.take() {
         handle.shutdown();
     }
-    if let (Some(client), Some(identifier)) =
-        (state.client.as_ref(), state.login_identifier.as_deref())
-    {
-        if state.guest_session {
+    if let (Some(client), Some(identifier)) = (
+        state.conn.client.as_ref(),
+        state.conn.login_identifier.as_deref(),
+    ) {
+        if state.conn.guest_session {
             forget_guest_bearer(client.base_url(), identifier);
         } else {
             forget_remembered_bearer(client.base_url(), identifier);
         }
     }
-    state.token = None;
+    state.conn.token = None;
     let status = if flood {
         "session-severed-flood"
     } else {
@@ -11376,7 +11404,8 @@ async fn answer_dcc_offer(
     offer_id: &str,
     accept: bool,
 ) {
-    let (Some(client), Some(token)) = (state.client.as_ref(), state.token.as_deref()) else {
+    let (Some(client), Some(token)) = (state.conn.client.as_ref(), state.conn.token.as_deref())
+    else {
         return;
     };
     let result = if accept {
@@ -11421,8 +11450,8 @@ async fn open_archive(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, netw
 /// it runs only when the screen opens or a push says the list changed.
 async fn load_archive(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token), Some(view)) = (
-        state.client.clone(),
-        state.token.clone(),
+        state.conn.client.clone(),
+        state.conn.token.clone(),
         state.panels.archive.as_ref(),
     ) else {
         return;
@@ -11455,8 +11484,8 @@ async fn load_archive(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
 /// the server's `archive_purged` push drives the refresh on every device.
 async fn delete_archive_target(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, target: &str) {
     let (Some(client), Some(token), Some(view)) = (
-        state.client.clone(),
-        state.token.clone(),
+        state.conn.client.clone(),
+        state.conn.token.clone(),
         state.panels.archive.as_ref(),
     ) else {
         return;
@@ -11663,7 +11692,8 @@ async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         .get(&window_state_key(&network, &channel))
         == Some(&ChannelWindowState::Joined);
     if !joined {
-        let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+        let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone())
+        else {
             return;
         };
         if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
@@ -11714,8 +11744,8 @@ async fn open_directory(
 /// replacing any loaded rows (the snapshot may have been replaced).
 async fn load_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token), Some(view)) = (
-        state.client.clone(),
-        state.token.clone(),
+        state.conn.client.clone(),
+        state.conn.token.clone(),
         state.panels.directory.as_ref(),
     ) else {
         return;
@@ -11749,8 +11779,8 @@ async fn load_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
 /// Appends the next page after the loaded rows, when the server has more.
 async fn load_more_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token), Some(view)) = (
-        state.client.clone(),
-        state.token.clone(),
+        state.conn.client.clone(),
+        state.conn.token.clone(),
         state.panels.directory.as_ref(),
     ) else {
         return;
@@ -11798,7 +11828,7 @@ async fn load_more_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow
 /// `directory_*` push (or a failed request) releases it; the new rows are
 /// fetched when those pushes arrive.
 async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let Some(view) = state.panels.directory.as_mut() else {
