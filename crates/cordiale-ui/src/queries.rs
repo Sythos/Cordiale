@@ -14,14 +14,14 @@ pub(crate) async fn handle_select_query(
     else {
         return;
     };
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     close_directory(state, ui);
 
     let topic = query_topic(&identifier, &query.network, &query.target_nick);
-    if let Some(handle) = &state.session {
-        if state.joined_topics.insert(topic.clone()) {
+    if let Some(handle) = &state.conn.session {
+        if state.conn.joined_topics.insert(topic.clone()) {
             handle.join_topic(topic, false);
         }
     }
@@ -103,7 +103,7 @@ pub(crate) async fn fetch_query_history(
     after_id: Option<i64>,
     limit: Option<usize>,
 ) -> bool {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return false;
     };
     let rows = match client

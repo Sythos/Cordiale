@@ -150,7 +150,7 @@ pub(crate) fn reset_query_join_failure(
 ) -> bool {
     state.transcript.query_joined.remove(identity);
     state.transcript.query_ready.remove(identity);
-    state.joined_topics.remove(topic);
+    state.conn.joined_topics.remove(topic);
     let selected = state.current_query
         && state
             .current_channel
@@ -168,7 +168,7 @@ async fn handle_query_join_reply(
     topic: &str,
     status: Option<&str>,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network, nick)) = query_from_topic(identifier, topic) else {
@@ -308,6 +308,7 @@ pub(crate) async fn handle_frame(
             return;
         }
         if let Some(reason) = state
+            .conn
             .identifier
             .as_deref()
             .and_then(|identifier| command_error_reason(&frame, identifier))
@@ -499,7 +500,7 @@ pub(crate) async fn handle_frame(
     // authoritative pushes last-write-wins, including a lower cursor from a
     // later-arriving frame, and treats the account-wide badge separately.
     if payload_kind == "read_cursor_set" {
-        if let Some(identifier) = state.identifier.clone() {
+        if let Some(identifier) = state.conn.identifier.clone() {
             apply_read_cursor_set(state, &identifier, &frame.topic, &frame.payload);
         }
         return;
@@ -637,7 +638,7 @@ pub(crate) async fn handle_frame(
             return;
         }
         if payload_kind == "message"
-            && state.own_listener_ready.contains(&frame.topic)
+            && state.conn.own_listener_ready.contains(&frame.topic)
             && own_nick_listener_accepts_inbound_dm(effective_payload)
         {
             if let Some(key) = own_nick_dm_query_key(state, &network, effective_payload) {
@@ -684,7 +685,7 @@ pub(crate) async fn handle_frame(
     // unrelated frame from adding another channel, while the upsert below
     // makes dual delivery idempotent (Cicchetto's setJoined semantics).
     if payload_kind == "joined" {
-        let Some(identifier) = state.identifier.as_deref() else {
+        let Some(identifier) = state.conn.identifier.as_deref() else {
             return;
         };
         let Some((network, channel)) = parse_joined_event(&frame.payload, &frame.topic, identifier)
@@ -725,7 +726,7 @@ pub(crate) async fn handle_frame(
     // faded pseudo-row, but never show a roster for a failed window. The
     // nullable reason/numeric stay in the session store only.
     if payload_kind == "join_failed" {
-        let Some(identifier) = state.identifier.as_deref() else {
+        let Some(identifier) = state.conn.identifier.as_deref() else {
             return;
         };
         let Some((network, channel, failure)) =
@@ -773,7 +774,7 @@ pub(crate) async fn handle_frame(
     // snapshot on the matching channel topic; query/DM topics are rejected
     // by the parser. Keep the by/reason metadata in session state only.
     if payload_kind == "kicked" {
-        let Some(identifier) = state.identifier.as_deref() else {
+        let Some(identifier) = state.conn.identifier.as_deref() else {
             return;
         };
         let Some((network, channel, kick)) =
@@ -834,6 +835,7 @@ pub(crate) async fn handle_frame(
     }
 
     if let Some((network, topic_nick)) = state
+        .conn
         .identifier
         .as_deref()
         .and_then(|identifier| query_from_topic(identifier, &frame.topic))
@@ -893,7 +895,7 @@ pub(crate) async fn handle_frame(
     publish_held_rows(state);
     let rebuild_worker =
         if open && history_excess(rows, CHAT_HISTORY_CAP, CHAT_HISTORY_TRIM_SLACK) > 0 {
-            state.chat_rebuild_tx.clone()
+            state.conn.chat_rebuild_tx.clone()
         } else {
             None
         };
@@ -1087,6 +1089,7 @@ pub(crate) fn apply_window_counts(state: &mut WorkerState, topic: &str, payload:
         parse_own_nick_window_counts(state, topic, payload)
     } else {
         state
+            .conn
             .identifier
             .as_deref()
             .and_then(|identifier| parse_window_counts(payload, topic, identifier))
@@ -1153,7 +1156,7 @@ pub(crate) fn apply_window_counts_join_reply(
     payload: &Value,
     status: Option<&str>,
 ) -> bool {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return false;
     };
     let Some((key, counts)) = parse_window_counts_join_reply(identifier, topic, payload, status)
@@ -1462,7 +1465,7 @@ fn handle_window_pending(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     let Some((network, channel)) = parse_window_pending_event(payload, carrier_topic, &identifier)
@@ -1488,11 +1491,11 @@ fn handle_window_pending(
 
     let topic = channel_topic(&identifier, &network, &channel);
     let subscription_added = register_pending_channel_topic(
-        &mut state.joined_topics,
+        &mut state.conn.joined_topics,
         &mut state.channel_topics,
         topic.clone(),
     );
-    if let (true, Some(handle)) = (subscription_added, state.session.as_ref()) {
+    if let (true, Some(handle)) = (subscription_added, state.conn.session.as_ref()) {
         handle.join_topic(topic, true);
     }
 
@@ -1611,7 +1614,7 @@ fn handle_window_invited(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     let Some((network, channel, inviter)) =
@@ -1639,11 +1642,11 @@ fn handle_window_invited(
 
     let topic = channel_topic(&identifier, &network, &channel);
     let subscription_added = register_pending_channel_topic(
-        &mut state.joined_topics,
+        &mut state.conn.joined_topics,
         &mut state.channel_topics,
         topic.clone(),
     );
-    if let (true, Some(handle)) = (subscription_added, state.session.as_ref()) {
+    if let (true, Some(handle)) = (subscription_added, state.conn.session.as_ref()) {
         handle.join_topic(topic, true);
     }
 
@@ -1763,6 +1766,7 @@ pub(crate) fn remove_declined_channel_subscription(
         Vec::new()
     } else {
         state
+            .conn
             .joined_topics
             .iter()
             .filter(|topic| channel_topic_matches(identifier, topic, network, channel))
@@ -1771,8 +1775,8 @@ pub(crate) fn remove_declined_channel_subscription(
     };
     let joined_topic_removed = !matching_joined_topics.is_empty();
     for topic in matching_joined_topics {
-        state.joined_topics.remove(&topic);
-        if let Some(handle) = state.session.as_ref() {
+        state.conn.joined_topics.remove(&topic);
+        if let Some(handle) = state.conn.session.as_ref() {
             handle.leave_topic(topic);
         }
     }
@@ -1785,7 +1789,7 @@ fn handle_window_invite_declined(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     let Some((network, channel)) =
@@ -2242,7 +2246,7 @@ fn show_live_query_message(
         return;
     };
     let over_cap = history_excess(rows, CHAT_HISTORY_CAP, CHAT_HISTORY_TRIM_SLACK) > 0;
-    let worker = state.chat_rebuild_tx.clone();
+    let worker = state.conn.chat_rebuild_tx.clone();
     let key = key.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         use slint::Model as _;
@@ -2279,7 +2283,7 @@ pub(crate) fn own_nick_listener_network_for_topic(
     state: &WorkerState,
     topic: &str,
 ) -> Option<String> {
-    let user = state.identifier.as_deref()?;
+    let user = state.conn.identifier.as_deref()?;
     state.networks.own_nicks.iter().find_map(|(network, nick)| {
         (own_nick_listener_topic(user, network, nick) == topic).then(|| network.clone())
     })
@@ -2628,7 +2632,7 @@ pub(crate) fn apply_away_confirmed(
 }
 
 pub(crate) fn handle_away_confirmed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
-    let Some(user) = state.identifier.as_deref() else {
+    let Some(user) = state.conn.identifier.as_deref() else {
         return;
     };
     if carrier_topic != format!("grappa:user:{user}") {
@@ -2672,7 +2676,7 @@ pub(crate) fn handle_session_identity_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(user) = state.identifier.as_deref() else {
+    let Some(user) = state.conn.identifier.as_deref() else {
         return;
     };
     if carrier_topic != format!("grappa:user:{user}") {
@@ -2696,7 +2700,7 @@ pub(crate) fn handle_isupport_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(user) = state.identifier.as_deref() else {
+    let Some(user) = state.conn.identifier.as_deref() else {
         return;
     };
     if carrier_topic != format!("grappa:user:{user}") {
@@ -2746,7 +2750,7 @@ fn parse_umode_changed(
 }
 
 pub(crate) fn handle_umode_changed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
-    let Some(user) = state.identifier.as_deref() else {
+    let Some(user) = state.conn.identifier.as_deref() else {
         return;
     };
     if carrier_topic != format!("grappa:user:{user}") {
@@ -2793,7 +2797,7 @@ pub(crate) fn handle_supported_umodes_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(user) = state.identifier.as_deref() else {
+    let Some(user) = state.conn.identifier.as_deref() else {
         return;
     };
     if carrier_topic != format!("grappa:user:{user}") {
@@ -2836,15 +2840,15 @@ pub(crate) fn apply_own_nick_change(
     let mut actions = Vec::with_capacity(2);
     if let Some(old_nick) = previous {
         let old_topic = own_nick_listener_topic(user, network, &old_nick);
-        state.own_listener_ready.remove(&old_topic);
+        state.conn.own_listener_ready.remove(&old_topic);
         if find_query_window(&state.transcript.query_windows, network, &old_nick).is_none() {
-            state.joined_topics.remove(&old_topic);
+            state.conn.joined_topics.remove(&old_topic);
             actions.push(OwnNickListenerAction::Leave(old_topic));
         }
     }
 
-    if state.joined_topics.insert(new_topic.clone()) {
-        state.own_listener_ready.remove(&new_topic);
+    if state.conn.joined_topics.insert(new_topic.clone()) {
+        state.conn.own_listener_ready.remove(&new_topic);
         actions.push(OwnNickListenerAction::Join(new_topic));
     } else if state
         .transcript
@@ -2853,7 +2857,7 @@ pub(crate) fn apply_own_nick_change(
     {
         // The canonical topic may already have been joined as a listed query.
         // Its successful query ACK is also sufficient for this listener.
-        state.own_listener_ready.insert(new_topic);
+        state.conn.own_listener_ready.insert(new_topic);
     }
 
     actions
@@ -2864,22 +2868,22 @@ pub(crate) fn handle_own_nick_listener_join_reply(
     topic: &str,
     status: Option<&str>,
 ) -> OwnNickListenerJoinReply {
-    if !state.joined_topics.contains(topic)
+    if !state.conn.joined_topics.contains(topic)
         || own_nick_listener_network_for_topic(state, topic).is_none()
     {
         return OwnNickListenerJoinReply::Untracked;
     }
     if status == Some("ok") {
-        state.own_listener_ready.insert(topic.to_string());
+        state.conn.own_listener_ready.insert(topic.to_string());
         OwnNickListenerJoinReply::Accepted
     } else {
-        state.own_listener_ready.remove(topic);
+        state.conn.own_listener_ready.remove(topic);
         OwnNickListenerJoinReply::Rejected
     }
 }
 
 fn handle_own_nick_changed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
-    let Some(user) = state.identifier.clone() else {
+    let Some(user) = state.conn.identifier.clone() else {
         return;
     };
     if carrier_topic != format!("grappa:user:{user}") {
@@ -2895,7 +2899,7 @@ fn handle_own_nick_changed(state: &mut WorkerState, carrier_topic: &str, payload
     };
 
     let actions = apply_own_nick_change(state, &user, &network, &nick);
-    if let Some(session) = state.session.as_ref() {
+    if let Some(session) = state.conn.session.as_ref() {
         for action in actions {
             match action {
                 OwnNickListenerAction::Leave(topic) => session.leave_topic(topic),
@@ -2916,13 +2920,13 @@ async fn handle_channels_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     if !is_channels_changed_signal(&identifier, carrier_topic, payload) {
         return;
     }
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
 
@@ -2953,7 +2957,7 @@ async fn handle_channels_changed(
         }
     }
 
-    if state.session.is_none() {
+    if state.conn.session.is_none() {
         persistence::log_line(
             "channels_changed refresh skipped without an active realtime session",
         );
@@ -2961,7 +2965,7 @@ async fn handle_channels_changed(
     }
     let entries = channel_entries_from_channels(&channels_by_network);
     let actions = reconcile_channel_entries(state, &identifier, entries);
-    let Some(session) = state.session.as_ref() else {
+    let Some(session) = state.conn.session.as_ref() else {
         // Checked immediately before reconciliation; keep this defensive in
         // case the state container changes independently in the future.
         return;
@@ -3063,9 +3067,9 @@ fn reconcile_own_nick_listener_topics(
         }
 
         let old_topic = own_nick_listener_topic(user, &network, &old_nick);
-        state.own_listener_ready.remove(&old_topic);
+        state.conn.own_listener_ready.remove(&old_topic);
         if find_query_window(&state.transcript.query_windows, &network, &old_nick).is_none()
-            && state.joined_topics.remove(&old_topic)
+            && state.conn.joined_topics.remove(&old_topic)
         {
             actions.push(OwnNickListenerAction::Leave(old_topic));
         }
@@ -3073,8 +3077,8 @@ fn reconcile_own_nick_listener_topics(
 
     for (network, nick) in next_own_nicks {
         let topic = own_nick_listener_topic(user, &network, &nick);
-        if state.joined_topics.insert(topic.clone()) {
-            state.own_listener_ready.remove(&topic);
+        if state.conn.joined_topics.insert(topic.clone()) {
+            state.conn.own_listener_ready.remove(&topic);
             actions.push(OwnNickListenerAction::Join(topic));
         }
     }
@@ -3234,7 +3238,7 @@ pub(crate) fn apply_network_rest_refresh(
     server_networks.sort();
     for network in server_networks {
         let topic = channel_topic(identifier, &network, SERVER_WINDOW_NAME);
-        if state.joined_topics.insert(topic.clone()) {
+        if state.conn.joined_topics.insert(topic.clone()) {
             actions.push(ChannelTopicAction::Join(topic));
         }
     }
@@ -3245,6 +3249,7 @@ pub(crate) fn apply_network_rest_refresh(
         });
     }
     let mut obsolete_topics: Vec<String> = state
+        .conn
         .joined_topics
         .iter()
         .filter(|topic| {
@@ -3255,7 +3260,7 @@ pub(crate) fn apply_network_rest_refresh(
         .collect();
     obsolete_topics.sort();
     for topic in obsolete_topics {
-        state.joined_topics.remove(&topic);
+        state.conn.joined_topics.remove(&topic);
         if !actions.iter().any(
             |action| matches!(action, ChannelTopicAction::Leave(existing) if existing == &topic),
         ) {
@@ -3271,7 +3276,7 @@ async fn handle_connection_state_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     let Some(transition) =
@@ -3314,7 +3319,7 @@ async fn reconcile_network_connection_states(
     ui: &slint::Weak<AppWindow>,
     context: &str,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let networks = match client.fetch_networks(&token).await {
@@ -3403,7 +3408,7 @@ async fn handle_connection_progress(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     let Some((network, progress)) = parse_connection_progress(
@@ -3505,7 +3510,7 @@ fn handle_recover_progress(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network, entry)) = parse_recover_progress(payload, carrier_topic, identifier) else {
@@ -3573,7 +3578,7 @@ fn handle_recover_result(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network, outcome, reason)) = parse_recover_result(payload, carrier_topic, identifier)
@@ -3613,7 +3618,7 @@ fn handle_web_session_severed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(code) = parse_web_session_severed(payload, carrier_topic, identifier) else {
@@ -3655,7 +3660,7 @@ fn handle_auto_away_debounce_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(debounce) = parse_auto_away_debounce_changed(payload, carrier_topic, identifier)
@@ -3701,7 +3706,7 @@ fn handle_quit_part_reason_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(reason) = parse_nullable_setting_echo(
@@ -3732,7 +3737,7 @@ fn handle_auto_away_reason_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(reason) = parse_nullable_setting_echo(
@@ -3765,7 +3770,7 @@ pub(crate) fn apply_away_nick_suffix_changed(
     carrier_topic: &str,
     payload: &Value,
 ) -> Option<Option<String>> {
-    let identifier = state.identifier.as_deref()?;
+    let identifier = state.conn.identifier.as_deref()?;
     let Some(suffix) = parse_nullable_setting_echo(
         payload,
         carrier_topic,
@@ -3940,7 +3945,7 @@ fn handle_dcc_offer(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(offer) = parse_dcc_offer(payload, carrier_topic, identifier) else {
@@ -3995,7 +4000,7 @@ fn handle_dcc_offer_resolved(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((offer_id, resolution)) = parse_dcc_offer_resolved(payload, carrier_topic, identifier)
@@ -4076,7 +4081,7 @@ async fn handle_archive_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(network) = parse_archive_changed(payload, carrier_topic, identifier) else {
@@ -4135,7 +4140,7 @@ async fn handle_archive_purged(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network, target)) = parse_archive_purged(payload, carrier_topic, identifier) else {
@@ -4199,7 +4204,7 @@ fn handle_notify_list(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(lists) = parse_notify_list(payload, carrier_topic, identifier) else {
@@ -4242,7 +4247,7 @@ fn handle_presence_snapshot(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network_id, nicks)) = parse_presence_snapshot(payload, carrier_topic, identifier)
@@ -4300,7 +4305,7 @@ fn handle_presence_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(change) = parse_presence_changed(payload, carrier_topic, identifier) else {
@@ -4364,7 +4369,7 @@ fn handle_presence_error(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network_id, reason, detail)) =
@@ -4424,7 +4429,7 @@ fn handle_peer_away(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network, peer, message)) = parse_peer_away(payload, carrier_topic, identifier) else {
@@ -4478,7 +4483,7 @@ fn handle_server_settings_changed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(limits) = parse_server_settings_changed(payload, carrier_topic, identifier) else {
@@ -4538,7 +4543,7 @@ pub(crate) fn parse_bundle_hash(
 /// native counterpart: it is consumed and logged when it changes, and never
 /// triggers a download or an update of this app.
 fn handle_bundle_hash(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(bundle) = parse_bundle_hash(payload, carrier_topic, identifier) else {
@@ -4637,7 +4642,7 @@ fn handle_mentions_bundle(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(view) = parse_mentions_bundle(payload, carrier_topic, identifier) else {
@@ -4684,7 +4689,7 @@ async fn handle_directory_progress(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(network) = parse_directory_count_signal(
@@ -4708,7 +4713,7 @@ async fn handle_directory_complete(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(network) = parse_directory_count_signal(
@@ -4753,7 +4758,7 @@ async fn handle_directory_failed(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network, reason)) = parse_directory_failed(payload, carrier_topic, identifier) else {
@@ -4790,7 +4795,7 @@ fn handle_who_reply(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(reply) = parse_who_reply(payload, carrier_topic, identifier) else {
@@ -4861,7 +4866,7 @@ fn handle_server_reply(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network, source, lines)) = parse_server_reply(payload, carrier_topic, identifier)
@@ -5067,7 +5072,7 @@ fn handle_whois_bundle(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(bundle) = parse_whois_bundle(payload, carrier_topic, identifier) else {
@@ -5087,7 +5092,7 @@ fn handle_whois_bundle(
 /// screen. Slint loads images from files, so it's written to the temp
 /// directory first; a failure just leaves the card without a picture.
 fn load_whois_avatar(state: &WorkerState, ui: &slint::Weak<AppWindow>, avatar_url: String) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let ui = ui.clone();
@@ -5183,7 +5188,7 @@ fn handle_whowas_bundle(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(view) = parse_whowas_bundle(payload, carrier_topic, identifier) else {
@@ -5251,7 +5256,7 @@ fn handle_banlist_bundle(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(view) = parse_banlist_bundle(payload, carrier_topic, identifier) else {
@@ -5294,7 +5299,7 @@ fn handle_invite_ack(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network, channel, peer)) = parse_invite_ack(payload, carrier_topic, identifier)
@@ -5356,7 +5361,7 @@ fn handle_lusers_bundle(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some(view) = parse_lusers_bundle(payload, carrier_topic, identifier) else {
@@ -5422,7 +5427,7 @@ fn handle_whois_avatar_ready(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.as_deref() else {
+    let Some(identifier) = state.conn.identifier.as_deref() else {
         return;
     };
     let Some((network, nick, avatar_url)) =
@@ -5472,7 +5477,7 @@ async fn handle_network_lifecycle(
     payload: &Value,
     lifecycle: NetworkLifecycleKind,
 ) {
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     let Some((network_id, network_slug)) = lifecycle.parse(payload, carrier_topic, &identifier)
@@ -5493,7 +5498,7 @@ async fn handle_network_lifecycle(
         ));
         return;
     }
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
 
@@ -5529,7 +5534,7 @@ async fn handle_network_lifecycle(
     }
 
     let actions = apply_network_rest_refresh(state, &identifier, &boot, &me);
-    if let Some(session) = state.session.as_ref() {
+    if let Some(session) = state.conn.session.as_ref() {
         for action in actions {
             match action {
                 ChannelTopicAction::Leave(topic) => session.leave_topic(topic),
@@ -5789,7 +5794,7 @@ pub(crate) fn apply_query_windows_snapshot(
             }
         }
     }
-    let renames = if rename_inference_applies(state.server_protocol_version) {
+    let renames = if rename_inference_applies(state.conn.server_protocol_version) {
         query_window_renames(&previous, &snapshot)
     } else {
         Vec::new()
@@ -5884,7 +5889,7 @@ fn handle_query_windows_list(
     carrier_topic: &str,
     payload: &Value,
 ) {
-    let Some(identifier) = state.identifier.clone() else {
+    let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
     if carrier_topic != format!("grappa:user:{identifier}") {
@@ -5904,10 +5909,10 @@ fn handle_query_windows_list(
     retain_window_counts_for_open_windows(state);
     reconcile_query_topic_tracking(state, &previous_queries);
     drain_pending_own_nick_dms(state);
-    if let Some(session) = state.session.as_ref() {
+    if let Some(session) = state.conn.session.as_ref() {
         for query in &state.transcript.query_windows {
             let topic = query_topic(&identifier, &query.network, &query.target_nick);
-            if state.joined_topics.insert(topic.clone()) {
+            if state.conn.joined_topics.insert(topic.clone()) {
                 // Query topics carry scrollback/messages, not the channel
                 // presence stream used to populate the roster.
                 session.join_topic(topic, false);

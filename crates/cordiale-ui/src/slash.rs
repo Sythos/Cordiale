@@ -42,7 +42,7 @@ pub(crate) async fn run_slash_command(
     command: SlashCommand,
     label: String,
 ) {
-    let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
     let in_channel = !state.current_query && slash::is_channel(&channel);
@@ -526,8 +526,8 @@ fn start_kickban(
     reason: String,
 ) {
     let (Some(session), Some(identifier), Some(&network_id)) = (
-        &state.session,
-        &state.identifier,
+        &state.conn.session,
+        &state.conn.identifier,
         state.networks.network_ids.get(network),
     ) else {
         return;
@@ -564,7 +564,7 @@ async fn post_message(
 
 /// Pushes `verb` on the user topic with `payload` as is (no `network_id`).
 fn send_user_topic_verb(state: &WorkerState, verb: &str, payload: Value) {
-    if let (Some(session), Some(identifier)) = (&state.session, &state.identifier) {
+    if let (Some(session), Some(identifier)) = (&state.conn.session, &state.conn.identifier) {
         session.send_command(format!("grappa:user:{identifier}"), verb, payload);
     }
 }
