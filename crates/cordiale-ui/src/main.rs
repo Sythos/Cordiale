@@ -1734,9 +1734,17 @@ async fn run_worker(
                         delete_archive_target(&mut state, &ui, &target).await;
                     }
                     Some(WorkerCommand::OpenLink(href)) => {
-                        match audio_link(&state, &href) {
-                            Some(hint) => play_audio_link(&mut radio_state, &radio, &ui, &href, hint),
-                            None => open_link(&state, &ui, href),
+                        match cordiale_core::media::validated_url(&href) {
+                            Ok(url) => {
+                                let href = url.to_string();
+                                match audio_link(&state, &href) {
+                                    Some(hint) => {
+                                        play_audio_link(&mut radio_state, &radio, &ui, &href, hint)
+                                    }
+                                    None => open_link(&state, &ui, href),
+                                }
+                            }
+                            Err(refusal) => link_refused(&ui, refusal),
                         }
                     }
                     Some(WorkerCommand::RadioTune(key)) => {
@@ -7782,12 +7790,17 @@ fn linked_markdown(text: &str) -> String {
     markdown
 }
 
-/// Asks the system to open an http(s) or ftp URL in the browser; other
-/// schemes are ignored.
+/// Asks the system to open an http(s) URL in the browser. The browser gets
+/// the validated, normalised URL rather than `href` itself; anything else is
+/// refused and only logged (without the link, which may hold a token).
 fn open_in_browser(href: &str) {
-    if !cordiale_core::media::is_openable(href) {
-        return;
-    }
+    let url = match cordiale_core::media::validated_url(href) {
+        Ok(url) => url,
+        Err(refusal) => {
+            persistence::log_line(&format!("browser not opened: {refusal}"));
+            return;
+        }
+    };
     let mut command = if cfg!(target_os = "windows") {
         let mut command = std::process::Command::new("rundll32");
         command.arg("url.dll,FileProtocolHandler");
@@ -7797,7 +7810,7 @@ fn open_in_browser(href: &str) {
     } else {
         std::process::Command::new("xdg-open")
     };
-    if let Err(err) = command.arg(href).spawn() {
+    if let Err(err) = command.arg(url.as_str()).spawn() {
         persistence::log_line(&format!("browser not opened: {err}"));
     }
 }
@@ -7821,7 +7834,22 @@ fn open_folder(dir: &std::path::Path) {
     }
 }
 
-/// A clicked chat link: images and text uploads (and https images
+/// A clicked link that isn't opened: the viewer says so, as it does for a
+/// file that couldn't be shown. The link itself is not logged.
+fn link_refused(ui: &slint::Weak<AppWindow>, refusal: cordiale_core::media::LinkRefusal) {
+    persistence::log_line(&format!("link not opened: {refusal}"));
+    let reason = refusal.to_string();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_media_url("".into());
+        ui.set_media_title("".into());
+        ui.set_media_error(reason.into());
+        ui.set_media_kind("failed".into());
+        ui.set_media_zoom(false);
+        ui.set_screen("media".into());
+    });
+}
+
+/// A clicked chat link, already validated and normalised: images and text uploads (and https images
 /// elsewhere) open in the viewer, like Cicchetto; anything else in the
 /// browser. Grappa files are read with the session; other hosts without
 /// any credential.

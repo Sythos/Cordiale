@@ -200,7 +200,11 @@ Cordiale also covers:
   image and text uploads on Grappa, and https images elsewhere, open in the
   media viewer (fit or actual size; text read-only, with Copy), MP3, Ogg and
   FLAC links play in the radio's player, and the rest opens in the browser.
-  Like Cicchetto, Cordiale shows no inline previews.
+  Like Cicchetto, Cordiale shows no inline previews. Only http, https and
+  ftp links open (not `file:`, `javascript:`, `mailto:` or links with a user
+  name or password), and the browser gets the normalised URL. A download for the
+  viewer follows at most five redirects and refuses one that goes from
+  https to http or from a public host into the local network.
 - **Slash commands:** the everyday IRC verbs (`/me`, `/msg`, `/notice`,
   `/query`, `/join`, `/part`, `/cycle`, `/topic`, `/nick`, `/away`, `/ctcp`,
   `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
