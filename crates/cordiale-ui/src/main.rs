@@ -46,6 +46,7 @@ mod taskbar;
 mod totp;
 #[cfg(windows)]
 mod webauthn_windows;
+mod worker_commands;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -91,6 +92,7 @@ use frames::*;
 use history::*;
 use queries::*;
 use slash::*;
+use worker_commands::*;
 
 /// The default server offered on first launch.
 const DEFAULT_SERVER_URL: &str = "https://irc.sindro.me";
@@ -3178,16 +3180,7 @@ async fn run_worker(
                         handle_security_totp_disable(&state, &ui, password).await;
                     }
                     Some(WorkerCommand::SecurityTotpDone) => {
-                        state.conn.totp_enrollment = None;
-                        let _ = ui.upgrade_in_event_loop(|ui| {
-                            ui.set_security_totp_step("".into());
-                            ui.set_security_totp_secret("".into());
-                            ui.set_security_totp_uri("".into());
-                            ui.set_security_totp_code("".into());
-                            ui.set_security_totp_qr(slint::Image::default());
-                            ui.set_security_recovery_codes(slint::ModelRc::default());
-                            ui.set_security_totp_error("".into());
-                        });
+                        run_security_totp_done(&mut state, &ui);
                     }
                     Some(WorkerCommand::SecurityPasskeysRefresh) => {
                         handle_security_passkeys_refresh(&state, &ui).await;
@@ -3238,16 +3231,7 @@ async fn run_worker(
                         handle_select_channel(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::SelectNetwork(network)) => {
-                        if state.networks.network_ids.contains_key(&network) {
-                            write_back_read_cursor(&mut state);
-                            handle_select_channel(
-                                &mut state,
-                                &ui,
-                                network,
-                                SERVER_WINDOW_NAME.to_string(),
-                            )
-                            .await;
-                        }
+                        run_select_network(&mut state, &ui, network).await;
                     }
                     Some(WorkerCommand::PartChannel { network, channel }) => {
                         handle_part_channel(&mut state, &ui, network, channel, None).await;
@@ -3289,17 +3273,7 @@ async fn run_worker(
                         close_directory(&mut state, &ui);
                     }
                     Some(WorkerCommand::DirectoryOpen(network)) => {
-                        if state.networks.network_ids.contains_key(&network) {
-                            let reopen = state
-                                .panels.directory
-                                .as_ref()
-                                .is_some_and(|view| view.network == network);
-                            if reopen {
-                                push_directory(&state, &ui, true);
-                            } else {
-                                open_directory(&mut state, &ui, network, String::new()).await;
-                            }
-                        }
+                        run_directory_open(&mut state, &ui, network).await;
                     }
                     Some(WorkerCommand::DirectoryActivate(channel)) => {
                         directory_activate(&mut state, &ui, channel).await;
@@ -3376,16 +3350,7 @@ async fn run_worker(
                         handle_attach_file(&mut state, &ui, path, expire).await;
                     }
                     Some(WorkerCommand::UploadPrefsChanged { ttl, confirm }) => {
-                        if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
-                            if let Err(err) = client.set_upload_ttl(token, ttl).await {
-                                persistence::log_line(&format!("upload ttl save failed: {err:?}"));
-                            }
-                            if let Err(err) = client.set_upload_confirm(token, confirm).await {
-                                persistence::log_line(&format!(
-                                    "upload confirm save failed: {err:?}"
-                                ));
-                            }
-                        }
+                        run_upload_prefs_changed(&mut state, ttl, confirm).await;
                     }
                     Some(WorkerCommand::SendMessage { body }) => {
                         handle_send_message(&mut state, &ui, body).await;
@@ -3433,16 +3398,7 @@ async fn run_worker(
                         }
                     }
                     Some(WorkerCommand::ThemeCopy(theme_id)) => {
-                        if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
-                            match client.copy_theme(&token, theme_id).await {
-                                Ok(copy) => {
-                                    load_color_themes(&mut state, &ui).await;
-                                    let key = format!("server:{}", copy.id);
-                                    open_theme_editor(&state, &ui, &key).await;
-                                }
-                                Err(err) => report_theme_action(&ui, Some(err)),
-                            }
-                        }
+                        run_theme_copy(&mut state, &ui, theme_id).await;
                     }
                     Some(WorkerCommand::ThemeBackgroundUpload(path)) => {
                         upload_theme_background(&state, &ui, &path).await;
@@ -3503,16 +3459,7 @@ async fn run_worker(
                         }
                     }
                     Some(WorkerCommand::AdminRefresh) => {
-                        // The live feed needs a full web session, like the
-                        // rest of /admin; a refused join just leaves it empty.
-                        let topic = cordiale_core::admin::ADMIN_EVENTS_TOPIC.to_string();
-                        if let Some(session) = &state.conn.session {
-                            if state.conn.joined_topics.insert(topic.clone()) {
-                                session.join_topic(topic, false);
-                            }
-                        }
-                        handle_admin_refresh(&state, &ui).await;
-                        handle_admin_uploads_refresh(&mut state, &ui, None).await;
+                        run_admin_refresh(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::AdminUploadsRefresh) => {
                         handle_admin_uploads_refresh(&mut state, &ui, None).await;
@@ -3578,38 +3525,23 @@ async fn run_worker(
                         nick,
                         auth_method,
                         password,
-                    }) => match network_id.parse::<i64>() {
-                        Ok(network_id) if !nick.is_empty() => {
-                            let mut body = serde_json::json!({
-                                "user_id": user_id,
-                                "network_id": network_id,
-                                "nick": nick,
-                                "auth_method": auth_method,
-                            });
-                            if !password.is_empty() {
-                                body["password"] = Value::from(password);
-                            }
-                            handle_admin_write(&state, &ui, AdminWrite::BindCredential(body)).await;
-                        }
-                        _ => {
-                            let _ = ui.upgrade_in_event_loop(|ui| {
-                                ui.set_status_kind("admin-credential-invalid".into());
-                            });
-                        }
-                    },
+                    }) => {
+                        run_admin_credential_bind(
+                            &mut state,
+                            &ui,
+                            user_id,
+                            network_id,
+                            nick,
+                            auth_method,
+                            password,
+                        )
+                        .await;
+                    }
                     Some(WorkerCommand::AdminCredentialUnbind {
                         user_id,
                         network_id,
                     }) => {
-                        handle_admin_write(
-                            &state,
-                            &ui,
-                            AdminWrite::UnbindCredential {
-                                user_id,
-                                network_id,
-                            },
-                        )
-                        .await;
+                        run_admin_credential_unbind(&mut state, &ui, user_id, network_id).await;
                     }
                     Some(WorkerCommand::AdminVhostAdd { address, in_pool }) => {
                         handle_admin_write(&state, &ui, AdminWrite::AddVhost { address, in_pool })
@@ -3620,20 +3552,7 @@ async fn run_worker(
                         field,
                         value,
                     }) => {
-                        // Only the two flags the panel toggles are sent.
-                        if field == "in_pool" || field == "generally_available" {
-                            let mut changes = serde_json::Map::new();
-                            changes.insert(field, Value::Bool(value));
-                            handle_admin_write(
-                                &state,
-                                &ui,
-                                AdminWrite::UpdateVhost {
-                                    vhost_id,
-                                    changes: Value::Object(changes),
-                                },
-                            )
-                            .await;
-                        }
+                        run_admin_vhost_set(&mut state, &ui, vhost_id, field, value).await;
                     }
                     Some(WorkerCommand::AdminVhostDelete(vhost_id)) => {
                         handle_admin_write(&state, &ui, AdminWrite::DeleteVhost(vhost_id)).await;
@@ -3643,12 +3562,14 @@ async fn run_worker(
                         subject_type,
                         subject_id,
                     }) => {
-                        let write = AdminWrite::GrantVhost {
+                        run_admin_grant_add(
+                            &mut state,
+                            &ui,
                             vhost_id,
                             subject_type,
                             subject_id,
-                        };
-                        handle_admin_write(&state, &ui, write).await;
+                        )
+                        .await;
                     }
                     Some(WorkerCommand::AdminSubjectSearch(query)) => {
                         handle_admin_subject_search(&state, &ui, &query).await;
@@ -3693,52 +3614,34 @@ async fn run_worker(
                         name,
                         description,
                     }) => {
-                        if let Some(body) =
-                            cordiale_core::admin::admin_featured_body(&name, &description)
-                        {
-                            handle_admin_write(
-                                &state,
-                                &ui,
-                                AdminWrite::AddFeatured {
-                                    network_id: network_id.clone(),
-                                    body,
-                                },
-                            )
-                            .await;
-                            push_admin_featured(&state, &ui, &network_id).await;
-                        }
+                        run_admin_featured_add(
+                            &mut state,
+                            &ui,
+                            network_id,
+                            name,
+                            description,
+                        )
+                        .await;
                     }
                     Some(WorkerCommand::AdminFeaturedSet {
                         network_id,
                         featured_id,
                         enabled,
                     }) => {
-                        handle_admin_write(
-                            &state,
+                        run_admin_featured_set(
+                            &mut state,
                             &ui,
-                            AdminWrite::SetFeatured {
-                                network_id: network_id.clone(),
-                                featured_id,
-                                enabled,
-                            },
+                            network_id,
+                            featured_id,
+                            enabled,
                         )
                         .await;
-                        push_admin_featured(&state, &ui, &network_id).await;
                     }
                     Some(WorkerCommand::AdminFeaturedDelete {
                         network_id,
                         featured_id,
                     }) => {
-                        handle_admin_write(
-                            &state,
-                            &ui,
-                            AdminWrite::DeleteFeatured {
-                                network_id: network_id.clone(),
-                                featured_id,
-                            },
-                        )
-                        .await;
-                        push_admin_featured(&state, &ui, &network_id).await;
+                        run_admin_featured_delete(&mut state, &ui, network_id, featured_id).await;
                     }
                     Some(WorkerCommand::AdminNetworkCount(network_id)) => {
                         handle_admin_network_count(&state, &ui, network_id).await;
@@ -3777,58 +3680,20 @@ async fn run_worker(
                         host,
                         port,
                         tls,
-                    }) => match port.parse::<u16>() {
-                        Ok(port) if !host.is_empty() => {
-                            handle_admin_write(
-                                &state,
-                                &ui,
-                                AdminWrite::AddServer {
-                                    network_id: network_id.clone(),
-                                    host,
-                                    port,
-                                    tls,
-                                },
-                            )
-                            .await;
-                            push_admin_servers(&state, &ui, &network_id).await;
-                        }
-                        _ => {
-                            let _ = ui.upgrade_in_event_loop(|ui| {
-                                ui.set_status_kind("admin-server-invalid".into());
-                            });
-                        }
-                    },
+                    }) => {
+                        run_admin_server_add(&mut state, &ui, network_id, host, port, tls).await;
+                    }
                     Some(WorkerCommand::AdminServerDelete {
                         network_id,
                         server_id,
                     }) => {
-                        handle_admin_write(
-                            &state,
-                            &ui,
-                            AdminWrite::DeleteServer {
-                                network_id: network_id.clone(),
-                                server_id,
-                            },
-                        )
-                        .await;
-                        push_admin_servers(&state, &ui, &network_id).await;
+                        run_admin_server_delete(&mut state, &ui, network_id, server_id).await;
                     }
                     Some(WorkerCommand::AdminSettingsLoad) => {
                         handle_admin_settings_load(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::AdminSettingsSave(form)) => {
-                        match admin_settings_body(&form, state.panels.admin_settings.as_ref()) {
-                            Some(settings) => {
-                                handle_admin_write(&state, &ui, AdminWrite::UpdateSettings(settings))
-                                    .await;
-                                handle_admin_settings_load(&mut state, &ui).await;
-                            }
-                            None => {
-                                let _ = ui.upgrade_in_event_loop(|ui| {
-                                    ui.set_status_kind("admin-setting-invalid".into());
-                                });
-                            }
-                        }
+                        run_admin_settings_save(&mut state, &ui, form).await;
                     }
                     Some(WorkerCommand::AdminNetworkDelete(network_id)) => {
                         handle_admin_write(&state, &ui, AdminWrite::DeleteNetwork(network_id)).await;
@@ -3840,37 +3705,16 @@ async fn run_worker(
                         user_cap,
                         ip_cap,
                     }) => {
-                        let caps = [
-                            ("max_concurrent_visitor_sessions", visitor_cap),
-                            ("max_concurrent_user_sessions", user_cap),
-                            ("max_per_ip", ip_cap),
-                        ];
-                        let mut settings = serde_json::Map::new();
-                        settings.insert("visitor_enabled".to_string(), Value::Bool(visitor_enabled));
-                        let mut valid = true;
-                        for (key, text) in caps {
-                            match cordiale_core::admin::parse_admin_cap(&text) {
-                                Some(value) => {
-                                    settings.insert(key.to_string(), value);
-                                }
-                                None => valid = false,
-                            }
-                        }
-                        if valid {
-                            handle_admin_write(
-                                &state,
-                                &ui,
-                                AdminWrite::UpdateNetwork {
-                                    slug,
-                                    settings: Value::Object(settings),
-                                },
-                            )
-                            .await;
-                        } else {
-                            let _ = ui.upgrade_in_event_loop(|ui| {
-                                ui.set_status_kind("admin-cap-invalid".into());
-                            });
-                        }
+                        run_admin_network_save(
+                            &mut state,
+                            &ui,
+                            slug,
+                            visitor_enabled,
+                            visitor_cap,
+                            user_cap,
+                            ip_cap,
+                        )
+                        .await;
                     }
                     Some(WorkerCommand::AdminReaperRun) => {
                         if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
@@ -3907,8 +3751,8 @@ async fn run_worker(
                         show_peer_profiles,
                         away_nick_suffix,
                     }) => {
-                        handle_personal_prefs_save(
-                            &state,
+                        run_personal_prefs_save(
+                            &mut state,
                             &ui,
                             leave_message,
                             away_message,
@@ -3919,48 +3763,16 @@ async fn run_worker(
                         .await;
                     }
                     Some(WorkerCommand::DccAutoAcceptToggle(enabled)) => {
-                        if let (Some(client), Some(token), Some(network)) =
-                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
-                        {
-                            if let Err(err) =
-                                client.set_dcc_auto_accept(token, network, enabled).await
-                            {
-                                persistence::log_line(&format!(
-                                    "dcc auto-accept save failed: {err:?}"
-                                ));
-                            }
-                        }
+                        run_dcc_auto_accept_toggle(&mut state, enabled).await;
                     }
                     Some(WorkerCommand::IgnoreAdd { mask, text_pattern }) => {
-                        if let (Some(client), Some(token), Some(network)) =
-                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
-                        {
-                            let result = client
-                                .add_ignore(token, network, &mask, text_pattern.as_deref())
-                                .await;
-                            push_ignore_mutation(&ui, result);
-                        }
+                        run_ignore_add(&mut state, &ui, mask, text_pattern).await;
                     }
                     Some(WorkerCommand::IgnoreRemove { mask, text_pattern }) => {
-                        if let (Some(client), Some(token), Some(network)) =
-                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
-                        {
-                            let result = client
-                                .remove_ignore(token, network, &mask, text_pattern.as_deref())
-                                .await;
-                            push_ignore_mutation(&ui, result);
-                        }
+                        run_ignore_remove(&mut state, &ui, mask, text_pattern).await;
                     }
                     Some(WorkerCommand::PerformSave(text)) => {
-                        if let (Some(client), Some(token), Some(network)) =
-                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
-                        {
-                            let request = cordiale_core::profile::PerformUpdateRequest {
-                                perform_list: Some(text),
-                                oper_pass: None,
-                            };
-                            let _ = client.update_perform(token, network, &request).await;
-                        }
+                        run_perform_save(&mut state, text).await;
                     }
                     Some(WorkerCommand::AliasAdd { command, expansion }) => {
                         handle_alias_upsert(&state, &ui, Some((command, expansion))).await;
@@ -3977,67 +3789,16 @@ async fn run_worker(
                     // snapshot; the local edit only avoids a stale row until
                     // it arrives.
                     Some(WorkerCommand::NotifyAdd(nick)) => {
-                        if let (Some(client), Some(token), Some(network)) =
-                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
-                        {
-                            let network_id = state.networks.network_ids.get(network).copied();
-                            if client
-                                .add_notify_nicks(token, network, vec![nick.clone()])
-                                .await
-                                .is_ok()
-                            {
-                                if let Some(network_id) = network_id {
-                                    let nicks = state.networks.notify_lists.entry(network_id).or_default();
-                                    if !nicks.contains(&nick) {
-                                        nicks.push(nick);
-                                    }
-                                }
-                            }
-                        }
-                        push_notify_nicks(&state, &ui);
+                        run_notify_add(&mut state, &ui, nick).await;
                     }
                     Some(WorkerCommand::NotifyRemove(nick)) => {
-                        if let (Some(client), Some(token), Some(network)) =
-                            (&state.conn.client, &state.conn.token, &state.prefs.settings_network)
-                        {
-                            let network_id = state.networks.network_ids.get(network).copied();
-                            if client.remove_notify_nick(token, network, &nick).await.is_ok() {
-                                if let Some(nicks) =
-                                    network_id.and_then(|id| state.networks.notify_lists.get_mut(&id))
-                                {
-                                    nicks.retain(|existing| existing != &nick);
-                                }
-                            }
-                        }
-                        push_notify_nicks(&state, &ui);
+                        run_notify_remove(&mut state, &ui, nick).await;
                     }
                     Some(WorkerCommand::WatchPatternAdd(pattern)) => {
-                        if let (Some(session), Some(identifier)) =
-                            (&state.conn.session, &state.conn.identifier)
-                        {
-                            session.send_command(
-                                format!("grappa:user:{identifier}"),
-                                "watchlist",
-                                serde_json::json!({"action": "add", "pattern": pattern}),
-                            );
-                        }
-                        if !state.prefs.watch_patterns.contains(&pattern) {
-                            state.prefs.watch_patterns.push(pattern);
-                        }
-                        push_watch_patterns(&state, &ui);
+                        run_watch_pattern_add(&mut state, &ui, pattern);
                     }
                     Some(WorkerCommand::WatchPatternRemove(pattern)) => {
-                        if let (Some(session), Some(identifier)) =
-                            (&state.conn.session, &state.conn.identifier)
-                        {
-                            session.send_command(
-                                format!("grappa:user:{identifier}"),
-                                "watchlist",
-                                serde_json::json!({"action": "del", "pattern": pattern}),
-                            );
-                        }
-                        state.prefs.watch_patterns.retain(|existing| existing != &pattern);
-                        push_watch_patterns(&state, &ui);
+                        run_watch_pattern_remove(&mut state, &ui, pattern);
                     }
                     Some(WorkerCommand::Disconnect) => {
                         persistence::log_line("disconnect requested");
