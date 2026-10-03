@@ -396,7 +396,7 @@ pub(crate) async fn handle_admin_settings_load(
         }
     };
     let form = admin_settings_form(&settings);
-    state.admin_settings = Some(settings);
+    state.panels.admin_settings = Some(settings);
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let sizes: Vec<slint::SharedString> = form.sizes.into_iter().map(Into::into).collect();
         ui.set_admin_setting_host_index(form.host_index);
@@ -774,7 +774,7 @@ pub(crate) async fn handle_admin_uploads_refresh(
             (None, key)
         }
     };
-    state.admin_uploads = view.clone();
+    state.panels.admin_uploads = view.clone();
     let error = error.unwrap_or(load_error);
     let rows = view
         .as_ref()
@@ -821,7 +821,7 @@ pub(crate) async fn handle_admin_upload_delete(
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
         return;
     };
-    if !admin_uploads::can_delete(state.admin_uploads.as_ref(), &upload_id) {
+    if !admin_uploads::can_delete(state.panels.admin_uploads.as_ref(), &upload_id) {
         return;
     }
     let error = match client.delete_admin_upload(&token, &upload_id).await {
