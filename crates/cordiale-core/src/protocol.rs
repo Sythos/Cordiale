@@ -52,7 +52,9 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// reads `dm_with` to label a DM mention); 36 adds `dm_with` to every
 /// scrollback row; 37 removes `dm_conversation_id` from scrollback rows and
 /// `query_windows_list` entries, and a nick change moves nothing server-side
-/// any more (a renamed peer's next message opens a new window).
+/// any more (a renamed peer's next message opens a new window). Last
+/// re-checked against the Grappa source at tag `v1.5.12`, the first release
+/// that speaks 37.
 pub const CLIENT_PROTOCOL_VERSION: u32 = 37;
 
 /// The bootstrap compatibility fields from `GET /api/config`, and echoed
