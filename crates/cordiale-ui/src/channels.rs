@@ -43,11 +43,31 @@ pub(crate) async fn handle_select_channel(
     settings.last_channel = Some(key.clone());
     let _ = persistence::save_settings(&settings);
 
-    let lines = state.messages.get(&key).cloned().unwrap_or_default();
-    let draft = state.drafts.get(&key).cloned().unwrap_or_default();
-    let irc_topic = state.topics.get(&key).cloned().unwrap_or_default();
+    let lines = state
+        .transcript
+        .messages
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
+    let draft = state
+        .transcript
+        .drafts
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
+    let irc_topic = state
+        .transcript
+        .topics
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
     let window_status = window_status_for(state);
-    let members = state.members.get(&key).cloned().unwrap_or_default();
+    let members = state
+        .transcript
+        .members
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
     let window_is_joined = !server_window
         && state
             .window_states
@@ -58,7 +78,7 @@ pub(crate) async fn handle_select_channel(
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let casemapping = network_casemapping(state, &network);
-    let history_start = state.history_start_reached.contains(&key);
+    let history_start = state.transcript.history_start_reached.contains(&key);
     let denoise = state.denoise_active(&key);
 
     push_window_note(state, ui);
@@ -148,11 +168,23 @@ pub(crate) async fn handle_part_channel(
     state.window_failures.remove(&key);
     state.window_kicks.remove(&key);
     state.invited_by.remove(&key);
-    state.channel_modes.remove(&key);
-    state.topics.remove(&(network.clone(), channel.clone()));
-    state.members.remove(&(network.clone(), channel.clone()));
-    state.messages.remove(&(network.clone(), channel.clone()));
-    state.drafts.remove(&(network.clone(), channel.clone()));
+    state.transcript.channel_modes.remove(&key);
+    state
+        .transcript
+        .topics
+        .remove(&(network.clone(), channel.clone()));
+    state
+        .transcript
+        .members
+        .remove(&(network.clone(), channel.clone()));
+    state
+        .transcript
+        .messages
+        .remove(&(network.clone(), channel.clone()));
+    state
+        .transcript
+        .drafts
+        .remove(&(network.clone(), channel.clone()));
     state
         .recent_channels
         .retain(|(recent_network, recent_channel)| {
@@ -269,6 +301,7 @@ pub(crate) fn force_parted_kicked_window(
     state.window_kicks.remove(&key);
     state.invited_by.remove(&key);
     state
+        .transcript
         .channel_modes
         .retain(|(known_network, known_channel), _| {
             window_state_key(known_network, known_channel) != key
@@ -361,10 +394,12 @@ pub(crate) fn channel_topic_is_owned_elsewhere(
     topic: &str,
 ) -> bool {
     state
+        .transcript
         .query_windows
         .iter()
         .any(|query| query_topic(user, &query.network, &query.target_nick) == topic)
         || state
+            .transcript
             .stale_query_topics
             .iter()
             .any(|(network, nick)| query_topic(user, network, nick) == topic)

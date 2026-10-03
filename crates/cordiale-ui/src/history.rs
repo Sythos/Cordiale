@@ -55,7 +55,7 @@ pub(crate) async fn reload_history_tail(
             return;
         }
     };
-    let messages = state.messages.entry(key.clone()).or_default();
+    let messages = state.transcript.messages.entry(key.clone()).or_default();
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
     if !state.current_query && state.current_channel.as_ref() == Some(key) {
         push_chat_lines_update(state, ui, key);
@@ -92,6 +92,7 @@ pub(crate) async fn handle_load_older_history(
         return;
     };
     let oldest = state
+        .transcript
         .messages
         .get(&key)
         .and_then(|lines| lines.iter().filter_map(|line| line.message_id).min());
@@ -99,10 +100,11 @@ pub(crate) async fn handle_load_older_history(
     // fetched: there is no page left to ask for.
     let Some(oldest) = oldest.filter(|oldest| {
         !state
+            .transcript
             .history_cursors_fetched
             .contains(&(key.clone(), *oldest))
     }) else {
-        state.history_start_reached.insert(key);
+        state.transcript.history_start_reached.insert(key);
         finish(false, true);
         return;
     };
@@ -119,8 +121,11 @@ pub(crate) async fn handle_load_older_history(
             return;
         }
     };
-    state.history_cursors_fetched.insert((key.clone(), oldest));
-    let messages = state.messages.entry(key.clone()).or_default();
+    state
+        .transcript
+        .history_cursors_fetched
+        .insert((key.clone(), oldest));
+    let messages = state.transcript.messages.entry(key.clone()).or_default();
     let position_of_oldest = |lines: &[RenderedMessage]| {
         lines
             .iter()
@@ -135,19 +140,29 @@ pub(crate) async fn handle_load_older_history(
     };
     let start_reached = rows.len() < OLDER_HISTORY_PAGE || prepended == 0;
     if start_reached {
-        state.history_start_reached.insert(key.clone());
+        state.transcript.history_start_reached.insert(key.clone());
     }
     publish_held_rows(state);
     // The user may have switched window while the page was loading.
     if state.current_channel.as_ref() != Some(&key) {
         return;
     }
-    let lines = state.messages.get(&key).cloned().unwrap_or_default();
+    let lines = state
+        .transcript
+        .messages
+        .get(&key)
+        .cloned()
+        .unwrap_or_default();
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let roster = (!state.current_query).then(|| {
         (
-            state.members.get(&key).cloned().unwrap_or_default(),
+            state
+                .transcript
+                .members
+                .get(&key)
+                .cloned()
+                .unwrap_or_default(),
             network_casemapping(state, &key.0),
             state.denoise_active(&key),
         )
@@ -212,6 +227,7 @@ pub(crate) fn render_history_entry(value: &Value) -> RenderedMessage {
 
 pub(crate) fn query_high_water_id(state: &WorkerState, key: &(String, String)) -> Option<i64> {
     state
+        .transcript
         .messages
         .get(key)?
         .iter()
@@ -247,7 +263,7 @@ pub(crate) fn note_catch_up_anchors(state: &mut WorkerState) {
         })
         .collect();
     for (key, id) in anchors {
-        state.catch_up_anchors.entry(key).or_insert(id);
+        state.transcript.catch_up_anchors.entry(key).or_insert(id);
     }
 }
 
@@ -259,14 +275,14 @@ pub(crate) async fn handle_catch_up_next(
     worker_self: &mpsc::UnboundedSender<WorkerCommand>,
 ) {
     if state.session.is_none() {
-        state.catch_up_anchors.clear();
+        state.transcript.catch_up_anchors.clear();
         return;
     }
-    let Some((key, anchor)) = state.catch_up_anchors.pop_first() else {
+    let Some((key, anchor)) = state.transcript.catch_up_anchors.pop_first() else {
         return;
     };
     catch_up_channel(state, ui, &key, anchor).await;
-    if !state.catch_up_anchors.is_empty() {
+    if !state.transcript.catch_up_anchors.is_empty() {
         let next = worker_self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(CATCH_UP_PACING).await;
@@ -339,11 +355,12 @@ async fn catch_up_channel(
     if incoming.is_empty() {
         return;
     }
-    let messages = state.messages.entry(key.clone()).or_default();
+    let messages = state.transcript.messages.entry(key.clone()).or_default();
     if plan == CatchUpPlan::ReloadTail {
         replace_with_history_tail(messages, incoming);
-        state.history_start_reached.remove(key);
+        state.transcript.history_start_reached.remove(key);
         state
+            .transcript
             .history_cursors_fetched
             .retain(|(window, _)| window != key);
     } else {
@@ -423,14 +440,15 @@ pub(crate) fn trim_oldest_rows(
 /// cursor already fetched may now be the oldest row still held. Returns
 /// whether anything was dropped.
 pub(crate) fn trim_window_history(state: &mut WorkerState, key: &(String, String)) -> bool {
-    let Some(messages) = state.messages.get_mut(key) else {
+    let Some(messages) = state.transcript.messages.get_mut(key) else {
         return false;
     };
     if trim_oldest_rows(messages, CHAT_HISTORY_CAP, CHAT_HISTORY_TRIM_SLACK) == 0 {
         return false;
     }
-    state.history_start_reached.remove(key);
+    state.transcript.history_start_reached.remove(key);
     state
+        .transcript
         .history_cursors_fetched
         .retain(|(window, _)| window != key);
     true
@@ -445,6 +463,6 @@ pub(crate) fn held_rows(messages: &MessagesByChannel) -> (usize, usize) {
 
 /// Hands the Debug page the current row counts.
 pub(crate) fn publish_held_rows(state: &WorkerState) {
-    let (total, largest) = held_rows(&state.messages);
+    let (total, largest) = held_rows(&state.transcript.messages);
     debug_info::note_chat_rows(total, largest);
 }

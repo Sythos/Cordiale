@@ -173,6 +173,7 @@ pub(crate) async fn run_slash_command(
                 return set_command_status(ui, "command-needs-channel", label);
             };
             return match state
+                .transcript
                 .topics
                 .get(&(network.clone(), target.clone()))
                 .filter(|topic| !topic.is_empty())
@@ -188,6 +189,7 @@ pub(crate) async fn run_slash_command(
                 return set_command_status(ui, "command-needs-channel", label);
             };
             let modes = state
+                .transcript
                 .channel_modes
                 .get(&(network.clone(), target.clone()))
                 .map(|snapshot| format_channel_modes(&snapshot.modes))

@@ -315,7 +315,7 @@ fn session_identity_changed_is_user_carrier_scoped_and_per_network() {
         .into_iter()
         .collect();
     let message_key = ("libera".to_string(), "#rust".to_string());
-    state.messages.insert(
+    state.transcript.messages.insert(
         message_key.clone(),
         vec![render_message(
             &serde_json::json!({"kind": "privmsg", "sender": "Alice", "body": "hello"}),
@@ -374,7 +374,10 @@ fn session_identity_changed_is_user_carrier_scoped_and_per_network() {
             account: Some("descriptive-account".to_string()),
         })
     );
-    assert_eq!(state.messages.get(&message_key).map(Vec::len), Some(1));
+    assert_eq!(
+        state.transcript.messages.get(&message_key).map(Vec::len),
+        Some(1)
+    );
 }
 
 fn isupport_payload(network_id: i64, casemapping: &str, frame_budget_base: u64) -> Value {
@@ -683,6 +686,7 @@ fn late_away_confirmation_updates_one_network_without_resetting_other_state() {
         None,
     )];
     state
+        .transcript
         .messages
         .insert(message_key.clone(), existing_messages.clone());
 
@@ -709,11 +713,12 @@ fn late_away_confirmation_updates_one_network_without_resetting_other_state() {
         Some(&AwayStatus::Present)
     );
     assert_eq!(
-        state.messages.get(&message_key).map(Vec::len),
+        state.transcript.messages.get(&message_key).map(Vec::len),
         Some(existing_messages.len())
     );
     assert_eq!(
         state
+            .transcript
             .messages
             .get(&message_key)
             .and_then(|messages| messages.first())
@@ -738,11 +743,12 @@ fn late_away_confirmation_updates_one_network_without_resetting_other_state() {
         Some(&AwayStatus::Present)
     );
     assert_eq!(
-        state.messages.get(&message_key).map(Vec::len),
+        state.transcript.messages.get(&message_key).map(Vec::len),
         Some(existing_messages.len())
     );
     assert_eq!(
         state
+            .transcript
             .messages
             .get(&message_key)
             .and_then(|messages| messages.first())
@@ -816,13 +822,14 @@ fn channels_changed_reconciles_authoritative_topics_idempotently() {
 fn channels_changed_keeps_topics_owned_by_queries_and_own_nick_listener() {
     let user = "vjt";
     let mut state = WorkerState::new();
-    state.query_windows.push(QueryWindow {
+    state.transcript.query_windows.push(QueryWindow {
         network: "libera".to_string(),
         target_nick: "Peer".to_string(),
         opened_at: "2026-09-21T10:00:00Z".to_string(),
         dm_conversation_id: None,
     });
     state
+        .transcript
         .stale_query_topics
         .insert(query_window_key("libera", "FormerPeer"));
     state
@@ -906,7 +913,7 @@ fn own_nick_rename_keeps_old_topic_when_an_open_query_owns_it() {
         .own_nicks
         .insert("libera".to_string(), "OldNick".to_string());
     state.identifier = Some("vjt".to_string());
-    state.query_windows.push(QueryWindow {
+    state.transcript.query_windows.push(QueryWindow {
         network: "libera".to_string(),
         target_nick: "OldNick".to_string(),
         opened_at: "2026-09-21T10:00:00Z".to_string(),
@@ -917,8 +924,8 @@ fn own_nick_rename_keeps_old_topic_when_an_open_query_owns_it() {
     let old_query = query_window_key("libera", "OldNick");
     state.joined_topics.insert(old_topic.clone());
     state.own_listener_ready.insert(old_topic.clone());
-    state.query_joined.insert(old_query.clone());
-    state.query_ready.insert(old_query.clone());
+    state.transcript.query_joined.insert(old_query.clone());
+    state.transcript.query_ready.insert(old_query.clone());
 
     let actions = apply_own_nick_change(&mut state, "vjt", "libera", "NewNick");
 
@@ -930,16 +937,16 @@ fn own_nick_rename_keeps_old_topic_when_an_open_query_owns_it() {
     assert!(!state.own_listener_ready.contains(&old_topic));
     assert!(state.joined_topics.contains(&new_topic));
     assert!(!state.own_listener_ready.contains(&new_topic));
-    assert!(state.query_joined.contains(&old_query));
-    assert!(state.query_ready.contains(&old_query));
+    assert!(state.transcript.query_joined.contains(&old_query));
+    assert!(state.transcript.query_ready.contains(&old_query));
     assert_eq!(
         own_nick_listener_network_for_topic(&state, &old_topic),
         None
     );
     assert!(matches!(
         resolve_query_topic(
-            &state.query_windows,
-            &state.stale_query_topics,
+            &state.transcript.query_windows,
+            &state.transcript.stale_query_topics,
             "libera",
             "OldNick"
         ),
@@ -1034,7 +1041,7 @@ fn own_nick_listener_rejects_non_dm_kinds() {
 #[test]
 fn own_nick_dm_is_appended_only_to_an_authoritative_existing_query() {
     let mut state = WorkerState::new();
-    state.query_windows = vec![QueryWindow {
+    state.transcript.query_windows = vec![QueryWindow {
         network: "libera".to_string(),
         target_nick: "Peer".to_string(),
         opened_at: "2026-09-21T10:00:00Z".to_string(),
@@ -1053,7 +1060,9 @@ fn own_nick_dm_is_appended_only_to_an_authoritative_existing_query() {
     require_query_full_history_if_unready(&mut state, &key);
     assert!(append_query_live_message(&mut state, &key, &inbound, Some("message")).is_some());
     assert_eq!(
-        state.messages.get(&key).unwrap()[0].text.as_str(),
+        state.transcript.messages.get(&key).unwrap()[0]
+            .text
+            .as_str(),
         "inbound DM"
     );
     assert_eq!(
@@ -1072,8 +1081,8 @@ fn own_nick_dm_is_appended_only_to_an_authoritative_existing_query() {
         None
     );
     assert_eq!(own_nick_dm_query_key(&state, "azzurra", &inbound), None);
-    assert_eq!(state.query_windows.len(), 1);
-    assert_eq!(state.messages.len(), 1);
+    assert_eq!(state.transcript.query_windows.len(), 1);
+    assert_eq!(state.transcript.messages.len(), 1);
 }
 
 #[test]
@@ -1097,8 +1106,8 @@ fn own_nick_dm_fifo_waits_for_snapshot_then_merges_with_history_by_id() {
     assert_eq!(own_nick_dm_query_key(&state, "libera", &first), None);
     buffer_pending_own_nick_dm(&mut state, "libera", &first, "message");
     buffer_pending_own_nick_dm(&mut state, "libera", &second, "message");
-    assert_eq!(state.pending_own_nick_dms.len(), 2);
-    assert!(state.messages.is_empty());
+    assert_eq!(state.transcript.pending_own_nick_dms.len(), 2);
+    assert!(state.transcript.messages.is_empty());
 
     let query = QueryWindow {
         network: "libera".to_string(),
@@ -1111,14 +1120,17 @@ fn own_nick_dm_fifo_waits_for_snapshot_then_merges_with_history_by_id() {
 
     let key = ("libera".to_string(), "Peer".to_string());
     let identity = query_window_key(&key.0, &key.1);
-    assert!(state.pending_own_nick_dms.is_empty());
-    assert!(state.query_full_history_required.contains(&identity));
+    assert!(state.transcript.pending_own_nick_dms.is_empty());
+    assert!(state
+        .transcript
+        .query_full_history_required
+        .contains(&identity));
     assert_eq!(
         query_history_fetch_window(&state, &identity, &key),
         (None, None)
     );
     assert_eq!(
-        state.messages[&key]
+        state.transcript.messages[&key]
             .iter()
             .filter_map(|message| message.message_id)
             .collect::<Vec<_>>(),
@@ -1146,7 +1158,7 @@ fn own_nick_dm_fifo_waits_for_snapshot_then_merges_with_history_by_id() {
         ],
     );
 
-    let messages = &state.messages[&key];
+    let messages = &state.transcript.messages[&key];
     assert_eq!(
         messages
             .iter()
@@ -1155,7 +1167,10 @@ fn own_nick_dm_fifo_waits_for_snapshot_then_merges_with_history_by_id() {
         vec![40, 41, 42]
     );
     assert_eq!(messages[1].text, "first buffered");
-    state.query_full_history_required.remove(&identity);
+    state
+        .transcript
+        .query_full_history_required
+        .remove(&identity);
     assert_eq!(
         query_history_fetch_window(&state, &identity, &key),
         (Some(42), Some(200))
@@ -1175,21 +1190,36 @@ fn own_nick_dm_buffer_is_bounded_and_unconfirmed_queries_are_discarded() {
         });
         buffer_pending_own_nick_dm(&mut state, "libera", &payload, "message");
     }
-    assert_eq!(state.pending_own_nick_dms.len(), MAX_PENDING_OWN_NICK_DMS);
     assert_eq!(
-        state.pending_own_nick_dms.front().unwrap().payload["id"].as_i64(),
+        state.transcript.pending_own_nick_dms.len(),
+        MAX_PENDING_OWN_NICK_DMS
+    );
+    assert_eq!(
+        state
+            .transcript
+            .pending_own_nick_dms
+            .front()
+            .unwrap()
+            .payload["id"]
+            .as_i64(),
         Some(2)
     );
     // The overflow is recovered from history if the query opens.
     let identity = query_window_key("libera", "unlisted");
-    assert!(state.query_full_history_required.contains(&identity));
+    assert!(state
+        .transcript
+        .query_full_history_required
+        .contains(&identity));
 
     assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
     drain_pending_own_nick_dms(&mut state);
-    assert!(state.pending_own_nick_dms.is_empty());
-    assert!(!state.query_full_history_required.contains(&identity));
-    assert!(state.query_windows.is_empty());
-    assert!(state.messages.is_empty());
+    assert!(state.transcript.pending_own_nick_dms.is_empty());
+    assert!(!state
+        .transcript
+        .query_full_history_required
+        .contains(&identity));
+    assert!(state.transcript.query_windows.is_empty());
+    assert!(state.transcript.messages.is_empty());
 }
 
 #[test]
@@ -1333,49 +1363,58 @@ fn query_windows_snapshot_replaces_state_and_migrates_unambiguous_rename() {
     let old_key = (old.network.clone(), old.target_nick.clone());
     let new_key = (renamed.network.clone(), renamed.target_nick.clone());
     let mut state = WorkerState::new();
-    state.query_windows = vec![old.clone()];
+    state.transcript.query_windows = vec![old.clone()];
     state
+        .transcript
         .query_joined
         .insert(query_window_key(&old.network, &old.target_nick));
     state
+        .transcript
         .query_ready
         .insert(query_window_key(&old.network, &old.target_nick));
     state.current_query = true;
     state.current_query_ready = true;
     state.current_channel = Some(old_key.clone());
-    state.messages.insert(old_key.clone(), Vec::new());
     state
+        .transcript
+        .messages
+        .insert(old_key.clone(), Vec::new());
+    state
+        .transcript
         .drafts
         .insert(old_key.clone(), "unsent draft".to_string());
 
-    let previous = state.query_windows.clone();
+    let previous = state.transcript.query_windows.clone();
     assert!(!apply_query_windows_snapshot(
         &mut state,
         vec![renamed.clone()]
     ));
     reconcile_query_topic_tracking(&mut state, &previous);
-    assert_eq!(state.query_windows, vec![renamed]);
+    assert_eq!(state.transcript.query_windows, vec![renamed]);
     assert_eq!(state.current_channel, Some(new_key.clone()));
     assert!(!state.current_query_ready);
     assert!(state
+        .transcript
         .query_joined
         .contains(&query_window_key(&old.network, &old.target_nick)));
     assert!(!state
+        .transcript
         .query_ready
         .contains(&query_window_key(&old.network, &old.target_nick)));
     assert!(state
+        .transcript
         .stale_query_topics
         .contains(&query_window_key(&old.network, &old.target_nick)));
-    assert!(state.messages.contains_key(&new_key));
+    assert!(state.transcript.messages.contains_key(&new_key));
     assert_eq!(
-        state.drafts.get(&new_key).map(String::as_str),
+        state.transcript.drafts.get(&new_key).map(String::as_str),
         Some("unsent draft")
     );
 
-    let previous = state.query_windows.clone();
+    let previous = state.transcript.query_windows.clone();
     assert!(apply_query_windows_snapshot(&mut state, Vec::new()));
     reconcile_query_topic_tracking(&mut state, &previous);
-    assert!(state.query_windows.is_empty());
+    assert!(state.transcript.query_windows.is_empty());
     assert!(!state.current_query);
     assert_eq!(state.current_channel, None);
 }
@@ -1399,11 +1438,11 @@ fn query_windows_snapshot_migrates_cache_on_case_only_nick_change() {
     let identity = query_window_key(&old.network, &old.target_nick);
     let topic = query_topic("vjt", &old.network, &old.target_nick);
     let mut state = WorkerState::new();
-    state.query_windows = vec![old.clone()];
-    state.query_joined.insert(identity.clone());
-    state.query_ready.insert(identity.clone());
+    state.transcript.query_windows = vec![old.clone()];
+    state.transcript.query_joined.insert(identity.clone());
+    state.transcript.query_ready.insert(identity.clone());
     state.joined_topics.insert(topic.clone());
-    state.messages.insert(
+    state.transcript.messages.insert(
         old_key.clone(),
         vec![RenderedMessage {
             timestamp: "10:00".to_string(),
@@ -1416,28 +1455,36 @@ fn query_windows_snapshot_migrates_cache_on_case_only_nick_change() {
         }],
     );
     state
+        .transcript
         .drafts
         .insert(old_key.clone(), "unsent draft".to_string());
 
-    let previous = state.query_windows.clone();
+    let previous = state.transcript.query_windows.clone();
     assert!(!apply_query_windows_snapshot(
         &mut state,
         vec![recased.clone()]
     ));
     reconcile_query_topic_tracking(&mut state, &previous);
 
-    assert_eq!(state.query_windows, vec![recased]);
-    assert!(!state.messages.contains_key(&old_key));
-    assert_eq!(state.messages[&recased_key][0].text, "retained history");
-    assert!(!state.drafts.contains_key(&old_key));
+    assert_eq!(state.transcript.query_windows, vec![recased]);
+    assert!(!state.transcript.messages.contains_key(&old_key));
     assert_eq!(
-        state.drafts.get(&recased_key).map(String::as_str),
+        state.transcript.messages[&recased_key][0].text,
+        "retained history"
+    );
+    assert!(!state.transcript.drafts.contains_key(&old_key));
+    assert_eq!(
+        state
+            .transcript
+            .drafts
+            .get(&recased_key)
+            .map(String::as_str),
         Some("unsent draft")
     );
-    assert!(state.query_joined.contains(&identity));
-    assert!(state.query_ready.contains(&identity));
+    assert!(state.transcript.query_joined.contains(&identity));
+    assert!(state.transcript.query_ready.contains(&identity));
     assert!(state.joined_topics.contains(&topic));
-    assert!(!state.stale_query_topics.contains(&identity));
+    assert!(!state.transcript.stale_query_topics.contains(&identity));
 }
 
 #[test]
@@ -1518,10 +1565,10 @@ fn state_with_selected_query(
     let old_key = (old.network.clone(), old.target_nick.clone());
     let mut state = WorkerState::new();
     state.server_protocol_version = server_protocol_version;
-    state.query_windows = vec![old.clone()];
+    state.transcript.query_windows = vec![old.clone()];
     state.current_query = true;
     state.current_channel = Some(old_key.clone());
-    state.messages.insert(
+    state.transcript.messages.insert(
         old_key.clone(),
         vec![RenderedMessage {
             timestamp: "10:00".to_string(),
@@ -1533,7 +1580,10 @@ fn state_with_selected_query(
             presence_noise: false,
         }],
     );
-    state.drafts.insert(old_key, "unsent draft".to_string());
+    state
+        .transcript
+        .drafts
+        .insert(old_key, "unsent draft".to_string());
     state
 }
 
@@ -1557,19 +1607,19 @@ fn protocol_37_snapshot_keeps_old_and_new_window_of_a_renamed_peer() {
         &mut state,
         vec![old.clone(), new.clone()]
     ));
-    assert_eq!(state.query_windows, vec![old, new]);
+    assert_eq!(state.transcript.query_windows, vec![old, new]);
     assert_eq!(state.current_channel, Some(old_key.clone()));
     assert!(state.current_query);
     assert_eq!(
-        state.messages[&old_key][0].text,
+        state.transcript.messages[&old_key][0].text,
         "history under the old nick"
     );
-    assert!(!state.messages.contains_key(&new_key));
+    assert!(!state.transcript.messages.contains_key(&new_key));
     assert_eq!(
-        state.drafts.get(&old_key).map(String::as_str),
+        state.transcript.drafts.get(&old_key).map(String::as_str),
         Some("unsent draft")
     );
-    assert!(!state.drafts.contains_key(&new_key));
+    assert!(!state.transcript.drafts.contains_key(&new_key));
 }
 
 #[test]
@@ -1592,8 +1642,8 @@ fn protocol_37_snapshot_does_not_follow_a_vanished_selection_to_a_new_window() {
     assert_eq!(state.current_channel, None);
     assert!(!state.current_query);
     let bob_key = ("libera".to_string(), "bob".to_string());
-    assert!(!state.messages.contains_key(&bob_key));
-    assert!(!state.drafts.contains_key(&bob_key));
+    assert!(!state.transcript.messages.contains_key(&bob_key));
+    assert!(!state.transcript.drafts.contains_key(&bob_key));
 }
 
 #[test]
@@ -1614,11 +1664,15 @@ fn protocol_37_snapshot_still_moves_a_case_only_change() {
     ));
     assert_eq!(state.current_channel, Some(recased_key.clone()));
     assert_eq!(
-        state.messages[&recased_key][0].text,
+        state.transcript.messages[&recased_key][0].text,
         "history under the old nick"
     );
     assert_eq!(
-        state.drafts.get(&recased_key).map(String::as_str),
+        state
+            .transcript
+            .drafts
+            .get(&recased_key)
+            .map(String::as_str),
         Some("unsent draft")
     );
 }
@@ -1639,14 +1693,14 @@ fn pre_37_and_unknown_servers_still_follow_an_id_based_rename() {
         let mut state = state_with_selected_query(&old, version);
 
         assert!(!apply_query_windows_snapshot(&mut state, vec![new.clone()]));
-        assert_eq!(state.query_windows, vec![new]);
+        assert_eq!(state.transcript.query_windows, vec![new]);
         assert_eq!(state.current_channel, Some(new_key.clone()));
         assert_eq!(
-            state.messages[&new_key][0].text,
+            state.transcript.messages[&new_key][0].text,
             "history under the old nick"
         );
         assert_eq!(
-            state.drafts.get(&new_key).map(String::as_str),
+            state.transcript.drafts.get(&new_key).map(String::as_str),
             Some("unsent draft")
         );
     }
@@ -1668,9 +1722,9 @@ fn pre_37_and_unknown_servers_still_fall_back_to_the_opening_instant() {
 
         assert!(!apply_query_windows_snapshot(&mut state, vec![new.clone()]));
         assert_eq!(state.current_channel, Some(new_key.clone()));
-        assert_eq!(state.messages[&new_key].len(), 1);
+        assert_eq!(state.transcript.messages[&new_key].len(), 1);
         assert_eq!(
-            state.drafts.get(&new_key).map(String::as_str),
+            state.transcript.drafts.get(&new_key).map(String::as_str),
             Some("unsent draft")
         );
     }
@@ -1703,33 +1757,33 @@ fn closing_and_reopening_query_reuses_join_but_reloads_tail_before_ready() {
     let identity = query_window_key(&query.network, &query.target_nick);
     let topic = query_topic("vjt", &query.network, &query.target_nick);
     let mut state = WorkerState::new();
-    state.query_windows = vec![query.clone()];
+    state.transcript.query_windows = vec![query.clone()];
     state.joined_topics.insert(topic.clone());
     record_query_join_success(&mut state, &identity);
-    state.query_ready.insert(identity.clone());
+    state.transcript.query_ready.insert(identity.clone());
 
-    let previous = state.query_windows.clone();
+    let previous = state.transcript.query_windows.clone();
     assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
     reconcile_query_topic_tracking(&mut state, &previous);
-    assert!(state.stale_query_topics.contains(&identity));
+    assert!(state.transcript.stale_query_topics.contains(&identity));
     assert!(state.joined_topics.contains(&topic));
-    assert!(state.query_joined.contains(&identity));
-    assert!(!state.query_ready.contains(&identity));
+    assert!(state.transcript.query_joined.contains(&identity));
+    assert!(!state.transcript.query_ready.contains(&identity));
 
-    let previous = state.query_windows.clone();
+    let previous = state.transcript.query_windows.clone();
     assert!(!apply_query_windows_snapshot(
         &mut state,
         vec![query.clone()]
     ));
     reconcile_query_topic_tracking(&mut state, &previous);
-    assert!(!state.stale_query_topics.contains(&identity));
+    assert!(!state.transcript.stale_query_topics.contains(&identity));
     assert!(state.joined_topics.contains(&topic));
-    assert!(state.query_joined.contains(&identity));
-    assert!(!state.query_ready.contains(&identity));
+    assert!(state.transcript.query_joined.contains(&identity));
+    assert!(!state.transcript.query_ready.contains(&identity));
     state.current_query = true;
     state.current_channel = Some(("libera".to_string(), "peer".to_string()));
     mark_query_ready_after_history(&mut state, &identity);
-    assert!(state.query_ready.contains(&identity));
+    assert!(state.transcript.query_ready.contains(&identity));
     assert!(state.current_query_ready);
 }
 
@@ -1744,31 +1798,31 @@ fn reopening_query_after_reconnect_waits_for_ack_and_history_again() {
     let identity = query_window_key(&query.network, &query.target_nick);
     let topic = query_topic("vjt", &query.network, &query.target_nick);
     let mut state = WorkerState::new();
-    state.query_windows = vec![query.clone()];
+    state.transcript.query_windows = vec![query.clone()];
     state.joined_topics.insert(topic);
     record_query_join_success(&mut state, &identity);
-    state.query_ready.insert(identity.clone());
+    state.transcript.query_ready.insert(identity.clone());
 
-    let previous = state.query_windows.clone();
+    let previous = state.transcript.query_windows.clone();
     assert!(!apply_query_windows_snapshot(&mut state, Vec::new()));
     reconcile_query_topic_tracking(&mut state, &previous);
     reset_query_session_readiness(&mut state);
-    assert!(state.query_joined.is_empty());
-    assert!(state.query_ready.is_empty());
+    assert!(state.transcript.query_joined.is_empty());
+    assert!(state.transcript.query_ready.is_empty());
 
     // The session rejoins the retained stale topic after reconnect; its
     // successful ACK is remembered even though the snapshot still omits it.
     record_query_join_success(&mut state, &identity);
-    let previous = state.query_windows.clone();
+    let previous = state.transcript.query_windows.clone();
     assert!(!apply_query_windows_snapshot(&mut state, vec![query]));
     reconcile_query_topic_tracking(&mut state, &previous);
-    assert!(state.query_joined.contains(&identity));
-    assert!(!state.query_ready.contains(&identity));
+    assert!(state.transcript.query_joined.contains(&identity));
+    assert!(!state.transcript.query_ready.contains(&identity));
 
     state.current_query = true;
     state.current_channel = Some(("libera".to_string(), "peer".to_string()));
     mark_query_ready_after_history(&mut state, &identity);
-    assert!(state.query_ready.contains(&identity));
+    assert!(state.transcript.query_ready.contains(&identity));
     assert!(state.current_query_ready);
 }
 
@@ -1778,15 +1832,15 @@ fn failed_query_join_clears_readiness_and_allows_a_retry() {
     let topic = query_topic("vjt", "libera", "peer");
     let mut state = WorkerState::new();
     state.joined_topics.insert(topic.clone());
-    state.query_joined.insert(identity.clone());
-    state.query_ready.insert(identity.clone());
+    state.transcript.query_joined.insert(identity.clone());
+    state.transcript.query_ready.insert(identity.clone());
     state.current_query = true;
     state.current_query_ready = true;
     state.current_channel = Some(("libera".to_string(), "peer".to_string()));
 
     assert!(reset_query_join_failure(&mut state, &identity, &topic));
-    assert!(!state.query_joined.contains(&identity));
-    assert!(!state.query_ready.contains(&identity));
+    assert!(!state.transcript.query_joined.contains(&identity));
+    assert!(!state.transcript.query_ready.contains(&identity));
     assert!(!state.joined_topics.contains(&topic));
     assert!(!state.current_query_ready);
 }
@@ -1836,7 +1890,7 @@ fn query_history_merges_tail_and_after_pages_by_time_then_id() {
     ];
     merge_query_history(&mut state, &key, &after);
 
-    let messages = &state.messages[&key];
+    let messages = &state.transcript.messages[&key];
     assert_eq!(
         messages
             .iter()
@@ -1934,10 +1988,13 @@ fn channel_modes_changed_replaces_the_complete_channel_snapshot() {
     );
     let key = ("libera".to_string(), "#cordiale".to_string());
     assert_eq!(
-        state.channel_modes[&key].params.get("k"),
+        state.transcript.channel_modes[&key].params.get("k"),
         Some(&Some("secret".to_string()))
     );
-    assert_eq!(state.channel_modes[&key].params.get("l"), Some(&None));
+    assert_eq!(
+        state.transcript.channel_modes[&key].params.get("l"),
+        Some(&None)
+    );
 
     let replacement = serde_json::json!({
         "kind": "channel_modes_changed",
@@ -1956,9 +2013,12 @@ fn channel_modes_changed_replaces_the_complete_channel_snapshot() {
             "+i".to_string(),
         ))
     );
-    assert_eq!(state.channel_modes.len(), 1);
-    assert_eq!(state.channel_modes[&key].modes, vec!["i".to_string()]);
-    assert!(state.channel_modes[&key].params.is_empty());
+    assert_eq!(state.transcript.channel_modes.len(), 1);
+    assert_eq!(
+        state.transcript.channel_modes[&key].modes,
+        vec!["i".to_string()]
+    );
+    assert!(state.transcript.channel_modes[&key].params.is_empty());
 }
 
 #[test]
@@ -1978,6 +2038,7 @@ fn channel_modes_changed_preserves_known_empty_and_rejects_bad_params() {
         Some((("libera".to_string(), "#empty".to_string()), String::new(),))
     );
     assert!(state
+        .transcript
         .channel_modes
         .contains_key(&("libera".to_string(), "#empty".to_string())));
 
@@ -1995,7 +2056,7 @@ fn channel_modes_changed_preserves_known_empty_and_rejects_bad_params() {
         None
     );
     assert!(
-        state.channel_modes[&("libera".to_string(), "#empty".to_string())]
+        state.transcript.channel_modes[&("libera".to_string(), "#empty".to_string())]
             .modes
             .is_empty()
     );
@@ -2022,7 +2083,7 @@ fn channel_modes_changed_requires_the_matching_channel_topic() {
         ),
         None
     );
-    assert!(state.channel_modes.is_empty());
+    assert!(state.transcript.channel_modes.is_empty());
 }
 
 #[test]
@@ -2034,7 +2095,7 @@ fn window_counts_updates_messages_and_mentions_for_each_known_window() {
         "#Cordiale".to_string(),
         "#Cordiale".to_string(),
     )];
-    state.query_windows = vec![QueryWindow {
+    state.transcript.query_windows = vec![QueryWindow {
         network: "libera".to_string(),
         target_nick: "Peer".to_string(),
         opened_at: "2026-09-21T10:00:00Z".to_string(),
@@ -2323,7 +2384,7 @@ fn window_counts_on_own_nick_listener_updates_only_own_nick_window() {
         .networks
         .own_nicks
         .insert("libera".to_string(), "Sythos".to_string());
-    state.query_windows = vec![QueryWindow {
+    state.transcript.query_windows = vec![QueryWindow {
         network: "libera".to_string(),
         target_nick: "Peer".to_string(),
         opened_at: "2026-09-21T10:00:00Z".to_string(),
@@ -2551,7 +2612,7 @@ fn window_counts_removes_closed_query_counters_but_keeps_channels() {
         "#cordiale".to_string(),
         "#cordiale".to_string(),
     )];
-    state.query_windows = vec![QueryWindow {
+    state.transcript.query_windows = vec![QueryWindow {
         network: "libera".to_string(),
         target_nick: "Peer".to_string(),
         opened_at: "2026-09-21T10:00:00Z".to_string(),
@@ -2576,7 +2637,7 @@ fn window_counts_removes_closed_query_counters_but_keeps_channels() {
         .window_messages
         .insert(window_counts_key("libera", "Sythos"), 4);
 
-    state.query_windows.clear();
+    state.transcript.query_windows.clear();
     retain_window_counts_for_open_windows(&mut state);
 
     assert_eq!(
@@ -2956,11 +3017,18 @@ fn declined_window_removes_invited_and_pending_state_and_sidebar_row() {
         "#cordiale".to_string(),
     ));
     state
+        .transcript
         .members
         .insert(key.clone(), vec![("sythos".to_string(), "@".to_string())]);
-    state.messages.insert(key.clone(), Vec::new());
-    state.drafts.insert(key.clone(), "draft".to_string());
-    state.topics.insert(key.clone(), "topic".to_string());
+    state.transcript.messages.insert(key.clone(), Vec::new());
+    state
+        .transcript
+        .drafts
+        .insert(key.clone(), "draft".to_string());
+    state
+        .transcript
+        .topics
+        .insert(key.clone(), "topic".to_string());
     let topic = channel_topic("sythos", "libera", "#cordiale");
     state.channel_topics.insert(topic.clone());
     state.joined_topics.insert(topic.clone());
@@ -2972,10 +3040,16 @@ fn declined_window_removes_invited_and_pending_state_and_sidebar_row() {
     assert!(!state.invited_by.contains_key(&key));
     assert!(state.channel_entries.is_empty());
     // Lifecycle cleanup does not discard cached content or topic data.
-    assert!(state.members.contains_key(&key));
-    assert!(state.messages.contains_key(&key));
-    assert_eq!(state.drafts.get(&key).map(String::as_str), Some("draft"));
-    assert_eq!(state.topics.get(&key).map(String::as_str), Some("topic"));
+    assert!(state.transcript.members.contains_key(&key));
+    assert!(state.transcript.messages.contains_key(&key));
+    assert_eq!(
+        state.transcript.drafts.get(&key).map(String::as_str),
+        Some("draft")
+    );
+    assert_eq!(
+        state.transcript.topics.get(&key).map(String::as_str),
+        Some("topic")
+    );
     assert!(remove_declined_channel_subscription(
         &mut state,
         "sythos",
@@ -3595,12 +3669,19 @@ fn force_parted_kicked_window_clears_only_lifecycle_metadata() {
         "#cordiale".to_string(),
     ));
     state
+        .transcript
         .members
         .insert(key.clone(), vec![("sythos".to_string(), "@".to_string())]);
-    state.messages.insert(key.clone(), Vec::new());
-    state.drafts.insert(key.clone(), "draft".to_string());
-    state.topics.insert(key.clone(), "topic".to_string());
-    state.channel_modes.insert(
+    state.transcript.messages.insert(key.clone(), Vec::new());
+    state
+        .transcript
+        .drafts
+        .insert(key.clone(), "draft".to_string());
+    state
+        .transcript
+        .topics
+        .insert(key.clone(), "topic".to_string());
+    state.transcript.channel_modes.insert(
         key.clone(),
         ChannelModes {
             modes: vec!["n".to_string()],
@@ -3620,12 +3701,18 @@ fn force_parted_kicked_window_clears_only_lifecycle_metadata() {
     assert!(!state.window_failures.contains_key(&key));
     assert!(!state.window_kicks.contains_key(&key));
     assert!(!state.invited_by.contains_key(&key));
-    assert!(!state.channel_modes.contains_key(&key));
+    assert!(!state.transcript.channel_modes.contains_key(&key));
     assert_eq!(state.channel_entries.len(), 1);
-    assert!(state.members.contains_key(&key));
-    assert!(state.messages.contains_key(&key));
-    assert_eq!(state.drafts.get(&key).map(String::as_str), Some("draft"));
-    assert_eq!(state.topics.get(&key).map(String::as_str), Some("topic"));
+    assert!(state.transcript.members.contains_key(&key));
+    assert!(state.transcript.messages.contains_key(&key));
+    assert_eq!(
+        state.transcript.drafts.get(&key).map(String::as_str),
+        Some("draft")
+    );
+    assert_eq!(
+        state.transcript.topics.get(&key).map(String::as_str),
+        Some("topic")
+    );
     assert_eq!(state.recent_channels.len(), 1);
 }
 
@@ -3690,6 +3777,7 @@ fn dismiss_kicked_window_locally_removes_row_and_preserves_selection_state() {
     state.current_channel = Some(key.clone());
     state.recent_channels.push(key.clone());
     state
+        .transcript
         .members
         .insert(key.clone(), vec![("sythos".to_string(), "@".to_string())]);
 
@@ -3704,7 +3792,7 @@ fn dismiss_kicked_window_locally_removes_row_and_preserves_selection_state() {
     assert!(!state.invited_by.contains_key(&key));
     assert_eq!(state.current_channel, Some(key.clone()));
     assert_eq!(state.recent_channels, vec![key.clone()]);
-    assert!(state.members.contains_key(&key));
+    assert!(state.transcript.members.contains_key(&key));
 }
 
 fn channel_row(network: &str, channel: &str) -> (String, String, String) {
@@ -3788,7 +3876,7 @@ fn kicked_row_survives_a_channel_list_refresh_until_dismissed() {
     assert!(state.joined_topics.contains(&kicked_topic));
     let groups = network_groups_data(
         &state.channel_entries,
-        &state.query_windows,
+        &state.transcript.query_windows,
         &state.expanded_networks,
         &state.networks.network_connection_states,
         &state.networks.network_ids,
@@ -4155,7 +4243,7 @@ fn denoise_follows_the_choice_then_the_channel_size() {
     let key = ("libera".to_string(), "#Rust".to_string());
     assert!(!state.denoise_active(&key));
 
-    state.members.insert(
+    state.transcript.members.insert(
         key.clone(),
         vec![("nick".to_string(), String::new()); cordiale_core::presence::LARGE_CHANNEL_THRESHOLD],
     );
@@ -4167,7 +4255,7 @@ fn denoise_follows_the_choice_then_the_channel_size() {
         .insert("libera #rust".to_string(), PresencePref::Show);
     assert!(!state.denoise_active(&key));
 
-    state.members.remove(&key);
+    state.transcript.members.remove(&key);
     state
         .prefs
         .presence_pins
@@ -4707,7 +4795,12 @@ fn seeded_roster(isupport: &IsupportState, entries: Value) -> Vec<MemberEntry> {
         &serde_json::json!({"network": "net", "channel": "#c", "members": entries}),
     )
     .expect("members_seeded applies");
-    state.members.get(&key).cloned().unwrap_or_default()
+    state
+        .transcript
+        .members
+        .get(&key)
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn roster(pairs: &[(&str, &str)]) -> Vec<MemberEntry> {
@@ -4867,6 +4960,7 @@ fn member_roles_on_a_network_with_an_extra_sigil() {
         .isupport_by_network
         .insert("net".to_string(), network);
     state
+        .transcript
         .members
         .insert(key.clone(), roster(&[("opy", "@"), ("vic", "+")]));
     let mode = serde_json::json!({
@@ -4875,7 +4969,7 @@ fn member_roles_on_a_network_with_an_extra_sigil() {
     });
     assert!(update_members_from_frame(&mut state, &key, &mode));
     assert_eq!(
-        state.members.get(&key),
+        state.transcript.members.get(&key),
         Some(&roster(&[("vic", "!+"), ("opy", "@")]))
     );
 }
@@ -4885,6 +4979,7 @@ fn live_mode_grants_owner_before_a_snapshot() {
     let key = ("net".to_string(), "#c".to_string());
     let mut state = WorkerState::new();
     state
+        .transcript
         .members
         .insert(key.clone(), roster(&[("ann", ""), ("bob", "@")]));
     let mode = serde_json::json!({
@@ -4893,7 +4988,7 @@ fn live_mode_grants_owner_before_a_snapshot() {
     });
     assert!(update_members_from_frame(&mut state, &key, &mode));
     assert_eq!(
-        state.members.get(&key),
+        state.transcript.members.get(&key),
         Some(&roster(&[("ann", "~"), ("bob", "@")]))
     );
 }
@@ -5389,7 +5484,7 @@ fn window_status_follows_the_active_window_and_never_leaks_flags() {
         .networks
         .user_modes_by_network
         .insert("azzurra".into(), vec!["i".into(), "r".into()]);
-    state.channel_modes.insert(
+    state.transcript.channel_modes.insert(
         ("azzurra".into(), "#grappa".into()),
         ChannelModes {
             modes: vec!["n".into(), "t".into()],
@@ -5402,7 +5497,7 @@ fn window_status_follows_the_active_window_and_never_leaks_flags() {
     assert_eq!(window_status_for(&state), "azzurra +ir · #grappa +nt");
 
     // A live channel-mode snapshot replaces the old flags.
-    state.channel_modes.insert(
+    state.transcript.channel_modes.insert(
         ("azzurra".into(), "#grappa".into()),
         ChannelModes {
             modes: vec!["m".into()],
@@ -5420,7 +5515,7 @@ fn window_status_follows_the_active_window_and_never_leaks_flags() {
     // channel of that name happens to hold a snapshot.
     state.current_channel = Some(("azzurra".into(), SERVER_WINDOW_NAME.into()));
     assert_eq!(window_status_for(&state), "azzurra +ir · $server");
-    state.channel_modes.insert(
+    state.transcript.channel_modes.insert(
         ("azzurra".into(), "vjt".into()),
         ChannelModes {
             modes: vec!["s".into()],
@@ -7718,7 +7813,7 @@ fn server_window_history_merges_with_live_messages_without_duplicates() {
     merge_query_history(&mut state, &key, &rows[1..]);
     assert_eq!(query_high_water_id(&state, &key), Some(12));
     merge_query_history(&mut state, &key, &rows);
-    let ids: Vec<_> = state.messages[&key]
+    let ids: Vec<_> = state.transcript.messages[&key]
         .iter()
         .filter_map(|message| message.message_id)
         .collect();
@@ -7798,8 +7893,8 @@ fn network_attached_rest_refresh_is_idempotent() {
         snapshot.sort_by(|left, right| left.0.cmp(&right.0));
         snapshot
     };
-    let first_messages = message_snapshot(&state.messages);
-    let first_members = state.members.clone();
+    let first_messages = message_snapshot(&state.transcript.messages);
+    let first_members = state.transcript.members.clone();
     let first_cursors = state.read_cursors.clone();
     let first_counts = (state.window_messages.clone(), state.window_mentions.clone());
 
@@ -7816,8 +7911,8 @@ fn network_attached_rest_refresh_is_idempotent() {
     assert!(second_actions.is_empty());
     assert_eq!(state.channel_entries, first_channel_entries);
     assert_eq!(state.joined_topics, first_joined_topics);
-    assert_eq!(message_snapshot(&state.messages), first_messages);
-    assert_eq!(state.members, first_members);
+    assert_eq!(message_snapshot(&state.transcript.messages), first_messages);
+    assert_eq!(state.transcript.members, first_members);
     assert_eq!(state.read_cursors, first_cursors);
     assert_eq!(
         (&state.window_messages, &state.window_mentions),
@@ -7835,7 +7930,7 @@ fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
     let mut state = WorkerState::new();
     state.identifier = Some("sythos".to_string());
     state.networks.network_ids.insert("deleted".to_string(), 9);
-    state.query_windows.push(QueryWindow {
+    state.transcript.query_windows.push(QueryWindow {
         network: "deleted".to_string(),
         target_nick: "alice".to_string(),
         opened_at: "now".to_string(),
@@ -7860,6 +7955,7 @@ fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
         std::slice::from_ref(&server_row),
     );
     state
+        .transcript
         .query_ready
         .insert(("deleted".to_string(), "alice".to_string()));
     let boot = BootResponse {
@@ -7895,18 +7991,20 @@ fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
     ))));
     assert!(!state.networks.network_ids.contains_key("deleted"));
     assert!(!state
+        .transcript
         .messages
         .contains_key(&("deleted".to_string(), SERVER_WINDOW_NAME.to_string())));
     assert_eq!(
         state
+            .transcript
             .messages
             .get(&("libera".to_string(), SERVER_WINDOW_NAME.to_string()))
             .map(Vec::len),
         Some(1)
     );
     assert!(state.channel_entries.is_empty());
-    assert!(state.query_windows.is_empty());
-    assert!(state.query_ready.is_empty());
+    assert!(state.transcript.query_windows.is_empty());
+    assert!(state.transcript.query_ready.is_empty());
     assert_eq!(
         state.joined_topics,
         std::collections::HashSet::from([
@@ -7916,7 +8014,7 @@ fn authoritative_refresh_removes_deleted_network_windows_and_listeners() {
     );
     let groups = network_groups_data(
         &state.channel_entries,
-        &state.query_windows,
+        &state.transcript.query_windows,
         &state.expanded_networks,
         &state.networks.network_connection_states,
         &state.networks.network_ids,
@@ -7940,7 +8038,10 @@ fn read_cursor_write_back_is_forward_only() {
     };
     assert_eq!(read_cursor_to_write(&mut state), None);
     state.current_channel = Some(key.clone());
-    state.messages.insert(key.clone(), vec![line(7), line(9)]);
+    state
+        .transcript
+        .messages
+        .insert(key.clone(), vec![line(7), line(9)]);
     assert_eq!(
         read_cursor_to_write(&mut state),
         Some(("libera".to_string(), "#Rust".to_string(), 9))
@@ -7950,7 +8051,12 @@ fn read_cursor_write_back_is_forward_only() {
         Some(&9)
     );
     assert_eq!(read_cursor_to_write(&mut state), None);
-    state.messages.get_mut(&key).unwrap().push(line(12));
+    state
+        .transcript
+        .messages
+        .get_mut(&key)
+        .unwrap()
+        .push(line(12));
     assert_eq!(
         read_cursor_to_write(&mut state),
         Some(("libera".to_string(), "#Rust".to_string(), 12))
@@ -7994,20 +8100,29 @@ fn catch_up_anchors_cover_joined_channels_and_keep_the_first_one() {
         ChannelWindowState::Kicked,
     );
     state
+        .transcript
         .messages
         .insert(joined.clone(), vec![line(5), line(9), line(7)]);
-    state.messages.insert(kicked.clone(), vec![line(3)]);
+    state
+        .transcript
+        .messages
+        .insert(kicked.clone(), vec![line(3)]);
 
     note_catch_up_anchors(&mut state);
     assert_eq!(
-        state.catch_up_anchors.iter().collect::<Vec<_>>(),
+        state.transcript.catch_up_anchors.iter().collect::<Vec<_>>(),
         vec![(&joined, &9)]
     );
 
     // A second drop before the catch-up ran keeps the older anchor.
-    state.messages.get_mut(&joined).unwrap().push(line(12));
+    state
+        .transcript
+        .messages
+        .get_mut(&joined)
+        .unwrap()
+        .push(line(12));
     note_catch_up_anchors(&mut state);
-    assert_eq!(state.catch_up_anchors.get(&joined), Some(&9));
+    assert_eq!(state.transcript.catch_up_anchors.get(&joined), Some(&9));
 }
 
 #[test]
@@ -8614,43 +8729,58 @@ fn trimming_a_window_resets_its_paging_state_only() {
     let other = ("libera".to_string(), "#quiet".to_string());
     let mut state = WorkerState::new();
     let total = (CHAT_HISTORY_CAP + CHAT_HISTORY_TRIM_SLACK + 1) as i64;
-    state.messages.insert(
+    state.transcript.messages.insert(
         key.clone(),
         (1..=total)
             .map(|id| history_row(Some(id), Some(id)))
             .collect(),
     );
     state
+        .transcript
         .messages
         .insert(other.clone(), vec![history_row(Some(1), Some(1))]);
-    state.history_start_reached.insert(key.clone());
-    state.history_start_reached.insert(other.clone());
-    state.history_cursors_fetched.insert((key.clone(), 1));
-    state.history_cursors_fetched.insert((other.clone(), 1));
+    state.transcript.history_start_reached.insert(key.clone());
+    state.transcript.history_start_reached.insert(other.clone());
+    state
+        .transcript
+        .history_cursors_fetched
+        .insert((key.clone(), 1));
+    state
+        .transcript
+        .history_cursors_fetched
+        .insert((other.clone(), 1));
 
     assert!(trim_window_history(&mut state, &key));
-    assert_eq!(state.messages[&key].len(), CHAT_HISTORY_CAP);
+    assert_eq!(state.transcript.messages[&key].len(), CHAT_HISTORY_CAP);
     assert_eq!(
-        state.messages[&key].last().and_then(|m| m.message_id),
+        state.transcript.messages[&key]
+            .last()
+            .and_then(|m| m.message_id),
         Some(total)
     );
-    assert!(!state.history_start_reached.contains(&key));
-    assert!(!state.history_cursors_fetched.contains(&(key.clone(), 1)));
+    assert!(!state.transcript.history_start_reached.contains(&key));
+    assert!(!state
+        .transcript
+        .history_cursors_fetched
+        .contains(&(key.clone(), 1)));
     // The oldest id left is the cursor older rows are paged from.
     assert_eq!(
-        state.messages[&key]
+        state.transcript.messages[&key]
             .iter()
             .filter_map(|m| m.message_id)
             .min(),
         Some(total - CHAT_HISTORY_CAP as i64 + 1)
     );
-    assert!(state.history_start_reached.contains(&other));
-    assert!(state.history_cursors_fetched.contains(&(other.clone(), 1)));
+    assert!(state.transcript.history_start_reached.contains(&other));
+    assert!(state
+        .transcript
+        .history_cursors_fetched
+        .contains(&(other.clone(), 1)));
 
     // Already within the cap: nothing more to drop, nothing reset.
-    state.history_start_reached.insert(key.clone());
+    state.transcript.history_start_reached.insert(key.clone());
     assert!(!trim_window_history(&mut state, &key));
-    assert!(state.history_start_reached.contains(&key));
+    assert!(state.transcript.history_start_reached.contains(&key));
     let unknown = ("libera".to_string(), "#none".to_string());
     assert!(!trim_window_history(&mut state, &unknown));
 }
@@ -8775,5 +8905,5 @@ fn a_duplicate_dm_line_is_not_stored_twice() {
         append_query_live_message(&mut state, &key, &earlier, None),
         Some(LiveInsert::Reordered)
     );
-    assert_eq!(state.messages[&key].len(), 2);
+    assert_eq!(state.transcript.messages[&key].len(), 2);
 }

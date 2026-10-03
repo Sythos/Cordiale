@@ -2779,6 +2779,58 @@ struct NetworkState {
     peer_away: HashMap<(String, String), String>,
 }
 
+struct TranscriptState {
+    /// Channels to backfill after a reconnect, with the highest message id
+    /// they held when the socket dropped (live rows arriving after the
+    /// rejoin must not move the anchor). Drained one channel at a time.
+    catch_up_anchors: std::collections::BTreeMap<(String, String), i64>,
+    /// Keyed by `(network, channel)`; holds messages already rendered for
+    /// that channel so switching channels doesn't lose history.
+    messages: MessagesByChannel,
+    /// Keyed by `(network, channel)`; an unsent compose draft per channel,
+    /// mirroring Cicchetto's own per-channel drafts (confirmed by the
+    /// Grappa/Cicchetto maintainer) so switching channels doesn't lose or
+    /// leak what's half-typed.
+    drafts: HashMap<(String, String), String>,
+    /// Keyed by `(network, channel)`; the channel topic, as pushed on the
+    /// channel's Phoenix topic — see `handle_frame`.
+    topics: HashMap<(String, String), String>,
+    /// Keyed by `(network, channel)`; the last complete channel-mode
+    /// snapshot received on the Phoenix channel topic.
+    channel_modes: HashMap<(String, String), ChannelModes>,
+    /// Keyed by `(network, channel)`; the member list seeded by
+    /// `members_seeded` on the channel's Phoenix topic, then kept current
+    /// from join/part/quit/nick frames.
+    members: MembersByChannel,
+    /// Full replacement from `query_windows_list`; query rows live beside
+    /// channel rows while retaining their own window identity.
+    query_windows: Vec<QueryWindow>,
+    /// Own-nick DMs can precede the authoritative query snapshot that Grappa
+    /// emits after opening a sender's query. Hold only a small FIFO until that
+    /// snapshot either confirms the query or proves it should be discarded.
+    pending_own_nick_dms: VecDeque<PendingOwnNickDm>,
+    /// Query topics whose Phoenix join was acknowledged successfully. Keys
+    /// use the same network + ASCII-folded target identity as the snapshot.
+    query_joined: std::collections::HashSet<(String, String)>,
+    /// Query topics whose join and initial/refresh history load both
+    /// completed; only these are ready for sending, like Cicchetto.
+    query_ready: std::collections::HashSet<(String, String)>,
+    /// Queries that received a buffered first DM before their initial history
+    /// fetch; the join-ACK path must load the full tail, not just `after` the
+    /// buffered message ID.
+    query_full_history_required: std::collections::HashSet<(String, String)>,
+    /// Windows whose history was paged back to its very first message.
+    history_start_reached: std::collections::HashSet<(String, String)>,
+    /// `?before=` cursors already fetched per window: the same page is
+    /// never asked for twice.
+    history_cursors_fetched: std::collections::HashSet<((String, String), i64)>,
+    /// Query keys removed/renamed by a later full snapshot. Since Grappa
+    /// shares the channel-shaped Phoenix topic for channels and queries,
+    /// remember these identities so their late frames are ignored without
+    /// swallowing ordinary channel traffic.
+    stale_query_topics: std::collections::HashSet<(String, String)>,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -2790,10 +2842,8 @@ struct WorkerState {
     login_identifier: Option<String>,
     session: Option<SessionHandle>,
     joined_topics: std::collections::HashSet<String>,
-    /// Channels to backfill after a reconnect, with the highest message id
-    /// they held when the socket dropped (live rows arriving after the
-    /// rejoin must not move the anchor). Drained one channel at a time.
-    catch_up_anchors: std::collections::BTreeMap<(String, String), i64>,
+    /// Per-window message content, history paging and query-window bookkeeping.
+    transcript: TranscriptState,
     /// Caches of account settings and local preferences.
     prefs: SettingsState,
     /// Screens and pending requests fed by slash commands and server pushes.
@@ -2815,30 +2865,12 @@ struct WorkerState {
     /// Mentions remain separate so the existing highlight badge is preserved.
     window_mentions: HashMap<WindowCountsKey, u64>,
     window_messages: HashMap<WindowCountsKey, u64>,
-    /// Keyed by `(network, channel)`; holds messages already rendered for
-    /// that channel so switching channels doesn't lose history.
-    messages: MessagesByChannel,
-    /// Keyed by `(network, channel)`; an unsent compose draft per channel,
-    /// mirroring Cicchetto's own per-channel drafts (confirmed by the
-    /// Grappa/Cicchetto maintainer) so switching channels doesn't lose or
-    /// leak what's half-typed.
-    drafts: HashMap<(String, String), String>,
-    /// Keyed by `(network, channel)`; the channel topic, as pushed on the
-    /// channel's Phoenix topic — see `handle_frame`.
-    topics: HashMap<(String, String), String>,
-    /// Keyed by `(network, channel)`; the last complete channel-mode
-    /// snapshot received on the Phoenix channel topic.
-    channel_modes: HashMap<(String, String), ChannelModes>,
     /// Last server-confirmed read message ID per canonical channel-shaped
     /// window key. The network is preserved and only the channel segment is
     /// ASCII-folded, matching Cicchetto's channel key.
     read_cursors: HashMap<(String, String), i64>,
     /// Account-wide unread badge from `/me` or the latest read-cursor push.
     badge_count: u64,
-    /// Keyed by `(network, channel)`; the member list seeded by
-    /// `members_seeded` on the channel's Phoenix topic, then kept current
-    /// from join/part/quit/nick frames.
-    members: MembersByChannel,
     /// Network slug -> whether its channel list is expanded in the sidebar.
     /// Missing entries default to expanded (see `network_groups_data`).
     expanded_networks: HashMap<String, bool>,
@@ -2849,40 +2881,13 @@ struct WorkerState {
     /// This stays separate because `joined_topics` also includes query and
     /// own-nick listeners that may share the same channel-shaped topic.
     channel_topics: std::collections::HashSet<String>,
-    /// Full replacement from `query_windows_list`; query rows live beside
-    /// channel rows while retaining their own window identity.
-    query_windows: Vec<QueryWindow>,
     /// The server's `protocol_version`, from `/api/config` at sign-in and
     /// again from the user-topic join reply. `None` until known; see
     /// `rename_inference_applies`.
     server_protocol_version: Option<u32>,
-    /// Own-nick DMs can precede the authoritative query snapshot that Grappa
-    /// emits after opening a sender's query. Hold only a small FIFO until that
-    /// snapshot either confirms the query or proves it should be discarded.
-    pending_own_nick_dms: VecDeque<PendingOwnNickDm>,
-    /// Query topics whose Phoenix join was acknowledged successfully. Keys
-    /// use the same network + ASCII-folded target identity as the snapshot.
-    query_joined: std::collections::HashSet<(String, String)>,
-    /// Query topics whose join and initial/refresh history load both
-    /// completed; only these are ready for sending, like Cicchetto.
-    query_ready: std::collections::HashSet<(String, String)>,
-    /// Queries that received a buffered first DM before their initial history
-    /// fetch; the join-ACK path must load the full tail, not just `after` the
-    /// buffered message ID.
-    query_full_history_required: std::collections::HashSet<(String, String)>,
-    /// Windows whose history was paged back to its very first message.
-    history_start_reached: std::collections::HashSet<(String, String)>,
-    /// `?before=` cursors already fetched per window: the same page is
-    /// never asked for twice.
-    history_cursors_fetched: std::collections::HashSet<((String, String), i64)>,
     /// How the open chat pane's update asks the worker for a rebuild
     /// (`WorkerCommand::RebuildChat`); `None` until the worker runs.
     chat_rebuild_tx: Option<mpsc::UnboundedSender<WorkerCommand>>,
-    /// Query keys removed/renamed by a later full snapshot. Since Grappa
-    /// shares the channel-shaped Phoenix topic for channels and queries,
-    /// remember these identities so their late frames are ignored without
-    /// swallowing ordinary channel traffic.
-    stale_query_topics: std::collections::HashSet<(String, String)>,
     /// Channel-selection MRU, used when a dismissed pseudo-window was open.
     recent_channels: Vec<(String, String)>,
     /// `current_channel` is the active window's `(network, target)` key;
@@ -2918,7 +2923,22 @@ impl WorkerState {
             login_identifier: None,
             session: None,
             joined_topics: std::collections::HashSet::new(),
-            catch_up_anchors: std::collections::BTreeMap::new(),
+            transcript: TranscriptState {
+                catch_up_anchors: std::collections::BTreeMap::new(),
+                messages: HashMap::new(),
+                drafts: HashMap::new(),
+                topics: HashMap::new(),
+                channel_modes: HashMap::new(),
+                members: HashMap::new(),
+                query_windows: Vec::new(),
+                pending_own_nick_dms: VecDeque::new(),
+                query_joined: std::collections::HashSet::new(),
+                query_ready: std::collections::HashSet::new(),
+                query_full_history_required: std::collections::HashSet::new(),
+                history_start_reached: std::collections::HashSet::new(),
+                history_cursors_fetched: std::collections::HashSet::new(),
+                stale_query_topics: std::collections::HashSet::new(),
+            },
             prefs: SettingsState {
                 presence_pins: settings.presence_pins,
                 presence_unsynced: settings.presence_unsynced,
@@ -2961,26 +2981,13 @@ impl WorkerState {
             invited_by: HashMap::new(),
             window_mentions: HashMap::new(),
             window_messages: HashMap::new(),
-            messages: HashMap::new(),
-            drafts: HashMap::new(),
-            topics: HashMap::new(),
-            channel_modes: HashMap::new(),
             read_cursors: HashMap::new(),
             badge_count: 0,
-            members: HashMap::new(),
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
             channel_topics: std::collections::HashSet::new(),
-            query_windows: Vec::new(),
             server_protocol_version: None,
-            pending_own_nick_dms: VecDeque::new(),
-            query_joined: std::collections::HashSet::new(),
-            query_ready: std::collections::HashSet::new(),
-            query_full_history_required: std::collections::HashSet::new(),
-            history_start_reached: std::collections::HashSet::new(),
-            history_cursors_fetched: std::collections::HashSet::new(),
             chat_rebuild_tx: None,
-            stale_query_topics: std::collections::HashSet::new(),
             recent_channels: Vec::new(),
             current_query: false,
             current_query_ready: false,
@@ -3016,7 +3023,7 @@ impl WorkerState {
             .presence_pins
             .get(&muted_key(&key.0, &key.1))
             .copied();
-        presence_hidden(pref, self.members.get(key).map(Vec::len))
+        presence_hidden(pref, self.transcript.members.get(key).map(Vec::len))
     }
 
     /// Whether a line arriving live belongs in `key`'s open transcript.
@@ -3369,15 +3376,15 @@ async fn run_worker(
                     Some(WorkerCommand::SendMessage { body }) => {
                         handle_send_message(&mut state, &ui, body).await;
                         if let Some(key) = state.current_channel.clone() {
-                            state.drafts.remove(&key);
+                            state.transcript.drafts.remove(&key);
                         }
                     }
                     Some(WorkerCommand::ComposeTextChanged(text)) => {
                         if let Some(key) = state.current_channel.clone() {
                             if text.is_empty() {
-                                state.drafts.remove(&key);
+                                state.transcript.drafts.remove(&key);
                             } else {
-                                state.drafts.insert(key, text);
+                                state.transcript.drafts.insert(key, text);
                             }
                         }
                     }
@@ -4158,7 +4165,7 @@ async fn run_worker(
                         request_watch_patterns(&mut state);
                         // Grappa doesn't replay what a channel said while
                         // the socket was down: backfill it over REST.
-                        if !state.catch_up_anchors.is_empty() {
+                        if !state.transcript.catch_up_anchors.is_empty() {
                             let _ = worker_self.send(WorkerCommand::CatchUpNext);
                         }
                     }
@@ -4503,13 +4510,13 @@ async fn finish_connect(
 
             let entries = channel_entries_from_boot(&outcome);
             state.channel_entries = entries.clone();
-            state.query_windows.clear();
+            state.transcript.query_windows.clear();
             state.server_protocol_version = Some(outcome.compatibility.protocol_version);
-            state.pending_own_nick_dms.clear();
-            state.query_joined.clear();
-            state.query_ready.clear();
-            state.query_full_history_required.clear();
-            state.stale_query_topics.clear();
+            state.transcript.pending_own_nick_dms.clear();
+            state.transcript.query_joined.clear();
+            state.transcript.query_ready.clear();
+            state.transcript.query_full_history_required.clear();
+            state.transcript.stale_query_topics.clear();
             state.window_states = joined_window_states_from_boot_channels(&outcome.boot.channels);
             state.window_failures.clear();
             state.window_kicks.clear();
@@ -4517,17 +4524,17 @@ async fn finish_connect(
             state.window_mentions = window_mentions_from_me(&outcome.me.unread_counts);
             state.window_messages = window_messages_from_me(&outcome.me.unread_counts);
             state.recent_channels.clear();
-            state.topics.clear();
+            state.transcript.topics.clear();
             // Mode snapshots are replayed on each subscribed channel topic,
             // not included in `/boot`; never carry them across identities.
-            state.channel_modes.clear();
+            state.transcript.channel_modes.clear();
             // `/me` is the cold seed for the server-authoritative read cursor
             // and account-wide badge; replace prior identity state before
             // opening the new Phoenix session.
             state.read_cursors = read_cursors_from_me(&outcome.me.read_cursors);
             state.badge_count = normalize_badge_count(Some(&outcome.me.badge_count));
-            state.members.clear();
-            state.messages = messages_from_boot(&outcome);
+            state.transcript.members.clear();
+            state.transcript.messages = messages_from_boot(&outcome);
             state.networks.network_ids = network_ids_from_boot(&outcome);
             state.networks.network_connection_states = connection_states;
             state.networks.connecting_networks.clear();
@@ -4555,7 +4562,7 @@ async fn finish_connect(
             state.networks.user_modes_by_network.clear();
             state.networks.supported_user_modes_by_network.clear();
             state.own_listener_ready.clear();
-            state.catch_up_anchors.clear();
+            state.transcript.catch_up_anchors.clear();
             state.prefs.notification_prefs = None;
             state.current_query = false;
             state.current_query_ready = false;
@@ -4658,7 +4665,7 @@ async fn finish_connect(
             let channel_count = entries.len();
             let groups_data = network_groups_data(
                 &entries,
-                &state.query_windows,
+                &state.transcript.query_windows,
                 &state.expanded_networks,
                 &state.networks.network_connection_states,
                 &state.networks.network_ids,
@@ -6037,7 +6044,7 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let current_lines = state
         .current_channel
         .as_ref()
-        .and_then(|key| state.messages.get(key))
+        .and_then(|key| state.transcript.messages.get(key))
         .cloned();
     let current_roster = state
         .current_channel
@@ -6045,7 +6052,12 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
         .filter(|_| !state.current_query)
         .map(|key| {
             (
-                state.members.get(key).cloned().unwrap_or_default(),
+                state
+                    .transcript
+                    .members
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_default(),
                 network_casemapping(state, &key.0),
                 state.denoise_active(key),
             )
@@ -6579,8 +6591,18 @@ fn push_chat_lines_update(
     ui: &slint::Weak<AppWindow>,
     key: &(String, String),
 ) {
-    let lines = state.messages.get(key).cloned().unwrap_or_default();
-    let members = state.members.get(key).cloned().unwrap_or_default();
+    let lines = state
+        .transcript
+        .messages
+        .get(key)
+        .cloned()
+        .unwrap_or_default();
+    let members = state
+        .transcript
+        .members
+        .get(key)
+        .cloned()
+        .unwrap_or_default();
     let casemapping = network_casemapping(state, &key.0);
     let denoise = state.denoise_active(key);
     let dark_theme = state.prefs.theme == Theme::Dark;
@@ -8055,7 +8077,7 @@ fn window_messages_from_me(value: &Value) -> HashMap<WindowCountsKey, u64> {
 }
 
 /// Cicchetto's compact `+nt` form; empty-but-known modes remain distinguishable
-/// from an unknown snapshot in `WorkerState::channel_modes`.
+/// from an unknown snapshot in `TranscriptState::channel_modes`.
 fn format_channel_modes(modes: &[String]) -> String {
     if modes.is_empty() {
         String::new()
@@ -8105,6 +8127,7 @@ fn window_status_for(state: &WorkerState) -> String {
         None
     } else {
         state
+            .transcript
             .channel_modes
             .get(&(network.clone(), window.clone()))
             .map(|snapshot| snapshot.modes.as_slice())
@@ -8275,7 +8298,12 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
     if state.current_query {
         return;
     }
-    let members = state.members.get(key).cloned().unwrap_or_default();
+    let members = state
+        .transcript
+        .members
+        .get(key)
+        .cloned()
+        .unwrap_or_default();
     let ranking = MemberRanking::new(state.networks.isupport_by_network.get(&key.0));
     let can_moderate = state
         .identifier
@@ -8283,7 +8311,12 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
         .is_some_and(|identifier| is_own_nick_an_op(&members, identifier, &ranking));
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
-    let lines = state.messages.get(key).cloned().unwrap_or_default();
+    let lines = state
+        .transcript
+        .messages
+        .get(key)
+        .cloned()
+        .unwrap_or_default();
     let casemapping = network_casemapping(state, &key.0);
     let denoise = state.denoise_active(key);
     let ui = ui.clone();
@@ -8600,12 +8633,22 @@ fn handle_rebuild_chat(
     if (trim && !trimmed) || state.current_channel.as_ref() != Some(key) {
         return;
     }
-    let lines = state.messages.get(key).cloned().unwrap_or_default();
+    let lines = state
+        .transcript
+        .messages
+        .get(key)
+        .cloned()
+        .unwrap_or_default();
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let roster = (!state.current_query).then(|| {
         (
-            state.members.get(key).cloned().unwrap_or_default(),
+            state
+                .transcript
+                .members
+                .get(key)
+                .cloned()
+                .unwrap_or_default(),
             network_casemapping(state, &key.0),
             state.denoise_active(key),
         )
@@ -9040,7 +9083,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     push_window_note(state, ui);
     let mut data = network_groups_data(
         &state.channel_entries,
-        &state.query_windows,
+        &state.transcript.query_windows,
         &state.expanded_networks,
         &state.networks.network_connection_states,
         &state.networks.network_ids,
@@ -10792,7 +10835,7 @@ fn apply_color_theme(
     let current_lines = state
         .current_channel
         .as_ref()
-        .and_then(|key| state.messages.get(key))
+        .and_then(|key| state.transcript.messages.get(key))
         .cloned();
     let current_roster = state
         .current_channel
@@ -10800,7 +10843,12 @@ fn apply_color_theme(
         .filter(|_| !state.current_query)
         .map(|key| {
             (
-                state.members.get(key).cloned().unwrap_or_default(),
+                state
+                    .transcript
+                    .members
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_default(),
                 network_casemapping(state, &key.0),
                 state.denoise_active(key),
                 MemberRanking::new(state.networks.isupport_by_network.get(&key.0)),

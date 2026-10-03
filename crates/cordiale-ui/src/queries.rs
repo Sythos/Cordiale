@@ -10,7 +10,8 @@ pub(crate) async fn handle_select_query(
     network: String,
     nick: String,
 ) {
-    let Some(query) = find_query_window(&state.query_windows, &network, &nick).cloned() else {
+    let Some(query) = find_query_window(&state.transcript.query_windows, &network, &nick).cloned()
+    else {
         return;
     };
     let Some(identifier) = state.identifier.clone() else {
@@ -28,7 +29,7 @@ pub(crate) async fn handle_select_query(
     let key = (query.network.clone(), query.target_nick.clone());
     let identity = query_window_key(&query.network, &query.target_nick);
     state.current_query = true;
-    state.current_query_ready = state.query_ready.contains(&identity);
+    state.current_query_ready = state.transcript.query_ready.contains(&identity);
     open_window(state, &key);
     push_mute_bar(state, ui);
     show_query_window(state, ui, &query, &key);
@@ -38,7 +39,10 @@ pub(crate) async fn handle_select_query(
     // default page is newest-first, so merge_query_history restores chronological
     // display order and deduplicates any messages received live in the meantime.
     if fetch_query_history(state, &query, None, None).await {
-        state.query_full_history_required.remove(&identity);
+        state
+            .transcript
+            .query_full_history_required
+            .remove(&identity);
         mark_query_ready_after_history(state, &identity);
         show_query_window(state, ui, &query, &key);
     }
@@ -50,12 +54,22 @@ pub(crate) fn show_query_window(
     query: &QueryWindow,
     key: &(String, String),
 ) {
-    let lines = state.messages.get(key).cloned().unwrap_or_default();
-    let draft = state.drafts.get(key).cloned().unwrap_or_default();
+    let lines = state
+        .transcript
+        .messages
+        .get(key)
+        .cloned()
+        .unwrap_or_default();
+    let draft = state
+        .transcript
+        .drafts
+        .get(key)
+        .cloned()
+        .unwrap_or_default();
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let query_ready = state.current_query_ready;
-    let history_start = state.history_start_reached.contains(key);
+    let history_start = state.transcript.history_start_reached.contains(key);
     let label = format!("{} — {}", query.network, query.target_nick);
     let window_status = window_status_for(state);
     let peer_nick = query.target_nick.clone();
@@ -109,7 +123,13 @@ pub(crate) async fn fetch_query_history(
     // A newer full snapshot can close/rename this query while the request is
     // in flight. The worker serializes awaits today, but retain the guard so a
     // later async refactor cannot resurrect a stale conversation.
-    if find_query_window(&state.query_windows, &query.network, &query.target_nick).is_none() {
+    if find_query_window(
+        &state.transcript.query_windows,
+        &query.network,
+        &query.target_nick,
+    )
+    .is_none()
+    {
         return false;
     }
     let key = (query.network.clone(), query.target_nick.clone());
@@ -118,10 +138,10 @@ pub(crate) async fn fetch_query_history(
 }
 
 pub(crate) fn mark_query_ready_after_history(state: &mut WorkerState, identity: &(String, String)) {
-    if !state.query_joined.contains(identity) {
+    if !state.transcript.query_joined.contains(identity) {
         return;
     }
-    state.query_ready.insert(identity.clone());
+    state.transcript.query_ready.insert(identity.clone());
     if state.current_query
         && state
             .current_channel
@@ -133,8 +153,8 @@ pub(crate) fn mark_query_ready_after_history(state: &mut WorkerState, identity: 
 }
 
 pub(crate) fn reset_query_session_readiness(state: &mut WorkerState) {
-    state.query_joined.clear();
-    state.query_ready.clear();
+    state.transcript.query_joined.clear();
+    state.transcript.query_ready.clear();
     state.current_query_ready = false;
 }
 
@@ -143,7 +163,7 @@ pub(crate) fn reset_query_session_readiness(state: &mut WorkerState) {
 /// `(server_time, id)` ordering. This makes the default newest-first tail and
 /// the post-join `after` page converge without duplicate echoes.
 pub(crate) fn merge_query_history(state: &mut WorkerState, key: &(String, String), rows: &[Value]) {
-    let messages = state.messages.entry(key.clone()).or_default();
+    let messages = state.transcript.messages.entry(key.clone()).or_default();
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
 }
 
