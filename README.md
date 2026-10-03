@@ -70,6 +70,18 @@ tokens and your user name in paths. Anything the platform can't report
 reliably says "Not available"; the keyboard layout is only read on Windows,
 and the input method isn't detected yet.
 
+Cordiale keeps its files where each platform expects them: settings and
+servers in the config folder (`~/.config/cordiale`, `%APPDATA%\Cordiale`,
+`~/Library/Application Support/Cordiale`), the keyring fallback in the local
+data folder and the log in the state or log folder (`~/.local/state/cordiale`,
+`%LOCALAPPDATA%\Cordiale`, `~/Library/Logs/Cordiale`). An older `~/.cordiale`
+folder is copied across on the first start (each file is checked, then the old
+ones are removed; if that fails the old folder stays in use and the Debug page
+says so). Files are written atomically and, on Unix, privately (folders 0700,
+files 0600), and a settings or servers file that no longer parses is kept as
+`.corrupt` instead of being overwritten. The log is capped at 1 MiB with one
+rotated copy (`cordiale.log.1`).
+
 Settings > Themes lists Grappa's theme gallery, including the irssi-derived
 `irssi-dark` and `sux`, each shown with its color set. Picking one makes it
 the account's active theme on Grappa (`PUT /me/theme`) and restyles Cordiale:
@@ -115,8 +127,9 @@ Cordiale also covers:
   Security adding a passkey, changing the passkey mode and turning on
   passwordless (not yet tried with a real authenticator). Builds made with
   the optional `ctap-hid` cargo feature do the same on Linux and macOS with
-  a USB security key and its PIN (not tried with a real key yet; the
-  release packages leave it off). Elsewhere,
+  a USB security key and its PIN (CI builds and lints it on Linux and macOS,
+  but it hasn't been tried with a real key yet; the release packages leave
+  it off). Elsewhere,
   passkey-only sign-in still needs a share link or client token from
   Cicchetto; an account whose passkey is backed by recovery codes can sign
   in with one of those, and a passwordless account can sign in from the
@@ -132,6 +145,12 @@ Cordiale also covers:
   automatic sign-in at launch. A passkey origin override with the same kind
   of address gets the same warning. Local development servers are never
   blocked.
+- **TLS trust:** REST and the realtime socket verify the server's
+  certificate against the operating system's store, so a server behind a
+  private or corporate CA works once that CA is installed. A rejected
+  certificate stops the session with a message in the status bar (this
+  computer doesn't trust it, with the reason) instead of retrying forever;
+  sign in again after fixing the trust.
 - **Session sharing:** Settings > Security makes a single-use link and QR
   code (valid ten minutes) that signs another device into the same account,
   and the connect screen signs in with such a link or token from another
@@ -216,7 +235,9 @@ Cordiale also covers:
 - **Chat:** multi-colored mIRC messages wrap as one paragraph, channel MODE
   changes follow the network's ISUPPORT PREFIX and CHANMODES, and direct
   messages that arrive before the query snapshot are recovered from
-  Grappa's history.
+  Grappa's history. Each window keeps its newest 5,000 rows in memory (older
+  ones are fetched again when you scroll back), and a new direct-message line
+  is appended in place instead of rebuilding the whole list.
 - **Presentation:** WHOIS avatars in PNG, JPEG, GIF, WebP or BMP; the
   account-wide unread count in the window title and, on Windows, as a
   badge on the taskbar button.
@@ -233,7 +254,9 @@ Cordiale also covers:
 - **Not yet tried against a live server:** passkey listing and deletion,
   the Windows passkey ceremonies (no real authenticator either),
   session-sharing links, channel-history catch-up after a reconnect, the
-  reconnect back-off and the `Retry-After` handling, the
+  reconnect back-off and the `Retry-After` handling, the TLS trust against a
+  private CA, the move of the files out of `~/.cordiale` on real Windows and
+  macOS machines, the history cap in a long-running window, the
   foreground presence reports, the `client_proto` declaration and its `426`
   handling, DM renames by conversation id (servers below protocol 37), the
   coexisting old and new private windows after a peer's nick change on
@@ -255,7 +278,10 @@ Cordiale also covers:
 Packaged releases (installers, distro packages, source archive) are on
 the [Releases page](https://github.com/Sythos/Cordiale/releases) — see
 [docs/installation.md](docs/installation.md) for per-platform
-instructions. Prefer building from source? `main` always builds:
+instructions. The Debian, Ubuntu, AlmaLinux and Arch packages declare the
+libraries they need (`libasound`, fontconfig, the X11 and Wayland ones, GL
+and xkbcommon), and a CI check fails if a new shared library isn't covered.
+Prefer building from source? `main` always builds:
 
 ```bash
 git clone https://github.com/Sythos/Cordiale.git
@@ -268,7 +294,11 @@ cargo build --release --package cordiale-ui
 
 - `crates/cordiale-core` — domain model, protocol, persistence, credentials,
   REST/WebSocket clients, and other shareable logic;
-- `crates/cordiale-ui` — Slint executable and GUI entry point;
+- `crates/cordiale-ui` — Slint executable and GUI entry point. `main.rs`
+  holds the setup and the shared state (`WorkerState`, grouped in sub-structs
+  by area), the handlers live in modules (`frames`, `slash`, `admin_handlers`,
+  `history`, `channels`, `queries`, `worker_commands`, `ui_callbacks` and the
+  smaller ones), and the unit tests are in `tests.rs`;
 - `crates/cordiale-ui/lang/{it,fr,de,es}/LC_MESSAGES/cordiale-ui.po` — UI
   translations, bundled into the binary at build time by `slint-build`
   (no runtime gettext dependency); English is the untranslated source
@@ -276,7 +306,10 @@ cargo build --release --package cordiale-ui
 - `resources/branding/` — project image and app icon source;
 - `packaging/windows` and `packaging/linux` — space for future deliverables
   (packaging notes in `docs/packaging-windows.md` and
-  `docs/packaging-linux.md`);
+  `docs/packaging-linux.md`), and `packaging/check-linux-deps.sh`, which
+  maps the binary's shared libraries to each distro's package names;
+- `.github/workflows` — CI (formatting, clippy and tests on Linux, Windows and
+  macOS, plus the `ctap-hid` feature) and the release packaging;
 - `docs/` — technical documentation: Grappa protocol contract
   (`protocol-notes.md`), feature matrix (`feature-matrix.md`), packaging
   notes, and how to [install a release](docs/installation.md).
