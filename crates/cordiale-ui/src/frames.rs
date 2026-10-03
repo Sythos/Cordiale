@@ -140,7 +140,7 @@ pub(crate) fn renders_as_chat_line(kind: &str) -> bool {
 }
 
 pub(crate) fn record_query_join_success(state: &mut WorkerState, identity: &(String, String)) {
-    state.query_joined.insert(identity.clone());
+    state.transcript.query_joined.insert(identity.clone());
 }
 
 pub(crate) fn reset_query_join_failure(
@@ -148,8 +148,8 @@ pub(crate) fn reset_query_join_failure(
     identity: &(String, String),
     topic: &str,
 ) -> bool {
-    state.query_joined.remove(identity);
-    state.query_ready.remove(identity);
+    state.transcript.query_joined.remove(identity);
+    state.transcript.query_ready.remove(identity);
     state.joined_topics.remove(topic);
     let selected = state.current_query
         && state
@@ -175,8 +175,8 @@ async fn handle_query_join_reply(
         return;
     };
     let (identity, query) = match resolve_query_topic(
-        &state.query_windows,
-        &state.stale_query_topics,
+        &state.transcript.query_windows,
+        &state.transcript.stale_query_topics,
         &network,
         &nick,
     ) {
@@ -217,7 +217,10 @@ async fn handle_query_join_reply(
     if !fetch_query_history(state, &query, high_water, limit).await {
         return;
     }
-    state.query_full_history_required.remove(&identity);
+    state
+        .transcript
+        .query_full_history_required
+        .remove(&identity);
     mark_query_ready_after_history(state, &identity);
 
     let selected = state.current_query
@@ -580,7 +583,12 @@ pub(crate) async fn handle_frame(
     if payload_kind == "members_seeded" {
         match apply_members_seeded(state, &frame.payload) {
             Some(key) => {
-                let count = state.members.get(&key).map(Vec::len).unwrap_or(0);
+                let count = state
+                    .transcript
+                    .members
+                    .get(&key)
+                    .map(Vec::len)
+                    .unwrap_or(0);
                 persistence::log_line(&format!(
                     "members_seeded applied: {}/{} -> {count} member(s)",
                     key.0, key.1
@@ -786,9 +794,12 @@ pub(crate) async fn handle_frame(
         let sidebar_changed =
             upsert_channel_entry(&mut state.channel_entries, network.clone(), channel.clone());
         let key = window_state_key(&network, &channel);
-        state.members.retain(|(known_network, known_channel), _| {
-            window_state_key(known_network, known_channel) != key
-        });
+        state
+            .transcript
+            .members
+            .retain(|(known_network, known_channel), _| {
+                window_state_key(known_network, known_channel) != key
+            });
         let selected_window_kicked =
             state
                 .current_channel
@@ -828,8 +839,8 @@ pub(crate) async fn handle_frame(
         .and_then(|identifier| query_from_topic(identifier, &frame.topic))
     {
         match resolve_query_topic(
-            &state.query_windows,
-            &state.stale_query_topics,
+            &state.transcript.query_windows,
+            &state.transcript.stale_query_topics,
             &network,
             &topic_nick,
         ) {
@@ -863,7 +874,7 @@ pub(crate) async fn handle_frame(
     let key = (network.clone(), channel.clone());
 
     let line = render_message(effective_payload, Some(&frame.event));
-    let messages = state.messages.entry(key.clone()).or_default();
+    let messages = state.transcript.messages.entry(key.clone()).or_default();
     // A reconnect catch-up can already hold a row this push announces.
     let already_shown = line
         .message_id
@@ -892,7 +903,12 @@ pub(crate) async fn handle_frame(
         let rebuild_key = key.clone();
         let dark_theme = state.prefs.theme == Theme::Dark;
         refresh_mention_context(state);
-        let members = state.members.get(&key).cloned().unwrap_or_default();
+        let members = state
+            .transcript
+            .members
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
         let casemapping = network_casemapping(state, &network);
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -929,7 +945,7 @@ fn handle_topic_changed(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, pa
         return;
     };
 
-    state.topics.insert(key.clone(), text.clone());
+    state.transcript.topics.insert(key.clone(), text.clone());
     if state.current_channel.as_ref() == Some(&key) {
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -980,7 +996,7 @@ pub(crate) fn apply_channel_modes_changed(
         return None;
     }
     let label = format_channel_modes(&snapshot.modes);
-    state.channel_modes.insert(key.clone(), snapshot);
+    state.transcript.channel_modes.insert(key.clone(), snapshot);
     Some((key, label))
 }
 
@@ -1083,6 +1099,7 @@ pub(crate) fn apply_window_counts(state: &mut WorkerState, topic: &str, payload:
         .iter()
         .any(|(network, channel, _)| window_counts_key(network, channel) == key)
         || state
+            .transcript
             .query_windows
             .iter()
             .any(|query| window_counts_key(&query.network, &query.target_nick) == key);
@@ -1197,6 +1214,7 @@ pub(crate) fn retain_window_counts_for_open_windows(state: &mut WorkerState) {
     );
     retained.extend(
         state
+            .transcript
             .query_windows
             .iter()
             .map(|query| window_counts_key(&query.network, &query.target_nick)),
@@ -1889,7 +1907,7 @@ pub(crate) fn apply_members_seeded(
         .collect();
     sort_members_by_rank(&mut members, &order);
     let key = (network, channel);
-    state.members.insert(key.clone(), members);
+    state.transcript.members.insert(key.clone(), members);
     Some(key)
 }
 
@@ -1915,7 +1933,7 @@ pub(crate) fn update_members_from_frame(
             let order = cordiale_core::isupport::prefix_symbol_order(
                 state.networks.isupport_by_network.get(&key.0),
             );
-            let members = state.members.entry(key.clone()).or_default();
+            let members = state.transcript.members.entry(key.clone()).or_default();
             if members.iter().any(|(name, _)| name == nick) {
                 return false;
             }
@@ -1925,7 +1943,7 @@ pub(crate) fn update_members_from_frame(
         }
         Some("part") | Some("quit") => {
             let Some(nick) = nick else { return false };
-            let Some(members) = state.members.get_mut(key) else {
+            let Some(members) = state.transcript.members.get_mut(key) else {
                 return false;
             };
             let before = members.len();
@@ -1945,7 +1963,7 @@ pub(crate) fn update_members_from_frame(
             let order = cordiale_core::isupport::prefix_symbol_order(
                 state.networks.isupport_by_network.get(&key.0),
             );
-            let Some(members) = state.members.get_mut(key) else {
+            let Some(members) = state.transcript.members.get_mut(key) else {
                 return false;
             };
             let Some(entry) = members.iter_mut().find(|(name, _)| name == old_nick) else {
@@ -1971,7 +1989,7 @@ pub(crate) fn update_members_from_frame(
                 cordiale_core::isupport::prefix_mode_changes(modes, &mode_args(payload), isupport);
             let order = cordiale_core::isupport::prefix_symbol_order(isupport);
             let casemapping = network_casemapping(state, &key.0);
-            let Some(members) = state.members.get_mut(key) else {
+            let Some(members) = state.transcript.members.get_mut(key) else {
                 return false;
             };
             let mut changed = false;
@@ -2100,7 +2118,11 @@ pub(crate) fn query_history_fetch_window(
     identity: &(String, String),
     key: &(String, String),
 ) -> (Option<i64>, Option<usize>) {
-    if state.query_full_history_required.contains(identity) {
+    if state
+        .transcript
+        .query_full_history_required
+        .contains(identity)
+    {
         // The highest local ID may be the just-buffered inbound DM, not a
         // history checkpoint. Fetch the default tail and merge it by ID.
         return (None, None);
@@ -2114,8 +2136,11 @@ pub(crate) fn require_query_full_history_if_unready(
     key: &(String, String),
 ) {
     let identity = query_window_key(&key.0, &key.1);
-    if !state.query_ready.contains(&identity) {
-        state.query_full_history_required.insert(identity);
+    if !state.transcript.query_ready.contains(&identity) {
+        state
+            .transcript
+            .query_full_history_required
+            .insert(identity);
     }
 }
 
@@ -2149,7 +2174,7 @@ pub(crate) fn append_query_live_message(
     event_fallback: Option<&str>,
 ) -> Option<LiveInsert> {
     let message = render_message(payload, event_fallback);
-    let messages = state.messages.entry(key.clone()).or_default();
+    let messages = state.transcript.messages.entry(key.clone()).or_default();
     if message.message_id.is_some_and(|id| {
         messages
             .iter()
@@ -2195,14 +2220,20 @@ fn show_live_query_message(
     refresh_mention_context(state);
     let ui = ui.clone();
     if insert == LiveInsert::Reordered {
-        let lines = state.messages.get(key).cloned().unwrap_or_default();
+        let lines = state
+            .transcript
+            .messages
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
         let _ = ui.upgrade_in_event_loop(move |ui| {
             show_chat_lines(&ui, chat_lines_model(&lines, dark_theme));
         });
         return;
     }
-    let rows = state.messages.get(key).map_or(0, Vec::len);
+    let rows = state.transcript.messages.get(key).map_or(0, Vec::len);
     let Some(line) = state
+        .transcript
         .messages
         .get(key)
         .and_then(|rows| rows.last())
@@ -2267,7 +2298,7 @@ pub(crate) fn own_nick_dm_query_key(
     payload: &Value,
 ) -> Option<(String, String)> {
     let sender = own_nick_dm_sender(payload)?;
-    let query = find_query_window(&state.query_windows, network, sender)?;
+    let query = find_query_window(&state.transcript.query_windows, network, sender)?;
     Some((query.network.clone(), query.target_nick.clone()))
 }
 
@@ -2296,36 +2327,42 @@ pub(crate) fn buffer_pending_own_nick_dm(
     let Some(sender) = own_nick_dm_sender(payload) else {
         return;
     };
-    if find_query_window(&state.query_windows, network, sender).is_some() {
+    if find_query_window(&state.transcript.query_windows, network, sender).is_some() {
         return;
     }
-    if state.pending_own_nick_dms.len() >= MAX_PENDING_OWN_NICK_DMS {
+    if state.transcript.pending_own_nick_dms.len() >= MAX_PENDING_OWN_NICK_DMS {
         // The dropped DM is in Grappa's scrollback: if its query opens, the
         // first history load fetches the full tail instead of only what
         // follows the buffered messages, so nothing goes missing.
-        if let Some(dropped) = state.pending_own_nick_dms.pop_front() {
+        if let Some(dropped) = state.transcript.pending_own_nick_dms.pop_front() {
             state
+                .transcript
                 .query_full_history_required
                 .insert(query_window_key(&dropped.network, &dropped.sender));
         }
     }
-    state.pending_own_nick_dms.push_back(PendingOwnNickDm {
-        network: network.to_string(),
-        sender: sender.to_string(),
-        payload: payload.clone(),
-        event_fallback: event_fallback.to_string(),
-    });
+    state
+        .transcript
+        .pending_own_nick_dms
+        .push_back(PendingOwnNickDm {
+            network: network.to_string(),
+            sender: sender.to_string(),
+            payload: payload.clone(),
+            event_fallback: event_fallback.to_string(),
+        });
 }
 
 pub(crate) fn drain_pending_own_nick_dms(state: &mut WorkerState) {
-    let pending = std::mem::take(&mut state.pending_own_nick_dms);
+    let pending = std::mem::take(&mut state.transcript.pending_own_nick_dms);
     for dm in pending {
-        let Some(query) = find_query_window(&state.query_windows, &dm.network, &dm.sender).cloned()
+        let Some(query) =
+            find_query_window(&state.transcript.query_windows, &dm.network, &dm.sender).cloned()
         else {
             // A valid full snapshot is authoritative: if it didn't open the
             // sender's query, don't invent a client-side window or retain the
             // message until some unrelated later snapshot.
             state
+                .transcript
                 .query_full_history_required
                 .remove(&query_window_key(&dm.network, &dm.sender));
             continue;
@@ -2800,7 +2837,7 @@ pub(crate) fn apply_own_nick_change(
     if let Some(old_nick) = previous {
         let old_topic = own_nick_listener_topic(user, network, &old_nick);
         state.own_listener_ready.remove(&old_topic);
-        if find_query_window(&state.query_windows, network, &old_nick).is_none() {
+        if find_query_window(&state.transcript.query_windows, network, &old_nick).is_none() {
             state.joined_topics.remove(&old_topic);
             actions.push(OwnNickListenerAction::Leave(old_topic));
         }
@@ -2810,6 +2847,7 @@ pub(crate) fn apply_own_nick_change(
         state.own_listener_ready.remove(&new_topic);
         actions.push(OwnNickListenerAction::Join(new_topic));
     } else if state
+        .transcript
         .query_joined
         .contains(&query_window_key(network, nick))
     {
@@ -3026,7 +3064,7 @@ fn reconcile_own_nick_listener_topics(
 
         let old_topic = own_nick_listener_topic(user, &network, &old_nick);
         state.own_listener_ready.remove(&old_topic);
-        if find_query_window(&state.query_windows, &network, &old_nick).is_none()
+        if find_query_window(&state.transcript.query_windows, &network, &old_nick).is_none()
             && state.joined_topics.remove(&old_topic)
         {
             actions.push(OwnNickListenerAction::Leave(old_topic));
@@ -3065,21 +3103,26 @@ pub(crate) fn apply_network_rest_refresh(
     // The account's /boot network list is authoritative. A removed network
     // must not be recreated by an old query row or a late channel snapshot.
     state
+        .transcript
         .query_windows
         .retain(|query| next_network_ids.contains_key(&query.network));
     state
         .expanded_networks
         .retain(|network, _| next_network_ids.contains_key(network));
     state
+        .transcript
         .query_joined
         .retain(|(network, _)| next_network_ids.contains_key(network));
     state
+        .transcript
         .query_ready
         .retain(|(network, _)| next_network_ids.contains_key(network));
     state
+        .transcript
         .query_full_history_required
         .retain(|(network, _)| next_network_ids.contains_key(network));
     state
+        .transcript
         .stale_query_topics
         .retain(|(network, _)| next_network_ids.contains_key(network));
     state
@@ -3117,13 +3160,13 @@ pub(crate) fn apply_network_rest_refresh(
     state.window_messages = window_messages_from_me(&me.unread_counts);
     // `/boot` carries neither topics nor rosters: both are re-seeded on
     // each channel's Phoenix topic.
-    state.topics.clear();
-    state.members.clear();
+    state.transcript.topics.clear();
+    state.transcript.members.clear();
     let mut messages = messages_from_boot_response(boot);
     // `/boot.heads` is not guaranteed to include the synthetic window. Keep
     // its live/REST rows across unrelated network refreshes while dropping
     // rows belonging to networks no longer present in the authoritative list.
-    for ((network, channel), rows) in &state.messages {
+    for ((network, channel), rows) in &state.transcript.messages {
         if channel == SERVER_WINDOW_NAME && next_network_ids.contains_key(network) {
             merge_rendered_messages(
                 messages
@@ -3133,7 +3176,7 @@ pub(crate) fn apply_network_rest_refresh(
             );
         }
     }
-    state.messages = messages;
+    state.transcript.messages = messages;
     state.read_cursors = read_cursors_from_me(&me.read_cursors);
     state.badge_count = normalize_badge_count(Some(&me.badge_count));
     state.home.apply_me(me);
@@ -4106,7 +4149,7 @@ async fn handle_archive_purged(
         .map(|isupport| isupport.casemapping)
         .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459);
     let purged = |key: &(String, String)| is_purged_window(key, &network, &target, casemapping);
-    state.messages.retain(|key, _| !purged(key));
+    state.transcript.messages.retain(|key, _| !purged(key));
     state.window_messages.retain(|key, _| !purged(key));
     state.window_mentions.retain(|key, _| !purged(key));
     if state
@@ -5710,12 +5753,15 @@ fn move_query_window_cache(state: &mut WorkerState, old: &QueryWindow, new: &Que
     if from == to {
         return;
     }
-    if let Some(lines) = state.messages.remove(&from) {
-        merge_rendered_messages(state.messages.entry(to.clone()).or_default(), lines);
+    if let Some(lines) = state.transcript.messages.remove(&from) {
+        merge_rendered_messages(
+            state.transcript.messages.entry(to.clone()).or_default(),
+            lines,
+        );
     }
-    if !state.drafts.contains_key(&to) {
-        if let Some(draft) = state.drafts.remove(&from) {
-            state.drafts.insert(to, draft);
+    if !state.transcript.drafts.contains_key(&to) {
+        if let Some(draft) = state.transcript.drafts.remove(&from) {
+            state.transcript.drafts.insert(to, draft);
         }
     }
     // A rename changes the canonical Phoenix topic. Keep old join/readiness
@@ -5731,7 +5777,7 @@ pub(crate) fn apply_query_windows_snapshot(
     state: &mut WorkerState,
     snapshot: Vec<QueryWindow>,
 ) -> bool {
-    let previous = state.query_windows.clone();
+    let previous = state.transcript.query_windows.clone();
     // A case-only nick change retains the same query identity and topic, but
     // the rendered-message and draft maps use the displayed nick verbatim.
     // Move those exact-key caches before normal rename detection, which
@@ -5782,7 +5828,7 @@ pub(crate) fn apply_query_windows_snapshot(
         }
     }
 
-    state.query_windows = snapshot;
+    state.transcript.query_windows = snapshot;
     selected_closed
 }
 
@@ -5793,26 +5839,30 @@ pub(crate) fn apply_query_windows_snapshot(
 /// join.
 pub(crate) fn reconcile_query_topic_tracking(state: &mut WorkerState, previous: &[QueryWindow]) {
     let active_queries: std::collections::HashSet<(String, String)> = state
+        .transcript
         .query_windows
         .iter()
         .map(|query| query_window_key(&query.network, &query.target_nick))
         .collect();
     state
+        .transcript
         .query_full_history_required
         .retain(|identity| active_queries.contains(identity));
     for query in previous {
         let identity = query_window_key(&query.network, &query.target_nick);
         if !active_queries.contains(&identity) {
-            state.stale_query_topics.insert(identity);
+            state.transcript.stale_query_topics.insert(identity);
             // The topic remains joined, but reopening must load its latest
             // tail before the composer is enabled again.
             state
+                .transcript
                 .query_ready
                 .remove(&query_window_key(&query.network, &query.target_nick));
         }
     }
-    for query in &state.query_windows {
+    for query in &state.transcript.query_windows {
         state
+            .transcript
             .stale_query_topics
             .remove(&query_window_key(&query.network, &query.target_nick));
     }
@@ -5821,7 +5871,10 @@ pub(crate) fn reconcile_query_topic_tracking(state: &mut WorkerState, previous: 
             .current_channel
             .as_ref()
             .is_some_and(|(network, nick)| {
-                state.query_ready.contains(&query_window_key(network, nick))
+                state
+                    .transcript
+                    .query_ready
+                    .contains(&query_window_key(network, nick))
             });
 }
 
@@ -5846,13 +5899,13 @@ fn handle_query_windows_list(
         return;
     };
 
-    let previous_queries = state.query_windows.clone();
+    let previous_queries = state.transcript.query_windows.clone();
     let selected_closed = apply_query_windows_snapshot(state, snapshot);
     retain_window_counts_for_open_windows(state);
     reconcile_query_topic_tracking(state, &previous_queries);
     drain_pending_own_nick_dms(state);
     if let Some(session) = state.session.as_ref() {
-        for query in &state.query_windows {
+        for query in &state.transcript.query_windows {
             let topic = query_topic(&identifier, &query.network, &query.target_nick);
             if state.joined_topics.insert(topic.clone()) {
                 // Query topics carry scrollback/messages, not the channel
@@ -5865,7 +5918,9 @@ fn handle_query_windows_list(
     refresh_network_groups(state, ui);
     if state.current_query {
         if let Some((network, nick)) = state.current_channel.as_ref() {
-            if let Some(query) = find_query_window(&state.query_windows, network, nick).cloned() {
+            if let Some(query) =
+                find_query_window(&state.transcript.query_windows, network, nick).cloned()
+            {
                 let key = (query.network.clone(), query.target_nick.clone());
                 show_query_window(state, ui, &query, &key);
             }
