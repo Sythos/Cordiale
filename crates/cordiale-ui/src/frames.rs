@@ -65,7 +65,7 @@ fn handle_admin_feed(
             return;
         }
         "snapshot" => {
-            state.admin_events = frame
+            state.panels.admin_events = frame
                 .payload
                 .get("events")
                 .and_then(Value::as_array)
@@ -82,17 +82,21 @@ fn handle_admin_feed(
                 "session · {}",
                 cordiale_core::admin::admin_session_log_line(&frame.payload)
             );
-            state.admin_events.insert(0, line);
+            state.panels.admin_events.insert(0, line);
         }
         _ if frame.payload.get("kind").is_some() => {
             let line = cordiale_core::admin::admin_event_line(&frame.payload);
-            state.admin_events.insert(0, line);
+            state.panels.admin_events.insert(0, line);
         }
         _ => return,
     }
-    state.admin_events.truncate(ADMIN_EVENTS_CAP);
-    let lines: Vec<slint::SharedString> =
-        state.admin_events.iter().map(|line| line.into()).collect();
+    state.panels.admin_events.truncate(ADMIN_EVENTS_CAP);
+    let lines: Vec<slint::SharedString> = state
+        .panels
+        .admin_events
+        .iter()
+        .map(|line| line.into())
+        .collect();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_admin_events(Rc::new(slint::VecModel::from(lines)).into());
     });
@@ -295,7 +299,7 @@ pub(crate) async fn handle_frame(
         if let Some(pending) = frame
             .message_ref
             .as_ref()
-            .and_then(|message_ref| state.pending_kickbans.remove(message_ref))
+            .and_then(|message_ref| state.panels.pending_kickbans.remove(message_ref))
         {
             finish_kickban(state, ui, pending, &frame.payload);
             return;
@@ -3345,7 +3349,7 @@ async fn handle_connection_progress(
     // A `/lusers` only belongs to the connection it was issued on: the
     // registration burst of a new attempt is unsolicited.
     if progress == ConnectionProgressState::Connecting {
-        state.lusers_requested.remove(&network);
+        state.panels.lusers_requested.remove(&network);
     }
     if apply_connection_progress(&mut state.connecting_networks, &network, progress) {
         refresh_network_groups(state, ui);
@@ -3439,7 +3443,7 @@ fn handle_recover_progress(
         persistence::log_line("recover_progress rejected: invalid carrier or payload");
         return;
     };
-    if apply_recover_progress(&mut state.recover_panel, &network, entry) {
+    if apply_recover_progress(&mut state.panels.recover_panel, &network, entry) {
         push_recover_panel(state, ui);
     }
 }
@@ -3508,7 +3512,7 @@ fn handle_recover_result(
         persistence::log_line("recover_result rejected: invalid carrier or payload");
         return;
     };
-    if apply_recover_result(&mut state.recover_panel, &network, outcome, reason) {
+    if apply_recover_result(&mut state.panels.recover_panel, &network, outcome, reason) {
         push_recover_panel(state, ui);
     }
 }
@@ -3874,7 +3878,7 @@ fn handle_dcc_offer(
         persistence::log_line("dcc_offer rejected: invalid carrier or payload");
         return;
     };
-    if apply_dcc_offer(&mut state.dcc_offers, offer) {
+    if apply_dcc_offer(&mut state.panels.dcc_offers, offer) {
         push_dcc_offers(state, ui);
     }
 }
@@ -3930,7 +3934,7 @@ fn handle_dcc_offer_resolved(
         persistence::log_line("dcc_offer_resolved rejected: invalid carrier or payload");
         return;
     };
-    let Some(offer) = apply_dcc_offer_resolved(&mut state.dcc_offers, &offer_id) else {
+    let Some(offer) = apply_dcc_offer_resolved(&mut state.panels.dcc_offers, &offer_id) else {
         return;
     };
     push_dcc_offers(state, ui);
@@ -3946,6 +3950,7 @@ fn handle_dcc_offer_resolved(
 /// Mirrors the held offers into the sidebar consent panel.
 fn push_dcc_offers(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let offers: Vec<(String, String, String, String, String)> = state
+        .panels
         .dcc_offers
         .iter()
         .map(|offer| {
@@ -4010,6 +4015,7 @@ async fn handle_archive_changed(
         return;
     };
     if state
+        .panels
         .archive
         .as_ref()
         .is_some_and(|view| view.network == network)
@@ -4077,6 +4083,7 @@ async fn handle_archive_purged(
     state.window_messages.retain(|key, _| !purged(key));
     state.window_mentions.retain(|key, _| !purged(key));
     if state
+        .panels
         .archive
         .as_ref()
         .is_some_and(|view| view.network == network)
@@ -4567,6 +4574,7 @@ fn handle_mentions_bundle(
         return;
     };
     state
+        .panels
         .mentions_bundles
         .insert(view.network.clone(), view.clone());
     show_reply_view(state, ui, view);
@@ -4693,7 +4701,7 @@ async fn reload_directory_after_push(
     network: &str,
     failed_reason: Option<String>,
 ) {
-    let Some(view) = state.directory.as_mut() else {
+    let Some(view) = state.panels.directory.as_mut() else {
         return;
     };
     if view.network != network {
@@ -4997,7 +5005,7 @@ fn handle_whois_bundle(
     };
     let view = whois_bundle_view(&bundle);
     let avatar_url = bundle.avatar_url.clone();
-    state.whois_card = Some(bundle);
+    state.panels.whois_card = Some(bundle);
     show_reply_view(state, ui, view);
     if let Some(avatar_url) = avatar_url {
         load_whois_avatar(state, ui, avatar_url);
@@ -5284,7 +5292,7 @@ fn handle_lusers_bundle(
         persistence::log_line("lusers_bundle rejected: invalid carrier or payload");
         return;
     };
-    if !state.lusers_requested.remove(&view.network) {
+    if !state.panels.lusers_requested.remove(&view.network) {
         return;
     }
     show_reply_view(state, ui, view);
@@ -5360,7 +5368,7 @@ fn handle_whois_avatar_ready(
         .map(|isupport| isupport.casemapping)
         .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459);
     if !apply_whois_avatar_ready(
-        &mut state.whois_card,
+        &mut state.panels.whois_card,
         &network,
         &nick,
         avatar_url,
@@ -5368,17 +5376,17 @@ fn handle_whois_avatar_ready(
     ) {
         return;
     }
-    let Some(card) = state.whois_card.as_ref() else {
+    let Some(card) = state.panels.whois_card.as_ref() else {
         return;
     };
-    let shown = state.reply_view.as_ref().is_some_and(|view| {
+    let shown = state.panels.reply_view.as_ref().is_some_and(|view| {
         view.kind == "whois_bundle" && view.network == card.network && view.subject == card.target
     });
     if shown {
         let view = whois_bundle_view(card);
         let avatar_url = card.avatar_url.clone();
         push_reply_view(ui, &view, false);
-        state.reply_view = Some(view);
+        state.panels.reply_view = Some(view);
         if let Some(avatar_url) = avatar_url {
             load_whois_avatar(state, ui, avatar_url);
         }

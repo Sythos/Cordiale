@@ -531,7 +531,7 @@ fn start_kickban(
         "resolve_userhost",
         serde_json::json!({ "network_id": network_id, "nick": nick }),
     );
-    state.pending_kickbans.insert(
+    state.panels.pending_kickbans.insert(
         message_ref,
         PendingKickBan {
             network: network.to_string(),

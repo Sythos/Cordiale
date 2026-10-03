@@ -2628,6 +2628,40 @@ struct NetworkConnectionTransition {
     snapshot: NetworkConnectionSnapshot,
 }
 
+struct PanelState {
+    /// Lines of the live admin feed, newest first (capped).
+    admin_events: Vec<String>,
+    /// Last `GET /admin/settings`, to tell whether addressing was edited.
+    admin_settings: Option<Value>,
+    /// The last `GET /admin/uploads` answer, which decides what may be
+    /// deleted.
+    admin_uploads: Option<cordiale_core::admin::AdminUploadsResponse>,
+    /// `/kb` requests waiting for their `resolve_userhost` reply, by ref.
+    pending_kickbans: HashMap<String, PendingKickBan>,
+    /// Identity-recovery panel driven entirely by server pushes; `None`
+    /// until the first `recover_progress` and again after a dismiss.
+    recover_panel: Option<RecoverPanel>,
+    /// Latest requester reply shown on the reply screen; never persisted
+    /// and never rendered into a chat window.
+    reply_view: Option<ReplyView>,
+    /// The WHOIS card currently shown, kept so a later `whois_avatar_ready`
+    /// can patch exactly this card and no other.
+    whois_card: Option<WhoisBundle>,
+    /// Networks with a `/lusers` awaiting its bundle. The ircd also sends
+    /// LUSERS unasked at registration; only a requested bundle is shown,
+    /// and each request is consumed by the first matching bundle.
+    lusers_requested: std::collections::HashSet<String>,
+    /// The channel directory screen opened with `/list`, if any.
+    directory: Option<DirectoryView>,
+    /// DCC offers the server is holding for consent, in arrival order.
+    dcc_offers: Vec<DccOffer>,
+    /// The archive screen opened with `/archive`, if any.
+    archive: Option<ArchiveView>,
+    /// Latest back-from-away mentions summary per network, kept apart from
+    /// `reply_view` so a later reply can't lose it; `/mentions` reopens it.
+    mentions_bundles: HashMap<String, ReplyView>,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -2653,15 +2687,8 @@ struct WorkerState {
     /// spelling): Grappa stores no "muted at", only the end of the mute.
     /// Kept in `settings.json`.
     mute_since: std::collections::BTreeMap<String, i64>,
-    /// Lines of the live admin feed, newest first (capped).
-    admin_events: Vec<String>,
-    /// Last `GET /admin/settings`, to tell whether addressing was edited.
-    admin_settings: Option<Value>,
-    /// The last `GET /admin/uploads` answer, which decides what may be
-    /// deleted.
-    admin_uploads: Option<cordiale_core::admin::AdminUploadsResponse>,
-    /// `/kb` requests waiting for their `resolve_userhost` reply, by ref.
-    pending_kickbans: HashMap<String, PendingKickBan>,
+    /// Screens and pending requests fed by slash commands and server pushes.
+    panels: PanelState,
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
     /// transitions.
     window_states: HashMap<(String, String), ChannelWindowState>,
@@ -2773,15 +2800,6 @@ struct WorkerState {
     /// the event is never replayed and a missed `connected` would otherwise
     /// leave the badge stuck.
     connecting_networks: std::collections::HashSet<String>,
-    /// Identity-recovery panel driven entirely by server pushes; `None`
-    /// until the first `recover_progress` and again after a dismiss.
-    recover_panel: Option<RecoverPanel>,
-    /// Latest requester reply shown on the reply screen; never persisted
-    /// and never rendered into a chat window.
-    reply_view: Option<ReplyView>,
-    /// The WHOIS card currently shown, kept so a later `whois_avatar_ready`
-    /// can patch exactly this card and no other.
-    whois_card: Option<WhoisBundle>,
     /// Display copy of the account-wide auto-away delay; `None` until the
     /// server announces it. Grappa applies the value itself.
     auto_away_debounce: Option<AutoAwayDebounce>,
@@ -2795,16 +2813,6 @@ struct WorkerState {
     /// shape; inner `None` means the rename is off. Never combined with
     /// the nick: the actual nick comes from the nick events alone.
     away_nick_suffix: Option<Option<String>>,
-    /// Networks with a `/lusers` awaiting its bundle. The ircd also sends
-    /// LUSERS unasked at registration; only a requested bundle is shown,
-    /// and each request is consumed by the first matching bundle.
-    lusers_requested: std::collections::HashSet<String>,
-    /// The channel directory screen opened with `/list`, if any.
-    directory: Option<DirectoryView>,
-    /// DCC offers the server is holding for consent, in arrival order.
-    dcc_offers: Vec<DccOffer>,
-    /// The archive screen opened with `/archive`, if any.
-    archive: Option<ArchiveView>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -2846,9 +2854,6 @@ struct WorkerState {
     /// Last standalone away message (301) per `(network, folded peer)`,
     /// shown above that peer's private window until dismissed.
     peer_away: HashMap<(String, String), String>,
-    /// Latest back-from-away mentions summary per network, kept apart from
-    /// `reply_view` so a later reply can't lose it; `/mentions` reopens it.
-    mentions_bundles: HashMap<String, ReplyView>,
     /// Upload limits from the latest `server_settings_changed`, shown read
     /// only in Settings (Cordiale doesn't upload files yet).
     upload_limits: Option<UploadLimits>,
@@ -2907,10 +2912,20 @@ impl WorkerState {
             presence_pins: settings.presence_pins,
             presence_unsynced: settings.presence_unsynced,
             mute_since: settings.mute_since,
-            admin_events: Vec::new(),
-            admin_settings: None,
-            admin_uploads: None,
-            pending_kickbans: HashMap::new(),
+            panels: PanelState {
+                admin_events: Vec::new(),
+                admin_settings: None,
+                admin_uploads: None,
+                pending_kickbans: HashMap::new(),
+                recover_panel: None,
+                reply_view: None,
+                whois_card: None,
+                lusers_requested: std::collections::HashSet::new(),
+                directory: None,
+                dcc_offers: Vec::new(),
+                archive: None,
+                mentions_bundles: HashMap::new(),
+            },
             window_states: HashMap::new(),
             window_failures: HashMap::new(),
             window_kicks: HashMap::new(),
@@ -2945,17 +2960,10 @@ impl WorkerState {
             network_ids: HashMap::new(),
             network_connection_states: HashMap::new(),
             connecting_networks: std::collections::HashSet::new(),
-            recover_panel: None,
-            reply_view: None,
-            whois_card: None,
             auto_away_debounce: None,
             quit_part_reason: None,
             auto_away_reason: None,
             away_nick_suffix: None,
-            lusers_requested: std::collections::HashSet::new(),
-            directory: None,
-            dcc_offers: Vec::new(),
-            archive: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -2969,7 +2977,6 @@ impl WorkerState {
             notify_lists: HashMap::new(),
             presence_by_network: HashMap::new(),
             peer_away: HashMap::new(),
-            mentions_bundles: HashMap::new(),
             upload_limits: None,
             notification_prefs: None,
             web_bundle: None,
@@ -3217,7 +3224,7 @@ async fn run_worker(
                         decline_invite(&state, &ui, &network, &channel).await;
                     }
                     Some(WorkerCommand::DismissRecover) => {
-                        state.recover_panel = None;
+                        state.panels.recover_panel = None;
                         push_recover_panel(&state, &ui);
                     }
                     Some(WorkerCommand::DirectoryRefresh) => {
@@ -3228,13 +3235,13 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::DirectorySort(sort)) => {
                         let sort = if sort == "name" { "name" } else { "users" };
-                        if let Some(view) = state.directory.as_mut() {
+                        if let Some(view) = state.panels.directory.as_mut() {
                             view.sort = sort;
                         }
                         load_directory(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::DirectorySearch(query)) => {
-                        if let Some(view) = state.directory.as_mut() {
+                        if let Some(view) = state.panels.directory.as_mut() {
                             view.query = query.trim().to_string();
                         }
                         load_directory(&mut state, &ui).await;
@@ -3245,7 +3252,7 @@ async fn run_worker(
                     Some(WorkerCommand::DirectoryOpen(network)) => {
                         if state.network_ids.contains_key(&network) {
                             let reopen = state
-                                .directory
+                                .panels.directory
                                 .as_ref()
                                 .is_some_and(|view| view.network == network);
                             if reopen {
@@ -3301,7 +3308,7 @@ async fn run_worker(
                         }
                     }
                     Some(WorkerCommand::ArchiveClose) => {
-                        state.archive = None;
+                        state.panels.archive = None;
                     }
                     Some(WorkerCommand::CatchUpNext) => {
                         handle_catch_up_next(&mut state, &ui, &worker_self).await;
@@ -3771,7 +3778,7 @@ async fn run_worker(
                         handle_admin_settings_load(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::AdminSettingsSave(form)) => {
-                        match admin_settings_body(&form, state.admin_settings.as_ref()) {
+                        match admin_settings_body(&form, state.panels.admin_settings.as_ref()) {
                             Some(settings) => {
                                 handle_admin_write(&state, &ui, AdminWrite::UpdateSettings(settings))
                                     .await;
@@ -4506,21 +4513,21 @@ async fn finish_connect(
             state.network_ids = network_ids_from_boot(&outcome);
             state.network_connection_states = connection_states;
             state.connecting_networks.clear();
-            state.recover_panel = None;
-            state.reply_view = None;
-            state.whois_card = None;
+            state.panels.recover_panel = None;
+            state.panels.reply_view = None;
+            state.panels.whois_card = None;
             state.auto_away_debounce = None;
             state.quit_part_reason = None;
             state.auto_away_reason = None;
             state.away_nick_suffix = None;
-            state.lusers_requested.clear();
+            state.panels.lusers_requested.clear();
             close_directory(state, ui);
-            state.dcc_offers.clear();
-            state.archive = None;
+            state.panels.dcc_offers.clear();
+            state.panels.archive = None;
             state.notify_lists.clear();
             state.presence_by_network.clear();
             state.peer_away.clear();
-            state.mentions_bundles.clear();
+            state.panels.mentions_bundles.clear();
             state.upload_limits = None;
             state.web_bundle = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
@@ -5654,7 +5661,7 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     }
     // `/mentions` reopens the last away summary of the active network.
     if body.trim().eq_ignore_ascii_case("/mentions") {
-        let bundle = state.mentions_bundles.get(network.as_str()).cloned();
+        let bundle = state.panels.mentions_bundles.get(network.as_str()).cloned();
         match bundle {
             Some(view) => show_reply_view(state, ui, view),
             None => {
@@ -5684,7 +5691,7 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
         match command {
             ReplyCommand::Request { verb, payload } => {
                 if verb == "lusers" {
-                    state.lusers_requested.insert(network.to_string());
+                    state.panels.lusers_requested.insert(network.to_string());
                 }
                 send_user_verb(state, network, verb, payload);
             }
@@ -11132,7 +11139,7 @@ fn away_nick_suffix_error_key(status: Option<u16>) -> &'static str {
 /// Mirrors `state.recover_panel` into the sidebar panel. The Slint row model
 /// is built inside the UI-thread closure because `ModelRc` is not `Send`.
 fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (visible, network, rows, outcome, outcome_reason) = match &state.recover_panel {
+    let (visible, network, rows, outcome, outcome_reason) = match &state.panels.recover_panel {
         Some(panel) => (
             true,
             panel.network.clone(),
@@ -11175,7 +11182,7 @@ fn push_recover_panel(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 /// never touches chat history or the selected window.
 fn show_reply_view(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, view: ReplyView) {
     push_reply_view(ui, &view, true);
-    state.reply_view = Some(view);
+    state.panels.reply_view = Some(view);
 }
 
 /// Mirrors a reply view into the UI; `open` also switches to the reply
@@ -11291,7 +11298,7 @@ fn dcc_answer_error_status(status: Option<u16>) -> &'static str {
 
 /// Opens the archive screen for `network` and loads its list.
 async fn open_archive(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, network: String) {
-    state.archive = Some(ArchiveView {
+    state.panels.archive = Some(ArchiveView {
         network,
         entries: None,
         error: None,
@@ -11306,13 +11313,13 @@ async fn load_archive(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token), Some(view)) = (
         state.client.clone(),
         state.token.clone(),
-        state.archive.as_ref(),
+        state.panels.archive.as_ref(),
     ) else {
         return;
     };
     let network = view.network.clone();
     let result = client.fetch_archive(&token, &network).await;
-    let Some(view) = state.archive.as_mut() else {
+    let Some(view) = state.panels.archive.as_mut() else {
         return;
     };
     if view.network != network {
@@ -11340,7 +11347,7 @@ async fn delete_archive_target(state: &mut WorkerState, ui: &slint::Weak<AppWind
     let (Some(client), Some(token), Some(view)) = (
         state.client.clone(),
         state.token.clone(),
-        state.archive.as_ref(),
+        state.panels.archive.as_ref(),
     ) else {
         return;
     };
@@ -11349,7 +11356,7 @@ async fn delete_archive_target(state: &mut WorkerState, ui: &slint::Weak<AppWind
         return;
     };
     persistence::log_line(&format!("archive delete failed: {err:?}"));
-    if let Some(view) = state.archive.as_mut() {
+    if let Some(view) = state.panels.archive.as_mut() {
         if view.network == network {
             view.error = Some(archive_error_key(
                 err.status().map(|status| status.as_u16()),
@@ -11372,7 +11379,7 @@ fn archive_error_key(status: Option<u16>, fallback: &'static str) -> &'static st
 /// Mirrors the open archive into the UI; `open` also switches to its screen
 /// and clears any pending delete confirmation.
 fn push_archive(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
-    let Some(view) = state.archive.as_ref() else {
+    let Some(view) = state.panels.archive.as_ref() else {
         return;
     };
     let network = view.network.clone();
@@ -11518,7 +11525,7 @@ fn parse_list_command(body: &str) -> Option<String> {
 
 /// Closes the directory pane, if open, and gives the chat its place back.
 fn close_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    if state.directory.take().is_none() {
+    if state.panels.directory.take().is_none() {
         return;
     }
     let _ = ui.upgrade_in_event_loop(|ui| ui.set_directory_open(false));
@@ -11527,7 +11534,12 @@ fn close_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
 /// A directory row: joined first when it isn't, then focused, like
 /// Cicchetto (the intent follows the tap). A failed join stays on the pane.
 async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, channel: String) {
-    let Some(network) = state.directory.as_ref().map(|view| view.network.clone()) else {
+    let Some(network) = state
+        .panels
+        .directory
+        .as_ref()
+        .map(|view| view.network.clone())
+    else {
         return;
     };
     if !state.network_ids.contains_key(&network) {
@@ -11545,7 +11557,7 @@ async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         };
         if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
             persistence::log_line(&format!("directory join failed: {err:?}"));
-            if let Some(view) = state.directory.as_mut() {
+            if let Some(view) = state.panels.directory.as_mut() {
                 view.error = Some("directory-join-failed");
             }
             push_directory(state, ui, false);
@@ -11582,7 +11594,7 @@ async fn open_directory(
     network: String,
     query: String,
 ) {
-    state.directory = Some(DirectoryView::new(network, query));
+    state.panels.directory = Some(DirectoryView::new(network, query));
     push_directory(state, ui, true);
     load_directory(state, ui).await;
 }
@@ -11593,7 +11605,7 @@ async fn load_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token), Some(view)) = (
         state.client.clone(),
         state.token.clone(),
-        state.directory.as_ref(),
+        state.panels.directory.as_ref(),
     ) else {
         return;
     };
@@ -11603,7 +11615,7 @@ async fn load_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let result = client
         .fetch_directory(&token, &network, sort, &query, None)
         .await;
-    let Some(view) = state.directory.as_mut() else {
+    let Some(view) = state.panels.directory.as_mut() else {
         return;
     };
     // The view may have changed network, sort or search meanwhile.
@@ -11628,7 +11640,7 @@ async fn load_more_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     let (Some(client), Some(token), Some(view)) = (
         state.client.clone(),
         state.token.clone(),
-        state.directory.as_ref(),
+        state.panels.directory.as_ref(),
     ) else {
         return;
     };
@@ -11641,7 +11653,7 @@ async fn load_more_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     let result = client
         .fetch_directory(&token, &network, sort, &query, Some(&cursor))
         .await;
-    let Some(view) = state.directory.as_mut() else {
+    let Some(view) = state.panels.directory.as_mut() else {
         return;
     };
     let same_cursor = view
@@ -11678,7 +11690,7 @@ async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
     let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) else {
         return;
     };
-    let Some(view) = state.directory.as_mut() else {
+    let Some(view) = state.panels.directory.as_mut() else {
         return;
     };
     if view.refresh_pending {
@@ -11690,7 +11702,7 @@ async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
     push_directory(state, ui, false);
     if let Err(err) = client.refresh_directory(&token, &network).await {
         persistence::log_line(&format!("directory refresh failed: {err:?}"));
-        if let Some(view) = state.directory.as_mut() {
+        if let Some(view) = state.panels.directory.as_mut() {
             if view.network == network {
                 view.refresh_pending = false;
                 view.error = Some("directory-refresh-failed");
@@ -11705,7 +11717,7 @@ async fn refresh_directory(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
 /// overwritten by an answer to an earlier query). Nothing is pushed when no
 /// directory is open.
 fn push_directory(state: &WorkerState, ui: &slint::Weak<AppWindow>, open: bool) {
-    let Some(view) = state.directory.as_ref() else {
+    let Some(view) = state.panels.directory.as_ref() else {
         return;
     };
     let network = view.network.clone();
