@@ -392,9 +392,12 @@ pub(crate) async fn run_slash_command(
                 serde_json::json!({ "action": action, "pattern": pattern }),
             );
             if !add {
-                state.watch_patterns.retain(|existing| existing != &pattern);
-            } else if !state.watch_patterns.contains(&pattern) {
-                state.watch_patterns.push(pattern);
+                state
+                    .prefs
+                    .watch_patterns
+                    .retain(|existing| existing != &pattern);
+            } else if !state.prefs.watch_patterns.contains(&pattern) {
+                state.prefs.watch_patterns.push(pattern);
             }
             push_watch_patterns(state, ui);
             Ok(())
@@ -417,7 +420,7 @@ pub(crate) async fn run_slash_command(
             // the same network shows it at once, like Cicchetto's mirror.
             match result {
                 Ok(response) => {
-                    if state.settings_network.as_deref() == Some(network.as_str()) {
+                    if state.prefs.settings_network.as_deref() == Some(network.as_str()) {
                         push_ignore_entries(ui, response.entries(), "");
                     }
                     Ok(())
@@ -435,10 +438,11 @@ pub(crate) async fn run_slash_command(
         }
         SlashCommand::Notify(nicks) => client.add_notify_nicks(&token, &network, nicks).await,
         SlashCommand::Beep(None) => {
-            if state.notification_prefs.is_none() {
+            if state.prefs.notification_prefs.is_none() {
                 handle_load_notification_prefs(state, ui).await;
             }
             let sound = state
+                .prefs
                 .notification_prefs
                 .as_ref()
                 .and_then(|prefs| prefs.get("notification_sound"))
@@ -456,12 +460,12 @@ pub(crate) async fn run_slash_command(
         }
         SlashCommand::AliasDefine { name, expansion } => {
             handle_alias_upsert(state, ui, Some((name, expansion))).await;
-            state.aliases = None;
+            state.prefs.aliases = None;
             Ok(())
         }
         SlashCommand::Unalias(name) => {
             handle_alias_remove(state, ui, name).await;
-            state.aliases = None;
+            state.prefs.aliases = None;
             Ok(())
         }
         // One message per joined channel; a failure on one doesn't stop the

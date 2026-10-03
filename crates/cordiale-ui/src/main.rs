@@ -2662,6 +2662,72 @@ struct PanelState {
     mentions_bundles: HashMap<String, ReplyView>,
 }
 
+struct SettingsState {
+    /// Channels where Denoise was turned on or off, in Grappa's key
+    /// spelling (`muted_key`); the rest follow their size. Kept in
+    /// `settings.json`.
+    presence_pins: std::collections::BTreeMap<String, PresencePref>,
+    /// Pins whose upload to Grappa isn't confirmed yet.
+    presence_unsynced: std::collections::BTreeSet<String>,
+    /// When this device muted each conversation (unix seconds, Grappa's key
+    /// spelling): Grappa stores no "muted at", only the end of the mute.
+    /// Kept in `settings.json`.
+    mute_since: std::collections::BTreeMap<String, i64>,
+    /// The account's command aliases, read on the first slash command and
+    /// dropped whenever they change so the next one reads them again.
+    aliases: Option<HashMap<String, String>>,
+    /// Display copy of the account-wide auto-away delay; `None` until the
+    /// server announces it. Grappa applies the value itself.
+    auto_away_debounce: Option<AutoAwayDebounce>,
+    /// Display copy of the remembered QUIT/PART text: outer `None` until
+    /// announced, inner `None` for `null` (the server's own fallback).
+    quit_part_reason: Option<Option<String>>,
+    /// Display copy of the auto-away text, same shape as `quit_part_reason`
+    /// (inner `None`: the server keeps its built-in text).
+    auto_away_reason: Option<Option<String>>,
+    /// Display copy of the auto-away nick suffix (protocol v32), same
+    /// shape; inner `None` means the rename is off. Never combined with
+    /// the nick: the actual nick comes from the nick events alone.
+    away_nick_suffix: Option<Option<String>>,
+    /// The network the self-service Identity/Ignores/Perform/Notify
+    /// sections currently act on.
+    settings_network: Option<String>,
+    /// The profile fields as Grappa last reported them for
+    /// `settings_network`; a save sends only what differs from this.
+    profile_baseline: ProfileFields,
+    /// Upload limits from the latest `server_settings_changed`, shown read
+    /// only in Settings (Cordiale doesn't upload files yet).
+    upload_limits: Option<UploadLimits>,
+    /// Last push-notification map read from Grappa; edits overlay the
+    /// toggles Cordiale shows and send the whole map back.
+    notification_prefs: Option<serde_json::Map<String, Value>>,
+    /// Last announced web-client bundle `(hash, version)`, only to log a
+    /// change once; it names Cicchetto's build, not this app.
+    web_bundle: Option<(String, Option<String>)>,
+    /// Session-local only: the keyword watchlist has no documented `list`
+    /// reply shape (see `docs/protocol-notes.md` §4quater). It is cleared on
+    /// disconnect or relaunch; an automatic reconnect keeps it as it was,
+    /// possibly stale.
+    watch_patterns: Vec<String>,
+    /// Ref of the `watchlist` list request whose reply holds the account's
+    /// keyword patterns.
+    pending_watchlist_ref: Option<String>,
+    /// Current app theme, kept here too (not just in Slint's `theme`
+    /// property) so message-rendering helpers running on this thread can
+    /// pick a legible color without an extra hop to the UI thread.
+    theme: Theme,
+    /// Color themes offered in Settings > Themes: Grappa's gallery when the
+    /// server has one, the built-in copies otherwise.
+    theme_choices: Vec<ThemeChoice>,
+    /// The account's day and night themes on Grappa, when one is in use.
+    theme_pair: Option<(ThemeChoice, Option<ThemeChoice>)>,
+    /// Whether the OS is in dark mode, which picks the night theme.
+    system_dark: bool,
+    /// Whether the window is in the foreground, as last reported by the UI
+    /// thread. Kept across sign-outs so the next session starts right.
+    foreground: bool,
+}
+
 struct WorkerState {
     client: Option<GrappaClient>,
     token: Option<String>,
@@ -2677,16 +2743,8 @@ struct WorkerState {
     /// they held when the socket dropped (live rows arriving after the
     /// rejoin must not move the anchor). Drained one channel at a time.
     catch_up_anchors: std::collections::BTreeMap<(String, String), i64>,
-    /// Channels where Denoise was turned on or off, in Grappa's key
-    /// spelling (`muted_key`); the rest follow their size. Kept in
-    /// `settings.json`.
-    presence_pins: std::collections::BTreeMap<String, PresencePref>,
-    /// Pins whose upload to Grappa isn't confirmed yet.
-    presence_unsynced: std::collections::BTreeSet<String>,
-    /// When this device muted each conversation (unix seconds, Grappa's key
-    /// spelling): Grappa stores no "muted at", only the end of the mute.
-    /// Kept in `settings.json`.
-    mute_since: std::collections::BTreeMap<String, i64>,
+    /// Caches of account settings and local preferences.
+    prefs: SettingsState,
     /// Screens and pending requests fed by slash commands and server pushes.
     panels: PanelState,
     /// Cicchetto's `windowStateByChannel` projection for supported lifecycle
@@ -2736,9 +2794,6 @@ struct WorkerState {
     /// `(network, channel, label)` from the last bootstrap, kept around so
     /// `ToggleNetwork` can rebuild the sidebar model without re-fetching.
     channel_entries: Vec<(String, String, String)>,
-    /// The account's command aliases, read on the first slash command and
-    /// dropped whenever they change so the next one reads them again.
-    aliases: Option<HashMap<String, String>>,
     /// Channel topics owned by the latest authoritative `/boot` snapshot.
     /// This stays separate because `joined_topics` also includes query and
     /// own-nick listeners that may share the same channel-shaped topic.
@@ -2800,19 +2855,6 @@ struct WorkerState {
     /// the event is never replayed and a missed `connected` would otherwise
     /// leave the badge stuck.
     connecting_networks: std::collections::HashSet<String>,
-    /// Display copy of the account-wide auto-away delay; `None` until the
-    /// server announces it. Grappa applies the value itself.
-    auto_away_debounce: Option<AutoAwayDebounce>,
-    /// Display copy of the remembered QUIT/PART text: outer `None` until
-    /// announced, inner `None` for `null` (the server's own fallback).
-    quit_part_reason: Option<Option<String>>,
-    /// Display copy of the auto-away text, same shape as `quit_part_reason`
-    /// (inner `None`: the server keeps its built-in text).
-    auto_away_reason: Option<Option<String>>,
-    /// Display copy of the auto-away nick suffix (protocol v32), same
-    /// shape; inner `None` means the rename is off. Never combined with
-    /// the nick: the actual nick comes from the nick events alone.
-    away_nick_suffix: Option<Option<String>>,
     /// Current IRC nick for each network, seeded from `/boot.networks` and
     /// replaced by `own_nick_changed` on the matching network only.
     own_nicks: HashMap<String, String>,
@@ -2839,12 +2881,6 @@ struct WorkerState {
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
-    /// The network the self-service Identity/Ignores/Perform/Notify
-    /// sections currently act on.
-    settings_network: Option<String>,
-    /// The profile fields as Grappa last reported them for
-    /// `settings_network`; a save sends only what differs from this.
-    profile_baseline: ProfileFields,
     /// Presence watchlist nicks per network ID, replaced whole by every
     /// `notify_list` snapshot (sent after join and after each change).
     notify_lists: HashMap<i64, Vec<String>>,
@@ -2854,37 +2890,6 @@ struct WorkerState {
     /// Last standalone away message (301) per `(network, folded peer)`,
     /// shown above that peer's private window until dismissed.
     peer_away: HashMap<(String, String), String>,
-    /// Upload limits from the latest `server_settings_changed`, shown read
-    /// only in Settings (Cordiale doesn't upload files yet).
-    upload_limits: Option<UploadLimits>,
-    /// Last push-notification map read from Grappa; edits overlay the
-    /// toggles Cordiale shows and send the whole map back.
-    notification_prefs: Option<serde_json::Map<String, Value>>,
-    /// Last announced web-client bundle `(hash, version)`, only to log a
-    /// change once; it names Cicchetto's build, not this app.
-    web_bundle: Option<(String, Option<String>)>,
-    /// Session-local only: the keyword watchlist has no documented `list`
-    /// reply shape (see `docs/protocol-notes.md` §4quater). It is cleared on
-    /// disconnect or relaunch; an automatic reconnect keeps it as it was,
-    /// possibly stale.
-    watch_patterns: Vec<String>,
-    /// Ref of the `watchlist` list request whose reply holds the account's
-    /// keyword patterns.
-    pending_watchlist_ref: Option<String>,
-    /// Current app theme, kept here too (not just in Slint's `theme`
-    /// property) so message-rendering helpers running on this thread can
-    /// pick a legible color without an extra hop to the UI thread.
-    theme: Theme,
-    /// Color themes offered in Settings > Themes: Grappa's gallery when the
-    /// server has one, the built-in copies otherwise.
-    theme_choices: Vec<ThemeChoice>,
-    /// The account's day and night themes on Grappa, when one is in use.
-    theme_pair: Option<(ThemeChoice, Option<ThemeChoice>)>,
-    /// Whether the OS is in dark mode, which picks the night theme.
-    system_dark: bool,
-    /// Whether the window is in the foreground, as last reported by the UI
-    /// thread. Kept across sign-outs so the next session starts right.
-    foreground: bool,
     /// A sign-in waiting for its second factor (issue #118).
     pending_totp: Option<PendingTotp>,
     /// The token confirming a TOTP enrolment started in Settings.
@@ -2909,9 +2914,28 @@ impl WorkerState {
             session: None,
             joined_topics: std::collections::HashSet::new(),
             catch_up_anchors: std::collections::BTreeMap::new(),
-            presence_pins: settings.presence_pins,
-            presence_unsynced: settings.presence_unsynced,
-            mute_since: settings.mute_since,
+            prefs: SettingsState {
+                presence_pins: settings.presence_pins,
+                presence_unsynced: settings.presence_unsynced,
+                mute_since: settings.mute_since,
+                aliases: None,
+                auto_away_debounce: None,
+                quit_part_reason: None,
+                auto_away_reason: None,
+                away_nick_suffix: None,
+                settings_network: None,
+                profile_baseline: ProfileFields::default(),
+                upload_limits: None,
+                notification_prefs: None,
+                web_bundle: None,
+                watch_patterns: Vec::new(),
+                pending_watchlist_ref: None,
+                theme: settings.theme,
+                theme_choices: builtin_theme_choices(),
+                theme_pair: None,
+                system_dark: false,
+                foreground: false,
+            },
             panels: PanelState {
                 admin_events: Vec::new(),
                 admin_settings: None,
@@ -2941,7 +2965,6 @@ impl WorkerState {
             members: HashMap::new(),
             expanded_networks: HashMap::new(),
             channel_entries: Vec::new(),
-            aliases: None,
             channel_topics: std::collections::HashSet::new(),
             query_windows: Vec::new(),
             server_protocol_version: None,
@@ -2960,10 +2983,6 @@ impl WorkerState {
             network_ids: HashMap::new(),
             network_connection_states: HashMap::new(),
             connecting_networks: std::collections::HashSet::new(),
-            auto_away_debounce: None,
-            quit_part_reason: None,
-            auto_away_reason: None,
-            away_nick_suffix: None,
             own_nicks: HashMap::new(),
             away_states: HashMap::new(),
             session_identities: HashMap::new(),
@@ -2972,21 +2991,9 @@ impl WorkerState {
             supported_user_modes_by_network: HashMap::new(),
             umode_view_network: None,
             own_listener_ready: std::collections::HashSet::new(),
-            settings_network: None,
-            profile_baseline: ProfileFields::default(),
             notify_lists: HashMap::new(),
             presence_by_network: HashMap::new(),
             peer_away: HashMap::new(),
-            upload_limits: None,
-            notification_prefs: None,
-            web_bundle: None,
-            watch_patterns: Vec::new(),
-            pending_watchlist_ref: None,
-            theme: settings.theme,
-            theme_choices: builtin_theme_choices(),
-            theme_pair: None,
-            system_dark: false,
-            foreground: false,
             pending_totp: None,
             totp_enrollment: None,
             passwordless_recovery_token: None,
@@ -2997,7 +3004,11 @@ impl WorkerState {
     /// Whether `key`'s transcript hides join/part/quit/nick-change/mode
     /// lines: the channel's own choice, else its size.
     fn denoise_active(&self, key: &(String, String)) -> bool {
-        let pref = self.presence_pins.get(&muted_key(&key.0, &key.1)).copied();
+        let pref = self
+            .prefs
+            .presence_pins
+            .get(&muted_key(&key.0, &key.1))
+            .copied();
         presence_hidden(pref, self.members.get(key).map(Vec::len))
     }
 
@@ -3052,7 +3063,7 @@ async fn run_worker(
                             credential,
                         )
                         .await;
-                        if let Some(network) = state.settings_network.clone() {
+                        if let Some(network) = state.prefs.settings_network.clone() {
                             let ui_for_network = ui.clone();
                             let loaded_network = network.clone();
                             let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
@@ -3064,7 +3075,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::TotpVerify(code)) => {
                         handle_totp_verify(&mut state, &mut session_events, &ui, code).await;
-                        if let Some(network) = state.settings_network.clone() {
+                        if let Some(network) = state.prefs.settings_network.clone() {
                             let ui_for_network = ui.clone();
                             let loaded_network = network.clone();
                             let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
@@ -3083,7 +3094,7 @@ async fn run_worker(
                             input,
                         )
                         .await;
-                        if let Some(network) = state.settings_network.clone() {
+                        if let Some(network) = state.prefs.settings_network.clone() {
                             let ui_for_network = ui.clone();
                             let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
                                 ui.set_settings_network(network.into());
@@ -3105,7 +3116,7 @@ async fn run_worker(
                             code,
                         )
                         .await;
-                        if let Some(network) = state.settings_network.clone() {
+                        if let Some(network) = state.prefs.settings_network.clone() {
                             let ui_for_network = ui.clone();
                             let loaded_network = network.clone();
                             let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
@@ -3159,7 +3170,7 @@ async fn run_worker(
                     Some(WorkerCommand::PasskeySignIn(request)) => {
                         handle_passkey_sign_in(&mut state, &mut session_events, &ui, request)
                             .await;
-                        if let Some(network) = state.settings_network.clone() {
+                        if let Some(network) = state.prefs.settings_network.clone() {
                             let ui_for_network = ui.clone();
                             let loaded_network = network.clone();
                             let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
@@ -3415,14 +3426,14 @@ async fn run_worker(
                         select_night_theme(&mut state, &ui, &key).await;
                     }
                     Some(WorkerCommand::SystemScheme(dark)) => {
-                        let changed = state.system_dark != dark;
-                        state.system_dark = dark;
-                        if changed && state.theme_pair.as_ref().is_some_and(|pair| pair.1.is_some()) {
+                        let changed = state.prefs.system_dark != dark;
+                        state.prefs.system_dark = dark;
+                        if changed && state.prefs.theme_pair.as_ref().is_some_and(|pair| pair.1.is_some()) {
                             apply_theme_pair(&mut state, &ui);
                         }
                     }
                     Some(WorkerCommand::Foreground(foreground)) => {
-                        state.foreground = foreground;
+                        state.prefs.foreground = foreground;
                         if let Some(session) = &state.session {
                             session.set_foreground(foreground);
                         }
@@ -3841,7 +3852,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::SettingsNetworkSelected(network)) => {
                         load_identity_settings(&mut state, &ui, &network).await;
-                        state.settings_network = Some(network);
+                        state.prefs.settings_network = Some(network);
                         handle_settings_network_refresh(&state, &ui).await;
                         push_notify_nicks(&state, &ui);
                     }
@@ -3881,7 +3892,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::DccAutoAcceptToggle(enabled)) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.settings_network)
+                            (&state.client, &state.token, &state.prefs.settings_network)
                         {
                             if let Err(err) =
                                 client.set_dcc_auto_accept(token, network, enabled).await
@@ -3894,7 +3905,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::IgnoreAdd { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.settings_network)
+                            (&state.client, &state.token, &state.prefs.settings_network)
                         {
                             let result = client
                                 .add_ignore(token, network, &mask, text_pattern.as_deref())
@@ -3904,7 +3915,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::IgnoreRemove { mask, text_pattern }) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.settings_network)
+                            (&state.client, &state.token, &state.prefs.settings_network)
                         {
                             let result = client
                                 .remove_ignore(token, network, &mask, text_pattern.as_deref())
@@ -3914,7 +3925,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::PerformSave(text)) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.settings_network)
+                            (&state.client, &state.token, &state.prefs.settings_network)
                         {
                             let request = cordiale_core::profile::PerformUpdateRequest {
                                 perform_list: Some(text),
@@ -3925,11 +3936,11 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::AliasAdd { command, expansion }) => {
                         handle_alias_upsert(&state, &ui, Some((command, expansion))).await;
-                        state.aliases = None;
+                        state.prefs.aliases = None;
                     }
                     Some(WorkerCommand::AliasRemove(command)) => {
                         handle_alias_remove(&state, &ui, command).await;
-                        state.aliases = None;
+                        state.prefs.aliases = None;
                     }
                     Some(WorkerCommand::VhostToggle(address)) => {
                         handle_vhost_toggle(&state, &ui, address).await;
@@ -3939,7 +3950,7 @@ async fn run_worker(
                     // it arrives.
                     Some(WorkerCommand::NotifyAdd(nick)) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.settings_network)
+                            (&state.client, &state.token, &state.prefs.settings_network)
                         {
                             let network_id = state.network_ids.get(network).copied();
                             if client
@@ -3959,7 +3970,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::NotifyRemove(nick)) => {
                         if let (Some(client), Some(token), Some(network)) =
-                            (&state.client, &state.token, &state.settings_network)
+                            (&state.client, &state.token, &state.prefs.settings_network)
                         {
                             let network_id = state.network_ids.get(network).copied();
                             if client.remove_notify_nick(token, network, &nick).await.is_ok() {
@@ -3982,8 +3993,8 @@ async fn run_worker(
                                 serde_json::json!({"action": "add", "pattern": pattern}),
                             );
                         }
-                        if !state.watch_patterns.contains(&pattern) {
-                            state.watch_patterns.push(pattern);
+                        if !state.prefs.watch_patterns.contains(&pattern) {
+                            state.prefs.watch_patterns.push(pattern);
                         }
                         push_watch_patterns(&state, &ui);
                     }
@@ -3997,7 +4008,7 @@ async fn run_worker(
                                 serde_json::json!({"action": "del", "pattern": pattern}),
                             );
                         }
-                        state.watch_patterns.retain(|existing| existing != &pattern);
+                        state.prefs.watch_patterns.retain(|existing| existing != &pattern);
                         push_watch_patterns(&state, &ui);
                     }
                     Some(WorkerCommand::Disconnect) => {
@@ -4043,12 +4054,12 @@ async fn run_worker(
                         session_events = None;
                         // The OS scheme and the window's state outlive the
                         // account.
-                        let system_dark = state.system_dark;
-                        let foreground = state.foreground;
+                        let system_dark = state.prefs.system_dark;
+                        let foreground = state.prefs.foreground;
                         state = WorkerState::new();
                         state.chat_rebuild_tx = Some(worker_self.clone());
-                        state.system_dark = system_dark;
-                        state.foreground = foreground;
+                        state.prefs.system_dark = system_dark;
+                        state.prefs.foreground = foreground;
                         push_home(&state, &ui);
                         // Like Cicchetto, signing out stops the radio.
                         radio.stop();
@@ -4516,10 +4527,10 @@ async fn finish_connect(
             state.panels.recover_panel = None;
             state.panels.reply_view = None;
             state.panels.whois_card = None;
-            state.auto_away_debounce = None;
-            state.quit_part_reason = None;
-            state.auto_away_reason = None;
-            state.away_nick_suffix = None;
+            state.prefs.auto_away_debounce = None;
+            state.prefs.quit_part_reason = None;
+            state.prefs.auto_away_reason = None;
+            state.prefs.away_nick_suffix = None;
             state.panels.lusers_requested.clear();
             close_directory(state, ui);
             state.panels.dcc_offers.clear();
@@ -4528,8 +4539,8 @@ async fn finish_connect(
             state.presence_by_network.clear();
             state.peer_away.clear();
             state.panels.mentions_bundles.clear();
-            state.upload_limits = None;
-            state.web_bundle = None;
+            state.prefs.upload_limits = None;
+            state.prefs.web_bundle = None;
             state.own_nicks = network_nicks_from_boot(&outcome);
             state.away_states.clear();
             state.session_identities.clear();
@@ -4538,7 +4549,7 @@ async fn finish_connect(
             state.supported_user_modes_by_network.clear();
             state.own_listener_ready.clear();
             state.catch_up_anchors.clear();
-            state.notification_prefs = None;
+            state.prefs.notification_prefs = None;
             state.current_query = false;
             state.current_query_ready = false;
             state.current_channel = None;
@@ -4563,7 +4574,7 @@ async fn finish_connect(
 
             let ws_url = to_ws_url(&server_url);
             let (handle, events) = spawn_session(ws_url, token.clone(), session_identifier.clone());
-            handle.set_foreground(state.foreground);
+            handle.set_foreground(state.prefs.foreground);
             for network in state.network_ids.keys() {
                 handle.join_topic(
                     channel_topic(&session_identifier, network, SERVER_WINDOW_NAME),
@@ -4634,7 +4645,7 @@ async fn finish_connect(
             let ui = ui.clone();
             let mut distinct_networks: Vec<String> = state.network_ids.keys().cloned().collect();
             distinct_networks.sort();
-            state.settings_network = distinct_networks.first().cloned();
+            state.prefs.settings_network = distinct_networks.first().cloned();
             let network_count = distinct_networks.len();
             let channel_count = entries.len();
             let groups_data = network_groups_data(
@@ -5802,6 +5813,7 @@ async fn handle_attach_file(
         }
     };
     let over_cap = state
+        .prefs
         .upload_limits
         .as_ref()
         .is_some_and(|limits| bytes.len() as u64 > upload_cap(limits, category));
@@ -5960,15 +5972,15 @@ struct StatusmsgTarget {
 
 /// The account's aliases, fetched once and cached until they change.
 async fn user_aliases(state: &mut WorkerState) -> HashMap<String, String> {
-    if state.aliases.is_none() {
+    if state.prefs.aliases.is_none() {
         if let (Some(client), Some(token)) = (state.client.clone(), state.token.clone()) {
             match client.fetch_aliases(&token).await {
-                Ok(aliases) => state.aliases = Some(aliases),
+                Ok(aliases) => state.prefs.aliases = Some(aliases),
                 Err(err) => persistence::log_line(&format!("aliases fetch failed: {err:?}")),
             }
         }
     }
-    state.aliases.clone().unwrap_or_default()
+    state.prefs.aliases.clone().unwrap_or_default()
 }
 
 /// A `/kb` waiting for the target's host.
@@ -6005,7 +6017,7 @@ fn handle_toggle_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     }
 
     let new_theme = settings.theme;
-    state.theme = new_theme;
+    state.prefs.theme = new_theme;
 
     // Re-render the currently open channel's history too: an mIRC-colored
     // message that was legible a moment ago (see `ensure_legible`) can
@@ -6106,7 +6118,7 @@ async fn handle_load_notification_prefs(state: &mut WorkerState, ui: &slint::Wea
         Ok(prefs) => {
             push_notification_toggles(ui, NotificationToggles::from_prefs(&prefs));
             push_notification_lists(ui, &prefs);
-            state.notification_prefs = Some(prefs);
+            state.prefs.notification_prefs = Some(prefs);
             sync_mute_bar(state, ui);
         }
         Err(err) => persistence::log_line(&format!("notification prefs load failed: {err:?}")),
@@ -6124,14 +6136,14 @@ async fn handle_save_notification_prefs(
     let (Some(client), Some(token), Some(stored)) = (
         state.client.clone(),
         state.token.clone(),
-        state.notification_prefs.clone(),
+        state.prefs.notification_prefs.clone(),
     ) else {
         return;
     };
     let mut prefs = stored.clone();
     toggles.apply_to(&mut prefs);
     match client.set_notification_prefs(&token, &prefs).await {
-        Ok(()) => state.notification_prefs = Some(prefs),
+        Ok(()) => state.prefs.notification_prefs = Some(prefs),
         Err(err) => {
             persistence::log_line(&format!("notification prefs save failed: {err:?}"));
             let kind = if err.status().map(|status| status.as_u16()) == Some(422) {
@@ -6508,8 +6520,8 @@ enum NotificationEdit {
 /// `settings.json`.
 fn save_presence_settings(state: &WorkerState) {
     let mut settings = persistence::load_settings().unwrap_or_default();
-    settings.presence_pins = state.presence_pins.clone();
-    settings.presence_unsynced = state.presence_unsynced.clone();
+    settings.presence_pins = state.prefs.presence_pins.clone();
+    settings.presence_unsynced = state.prefs.presence_unsynced.clone();
     let _ = persistence::save_settings(&settings);
 }
 
@@ -6527,9 +6539,13 @@ async fn sync_presence_pins(state: &mut WorkerState) {
             return;
         }
     };
-    let reconciled = reconcile(&state.presence_pins, &state.presence_unsynced, &server);
-    state.presence_pins = reconciled.pins;
-    state.presence_unsynced.clear();
+    let reconciled = reconcile(
+        &state.prefs.presence_pins,
+        &state.prefs.presence_unsynced,
+        &server,
+    );
+    state.prefs.presence_pins = reconciled.pins;
+    state.prefs.presence_unsynced.clear();
     let upload = if reconciled.push.is_empty() {
         None
     } else {
@@ -6537,7 +6553,10 @@ async fn sync_presence_pins(state: &mut WorkerState) {
     };
     if let Some(Err(error)) = upload {
         persistence::log_line(&format!("denoise choices upload failed: {error:?}"));
-        state.presence_unsynced.extend(reconciled.push.into_keys());
+        state
+            .prefs
+            .presence_unsynced
+            .extend(reconciled.push.into_keys());
     }
     save_presence_settings(state);
 }
@@ -6553,7 +6572,7 @@ fn push_chat_lines_update(
     let members = state.members.get(key).cloned().unwrap_or_default();
     let casemapping = network_casemapping(state, &key.0);
     let denoise = state.denoise_active(key);
-    let dark_theme = state.theme == Theme::Dark;
+    let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -6576,8 +6595,8 @@ async fn handle_toggle_denoise(state: &mut WorkerState, ui: &slint::Weak<AppWind
     }
     let pin_key = muted_key(&key.0, &key.1);
     let pref = toggled_pref(state.denoise_active(&key));
-    state.presence_pins.insert(pin_key.clone(), pref);
-    state.presence_unsynced.insert(pin_key.clone());
+    state.prefs.presence_pins.insert(pin_key.clone(), pref);
+    state.prefs.presence_unsynced.insert(pin_key.clone());
     save_presence_settings(state);
     push_chat_lines_update(state, ui, &key);
 
@@ -6592,7 +6611,7 @@ async fn handle_toggle_denoise(state: &mut WorkerState, ui: &slint::Weak<AppWind
         ));
         return;
     }
-    state.presence_unsynced.remove(&pin_key);
+    state.prefs.presence_unsynced.remove(&pin_key);
     save_presence_settings(state);
     if pref == PresencePref::Show {
         reload_history_tail(state, ui, &key).await;
@@ -6826,7 +6845,7 @@ fn forget_lifted_mutes(
 /// Writes the "muted at" records to `settings.json`.
 fn save_mute_settings(state: &WorkerState) {
     let mut settings = persistence::load_settings().unwrap_or_default();
-    settings.mute_since = state.mute_since.clone();
+    settings.mute_since = state.prefs.mute_since.clone();
     let _ = persistence::save_settings(&settings);
 }
 
@@ -6836,17 +6855,22 @@ fn push_mute_bar(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let mute = state
         .current_channel
         .as_ref()
-        .zip(state.notification_prefs.as_ref())
+        .zip(state.prefs.notification_prefs.as_ref())
         .and_then(|((network, target), prefs)| {
-            current_mute(prefs, &muted_key(network, target), &state.mute_since, now)
+            current_mute(
+                prefs,
+                &muted_key(network, target),
+                &state.prefs.mute_since,
+                now,
+            )
         });
     let _ = ui.upgrade_in_event_loop(move |ui| apply_mute_bar(&ui, mute.as_ref(), now));
 }
 
 /// Drops the "muted at" records of lifted mutes, then refreshes the bar.
 fn sync_mute_bar(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    if let Some(prefs) = &state.notification_prefs {
-        if forget_lifted_mutes(&mut state.mute_since, prefs) {
+    if let Some(prefs) = &state.prefs.notification_prefs {
+        if forget_lifted_mutes(&mut state.prefs.mute_since, prefs) {
             save_mute_settings(state);
         }
     }
@@ -6891,13 +6915,13 @@ async fn handle_notification_edit(
     ui: &slint::Weak<AppWindow>,
     edit: NotificationEdit,
 ) {
-    if state.notification_prefs.is_none() {
+    if state.prefs.notification_prefs.is_none() {
         handle_load_notification_prefs(state, ui).await;
     }
     let (Some(client), Some(token), Some(stored)) = (
         state.client.clone(),
         state.token.clone(),
-        state.notification_prefs.clone(),
+        state.prefs.notification_prefs.clone(),
     ) else {
         return;
     };
@@ -6908,9 +6932,10 @@ async fn handle_notification_edit(
     match client.set_notification_prefs(&token, &prefs).await {
         Ok(()) => {
             push_notification_lists(ui, &prefs);
-            state.notification_prefs = Some(prefs);
+            state.prefs.notification_prefs = Some(prefs);
             if let NotificationEdit::Mute(key, _) = &edit {
                 state
+                    .prefs
                     .mute_since
                     .insert(key.clone(), chrono::Utc::now().timestamp());
                 save_mute_settings(state);
@@ -7166,14 +7191,14 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
         return;
     };
 
-    let ignores: Vec<IgnoreEntry> = match &state.settings_network {
+    let ignores: Vec<IgnoreEntry> = match &state.prefs.settings_network {
         Some(network) => client
             .fetch_ignores(token, network)
             .await
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    let perform_text = match &state.settings_network {
+    let perform_text = match &state.prefs.settings_network {
         Some(network) => client
             .fetch_perform(token, network)
             .await
@@ -7184,7 +7209,7 @@ async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<A
     };
     let aliases = client.fetch_aliases(token).await.unwrap_or_default();
     let vhost = client.fetch_vhost_settings(token).await.ok();
-    let dcc_auto_accept = match &state.settings_network {
+    let dcc_auto_accept = match &state.prefs.settings_network {
         Some(network) => client
             .fetch_dcc_auto_accept(token, network)
             .await
@@ -7410,7 +7435,7 @@ fn non_empty(value: String) -> Option<String> {
 
 async fn handle_identity_save(state: &WorkerState, nick: String, ident: String, realname: String) {
     let (Some(client), Some(token), Some(network)) =
-        (&state.client, &state.token, &state.settings_network)
+        (&state.client, &state.token, &state.prefs.settings_network)
     else {
         return;
     };
@@ -7479,6 +7504,7 @@ async fn handle_vhost_toggle(state: &WorkerState, ui: &slint::Weak<AppWindow>, a
 /// nick with its last known presence.
 fn push_notify_nicks(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let network_id = state
+        .prefs
         .settings_network
         .as_ref()
         .and_then(|network| state.network_ids.get(network))
@@ -7543,7 +7569,7 @@ fn presence_key(nick: &str) -> String {
 }
 
 /// Pushes the session-local keyword-watchlist patterns to the UI — see
-/// `WorkerState::watch_patterns` for why they are session-local.
+/// `SettingsState::watch_patterns` for why they are session-local.
 /// Asks Grappa for the account's keyword patterns (`watchlist` with
 /// `action: "list"`), so the list reflects what other clients changed too;
 /// the reply is matched by its ref.
@@ -7556,7 +7582,7 @@ fn request_watch_patterns(state: &mut WorkerState) {
         "watchlist",
         serde_json::json!({ "action": "list" }),
     );
-    state.pending_watchlist_ref = Some(message_ref);
+    state.prefs.pending_watchlist_ref = Some(message_ref);
 }
 
 /// The `GET /networks` row of `network`.
@@ -7595,7 +7621,7 @@ async fn load_identity_settings(
     if let Some(row) = network_row(&networks, network) {
         let fields = ProfileFields::from_credential(row);
         show_profile(ui, &fields, has_avatar(row));
-        state.profile_baseline = fields;
+        state.prefs.profile_baseline = fields;
     }
 }
 
@@ -7631,7 +7657,7 @@ async fn handle_profile_save(
     edited: ProfileFields,
 ) {
     let (Some(client), Some(token), Some(network)) =
-        (&state.client, &state.token, &state.settings_network)
+        (&state.client, &state.token, &state.prefs.settings_network)
     else {
         return;
     };
@@ -7642,7 +7668,7 @@ async fn handle_profile_save(
         set_status("profile-invalid");
         return;
     }
-    let request = state.profile_baseline.changes_to(&edited);
+    let request = state.prefs.profile_baseline.changes_to(&edited);
     if request.is_empty() {
         set_status("profile-saved");
         return;
@@ -7654,7 +7680,7 @@ async fn handle_profile_save(
         Ok(credential) => {
             let saved = ProfileFields::from_credential(&credential);
             show_profile(ui, &saved, has_avatar(&credential));
-            state.profile_baseline = saved;
+            state.prefs.profile_baseline = saved;
             set_status("profile-saved");
         }
         Err(err) => {
@@ -7685,7 +7711,7 @@ async fn handle_avatar_upload(
         });
     };
     let (Some(client), Some(token), Some(network)) =
-        (&state.client, &state.token, &state.settings_network)
+        (&state.client, &state.token, &state.prefs.settings_network)
     else {
         return;
     };
@@ -7702,6 +7728,7 @@ async fn handle_avatar_upload(
         }
     };
     let over_cap = state
+        .prefs
         .upload_limits
         .as_ref()
         .is_some_and(|limits| bytes.len() as u64 > upload_cap(limits, UploadCategory::Image));
@@ -7732,7 +7759,7 @@ async fn handle_avatar_upload(
 /// Removes the Settings network's own avatar.
 async fn handle_avatar_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let (Some(client), Some(token), Some(network)) =
-        (&state.client, &state.token, &state.settings_network)
+        (&state.client, &state.token, &state.prefs.settings_network)
     else {
         return;
     };
@@ -7754,6 +7781,7 @@ async fn handle_avatar_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>) 
 
 fn push_watch_patterns(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let patterns: Vec<slint::SharedString> = state
+        .prefs
         .watch_patterns
         .iter()
         .cloned()
@@ -8238,7 +8266,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
         .identifier
         .as_deref()
         .is_some_and(|identifier| is_own_nick_an_op(&members, identifier, &ranking));
-    let dark_theme = state.theme == Theme::Dark;
+    let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let lines = state.messages.get(key).cloned().unwrap_or_default();
     let casemapping = network_casemapping(state, &key.0);
@@ -8558,7 +8586,7 @@ fn handle_rebuild_chat(
         return;
     }
     let lines = state.messages.get(key).cloned().unwrap_or_default();
-    let dark_theme = state.theme == Theme::Dark;
+    let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let roster = (!state.current_query).then(|| {
         (
@@ -9285,7 +9313,7 @@ fn refresh_mention_context(state: &WorkerState) {
     if let Ok(mut context) = MENTION_CONTEXT.write() {
         *context = Some(MentionContext {
             own_nick,
-            patterns: state.watch_patterns.clone(),
+            patterns: state.prefs.watch_patterns.clone(),
         });
     }
 }
@@ -10172,7 +10200,7 @@ fn push_palette(ui: &AppWindow, choice: Option<&ThemeChoice>) {
 /// Mirrors the available color themes into Settings > Themes, marking
 /// `selected` (a choice key) as in use.
 fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected: Option<&str>) {
-    let (day, night) = match &state.theme_pair {
+    let (day, night) = match &state.prefs.theme_pair {
         Some((day, night)) => (
             Some(day.key.as_str()),
             night.as_ref().map(|night| night.key.as_str()),
@@ -10180,6 +10208,7 @@ fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected
         None => (selected, None),
     };
     let rows: Vec<(ThemeChoice, bool, bool)> = state
+        .prefs
         .theme_choices
         .iter()
         .map(|choice| {
@@ -10191,10 +10220,11 @@ fn push_theme_choices(state: &WorkerState, ui: &slint::Weak<AppWindow>, selected
         })
         .collect();
     let editable = state
+        .prefs
         .theme_choices
         .iter()
         .any(|choice| choice.key.starts_with("server:"));
-    let pair_active = state.theme_pair.is_some();
+    let pair_active = state.prefs.theme_pair.is_some();
     let has_night = night.is_some();
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -10258,18 +10288,18 @@ async fn load_color_themes(state: &mut WorkerState, ui: &slint::Weak<AppWindow>)
             }
         }
     }
-    state.theme_choices = if server_choices.is_empty() {
+    state.prefs.theme_choices = if server_choices.is_empty() {
         builtin_theme_choices()
     } else {
         server_choices
     };
 
     let saved = persistence::load_settings().unwrap_or_default().color_theme;
-    state.theme_pair = None;
+    state.prefs.theme_pair = None;
     let active = match saved.as_deref() {
         Some("server") => match client.fetch_active_theme(&token).await {
             Ok(pair) => {
-                state.theme_pair = theme_pair_choices(&pair);
+                state.prefs.theme_pair = theme_pair_choices(&pair);
                 return apply_theme_pair(state, ui);
             }
             Err(err) => {
@@ -10316,12 +10346,14 @@ async fn open_theme_editor(state: &WorkerState, ui: &slint::Weak<AppWindow>, key
     };
     let source = if key.is_empty() {
         state
+            .prefs
             .theme_pair
             .as_ref()
             .map(|pair| pair.0.clone())
-            .or_else(|| state.theme_choices.first().cloned())
+            .or_else(|| state.prefs.theme_choices.first().cloned())
     } else {
         state
+            .prefs
             .theme_choices
             .iter()
             .find(|choice| choice.key == key && choice.mine)
@@ -10485,6 +10517,7 @@ async fn save_theme(
         Err(err) => return report_theme_action(ui, Some(err)),
     };
     let night = state
+        .prefs
         .theme_pair
         .as_ref()
         .and_then(|pair| pair.1.as_ref())
@@ -10592,9 +10625,10 @@ fn pair_theme_for(pair: &(ThemeChoice, Option<ThemeChoice>), system_dark: bool) 
 
 fn apply_theme_pair(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let choice = state
+        .prefs
         .theme_pair
         .as_ref()
-        .map(|pair| pair_theme_for(pair, state.system_dark).clone());
+        .map(|pair| pair_theme_for(pair, state.prefs.system_dark).clone());
     apply_color_theme(state, ui, choice);
 }
 
@@ -10628,6 +10662,7 @@ async fn select_night_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         return;
     };
     let Some(light) = state
+        .prefs
         .theme_pair
         .as_ref()
         .and_then(|pair| pair.0.key.strip_prefix("server:"))
@@ -10648,7 +10683,7 @@ async fn select_night_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
     };
     match client.set_active_theme(&token, light, dark).await {
         Ok(pair) => {
-            state.theme_pair = theme_pair_choices(&pair);
+            state.prefs.theme_pair = theme_pair_choices(&pair);
             apply_theme_pair(state, ui);
         }
         Err(err) => {
@@ -10674,6 +10709,7 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
             return;
         };
         let night = state
+            .prefs
             .theme_pair
             .as_ref()
             .and_then(|pair| pair.1.as_ref())
@@ -10684,7 +10720,7 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
             Ok(pair) => {
                 settings.color_theme = Some("server".to_string());
                 let _ = persistence::save_settings(&settings);
-                state.theme_pair = theme_pair_choices(&pair);
+                state.prefs.theme_pair = theme_pair_choices(&pair);
                 return apply_theme_pair(state, ui);
             }
             Err(err) => {
@@ -10698,6 +10734,7 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         }
     } else {
         let choice = state
+            .prefs
             .theme_choices
             .iter()
             .chain(builtin_theme_choices().iter())
@@ -10709,7 +10746,7 @@ async fn select_color_theme(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         choice
     };
     let _ = persistence::save_settings(&settings);
-    state.theme_pair = None;
+    state.prefs.theme_pair = None;
     apply_color_theme(state, ui, choice);
 }
 
@@ -10727,7 +10764,7 @@ fn apply_color_theme(
         ui,
         choice.as_ref().and_then(|choice| choice.background.clone()),
     );
-    state.theme = match &choice {
+    state.prefs.theme = match &choice {
         Some(choice) if choice.palette.is_dark() => Theme::Dark,
         Some(_) => Theme::Light,
         None => persistence::load_settings().unwrap_or_default().theme,
@@ -10750,7 +10787,7 @@ fn apply_color_theme(
                 MemberRanking::new(state.isupport_by_network.get(&key.0)),
             )
         });
-    let dark_theme = state.theme == Theme::Dark;
+    let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {

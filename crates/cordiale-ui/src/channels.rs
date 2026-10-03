@@ -55,7 +55,7 @@ pub(crate) async fn handle_select_channel(
             == Some(&ChannelWindowState::Joined);
     let ranking = MemberRanking::new(state.isupport_by_network.get(&network));
     let can_moderate = is_own_nick_an_op(&members, &identifier, &ranking);
-    let dark_theme = state.theme == Theme::Dark;
+    let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let casemapping = network_casemapping(state, &network);
     let history_start = state.history_start_reached.contains(&key);

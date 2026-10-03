@@ -52,7 +52,7 @@ pub(crate) fn show_query_window(
 ) {
     let lines = state.messages.get(key).cloned().unwrap_or_default();
     let draft = state.drafts.get(key).cloned().unwrap_or_default();
-    let dark_theme = state.theme == Theme::Dark;
+    let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let query_ready = state.current_query_ready;
     let history_start = state.history_start_reached.contains(key);
