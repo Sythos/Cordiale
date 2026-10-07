@@ -424,13 +424,20 @@ fn fetch_error(err: reqwest::Error) -> FetchError {
 /// and the name it points at is resolved first: the download can't be led to
 /// another scheme, down from https to http, or from a public host into the
 /// local network, by address or by name. Each connection only uses the
-/// addresses that were checked.
+/// addresses that were checked, and no proxy is used (it would resolve the
+/// name itself). One time limit covers the lookups, every redirect and the
+/// body.
 pub async fn fetch_public(
     href: &str,
     max_bytes: usize,
     cut_when_larger: bool,
 ) -> Result<(Vec<u8>, Option<String>, bool), FetchError> {
-    fetch_public_with(href, max_bytes, cut_when_larger, lookup).await
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        fetch_public_with(href, max_bytes, cut_when_larger, lookup),
+    )
+    .await
+    .unwrap_or_else(|_| Err(FetchError::Failed("the download timed out".to_string())))
 }
 
 async fn lookup(host: String, port: u16) -> std::io::Result<Vec<SocketAddr>> {
@@ -461,7 +468,7 @@ where
     let mut response = loop {
         let mut builder = reqwest::Client::builder()
             .user_agent(crate::EXTERNAL_USER_AGENT)
-            .timeout(std::time::Duration::from_secs(60))
+            .no_proxy()
             .redirect(reqwest::redirect::Policy::none());
         let mut is_local = is_local_host(&url);
         if has_resolvable_host(&url) {
@@ -1006,7 +1013,9 @@ mod tests {
         )
         .await;
         let requests = server.received_requests().await.expect("requests");
-        let reached_target = requests.iter().any(|request| request.url.path() == "/b.png");
+        let reached_target = requests
+            .iter()
+            .any(|request| request.url.path() == "/b.png");
         match result {
             Ok(_) => {
                 assert!(reached_target);
