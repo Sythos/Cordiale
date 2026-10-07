@@ -329,8 +329,16 @@ msgid "Kick"
 msgstr "Kick"
 
 msgctxt "MemberContextMenu"
-msgid "Ban"
-msgstr "Ban"
+msgid "Kickban"
+msgstr "Kickban"
+
+msgctxt "MemberContextMenu"
+msgid "Ban nick"
+msgstr "Ban nick"
+
+msgctxt "MemberContextMenu"
+msgid "Ban host"
+msgstr "Ban host"
 
 msgctxt "MemberContextMenu"
 msgid "WHOIS"
@@ -1153,8 +1161,8 @@ msgid "Reset zoom"
 msgstr "Zoom zurücksetzen"
 
 msgctxt "AppWindow"
-msgid "{}'s host isn't known yet, so they were only kicked; /whois them first to ban too."
-msgstr "Der Host von {} ist noch nicht bekannt, daher wurde nur gekickt; zuerst /whois ausführen, um auch zu bannen."
+msgid "{}'s host isn't known yet, so nothing was sent; /whois them first."
+msgstr "Der Host von {} ist noch nicht bekannt, daher wurde nichts gesendet; zuerst /whois ausführen."
 
 msgctxt "AppWindow"
 msgid "Done."

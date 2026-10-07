@@ -520,6 +520,16 @@ pub(crate) fn register_member_callbacks(
         let _ = tx_for_ban.send(WorkerCommand::MemberBan(nick.to_string()));
     });
 
+    let tx_for_ban_host = worker_tx.clone();
+    ui.on_member_ban_host_requested(move |nick| {
+        let _ = tx_for_ban_host.send(WorkerCommand::MemberBanHost(nick.to_string()));
+    });
+
+    let tx_for_kickban = worker_tx.clone();
+    ui.on_member_kickban_requested(move |nick| {
+        let _ = tx_for_kickban.send(WorkerCommand::MemberKickBan(nick.to_string()));
+    });
+
     let tx_for_whois = worker_tx.clone();
     ui.on_member_whois_requested(move |nick| {
         let _ = tx_for_whois.send(WorkerCommand::MemberWhois(nick.to_string()));

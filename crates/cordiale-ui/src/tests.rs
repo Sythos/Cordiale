@@ -4676,6 +4676,23 @@ fn kickban_mask_needs_a_resolved_host() {
 }
 
 #[test]
+fn explicit_ban_masks_have_fixed_shapes() {
+    assert_eq!(ban_nick_mask("ada"), "ada!*@*");
+    assert_eq!(
+        ban_host_mask("spam.example"),
+        Some("*!*@spam.example".to_string())
+    );
+    assert_eq!(ban_host_mask(""), None);
+    assert_eq!(
+        kickban_mask(&serde_json::json!({
+            "status": "ok",
+            "response": {"user": "~u", "host": ""}
+        })),
+        None
+    );
+}
+
+#[test]
 fn mentions_follow_cicchettos_word_rule() {
     let context = MentionContext {
         own_nick: Some("Sythos".to_string()),

@@ -448,6 +448,8 @@ component MemberContextMenu {
     callback mode-action(string, string); // verb, nick
     callback kick(string);
     callback ban(string);
+    callback ban-host(string);
+    callback kickban(string);
     callback whois(string);
     callback ctcp(string, string); // nick, verb
     callback query(string);
@@ -486,9 +488,19 @@ component MemberContextMenu {
                 activated => { kick(target-nick); }
             }
             MenuItem {
-                title: "⛔  " + @tr("Ban");
+                title: "🚫  " + @tr("Kickban");
+                enabled: can-moderate;
+                activated => { kickban(target-nick); }
+            }
+            MenuItem {
+                title: "⛔  " + @tr("Ban nick");
                 enabled: can-moderate;
                 activated => { ban(target-nick); }
+            }
+            MenuItem {
+                title: "⛔  " + @tr("Ban host");
+                enabled: can-moderate;
+                activated => { ban-host(target-nick); }
             }
             MenuItem {
                 title: "🔍  " + @tr("WHOIS");
@@ -1438,6 +1450,8 @@ export component AppWindow inherits Window {
     callback member-mode-action-requested(string, string); // verb, nick
     callback member-kick-requested(string);
     callback member-ban-requested(string);
+    callback member-ban-host-requested(string);
+    callback member-kickban-requested(string);
     callback member-whois-requested(string);
     callback member-ctcp-requested(string, string); // nick, verb
     callback member-query-requested(string);
@@ -2239,7 +2253,7 @@ export component AppWindow inherits Window {
         } else if status-kind == "alias-too-deep" {
             return @tr("That alias expands into too many others: {}", status-command-hint);
         } else if status-kind == "kickban-host-unknown" {
-            return @tr("{}'s host isn't known yet, so they were only kicked; /whois them first to ban too.", status-command-hint);
+            return @tr("{}'s host isn't known yet, so nothing was sent; /whois them first.", status-command-hint);
         } else if status-kind == "command-topic" {
             return @tr("Topic of {}", status-command-hint);
         } else if status-kind == "command-no-topic" {
@@ -3833,6 +3847,8 @@ export component AppWindow inherits Window {
                             mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
                             kick(nick) => { member-kick-requested(nick); }
                             ban(nick) => { member-ban-requested(nick); }
+                            ban-host(nick) => { member-ban-host-requested(nick); }
+                            kickban(nick) => { member-kickban-requested(nick); }
                             whois(nick) => { member-whois-requested(nick); }
                             ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                             query(nick) => { member-query-requested(nick); }
@@ -4044,6 +4060,8 @@ export component AppWindow inherits Window {
                     mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
                     kick(nick) => { member-kick-requested(nick); }
                     ban(nick) => { member-ban-requested(nick); }
+                    ban-host(nick) => { member-ban-host-requested(nick); }
+                    kickban(nick) => { member-kickban-requested(nick); }
                     whois(nick) => { member-whois-requested(nick); }
                     ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                     query(nick) => { member-query-requested(nick); }

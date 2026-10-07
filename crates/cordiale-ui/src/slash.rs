@@ -267,7 +267,7 @@ pub(crate) async fn run_slash_command(
             Ok(())
         }
         SlashCommand::KickBan { nick, reason } if in_channel => {
-            start_kickban(state, &network, channel.clone(), nick, reason);
+            start_kickban(state, &network, channel.clone(), nick, Some(reason));
             Ok(())
         }
         SlashCommand::NickModes { .. }
@@ -519,13 +519,14 @@ pub(crate) fn joined_channels(state: &WorkerState, network: &str) -> Vec<String>
 }
 
 /// Asks Grappa for the target's `user@host` (from its userhost cache); the
-/// ban and kick follow in `finish_kickban` when the reply arrives.
-fn start_kickban(
+/// ban (and the kick, with `Some(reason)`) follow in `finish_kickban` when
+/// the reply arrives.
+pub(crate) fn start_kickban(
     state: &mut WorkerState,
     network: &str,
     channel: String,
     nick: String,
-    reason: String,
+    kick_reason: Option<String>,
 ) {
     let (Some(session), Some(identifier), Some(&network_id)) = (
         &state.conn.session,
@@ -545,7 +546,7 @@ fn start_kickban(
             network: network.to_string(),
             channel,
             nick,
-            reason,
+            kick_reason,
         },
     );
 }

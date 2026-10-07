@@ -444,6 +444,8 @@ enum WorkerCommand {
     },
     MemberKick(String),
     MemberBan(String),
+    MemberBanHost(String),
+    MemberKickBan(String),
     MemberWhois(String),
     MemberCtcp {
         nick: String,
@@ -2368,6 +2370,12 @@ async fn run_worker(
                     Some(WorkerCommand::MemberBan(nick)) => {
                         send_member_ban(&state, &nick);
                     }
+                    Some(WorkerCommand::MemberBanHost(nick)) => {
+                        start_member_host_ban(&mut state, nick, None);
+                    }
+                    Some(WorkerCommand::MemberKickBan(nick)) => {
+                        start_member_host_ban(&mut state, nick, Some(String::new()));
+                    }
                     Some(WorkerCommand::MemberWhois(nick)) => {
                         send_member_whois(&state, &nick);
                     }
@@ -4248,13 +4256,14 @@ async fn user_aliases(state: &mut WorkerState) -> HashMap<String, String> {
     state.prefs.aliases.clone().unwrap_or_default()
 }
 
-/// A `/kb` waiting for the target's host.
+/// A `/kb`, Kickban or Ban host waiting for the target's host; the kick
+/// follows the ban only when `kick_reason` is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingKickBan {
     network: String,
     channel: String,
     nick: String,
-    reason: String,
+    kick_reason: Option<String>,
 }
 
 /// Shows a slash-command outcome in the status bar; `hint` fills its `{}`.
@@ -6179,15 +6188,30 @@ fn send_member_kick(state: &WorkerState, nick: &str) {
     );
 }
 
-/// `{nick}!*@*` matches Cicchetto's own fallback mask (it prefers a
-/// WHOIS-derived host mask when available, a gap it documents itself —
-/// Cordiale doesn't have a WHOIS-derived mask to prefer either, so this
-/// only ever sends the fallback shape).
+/// "Ban host" (`kick_reason: None`) and Kickban (`Some(reason)`) on the
+/// open channel; the host is resolved first, like `/kb`. Never in a DM or
+/// server window, and Kickban only for a nick the member list shows.
+fn start_member_host_ban(state: &mut WorkerState, nick: String, kick_reason: Option<String>) {
+    let Some((_, _, _, channel)) = user_topic_channel_network(state) else {
+        return;
+    };
+    let channel = channel.to_string();
+    let Some((network, _)) = state.windows.current_channel.clone() else {
+        return;
+    };
+    if kick_reason.is_some() && !frames::is_channel_member(state, &network, &channel, &nick) {
+        return;
+    }
+    slash::start_kickban(state, &network, channel, nick, kick_reason);
+}
+
+/// "Ban nick": always the fixed `{nick}!*@*` mask, whatever the default
+/// ban type ends up being.
 fn send_member_ban(state: &WorkerState, nick: &str) {
     let Some((session, topic, network_id, channel)) = user_topic_channel_network(state) else {
         return;
     };
-    let mask = format!("{nick}!*@*");
+    let mask = frames::ban_nick_mask(nick);
     session.send_command(
         topic,
         "ban",
