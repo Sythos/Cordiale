@@ -26,7 +26,8 @@
 //! anything else goes to the browser.
 
 use std::error::Error as _;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::ops::Range;
 
 /// A link found in a message: where its text is, and the URL to open.
@@ -291,6 +292,16 @@ pub fn redirect_decision(
     previous: &[reqwest::Url],
     next: &reqwest::Url,
 ) -> Result<(), RedirectRefusal> {
+    redirect_decision_from(previous, next, previous.last().is_some_and(is_local_host))
+}
+
+/// [`redirect_decision`] when the caller already knows whether the last URL
+/// is in the local network (a name can be, once resolved).
+fn redirect_decision_from(
+    previous: &[reqwest::Url],
+    next: &reqwest::Url,
+    last_is_local: bool,
+) -> Result<(), RedirectRefusal> {
     if previous.len() > MAX_REDIRECTS {
         return Err(RedirectRefusal::TooMany);
     }
@@ -306,7 +317,7 @@ pub fn redirect_decision(
         }
         // A link the user clicked may point at a LAN host on purpose, but a
         // public host must not bounce the request into the local network.
-        if is_local_host(next) && !is_local_host(last) {
+        if is_local_host(next) && !last_is_local {
             return Err(RedirectRefusal::LocalHost);
         }
     }
@@ -315,8 +326,8 @@ pub fn redirect_decision(
 
 /// Whether the host of `url`, as `Url::host_str` writes it, is `localhost`
 /// (or a name under it) or an IP literal that is loopback, private,
-/// link-local, shared (CGNAT) or unspecified. Nothing is resolved, so a name
-/// that merely points at such an address isn't caught.
+/// link-local, shared (CGNAT) or unspecified. Nothing is resolved here: a
+/// name that merely points at such an address is caught by [`vet_addrs`].
 fn is_local_host(url: &reqwest::Url) -> bool {
     let Some(host) = url.host_str() else {
         return true;
@@ -325,13 +336,39 @@ fn is_local_host(url: &reqwest::Url) -> bool {
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
     }
-    match host.trim_matches(['[', ']']).parse::<IpAddr>() {
-        Ok(IpAddr::V4(ip)) => is_local_v4(ip),
-        Ok(IpAddr::V6(ip)) => ip
+    host.trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .is_ok_and(is_local_ip)
+}
+
+fn is_local_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_local_v4(ip),
+        IpAddr::V6(ip) => ip
             .to_ipv4_mapped()
             .map_or_else(|| is_local_v6(ip), is_local_v4),
-        Err(_) => false,
     }
+}
+
+/// Whether `url` has a name to resolve: not an IP literal, not `localhost`
+/// or a name under it.
+fn has_resolvable_host(url: &reqwest::Url) -> bool {
+    !is_local_host(url)
+        && url
+            .host_str()
+            .is_some_and(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().is_err())
+}
+
+/// What a name resolved to: whether every address is local, and the
+/// addresses a connection may use (the public ones; all of them when
+/// `allow_local`).
+fn vet_addrs(addrs: Vec<SocketAddr>, allow_local: bool) -> (bool, Vec<SocketAddr>) {
+    let all_local = !addrs.is_empty() && addrs.iter().all(|addr| is_local_ip(addr.ip()));
+    let usable = addrs
+        .into_iter()
+        .filter(|addr| allow_local || !is_local_ip(addr.ip()))
+        .collect();
+    (all_local, usable)
 }
 
 fn is_local_v4(ip: Ipv4Addr) -> bool {
@@ -380,34 +417,88 @@ fn fetch_error(err: reqwest::Error) -> FetchError {
 
 /// Downloads a file from a host other than Grappa, without credentials,
 /// up to `max_bytes`; a text file over the limit is cut there (`true`).
-/// `href` must pass [`validated_url`] (and be http or https) and every redirect
-/// [`redirect_decision`], so the download can't be led to another scheme,
-/// down from https to http, or from a public host into the local network.
+/// `href` must pass [`validated_url`] (and be http or https). Redirects are
+/// followed here, one request at a time, so each passes [`redirect_decision`]
+/// and the name it points at is resolved first: the download can't be led to
+/// another scheme, down from https to http, or from a public host into the
+/// local network, by address or by name. Each connection only uses the
+/// addresses that were checked.
 pub async fn fetch_public(
     href: &str,
     max_bytes: usize,
     cut_when_larger: bool,
 ) -> Result<(Vec<u8>, Option<String>, bool), FetchError> {
-    let url = validated_url(href).map_err(|refusal| FetchError::Failed(refusal.to_string()))?;
+    fetch_public_with(href, max_bytes, cut_when_larger, |host, port| async move {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map(|addrs| addrs.collect())
+    })
+    .await
+}
+
+async fn fetch_public_with<R, F>(
+    href: &str,
+    max_bytes: usize,
+    cut_when_larger: bool,
+    resolve: R,
+) -> Result<(Vec<u8>, Option<String>, bool), FetchError>
+where
+    R: Fn(String, u16) -> F,
+    F: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
+    let mut url = validated_url(href).map_err(|refusal| FetchError::Failed(refusal.to_string()))?;
     if url.scheme() == "ftp" {
         return Err(FetchError::Failed(
             "only http and https can be downloaded".to_string(),
         ));
     }
-    let redirects = reqwest::redirect::Policy::custom(|attempt| {
-        let decision = redirect_decision(attempt.previous(), attempt.url());
-        match decision {
-            Ok(()) => attempt.follow(),
-            Err(refusal) => attempt.error(refusal),
+    let refused = |refusal: RedirectRefusal| FetchError::Failed(refusal.to_string());
+    let mut chain: Vec<reqwest::Url> = Vec::new();
+    // The link the user clicked may be local; a redirect only if the last
+    // request was too.
+    let mut last_is_local = true;
+    let mut response = loop {
+        let mut builder = reqwest::Client::builder()
+            .user_agent(crate::EXTERNAL_USER_AGENT)
+            .timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none());
+        let mut is_local = is_local_host(&url);
+        if has_resolvable_host(&url) {
+            let host = url.host_str().unwrap_or_default().to_string();
+            let port = url.port_or_known_default().unwrap_or(80);
+            let addrs = resolve(host.clone(), port)
+                .await
+                .map_err(|err| FetchError::Failed(format!("could not resolve {host}: {err}")))?;
+            let (all_local, usable) = vet_addrs(addrs, last_is_local);
+            if usable.is_empty() {
+                return Err(if all_local {
+                    refused(RedirectRefusal::LocalHost)
+                } else {
+                    FetchError::Failed(format!("could not resolve {host}"))
+                });
+            }
+            is_local = all_local;
+            builder = builder.resolve_to_addrs(&host, &usable);
         }
-    });
-    let http = reqwest::Client::builder()
-        .user_agent(crate::EXTERNAL_USER_AGENT)
-        .timeout(std::time::Duration::from_secs(60))
-        .redirect(redirects)
-        .build()
-        .map_err(|err| FetchError::Failed(err.without_url().to_string()))?;
-    let mut response = http.get(url).send().await.map_err(fetch_error)?;
+        let http = builder
+            .build()
+            .map_err(|err| FetchError::Failed(err.without_url().to_string()))?;
+        let response = http.get(url.clone()).send().await.map_err(fetch_error)?;
+        let location = match response.status().as_u16() {
+            301 | 302 | 303 | 307 | 308 => response.headers().get(reqwest::header::LOCATION),
+            _ => None,
+        };
+        let Some(location) = location.and_then(|value| value.to_str().ok()) else {
+            break response;
+        };
+        let next = url
+            .join(location)
+            .map_err(|_| FetchError::Failed("invalid redirect address".to_string()))?;
+        chain.push(url);
+        redirect_decision_from(&chain, &next, is_local).map_err(refused)?;
+        last_is_local = is_local;
+        url = next;
+    };
     let status = response.status().as_u16();
     if status == 404 || status == 410 {
         return Err(FetchError::Gone);
@@ -848,6 +939,171 @@ mod tests {
             matches!(&result, Err(FetchError::Failed(reason)) if reason.contains("scheme")),
             "{result:?}"
         );
+    }
+
+    fn addr(ip: &str) -> SocketAddr {
+        SocketAddr::new(ip.parse().expect("ip"), 443)
+    }
+
+    #[test]
+    fn resolved_addresses_are_vetted() {
+        let local = addr("127.0.0.1");
+        let private = addr("10.0.0.5");
+        let public = addr("93.184.216.34");
+        assert_eq!(vet_addrs(vec![local, private], false), (true, vec![]));
+        assert_eq!(vet_addrs(vec![public], false), (false, vec![public]));
+        // A mixed answer keeps only the public addresses.
+        assert_eq!(
+            vet_addrs(vec![local, public, private], false),
+            (false, vec![public])
+        );
+        assert_eq!(
+            vet_addrs(vec![local, private], true),
+            (true, vec![local, private])
+        );
+        assert_eq!(vet_addrs(vec![], false), (false, vec![]));
+    }
+
+    /// Fetches a link whose server redirects to `target`, a name that
+    /// resolves to `resolved`. The first name has a public address next to
+    /// the loopback one, so the first request counts as public yet still
+    /// reaches the test server. Gives the refusal, if any.
+    async fn redirect_to_name(
+        target: &str,
+        resolved: &'static [&'static str],
+    ) -> Result<(), String> {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let port = server.address().port();
+        Mock::given(method("GET"))
+            .and(path("/a.png"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("http://{target}:{port}/b.png")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7u8]))
+            .mount(&server)
+            .await;
+        let result = fetch_public_with(
+            &format!("http://start.example:{port}/a.png"),
+            1024,
+            false,
+            |host, _| async move {
+                let ips: &[&str] = if host == "start.example" {
+                    &["127.0.0.1", "93.184.216.34"]
+                } else {
+                    resolved
+                };
+                Ok(ips.iter().map(|ip| addr(ip)).collect())
+            },
+        )
+        .await;
+        let requests = server.received_requests().await.expect("requests");
+        let reached_target = requests.iter().any(|request| request.url.path() == "/b.png");
+        match result {
+            Ok(_) => {
+                assert!(reached_target);
+                Ok(())
+            }
+            Err(FetchError::Failed(reason)) => {
+                assert!(!reached_target, "the target was contacted");
+                Err(reason)
+            }
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_redirect_to_a_name_that_resolves_locally() {
+        for resolved in [
+            &["127.0.0.1"][..],
+            &["10.0.0.5", "192.168.1.9"],
+            &["169.254.169.254"],
+            &["::1"],
+        ] {
+            let result = redirect_to_name("inner.example", resolved).await;
+            assert_eq!(
+                result,
+                Err("redirect to a local address refused".to_string()),
+                "{resolved:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_lets_a_local_name_redirect_within_the_local_network() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let port = server.address().port();
+        Mock::given(method("GET"))
+            .and(path("/a.png"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("http://nas2.lan:{port}/b.png")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![9u8]))
+            .mount(&server)
+            .await;
+        let (bytes, _, _) = fetch_public_with(
+            &format!("http://nas.lan:{port}/a.png"),
+            1024,
+            false,
+            |_, _| async { Ok(vec![addr("127.0.0.1")]) },
+        )
+        .await
+        .expect("fetch");
+        assert_eq!(bytes, [9u8]);
+    }
+
+    #[tokio::test]
+    async fn fetch_resolves_again_for_every_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let port = server.address().port();
+        Mock::given(method("GET"))
+            .and(path("/a.png"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("http://same.example:{port}/b.png")),
+            )
+            .mount(&server)
+            .await;
+        let calls = AtomicUsize::new(0);
+        // First answer is mixed (public as far as the guard goes), the second
+        // is local only: the redirect to the same name must be refused.
+        let result = fetch_public_with(
+            &format!("http://same.example:{port}/a.png"),
+            1024,
+            false,
+            |_, _| {
+                let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
+                async move {
+                    Ok(if first {
+                        vec![addr("127.0.0.1"), addr("93.184.216.34")]
+                    } else {
+                        vec![addr("127.0.0.1")]
+                    })
+                }
+            },
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(FetchError::Failed(reason)) if reason == "redirect to a local address refused"),
+            "{result:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
