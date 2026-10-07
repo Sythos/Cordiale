@@ -4680,7 +4680,10 @@ pub(crate) struct MentionJump {
 
 /// `dm_with` when it is a non-empty string, else `channel`.
 pub(crate) fn mention_window(channel: &str, dm_with: Option<&Value>) -> MentionWindow {
-    match dm_with.and_then(Value::as_str).filter(|peer| !peer.is_empty()) {
+    match dm_with
+        .and_then(Value::as_str)
+        .filter(|peer| !peer.is_empty())
+    {
         Some(peer) => MentionWindow::Query(peer.to_string()),
         None => MentionWindow::Channel(channel.to_string()),
     }

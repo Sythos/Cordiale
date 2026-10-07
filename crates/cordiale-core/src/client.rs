@@ -6372,9 +6372,9 @@ mod tests {
             .and(path("/networks/libera/channels/%23rust/messages"))
             .and(query_param("around", "120"))
             .and(query_param("limit", "50"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!([{ "id": 121 }, { "id": 120 }, { "id": 119 }]),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{ "id": 120 }])),
+            )
             .expect(1)
             .mount(&mock_server)
             .await;
@@ -6384,7 +6384,7 @@ mod tests {
             .fetch_messages_around("t", "libera", "#rust", 120, 50)
             .await
             .expect("page around the message");
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 1);
     }
 
     #[tokio::test]

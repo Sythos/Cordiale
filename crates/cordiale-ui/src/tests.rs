@@ -7104,25 +7104,15 @@ fn mention_jumps_resolve_the_window_and_keep_the_id_optional() {
             row("#rust", serde_json::json!({"id": "9", "dm_with": ""}))
         ]
     });
+    let channel = |name: &str| MentionWindow::Channel(name.to_string());
+    let jump = |window: MentionWindow, id: Option<i64>| MentionJump { window, id };
     assert_eq!(
         parse_mention_jumps(&payload),
         vec![
-            MentionJump {
-                window: MentionWindow::Query("Alice".to_string()),
-                id: Some(7)
-            },
-            MentionJump {
-                window: MentionWindow::Channel("#Rust".to_string()),
-                id: Some(8)
-            },
-            MentionJump {
-                window: MentionWindow::Channel("#rust".to_string()),
-                id: None
-            },
-            MentionJump {
-                window: MentionWindow::Channel("#rust".to_string()),
-                id: None
-            },
+            jump(MentionWindow::Query("Alice".to_string()), Some(7)),
+            jump(channel("#Rust"), Some(8)),
+            jump(channel("#rust"), None),
+            jump(channel("#rust"), None),
         ]
     );
     assert!(parse_mention_jumps(&serde_json::json!({})).is_empty());
