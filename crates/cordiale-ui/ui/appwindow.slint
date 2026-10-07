@@ -3801,6 +3801,12 @@ export component AppWindow inherits Window {
                 }
 
                 for line[line-index] in chat-lines : Rectangle {
+                    // A row never widens the pane: an oversized one (mIRC
+                    // block art, a long token without spaces) is clipped on
+                    // the right like Cicchetto's `overflow-x: clip`, instead
+                    // of making the `ListView` scroll sideways.
+                    clip: true;
+
                     // Cicchetto's flat mention background; the row a
                     // mention jump landed on is tinted over it.
                     background: line-index == chat-highlight-row
@@ -3847,6 +3853,9 @@ export component AppWindow inherits Window {
                             default-color: theme == "dark" ? white : black;
                             link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
                             horizontal-stretch: 1;
+                            // The longest word must not set the row's minimum
+                            // width; the row's clip trims what doesn't fit.
+                            min-width: 0px;
                             link-clicked(href) => { chat-link-clicked(href); }
                         }
                     }
