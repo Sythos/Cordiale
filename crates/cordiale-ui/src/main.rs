@@ -4084,8 +4084,11 @@ async fn handle_attach_file(
         return;
     }
     // No progress or success text: the outcome goes to the log, and a stale
-    // status from an earlier attempt is cleared.
-    set_status("", String::new());
+    // status from an earlier attempt is cleared, raw message included.
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_status_kind("".into());
+        ui.set_status_message("".into());
+    });
     match client
         .upload_file(&token, &filename, mime, bytes, expire)
         .await
