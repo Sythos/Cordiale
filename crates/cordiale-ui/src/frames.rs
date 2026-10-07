@@ -1,47 +1,89 @@
 use super::*;
 
+/// The fixed `nick!*@*` ban mask of "Ban nick".
+pub(crate) fn ban_nick_mask(nick: &str) -> String {
+    format!("{nick}!*@*")
+}
+
+/// The fixed `*!*@host` ban mask of "Ban host" and Kickban; `None` for an
+/// empty host.
+pub(crate) fn ban_host_mask(host: &str) -> Option<String> {
+    (!host.is_empty()).then(|| format!("*!*@{host}"))
+}
+
 /// The `*!*@host` ban mask from a `resolve_userhost` reply, if it has one.
 pub(crate) fn kickban_mask(reply: &Value) -> Option<String> {
     if reply.get("status").and_then(Value::as_str) != Some("ok") {
         return None;
     }
-    let host = reply.get("response")?.get("host")?.as_str()?;
-    (!host.is_empty()).then(|| format!("*!*@{host}"))
+    ban_host_mask(reply.get("response")?.get("host")?.as_str()?)
 }
 
-/// Bans by host when it was known, then kicks regardless, as Cicchetto
-/// does; an unknown host (`not_cached`) is reported, not fatal.
+/// Whether `nick` is currently listed in the channel's members.
+pub(crate) fn is_channel_member(
+    state: &WorkerState,
+    network: &str,
+    channel: &str,
+    nick: &str,
+) -> bool {
+    state
+        .transcript
+        .members
+        .get(&(network.to_string(), channel.to_string()))
+        .is_some_and(|members| {
+            members
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(nick))
+        })
+}
+
+/// Fails closed: without a host mask neither the ban nor the kick goes out
+/// (the host not being known yet is reported), and a channel that is no
+/// longer joined gets nothing. The ban goes first; the kick follows only
+/// for a Kickban whose target is still in the channel.
 fn finish_kickban(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
     pending: PendingKickBan,
     reply: &Value,
 ) {
-    match kickban_mask(reply) {
-        Some(mask) => send_user_verb(
-            state,
-            &pending.network,
-            "ban",
-            serde_json::json!({ "channel": pending.channel, "mask": mask }),
-        ),
-        None => {
-            let nick = pending.nick.clone();
-            let _ = ui.upgrade_in_event_loop(move |ui| {
-                ui.set_status_command_hint(nick.into());
-                ui.set_status_kind("kickban-host-unknown".into());
-            });
-        }
+    let joined = state
+        .windows
+        .window_states
+        .get(&window_state_key(&pending.network, &pending.channel))
+        == Some(&ChannelWindowState::Joined);
+    if !joined {
+        return;
     }
+    let Some(mask) = kickban_mask(reply) else {
+        let nick = pending.nick;
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_status_command_hint(nick.into());
+            ui.set_status_kind("kickban-host-unknown".into());
+        });
+        return;
+    };
     send_user_verb(
         state,
         &pending.network,
-        "kick",
-        serde_json::json!({
-            "channel": pending.channel,
-            "nick": pending.nick,
-            "reason": pending.reason,
-        }),
+        "ban",
+        serde_json::json!({ "channel": pending.channel, "mask": mask }),
     );
+    let Some(reason) = pending.kick_reason else {
+        return;
+    };
+    if is_channel_member(state, &pending.network, &pending.channel, &pending.nick) {
+        send_user_verb(
+            state,
+            &pending.network,
+            "kick",
+            serde_json::json!({
+                "channel": pending.channel,
+                "nick": pending.nick,
+                "reason": reason,
+            }),
+        );
+    }
 }
 
 /// Handles a push on the live admin topic: the join `snapshot` (newest
