@@ -86,17 +86,18 @@ impl BanType {
         user: Option<&str>,
         host: Option<&str>,
     ) -> Result<String, BanMaskError> {
-        let part = |value: Option<&str>| {
-            value
-                .filter(|value| mask_part_is_valid(value))
-                .ok_or(BanMaskError::MissingPart)
-        };
         match self {
-            BanType::Nick => Ok(format!("{}!*@*", part(Some(nick))?)),
-            BanType::Host => Ok(format!("*!*@{}", part(host)?)),
-            BanType::UserHost => Ok(format!("*!{}@{}", part(user)?, part(host)?)),
+            BanType::Nick => Ok(format!("{}!*@*", mask_part(Some(nick))?)),
+            BanType::Host => Ok(format!("*!*@{}", mask_part(host)?)),
+            BanType::UserHost => Ok(format!("*!{}@{}", mask_part(user)?, mask_part(host)?)),
         }
     }
+}
+
+fn mask_part(value: Option<&str>) -> Result<&str, BanMaskError> {
+    value
+        .filter(|value| mask_part_is_valid(value))
+        .ok_or(BanMaskError::MissingPart)
 }
 
 fn mask_part_is_valid(value: &str) -> bool {

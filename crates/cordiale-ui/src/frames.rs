@@ -6,11 +6,9 @@ use super::*;
 pub(crate) fn kickban_mask(pending: &PendingKickBan, reply: &Value) -> Option<String> {
     let ok = reply.get("status").and_then(Value::as_str) == Some("ok");
     let identity = reply.get("response").filter(|_| ok);
-    let part = |key: &str| identity?.get(key)?.as_str();
-    pending
-        .ban_type
-        .mask(&pending.nick, part("user"), part("host"))
-        .ok()
+    let user = identity.and_then(|identity| identity.get("user")?.as_str());
+    let host = identity.and_then(|identity| identity.get("host")?.as_str());
+    pending.ban_type.mask(&pending.nick, user, host).ok()
 }
 
 /// Reports a `/kb` that could not build its mask: nobody is banned or
