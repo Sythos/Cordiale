@@ -2432,8 +2432,6 @@ export component AppWindow inherits Window {
             return @tr("Invited {} to {} on {}.", status-invite-peer, status-invite-channel, status-invite-network);
         } else if status-kind == "attach-uploading" {
             return @tr("Uploading {}…", status-attach-name);
-        } else if status-kind == "attach-sent" {
-            return @tr("Uploaded {}; its link was posted.", status-attach-name);
         } else if status-kind == "attach-unsupported-type" {
             return @tr("The server doesn't accept this type of file: {}", status-attach-name);
         } else if status-kind == "attach-too-large" {

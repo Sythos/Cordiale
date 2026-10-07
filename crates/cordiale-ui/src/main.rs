@@ -4083,15 +4083,18 @@ async fn handle_attach_file(
         set_status("attach-too-large", filename);
         return;
     }
-    set_status("attach-uploading", filename.clone());
+    // No progress or success text: the outcome goes to the log, and a stale
+    // status from an earlier attempt is cleared, raw message included.
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_status_kind("".into());
+        ui.set_status_message("".into());
+    });
     match client
         .upload_file(&token, &filename, mime, bytes, expire)
         .await
     {
         Ok(uploaded) => {
             persistence::log_line(&format!("attachment uploaded: slug={}", uploaded.slug));
-            // Set first, so a failed send that follows can replace it.
-            set_status("attach-sent", filename);
             handle_send_message(state, ui, attachment_message(category, &uploaded.url)).await;
         }
         Err(err) => {
