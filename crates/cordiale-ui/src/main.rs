@@ -4030,7 +4030,7 @@ fn set_send_failed_status(ui: &slint::Weak<AppWindow>, err: &GrappaClientError) 
 /// server would refuse, and files over the advertised per-file cap, are
 /// stopped before uploading.
 async fn handle_attach_file(
-    state: &WorkerState,
+    state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     path: std::path::PathBuf,
     expire: Option<i64>,
@@ -4153,8 +4153,7 @@ fn attach_expiry(expires_at: &str, now: chrono::DateTime<chrono::Utc>) -> Attach
 
 thread_local! {
     /// The file the upload confirmation is showing (UI thread only).
-    static PENDING_UPLOAD: std::cell::RefCell<Option<std::path::PathBuf>> =
-        const { std::cell::RefCell::new(None) };
+    static PENDING_UPLOAD: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
 }
 
 /// Largest image the confirmation decodes for its thumbnail.
@@ -4194,9 +4193,10 @@ fn confirm_and_attach(
             .unwrap_or_default();
         let category = mime_for_filename(&name).map(|(_, category)| category);
         let size = std::fs::metadata(&path).map_or(0, |meta| meta.len());
-        let preview = (category == Some(UploadCategory::Image))
-            .then(|| upload_preview(&path))
-            .flatten();
+        let preview = match category {
+            Some(UploadCategory::Image) => upload_preview(&path),
+            _ => None,
+        };
         ui.set_upload_confirm_has_preview(preview.is_some());
         ui.set_upload_confirm_preview(preview.unwrap_or_default());
         let kind = match category {

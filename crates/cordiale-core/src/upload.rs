@@ -152,11 +152,7 @@ mod tests {
     #[test]
     fn announces_uploads_with_the_category_emoji() {
         assert_eq!(
-            attachment_message(
-                UploadCategory::Image,
-                "https://irc.example/uploads/abc.png",
-                None
-            ),
+            attachment_message(UploadCategory::Image, "https://irc.example/uploads/abc.png", None),
             "📸 https://irc.example/uploads/abc.png"
         );
         assert_eq!(UploadCategory::Audio.emoji(), "🎵");
@@ -168,7 +164,7 @@ mod tests {
             attachment_message(
                 UploadCategory::Video,
                 "https://irc.example/uploads/abc.mp4",
-                Some("24h")
+                Some("24h"),
             ),
             "🎬 https://irc.example/uploads/abc.mp4 (24h)"
         );
