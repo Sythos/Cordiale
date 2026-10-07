@@ -267,10 +267,7 @@ pub(crate) async fn run_slash_command(
             Ok(())
         }
         SlashCommand::KickBan { nick, reason } if in_channel => {
-            let ban_type = persistence::load_settings()
-                .unwrap_or_default()
-                .default_ban_type;
-            start_kickban(state, ui, &network, channel.clone(), nick, reason, ban_type);
+            start_kickban(state, ui, &network, channel.clone(), nick, reason);
             Ok(())
         }
         SlashCommand::NickModes { .. }
@@ -531,8 +528,11 @@ fn start_kickban(
     channel: String,
     nick: String,
     reason: String,
-    ban_type: cordiale_core::ban::BanType,
 ) {
+    // Read once here: the form stays fixed for this request.
+    let ban_type = persistence::load_settings()
+        .unwrap_or_default()
+        .default_ban_type;
     let pending = PendingKickBan {
         network: network.to_string(),
         channel,

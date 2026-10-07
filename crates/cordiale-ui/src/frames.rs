@@ -4,9 +4,8 @@ use super::*;
 /// reply (ignored by the nick form). `None` when the reply is not an `ok`
 /// or lacks a part that form needs: there is no fallback to another form.
 pub(crate) fn kickban_mask(pending: &PendingKickBan, reply: &Value) -> Option<String> {
-    let identity = (reply.get("status").and_then(Value::as_str) == Some("ok"))
-        .then(|| reply.get("response"))
-        .flatten();
+    let ok = reply.get("status").and_then(Value::as_str) == Some("ok");
+    let identity = reply.get("response").filter(|_| ok);
     let part = |key: &str| identity?.get(key)?.as_str();
     pending
         .ban_type

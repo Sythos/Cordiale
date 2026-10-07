@@ -4704,10 +4704,7 @@ fn kickban_mask_never_falls_back_to_another_form() {
         "response": {"user": "~u", "host": ""}
     });
     for ban_type in [BanType::Host, BanType::UserHost] {
-        assert_eq!(
-            kickban_mask(&pending_kickban(ban_type), &not_cached),
-            None
-        );
+        assert_eq!(kickban_mask(&pending_kickban(ban_type), &not_cached), None);
         assert_eq!(kickban_mask(&pending_kickban(ban_type), &no_host), None);
     }
     assert_eq!(
