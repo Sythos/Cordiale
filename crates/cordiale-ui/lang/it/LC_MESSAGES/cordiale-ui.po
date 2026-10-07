@@ -953,10 +953,6 @@ msgid "Uploading {}…"
 msgstr "Caricamento di {}…"
 
 msgctxt "AppWindow"
-msgid "Uploaded {}; its link was posted."
-msgstr "{} caricato; il link è stato pubblicato."
-
-msgctxt "AppWindow"
 msgid "The server doesn't accept this type of file: {}"
 msgstr "Il server non accetta questo tipo di file: {}"
 
