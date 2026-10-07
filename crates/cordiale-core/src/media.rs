@@ -292,7 +292,8 @@ pub fn redirect_decision(
     previous: &[reqwest::Url],
     next: &reqwest::Url,
 ) -> Result<(), RedirectRefusal> {
-    redirect_decision_from(previous, next, previous.last().is_some_and(is_local_host))
+    let last_is_local = previous.last().is_some_and(is_local_host);
+    redirect_decision_from(previous, next, last_is_local)
 }
 
 /// [`redirect_decision`] when the caller already knows whether the last URL
@@ -353,10 +354,11 @@ fn is_local_ip(ip: IpAddr) -> bool {
 /// Whether `url` has a name to resolve: not an IP literal, not `localhost`
 /// or a name under it.
 fn has_resolvable_host(url: &reqwest::Url) -> bool {
-    !is_local_host(url)
-        && url
-            .host_str()
-            .is_some_and(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().is_err())
+    if is_local_host(url) {
+        return false;
+    }
+    url.host_str()
+        .is_some_and(|host| host.trim_matches(['[', ']']).parse::<IpAddr>().is_err())
 }
 
 /// What a name resolved to: whether every address is local, and the
@@ -428,12 +430,11 @@ pub async fn fetch_public(
     max_bytes: usize,
     cut_when_larger: bool,
 ) -> Result<(Vec<u8>, Option<String>, bool), FetchError> {
-    fetch_public_with(href, max_bytes, cut_when_larger, |host, port| async move {
-        tokio::net::lookup_host((host, port))
-            .await
-            .map(|addrs| addrs.collect())
-    })
-    .await
+    fetch_public_with(href, max_bytes, cut_when_larger, lookup).await
+}
+
+async fn lookup(host: String, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    Ok(tokio::net::lookup_host((host, port)).await?.collect())
 }
 
 async fn fetch_public_with<R, F>(
@@ -945,6 +946,10 @@ mod tests {
         SocketAddr::new(ip.parse().expect("ip"), 443)
     }
 
+    fn resolved_to(ips: &[&str]) -> std::io::Result<Vec<SocketAddr>> {
+        Ok(ips.iter().copied().map(addr).collect())
+    }
+
     #[test]
     fn resolved_addresses_are_vetted() {
         let local = addr("127.0.0.1");
@@ -976,12 +981,10 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         let port = server.address().port();
+        let location = format!("http://{target}:{port}/b.png");
         Mock::given(method("GET"))
             .and(path("/a.png"))
-            .respond_with(
-                ResponseTemplate::new(302)
-                    .insert_header("location", format!("http://{target}:{port}/b.png")),
-            )
+            .respond_with(ResponseTemplate::new(302).insert_header("location", location))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -994,12 +997,11 @@ mod tests {
             1024,
             false,
             |host, _| async move {
-                let ips: &[&str] = if host == "start.example" {
-                    &["127.0.0.1", "93.184.216.34"]
+                if host == "start.example" {
+                    resolved_to(&["127.0.0.1", "93.184.216.34"])
                 } else {
-                    resolved
-                };
-                Ok(ips.iter().map(|ip| addr(ip)).collect())
+                    resolved_to(resolved)
+                }
             },
         )
         .await;
@@ -1041,12 +1043,10 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         let port = server.address().port();
+        let location = format!("http://nas2.lan:{port}/b.png");
         Mock::given(method("GET"))
             .and(path("/a.png"))
-            .respond_with(
-                ResponseTemplate::new(302)
-                    .insert_header("location", format!("http://nas2.lan:{port}/b.png")),
-            )
+            .respond_with(ResponseTemplate::new(302).insert_header("location", location))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -1058,7 +1058,7 @@ mod tests {
             &format!("http://nas.lan:{port}/a.png"),
             1024,
             false,
-            |_, _| async { Ok(vec![addr("127.0.0.1")]) },
+            |_, _| async { resolved_to(&["127.0.0.1"]) },
         )
         .await
         .expect("fetch");
@@ -1072,12 +1072,10 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         let port = server.address().port();
+        let location = format!("http://same.example:{port}/b.png");
         Mock::given(method("GET"))
             .and(path("/a.png"))
-            .respond_with(
-                ResponseTemplate::new(302)
-                    .insert_header("location", format!("http://same.example:{port}/b.png")),
-            )
+            .respond_with(ResponseTemplate::new(302).insert_header("location", location))
             .mount(&server)
             .await;
         let calls = AtomicUsize::new(0);
@@ -1090,11 +1088,11 @@ mod tests {
             |_, _| {
                 let first = calls.fetch_add(1, Ordering::SeqCst) == 0;
                 async move {
-                    Ok(if first {
-                        vec![addr("127.0.0.1"), addr("93.184.216.34")]
+                    if first {
+                        resolved_to(&["127.0.0.1", "93.184.216.34"])
                     } else {
-                        vec![addr("127.0.0.1")]
-                    })
+                        resolved_to(&["127.0.0.1"])
+                    }
                 }
             },
         )
