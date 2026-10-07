@@ -20,7 +20,12 @@ pub(crate) fn kickban_mask(reply: &Value) -> Option<String> {
 }
 
 /// Whether `nick` is currently listed in the channel's members.
-pub(crate) fn is_channel_member(state: &WorkerState, network: &str, channel: &str, nick: &str) -> bool {
+pub(crate) fn is_channel_member(
+    state: &WorkerState,
+    network: &str,
+    channel: &str,
+    nick: &str,
+) -> bool {
     state
         .transcript
         .members
