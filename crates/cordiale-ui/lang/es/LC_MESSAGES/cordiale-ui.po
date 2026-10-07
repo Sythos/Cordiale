@@ -997,8 +997,56 @@ msgid "Upload file"
 msgstr "Subir archivo"
 
 msgctxt "AppWindow"
-msgid "Upload this file to the server and post its link in the open window?"
-msgstr "¿Subir este archivo al servidor y publicar su enlace en la ventana abierta?"
+msgid "Preview of {}"
+msgstr "Vista previa de {}"
+
+msgctxt "AppWindow"
+msgid "🎬 No preview for videos."
+msgstr "🎬 Sin vista previa para vídeos."
+
+msgctxt "AppWindow"
+msgid "🎵 No preview for audio."
+msgstr "🎵 Sin vista previa para audio."
+
+msgctxt "AppWindow"
+msgid "📸 This image can't be previewed."
+msgstr "📸 Esta imagen no tiene vista previa."
+
+msgctxt "AppWindow"
+msgid "📄 No preview for this file."
+msgstr "📄 Sin vista previa para este archivo."
+
+msgctxt "AppWindow"
+msgid "Image, {}"
+msgstr "Imagen, {}"
+
+msgctxt "AppWindow"
+msgid "Video, {}"
+msgstr "Vídeo, {}"
+
+msgctxt "AppWindow"
+msgid "Audio, {}"
+msgstr "Audio, {}"
+
+msgctxt "AppWindow"
+msgid "Document, {}"
+msgstr "Documento, {}"
+
+msgctxt "AppWindow"
+msgid "The link will be posted in {}."
+msgstr "El enlace se publicará en {}."
+
+msgctxt "AppWindow"
+msgid "Keep this file for"
+msgstr "Conservar este archivo durante"
+
+msgctxt "AppWindow"
+msgid "{} expired before its link could be posted."
+msgstr "{} caducó antes de poder publicar su enlace."
+
+msgctxt "AppWindow"
+msgid "The server didn't say when {} expires; its link was posted without a lifetime."
+msgstr "El servidor no indicó cuándo caduca {}; el enlace se publicó sin duración."
 
 msgctxt "AppWindow"
 msgid "Uploads"

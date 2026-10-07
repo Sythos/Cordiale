@@ -85,7 +85,9 @@ use cordiale_core::rest::{PasskeyMode, PasskeyOptions, PasskeyRequestOptions};
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::share;
 use cordiale_core::theme::{font_family_for, ThemePalette, BUILTIN_THEMES};
-use cordiale_core::upload::{attachment_message, mime_for_filename, UploadCategory};
+use cordiale_core::upload::{
+    attachment_message, mime_for_filename, remaining_lifetime_label, UploadCategory,
+};
 use cordiale_core::wire_event::ClientEventKind;
 
 use admin_handlers::*;
@@ -4044,19 +4046,19 @@ async fn handle_attach_file(
             ui.set_status_kind(kind.into());
         });
     };
-    if state.windows.current_channel.is_none() {
+    // The window open when the upload starts is where the link goes, even
+    // if another one is opened while the file is on its way.
+    let Some((network, channel)) = state.windows.current_channel.clone() else {
         set_status("attach-no-window", filename);
         return;
-    }
-    if state
-        .windows
-        .current_channel
-        .as_ref()
-        .is_some_and(|(_, channel)| channel == SERVER_WINDOW_NAME)
-    {
+    };
+    if channel == SERVER_WINDOW_NAME {
         let _ = ui.upgrade_in_event_loop(|ui| {
             ui.set_status_kind("server-window-commands-only".into());
         });
+        return;
+    }
+    if state.windows.current_query && !state.windows.current_query_ready {
         return;
     }
     let Some((mime, category)) = mime_for_filename(&filename) else {
@@ -4095,7 +4097,25 @@ async fn handle_attach_file(
     {
         Ok(uploaded) => {
             persistence::log_line(&format!("attachment uploaded: slug={}", uploaded.slug));
-            handle_send_message(state, ui, attachment_message(category, &uploaded.url)).await;
+            let expiry = attach_expiry(&uploaded.expires_at, chrono::Utc::now());
+            let remaining = match &expiry {
+                AttachExpiry::Live(label) => Some(label.as_str()),
+                AttachExpiry::Expired => {
+                    set_status("attach-expired", filename);
+                    return;
+                }
+                AttachExpiry::Unknown => None,
+            };
+            let request =
+                SendMessageRequest::plain(attachment_message(category, &uploaded.url, remaining));
+            if let Err(err) = client
+                .send_message(&token, &network, &channel, &request)
+                .await
+            {
+                set_send_failed_status(ui, &err);
+            } else if remaining.is_none() {
+                set_status("attach-expiry-unknown", filename);
+            }
         }
         Err(err) => {
             persistence::log_line(&format!("attachment upload failed: {err:?}"));
@@ -4107,9 +4127,60 @@ async fn handle_attach_file(
     }
 }
 
+/// What the server's `expires_at` says about a fresh upload.
+#[derive(Debug, PartialEq, Eq)]
+enum AttachExpiry {
+    /// Still live: the remaining lifetime as it goes after the link.
+    Live(String),
+    /// Gone, or about to be: not announced as an attachment.
+    Expired,
+    /// Missing or unreadable: the link goes without a duration.
+    Unknown,
+}
+
+/// The lifetime left at `now`, from the expiry the server returned (not the
+/// one asked for: the upload itself takes time).
+fn attach_expiry(expires_at: &str, now: chrono::DateTime<chrono::Utc>) -> AttachExpiry {
+    let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+        return AttachExpiry::Unknown;
+    };
+    let remaining = (expires.with_timezone(&chrono::Utc) - now).num_seconds();
+    match remaining_lifetime_label(remaining) {
+        Some(label) => AttachExpiry::Live(label),
+        None => AttachExpiry::Expired,
+    }
+}
+
+thread_local! {
+    /// The file the upload confirmation is showing (UI thread only).
+    static PENDING_UPLOAD: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Largest image the confirmation decodes for its thumbnail.
+const PREVIEW_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// A thumbnail of an image file, `None` when it can't be decoded here.
+fn upload_preview(path: &std::path::Path) -> Option<slint::Image> {
+    if std::fs::metadata(path).ok()?.len() > PREVIEW_MAX_BYTES {
+        return None;
+    }
+    if let Ok(decoded) = image::open(path) {
+        let thumb = decoded.thumbnail(640, 360).to_rgba8();
+        let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+            thumb.as_raw(),
+            thumb.width(),
+            thumb.height(),
+        );
+        return Some(slint::Image::from_rgba8(buffer));
+    }
+    slint::Image::load_from_path(path).ok()
+}
+
 /// Asks for the upload when Settings says so, then hands `path` to the
 /// worker with the chosen lifetime: the paperclip, a dropped file and a
-/// paste all end here, as in Cicchetto.
+/// paste all end here, as in Cicchetto. With the question on, the popup
+/// (preview, lifetime menu) answers through `finish_upload_confirm`; its
+/// lifetime starts from the saved one and never writes it back.
 fn confirm_and_attach(
     ui: &AppWindow,
     tx: &mpsc::UnboundedSender<WorkerCommand>,
@@ -4120,17 +4191,45 @@ fn confirm_and_attach(
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let answer = rfd::MessageDialog::new()
-            .set_title(ui.get_upload_confirm_title().as_str())
-            .set_description(format!("{}\n\n{name}", ui.get_upload_confirm_text()))
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .show();
-        if !matches!(answer, rfd::MessageDialogResult::Yes) {
-            return;
-        }
+        let category = mime_for_filename(&name).map(|(_, category)| category);
+        let size = std::fs::metadata(&path).map_or(0, |meta| meta.len());
+        let preview = match category {
+            Some(UploadCategory::Image) => upload_preview(&path),
+            _ => None,
+        };
+        ui.set_upload_confirm_has_preview(preview.is_some());
+        ui.set_upload_confirm_preview(preview.unwrap_or_default());
+        let kind = match category {
+            Some(UploadCategory::Image) => "image",
+            Some(UploadCategory::Video) => "video",
+            Some(UploadCategory::Audio) => "audio",
+            Some(UploadCategory::Document) => "document",
+            None => "",
+        };
+        ui.set_upload_confirm_kind(kind.into());
+        ui.set_upload_confirm_name(name.into());
+        ui.set_upload_confirm_size(format_file_size(size).into());
+        ui.set_upload_confirm_ttl_index(ui.get_pref_upload_ttl_index());
+        PENDING_UPLOAD.with(|pending| *pending.borrow_mut() = Some(path));
+        ui.set_upload_confirm_open(true);
+        return;
     }
     let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
     let _ = tx.send(WorkerCommand::AttachFile(path, expire));
+}
+
+/// Closes the upload popup: with `send`, the pending file goes to the worker
+/// with the lifetime picked there; otherwise nothing is uploaded or posted.
+fn finish_upload_confirm(ui: &AppWindow, tx: &mpsc::UnboundedSender<WorkerCommand>, send: bool) {
+    let expire = upload_ttl_for_index(ui.get_upload_confirm_ttl_index());
+    ui.set_upload_confirm_open(false);
+    ui.set_upload_confirm_preview(slint::Image::default());
+    let Some(path) = PENDING_UPLOAD.with(|pending| pending.borrow_mut().take()) else {
+        return;
+    };
+    if send {
+        let _ = tx.send(WorkerCommand::AttachFile(path, expire));
+    }
 }
 
 /// Lines of pasted text above which Cordiale offers a .txt upload.
