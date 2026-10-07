@@ -98,6 +98,25 @@ pub(crate) async fn handle_open_mention(
             return;
         }
     };
+    // A page entirely older than what the window holds would sit next to
+    // the loaded tail with a hole between them that paging back can't fill
+    // (it only asks for rows before the oldest id). The window is then
+    // rebuilt from the page, and paging back starts again from its oldest row.
+    let page_newest = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_i64))
+        .max();
+    let messages = state.transcript.messages.entry(key.clone()).or_default();
+    let loaded_oldest = messages.iter().filter_map(|line| line.message_id).min();
+    if matches!((page_newest, loaded_oldest), (Some(page), Some(loaded)) if page < loaded) {
+        messages.clear();
+        state.transcript.history_start_reached.remove(&key);
+        state
+            .transcript
+            .history_cursors_fetched
+            .retain(|(cursor_key, _)| cursor_key != &key);
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_history_start_reached(false));
+    }
     let messages = state.transcript.messages.entry(key.clone()).or_default();
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
     // The reader may have switched window while the page was loading.
