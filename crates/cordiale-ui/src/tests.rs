@@ -6783,8 +6783,14 @@ fn attach_expiry_shrinks_with_the_time_spent_before_posting() {
 #[test]
 fn attach_expiry_refuses_expired_and_unreadable_values() {
     let now = expiry_at("2026-10-07T10:00:00Z");
-    assert_eq!(attach_expiry("2026-10-07T09:59:00Z", now), AttachExpiry::Expired);
-    assert_eq!(attach_expiry("2026-10-07T10:00:10Z", now), AttachExpiry::Expired);
+    assert_eq!(
+        attach_expiry("2026-10-07T09:59:00Z", now),
+        AttachExpiry::Expired
+    );
+    assert_eq!(
+        attach_expiry("2026-10-07T10:00:10Z", now),
+        AttachExpiry::Expired
+    );
     assert_eq!(attach_expiry("", now), AttachExpiry::Unknown);
     assert_eq!(attach_expiry("tomorrow", now), AttachExpiry::Unknown);
 }
