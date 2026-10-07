@@ -56,6 +56,8 @@ struct QueryEntry {
 struct ReplyRow {
     label: string,
     value: string,
+    // A mentions-summary message: clicking it opens its window.
+    jump: bool,
 }
 
 // One DCC file offer Grappa holds until it is accepted or refused; `size`
@@ -1072,12 +1074,16 @@ export component AppWindow inherits Window {
     // back to the top (or presses PgUp), never in a loop.
     in property <bool> history-failed: false;
     callback older-history-requested();
+    // A message row of the mentions summary was clicked (its row index).
+    callback mention-open-requested(int);
     // The chat pane's scroll position (two-way with the pane) and height,
     // read by Rust to keep the reader's line in place while an older page
     // is prepended, and whether the pane is following the newest line.
     in-out property <length> chat-scroll-y: 0px;
     out property <length> chat-content-height: 0px;
     in-out property <bool> chat-follow-bottom: true;
+    // The row a mention jump landed on, tinted for a moment; -1 for none.
+    in-out property <int> chat-highlight-row: -1;
     // What lets a chat pane that is torn down and rebuilt (the reader went
     // to the media viewer, Settings...) come back where it was: the number
     // of lines `chat-content-height` was measured for, and the window the
@@ -2416,6 +2422,12 @@ export component AppWindow inherits Window {
             return @tr("Couldn't answer the file offer.");
         } else if status-kind == "no-mentions" {
             return @tr("No away summary for this network yet.");
+        } else if status-kind == "mention-window-gone" {
+            return @tr("That window is no longer open.");
+        } else if status-kind == "mention-not-found" {
+            return @tr("That message is no longer in the history.");
+        } else if status-kind == "mention-load-failed" {
+            return @tr("Could not load that message.");
         } else if status-kind == "invite-sent" {
             return @tr("Invited {} to {} on {}.", status-invite-peer, status-invite-channel, status-invite-network);
         } else if status-kind == "attach-uploading" {
@@ -3790,9 +3802,12 @@ export component AppWindow inherits Window {
                     self.content-y = min(0px, self.visible-height - self.content-height);
                 }
 
-                for line in chat-lines : Rectangle {
-                    // Cicchetto's flat mention background.
-                    background: !line.mention
+                for line[line-index] in chat-lines : Rectangle {
+                    // Cicchetto's flat mention background; the row a
+                    // mention jump landed on is tinted over it.
+                    background: line-index == chat-highlight-row
+                        ? #3b82f666
+                        : !line.mention
                         ? transparent
                         : palette-active
                         ? palette-mention.with-alpha(0.25)
@@ -6941,12 +6956,21 @@ export component AppWindow inherits Window {
 
         ListView {
             vertical-stretch: 1;
-            for row in reply-rows : Text {
-                text: row.label == ""
-                    ? row.value
-                    : (row.value == "" ? reply-label(row.label) : @tr("{}: {}", reply-label(row.label), row.value));
-                wrap: word-wrap;
-                accessible-role: AccessibleRole.text;
+            for row[row-index] in reply-rows : Rectangle {
+                VerticalLayout {
+                    Text {
+                        text: row.label == ""
+                            ? row.value
+                            : (row.value == "" ? reply-label(row.label) : @tr("{}: {}", reply-label(row.label), row.value));
+                        wrap: word-wrap;
+                        accessible-role: AccessibleRole.text;
+                    }
+                }
+
+                if row.jump : TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { mention-open-requested(row-index); }
+                }
             }
         }
 

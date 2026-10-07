@@ -838,6 +838,42 @@ impl GrappaClient {
         Ok(response.json::<Vec<Value>>().await?)
     }
 
+    /// `GET /networks/:slug/channels/:channel/messages?around=<id>&limit=`
+    /// — the page of history centred on message `around_id`, the cursor a
+    /// mention jump needs. A message that is gone from the scrollback gives
+    /// a page without it (or a 404): the caller checks for the id.
+    pub async fn fetch_messages_around(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel_name: &str,
+        around_id: i64,
+        limit: usize,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend([
+                "networks",
+                network_slug,
+                "channels",
+                channel_name,
+                "messages",
+            ]);
+        url.query_pairs_mut()
+            .append_pair("around", &around_id.to_string())
+            .append_pair("limit", &limit.to_string());
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Vec<Value>>().await?)
+    }
+
     /// `GET /networks/:slug/channels/:channel/messages/count?after=<id>&cap=`
     /// — how many rows sit after message `after_id`: the gap probe behind a
     /// reconnect catch-up. With `cap` the server stops counting there (so
@@ -6327,6 +6363,28 @@ mod tests {
             .await
             .expect("older page");
         assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_around_sends_the_cursor() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/%23rust/messages"))
+            .and(query_param("around", "120"))
+            .and(query_param("limit", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!([{ "id": 121 }, { "id": 120 }, { "id": 119 }]),
+            ))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let rows = client
+            .fetch_messages_around("t", "libera", "#rust", 120, 50)
+            .await
+            .expect("page around the message");
+        assert_eq!(rows.len(), 3);
     }
 
     #[tokio::test]

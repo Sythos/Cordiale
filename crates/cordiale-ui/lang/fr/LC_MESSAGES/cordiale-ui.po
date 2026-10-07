@@ -709,6 +709,18 @@ msgid "No away summary for this network yet."
 msgstr "Aucun résumé d'absence pour ce réseau pour le moment."
 
 msgctxt "AppWindow"
+msgid "That window is no longer open."
+msgstr "Cette fenêtre n'est plus ouverte."
+
+msgctxt "AppWindow"
+msgid "That message is no longer in the history."
+msgstr "Ce message n'est plus dans l'historique."
+
+msgctxt "AppWindow"
+msgid "Could not load that message."
+msgstr "Impossible de charger ce message."
+
+msgctxt "AppWindow"
 msgid "Invited {} to {} on {}."
 msgstr "{} a été invité à rejoindre {} sur {}."
 

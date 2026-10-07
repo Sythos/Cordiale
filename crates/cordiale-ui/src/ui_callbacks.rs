@@ -428,6 +428,13 @@ pub(crate) fn register_navigation_callbacks(
         let _ = tx_for_older_history.send(WorkerCommand::LoadOlderHistory);
     });
 
+    let tx_for_mention = worker_tx.clone();
+    ui.on_mention_open_requested(move |index| {
+        if let Ok(index) = usize::try_from(index) {
+            let _ = tx_for_mention.send(WorkerCommand::OpenMention(index));
+        }
+    });
+
     // A chat pane rebuilt after a round trip through another screen (the
     // media viewer, settings...) asks here where the reader was. The line
     // is picked from the saved scroll state right away, but only put back

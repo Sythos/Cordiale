@@ -366,10 +366,17 @@ il resto della sezione Sicurezza resta in Cicchetto:
   `dm_with` (entrambi opzionali: assenti su server più vecchi). Su un DM in
   ingresso `channel` è il **proprio** nick: la finestra di una menzione è
   `dm_with` (nick del peer, RAW) quando non è `null`, altrimenti `channel`.
-  Cordiale usa `dm_with` come etichetta nel riepilogo delle menzioni; `id`
-  non è letto (servirebbe solo per saltare al messaggio, issue 238). Forma
-  verificata sul sorgente del tag `v1.5.12`; non provato in una sessione
-  reale.
+  Cordiale usa `dm_with` come etichetta nel riepilogo delle menzioni e per
+  aprire la finestra giusta (peer se non `null`, altrimenti `channel`, con
+  lo stesso fold di ogni finestra). Un clic su una riga apre la finestra,
+  chiede `GET .../messages?around=<id>&limit=50`, unisce la pagina alle righe
+  note, scorre alla riga e la evidenzia per tre secondi; lo scorrimento usa
+  l'altezza media delle righe già misurate, quindi è approssimato. Senza `id`
+  (server più vecchio) si ferma alla finestra. Finestra non più aperta, 404 o
+  id assente dalla pagina danno un messaggio in barra di stato, non un
+  errore generico. Forma verificata sul sorgente del tag `v1.5.12`; il
+  parametro `around` è preso dalla issue 238 e non è stato riletto sul
+  sorgente server; non provato in una sessione reale.
 - **Conteggi della finestra di sé dopo un cambio nick proprio (v37).** Il
   listener sul topic del proprio nick riceve `window_counts` con `channel`
   uguale al segmento del topic, cioè al nick con cui il listener è stato

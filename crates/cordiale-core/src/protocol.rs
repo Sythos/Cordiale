@@ -49,7 +49,7 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// and still accepts the connect.
 ///
 /// 35 adds `id` and `dm_with` to the rows of `mentions_bundle` (Cordiale
-/// reads `dm_with` to label a DM mention); 36 adds `dm_with` to every
+/// reads `dm_with` to find a mention's window and `id` to land on it); 36 adds `dm_with` to every
 /// scrollback row; 37 removes `dm_conversation_id` from scrollback rows and
 /// `query_windows_list` entries, and a nick change moves nothing server-side
 /// any more (a renamed peer's next message opens a new window). Last

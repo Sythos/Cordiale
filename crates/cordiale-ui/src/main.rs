@@ -37,6 +37,7 @@ mod history;
 mod home;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
 mod key_prompt;
+mod mentions;
 mod passkeys;
 mod player;
 mod queries;
@@ -91,6 +92,7 @@ use admin_handlers::*;
 use channels::*;
 use frames::*;
 use history::*;
+use mentions::*;
 use queries::*;
 use slash::*;
 use ui_callbacks::*;
@@ -426,6 +428,8 @@ enum WorkerCommand {
     Disconnect,
     GoHome,
     LoadOlderHistory,
+    /// A row of the mentions summary was clicked (its index in the rows).
+    OpenMention(usize),
     /// Rebuilds the open window's rows from the stored history, trimming
     /// its oldest rows first when `trim` is set. The chat pane asks for it:
     /// only the pane knows whether the reader follows the newest line, and
@@ -1107,6 +1111,8 @@ struct PanelState {
     /// Latest back-from-away mentions summary per network, kept apart from
     /// `reply_view` so a later reply can't lose it; `/mentions` reopens it.
     mentions_bundles: HashMap<String, ReplyView>,
+    /// Where each row of that summary leads, row for row (`None`: nowhere).
+    mention_jumps: HashMap<String, Vec<Option<MentionJump>>>,
 }
 
 struct SettingsState {
@@ -1439,6 +1445,7 @@ impl WorkerState {
                 dcc_offers: Vec::new(),
                 archive: None,
                 mentions_bundles: HashMap::new(),
+                mention_jumps: HashMap::new(),
             },
             windows: WindowState {
                 window_states: HashMap::new(),
@@ -2316,6 +2323,9 @@ async fn run_worker(
                     Some(WorkerCommand::LoadOlderHistory) => {
                         handle_load_older_history(&mut state, &ui).await;
                     }
+                    Some(WorkerCommand::OpenMention(index)) => {
+                        handle_open_mention(&mut state, &ui, index).await;
+                    }
                     Some(WorkerCommand::RebuildChat { key, trim }) => {
                         handle_rebuild_chat(&mut state, &ui, &key, trim);
                     }
@@ -2782,6 +2792,7 @@ async fn finish_connect(
             state.networks.presence_by_network.clear();
             state.networks.peer_away.clear();
             state.panels.mentions_bundles.clear();
+            state.panels.mention_jumps.clear();
             state.prefs.upload_limits = None;
             state.prefs.web_bundle = None;
             state.networks.own_nicks = network_nicks_from_boot(&outcome);
@@ -9585,11 +9596,14 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
     let subject = view.subject.clone();
     let network = view.network.clone();
     let rows = view.rows.clone();
+    // Only the message rows of the mentions summary (no label) lead anywhere.
+    let mentions = kind == "mentions_bundle";
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let rows: Vec<ReplyRow> = rows
             .into_iter()
             .map(|(label, value)| ReplyRow {
+                jump: mentions && label.is_empty(),
                 label: label.into(),
                 value: value.into(),
             })
