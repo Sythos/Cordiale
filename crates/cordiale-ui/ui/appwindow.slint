@@ -1291,9 +1291,18 @@ export component AppWindow inherits Window {
     in-out property <int> pref-upload-ttl-index: 0;
     in-out property <bool> pref-upload-confirm: false;
     callback upload-prefs-changed();
-    // Texts of the native confirmation shown before an upload.
-    out property <string> upload-confirm-title: @tr("Upload file");
-    out property <string> upload-confirm-text: @tr("Upload this file to the server and post its link in the open window?");
+    // The popup shown before an upload when "Ask before uploading" is on:
+    // the file, its thumbnail (images only) and the lifetime for this one
+    // upload (same menu as `pref-upload-ttl-index`, which it never changes).
+    in-out property <bool> upload-confirm-open: false;
+    in property <string> upload-confirm-name: "";
+    in property <string> upload-confirm-size: "";
+    in property <string> upload-confirm-kind: "";
+    in property <bool> upload-confirm-has-preview: false;
+    in property <image> upload-confirm-preview;
+    in-out property <int> upload-confirm-ttl-index: 0;
+    callback upload-confirm-accepted();
+    callback upload-confirm-cancelled();
     // Offered when pasting text of several lines into the one-line compose
     // box.
     out property <string> paste-upload-title: @tr("Paste as a file");
@@ -2452,6 +2461,10 @@ export component AppWindow inherits Window {
             return @tr("Open a channel or private conversation before attaching a file.");
         } else if status-kind == "attach-failed" {
             return @tr("Couldn't upload {}.", status-attach-name);
+        } else if status-kind == "attach-expired" {
+            return @tr("{} expired before its link could be posted.", status-attach-name);
+        } else if status-kind == "attach-expiry-unknown" {
+            return @tr("The server didn't say when {} expires; its link was posted without a lifetime.", status-attach-name);
         } else if status-kind == "theme-change-failed" {
             return @tr("Couldn't change the theme on the server.");
         } else {
@@ -7422,6 +7435,132 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+        }
+    }
+    // The upload confirmation (see `upload-confirm-open`): preview, lifetime
+    // for this file, and where the link will be posted. Enter sends, Escape
+    // cancels.
+    if upload-confirm-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        Rectangle {
+            width: min(480px, parent.width - 32px);
+            height: min(460px, parent.height - 32px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-width: 1px;
+            border-radius: 8px;
+            border-color: #8080806a;
+            background: theme == "dark" ? #242424 : white;
+
+            FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        upload-confirm-cancelled();
+                        return accept;
+                    }
+                    if event.text == Key.Return {
+                        upload-confirm-accepted();
+                        return accept;
+                    }
+                    return reject;
+                }
+
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                alignment: start;
+
+                Text {
+                    text: @tr("Upload file");
+                    font-size: 18px * FontScale.percent / 100;
+                    font-weight: 600;
+                }
+                if upload-confirm-has-preview : Image {
+                    source: upload-confirm-preview;
+                    image-fit: ImageFit.contain;
+                    height: 180px;
+                    accessible-role: AccessibleRole.image;
+                    accessible-label: @tr("Preview of {}", upload-confirm-name);
+                }
+                if !upload-confirm-has-preview : Rectangle {
+                    height: 120px;
+                    border-width: 1px;
+                    border-radius: 6px;
+                    border-color: #8080806a;
+
+                    Text {
+                        width: parent.width - 16px;
+                        text: upload-confirm-kind == "video" ? @tr("🎬 No preview for videos.")
+                            : upload-confirm-kind == "audio" ? @tr("🎵 No preview for audio.")
+                            : upload-confirm-kind == "image" ? @tr("📸 This image can't be previewed.")
+                            : @tr("📄 No preview for this file.");
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+                Text {
+                    text: upload-confirm-name;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    text: upload-confirm-kind == "image" ? @tr("Image, {}", upload-confirm-size)
+                        : upload-confirm-kind == "video" ? @tr("Video, {}", upload-confirm-size)
+                        : upload-confirm-kind == "audio" ? @tr("Audio, {}", upload-confirm-size)
+                        : @tr("Document, {}", upload-confirm-size);
+                }
+                Text {
+                    text: @tr("The link will be posted in {}.", current-channel-label);
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: @tr("Keep this file for");
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    ComboBox {
+                        model: [
+                            @tr("Server default"),
+                            @tr("1 hour"),
+                            @tr("12 hours"),
+                            @tr("1 day"),
+                            @tr("3 days")
+                        ];
+                        current-index <=> upload-confirm-ttl-index;
+                        horizontal-stretch: 0;
+                        min-width: 140px;
+                        accessible-label: @tr("Keep this file for");
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    Button {
+                        text: @tr("Cancel");
+                        clicked => { upload-confirm-cancelled(); }
+                    }
+                    Button {
+                        text: @tr("Send");
+                        primary: true;
+                        clicked => { upload-confirm-accepted(); }
+                    }
+                }
+            }
             }
         }
     }

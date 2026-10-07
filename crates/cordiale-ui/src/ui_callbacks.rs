@@ -815,6 +815,21 @@ pub(crate) fn register_attach_callbacks(
         confirm_and_attach(&ui, &tx_for_attach, path);
     });
 
+    let tx_for_confirm = worker_tx.clone();
+    let weak_for_confirm = ui.as_weak();
+    ui.on_upload_confirm_accepted(move || {
+        if let Some(ui) = weak_for_confirm.upgrade() {
+            finish_upload_confirm(&ui, &tx_for_confirm, true);
+        }
+    });
+    let tx_for_cancel = worker_tx.clone();
+    let weak_for_cancel = ui.as_weak();
+    ui.on_upload_confirm_cancelled(move || {
+        if let Some(ui) = weak_for_cancel.upgrade() {
+            finish_upload_confirm(&ui, &tx_for_cancel, false);
+        }
+    });
+
     // Files dropped on the window go through the paperclip's flow, like
     // Cicchetto's drop zone. Winit reports them (Windows, macOS, X11);
     // the confirmation runs once the event has been handled.

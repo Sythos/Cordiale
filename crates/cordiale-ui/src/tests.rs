@@ -6754,6 +6754,41 @@ fn format_file_size_uses_binary_units() {
     assert_eq!(format_file_size(5 * 1024 * 1024), "5.0 MiB");
 }
 
+fn expiry_at(text: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .expect("test time")
+        .with_timezone(&chrono::Utc)
+}
+
+#[test]
+fn attach_expiry_counts_from_the_returned_expiry() {
+    let now = expiry_at("2026-10-07T10:00:00Z");
+    let live = |text: &str| AttachExpiry::Live(text.to_string());
+    assert_eq!(attach_expiry("2026-10-07T11:30:00Z", now), live("1,5h"));
+    // Offsets are honoured, not read as UTC.
+    assert_eq!(attach_expiry("2026-10-07T13:00:00+02:00", now), live("1h"));
+}
+
+#[test]
+fn attach_expiry_shrinks_with_the_time_spent_before_posting() {
+    let expires = "2026-10-08T10:00:00Z";
+    let live = |text: &str| AttachExpiry::Live(text.to_string());
+    let at_start = expiry_at("2026-10-07T10:00:00Z");
+    assert_eq!(attach_expiry(expires, at_start), live("24h"));
+    // A minute lost to processing is shown, and rounded down.
+    let later = expiry_at("2026-10-07T10:01:00Z");
+    assert_eq!(attach_expiry(expires, later), live("23,9h"));
+}
+
+#[test]
+fn attach_expiry_refuses_expired_and_unreadable_values() {
+    let now = expiry_at("2026-10-07T10:00:00Z");
+    assert_eq!(attach_expiry("2026-10-07T09:59:00Z", now), AttachExpiry::Expired);
+    assert_eq!(attach_expiry("2026-10-07T10:00:10Z", now), AttachExpiry::Expired);
+    assert_eq!(attach_expiry("", now), AttachExpiry::Unknown);
+    assert_eq!(attach_expiry("tomorrow", now), AttachExpiry::Unknown);
+}
+
 #[test]
 fn decline_invite_errors_map_to_status_keys() {
     assert_eq!(decline_invite_error_status(Some(404)), None);

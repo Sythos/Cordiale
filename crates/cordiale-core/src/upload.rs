@@ -89,9 +89,38 @@ pub fn mime_for_filename(filename: &str) -> Option<(&'static str, UploadCategory
     Some(found)
 }
 
-/// The chat message announcing an uploaded file, as Cicchetto posts it.
-pub fn attachment_message(category: UploadCategory, url: &str) -> String {
-    format!("{} {url}", category.emoji())
+/// Shortest remaining lifetime worth announcing, in seconds (0,01 h).
+const MIN_ANNOUNCED_SECS: i64 = 36;
+
+/// The remaining lifetime of an upload as hours with a decimal comma and no
+/// trailing zeros (`24h`, `1,5h`). It is rounded down, to a tenth of an hour
+/// (hundredths below that), so the text never promises more than the server
+/// keeps. `None` when under 0,01 h is left or the time has passed: such an
+/// upload isn't announced as live.
+pub fn remaining_lifetime_label(remaining_secs: i64) -> Option<String> {
+    if remaining_secs < MIN_ANNOUNCED_SECS {
+        return None;
+    }
+    let tenths = remaining_secs / 360;
+    if tenths == 0 {
+        return Some(format!("0,{:02}h", remaining_secs / 36));
+    }
+    let (hours, tenth) = (tenths / 10, tenths % 10);
+    Some(if tenth == 0 {
+        format!("{hours}h")
+    } else {
+        format!("{hours},{tenth}h")
+    })
+}
+
+/// The chat message announcing an uploaded file, as Cicchetto posts it, with
+/// the remaining lifetime (see [`remaining_lifetime_label`]) after the link
+/// when it is known.
+pub fn attachment_message(category: UploadCategory, url: &str, remaining: Option<&str>) -> String {
+    match remaining {
+        Some(remaining) => format!("{} {url} ({remaining})", category.emoji()),
+        None => format!("{} {url}", category.emoji()),
+    }
 }
 
 #[cfg(test)]
@@ -123,9 +152,49 @@ mod tests {
     #[test]
     fn announces_uploads_with_the_category_emoji() {
         assert_eq!(
-            attachment_message(UploadCategory::Image, "https://irc.example/uploads/abc.png"),
+            attachment_message(
+                UploadCategory::Image,
+                "https://irc.example/uploads/abc.png",
+                None
+            ),
             "📸 https://irc.example/uploads/abc.png"
         );
         assert_eq!(UploadCategory::Audio.emoji(), "🎵");
+    }
+
+    #[test]
+    fn appends_the_remaining_lifetime_once() {
+        assert_eq!(
+            attachment_message(
+                UploadCategory::Video,
+                "https://irc.example/uploads/abc.mp4",
+                Some("24h")
+            ),
+            "🎬 https://irc.example/uploads/abc.mp4 (24h)"
+        );
+    }
+
+    #[test]
+    fn formats_whole_and_fractional_hours() {
+        assert_eq!(remaining_lifetime_label(86_400).as_deref(), Some("24h"));
+        assert_eq!(remaining_lifetime_label(5_400).as_deref(), Some("1,5h"));
+        assert_eq!(remaining_lifetime_label(3_600).as_deref(), Some("1h"));
+        assert_eq!(remaining_lifetime_label(259_200).as_deref(), Some("72h"));
+        assert_eq!(remaining_lifetime_label(360).as_deref(), Some("0,1h"));
+    }
+
+    #[test]
+    fn rounds_the_lifetime_down() {
+        assert_eq!(remaining_lifetime_label(86_399).as_deref(), Some("23,9h"));
+        assert_eq!(remaining_lifetime_label(5_759).as_deref(), Some("1,5h"));
+        assert_eq!(remaining_lifetime_label(359).as_deref(), Some("0,09h"));
+        assert_eq!(remaining_lifetime_label(36).as_deref(), Some("0,01h"));
+    }
+
+    #[test]
+    fn expired_or_nearly_expired_uploads_have_no_label() {
+        assert_eq!(remaining_lifetime_label(35), None);
+        assert_eq!(remaining_lifetime_label(0), None);
+        assert_eq!(remaining_lifetime_label(-3_600), None);
     }
 }
