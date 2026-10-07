@@ -271,3 +271,19 @@ pannello si ricostruisce solo se l'ordine cambia o se non corrisponde più
 alle righe salvate. La pagina Debug mostra le righe tenute (totale e
 finestra più grande). Non misurato su una finestra da 50k righe e mai
 provato a mano contro un server reale.
+
+**Aggiornamento (2026-10-07)**: tipo di ban predefinito per `/kb` e
+`/kickban` (issue 247), in Settings > Display: `nick` (`nick!*@*`), `host`
+(`*!*@host`, il predefinito, come prima) o `user_host` (`*!user@host`, con
+l'ident come lo restituisce `resolve_userhost`, tilde compresa). Il tipo è
+fissato quando parte il comando, quindi cambiarlo durante l'attesa della
+risposta non altera la richiesta. Se manca una parte necessaria alla forma
+scelta (per esempio `not_cached`) non parte né il ban né il kick, la barra di
+stato lo dice e non si ripiega mai su una maschera diversa; prima il kick
+partiva comunque. Ordine ban poi kick invariato, comandi senza conferma del
+server. Limiti: la preferenza è **solo locale al dispositivo**
+(`default_ban_type` in `settings.json`), perché Grappa non ha ancora un campo
+di account per questo; la grafia `*!user@host` è quella IRC usuale, non
+riletta sul sorgente upstream (issue upstream 2347), e va riallineata quando
+Cicchetto fissa dove salva l'impostazione. Il menu Kickban e le voci Ban nick
+/ Ban host (issue 246) non ci sono ancora: potranno usare `BanType::mask`.

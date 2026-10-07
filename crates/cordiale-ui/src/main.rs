@@ -512,6 +512,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_theme(theme_to_slint(settings.theme));
     ui.set_palette_muted(slint_color(classic_muted(settings.theme == Theme::Dark)));
     ui.set_font_size_percent(i32::from(settings.effective_font_size_percent()));
+    ui.set_ban_type_index(settings.default_ban_type.index());
     ui.invoke_apply_color_scheme();
     // A built-in color theme applies from the first screen; a Grappa one
     // needs the session and is applied after sign-in.
@@ -4248,13 +4249,15 @@ async fn user_aliases(state: &mut WorkerState) -> HashMap<String, String> {
     state.prefs.aliases.clone().unwrap_or_default()
 }
 
-/// A `/kb` waiting for the target's host.
+/// A `/kb` waiting for the target's host. The ban form is fixed when the
+/// command starts, so changing the setting meanwhile doesn't alter it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingKickBan {
     network: String,
     channel: String,
     nick: String,
     reason: String,
+    ban_type: cordiale_core::ban::BanType,
 }
 
 /// Shows a slash-command outcome in the status bar; `hint` fills its `{}`.

@@ -39,6 +39,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ban::BanType;
 use crate::domain::{Profile, Server};
 use crate::passkey_origin::{passkey_origin, OverrideCheck};
 use crate::presence::PresencePref;
@@ -132,6 +133,10 @@ pub struct Settings {
     /// shown above the compose box lives here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mute_since: BTreeMap<String, i64>,
+    /// Ban form used by `/kb` and `/kickban`. Kept on this device only:
+    /// Grappa has no account-level field for it.
+    #[serde(default)]
+    pub default_ban_type: BanType,
 }
 
 /// A radio station added in Settings > Radio.
@@ -175,6 +180,7 @@ impl Default for Settings {
             presence_pins: BTreeMap::new(),
             presence_unsynced: BTreeSet::new(),
             mute_since: BTreeMap::new(),
+            default_ban_type: BanType::default(),
         }
     }
 }
@@ -1067,6 +1073,7 @@ mod tests {
             presence_pins: BTreeMap::from([("libera #rust".to_string(), PresencePref::Hide)]),
             presence_unsynced: BTreeSet::from(["libera #rust".to_string()]),
             mute_since: BTreeMap::from([("libera #rust".to_string(), 1_700_000_000)]),
+            default_ban_type: BanType::UserHost,
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");
@@ -1083,6 +1090,16 @@ mod tests {
         assert!(decoded.presence_unsynced.is_empty());
         let json = serde_json::to_value(Settings::default()).expect("serialize");
         assert!(json.get("presence_pins").is_none());
+    }
+
+    #[test]
+    fn settings_without_a_ban_type_default_to_host() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
+        assert_eq!(decoded.default_ban_type, BanType::Host);
+        let decoded: Settings =
+            serde_json::from_str(r#"{"default_ban_type":"user_host"}"#).expect("deserialize");
+        assert_eq!(decoded.default_ban_type, BanType::UserHost);
     }
 
     #[test]

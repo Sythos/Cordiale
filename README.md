@@ -229,7 +229,9 @@ Cordiale also covers:
   `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb`, `/beep`, the services shortcuts), `/np` for the radio,
+  expansion, `/kb` with a default ban type of nick, host or user@host
+  chosen in Settings and kept on the device, `/beep`, the services
+  shortcuts), `/np` for the radio,
   and a bare `/umode` that opens the user-mode toggles; a bare `/topic` or
   `/mode` shows the channel's topic or modes in the status bar.
 - **Chat:** multi-colored mIRC messages wrap as one paragraph, channel MODE

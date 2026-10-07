@@ -848,6 +848,8 @@ component CleartextNotice {
 export component AppWindow inherits Window {
     in-out property <int> font-size-percent: 100;
     callback font-size-changed(int);
+    in-out property <int> ban-type-index: 1;
+    callback ban-type-changed(int);
     changed font-size-percent => { FontScale.percent = font-size-percent; }
     // Account-wide unread count (Grappa's `badge_count`). It goes in the
     // title, which every taskbar shows, and on Windows also in a taskbar
@@ -2238,8 +2240,8 @@ export component AppWindow inherits Window {
             return @tr("The server refused that command ({}).", status-command-hint);
         } else if status-kind == "alias-too-deep" {
             return @tr("That alias expands into too many others: {}", status-command-hint);
-        } else if status-kind == "kickban-host-unknown" {
-            return @tr("{}'s host isn't known yet, so they were only kicked; /whois them first to ban too.", status-command-hint);
+        } else if status-kind == "kickban-mask-failed" {
+            return @tr("Couldn't build a ban mask for {}, so nobody was banned or kicked; /whois them first or change the default ban type.", status-command-hint);
         } else if status-kind == "command-topic" {
             return @tr("Topic of {}", status-command-hint);
         } else if status-kind == "command-no-topic" {
@@ -4610,6 +4612,31 @@ export component AppWindow inherits Window {
                 }
                 Text {
                     text: @tr("Automatic follows the language of Cordiale.");
+                    wrap: word-wrap;
+                    color: palette-muted;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    Text {
+                        text: @tr("Default ban type");
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    ComboBox {
+                        model: [
+                            @tr("Nick (nick!*@*)"),
+                            @tr("Host (*!*@host)"),
+                            @tr("User and host (*!user@host)")
+                        ];
+                        current-index <=> ban-type-index;
+                        horizontal-stretch: 0;
+                        min-width: 220px;
+                        selected => { ban-type-changed(ban-type-index); }
+                    }
+                }
+                Text {
+                    text: @tr("Used by /kb and /kickban. Saved on this device only.");
                     wrap: word-wrap;
                     color: palette-muted;
                 }

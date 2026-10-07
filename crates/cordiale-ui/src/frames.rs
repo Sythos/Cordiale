@@ -1,37 +1,52 @@
 use super::*;
 
-/// The `*!*@host` ban mask from a `resolve_userhost` reply, if it has one.
-pub(crate) fn kickban_mask(reply: &Value) -> Option<String> {
-    if reply.get("status").and_then(Value::as_str) != Some("ok") {
-        return None;
-    }
-    let host = reply.get("response")?.get("host")?.as_str()?;
-    (!host.is_empty()).then(|| format!("*!*@{host}"))
+/// The ban mask in the form `pending` captured, from a `resolve_userhost`
+/// reply (ignored by the nick form). `None` when the reply is not an `ok`
+/// or lacks a part that form needs: there is no fallback to another form.
+pub(crate) fn kickban_mask(pending: &PendingKickBan, reply: &Value) -> Option<String> {
+    let identity = (reply.get("status").and_then(Value::as_str) == Some("ok"))
+        .then(|| reply.get("response"))
+        .flatten();
+    let part = |key: &str| identity?.get(key)?.as_str();
+    pending
+        .ban_type
+        .mask(&pending.nick, part("user"), part("host"))
+        .ok()
 }
 
-/// Bans by host when it was known, then kicks regardless, as Cicchetto
-/// does; an unknown host (`not_cached`) is reported, not fatal.
+/// Reports a `/kb` that could not build its mask: nobody is banned or
+/// kicked.
+pub(crate) fn kickban_mask_failed(ui: &slint::Weak<AppWindow>, nick: &str) {
+    let nick = nick.to_string();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_command_hint(nick.into());
+        ui.set_status_kind("kickban-mask-failed".into());
+    });
+}
+
+/// Bans with the mask built from the reply, then kicks. When no mask can
+/// be built (for example `not_cached`) nothing is sent and the failure is
+/// reported.
 fn finish_kickban(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
     pending: PendingKickBan,
     reply: &Value,
 ) {
-    match kickban_mask(reply) {
-        Some(mask) => send_user_verb(
-            state,
-            &pending.network,
-            "ban",
-            serde_json::json!({ "channel": pending.channel, "mask": mask }),
-        ),
-        None => {
-            let nick = pending.nick.clone();
-            let _ = ui.upgrade_in_event_loop(move |ui| {
-                ui.set_status_command_hint(nick.into());
-                ui.set_status_kind("kickban-host-unknown".into());
-            });
-        }
+    match kickban_mask(&pending, reply) {
+        Some(mask) => send_kickban(state, &pending, &mask),
+        None => kickban_mask_failed(ui, &pending.nick),
     }
+}
+
+/// Sends the ban for `mask`, then the kick, in that order.
+pub(crate) fn send_kickban(state: &WorkerState, pending: &PendingKickBan, mask: &str) {
+    send_user_verb(
+        state,
+        &pending.network,
+        "ban",
+        serde_json::json!({ "channel": pending.channel, "mask": mask }),
+    );
     send_user_verb(
         state,
         &pending.network,
