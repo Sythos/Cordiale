@@ -7079,6 +7079,68 @@ fn parse_mentions_bundle_labels_a_dm_mention_with_the_peer() {
 }
 
 #[test]
+fn mention_jumps_resolve_the_window_and_keep_the_id_optional() {
+    let row = |channel: &str, extra: Value| {
+        let mut row = serde_json::json!({
+            "server_time": 1790000000000_i64,
+            "channel": channel,
+            "sender": "Alice",
+            "body": "hi",
+            "kind": "privmsg"
+        });
+        if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+            row.extend(extra.clone());
+        }
+        row
+    };
+    let payload = serde_json::json!({
+        "messages": [
+            // A DM received under a previous own nick: `channel` is that old
+            // nick, `dm_with` still names the peer.
+            row("oldnick", serde_json::json!({"id": 7, "dm_with": "Alice"})),
+            row("#Rust", serde_json::json!({"id": 8, "dm_with": null})),
+            // A server older than v35: no `id`, no `dm_with`.
+            row("#rust", serde_json::json!({})),
+            row("#rust", serde_json::json!({"id": "9", "dm_with": ""}))
+        ]
+    });
+    let channel = |name: &str| MentionWindow::Channel(name.to_string());
+    let jump = |window: MentionWindow, id: Option<i64>| MentionJump { window, id };
+    assert_eq!(
+        parse_mention_jumps(&payload),
+        vec![
+            jump(MentionWindow::Query("Alice".to_string()), Some(7)),
+            jump(channel("#Rust"), Some(8)),
+            jump(channel("#rust"), None),
+            jump(channel("#rust"), None),
+        ]
+    );
+    assert!(parse_mention_jumps(&serde_json::json!({})).is_empty());
+    // Folded like any window name, the channel finds its open window.
+    assert_eq!(
+        window_state_key("libera", "#Rust"),
+        window_state_key("libera", "#rust")
+    );
+}
+
+#[test]
+fn mention_row_finds_the_message_among_the_shown_rows() {
+    let row = |kind: &str, id: i64| {
+        render_message(
+            &serde_json::json!({"kind": kind, "sender": "alice", "body": "x", "id": id}),
+            None,
+        )
+    };
+    let messages = vec![row("privmsg", 1), row("join", 2), row("privmsg", 3)];
+    assert_eq!(mention_row(&messages, 3, false), Some(2));
+    // Denoise leaves the join out of the pane, so the row moves up.
+    assert_eq!(mention_row(&messages, 3, true), Some(1));
+    // The message is no longer in the scrollback.
+    assert_eq!(mention_row(&messages, 99, false), None);
+    assert_eq!(mention_row(&[], 1, false), None);
+}
+
+#[test]
 fn parse_mentions_bundle_keeps_order_and_null_bodies() {
     let topic = "grappa:user:vjt";
     let message = |kind: &str, body: Value| serde_json::json!({"server_time": 1790000000000_i64, "channel": "#rust", "sender": "alice", "body": body, "kind": kind});

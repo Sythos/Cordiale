@@ -4661,6 +4661,55 @@ pub(crate) fn parse_mentions_bundle(
     })
 }
 
+/// The window a mention lives in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MentionWindow {
+    Channel(String),
+    /// The peer's raw nick: an inbound DM is stored under our own nick, so
+    /// `channel` would name the self window where the row isn't shown.
+    Query(String),
+}
+
+/// Where a row of the mentions summary leads: its window and, from protocol
+/// v35, the scrollback id to land on (`None` on an older server).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MentionJump {
+    pub(crate) window: MentionWindow,
+    pub(crate) id: Option<i64>,
+}
+
+/// `dm_with` when it is a non-empty string, else `channel`.
+pub(crate) fn mention_window(channel: &str, dm_with: Option<&Value>) -> MentionWindow {
+    match dm_with
+        .and_then(Value::as_str)
+        .filter(|peer| !peer.is_empty())
+    {
+        Some(peer) => MentionWindow::Query(peer.to_string()),
+        None => MentionWindow::Channel(channel.to_string()),
+    }
+}
+
+/// One jump per message of a bundle `parse_mentions_bundle` accepted, in
+/// the same order.
+pub(crate) fn parse_mention_jumps(payload: &Value) -> Vec<MentionJump> {
+    let Some(messages) = payload.get("messages").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    messages
+        .iter()
+        .map(|message| {
+            let channel = message
+                .get("channel")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            MentionJump {
+                window: mention_window(channel, message.get("dm_with")),
+                id: message.get("id").and_then(Value::as_i64),
+            }
+        })
+        .collect()
+}
+
 /// Back from away: keeps the summary for `/mentions` and opens it, as
 /// Cicchetto focuses its mentions window (returning is the user's action).
 fn handle_mentions_bundle(
@@ -4680,6 +4729,16 @@ fn handle_mentions_bundle(
         .panels
         .mentions_bundles
         .insert(view.network.clone(), view.clone());
+    // The summary rows after the away period (and reason) are the messages;
+    // the rows before them have nowhere to go.
+    let jumps = parse_mention_jumps(payload);
+    let leading = view.rows.len().saturating_sub(jumps.len());
+    let mut row_jumps = vec![None; leading];
+    row_jumps.extend(jumps.into_iter().map(Some));
+    state
+        .panels
+        .mention_jumps
+        .insert(view.network.clone(), row_jumps);
     show_reply_view(state, ui, view);
 }
 
