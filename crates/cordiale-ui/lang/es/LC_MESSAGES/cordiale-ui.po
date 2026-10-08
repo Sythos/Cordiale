@@ -1229,8 +1229,8 @@ msgid "User and host (*!user@host)"
 msgstr "Usuario y host (*!usuario@host)"
 
 msgctxt "AppWindow"
-msgid "Used by /kb and /kickban. Saved on this device only."
-msgstr "Lo usan /kb y /kickban. Se guarda solo en este dispositivo."
+msgid "Used by /kb and /kickban. Saved to your account."
+msgstr "Lo usan /kb y /kickban. Se guarda en tu cuenta."
 
 msgctxt "AppWindow"
 msgid "Done."

@@ -23,8 +23,8 @@
 //! Ban masks for `/kb` and `/kickban`: which form the user prefers and how
 //! each one is built from what is known about the target.
 //!
-//! The choice is a device-local preference (`Settings::default_ban_type`):
-//! Grappa has no account-level field for it yet. A mask is only ever built
+//! The choice is an account setting kept by Grappa (`ban_mask_form`, see
+//! `GrappaClient::fetch_ban_mask_form`). A mask is only ever built
 //! in the exact form asked for; when a part it needs is missing there is
 //! no mask, never a broader or different one.
 
@@ -55,6 +55,25 @@ impl BanType {
     /// Whether the mask needs the target's `user@host` from the server.
     pub fn needs_userhost(self) -> bool {
         !matches!(self, BanType::Nick)
+    }
+
+    /// The value Grappa stores in `ban_mask_form`.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            BanType::Nick => "nick",
+            BanType::Host => "host",
+            BanType::UserHost => "user_host",
+        }
+    }
+
+    /// The form for a `ban_mask_form` value; `None` for anything else.
+    pub fn from_wire_name(name: &str) -> Option<Self> {
+        match name {
+            "nick" => Some(BanType::Nick),
+            "host" => Some(BanType::Host),
+            "user_host" => Some(BanType::UserHost),
+            _ => None,
+        }
     }
 
     /// The position in the Settings picker.
@@ -110,6 +129,17 @@ fn mask_part_is_valid(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wire_names_round_trip() {
+        for ban_type in [BanType::Nick, BanType::Host, BanType::UserHost] {
+            assert_eq!(
+                BanType::from_wire_name(ban_type.wire_name()),
+                Some(ban_type)
+            );
+        }
+        assert_eq!(BanType::from_wire_name("mask"), None);
+    }
 
     #[test]
     fn builds_each_form() {

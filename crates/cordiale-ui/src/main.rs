@@ -408,6 +408,8 @@ enum WorkerCommand {
         text_pattern: Option<String>,
     },
     PerformSave(String),
+    /// A new account default ban form picked in Settings.
+    BanTypeSave(cordiale_core::ban::BanType),
     PersonalPrefsSave {
         leave_message: String,
         away_message: String,
@@ -517,7 +519,6 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_theme(theme_to_slint(settings.theme));
     ui.set_palette_muted(slint_color(classic_muted(settings.theme == Theme::Dark)));
     ui.set_font_size_percent(i32::from(settings.effective_font_size_percent()));
-    ui.set_ban_type_index(settings.default_ban_type.index());
     ui.invoke_apply_color_scheme();
     // A built-in color theme applies from the first screen; a Grappa one
     // needs the session and is applied after sign-in.
@@ -1140,6 +1141,10 @@ struct SettingsState {
     /// The account's command aliases, read on the first slash command and
     /// dropped whenever they change so the next one reads them again.
     aliases: Option<HashMap<String, String>>,
+    /// The account's default ban form (`ban_mask_form`), as the server last
+    /// reported or accepted it; `None` until read, or when the read failed
+    /// (the next `/kb` reads it again, and `host` applies if that fails).
+    ban_type: Option<cordiale_core::ban::BanType>,
     /// Display copy of the account-wide auto-away delay; `None` until the
     /// server announces it. Grappa applies the value itself.
     auto_away_debounce: Option<AutoAwayDebounce>,
@@ -1430,6 +1435,7 @@ impl WorkerState {
                 presence_unsynced: settings.presence_unsynced,
                 mute_since: settings.mute_since,
                 aliases: None,
+                ban_type: None,
                 auto_away_debounce: None,
                 quit_part_reason: None,
                 auto_away_reason: None,
@@ -2226,6 +2232,9 @@ async fn run_worker(
                     Some(WorkerCommand::AvatarRemove) => {
                         handle_avatar_remove(&state, &ui).await;
                     }
+                    Some(WorkerCommand::BanTypeSave(ban_type)) => {
+                        run_ban_type_save(&mut state, &ui, ban_type).await;
+                    }
                     Some(WorkerCommand::PersonalPrefsSave {
                         leave_message,
                         away_message,
@@ -2810,6 +2819,7 @@ async fn finish_connect(
             state.panels.reply_view = None;
             state.panels.whois_card = None;
             state.prefs.auto_away_debounce = None;
+            state.prefs.ban_type = None;
             state.prefs.quit_part_reason = None;
             state.prefs.auto_away_reason = None;
             state.prefs.away_nick_suffix = None;
@@ -2905,6 +2915,9 @@ async fn finish_connect(
 
             sync_presence_pins(state).await;
             handle_load_notification_prefs(state, ui).await;
+            // Before the first command can run, so the first Kickban uses
+            // the stored form.
+            load_ban_type(state, ui).await;
 
             let prefs_client = GrappaClient::new(server_url.clone());
             let prefs_token = token.clone();
@@ -4575,6 +4588,66 @@ async fn user_aliases(state: &mut WorkerState) -> HashMap<String, String> {
         }
     }
     state.prefs.aliases.clone().unwrap_or_default()
+}
+
+/// Reads the account's default ban form into the worker state and the
+/// Settings picker. A failed read leaves it unknown (the picker shows
+/// `host`, the server default).
+async fn load_ban_type(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
+    match client.fetch_ban_mask_form(&token).await {
+        Ok(ban_type) => {
+            state.prefs.ban_type = Some(ban_type);
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_ban_type_index(ban_type.index()));
+        }
+        Err(err) => {
+            persistence::log_line(&format!("ban mask form load failed: {err:?}"));
+            let host = cordiale_core::ban::BanType::default().index();
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_ban_type_index(host));
+        }
+    }
+}
+
+/// The form `/kb` and `/kickban` use: the account's, read again if the
+/// sign-in read failed, `host` when it still can't be known.
+async fn effective_ban_type(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+) -> cordiale_core::ban::BanType {
+    if state.prefs.ban_type.is_none() {
+        load_ban_type(state, ui).await;
+    }
+    state.prefs.ban_type.unwrap_or_default()
+}
+
+/// Body of the `WorkerCommand::BanTypeSave` arm of `run_worker`: the
+/// active form changes only once the server accepted the PUT; otherwise
+/// the picker goes back to the previous one and the error is shown.
+async fn run_ban_type_save(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    ban_type: cordiale_core::ban::BanType,
+) {
+    let previous = state.prefs.ban_type.unwrap_or_default();
+    let saved = match (state.conn.client.clone(), state.conn.token.clone()) {
+        (Some(client), Some(token)) => client.set_ban_mask_form(&token, ban_type).await,
+        _ => return,
+    };
+    match saved {
+        Ok(stored) => {
+            state.prefs.ban_type = Some(stored);
+            let _ = ui.upgrade_in_event_loop(move |ui| ui.set_ban_type_index(stored.index()));
+        }
+        Err(err) => {
+            persistence::log_line(&format!("ban mask form save failed: {err:?}"));
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_ban_type_index(previous.index());
+                ui.set_status_kind("personal-prefs-failed".into());
+            });
+        }
+    }
 }
 
 /// A `/kb`, Kickban or Ban host waiting for the target's host; the kick

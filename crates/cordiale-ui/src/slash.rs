@@ -268,9 +268,7 @@ pub(crate) async fn run_slash_command(
         }
         SlashCommand::KickBan { nick, reason } if in_channel => {
             // Read once here: the form stays fixed for this request.
-            let ban_type = persistence::load_settings()
-                .unwrap_or_default()
-                .default_ban_type;
+            let ban_type = effective_ban_type(state, ui).await;
             start_kickban(
                 state,
                 ui,
