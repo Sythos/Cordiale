@@ -294,7 +294,7 @@ msgstr "Añadir"
 
 msgctxt "AppWindow"
 msgid "Mask (nick!user@host)"
-msgstr "Máscara (nick!usuario@host)"
+msgstr "Máscara (nick!user@host)"
 
 msgctxt "AppWindow"
 msgid "Command"
@@ -1226,7 +1226,7 @@ msgstr "Host (*!*@host)"
 
 msgctxt "AppWindow"
 msgid "User and host (*!user@host)"
-msgstr "Usuario y host (*!usuario@host)"
+msgstr "Usuario y host (*!user@host)"
 
 msgctxt "AppWindow"
 msgid "Used by /kb and /kickban. Saved to your account."
