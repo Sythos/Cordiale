@@ -2705,6 +2705,10 @@ msgid "Admin actions need an administrator signed in with a full session. A clie
 msgstr "Le azioni di amministrazione richiedono un amministratore con una sessione completa. Un token client non può eseguirle."
 
 msgctxt "AppWindow"
+msgid "Couldn't delete that visitor ({}). A visitor with a lot of history can time out on the server; try again, or ask the server admin."
+msgstr "Impossibile eliminare quel visitor ({}). Un visitor con molta cronologia può andare in timeout sul server: riprova o contatta l'amministratore del server."
+
+msgctxt "AppWindow"
 msgid "That network still has accounts bound to it. Unbind them on the Credentials tab first."
 msgstr "A quella rete sono ancora collegati degli account. Scollegali prima dalla scheda Credenziali."
 

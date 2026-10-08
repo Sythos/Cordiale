@@ -4658,6 +4658,25 @@ fn a_refused_admin_write_is_told_apart() {
 }
 
 #[test]
+fn a_failed_visitor_delete_says_to_retry() {
+    // Timeouts and dropped connections look like a slow bulk delete.
+    for status in [Some(500), Some(503), None] {
+        assert_eq!(
+            admin_visitor_delete_failure_kind(status),
+            "admin-visitor-delete-failed"
+        );
+    }
+    assert_eq!(
+        admin_visitor_delete_failure_kind(Some(403)),
+        "admin-forbidden"
+    );
+    assert_eq!(
+        admin_visitor_delete_failure_kind(Some(404)),
+        "admin-action-failed"
+    );
+}
+
+#[test]
 fn network_delete_needs_a_count_for_that_network() {
     let mut state = WorkerState::new();
     // No count answered yet (counting, 404 or any failure): refused.

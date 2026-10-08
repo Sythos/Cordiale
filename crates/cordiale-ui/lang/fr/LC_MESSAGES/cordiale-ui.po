@@ -2705,6 +2705,10 @@ msgid "Admin actions need an administrator signed in with a full session. A clie
 msgstr "Les actions d'administration nécessitent un administrateur connecté avec une session complète. Un jeton client ne peut pas les effectuer."
 
 msgctxt "AppWindow"
+msgid "Couldn't delete that visitor ({}). A visitor with a lot of history can time out on the server; try again, or ask the server admin."
+msgstr "Impossible de supprimer ce visiteur ({}). Un visiteur avec beaucoup d'historique peut dépasser le délai côté serveur : réessaie ou contacte l'administrateur du serveur."
+
+msgctxt "AppWindow"
 msgid "That network still has accounts bound to it. Unbind them on the Credentials tab first."
 msgstr "Des comptes sont encore associés à ce réseau. Dissocie-les d'abord dans l'onglet Identifiants."
 

@@ -2418,6 +2418,8 @@ export component AppWindow inherits Window {
             return @tr("The server refused that admin action ({}).", status-command-hint);
         } else if status-kind == "admin-forbidden" {
             return @tr("Admin actions need an administrator signed in with a full session. A client token can't do them.");
+        } else if status-kind == "admin-visitor-delete-failed" {
+            return @tr("Couldn't delete that visitor ({}). A visitor with a lot of history can time out on the server; try again, or ask the server admin.", status-command-hint);
         } else if status-kind == "admin-network-in-use" {
             return @tr("That network still has accounts bound to it. Unbind them on the Credentials tab first.");
         } else if status-kind == "admin-credential-stopped" {
