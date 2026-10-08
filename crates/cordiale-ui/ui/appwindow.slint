@@ -396,6 +396,10 @@ component ResizeHandle {
     in property <length> target-min-width: 120px;
     in property <length> target-max-width: 420px;
 
+    // True for a panel on the right of the strip: dragging left grows it,
+    // and the strip moves left with the panel, so the pointer stays on it.
+    in property <bool> grows-left: false;
+
     width: 6px;
 
     Rectangle {
@@ -410,7 +414,7 @@ component ResizeHandle {
             if (self.pressed) {
                 target-width = max(
                     target-min-width,
-                    min(target-max-width, target-width + (self.mouse-x - self.pressed-x))
+                    min(target-max-width, target-width + (grows-left ? self.pressed-x - self.mouse-x : self.mouse-x - self.pressed-x))
                 );
             }
         }
@@ -522,6 +526,10 @@ component MemberContextMenu {
         }
 
         HorizontalLayout {
+            // Pack the role marker and the nick at the left instead of
+            // splitting the row between the two stretchy texts.
+            alignment: start;
+
             if prefix-text != "" : Text {
                 text: prefix-text;
                 wrap: no-wrap;
@@ -4077,6 +4085,7 @@ export component AppWindow inherits Window {
         // and hiding the whole column also hid it.
         ResizeHandle {
             target-width <=> members-width;
+            grows-left: true;
             target-min-width: members-min-width;
             target-max-width: max(320px, members-min-width);
         }
