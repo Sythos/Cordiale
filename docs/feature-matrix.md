@@ -281,9 +281,13 @@ risposta non altera la richiesta. Se manca una parte necessaria alla forma
 scelta (per esempio `not_cached`) non parte né il ban né il kick, la barra di
 stato lo dice e non si ripiega mai su una maschera diversa; prima il kick
 partiva comunque. Ordine ban poi kick invariato, comandi senza conferma del
-server. Limiti: la preferenza è **solo locale al dispositivo**
-(`default_ban_type` in `settings.json`), perché Grappa non ha ancora un campo
-di account per questo; la grafia `*!user@host` è quella IRC usuale, non
+server. La preferenza è ora
+un'impostazione di account (`GET/PUT /me/settings/ban-mask-form`, protocollo
+38, `ban_mask_form`): si legge all'accesso, si salva con PUT e il valore
+attivo cambia solo a risposta riuscita; assente o 404 (server pre-38) vale
+`host`. Il vecchio campo locale `default_ban_type` è ritirato e ignorato in
+`settings.json`, senza caricarlo sul server. Cordiale dichiara ancora
+`client_proto=37`: il bump a 38 va riletto sul sorgente di Grappa. Limiti: la grafia `*!user@host` è quella IRC usuale, non
 riletta sul sorgente upstream (issue upstream 2347), e va riallineata quando
 Cicchetto fissa dove salva l'impostazione. Il menu Kickban e le voci Ban nick
 / Ban host (issue 246) non ci sono ancora: potranno usare `BanType::mask`.

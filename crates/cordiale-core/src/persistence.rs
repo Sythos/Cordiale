@@ -39,7 +39,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::ban::BanType;
 use crate::domain::{Profile, Server};
 use crate::passkey_origin::{passkey_origin, OverrideCheck};
 use crate::presence::PresencePref;
@@ -133,10 +132,6 @@ pub struct Settings {
     /// shown above the compose box lives here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mute_since: BTreeMap<String, i64>,
-    /// Ban form used by `/kb` and `/kickban`. Kept on this device only:
-    /// Grappa has no account-level field for it.
-    #[serde(default)]
-    pub default_ban_type: BanType,
     /// "Shrink videos before sending": the default for video uploads, kept on
     /// this device only (never sent to Grappa). Off until the user turns it
     /// on; the upload popup starts from it and never writes it back.
@@ -185,7 +180,6 @@ impl Default for Settings {
             presence_pins: BTreeMap::new(),
             presence_unsynced: BTreeSet::new(),
             mute_since: BTreeMap::new(),
-            default_ban_type: BanType::default(),
             shrink_videos: false,
         }
     }
@@ -1079,7 +1073,6 @@ mod tests {
             presence_pins: BTreeMap::from([("libera #rust".to_string(), PresencePref::Hide)]),
             presence_unsynced: BTreeSet::from(["libera #rust".to_string()]),
             mute_since: BTreeMap::from([("libera #rust".to_string(), 1_700_000_000)]),
-            default_ban_type: BanType::UserHost,
             shrink_videos: true,
         };
 
@@ -1100,13 +1093,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_without_a_ban_type_default_to_host() {
+    fn settings_with_the_retired_ban_type_still_load() {
         let decoded: Settings =
-            serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
-        assert_eq!(decoded.default_ban_type, BanType::Host);
-        let decoded: Settings =
-            serde_json::from_str(r#"{"default_ban_type":"user_host"}"#).expect("deserialize");
-        assert_eq!(decoded.default_ban_type, BanType::UserHost);
+            serde_json::from_str(r#"{"default_ban_type":"user_host","theme":"dark"}"#)
+                .expect("deserialize");
+        assert_eq!(decoded.theme, Theme::Dark);
+        let json = serde_json::to_value(&decoded).expect("serialize");
+        assert!(json.get("default_ban_type").is_none());
     }
 
     #[test]

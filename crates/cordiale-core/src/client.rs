@@ -1144,6 +1144,59 @@ impl GrappaClient {
             .await
     }
 
+    /// `GET /me/settings/ban-mask-form` (protocol v38): the account's
+    /// default ban form. An absent or unknown value, and a server without
+    /// the endpoint (404), read as `host`, the server default.
+    pub async fn fetch_ban_mask_form(
+        &self,
+        token: &str,
+    ) -> Result<crate::ban::BanType, GrappaClientError> {
+        match self
+            .fetch_setting(token, "ban-mask-form", "ban_mask_form")
+            .await
+        {
+            Ok(value) => Ok(value
+                .as_str()
+                .and_then(crate::ban::BanType::from_wire_name)
+                .unwrap_or_default()),
+            Err(err) if err.status() == Some(StatusCode::NOT_FOUND) => {
+                Ok(crate::ban::BanType::default())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// `PUT /me/settings/ban-mask-form`: returns the form the server
+    /// stored, read from its response (the sent one if the response
+    /// carries none).
+    pub async fn set_ban_mask_form(
+        &self,
+        token: &str,
+        ban_type: crate::ban::BanType,
+    ) -> Result<crate::ban::BanType, GrappaClientError> {
+        let url = format!("{}/me/settings/ban-mask-form", self.base_url);
+        let body = serde_json::json!({ "ban_mask_form": ban_type.wire_name() });
+        let response = self
+            .http
+            .put(url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        let stored = response
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|body| {
+                body.get("ban_mask_form")
+                    .and_then(Value::as_str)
+                    .and_then(crate::ban::BanType::from_wire_name)
+            })
+            .unwrap_or(ban_type);
+        Ok(stored)
+    }
+
     /// The text sent when the bouncer marks the user away (`None`: the
     /// server's own).
     pub async fn fetch_auto_away_reason(
@@ -4662,6 +4715,90 @@ mod tests {
             .set_dcc_auto_accept("t", "libera", true)
             .await
             .expect("dcc");
+    }
+
+    #[tokio::test]
+    async fn ban_mask_form_reads_and_saves_all_three_forms() {
+        use crate::ban::BanType;
+        for (wire, expected) in [
+            ("nick", BanType::Nick),
+            ("host", BanType::Host),
+            ("user_host", BanType::UserHost),
+        ] {
+            let mock_server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/me/settings/ban-mask-form"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "ban_mask_form": wire })),
+                )
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("PUT"))
+                .and(path("/me/settings/ban-mask-form"))
+                .and(body_json(serde_json::json!({ "ban_mask_form": wire })))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "ban_mask_form": wire })),
+                )
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+            let client = GrappaClient::new(mock_server.uri());
+            assert_eq!(
+                client.fetch_ban_mask_form("t").await.expect("get"),
+                expected
+            );
+            assert_eq!(
+                client.set_ban_mask_form("t", expected).await.expect("put"),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ban_mask_form_falls_back_to_host_and_reports_failures() {
+        use crate::ban::BanType;
+        // Pre-38 server: no endpoint at all.
+        let old_server = MockServer::start().await;
+        let client = GrappaClient::new(old_server.uri());
+        assert_eq!(
+            client.fetch_ban_mask_form("t").await.expect("404 is host"),
+            BanType::Host
+        );
+        assert!(client.set_ban_mask_form("t", BanType::Nick).await.is_err());
+
+        // Absent or unknown value reads as host.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/ban-mask-form"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let client = GrappaClient::new(server.uri());
+        assert_eq!(
+            client.fetch_ban_mask_form("t").await.expect("absent"),
+            BanType::Host
+        );
+
+        // Any other failure is an error, not a silent host.
+        let failing = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me/settings/ban-mask-form"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&failing)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/me/settings/ban-mask-form"))
+            .respond_with(ResponseTemplate::new(422))
+            .mount(&failing)
+            .await;
+        let client = GrappaClient::new(failing.uri());
+        assert!(client.fetch_ban_mask_form("t").await.is_err());
+        assert!(client
+            .set_ban_mask_form("t", BanType::UserHost)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

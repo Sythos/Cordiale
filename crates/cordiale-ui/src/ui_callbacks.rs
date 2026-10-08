@@ -40,10 +40,11 @@ pub(crate) fn register_radio_callbacks(
         let _ = persistence::save_settings(&settings);
     });
 
+    let tx_for_ban_type = worker_tx.clone();
     ui.on_ban_type_changed(move |index| {
-        let mut settings = persistence::load_settings().unwrap_or_default();
-        settings.default_ban_type = cordiale_core::ban::BanType::from_index(index);
-        let _ = persistence::save_settings(&settings);
+        let _ = tx_for_ban_type.send(WorkerCommand::BanTypeSave(
+            cordiale_core::ban::BanType::from_index(index),
+        ));
     });
 
     let weak_for_radio_save = ui.as_weak();

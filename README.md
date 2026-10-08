@@ -239,7 +239,7 @@ Cordiale also covers:
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
   expansion, `/kb` with a default ban type of nick, host or user@host
-  chosen in Settings and kept on the device, `/beep`, the services
+  chosen in Settings and kept in your Grappa account, `/beep`, the services
   shortcuts), `/np` for the radio,
   and a bare `/umode` that opens the user-mode toggles; a bare `/topic` or
   `/mode` shows the channel's topic or modes in the status bar.
