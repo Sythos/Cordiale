@@ -329,8 +329,16 @@ msgid "Kick"
 msgstr "Kick"
 
 msgctxt "MemberContextMenu"
-msgid "Ban"
-msgstr "Ban"
+msgid "Kickban"
+msgstr "Kickban"
+
+msgctxt "MemberContextMenu"
+msgid "Ban nick"
+msgstr "Ban nick"
+
+msgctxt "MemberContextMenu"
+msgid "Ban host"
+msgstr "Ban host"
 
 msgctxt "MemberContextMenu"
 msgid "WHOIS"
@@ -997,8 +1005,56 @@ msgid "Upload file"
 msgstr "Datei hochladen"
 
 msgctxt "AppWindow"
-msgid "Upload this file to the server and post its link in the open window?"
-msgstr "Diese Datei auf den Server hochladen und ihren Link im offenen Fenster posten?"
+msgid "Preview of {}"
+msgstr "Vorschau von {}"
+
+msgctxt "AppWindow"
+msgid "🎬 No preview for videos."
+msgstr "🎬 Keine Vorschau für Videos."
+
+msgctxt "AppWindow"
+msgid "🎵 No preview for audio."
+msgstr "🎵 Keine Vorschau für Audio."
+
+msgctxt "AppWindow"
+msgid "📸 This image can't be previewed."
+msgstr "📸 Dieses Bild hat keine Vorschau."
+
+msgctxt "AppWindow"
+msgid "📄 No preview for this file."
+msgstr "📄 Keine Vorschau für diese Datei."
+
+msgctxt "AppWindow"
+msgid "Image, {}"
+msgstr "Bild, {}"
+
+msgctxt "AppWindow"
+msgid "Video, {}"
+msgstr "Video, {}"
+
+msgctxt "AppWindow"
+msgid "Audio, {}"
+msgstr "Audio, {}"
+
+msgctxt "AppWindow"
+msgid "Document, {}"
+msgstr "Dokument, {}"
+
+msgctxt "AppWindow"
+msgid "The link will be posted in {}."
+msgstr "Der Link wird in {} gepostet."
+
+msgctxt "AppWindow"
+msgid "Keep this file for"
+msgstr "Datei aufbewahren für"
+
+msgctxt "AppWindow"
+msgid "{} expired before its link could be posted."
+msgstr "{} ist abgelaufen, bevor der Link gepostet werden konnte."
+
+msgctxt "AppWindow"
+msgid "The server didn't say when {} expires; its link was posted without a lifetime."
+msgstr "Der Server hat nicht gemeldet, wann {} abläuft; der Link wurde ohne Dauer gepostet."
 
 msgctxt "AppWindow"
 msgid "Uploads"

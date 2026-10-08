@@ -267,7 +267,19 @@ pub(crate) async fn run_slash_command(
             Ok(())
         }
         SlashCommand::KickBan { nick, reason } if in_channel => {
-            start_kickban(state, ui, &network, channel.clone(), nick, reason);
+            // Read once here: the form stays fixed for this request.
+            let ban_type = persistence::load_settings()
+                .unwrap_or_default()
+                .default_ban_type;
+            start_kickban(
+                state,
+                ui,
+                &network,
+                channel.clone(),
+                nick,
+                Some(reason),
+                ban_type,
+            );
             Ok(())
         }
         SlashCommand::NickModes { .. }
@@ -519,25 +531,22 @@ pub(crate) fn joined_channels(state: &WorkerState, network: &str) -> Vec<String>
 }
 
 /// Asks Grappa for the target's `user@host` (from its userhost cache); the
-/// ban and kick follow in `finish_kickban` when the reply arrives. The nick
-/// form needs no lookup and goes out at once.
-fn start_kickban(
+/// ban (and the kick, with `Some(reason)`) follow in `finish_kickban` when
+/// the reply arrives. The nick form needs no lookup and goes out at once.
+pub(crate) fn start_kickban(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     network: &str,
     channel: String,
     nick: String,
-    reason: String,
+    kick_reason: Option<String>,
+    ban_type: cordiale_core::ban::BanType,
 ) {
-    // Read once here: the form stays fixed for this request.
-    let ban_type = persistence::load_settings()
-        .unwrap_or_default()
-        .default_ban_type;
     let pending = PendingKickBan {
         network: network.to_string(),
         channel,
         nick,
-        reason,
+        kick_reason,
         ban_type,
     };
     if !ban_type.needs_userhost() {

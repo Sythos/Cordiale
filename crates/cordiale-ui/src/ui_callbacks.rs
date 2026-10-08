@@ -526,6 +526,16 @@ pub(crate) fn register_member_callbacks(
         let _ = tx_for_ban.send(WorkerCommand::MemberBan(nick.to_string()));
     });
 
+    let tx_for_ban_host = worker_tx.clone();
+    ui.on_member_ban_host_requested(move |nick| {
+        let _ = tx_for_ban_host.send(WorkerCommand::MemberBanHost(nick.to_string()));
+    });
+
+    let tx_for_kickban = worker_tx.clone();
+    ui.on_member_kickban_requested(move |nick| {
+        let _ = tx_for_kickban.send(WorkerCommand::MemberKickBan(nick.to_string()));
+    });
+
     let tx_for_whois = worker_tx.clone();
     ui.on_member_whois_requested(move |nick| {
         let _ = tx_for_whois.send(WorkerCommand::MemberWhois(nick.to_string()));
@@ -819,6 +829,21 @@ pub(crate) fn register_attach_callbacks(
             return;
         };
         confirm_and_attach(&ui, &tx_for_attach, path);
+    });
+
+    let tx_for_confirm = worker_tx.clone();
+    let weak_for_confirm = ui.as_weak();
+    ui.on_upload_confirm_accepted(move || {
+        if let Some(ui) = weak_for_confirm.upgrade() {
+            finish_upload_confirm(&ui, &tx_for_confirm, true);
+        }
+    });
+    let tx_for_cancel = worker_tx.clone();
+    let weak_for_cancel = ui.as_weak();
+    ui.on_upload_confirm_cancelled(move || {
+        if let Some(ui) = weak_for_cancel.upgrade() {
+            finish_upload_confirm(&ui, &tx_for_cancel, false);
+        }
     });
 
     // Files dropped on the window go through the paperclip's flow, like

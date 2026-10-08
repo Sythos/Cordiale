@@ -11,7 +11,30 @@ pub(crate) fn kickban_mask(pending: &PendingKickBan, reply: &Value) -> Option<St
     pending.ban_type.mask(&pending.nick, user, host).ok()
 }
 
-/// Reports a `/kb` that could not build its mask: nobody is banned or
+/// The fixed `nick!*@*` ban mask of "Ban nick".
+pub(crate) fn ban_nick_mask(nick: &str) -> String {
+    format!("{nick}!*@*")
+}
+
+/// Whether `nick` is currently listed in the channel's members.
+pub(crate) fn is_channel_member(
+    state: &WorkerState,
+    network: &str,
+    channel: &str,
+    nick: &str,
+) -> bool {
+    state
+        .transcript
+        .members
+        .get(&(network.to_string(), channel.to_string()))
+        .is_some_and(|members| {
+            members
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(nick))
+        })
+}
+
+/// Reports a ban that could not build its mask: nobody is banned or
 /// kicked.
 pub(crate) fn kickban_mask_failed(ui: &slint::Weak<AppWindow>, nick: &str) {
     let nick = nick.to_string();
@@ -21,22 +44,31 @@ pub(crate) fn kickban_mask_failed(ui: &slint::Weak<AppWindow>, nick: &str) {
     });
 }
 
-/// Bans with the mask built from the reply, then kicks. When no mask can
-/// be built (for example `not_cached`) nothing is sent and the failure is
-/// reported.
+/// Fails closed: without a mask neither the ban nor the kick goes out (the
+/// failure is reported, for example for `not_cached`), and a channel that
+/// is no longer joined gets nothing.
 fn finish_kickban(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
     pending: PendingKickBan,
     reply: &Value,
 ) {
+    let joined = state
+        .windows
+        .window_states
+        .get(&window_state_key(&pending.network, &pending.channel))
+        == Some(&ChannelWindowState::Joined);
+    if !joined {
+        return;
+    }
     match kickban_mask(&pending, reply) {
         Some(mask) => send_kickban(state, &pending, &mask),
         None => kickban_mask_failed(ui, &pending.nick),
     }
 }
 
-/// Sends the ban for `mask`, then the kick, in that order.
+/// Sends the ban for `mask`. The kick follows it only when `kick_reason` is
+/// set and the target is still in the channel.
 pub(crate) fn send_kickban(state: &WorkerState, pending: &PendingKickBan, mask: &str) {
     send_user_verb(
         state,
@@ -44,16 +76,21 @@ pub(crate) fn send_kickban(state: &WorkerState, pending: &PendingKickBan, mask: 
         "ban",
         serde_json::json!({ "channel": pending.channel, "mask": mask }),
     );
-    send_user_verb(
-        state,
-        &pending.network,
-        "kick",
-        serde_json::json!({
-            "channel": pending.channel,
-            "nick": pending.nick,
-            "reason": pending.reason,
-        }),
-    );
+    let Some(reason) = &pending.kick_reason else {
+        return;
+    };
+    if is_channel_member(state, &pending.network, &pending.channel, &pending.nick) {
+        send_user_verb(
+            state,
+            &pending.network,
+            "kick",
+            serde_json::json!({
+                "channel": pending.channel,
+                "nick": pending.nick,
+                "reason": reason,
+            }),
+        );
+    }
 }
 
 /// Handles a push on the live admin topic: the join `snapshot` (newest
