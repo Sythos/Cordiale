@@ -1095,6 +1095,9 @@ struct PanelState {
     /// The last `GET /admin/uploads` answer, which decides what may be
     /// deleted.
     admin_uploads: Option<cordiale_core::admin::AdminUploadsResponse>,
+    /// The network id whose scrollback count the server last answered; only
+    /// that network may be deleted.
+    admin_network_count_for: Option<String>,
     /// `/kb` requests waiting for their `resolve_userhost` reply, by ref.
     pending_kickbans: HashMap<String, PendingKickBan>,
     /// Identity-recovery panel driven entirely by server pushes; `None`
@@ -1448,6 +1451,7 @@ impl WorkerState {
                 admin_events: Vec::new(),
                 admin_settings: None,
                 admin_uploads: None,
+                admin_network_count_for: None,
                 pending_kickbans: HashMap::new(),
                 recover_panel: None,
                 reply_view: None,
@@ -2116,7 +2120,7 @@ async fn run_worker(
                         run_admin_featured_delete(&mut state, &ui, network_id, featured_id).await;
                     }
                     Some(WorkerCommand::AdminNetworkCount(network_id)) => {
-                        handle_admin_network_count(&state, &ui, network_id).await;
+                        handle_admin_network_count(&mut state, &ui, network_id).await;
                     }
                     Some(WorkerCommand::AdminCredentialEdit {
                         user_id,
@@ -2168,7 +2172,13 @@ async fn run_worker(
                         run_admin_settings_save(&mut state, &ui, form).await;
                     }
                     Some(WorkerCommand::AdminNetworkDelete(network_id)) => {
-                        handle_admin_write(&state, &ui, AdminWrite::DeleteNetwork(network_id)).await;
+                        if admin_network_delete_armed(&state, &network_id) {
+                            state.panels.admin_network_count_for = None;
+                            handle_admin_write(&state, &ui, AdminWrite::DeleteNetwork(network_id))
+                                .await;
+                        } else {
+                            persistence::log_line("admin network delete refused: no count");
+                        }
                     }
                     Some(WorkerCommand::AdminNetworkSave {
                         slug,

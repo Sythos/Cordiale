@@ -4657,6 +4657,20 @@ fn a_refused_admin_write_is_told_apart() {
     assert_eq!(admin_failure_kind(None, true), "admin-action-failed");
 }
 
+#[test]
+fn network_delete_needs_a_count_for_that_network() {
+    let mut state = WorkerState::new();
+    // No count answered yet (counting, 404 or any failure): refused.
+    assert!(!admin_network_delete_armed(&state, "7"));
+    // A successful count, zero included, arms only its own network.
+    state.panels.admin_network_count_for = Some("7".to_string());
+    assert!(admin_network_delete_armed(&state, "7"));
+    assert!(!admin_network_delete_armed(&state, "8"));
+    // A new count request clears the previous answer.
+    state.panels.admin_network_count_for = None;
+    assert!(!admin_network_delete_armed(&state, "7"));
+}
+
 fn pending_kickban(ban_type: cordiale_core::ban::BanType) -> PendingKickBan {
     PendingKickBan {
         network: "libera".to_string(),

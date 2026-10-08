@@ -2729,8 +2729,8 @@ msgid "Delete {} for good? Its whole scrollback goes with it, for every account.
 msgstr "{} endgültig löschen? Der gesamte Verlauf geht damit verloren, für jedes Konto. Gelöschte Nachrichten: {}"
 
 msgctxt "AppWindow"
-msgid "Delete {} for good? Its whole scrollback goes with it, for every account; the server couldn't say how many messages that is."
-msgstr "{} endgültig löschen? Der gesamte Verlauf geht damit verloren, für jedes Konto; der Server konnte nicht sagen, wie viele Nachrichten das sind."
+msgid "Can't delete {}: the server couldn't say how many messages that would remove. Cancel and try again."
+msgstr "{} kann nicht gelöscht werden: Der Server konnte nicht sagen, wie viele Nachrichten entfernt würden. Abbrechen und erneut versuchen."
 
 msgctxt "AppWindow"
 msgid "Delete network and scrollback"

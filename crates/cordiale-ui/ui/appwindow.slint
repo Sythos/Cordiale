@@ -6223,7 +6223,7 @@ export component AppWindow inherits Window {
                             ? @tr("Counting the messages of {}…", admin-network-confirm-slug)
                             : (admin-network-count-state == "known"
                                 ? @tr("Delete {} for good? Its whole scrollback goes with it, for every account. Messages deleted: {}", admin-network-confirm-slug, admin-network-count)
-                                : @tr("Delete {} for good? Its whole scrollback goes with it, for every account; the server couldn't say how many messages that is.", admin-network-confirm-slug));
+                                : @tr("Can't delete {}: the server couldn't say how many messages that would remove. Cancel and try again.", admin-network-confirm-slug));
                         wrap: word-wrap;
                         horizontal-stretch: 1;
                         vertical-alignment: center;
@@ -6238,7 +6238,7 @@ export component AppWindow inherits Window {
                     }
                     Button {
                         text: @tr("Delete network and scrollback");
-                        enabled: admin-network-count-state != "counting";
+                        enabled: admin-network-count-state == "known";
                         clicked => {
                             admin-network-delete(admin-network-confirm-id);
                             admin-network-confirm-id = "";
