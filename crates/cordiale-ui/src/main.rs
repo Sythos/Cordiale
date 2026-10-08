@@ -8204,7 +8204,7 @@ fn link_refused(ui: &slint::Weak<AppWindow>, refusal: cordiale_core::media::Link
         ui.set_media_error(reason.into());
         ui.set_media_kind("failed".into());
         ui.set_media_zoom(false);
-        ui.set_screen("media".into());
+        ui.set_media_open(true);
     });
 }
 
@@ -8237,7 +8237,7 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
         ui.set_media_title(title.into());
         ui.set_media_kind("loading".into());
         ui.set_media_zoom(false);
-        ui.set_screen("media".into());
+        ui.set_media_open(true);
     });
     let ui = ui.clone();
     tokio::spawn(async move {
