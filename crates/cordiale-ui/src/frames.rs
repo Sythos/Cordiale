@@ -1224,8 +1224,12 @@ pub(crate) fn apply_window_counts_join_reply(
 fn apply_window_count_snapshot(
     state: &mut WorkerState,
     key: WindowCountsKey,
-    counts: WindowCountSnapshot,
+    mut counts: WindowCountSnapshot,
 ) -> bool {
+    // Whatever arrives in the window being read is read already.
+    if selected_window(state) == Some((key.clone(), false)) {
+        counts.messages = 0;
+    }
     let mentions_changed = apply_window_mention_count(state, key.clone(), counts.mentions);
     let messages_changed = state.windows.window_messages.get(&key) != Some(&counts.messages);
     if messages_changed {

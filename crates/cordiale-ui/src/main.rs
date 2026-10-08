@@ -2965,6 +2965,7 @@ async fn finish_connect(
                     window_states,
                     window_mentions,
                     window_messages,
+                    None,
                 );
                 ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
                 ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
@@ -7562,6 +7563,16 @@ fn apply_connecting_labels(
     }
 }
 
+/// The open window as a counts key plus whether it is a query, for the
+/// sidebar's selected row.
+fn selected_window(state: &WorkerState) -> Option<(WindowCountsKey, bool)> {
+    let (network, target) = state.windows.current_channel.as_ref()?;
+    Some((
+        window_counts_key(network, target),
+        state.windows.current_query,
+    ))
+}
+
 /// Builds the actual sidebar `NetworkGroup` Slint model out of
 /// `network_groups_data`'s plain grouping — must run on the UI thread,
 /// see that function's doc comment for why.
@@ -7570,6 +7581,7 @@ fn network_groups_model(
     window_states: HashMap<(String, String), ChannelWindowState>,
     window_mentions: HashMap<WindowCountsKey, u64>,
     window_messages: HashMap<WindowCountsKey, u64>,
+    selected: Option<(WindowCountsKey, bool)>,
 ) -> Vec<NetworkGroup> {
     data.into_iter()
         .enumerate()
@@ -7594,6 +7606,9 @@ fn network_groups_model(
                                 .get(&window_counts_key(&network, &channel))
                                 .copied(),
                         );
+                        let selected = selected.as_ref().is_some_and(|(key, query)| {
+                            !query && *key == window_counts_key(&network, &channel)
+                        });
                         ChannelEntry {
                             network: network.clone().into(),
                             channel: channel.into(),
@@ -7606,6 +7621,7 @@ fn network_groups_model(
                             kicked,
                             invited,
                             joined,
+                            selected,
                         }
                     })
                     .collect();
@@ -7617,12 +7633,16 @@ fn network_groups_model(
                             .copied()
                             .map(mention_count_labels)
                             .unwrap_or_default();
+                        let selected = selected.as_ref().is_some_and(|(key, query)| {
+                            *query && *key == window_counts_key(&network, &nick)
+                        });
                         QueryEntry {
                             network: network.clone().into(),
                             nick: nick.into(),
                             label: label.into(),
                             mention_badge: mention_badge.into(),
                             mentions_description: mentions_description.into(),
+                            selected,
                         }
                     })
                     .collect();
@@ -7702,9 +7722,16 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let window_states = state.windows.window_states.clone();
     let window_mentions = state.windows.window_mentions.clone();
     let window_messages = state.windows.window_messages.clone();
+    let selected = selected_window(state);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        let groups = network_groups_model(data, window_states, window_mentions, window_messages);
+        let groups = network_groups_model(
+            data,
+            window_states,
+            window_mentions,
+            window_messages,
+            selected,
+        );
         ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
         ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
     });
