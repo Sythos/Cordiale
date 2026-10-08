@@ -11,6 +11,18 @@ pub(crate) fn admin_failure_kind(status: Option<u16>, network_delete: bool) -> &
     }
 }
 
+/// The status line for a failed visitor delete. A server error or a dropped
+/// connection is what a slow bulk delete looks like (Grappa's write pool can
+/// time out on a visitor with a lot of scrollback), so it gets its own text
+/// with a retry hint; anything else follows `admin_failure_kind`.
+pub(crate) fn admin_visitor_delete_failure_kind(status: Option<u16>) -> &'static str {
+    match status {
+        None => "admin-visitor-delete-failed",
+        Some(code) if code >= 500 => "admin-visitor-delete-failed",
+        other => admin_failure_kind(other, false),
+    }
+}
+
 /// One `subject_search` row: `(type, id, network, nick)`, `network` empty
 /// for an account.
 pub(crate) fn admin_subject_row(row: &Value) -> Option<(String, String, String, String)> {
@@ -103,6 +115,9 @@ pub(crate) async fn handle_admin_write(
         ),
         AdminWrite::DeleteNetwork(network_id) => {
             (client.delete_admin_network(token, network_id).await, "")
+        }
+        AdminWrite::DeleteVisitor(visitor_id) => {
+            (client.delete_admin_visitor(token, visitor_id).await, "")
         }
         AdminWrite::AddServer {
             network_id,
@@ -267,10 +282,12 @@ pub(crate) async fn handle_admin_write(
                 .map(|status| status.as_u16().to_string())
                 .unwrap_or_else(|| "network error".to_string());
             persistence::log_line(&format!("admin write failed: {status}"));
-            let kind = admin_failure_kind(
-                err.status().map(|status| status.as_u16()),
-                matches!(write, AdminWrite::DeleteNetwork(_)),
-            );
+            let code = err.status().map(|status| status.as_u16());
+            let kind = if matches!(write, AdminWrite::DeleteVisitor(_)) {
+                admin_visitor_delete_failure_kind(code)
+            } else {
+                admin_failure_kind(code, matches!(write, AdminWrite::DeleteNetwork(_)))
+            };
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_status_command_hint(status.into());
                 ui.set_status_kind(kind.into());

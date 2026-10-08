@@ -1969,10 +1969,8 @@ async fn run_worker(
                         handle_admin_refresh(&state, &ui).await;
                     }
                     Some(WorkerCommand::AdminVisitorDelete(visitor_id)) => {
-                        if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
-                            let _ = client.delete_admin_visitor(token, &visitor_id).await;
-                        }
-                        handle_admin_refresh(&state, &ui).await;
+                        handle_admin_write(&state, &ui, AdminWrite::DeleteVisitor(visitor_id))
+                            .await;
                     }
                     Some(WorkerCommand::AdminNetworkResetCircuit(network_id)) => {
                         if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
@@ -5708,6 +5706,7 @@ enum AdminWrite {
         password: String,
     },
     CreateNetwork(String),
+    DeleteVisitor(String),
     UpdateNetwork {
         slug: String,
         settings: Value,
