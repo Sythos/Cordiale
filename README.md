@@ -215,7 +215,14 @@ Cordiale also covers:
   cap. Settings > General sets how long uploads are kept and whether to ask
   before each one. Files dropped on the window and images pasted into the
   compose box go through the same flow, and pasting several lines of text
-  offers to upload them as `paste.txt`. Links in messages are clickable:
+  offers to upload them as `paste.txt`. The upload popup (and Settings, as
+  a device-local default that the popup never writes back) has a "Shrink
+  videos before sending" switch for videos: the video is re-encoded into a
+  temporary MP4 (VP9, audio copied, at most 720p), and the result is checked
+  against the server's cap before it goes up. The original is never touched,
+  and a video that can't be shrunk or comes out no smaller is not uploaded.
+  It needs a build with the `video-shrink` feature (FFmpeg with libvpx);
+  other builds show the switch disabled. Links in messages are clickable:
   image and text uploads on Grappa, and https images elsewhere, open in the
   media viewer (fit or actual size; text read-only, with Copy), MP3, Ogg and
   FLAC links play in the radio's player, and the rest opens in the browser.

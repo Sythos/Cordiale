@@ -70,6 +70,8 @@ ctap-hid-fido2 = { version = "3.6", optional = true }
 
 [features]
 ctap-hid = ["dep:ctap-hid-fido2"]
+# Shrinking videos before an upload: links FFmpeg through the core crate.
+video-shrink = ["cordiale-core/video-shrink"]
 
 [build-dependencies]
 slint-build = "1"

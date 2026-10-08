@@ -3327,3 +3327,31 @@ msgstr "Verbindung getrennt. Verbinde in {} s erneut… ({})"
 msgctxt "AppWindow"
 msgid "Reconnecting in {} s… ({})"
 msgstr "Verbinde in {} s erneut… ({})"
+
+msgctxt "AppWindow"
+msgid "Shrink videos before sending"
+msgstr "Videos vor dem Senden verkleinern"
+
+msgctxt "AppWindow"
+msgid "Not available in this build."
+msgstr "In dieser Version nicht verfügbar."
+
+msgctxt "AppWindow"
+msgid "Shrinking {}…"
+msgstr "{} wird verkleinert…"
+
+msgctxt "AppWindow"
+msgid "Video shrinking isn't available in this build, so {} was not sent."
+msgstr "Das Verkleinern von Videos ist in dieser Version nicht verfügbar; {} wurde nicht gesendet."
+
+msgctxt "AppWindow"
+msgid "Couldn't shrink {}, so it was not sent."
+msgstr "{} konnte nicht verkleinert werden und wurde nicht gesendet."
+
+msgctxt "AppWindow"
+msgid "Shrinking didn't make {} smaller, so it was not sent."
+msgstr "Durch das Verkleinern wurde {} nicht kleiner; es wurde nicht gesendet."
+
+msgctxt "AppWindow"
+msgid "{} is still larger than the server allows after shrinking, so it was not sent."
+msgstr "Auch verkleinert überschreitet {} die Grenze des Servers; es wurde nicht gesendet."

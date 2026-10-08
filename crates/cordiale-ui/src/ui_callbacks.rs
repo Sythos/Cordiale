@@ -24,6 +24,16 @@ pub(crate) fn register_radio_callbacks(
         let _ = tx_for_radio_volume.send(WorkerCommand::RadioVolume(volume));
     });
 
+    let weak_for_shrink_pref = ui.as_weak();
+    ui.on_shrink_pref_changed(move || {
+        let Some(ui) = weak_for_shrink_pref.upgrade() else {
+            return;
+        };
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.shrink_videos = ui.get_pref_shrink_videos();
+        let _ = persistence::save_settings(&settings);
+    });
+
     ui.on_font_size_changed(move |percent| {
         let mut settings = persistence::load_settings().unwrap_or_default();
         settings.font_size_percent = u8::try_from(percent.clamp(50, 150)).unwrap_or(100);

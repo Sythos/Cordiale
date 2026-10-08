@@ -132,6 +132,11 @@ pub struct Settings {
     /// shown above the compose box lives here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mute_since: BTreeMap<String, i64>,
+    /// "Shrink videos before sending": the default for video uploads, kept on
+    /// this device only (never sent to Grappa). Off until the user turns it
+    /// on; the upload popup starts from it and never writes it back.
+    #[serde(default)]
+    pub shrink_videos: bool,
 }
 
 /// A radio station added in Settings > Radio.
@@ -175,6 +180,7 @@ impl Default for Settings {
             presence_pins: BTreeMap::new(),
             presence_unsynced: BTreeSet::new(),
             mute_since: BTreeMap::new(),
+            shrink_videos: false,
         }
     }
 }
@@ -1067,6 +1073,7 @@ mod tests {
             presence_pins: BTreeMap::from([("libera #rust".to_string(), PresencePref::Hide)]),
             presence_unsynced: BTreeSet::from(["libera #rust".to_string()]),
             mute_since: BTreeMap::from([("libera #rust".to_string(), 1_700_000_000)]),
+            shrink_videos: true,
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");
@@ -1083,6 +1090,14 @@ mod tests {
         assert!(decoded.presence_unsynced.is_empty());
         let json = serde_json::to_value(Settings::default()).expect("serialize");
         assert!(json.get("presence_pins").is_none());
+    }
+
+    #[test]
+    fn settings_without_the_shrink_choice_keep_it_off() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
+        assert!(!decoded.shrink_videos);
+        assert!(!Settings::default().shrink_videos);
     }
 
     #[test]
