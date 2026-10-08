@@ -294,7 +294,7 @@ msgstr "Ajouter"
 
 msgctxt "AppWindow"
 msgid "Mask (nick!user@host)"
-msgstr "Masque (pseudo!utilisateur@hôte)"
+msgstr "Masque (nick!user@host)"
 
 msgctxt "AppWindow"
 msgid "Command"
@@ -1218,15 +1218,15 @@ msgstr "Type de bannissement par défaut"
 
 msgctxt "AppWindow"
 msgid "Nick (nick!*@*)"
-msgstr "Pseudo (pseudo!*@*)"
+msgstr "Pseudo (nick!*@*)"
 
 msgctxt "AppWindow"
 msgid "Host (*!*@host)"
-msgstr "Hôte (*!*@hôte)"
+msgstr "Hôte (*!*@host)"
 
 msgctxt "AppWindow"
 msgid "User and host (*!user@host)"
-msgstr "Utilisateur et hôte (*!utilisateur@hôte)"
+msgstr "Utilisateur et hôte (*!user@host)"
 
 msgctxt "AppWindow"
 msgid "Used by /kb and /kickban. Saved to your account."

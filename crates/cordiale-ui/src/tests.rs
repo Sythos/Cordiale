@@ -5622,6 +5622,42 @@ fn upload_507_copy_does_not_attribute_the_cause() {
     }
 }
 
+/// The example masks in the ban-type picker and the ignore-mask hint are
+/// IRC syntax, not prose: every catalog must keep them as in the source.
+#[test]
+fn translated_labels_keep_the_irc_mask_examples() {
+    const LABELS: [(&str, &str); 4] = [
+        ("Nick (nick!*@*)", "nick!*@*"),
+        ("Host (*!*@host)", "*!*@host"),
+        ("User and host (*!user@host)", "*!user@host"),
+        ("Mask (nick!user@host)", "nick!user@host"),
+    ];
+    let slint = include_str!("../ui/appwindow.slint");
+    for (msgid, _) in LABELS {
+        assert!(slint.contains(&format!("@tr(\"{msgid}\"")), "{msgid}");
+    }
+
+    for (lang, catalog) in [
+        ("it", include_str!("../lang/it/LC_MESSAGES/cordiale-ui.po")),
+        ("fr", include_str!("../lang/fr/LC_MESSAGES/cordiale-ui.po")),
+        ("de", include_str!("../lang/de/LC_MESSAGES/cordiale-ui.po")),
+        ("es", include_str!("../lang/es/LC_MESSAGES/cordiale-ui.po")),
+    ] {
+        for (label, mask) in LABELS {
+            let msgid = format!("msgid \"{label}\"");
+            let msgstr = catalog
+                .lines()
+                .skip_while(|line| *line != msgid)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{lang}: missing msgid {label}"));
+            assert!(
+                msgstr.starts_with("msgstr \"") && msgstr.contains(&format!("({mask})")),
+                "{lang}: {msgstr}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_rejected_date_format_has_its_own_message() {
     assert_eq!(display_prefs_error_key(Some(422)), "display-prefs-rejected");
