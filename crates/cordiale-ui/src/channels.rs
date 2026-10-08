@@ -38,6 +38,11 @@ pub(crate) async fn handle_select_channel(
     state.windows.current_query = false;
     state.windows.current_query_ready = false;
     open_window(state, &key);
+    state
+        .windows
+        .window_messages
+        .insert(window_counts_key(&network, &channel), 0);
+    refresh_network_groups(state, ui);
     push_mute_bar(state, ui);
 
     let mut settings = persistence::load_settings().unwrap_or_default();

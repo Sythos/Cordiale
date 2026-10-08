@@ -31,6 +31,7 @@ pub(crate) async fn handle_select_query(
     state.windows.current_query = true;
     state.windows.current_query_ready = state.transcript.query_ready.contains(&identity);
     open_window(state, &key);
+    refresh_network_groups(state, ui);
     push_mute_bar(state, ui);
     show_query_window(state, ui, &query, &key);
 
