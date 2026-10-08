@@ -40,6 +40,12 @@ pub(crate) fn register_radio_callbacks(
         let _ = persistence::save_settings(&settings);
     });
 
+    ui.on_ban_type_changed(move |index| {
+        let mut settings = persistence::load_settings().unwrap_or_default();
+        settings.default_ban_type = cordiale_core::ban::BanType::from_index(index);
+        let _ = persistence::save_settings(&settings);
+    });
+
     let weak_for_radio_save = ui.as_weak();
     ui.on_radio_station_save(move |index, name, url, codec_index| {
         let Some(ui) = weak_for_radio_save.upgrade() else {

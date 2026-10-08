@@ -267,7 +267,19 @@ pub(crate) async fn run_slash_command(
             Ok(())
         }
         SlashCommand::KickBan { nick, reason } if in_channel => {
-            start_kickban(state, &network, channel.clone(), nick, Some(reason));
+            // Read once here: the form stays fixed for this request.
+            let ban_type = persistence::load_settings()
+                .unwrap_or_default()
+                .default_ban_type;
+            start_kickban(
+                state,
+                ui,
+                &network,
+                channel.clone(),
+                nick,
+                Some(reason),
+                ban_type,
+            );
             Ok(())
         }
         SlashCommand::NickModes { .. }
@@ -520,14 +532,30 @@ pub(crate) fn joined_channels(state: &WorkerState, network: &str) -> Vec<String>
 
 /// Asks Grappa for the target's `user@host` (from its userhost cache); the
 /// ban (and the kick, with `Some(reason)`) follow in `finish_kickban` when
-/// the reply arrives.
+/// the reply arrives. The nick form needs no lookup and goes out at once.
 pub(crate) fn start_kickban(
     state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
     network: &str,
     channel: String,
     nick: String,
     kick_reason: Option<String>,
+    ban_type: cordiale_core::ban::BanType,
 ) {
+    let pending = PendingKickBan {
+        network: network.to_string(),
+        channel,
+        nick,
+        kick_reason,
+        ban_type,
+    };
+    if !ban_type.needs_userhost() {
+        match ban_type.mask(&pending.nick, None, None) {
+            Ok(mask) => send_kickban(state, &pending, &mask),
+            Err(_) => kickban_mask_failed(ui, &pending.nick),
+        }
+        return;
+    }
     let (Some(session), Some(identifier), Some(&network_id)) = (
         &state.conn.session,
         &state.conn.identifier,
@@ -538,17 +566,9 @@ pub(crate) fn start_kickban(
     let message_ref = session.send_tracked_command(
         format!("grappa:user:{identifier}"),
         "resolve_userhost",
-        serde_json::json!({ "network_id": network_id, "nick": nick }),
+        serde_json::json!({ "network_id": network_id, "nick": pending.nick }),
     );
-    state.panels.pending_kickbans.insert(
-        message_ref,
-        PendingKickBan {
-            network: network.to_string(),
-            channel,
-            nick,
-            kick_reason,
-        },
-    );
+    state.panels.pending_kickbans.insert(message_ref, pending);
 }
 
 /// Posts to `/networks/:slug/channels/:target/messages`.

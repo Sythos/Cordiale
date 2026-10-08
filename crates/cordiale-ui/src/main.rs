@@ -517,6 +517,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_theme(theme_to_slint(settings.theme));
     ui.set_palette_muted(slint_color(classic_muted(settings.theme == Theme::Dark)));
     ui.set_font_size_percent(i32::from(settings.effective_font_size_percent()));
+    ui.set_ban_type_index(settings.default_ban_type.index());
     ui.invoke_apply_color_scheme();
     // A built-in color theme applies from the first screen; a Grappa one
     // needs the session and is applied after sign-in.
@@ -2381,10 +2382,10 @@ async fn run_worker(
                         send_member_ban(&state, &nick);
                     }
                     Some(WorkerCommand::MemberBanHost(nick)) => {
-                        start_member_host_ban(&mut state, nick, None);
+                        start_member_host_ban(&mut state, &ui, nick, None);
                     }
                     Some(WorkerCommand::MemberKickBan(nick)) => {
-                        start_member_host_ban(&mut state, nick, Some(String::new()));
+                        start_member_host_ban(&mut state, &ui, nick, Some(String::new()));
                     }
                     Some(WorkerCommand::MemberWhois(nick)) => {
                         send_member_whois(&state, &nick);
@@ -4566,13 +4567,16 @@ async fn user_aliases(state: &mut WorkerState) -> HashMap<String, String> {
 }
 
 /// A `/kb`, Kickban or Ban host waiting for the target's host; the kick
-/// follows the ban only when `kick_reason` is set.
+/// follows the ban only when `kick_reason` is set. The ban form is fixed
+/// when the request starts, so changing the setting meanwhile doesn't
+/// alter it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingKickBan {
     network: String,
     channel: String,
     nick: String,
     kick_reason: Option<String>,
+    ban_type: cordiale_core::ban::BanType,
 }
 
 /// Shows a slash-command outcome in the status bar; `hint` fills its `{}`.
@@ -6500,7 +6504,12 @@ fn send_member_kick(state: &WorkerState, nick: &str) {
 /// "Ban host" (`kick_reason: None`) and Kickban (`Some(reason)`) on the
 /// open channel; the host is resolved first, like `/kb`. Never in a DM or
 /// server window, and Kickban only for a nick the member list shows.
-fn start_member_host_ban(state: &mut WorkerState, nick: String, kick_reason: Option<String>) {
+fn start_member_host_ban(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    nick: String,
+    kick_reason: Option<String>,
+) {
     let Some((_, _, _, channel)) = user_topic_channel_network(state) else {
         return;
     };
@@ -6511,7 +6520,10 @@ fn start_member_host_ban(state: &mut WorkerState, nick: String, kick_reason: Opt
     if kick_reason.is_some() && !frames::is_channel_member(state, &network, &channel, &nick) {
         return;
     }
-    slash::start_kickban(state, &network, channel, nick, kick_reason);
+    // The menu entries are explicit: always the host form, whatever the
+    // default ban type is.
+    let ban_type = cordiale_core::ban::BanType::Host;
+    slash::start_kickban(state, ui, &network, channel, nick, kick_reason, ban_type);
 }
 
 /// "Ban nick": always the fixed `{nick}!*@*` mask, whatever the default

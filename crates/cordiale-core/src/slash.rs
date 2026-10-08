@@ -66,8 +66,8 @@ pub enum SlashCommand {
     },
     /// `/kick <nick> [reason]`.
     Kick { nick: String, reason: String },
-    /// `/kb <nick> [reason]` (`/kickban`): bans `*!*@host` when the host is
-    /// known, and kicks either way.
+    /// `/kb <nick> [reason]` (`/kickban`): bans with the default ban type
+    /// and then kicks; when the mask can't be built, does neither.
     KickBan { nick: String, reason: String },
     /// `/ban <mask-or-nick>`.
     Ban(String),

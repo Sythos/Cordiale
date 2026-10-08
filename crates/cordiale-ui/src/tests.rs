@@ -4657,37 +4657,88 @@ fn a_refused_admin_write_is_told_apart() {
     assert_eq!(admin_failure_kind(None, true), "admin-action-failed");
 }
 
+fn pending_kickban(ban_type: cordiale_core::ban::BanType) -> PendingKickBan {
+    PendingKickBan {
+        network: "libera".to_string(),
+        channel: "#rust".to_string(),
+        nick: "troll".to_string(),
+        kick_reason: Some("bye".to_string()),
+        ban_type,
+    }
+}
+
 #[test]
-fn kickban_mask_needs_a_resolved_host() {
+fn kickban_mask_follows_the_captured_ban_type() {
+    use cordiale_core::ban::BanType;
+    let reply = serde_json::json!({
+        "status": "ok",
+        "response": {"user": "~u", "host": "spam.example"}
+    });
     assert_eq!(
-        kickban_mask(&serde_json::json!({
-            "status": "ok",
-            "response": {"user": "~u", "host": "spam.example"}
-        })),
+        kickban_mask(&pending_kickban(BanType::Host), &reply),
         Some("*!*@spam.example".to_string())
     );
     assert_eq!(
-        kickban_mask(&serde_json::json!({
-            "status": "error",
-            "response": {"error": "not_cached"}
-        })),
+        kickban_mask(&pending_kickban(BanType::UserHost), &reply),
+        Some("*!~u@spam.example".to_string())
+    );
+    assert_eq!(
+        kickban_mask(&pending_kickban(BanType::Nick), &reply),
+        Some("troll!*@*".to_string())
+    );
+}
+
+#[test]
+fn kickban_mask_never_falls_back_to_another_form() {
+    use cordiale_core::ban::BanType;
+    let not_cached = serde_json::json!({
+        "status": "error",
+        "response": {"error": "not_cached"}
+    });
+    let no_user = serde_json::json!({
+        "status": "ok",
+        "response": {"host": "spam.example"}
+    });
+    let no_host = serde_json::json!({
+        "status": "ok",
+        "response": {"user": "~u", "host": ""}
+    });
+    for ban_type in [BanType::Host, BanType::UserHost] {
+        assert_eq!(kickban_mask(&pending_kickban(ban_type), &not_cached), None);
+        assert_eq!(kickban_mask(&pending_kickban(ban_type), &no_host), None);
+    }
+    assert_eq!(
+        kickban_mask(&pending_kickban(BanType::UserHost), &no_user),
         None
+    );
+    assert_eq!(
+        kickban_mask(&pending_kickban(BanType::Host), &no_user),
+        Some("*!*@spam.example".to_string())
     );
 }
 
 #[test]
 fn explicit_ban_masks_have_fixed_shapes() {
+    use cordiale_core::ban::BanType;
     assert_eq!(ban_nick_mask("ada"), "ada!*@*");
     assert_eq!(
-        ban_host_mask("spam.example"),
+        kickban_mask(
+            &pending_kickban(BanType::Host),
+            &serde_json::json!({
+                "status": "ok",
+                "response": {"user": "~u", "host": "spam.example"}
+            })
+        ),
         Some("*!*@spam.example".to_string())
     );
-    assert_eq!(ban_host_mask(""), None);
     assert_eq!(
-        kickban_mask(&serde_json::json!({
-            "status": "ok",
-            "response": {"user": "~u", "host": ""}
-        })),
+        kickban_mask(
+            &pending_kickban(BanType::Host),
+            &serde_json::json!({
+                "status": "ok",
+                "response": {"user": "~u", "host": ""}
+            })
+        ),
         None
     );
 }

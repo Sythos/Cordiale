@@ -1209,8 +1209,28 @@ msgid "Reset zoom"
 msgstr "Ripristina lo zoom"
 
 msgctxt "AppWindow"
-msgid "{}'s host isn't known yet, so nothing was sent; /whois them first."
-msgstr "L'host di {} non è ancora noto, quindi non è stato inviato nulla; fai prima /whois."
+msgid "Couldn't build a ban mask for {}, so nobody was banned or kicked; /whois them first or change the default ban type."
+msgstr "Impossibile costruire la maschera di ban per {}: nessuno è stato bannato né espulso; fai prima /whois o cambia il tipo di ban predefinito."
+
+msgctxt "AppWindow"
+msgid "Default ban type"
+msgstr "Tipo di ban predefinito"
+
+msgctxt "AppWindow"
+msgid "Nick (nick!*@*)"
+msgstr "Nick (nick!*@*)"
+
+msgctxt "AppWindow"
+msgid "Host (*!*@host)"
+msgstr "Host (*!*@host)"
+
+msgctxt "AppWindow"
+msgid "User and host (*!user@host)"
+msgstr "Utente e host (*!utente@host)"
+
+msgctxt "AppWindow"
+msgid "Used by /kb and /kickban. Saved on this device only."
+msgstr "Usato da /kb e /kickban. Salvato solo su questo dispositivo."
 
 msgctxt "AppWindow"
 msgid "Done."

@@ -1,22 +1,19 @@
 use super::*;
 
+/// The ban mask in the form `pending` captured, from a `resolve_userhost`
+/// reply (ignored by the nick form). `None` when the reply is not an `ok`
+/// or lacks a part that form needs: there is no fallback to another form.
+pub(crate) fn kickban_mask(pending: &PendingKickBan, reply: &Value) -> Option<String> {
+    let ok = reply.get("status").and_then(Value::as_str) == Some("ok");
+    let identity = reply.get("response").filter(|_| ok);
+    let user = identity.and_then(|identity| identity.get("user")?.as_str());
+    let host = identity.and_then(|identity| identity.get("host")?.as_str());
+    pending.ban_type.mask(&pending.nick, user, host).ok()
+}
+
 /// The fixed `nick!*@*` ban mask of "Ban nick".
 pub(crate) fn ban_nick_mask(nick: &str) -> String {
     format!("{nick}!*@*")
-}
-
-/// The fixed `*!*@host` ban mask of "Ban host" and Kickban; `None` for an
-/// empty host.
-pub(crate) fn ban_host_mask(host: &str) -> Option<String> {
-    (!host.is_empty()).then(|| format!("*!*@{host}"))
-}
-
-/// The `*!*@host` ban mask from a `resolve_userhost` reply, if it has one.
-pub(crate) fn kickban_mask(reply: &Value) -> Option<String> {
-    if reply.get("status").and_then(Value::as_str) != Some("ok") {
-        return None;
-    }
-    ban_host_mask(reply.get("response")?.get("host")?.as_str()?)
 }
 
 /// Whether `nick` is currently listed in the channel's members.
@@ -37,10 +34,19 @@ pub(crate) fn is_channel_member(
         })
 }
 
-/// Fails closed: without a host mask neither the ban nor the kick goes out
-/// (the host not being known yet is reported), and a channel that is no
-/// longer joined gets nothing. The ban goes first; the kick follows only
-/// for a Kickban whose target is still in the channel.
+/// Reports a ban that could not build its mask: nobody is banned or
+/// kicked.
+pub(crate) fn kickban_mask_failed(ui: &slint::Weak<AppWindow>, nick: &str) {
+    let nick = nick.to_string();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_command_hint(nick.into());
+        ui.set_status_kind("kickban-mask-failed".into());
+    });
+}
+
+/// Fails closed: without a mask neither the ban nor the kick goes out (the
+/// failure is reported, for example for `not_cached`), and a channel that
+/// is no longer joined gets nothing.
 fn finish_kickban(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -55,21 +61,22 @@ fn finish_kickban(
     if !joined {
         return;
     }
-    let Some(mask) = kickban_mask(reply) else {
-        let nick = pending.nick;
-        let _ = ui.upgrade_in_event_loop(move |ui| {
-            ui.set_status_command_hint(nick.into());
-            ui.set_status_kind("kickban-host-unknown".into());
-        });
-        return;
-    };
+    match kickban_mask(&pending, reply) {
+        Some(mask) => send_kickban(state, &pending, &mask),
+        None => kickban_mask_failed(ui, &pending.nick),
+    }
+}
+
+/// Sends the ban for `mask`. The kick follows it only when `kick_reason` is
+/// set and the target is still in the channel.
+pub(crate) fn send_kickban(state: &WorkerState, pending: &PendingKickBan, mask: &str) {
     send_user_verb(
         state,
         &pending.network,
         "ban",
         serde_json::json!({ "channel": pending.channel, "mask": mask }),
     );
-    let Some(reason) = pending.kick_reason else {
+    let Some(reason) = &pending.kick_reason else {
         return;
     };
     if is_channel_member(state, &pending.network, &pending.channel, &pending.nick) {
