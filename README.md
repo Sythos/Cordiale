@@ -50,7 +50,9 @@ into that window's draft, ready to edit before sending; the same nick menu in
 the member list stays message-free. Settings > Display now has a live
 **50–150% font size** control with a one-click reset. The choice is kept on
 this device, and the unread count sits centered alongside its channel row
-instead of wandering into the row below.
+instead of wandering into the row below. The channel you have open is
+highlighted in the sidebar and its unread badge is cleared, and the sidebar
+never gets narrower than its icon row.
 
 The Actions menu opens the radio: Cicchetto's stations (SomaFM and a few
 other Icecast streams) play in Cordiale itself, with the same player on
@@ -224,7 +226,7 @@ Cordiale also covers:
   It needs a build with the `video-shrink` feature (FFmpeg with libvpx);
   other builds show the switch disabled. Links in messages are clickable:
   image and text uploads on Grappa, and https images elsewhere, open in the
-  media viewer (fit or actual size; text read-only, with Copy), MP3, Ogg and
+  media viewer, a popup over the chat that Escape or Close dismisses (fit or actual size; text read-only, with Copy), MP3, Ogg and
   FLAC links play in the radio's player, and the rest opens in the browser.
   Like Cicchetto, Cordiale shows no inline previews. Only http, https and
   ftp links open (not `file:`, `javascript:`, `mailto:` or links with a user
@@ -313,9 +315,9 @@ cargo build --release --package cordiale-ui
   (no runtime gettext dependency); English is the untranslated source
   text, no `en/` file needed;
 - `resources/branding/` — project image and app icon source;
-- `packaging/windows` and `packaging/linux` — space for future deliverables
-  (packaging notes in `docs/packaging-windows.md` and
-  `docs/packaging-linux.md`), and `packaging/check-linux-deps.sh`, which
+- `packaging/windows` — the NSIS installer script (packaging notes in
+  `docs/packaging-windows.md` and `docs/packaging-linux.md`), and
+  `packaging/check-linux-deps.sh`, which
   maps the binary's shared libraries to each distro's package names;
 - `.github/workflows` — CI (formatting, clippy and tests on Linux, Windows and
   macOS, plus the `ctap-hid` feature) and the release packaging;
