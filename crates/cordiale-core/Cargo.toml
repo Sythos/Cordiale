@@ -24,6 +24,13 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 rustls-platform-verifier = "0.7"
 futures-util = { version = "0.3", features = ["sink"] }
+# Video shrinking before an upload (`video_processing.rs`). Off by default:
+# it links FFmpeg, which a build has to provide (system libraries, or the
+# `static` feature of this crate to build them).
+ffmpeg-next = { version = "9", optional = true }
+
+[features]
+video-shrink = ["dep:ffmpeg-next"]
 
 [dev-dependencies]
 wiremock = "0.6"

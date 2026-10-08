@@ -88,6 +88,7 @@ use cordiale_core::theme::{font_family_for, ThemePalette, BUILTIN_THEMES};
 use cordiale_core::upload::{
     attachment_message, mime_for_filename, remaining_lifetime_label, UploadCategory,
 };
+use cordiale_core::video_processing::{self, ShrinkError};
 use cordiale_core::wire_event::ClientEventKind;
 
 use admin_handlers::*;
@@ -243,8 +244,8 @@ enum WorkerCommand {
     SendMessage {
         body: String,
     },
-    /// A picked file and the lifetime to request for it.
-    AttachFile(std::path::PathBuf, Option<i64>),
+    /// A picked file and what was chosen for it.
+    AttachFile(std::path::PathBuf, UploadOptions),
     UploadPrefsChanged {
         ttl: Option<i64>,
         confirm: bool,
@@ -531,6 +532,8 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_known_servers(known_servers_model());
 
     ui.set_radio_volume(i32::from(settings.radio_volume));
+    ui.set_pref_shrink_videos(settings.shrink_videos);
+    ui.set_video_shrink_available(video_processing::is_available());
     push_radio_stations(&ui, &settings.radio_stations);
 
     let (worker_tx, worker_rx) = mpsc::unbounded_channel::<WorkerCommand>();
@@ -1310,6 +1313,9 @@ struct SessionState {
     /// Own-nick listener topics become usable only after a successful
     /// Phoenix join reply. Keys are canonical topic strings.
     own_listener_ready: std::collections::HashSet<String>,
+    /// Set to stop the videos being shrunk for the session that ends (see
+    /// `cancel_video_shrinks`).
+    shrink_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// A sign-in waiting for its second factor (issue #118).
     pending_totp: Option<PendingTotp>,
     /// The token confirming a TOTP enrolment started in Settings.
@@ -1395,6 +1401,7 @@ impl WorkerState {
                 server_protocol_version: None,
                 chat_rebuild_tx: None,
                 own_listener_ready: std::collections::HashSet::new(),
+                shrink_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 pending_totp: None,
                 totp_enrollment: None,
                 passwordless_recovery_token: None,
@@ -1811,8 +1818,8 @@ async fn run_worker(
                         *expanded = !*expanded;
                         refresh_network_groups(&state, &ui);
                     }
-                    Some(WorkerCommand::AttachFile(path, expire)) => {
-                        handle_attach_file(&mut state, &ui, path, expire).await;
+                    Some(WorkerCommand::AttachFile(path, options)) => {
+                        handle_attach_file(&mut state, &ui, path, options).await;
                     }
                     Some(WorkerCommand::UploadPrefsChanged { ttl, confirm }) => {
                         run_upload_prefs_changed(&mut state, ttl, confirm).await;
@@ -2267,6 +2274,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::Disconnect) => {
                         persistence::log_line("disconnect requested");
+                        cancel_video_shrinks(&mut state);
                         // A manual disconnect is how the user switches
                         // accounts: don't sign back in at the next launch.
                         set_auto_connect(false);
@@ -2805,6 +2813,7 @@ async fn finish_connect(
             state.panels.mentions_bundles.clear();
             state.panels.mention_jumps.clear();
             state.prefs.upload_limits = None;
+            cancel_video_shrinks(state);
             state.prefs.web_bundle = None;
             state.networks.own_nicks = network_nicks_from_boot(&outcome);
             state.networks.away_states.clear();
@@ -4042,7 +4051,7 @@ async fn handle_attach_file(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     path: std::path::PathBuf,
-    expire: Option<i64>,
+    options: UploadOptions,
 ) {
     let filename = path
         .file_name()
@@ -4077,6 +4086,35 @@ async fn handle_attach_file(
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
+    if options.shrink && category == UploadCategory::Video {
+        if !video_processing::is_available() {
+            set_status("attach-shrink-unavailable", filename);
+            return;
+        }
+        let video_cap = state
+            .prefs
+            .upload_limits
+            .as_ref()
+            .map(|limits| upload_cap(limits, category));
+        let job = UploadJob {
+            client,
+            token,
+            network,
+            channel,
+            ui: ui.clone(),
+            filename,
+            expire: options.expire,
+        };
+        // The encoder takes as long as the video does: its own task keeps
+        // session frames and other commands moving meanwhile.
+        tokio::spawn(shrink_and_upload(
+            job,
+            path,
+            video_cap,
+            state.conn.shrink_cancel.clone(),
+        ));
+        return;
+    }
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -4100,6 +4138,75 @@ async fn handle_attach_file(
         ui.set_status_kind("".into());
         ui.set_status_message("".into());
     });
+    let job = UploadJob {
+        client,
+        token,
+        network,
+        channel,
+        ui: ui.clone(),
+        filename,
+        expire: options.expire,
+    };
+    upload_and_post(job, mime, category, bytes).await;
+}
+
+/// What the user chose for one upload, fixed when they confirm it (or when
+/// the question is off, from the saved defaults) and carried unchanged to
+/// the upload: Settings changing meanwhile doesn't touch it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UploadOptions {
+    /// The lifetime to request (`expire`), `None` for the server's default.
+    expire: Option<i64>,
+    /// Shrink the video first. Ignored for other types of file.
+    shrink: bool,
+}
+
+/// Stops the videos being shrunk for the session that is ending, so that
+/// they are not uploaded under the next one. Later uploads get a fresh flag.
+fn cancel_video_shrinks(state: &mut WorkerState) {
+    state
+        .conn
+        .shrink_cancel
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    state.conn.shrink_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+}
+
+/// Where an upload goes and how: everything the task that sends it needs,
+/// taken when the file is accepted so that it doesn't depend on what the
+/// window shows when the upload ends.
+struct UploadJob {
+    client: GrappaClient,
+    token: String,
+    network: String,
+    channel: String,
+    ui: slint::Weak<AppWindow>,
+    filename: String,
+    expire: Option<i64>,
+}
+
+fn set_attach_status(ui: &slint::Weak<AppWindow>, kind: &'static str, name: String) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_attach_name(name.into());
+        ui.set_status_kind(kind.into());
+    });
+}
+
+/// Uploads `bytes` and posts the link in the job's window.
+async fn upload_and_post(
+    job: UploadJob,
+    mime: &'static str,
+    category: UploadCategory,
+    bytes: Vec<u8>,
+) {
+    let UploadJob {
+        client,
+        token,
+        network,
+        channel,
+        ui,
+        filename,
+        expire,
+    } = job;
     match client
         .upload_file(&token, &filename, mime, bytes, expire)
         .await
@@ -4110,7 +4217,7 @@ async fn handle_attach_file(
             let remaining = match &expiry {
                 AttachExpiry::Live(label) => Some(label.as_str()),
                 AttachExpiry::Expired => {
-                    set_status("attach-expired", filename);
+                    set_attach_status(&ui, "attach-expired", filename);
                     return;
                 }
                 AttachExpiry::Unknown => None,
@@ -4121,19 +4228,114 @@ async fn handle_attach_file(
                 .send_message(&token, &network, &channel, &request)
                 .await
             {
-                set_send_failed_status(ui, &err);
+                set_send_failed_status(&ui, &err);
             } else if remaining.is_none() {
-                set_status("attach-expiry-unknown", filename);
+                set_attach_status(&ui, "attach-expiry-unknown", filename);
             }
         }
         Err(err) => {
             persistence::log_line(&format!("attachment upload failed: {err:?}"));
-            set_status(
+            set_attach_status(
+                &ui,
                 attachment_error_status(err.status().map(|status| status.as_u16())),
                 filename,
             );
         }
     }
+}
+
+/// Status-bar key for a video that was not shrunk, `None` when it was
+/// stopped on purpose (nothing to report).
+fn shrink_error_status(error: &ShrinkError) -> Option<&'static str> {
+    match error {
+        ShrinkError::Unavailable => Some("attach-shrink-unavailable"),
+        ShrinkError::Cancelled => None,
+        ShrinkError::Failed(_) => Some("attach-shrink-failed"),
+        ShrinkError::NotSmaller => Some("attach-shrink-not-smaller"),
+        ShrinkError::OverCap => Some("attach-shrink-too-large"),
+    }
+}
+
+/// Puts the outcome of a video that was not shrunk in the status bar.
+fn report_shrink_error(ui: &slint::Weak<AppWindow>, name: &str, error: &ShrinkError) {
+    match shrink_error_status(error) {
+        Some(kind) => set_attach_status(ui, kind, name.to_string()),
+        None => {
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("".into()));
+        }
+    }
+}
+
+/// Shrinks the video at `path` into a temporary file, checks the result
+/// against the server's cap for videos (the original may be over it), then
+/// uploads the result. Nothing goes up unless the shrunk copy does: a failed
+/// or useless shrink is reported and the original is left alone. `cancel`
+/// is set when the session ends.
+async fn shrink_and_upload(
+    job: UploadJob,
+    path: std::path::PathBuf,
+    video_cap: Option<u64>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let ui = job.ui.clone();
+    let original_name = job.filename.clone();
+    let Ok(original_len) = std::fs::metadata(&path).map(|meta| meta.len()) else {
+        set_attach_status(&ui, "attach-read-failed", original_name.clone());
+        return;
+    };
+    set_attach_status(&ui, "attach-shrinking", original_name.clone());
+    let progress_ui = ui.clone();
+    let progress_name = original_name.clone();
+    let task_cancel = cancel.clone();
+    let shrunk = tokio::task::spawn_blocking(move || {
+        video_processing::shrink(&path, &task_cancel, &|percent| {
+            set_attach_status(
+                &progress_ui,
+                "attach-shrinking",
+                format!("{progress_name} ({percent}%)"),
+            );
+        })
+    })
+    .await;
+    let video = match shrunk {
+        Ok(Ok(video)) => video,
+        Ok(Err(error)) => {
+            persistence::log_line(&format!("video shrink stopped: {error:?}"));
+            report_shrink_error(&ui, &original_name, &error);
+            return;
+        }
+        Err(err) => {
+            persistence::log_line(&format!("video shrink task failed: {err}"));
+            report_shrink_error(&ui, &original_name, &ShrinkError::Failed(err.to_string()));
+            return;
+        }
+    };
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        report_shrink_error(&ui, &original_name, &ShrinkError::Cancelled);
+        return;
+    }
+    let shrunk_len = std::fs::metadata(&video.path).map_or(u64::MAX, |meta| meta.len());
+    if let Err(error) = video_processing::check_result(original_len, shrunk_len, video_cap) {
+        report_shrink_error(&ui, &original_name, &error);
+        return;
+    }
+    let bytes = match std::fs::read(&video.path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            persistence::log_line(&format!("shrunk video read failed: {err}"));
+            set_attach_status(&ui, "attach-read-failed", original_name.clone());
+            return;
+        }
+    };
+    let (filename, mime) = (video.filename.clone(), video.mime);
+    // The temporary folder goes now: the bytes are in memory.
+    drop(video);
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_status_kind("".into());
+        ui.set_status_message("".into());
+    });
+    let job = UploadJob { filename, ..job };
+    upload_and_post(job, mime, UploadCategory::Video, bytes).await;
 }
 
 /// What the server's `expires_at` says about a fresh upload.
@@ -4189,7 +4391,8 @@ fn upload_preview(path: &std::path::Path) -> Option<slint::Image> {
 /// worker with the chosen lifetime: the paperclip, a dropped file and a
 /// paste all end here, as in Cicchetto. With the question on, the popup
 /// (preview, lifetime menu) answers through `finish_upload_confirm`; its
-/// lifetime starts from the saved one and never writes it back.
+/// lifetime and its "shrink videos" switch (videos only) start from the
+/// saved ones and never write them back.
 fn confirm_and_attach(
     ui: &AppWindow,
     tx: &mpsc::UnboundedSender<WorkerCommand>,
@@ -4219,25 +4422,32 @@ fn confirm_and_attach(
         ui.set_upload_confirm_name(name.into());
         ui.set_upload_confirm_size(format_file_size(size).into());
         ui.set_upload_confirm_ttl_index(ui.get_pref_upload_ttl_index());
+        ui.set_upload_confirm_shrink(ui.get_pref_shrink_videos());
         PENDING_UPLOAD.with(|pending| *pending.borrow_mut() = Some(path));
         ui.set_upload_confirm_open(true);
         return;
     }
-    let expire = upload_ttl_for_index(ui.get_pref_upload_ttl_index());
-    let _ = tx.send(WorkerCommand::AttachFile(path, expire));
+    let options = UploadOptions {
+        expire: upload_ttl_for_index(ui.get_pref_upload_ttl_index()),
+        shrink: ui.get_pref_shrink_videos(),
+    };
+    let _ = tx.send(WorkerCommand::AttachFile(path, options));
 }
 
 /// Closes the upload popup: with `send`, the pending file goes to the worker
 /// with the lifetime picked there; otherwise nothing is uploaded or posted.
 fn finish_upload_confirm(ui: &AppWindow, tx: &mpsc::UnboundedSender<WorkerCommand>, send: bool) {
-    let expire = upload_ttl_for_index(ui.get_upload_confirm_ttl_index());
+    let options = UploadOptions {
+        expire: upload_ttl_for_index(ui.get_upload_confirm_ttl_index()),
+        shrink: ui.get_upload_confirm_shrink(),
+    };
     ui.set_upload_confirm_open(false);
     ui.set_upload_confirm_preview(slint::Image::default());
     let Some(path) = PENDING_UPLOAD.with(|pending| pending.borrow_mut().take()) else {
         return;
     };
     if send {
-        let _ = tx.send(WorkerCommand::AttachFile(path, expire));
+        let _ = tx.send(WorkerCommand::AttachFile(path, options));
     }
 }
 

@@ -137,6 +137,11 @@ pub struct Settings {
     /// Grappa has no account-level field for it.
     #[serde(default)]
     pub default_ban_type: BanType,
+    /// "Shrink videos before sending": the default for video uploads, kept on
+    /// this device only (never sent to Grappa). Off until the user turns it
+    /// on; the upload popup starts from it and never writes it back.
+    #[serde(default)]
+    pub shrink_videos: bool,
 }
 
 /// A radio station added in Settings > Radio.
@@ -181,6 +186,7 @@ impl Default for Settings {
             presence_unsynced: BTreeSet::new(),
             mute_since: BTreeMap::new(),
             default_ban_type: BanType::default(),
+            shrink_videos: false,
         }
     }
 }
@@ -1074,6 +1080,7 @@ mod tests {
             presence_unsynced: BTreeSet::from(["libera #rust".to_string()]),
             mute_since: BTreeMap::from([("libera #rust".to_string(), 1_700_000_000)]),
             default_ban_type: BanType::UserHost,
+            shrink_videos: true,
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");
@@ -1100,6 +1107,14 @@ mod tests {
         let decoded: Settings =
             serde_json::from_str(r#"{"default_ban_type":"user_host"}"#).expect("deserialize");
         assert_eq!(decoded.default_ban_type, BanType::UserHost);
+    }
+
+    #[test]
+    fn settings_without_the_shrink_choice_keep_it_off() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"schema_version":1,"theme":"light"}"#).expect("deserialize");
+        assert!(!decoded.shrink_videos);
+        assert!(!Settings::default().shrink_videos);
     }
 
     #[test]

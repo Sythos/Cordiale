@@ -77,6 +77,7 @@ pub mod share;
 pub mod slash;
 pub mod theme;
 pub mod upload;
+pub mod video_processing;
 pub mod websocket;
 pub mod wire_event;
 

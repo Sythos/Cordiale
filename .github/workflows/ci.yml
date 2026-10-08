@@ -133,3 +133,33 @@ jobs:
 
       - name: Run tests (ctap-hid)
         run: cargo test --package cordiale-ui --features ctap-hid
+
+  # The video-shrink feature (re-encoding a video before an upload) links
+  # FFmpeg, so the default build never compiles it. Here it is checked
+  # against the distribution's FFmpeg development packages.
+  video-shrink:
+    name: video-shrink (ubuntu-26.04)
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang pkg-config libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev
+
+      - name: Lint with Clippy (video-shrink)
+        run: cargo clippy --package cordiale-core --all-targets --features video-shrink -- -D warnings
+
+      - name: Run tests (video-shrink)
+        run: cargo test --package cordiale-core --features video-shrink
