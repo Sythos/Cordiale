@@ -5479,6 +5479,28 @@ fn attachment_caps_and_errors_follow_the_category() {
     assert_eq!(attachment_error_status(None), "attach-failed");
 }
 
+#[test]
+fn a_video_that_was_not_shrunk_is_reported_and_never_uploaded_as_is() {
+    assert_eq!(
+        shrink_error_status(&ShrinkError::Unavailable),
+        Some("attach-shrink-unavailable")
+    );
+    assert_eq!(
+        shrink_error_status(&ShrinkError::Failed("bad".to_string())),
+        Some("attach-shrink-failed")
+    );
+    assert_eq!(
+        shrink_error_status(&ShrinkError::NotSmaller),
+        Some("attach-shrink-not-smaller")
+    );
+    assert_eq!(
+        shrink_error_status(&ShrinkError::OverCap),
+        Some("attach-shrink-too-large")
+    );
+    // Stopped on purpose: nothing to report.
+    assert_eq!(shrink_error_status(&ShrinkError::Cancelled), None);
+}
+
 /// A 507 can't say whether the instance or the subject's own cap is out
 /// of space (protocol v26), so its copy must not blame the server, in
 /// the UI or in any catalog.

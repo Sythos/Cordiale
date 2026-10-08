@@ -3327,3 +3327,31 @@ msgstr "Desconectado. Reconectando en {} s… ({})"
 msgctxt "AppWindow"
 msgid "Reconnecting in {} s… ({})"
 msgstr "Reconectando en {} s… ({})"
+
+msgctxt "AppWindow"
+msgid "Shrink videos before sending"
+msgstr "Reducir los vídeos antes de enviarlos"
+
+msgctxt "AppWindow"
+msgid "Not available in this build."
+msgstr "No disponible en esta versión."
+
+msgctxt "AppWindow"
+msgid "Shrinking {}…"
+msgstr "Reduciendo {}…"
+
+msgctxt "AppWindow"
+msgid "Video shrinking isn't available in this build, so {} was not sent."
+msgstr "La reducción de vídeos no está disponible en esta versión; {} no se envió."
+
+msgctxt "AppWindow"
+msgid "Couldn't shrink {}, so it was not sent."
+msgstr "No se pudo reducir {}; no se envió."
+
+msgctxt "AppWindow"
+msgid "Shrinking didn't make {} smaller, so it was not sent."
+msgstr "Reducir {} no lo hizo más pequeño; no se envió."
+
+msgctxt "AppWindow"
+msgid "{} is still larger than the server allows after shrinking, so it was not sent."
+msgstr "Aun reducido, {} supera el límite del servidor; no se envió."

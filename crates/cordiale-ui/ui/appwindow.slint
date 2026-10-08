@@ -1303,6 +1303,12 @@ export component AppWindow inherits Window {
     in-out property <int> pref-upload-ttl-index: 0;
     in-out property <bool> pref-upload-confirm: false;
     callback upload-prefs-changed();
+    // "Shrink videos before sending": the default for video uploads, kept on
+    // this device (`Settings.shrink_videos`). `video-shrink-available` is
+    // false in builds without the video encoder.
+    in-out property <bool> pref-shrink-videos: false;
+    in property <bool> video-shrink-available: false;
+    callback shrink-pref-changed();
     // The popup shown before an upload when "Ask before uploading" is on:
     // the file, its thumbnail (images only) and the lifetime for this one
     // upload (same menu as `pref-upload-ttl-index`, which it never changes).
@@ -1313,6 +1319,9 @@ export component AppWindow inherits Window {
     in property <bool> upload-confirm-has-preview: false;
     in property <image> upload-confirm-preview;
     in-out property <int> upload-confirm-ttl-index: 0;
+    // The same choice for this one upload (videos only); it starts from
+    // `pref-shrink-videos` and never changes it.
+    in-out property <bool> upload-confirm-shrink: false;
     callback upload-confirm-accepted();
     callback upload-confirm-cancelled();
     // Offered when pasting text of several lines into the one-line compose
@@ -2455,6 +2464,16 @@ export component AppWindow inherits Window {
             return @tr("Invited {} to {} on {}.", status-invite-peer, status-invite-channel, status-invite-network);
         } else if status-kind == "attach-uploading" {
             return @tr("Uploading {}…", status-attach-name);
+        } else if status-kind == "attach-shrinking" {
+            return @tr("Shrinking {}…", status-attach-name);
+        } else if status-kind == "attach-shrink-unavailable" {
+            return @tr("Video shrinking isn't available in this build, so {} was not sent.", status-attach-name);
+        } else if status-kind == "attach-shrink-failed" {
+            return @tr("Couldn't shrink {}, so it was not sent.", status-attach-name);
+        } else if status-kind == "attach-shrink-not-smaller" {
+            return @tr("Shrinking didn't make {} smaller, so it was not sent.", status-attach-name);
+        } else if status-kind == "attach-shrink-too-large" {
+            return @tr("{} is still larger than the server allows after shrinking, so it was not sent.", status-attach-name);
         } else if status-kind == "attach-unsupported-type" {
             return @tr("The server doesn't accept this type of file: {}", status-attach-name);
         } else if status-kind == "attach-too-large" {
@@ -4407,6 +4426,16 @@ export component AppWindow inherits Window {
                         text: @tr("Ask before uploading");
                         checked <=> pref-upload-confirm;
                         toggled => { upload-prefs-changed(); }
+                    }
+                    CheckBox {
+                        text: @tr("Shrink videos before sending");
+                        checked <=> pref-shrink-videos;
+                        enabled: video-shrink-available;
+                        toggled => { shrink-pref-changed(); }
+                    }
+                    if !video-shrink-available : Text {
+                        text: @tr("Not available in this build.");
+                        wrap: word-wrap;
                     }
                 }
 
@@ -7480,7 +7509,7 @@ export component AppWindow inherits Window {
 
         Rectangle {
             width: min(480px, parent.width - 32px);
-            height: min(460px, parent.height - 32px);
+            height: min(upload-confirm-kind == "video" ? 520px : 460px, parent.height - 32px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             border-width: 1px;
@@ -7572,6 +7601,15 @@ export component AppWindow inherits Window {
                         min-width: 140px;
                         accessible-label: @tr("Keep this file for");
                     }
+                }
+                if upload-confirm-kind == "video" : CheckBox {
+                    text: @tr("Shrink videos before sending");
+                    checked <=> upload-confirm-shrink;
+                    enabled: video-shrink-available;
+                }
+                if upload-confirm-kind == "video" && !video-shrink-available : Text {
+                    text: @tr("Not available in this build.");
+                    wrap: word-wrap;
                 }
                 HorizontalLayout {
                     spacing: 8px;

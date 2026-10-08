@@ -39,7 +39,7 @@ prima di pianificare.
 | Names/Who/Whois/Whowas/Links/Server info | Sì | Fase 2 | Eventi per-connessione documentati |
 | Lusers | Sì | Fase 2 | Unico evento della famiglia con fan-out a tutte le connessioni |
 | Offerte DCC | Sì | Fase 2 | Endpoint ed eventi completamente documentati |
-| Upload/drag&drop file | Sì (sorgente Grappa, non in `CLIENT_PROTOCOL.md`) | Fase 2, implementato | `POST /api/uploads` (protocol-notes §6.5): graffetta, trascinamento, incolla |
+| Upload/drag&drop file | Sì (sorgente Grappa, non in `CLIENT_PROTOCOL.md`) | Fase 2, implementato | `POST /api/uploads` (protocol-notes §6.5): graffetta, trascinamento, incolla. Riduzione dei video prima dell'invio (issue #243): interruttore nel popup di conferma e default locale in Settings (`shrink_videos`, spento; il popup vale solo per quell'upload e non lo riscrive). Ricodifica in un MP4 temporaneo (VP9, audio copiato, al massimo 720p) con FFmpeg dietro la feature `video-shrink`, spenta di default come `ctap-hid`: nei pacchetti non è ancora attiva. Il risultato è controllato sul tetto video del server prima dell'invio; se non è disponibile, fallisce o non è più piccolo, il video non parte. Non provato con video e server reali |
 | Media viewer | No / non documentato | Implementato (client-side) | Rendering client-side, protocollo consegna solo byte grezzi |
 | Audio dock/mini player | No | Implementato (client-side) | Puramente client-side: player e radio, vedi la tabella del 2026-09-25 |
 | Editor/galleria temi | No | Fase 1/2 (nativo) | Cordiale gestisce temi via design token Slint, non wire protocol |
