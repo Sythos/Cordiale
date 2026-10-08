@@ -1250,7 +1250,7 @@ export component AppWindow inherits Window {
 
     // User-resizable via the drag handles between the three "connected"
     // screen columns (see `ResizeHandle`) — session-local, not persisted.
-    property <length> sidebar-width: 180px;
+    property <length> sidebar-width: sidebar-icons-min-width;
     property <length> members-width: 160px;
     // Texts measured by the invisible probes below to derive each side
     // column's minimum width: the widest sidebar row label, and a run of
@@ -1258,9 +1258,14 @@ export component AppWindow inherits Window {
     in property <string> sidebar-widest-label: "";
     in property <string> members-average-nick: "";
     // The sidebar never gets narrower than its widest row (plus the row
-    // indent, the part button and the box padding); the member column never
-    // narrower than the average member label or its Actions button.
-    property <length> sidebar-min-width: max(120px, sidebar-label-probe.preferred-width + 90px);
+    // indent, the part button and the box padding) nor than the top row of
+    // five 32px icon buttons (4px spacing, 12px box padding per side); the
+    // member column never narrower than the average member label or its
+    // Actions button.
+    property <length> sidebar-icons-min-width: 5 * 32px + 4 * 4px + 2 * 12px;
+    property <length> sidebar-min-width: max(
+        max(120px, sidebar-icons-min-width),
+        sidebar-label-probe.preferred-width + 90px);
     property <length> members-min-width: max(
         actions-probe.preferred-width + 16px,
         members-nick-probe.preferred-width + 40px);
