@@ -546,10 +546,11 @@ pub(crate) async fn push_admin_featured(
 /// confirmation. A 404 or any failure is "can't say", never zero, and the
 /// answer is dropped if the confirmation moved on to another network.
 pub(crate) async fn handle_admin_network_count(
-    state: &WorkerState,
+    state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     network_id: String,
 ) {
+    state.panels.admin_network_count_for = None;
     let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
@@ -563,6 +564,9 @@ pub(crate) async fn handle_admin_network_count(
             None
         }
     };
+    if count.is_some() {
+        state.panels.admin_network_count_for = Some(network_id.clone());
+    }
     let _ = ui.upgrade_in_event_loop(move |ui| {
         if ui.get_admin_network_confirm_id() != network_id.as_str() {
             return;
@@ -575,6 +579,12 @@ pub(crate) async fn handle_admin_network_count(
             None => ui.set_admin_network_count_state("unknown".into()),
         }
     });
+}
+
+/// A network may only be deleted once the server has answered its
+/// scrollback count (zero included); a stale or forged request is refused.
+pub(crate) fn admin_network_delete_armed(state: &WorkerState, network_id: &str) -> bool {
+    state.panels.admin_network_count_for.as_deref() == Some(network_id)
 }
 
 pub(crate) fn admin_overview_text(overview: &cordiale_core::admin::AdminOverview) -> String {
