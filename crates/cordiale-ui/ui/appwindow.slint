@@ -935,7 +935,8 @@ export component AppWindow inherits Window {
                 chat-resume = false;
             }
         } else {
-            chat-resume = screen == "media" || screen == "settings" || screen == "links" || screen == "archive" || screen == "reply" || screen == "umodes" || screen == "radio" || screen == "debug";
+            media-open = false;
+            chat-resume = screen == "settings" || screen == "links" || screen == "archive" || screen == "reply" || screen == "umodes" || screen == "radio" || screen == "debug";
         }
     }
     // Set once by Rust before the window is shown: where the splash
@@ -1589,6 +1590,8 @@ export component AppWindow inherits Window {
     in property <string> media-text: "";
     in property <bool> media-truncated: false;
     in-out property <bool> media-zoom: false;
+    // The viewer is a popup over the connected screen, not a screen of its own.
+    in-out property <bool> media-open: false;
     // The integrated radio. `radio-status` is "", "connecting", "playing",
     // "failed" or "ended"; the custom stations live in Settings > Radio.
     in property <[RadioRow]> radio-stations: [];
@@ -7292,7 +7295,39 @@ export component AppWindow inherits Window {
         }
     }
 
-    if screen == "media" : VerticalBox {
+    // The media viewer: a popup over the chat, which stays where it is
+    // behind it. Escape or Close dismisses it.
+    if media-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        Rectangle {
+            width: min(900px, parent.width - 32px);
+            height: parent.height - 32px;
+            x: (parent.width - self.width) / 2;
+            y: 16px;
+            border-width: 1px;
+            border-radius: 8px;
+            border-color: #8080806a;
+            background: theme == "dark" ? #242424 : white;
+
+            FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        media-open = false;
+                        return accept;
+                    }
+                    return reject;
+                }
+
+    VerticalBox {
         padding: 16px;
         spacing: 8px;
 
@@ -7317,7 +7352,7 @@ export component AppWindow inherits Window {
             }
             CompactButton {
                 text: "✕  " + @tr("Close");
-                clicked => { screen = "connected"; }
+                clicked => { media-open = false; }
             }
         }
 
@@ -7375,6 +7410,9 @@ export component AppWindow inherits Window {
                 read-only: true;
                 wrap: no-wrap;
                 vertical-stretch: 1;
+            }
+        }
+    }
             }
         }
     }
