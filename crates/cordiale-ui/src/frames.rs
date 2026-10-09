@@ -987,7 +987,12 @@ pub(crate) async fn handle_frame(
         });
     }
 
-    let rewrite = reply_presence::track_frame(state, &key, effective_payload);
+    // A catch-up replay of a row already shown must not redo its transition.
+    let rewrite = if already_shown {
+        None
+    } else {
+        reply_presence::track_frame(state, &key, effective_payload)
+    };
     let members_changed = update_members_from_frame(state, &key, effective_payload);
     if let Some(rewrite) = rewrite {
         reply_presence::apply_draft_rewrite(state, ui, &key, rewrite);

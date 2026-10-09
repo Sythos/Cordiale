@@ -11,6 +11,8 @@ use super::*;
 
 /// Oldest entries are dropped past this, per channel.
 const LOG_CAP: usize = 256;
+/// Message positions are kept as long as the transcript keeps the rows.
+const MESSAGE_CAP: usize = CHAT_HISTORY_CAP + CHAT_HISTORY_TRIM_SLACK;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Membership {
@@ -76,7 +78,10 @@ impl PresenceLog {
     pub(crate) fn note_message(&mut self, id: i64) {
         if self.messages.iter().all(|(known, _)| *known != id) {
             let seq = self.seq;
-            push_capped(&mut self.messages, (id, seq));
+            self.messages.push((id, seq));
+            if self.messages.len() > MESSAGE_CAP {
+                self.messages.remove(0);
+            }
         }
     }
 
