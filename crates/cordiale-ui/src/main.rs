@@ -42,6 +42,7 @@ mod passkeys;
 mod player;
 mod queries;
 mod reply;
+mod reply_presence;
 mod slash;
 mod taskbar;
 mod totp;
@@ -251,6 +252,17 @@ enum WorkerCommand {
         confirm: bool,
     },
     ComposeTextChanged(String),
+    /// Reply on a chat row: the author's nick and the raw message body.
+    ReplyToMessage {
+        nick: String,
+        body: String,
+        id: String,
+    },
+    /// The compose text of one window, set from the UI side.
+    DraftSynced {
+        key: (String, String),
+        text: String,
+    },
     ToggleTheme,
     SelectColorTheme(String),
     /// Night slot of the account's theme pair; "" goes back to one theme.
@@ -1271,6 +1283,12 @@ struct TranscriptState {
     /// `members_seeded` on the channel's Phoenix topic, then kept current
     /// from join/part/quit/nick frames.
     members: MembersByChannel,
+    /// Keyed by `(network, channel)`; joins, departures and nick changes
+    /// observed since login, for the Reply presence check.
+    presence_log: HashMap<(String, String), reply_presence::PresenceLog>,
+    /// Keyed by `(network, channel)`; the pending Reply of that channel's
+    /// draft, kept apart from the draft text.
+    reply_contexts: HashMap<(String, String), reply_presence::ReplyContext>,
     /// Full replacement from `query_windows_list`; query rows live beside
     /// channel rows while retaining their own window identity.
     query_windows: Vec<QueryWindow>,
@@ -1421,6 +1439,8 @@ impl WorkerState {
                 topics: HashMap::new(),
                 channel_modes: HashMap::new(),
                 members: HashMap::new(),
+                presence_log: HashMap::new(),
+                reply_contexts: HashMap::new(),
                 query_windows: Vec::new(),
                 pending_own_nick_dms: VecDeque::new(),
                 query_joined: std::collections::HashSet::new(),
@@ -1838,16 +1858,22 @@ async fn run_worker(
                         handle_send_message(&mut state, &ui, body).await;
                         if let Some(key) = state.windows.current_channel.clone() {
                             state.transcript.drafts.remove(&key);
+                            state.transcript.reply_contexts.remove(&key);
                         }
+                        reply_presence::push_reply_presence(&state, &ui);
                     }
                     Some(WorkerCommand::ComposeTextChanged(text)) => {
                         if let Some(key) = state.windows.current_channel.clone() {
-                            if text.is_empty() {
-                                state.transcript.drafts.remove(&key);
-                            } else {
-                                state.transcript.drafts.insert(key, text);
-                            }
+                            reply_presence::store_draft(&mut state, &ui, key, text);
                         }
+                    }
+                    // A draft the worker was told about for the window it
+                    // belongs to, not for whichever one is open by now.
+                    Some(WorkerCommand::DraftSynced { key, text }) => {
+                        reply_presence::store_draft(&mut state, &ui, key, text);
+                    }
+                    Some(WorkerCommand::ReplyToMessage { nick, body, id }) => {
+                        reply_presence::start_reply(&mut state, &ui, &nick, &body, id.parse().ok());
                     }
                     Some(WorkerCommand::ToggleTheme) => {
                         handle_toggle_theme(&mut state, &ui);
@@ -2340,6 +2366,7 @@ async fn run_worker(
                         state.prefs.system_dark = system_dark;
                         state.prefs.foreground = foreground;
                         push_home(&state, &ui);
+                        reply_presence::push_reply_presence(&state, &ui);
                         // Like Cicchetto, signing out stops the radio.
                         radio.stop();
                         radio_state.stop();
@@ -2809,6 +2836,9 @@ async fn finish_connect(
             state.windows.read_cursors = read_cursors_from_me(&outcome.me.read_cursors);
             state.windows.badge_count = normalize_badge_count(Some(&outcome.me.badge_count));
             state.transcript.members.clear();
+            state.transcript.presence_log.clear();
+            state.transcript.reply_contexts.clear();
+            reply_presence::push_reply_presence(state, ui);
             state.transcript.messages = messages_from_boot(&outcome);
             state.networks.network_ids = network_ids_from_boot(&outcome);
             state.networks.network_connection_states = connection_states;
@@ -8199,6 +8229,11 @@ fn chat_line_from_message(
         italic: message.italic,
         body,
         reply_body: message.text.clone().into(),
+        reply_id: message
+            .message_id
+            .map(|id| id.to_string())
+            .unwrap_or_default()
+            .into(),
         mention,
     }
 }

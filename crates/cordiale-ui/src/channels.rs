@@ -87,6 +87,7 @@ pub(crate) async fn handle_select_channel(
     let casemapping = network_casemapping(state, &network);
     let history_start = state.transcript.history_start_reached.contains(&key);
     let denoise = state.denoise_active(&key);
+    let reply_left = reply_presence::target_left(state);
 
     push_window_note(state, ui);
     let label = format!("{network} — {channel}");
@@ -101,6 +102,7 @@ pub(crate) async fn handle_select_channel(
         ui.set_current_query(false);
         ui.set_current_query_ready(false);
         ui.set_compose_text(draft.into());
+        ui.set_reply_target_left(reply_left);
         ui.set_can_moderate_members(can_moderate);
         ui.set_history_start_reached(history_start);
         ui.set_history_loading(false);
@@ -194,6 +196,14 @@ pub(crate) async fn handle_part_channel(
     state
         .transcript
         .drafts
+        .remove(&(network.clone(), channel.clone()));
+    state
+        .transcript
+        .reply_contexts
+        .remove(&(network.clone(), channel.clone()));
+    state
+        .transcript
+        .presence_log
         .remove(&(network.clone(), channel.clone()));
     state
         .windows
@@ -291,6 +301,7 @@ pub(crate) async fn handle_dismiss_kicked_channel(
         ui.set_current_server_window(false);
         ui.set_can_moderate_members(false);
         ui.set_compose_text("".into());
+        ui.set_reply_target_left(false);
         show_chat_lines(&ui, Vec::new());
         ui.set_channel_members(empty_members.into());
     });
@@ -343,6 +354,19 @@ pub(crate) fn dismiss_kicked_window_locally(
         return None;
     }
     remove_sidebar_channel_entry(&mut state.windows.channel_entries, network, channel);
+    // A later join of this channel starts without this session's reply state.
+    state
+        .transcript
+        .reply_contexts
+        .retain(|(known_network, known_channel), _| {
+            window_state_key(known_network, known_channel) != key
+        });
+    state
+        .transcript
+        .presence_log
+        .retain(|(known_network, known_channel), _| {
+            window_state_key(known_network, known_channel) != key
+        });
     Some(selected)
 }
 

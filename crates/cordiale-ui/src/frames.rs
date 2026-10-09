@@ -635,6 +635,8 @@ pub(crate) async fn handle_frame(
     if payload_kind == "members_seeded" {
         match apply_members_seeded(state, &frame.payload) {
             Some(key) => {
+                reply_presence::refresh_roster(state, &key);
+                reply_presence::push_reply_presence(state, ui);
                 let count = state
                     .transcript
                     .members
@@ -723,6 +725,8 @@ pub(crate) async fn handle_frame(
     // `members_seeded`, but the payload contract matches byte for byte).
     if payload_kind == "names_reply" {
         if let Some(key) = apply_members_seeded(state, &frame.payload) {
+            reply_presence::refresh_roster(state, &key);
+            reply_presence::push_reply_presence(state, ui);
             if state.windows.current_channel.as_ref() == Some(&key) {
                 push_members_update(state, ui, &key);
             }
@@ -983,10 +987,20 @@ pub(crate) async fn handle_frame(
         });
     }
 
+    // A catch-up replay of a row already shown must not redo its transition.
+    let rewrite = if already_shown {
+        None
+    } else {
+        reply_presence::track_frame(state, &key, effective_payload)
+    };
     let members_changed = update_members_from_frame(state, &key, effective_payload);
+    if let Some(rewrite) = rewrite {
+        reply_presence::apply_draft_rewrite(state, ui, &key, rewrite);
+    }
     if members_changed && state.windows.current_channel.as_ref() == Some(&key) {
         push_members_update(state, ui, &key);
     }
+    reply_presence::push_reply_presence(state, ui);
 }
 
 /// Applies a `topic_changed` push — real shape confirmed via a live user
@@ -2017,6 +2031,21 @@ pub(crate) fn update_members_from_frame(
             members.push((nick.to_string(), String::new()));
             sort_members_by_rank(members, &order);
             true
+        }
+        Some("kick") => {
+            let Some(target) = payload
+                .get("meta")
+                .and_then(|meta| meta.get("target"))
+                .and_then(Value::as_str)
+            else {
+                return false;
+            };
+            let Some(members) = state.transcript.members.get_mut(key) else {
+                return false;
+            };
+            let before = members.len();
+            members.retain(|(name, _)| name != target);
+            before != members.len()
         }
         Some("part") | Some("quit") => {
             let Some(nick) = nick else { return false };

@@ -933,18 +933,13 @@ pub(crate) fn register_composer_callbacks(
     });
 
     let tx_for_reply = worker_tx.clone();
-    let weak_for_reply = ui.as_weak();
-    ui.on_reply_to_message_requested(move |nick, body| {
-        let Some(ui) = weak_for_reply.upgrade() else {
-            return;
-        };
-        let Some(quote) = reply::reply_quote(nick.as_str(), body.as_str()) else {
-            return;
-        };
-        let draft = reply::draft_with_reply_quote(ui.get_compose_text().as_str(), &quote);
-        ui.set_compose_text(draft.clone().into());
-        // A programmatic Slint property write does not emit LineEdit.edited.
-        let _ = tx_for_reply.send(WorkerCommand::ComposeTextChanged(draft));
+    ui.on_reply_to_message_requested(move |nick, body, id| {
+        // The worker owns the draft mirror and the roster the quote needs.
+        let _ = tx_for_reply.send(WorkerCommand::ReplyToMessage {
+            nick: nick.to_string(),
+            body: body.to_string(),
+            id: id.to_string(),
+        });
     });
 
     // Tab-completion cycle state (see `NickCompletionCycle`): UI-thread only,

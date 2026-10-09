@@ -297,6 +297,10 @@ msgid "Mask (nick!user@host)"
 msgstr "Maske (nick!user@host)"
 
 msgctxt "AppWindow"
+msgid "Left the channel"
+msgstr "Hat den Kanal verlassen"
+
+msgctxt "AppWindow"
 msgid "Command"
 msgstr "Befehl"
 
