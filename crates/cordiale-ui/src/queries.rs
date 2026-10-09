@@ -87,6 +87,7 @@ pub(crate) fn show_query_window(
         ui.set_current_query_ready(query_ready);
         ui.set_current_query_peer_nick(peer_nick.into());
         ui.set_compose_text(draft.into());
+        ui.set_reply_target_left(false);
         ui.set_can_moderate_members(false);
         ui.set_history_start_reached(history_start);
         ui.set_history_loading(false);
