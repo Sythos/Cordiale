@@ -31,6 +31,9 @@ pub(crate) struct PresenceLog {
     /// Vacated nicks that someone took again: a message by one of these
     /// can't be tied to a single occupant.
     reoccupied: Vec<(String, u64)>,
+    /// `(message id, seq)` of the rows seen live: where each one falls among
+    /// the events above.
+    messages: Vec<(i64, u64)>,
 }
 
 fn push_capped<T>(list: &mut Vec<T>, item: T) {
@@ -68,6 +71,22 @@ impl PresenceLog {
         if self.was_vacated(nick, casemapping) {
             push_capped(&mut self.reoccupied, (nick.to_string(), seq));
         }
+    }
+
+    pub(crate) fn note_message(&mut self, id: i64) {
+        if self.messages.iter().all(|(known, _)| *known != id) {
+            let seq = self.seq;
+            push_capped(&mut self.messages, (id, seq));
+        }
+    }
+
+    /// Where a message falls among the events; 0 (before everything seen)
+    /// for one this client didn't see arrive.
+    fn seq_of(&self, id: i64) -> u64 {
+        self.messages
+            .iter()
+            .find(|(known, _)| *known == id)
+            .map_or(0, |(_, seq)| *seq)
     }
 
     pub(crate) fn note_join(&mut self, nick: &str, casemapping: CaseMapping) {
@@ -123,6 +142,7 @@ impl PresenceLog {
         author: &str,
         roster: &[MemberEntry],
         casemapping: CaseMapping,
+        since: u64,
     ) -> (String, Membership, bool) {
         // The roster's own spelling, which is the nick to quote.
         let in_roster = |nick: &str| {
@@ -132,7 +152,8 @@ impl PresenceLog {
                 .map(|(name, _)| name.clone())
         };
         let mut current = author.to_string();
-        let mut linked_at = 0;
+        // Only what happened after the replied-to message counts.
+        let mut linked_at = since;
         for _ in 0..=LOG_CAP {
             // A nick taken by someone else after the link names another person.
             if self.reoccupied_after(&current, linked_at, casemapping) {
@@ -195,8 +216,10 @@ pub(crate) fn new_reply(
     casemapping: CaseMapping,
     author: &str,
     body: &str,
+    message_id: Option<i64>,
 ) -> Option<(String, Option<ReplyContext>)> {
-    let (nick, presence, frozen) = log.resolve(author, roster, casemapping);
+    let since = message_id.map_or(0, |id| log.seq_of(id));
+    let (nick, presence, frozen) = log.resolve(author, roster, casemapping, since);
     let quote = reply::reply_quote(&nick, body)?;
     let context = quote.starts_with(&quote_head(&nick)).then(|| ReplyContext {
         nick,
@@ -294,6 +317,7 @@ pub(crate) fn start_reply(
     ui: &slint::Weak<AppWindow>,
     nick: &str,
     body: &str,
+    message_id: Option<i64>,
 ) {
     let draft_key = state.windows.current_channel.clone();
     let channel_key = draft_key.clone().filter(|_| !state.windows.current_query);
@@ -308,7 +332,7 @@ pub(crate) fn start_reply(
                 .get(key)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            match new_reply(log, roster, casemapping, nick, body) {
+            match new_reply(log, roster, casemapping, nick, body, message_id) {
                 Some(built) => built,
                 None => return,
             }
@@ -337,6 +361,8 @@ pub(crate) fn start_reply(
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_compose_text(draft.into());
         ui.set_reply_target_left(left);
+        // Focus the field and put the caret after the quote, now that it's there.
+        ui.set_compose_focus_request(ui.get_compose_focus_request() + 1);
     });
 }
 
@@ -360,6 +386,9 @@ pub(crate) fn track_frame(
         .presence_log
         .entry(key.clone())
         .or_default();
+    if let Some(id) = message_id(payload) {
+        log.note_message(id);
+    }
     let context = state.transcript.reply_contexts.get_mut(key);
     match kind {
         "join" => {
@@ -462,7 +491,7 @@ mod tests {
     #[test]
     fn present_author_keeps_their_nick() {
         let log = PresenceLog::default();
-        let (nick, presence, frozen) = log.resolve("Alice", &roster(&["alice"]), CM);
+        let (nick, presence, frozen) = log.resolve("Alice", &roster(&["alice"]), CM, 0);
         assert_eq!(
             (nick.as_str(), presence, frozen),
             ("alice", Membership::Present, false)
@@ -472,10 +501,10 @@ mod tests {
     #[test]
     fn departure_is_only_claimed_when_observed() {
         let mut log = PresenceLog::default();
-        let (_, presence, _) = log.resolve("alice", &roster(&["bob"]), CM);
+        let (_, presence, _) = log.resolve("alice", &roster(&["bob"]), CM, 0);
         assert_eq!(presence, Membership::Unknown);
         log.note_departure("alice");
-        let (_, presence, _) = log.resolve("alice", &roster(&["bob"]), CM);
+        let (_, presence, _) = log.resolve("alice", &roster(&["bob"]), CM, 0);
         assert_eq!(presence, Membership::Left);
     }
 
@@ -484,10 +513,10 @@ mod tests {
         let mut log = PresenceLog::default();
         log.note_rename("alice", "alice2", CM);
         log.note_rename("alice2", "alice3", CM);
-        let (nick, presence, _) = log.resolve("alice", &roster(&["alice3"]), CM);
+        let (nick, presence, _) = log.resolve("alice", &roster(&["alice3"]), CM, 0);
         assert_eq!((nick.as_str(), presence), ("alice3", Membership::Present));
         log.note_departure("alice3");
-        let (nick, presence, _) = log.resolve("alice", &roster(&[]), CM);
+        let (nick, presence, _) = log.resolve("alice", &roster(&[]), CM, 0);
         assert_eq!((nick.as_str(), presence), ("alice3", Membership::Left));
     }
 
@@ -497,7 +526,7 @@ mod tests {
         log.note_rename("alice", "bob", CM);
         log.note_departure("bob");
         log.note_join("bob", CM);
-        let (nick, presence, frozen) = log.resolve("alice", &roster(&["bob"]), CM);
+        let (nick, presence, frozen) = log.resolve("alice", &roster(&["bob"]), CM, 0);
         assert_eq!(
             (nick.as_str(), presence, frozen),
             ("alice", Membership::Unknown, true)
@@ -507,7 +536,7 @@ mod tests {
         let mut log = PresenceLog::default();
         log.note_departure("bob");
         log.note_rename("alice", "bob", CM);
-        let (nick, presence, frozen) = log.resolve("alice", &roster(&["bob"]), CM);
+        let (nick, presence, frozen) = log.resolve("alice", &roster(&["bob"]), CM, 0);
         assert_eq!(
             (nick.as_str(), presence, frozen),
             ("bob", Membership::Present, false)
@@ -515,17 +544,33 @@ mod tests {
     }
 
     #[test]
+    fn a_message_sent_after_the_nick_was_reused_belongs_to_the_new_occupant() {
+        let mut log = PresenceLog::default();
+        log.note_message(1);
+        log.note_departure("alice");
+        log.note_join("alice", CM);
+        log.note_message(2);
+        let roster = roster(&["alice"]);
+        let old = new_reply(&log, &roster, CM, "alice", "hi", Some(1)).expect("quote");
+        assert!(old.1.is_some_and(|context| !context.left()));
+        let (_, presence, frozen) = log.resolve("alice", &roster, CM, log.seq_of(1));
+        assert_eq!((presence, frozen), (Membership::Unknown, true));
+        let (_, presence, frozen) = log.resolve("alice", &roster, CM, log.seq_of(2));
+        assert_eq!((presence, frozen), (Membership::Present, false));
+    }
+
+    #[test]
     fn returning_to_an_earlier_nick_keeps_the_identity() {
         let mut log = PresenceLog::default();
         log.note_rename("alice", "bob", CM);
         log.note_rename("bob", "alice", CM);
-        let (nick, presence, frozen) = log.resolve("alice", &roster(&["alice"]), CM);
+        let (nick, presence, frozen) = log.resolve("alice", &roster(&["alice"]), CM, 0);
         assert_eq!(
             (nick.as_str(), presence, frozen),
             ("alice", Membership::Present, false)
         );
         log.note_departure("alice");
-        let (_, presence, frozen) = log.resolve("alice", &roster(&[]), CM);
+        let (_, presence, frozen) = log.resolve("alice", &roster(&[]), CM, 0);
         assert_eq!((presence, frozen), (Membership::Left, false));
     }
 
@@ -534,7 +579,7 @@ mod tests {
         let mut log = PresenceLog::default();
         log.note_departure("alice2");
         log.note_rename("alice", "alice2", CM);
-        let (nick, presence, _) = log.resolve("alice", &roster(&[]), CM);
+        let (nick, presence, _) = log.resolve("alice", &roster(&[]), CM, 0);
         assert_eq!((nick.as_str(), presence), ("alice2", Membership::Unknown));
     }
 
@@ -543,7 +588,7 @@ mod tests {
         let mut log = PresenceLog::default();
         log.note_departure("alice");
         log.note_join("alice", CM);
-        let (nick, presence, frozen) = log.resolve("alice", &roster(&["alice"]), CM);
+        let (nick, presence, frozen) = log.resolve("alice", &roster(&["alice"]), CM, 0);
         assert_eq!(
             (nick.as_str(), presence, frozen),
             ("alice", Membership::Unknown, true)
@@ -552,7 +597,7 @@ mod tests {
         let mut log = PresenceLog::default();
         log.note_rename("alice", "bob", CM);
         log.note_join("alice", CM);
-        let (nick, presence, frozen) = log.resolve("alice", &roster(&["alice", "bob"]), CM);
+        let (nick, presence, frozen) = log.resolve("alice", &roster(&["alice", "bob"]), CM, 0);
         assert_eq!(
             (nick.as_str(), presence, frozen),
             ("alice", Membership::Unknown, true)
@@ -563,7 +608,7 @@ mod tests {
     fn reply_follows_rename_and_leave_without_touching_the_answer() {
         let log = PresenceLog::default();
         let (quote, context) =
-            new_reply(&log, &roster(&["alice"]), CM, "alice", "hello").expect("quote");
+            new_reply(&log, &roster(&["alice"]), CM, "alice", "hello", None).expect("quote");
         let mut context = context.expect("context");
         assert_eq!(quote, "<alice> hello << ");
         assert!(!context.left());
@@ -596,7 +641,7 @@ mod tests {
     fn relayed_quotes_have_no_context() {
         let log = PresenceLog::default();
         let (quote, context) =
-            new_reply(&log, &roster(&["relay"]), CM, "relay", "<bob> hi").expect("quote");
+            new_reply(&log, &roster(&["relay"]), CM, "relay", "<bob> hi", None).expect("quote");
         assert_eq!(quote, "@bob hi << ");
         assert!(context.is_none());
     }
@@ -604,12 +649,13 @@ mod tests {
     #[test]
     fn refreshed_roster_only_flags_a_member_seen_present() {
         let log = PresenceLog::default();
-        let (_, unseen) = new_reply(&log, &roster(&[]), CM, "alice", "hi").expect("quote");
+        let (_, unseen) = new_reply(&log, &roster(&[]), CM, "alice", "hi", None).expect("quote");
         let mut unseen = unseen.expect("context");
         unseen.on_roster(&roster(&["bob"]), CM);
         assert!(!unseen.left());
 
-        let (_, seen) = new_reply(&log, &roster(&["alice"]), CM, "alice", "hi").expect("quote");
+        let (_, seen) =
+            new_reply(&log, &roster(&["alice"]), CM, "alice", "hi", None).expect("quote");
         let mut seen = seen.expect("context");
         seen.on_roster(&roster(&["bob"]), CM);
         assert!(seen.left());

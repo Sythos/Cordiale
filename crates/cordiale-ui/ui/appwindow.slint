@@ -213,6 +213,8 @@ struct ChatLine {
     body: styled-text,
     // Raw wire body for Reply; never reconstruct it from styled markup.
     reply-body: string,
+    // Message id for Reply (empty when the row has none).
+    reply-id: string,
     // Mentions the user (own nick or a /hilight pattern), as Cicchetto
     // marks it: the mention background.
     mention: bool,
@@ -443,6 +445,7 @@ component MemberContextMenu {
     in property <string> target-nick;
     in property <bool> is-chat-message: false;
     in property <string> reply-body: "";
+    in property <string> reply-id: "";
     in property <bool> can-moderate;
     in property <string> display-text;
     in property <color> text-color;
@@ -459,14 +462,14 @@ component MemberContextMenu {
     callback whois(string);
     callback ctcp(string, string); // nick, verb
     callback query(string);
-    callback reply(string, string); // nick, raw message body
+    callback reply(string, string, string); // nick, raw message body, message id
 
     ContextMenuArea {
         Menu {
             if is-chat-message : MenuItem {
                 title: "↩  " + @tr("Reply");
                 enabled: reply-body != "";
-                activated => { reply(target-nick, reply-body); }
+                activated => { reply(target-nick, reply-body, reply-id); }
             }
             MenuItem {
                 title: "⬆  " + @tr("Op");
@@ -1130,7 +1133,7 @@ export component AppWindow inherits Window {
     in-out property <bool> reply-target-left: false;
     // A counter lets the compose field react to every Reply, including
     // repeated replies to the same message from the scrollback's scope.
-    private property <int> compose-focus-request: 0;
+    in-out property <int> compose-focus-request: 0;
     in property <string> current-channel-label: "";
     in property <bool> current-server-window: false;
     // RPL_TOPIC-equivalent for the selected channel, shown above the chat
@@ -1751,7 +1754,7 @@ export component AppWindow inherits Window {
     callback home-featured-open(string, string); // network, channel
     callback send-chat-message(string);
     callback compose-text-changed(string);
-    callback reply-to-message-requested(string, string); // nick, raw body
+    callback reply-to-message-requested(string, string, string); // nick, raw body, message id
     // Tab-completes the word before the (assumed end-of-text) caret against
     // the open channel's member nicks, or the query peer's nick in a
     // private window; `true` cycles forward (Tab), `false` backward
@@ -3909,6 +3912,7 @@ export component AppWindow inherits Window {
                             target-nick: line.nick;
                             is-chat-message: true;
                             reply-body: line.reply-body;
+                            reply-id: line.reply-id;
                             can-moderate: can-moderate-members;
                             display-text: "<" + line.nick-prefix + line.nick + "> ";
                             text-color: line.nick-color;
@@ -3922,9 +3926,10 @@ export component AppWindow inherits Window {
                             whois(nick) => { member-whois-requested(nick); }
                             ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                             query(nick) => { member-query-requested(nick); }
-                            reply(nick, body) => {
-                                reply-to-message-requested(nick, body);
-                                compose-focus-request += 1;
+                            // The worker bumps `compose-focus-request` once the
+                            // quote is in the compose field.
+                            reply(nick, body, id) => {
+                                reply-to-message-requested(nick, body, id);
                             }
                         }
 

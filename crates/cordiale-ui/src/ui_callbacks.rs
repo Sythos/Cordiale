@@ -933,11 +933,12 @@ pub(crate) fn register_composer_callbacks(
     });
 
     let tx_for_reply = worker_tx.clone();
-    ui.on_reply_to_message_requested(move |nick, body| {
+    ui.on_reply_to_message_requested(move |nick, body, id| {
         // The worker owns the draft mirror and the roster the quote needs.
         let _ = tx_for_reply.send(WorkerCommand::ReplyToMessage {
             nick: nick.to_string(),
             body: body.to_string(),
+            id: id.to_string(),
         });
     });
 

@@ -256,6 +256,7 @@ enum WorkerCommand {
     ReplyToMessage {
         nick: String,
         body: String,
+        id: String,
     },
     ToggleTheme,
     SelectColorTheme(String),
@@ -1875,8 +1876,8 @@ async fn run_worker(
                             }
                         }
                     }
-                    Some(WorkerCommand::ReplyToMessage { nick, body }) => {
-                        reply_presence::start_reply(&mut state, &ui, &nick, &body);
+                    Some(WorkerCommand::ReplyToMessage { nick, body, id }) => {
+                        reply_presence::start_reply(&mut state, &ui, &nick, &body, id.parse().ok());
                     }
                     Some(WorkerCommand::ToggleTheme) => {
                         handle_toggle_theme(&mut state, &ui);
@@ -8232,6 +8233,11 @@ fn chat_line_from_message(
         italic: message.italic,
         body,
         reply_body: message.text.clone().into(),
+        reply_id: message
+            .message_id
+            .map(|id| id.to_string())
+            .unwrap_or_default()
+            .into(),
         mention,
     }
 }
