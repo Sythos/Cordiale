@@ -36,13 +36,15 @@ pub(crate) struct PresenceLog {
     /// `(message id, seq)` of the rows seen live: where each one falls among
     /// the events above.
     messages: Vec<(i64, u64)>,
+    /// Events up to this seq were dropped to stay in bounds: what happened
+    /// before it can't be told any more.
+    floor: u64,
 }
 
-fn push_capped<T>(list: &mut Vec<T>, item: T) {
+/// Adds `item`, and gives back the oldest one when the list overflows.
+fn push_capped<T>(list: &mut Vec<T>, item: T) -> Option<T> {
     list.push(item);
-    if list.len() > LOG_CAP {
-        list.remove(0);
-    }
+    (list.len() > LOG_CAP).then(|| list.remove(0))
 }
 
 impl PresenceLog {
@@ -71,7 +73,9 @@ impl PresenceLog {
 
     fn arrive(&mut self, nick: &str, seq: u64, casemapping: CaseMapping) {
         if self.was_vacated(nick, casemapping) {
-            push_capped(&mut self.reoccupied, (nick.to_string(), seq));
+            if let Some((_, dropped)) = push_capped(&mut self.reoccupied, (nick.to_string(), seq)) {
+                self.floor = self.floor.max(dropped);
+            }
         }
     }
 
@@ -101,7 +105,9 @@ impl PresenceLog {
 
     pub(crate) fn note_departure(&mut self, nick: &str) {
         let seq = self.tick();
-        push_capped(&mut self.vacated, (nick.to_string(), seq));
+        if let Some((_, dropped)) = push_capped(&mut self.vacated, (nick.to_string(), seq)) {
+            self.floor = self.floor.max(dropped);
+        }
     }
 
     /// Whether observed renames lead from `from` to `to`.
@@ -127,8 +133,14 @@ impl PresenceLog {
         if !self.renames_reach(new, old, casemapping) {
             self.arrive(new, seq, casemapping);
         }
-        push_capped(&mut self.vacated, (old.to_string(), seq));
-        push_capped(&mut self.renames, (old.to_string(), new.to_string(), seq));
+        if let Some((_, dropped)) = push_capped(&mut self.vacated, (old.to_string(), seq)) {
+            self.floor = self.floor.max(dropped);
+        }
+        if let Some((_, _, dropped)) =
+            push_capped(&mut self.renames, (old.to_string(), new.to_string(), seq))
+        {
+            self.floor = self.floor.max(dropped);
+        }
     }
 
     fn rename_of(&self, nick: &str, after: u64, casemapping: CaseMapping) -> Option<(&str, u64)> {
@@ -157,6 +169,10 @@ impl PresenceLog {
                 .map(|(name, _)| name.clone())
         };
         let mut current = author.to_string();
+        // Dropped evidence can't be read either way: keep the historical nick.
+        if since < self.floor {
+            return (author.to_string(), Membership::Unknown, true);
+        }
         // Only what happened after the replied-to message counts.
         let mut linked_at = since;
         for _ in 0..=LOG_CAP {
@@ -194,6 +210,9 @@ pub(crate) struct ReplyContext {
     /// Presence was confirmed at some point, so a refreshed roster without
     /// the nick means they left.
     seen_present: bool,
+    /// The quote has been seen in the stored draft; until then a draft
+    /// without it is an edit made before the quote arrived.
+    confirmed: bool,
     /// The nick was reused: don't follow it.
     frozen: bool,
 }
@@ -231,6 +250,7 @@ pub(crate) fn new_reply(
         quote: quote.clone(),
         presence,
         seen_present: presence == Membership::Present,
+        confirmed: false,
         frozen,
     });
     Some((quote, context))
@@ -289,6 +309,16 @@ impl ReplyContext {
         }
     }
 
+    /// Checks the stored draft against the quote; false once a quote that
+    /// was there is gone.
+    pub(crate) fn in_draft(&mut self, draft: &str) -> bool {
+        if draft.contains(&self.quote) {
+            self.confirmed = true;
+            return true;
+        }
+        !self.confirmed
+    }
+
     /// Records the quote after a head rewrite.
     pub(crate) fn set_quote(&mut self, quote: String) {
         self.quote = quote;
@@ -311,6 +341,30 @@ pub(crate) fn target_left(state: &WorkerState) -> bool {
 pub(crate) fn push_reply_presence(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let left = target_left(state);
     let _ = ui.upgrade_in_event_loop(move |ui| ui.set_reply_target_left(left));
+}
+
+/// Keeps `text` as the draft of `key`; a reply whose quote has left the draft
+/// is over.
+pub(crate) fn store_draft(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: (String, String),
+    text: String,
+) {
+    let reply_over = state
+        .transcript
+        .reply_contexts
+        .get_mut(&key)
+        .is_some_and(|context| !context.in_draft(&text));
+    if reply_over {
+        state.transcript.reply_contexts.remove(&key);
+        push_reply_presence(state, ui);
+    }
+    if text.is_empty() {
+        state.transcript.drafts.remove(&key);
+    } else {
+        state.transcript.drafts.insert(key, text);
+    }
 }
 
 /// Reply on a chat row: quotes the author by the nick they have now (when an
@@ -352,9 +406,10 @@ pub(crate) fn start_reply(
         .and_then(|key| state.transcript.drafts.get(key))
         .map(String::as_str)
         .unwrap_or_default();
-    let draft = reply::draft_with_reply_quote(current, &quote);
-    if let Some(key) = draft_key {
-        state.transcript.drafts.insert(key, draft.clone());
+    // What the stored draft looks like for now; the open field is merged below.
+    let stored = reply::draft_with_reply_quote(current, &quote);
+    if let Some(key) = &draft_key {
+        state.transcript.drafts.insert(key.clone(), stored.clone());
     }
     if let Some(key) = channel_key {
         match context {
@@ -363,11 +418,24 @@ pub(crate) fn start_reply(
         };
     }
     let left = target_left(state);
+    let worker = state.conn.chat_rebuild_tx.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        ui.set_compose_text(draft.into());
+        // Edits typed after the click are already in the field: put the quote
+        // into what is there now, and only into the window it was asked for.
+        let label = draft_key
+            .as_ref()
+            .map(|(network, window)| format!("{network} — {window}"));
+        if label.is_none_or(|label| ui.get_current_channel_label() == label.as_str()) {
+            let draft = reply::draft_with_reply_quote(ui.get_compose_text().as_str(), &quote);
+            ui.set_compose_text(draft.clone().into());
+            // A programmatic write doesn't emit `edited`; tell the worker, keyed.
+            if let (Some(worker), Some(key)) = (worker, draft_key) {
+                let _ = worker.send(WorkerCommand::DraftSynced { key, text: draft });
+            }
+            // Focus the field and put the caret after the quote, now that it's there.
+            ui.set_compose_focus_request(ui.get_compose_focus_request() + 1);
+        }
         ui.set_reply_target_left(left);
-        // Focus the field and put the caret after the quote, now that it's there.
-        ui.set_compose_focus_request(ui.get_compose_focus_request() + 1);
     });
 }
 
@@ -558,6 +626,21 @@ mod tests {
         let roster = roster(&["alice"]);
         let old = new_reply(&log, &roster, CM, "alice", "hi", Some(1)).expect("quote");
         assert!(old.1.is_some_and(|context| !context.left()));
+        let (_, presence, frozen) = log.resolve("alice", &roster, CM, log.seq_of(1));
+        assert_eq!((presence, frozen), (Membership::Unknown, true));
+        let (_, presence, frozen) = log.resolve("alice", &roster, CM, log.seq_of(2));
+        assert_eq!((presence, frozen), (Membership::Present, false));
+    }
+
+    #[test]
+    fn dropped_evidence_freezes_older_messages_only() {
+        let mut log = PresenceLog::default();
+        log.note_message(1);
+        for index in 0..=LOG_CAP {
+            log.note_departure(&format!("user{index}"));
+        }
+        log.note_message(2);
+        let roster = roster(&["alice"]);
         let (_, presence, frozen) = log.resolve("alice", &roster, CM, log.seq_of(1));
         assert_eq!((presence, frozen), (Membership::Unknown, true));
         let (_, presence, frozen) = log.resolve("alice", &roster, CM, log.seq_of(2));

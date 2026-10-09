@@ -258,6 +258,11 @@ enum WorkerCommand {
         body: String,
         id: String,
     },
+    /// The compose text of one window, set from the UI side.
+    DraftSynced {
+        key: (String, String),
+        text: String,
+    },
     ToggleTheme,
     SelectColorTheme(String),
     /// Night slot of the account's theme pair; "" goes back to one theme.
@@ -1859,22 +1864,13 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ComposeTextChanged(text)) => {
                         if let Some(key) = state.windows.current_channel.clone() {
-                            // A reply that is no longer in the draft is over.
-                            let reply_over = state
-                                .transcript
-                                .reply_contexts
-                                .get(&key)
-                                .is_some_and(|context| !text.contains(context.quote()));
-                            if reply_over {
-                                state.transcript.reply_contexts.remove(&key);
-                                reply_presence::push_reply_presence(&state, &ui);
-                            }
-                            if text.is_empty() {
-                                state.transcript.drafts.remove(&key);
-                            } else {
-                                state.transcript.drafts.insert(key, text);
-                            }
+                            reply_presence::store_draft(&mut state, &ui, key, text);
                         }
+                    }
+                    // A draft the worker was told about for the window it
+                    // belongs to, not for whichever one is open by now.
+                    Some(WorkerCommand::DraftSynced { key, text }) => {
+                        reply_presence::store_draft(&mut state, &ui, key, text);
                     }
                     Some(WorkerCommand::ReplyToMessage { nick, body, id }) => {
                         reply_presence::start_reply(&mut state, &ui, &nick, &body, id.parse().ok());
