@@ -198,6 +198,14 @@ pub(crate) async fn handle_part_channel(
         .drafts
         .remove(&(network.clone(), channel.clone()));
     state
+        .transcript
+        .reply_contexts
+        .remove(&(network.clone(), channel.clone()));
+    state
+        .transcript
+        .presence_log
+        .remove(&(network.clone(), channel.clone()));
+    state
         .windows
         .recent_channels
         .retain(|(recent_network, recent_channel)| {

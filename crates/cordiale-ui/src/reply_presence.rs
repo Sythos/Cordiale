@@ -427,21 +427,22 @@ pub(crate) fn apply_draft_rewrite(
         let new = after.strip_prefix('<')?.split_once("> ")?.0;
         rename_in_draft(draft, &before, old, new)
     };
-    if state.windows.current_channel.as_ref() == Some(key) && !state.windows.current_query {
-        let _ = ui.upgrade_in_event_loop(move |ui| {
-            if let Some(draft) = rename(ui.get_compose_text().as_str()) {
-                ui.set_compose_text(draft.clone().into());
-                // A programmatic write doesn't emit `edited`.
-                ui.invoke_compose_text_changed(draft.into());
-            }
-        });
-    } else if let Some(draft) = state
+    // The stored draft changes at once, under its own key, so a channel switch
+    // already queued can't file the rewrite under another channel.
+    if let Some(draft) = state
         .transcript
         .drafts
         .get(key)
         .and_then(|draft| rename(draft))
     {
         state.transcript.drafts.insert(key.clone(), draft);
+    }
+    if state.windows.current_channel.as_ref() == Some(key) && !state.windows.current_query {
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            if let Some(draft) = rename(ui.get_compose_text().as_str()) {
+                ui.set_compose_text(draft.into());
+            }
+        });
     }
 }
 
