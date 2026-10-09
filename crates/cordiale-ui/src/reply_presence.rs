@@ -115,8 +115,13 @@ impl PresenceLog {
         let mut current = from;
         let mut after = 0;
         for _ in 0..=LOG_CAP {
+            // A chain doesn't cross someone leaving or taking a nick over: that
+            // is another person, not the one who changed nick.
+            if self.reoccupied_after(current, after, casemapping) {
+                return false;
+            }
             if casemapping.nick_eq(current, to) {
-                return true;
+                return !self.vacated_after(current, after, casemapping);
             }
             let Some((next, at)) = self.rename_of(current, after, casemapping) else {
                 return false;
@@ -645,6 +650,20 @@ mod tests {
         assert_eq!((presence, frozen), (Membership::Unknown, true));
         let (_, presence, frozen) = log.resolve("alice", &roster, CM, log.seq_of(2));
         assert_eq!((presence, frozen), (Membership::Present, false));
+    }
+
+    #[test]
+    fn a_return_to_a_nick_does_not_cross_another_person() {
+        let mut log = PresenceLog::default();
+        log.note_rename("alice", "bob", CM);
+        log.note_departure("bob");
+        log.note_join("bob", CM);
+        log.note_rename("bob", "alice", CM);
+        let (nick, presence, frozen) = log.resolve("alice", &roster(&["alice"]), CM, 0);
+        assert_eq!(
+            (nick.as_str(), presence, frozen),
+            ("alice", Membership::Unknown, true)
+        );
     }
 
     #[test]

@@ -354,6 +354,19 @@ pub(crate) fn dismiss_kicked_window_locally(
         return None;
     }
     remove_sidebar_channel_entry(&mut state.windows.channel_entries, network, channel);
+    // A later join of this channel starts without this session's reply state.
+    state
+        .transcript
+        .reply_contexts
+        .retain(|(known_network, known_channel), _| {
+            window_state_key(known_network, known_channel) != key
+        });
+    state
+        .transcript
+        .presence_log
+        .retain(|(known_network, known_channel), _| {
+            window_state_key(known_network, known_channel) != key
+        });
     Some(selected)
 }
 
