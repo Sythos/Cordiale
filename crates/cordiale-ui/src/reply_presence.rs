@@ -79,8 +79,28 @@ impl PresenceLog {
         push_capped(&mut self.vacated, (nick.to_string(), seq));
     }
 
+    /// Whether observed renames lead from `from` to `to`.
+    fn renames_reach(&self, from: &str, to: &str, casemapping: CaseMapping) -> bool {
+        let mut current = from;
+        let mut after = 0;
+        for _ in 0..=LOG_CAP {
+            if casemapping.nick_eq(current, to) {
+                return true;
+            }
+            let Some((next, at)) = self.rename_of(current, after, casemapping) else {
+                return false;
+            };
+            current = next;
+            after = at;
+        }
+        false
+    }
+
     pub(crate) fn note_rename(&mut self, old: &str, new: &str, casemapping: CaseMapping) {
-        self.arrive(new, casemapping);
+        // Going back to an earlier nick of the same person isn't a reuse.
+        if !self.renames_reach(new, old, casemapping) {
+            self.arrive(new, casemapping);
+        }
         let seq = self.tick();
         push_capped(&mut self.vacated, (old.to_string(), seq));
         push_capped(&mut self.renames, (old.to_string(), new.to_string(), seq));
@@ -103,10 +123,12 @@ impl PresenceLog {
         roster: &[MemberEntry],
         casemapping: CaseMapping,
     ) -> (String, Membership, bool) {
+        // The roster's own spelling, which is the nick to quote.
         let in_roster = |nick: &str| {
             roster
                 .iter()
-                .any(|(name, _)| casemapping.nick_eq(name, nick))
+                .find(|(name, _)| casemapping.nick_eq(name, nick))
+                .map(|(name, _)| name.clone())
         };
         if self.is_reoccupied(author, casemapping) {
             return (author.to_string(), Membership::Unknown, true);
@@ -114,8 +136,8 @@ impl PresenceLog {
         let mut current = author.to_string();
         let mut linked_at = 0;
         for _ in 0..=LOG_CAP {
-            if in_roster(&current) {
-                return (current, Membership::Present, false);
+            if let Some(name) = in_roster(&current) {
+                return (name, Membership::Present, false);
             }
             if let Some((next, at)) = self.rename_of(&current, linked_at, casemapping) {
                 current = next.to_string();
@@ -464,6 +486,21 @@ mod tests {
         log.note_departure("alice3");
         let (nick, presence, _) = log.resolve("alice", &roster(&[]), CM);
         assert_eq!((nick.as_str(), presence), ("alice3", Membership::Left));
+    }
+
+    #[test]
+    fn returning_to_an_earlier_nick_keeps_the_identity() {
+        let mut log = PresenceLog::default();
+        log.note_rename("alice", "bob", CM);
+        log.note_rename("bob", "alice", CM);
+        let (nick, presence, frozen) = log.resolve("alice", &roster(&["alice"]), CM);
+        assert_eq!(
+            (nick.as_str(), presence, frozen),
+            ("alice", Membership::Present, false)
+        );
+        log.note_departure("alice");
+        let (_, presence, frozen) = log.resolve("alice", &roster(&[]), CM);
+        assert_eq!((presence, frozen), (Membership::Left, false));
     }
 
     #[test]
