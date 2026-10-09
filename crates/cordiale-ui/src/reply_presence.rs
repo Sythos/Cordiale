@@ -30,7 +30,7 @@ pub(crate) struct PresenceLog {
     renames: Vec<(String, String, u64)>,
     /// Vacated nicks that someone took again: a message by one of these
     /// can't be tied to a single occupant.
-    reoccupied: Vec<String>,
+    reoccupied: Vec<(String, u64)>,
 }
 
 fn push_capped<T>(list: &mut Vec<T>, item: T) {
@@ -58,20 +58,21 @@ impl PresenceLog {
             .any(|(name, at)| *at > seq && casemapping.nick_eq(name, nick))
     }
 
-    fn is_reoccupied(&self, nick: &str, casemapping: CaseMapping) -> bool {
+    fn reoccupied_after(&self, nick: &str, seq: u64, casemapping: CaseMapping) -> bool {
         self.reoccupied
             .iter()
-            .any(|name| casemapping.nick_eq(name, nick))
+            .any(|(name, at)| *at > seq && casemapping.nick_eq(name, nick))
     }
 
-    fn arrive(&mut self, nick: &str, casemapping: CaseMapping) {
-        if self.was_vacated(nick, casemapping) && !self.is_reoccupied(nick, casemapping) {
-            push_capped(&mut self.reoccupied, nick.to_string());
+    fn arrive(&mut self, nick: &str, seq: u64, casemapping: CaseMapping) {
+        if self.was_vacated(nick, casemapping) {
+            push_capped(&mut self.reoccupied, (nick.to_string(), seq));
         }
     }
 
     pub(crate) fn note_join(&mut self, nick: &str, casemapping: CaseMapping) {
-        self.arrive(nick, casemapping);
+        let seq = self.tick();
+        self.arrive(nick, seq, casemapping);
     }
 
     pub(crate) fn note_departure(&mut self, nick: &str) {
@@ -97,11 +98,11 @@ impl PresenceLog {
     }
 
     pub(crate) fn note_rename(&mut self, old: &str, new: &str, casemapping: CaseMapping) {
+        let seq = self.tick();
         // Going back to an earlier nick of the same person isn't a reuse.
         if !self.renames_reach(new, old, casemapping) {
-            self.arrive(new, casemapping);
+            self.arrive(new, seq, casemapping);
         }
-        let seq = self.tick();
         push_capped(&mut self.vacated, (old.to_string(), seq));
         push_capped(&mut self.renames, (old.to_string(), new.to_string(), seq));
     }
@@ -130,12 +131,13 @@ impl PresenceLog {
                 .find(|(name, _)| casemapping.nick_eq(name, nick))
                 .map(|(name, _)| name.clone())
         };
-        if self.is_reoccupied(author, casemapping) {
-            return (author.to_string(), Membership::Unknown, true);
-        }
         let mut current = author.to_string();
         let mut linked_at = 0;
         for _ in 0..=LOG_CAP {
+            // A nick taken by someone else after the link names another person.
+            if self.reoccupied_after(&current, linked_at, casemapping) {
+                break;
+            }
             if let Some(name) = in_roster(&current) {
                 return (name, Membership::Present, false);
             }
@@ -486,6 +488,29 @@ mod tests {
         log.note_departure("alice3");
         let (nick, presence, _) = log.resolve("alice", &roster(&[]), CM);
         assert_eq!((nick.as_str(), presence), ("alice3", Membership::Left));
+    }
+
+    #[test]
+    fn a_nick_taken_over_after_a_rename_is_not_the_renamed_person() {
+        let mut log = PresenceLog::default();
+        log.note_rename("alice", "bob", CM);
+        log.note_departure("bob");
+        log.note_join("bob", CM);
+        let (nick, presence, frozen) = log.resolve("alice", &roster(&["bob"]), CM);
+        assert_eq!(
+            (nick.as_str(), presence, frozen),
+            ("alice", Membership::Unknown, true)
+        );
+
+        // A nick that was taken before the rename doesn't spoil the link.
+        let mut log = PresenceLog::default();
+        log.note_departure("bob");
+        log.note_rename("alice", "bob", CM);
+        let (nick, presence, frozen) = log.resolve("alice", &roster(&["bob"]), CM);
+        assert_eq!(
+            (nick.as_str(), presence, frozen),
+            ("bob", Membership::Present, false)
+        );
     }
 
     #[test]

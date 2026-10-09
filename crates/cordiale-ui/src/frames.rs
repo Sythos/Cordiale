@@ -725,6 +725,8 @@ pub(crate) async fn handle_frame(
     // `members_seeded`, but the payload contract matches byte for byte).
     if payload_kind == "names_reply" {
         if let Some(key) = apply_members_seeded(state, &frame.payload) {
+            reply_presence::refresh_roster(state, &key);
+            reply_presence::push_reply_presence(state, ui);
             if state.windows.current_channel.as_ref() == Some(&key) {
                 push_members_update(state, ui, &key);
             }
