@@ -1316,6 +1316,12 @@ struct TranscriptState {
     /// remember these identities so their late frames are ignored without
     /// swallowing ordinary channel traffic.
     stale_query_topics: std::collections::HashSet<(String, String)>,
+    /// Per query window, how far back its history was loaded; used to page
+    /// the windows folded into a followed DM one by one.
+    query_history_sources: HashMap<(String, String), HistorySource>,
+    /// Client-side view over DM windows whose peer changed nick, built only
+    /// from observed `nick_change` events and dropped at every sign-in.
+    query_peer_links: Vec<QueryPeerLink>,
 }
 
 struct SessionState {
@@ -1449,6 +1455,8 @@ impl WorkerState {
                 history_start_reached: std::collections::HashSet::new(),
                 history_cursors_fetched: std::collections::HashSet::new(),
                 stale_query_topics: std::collections::HashSet::new(),
+                query_history_sources: HashMap::new(),
+                query_peer_links: Vec::new(),
             },
             prefs: SettingsState {
                 presence_pins: settings.presence_pins,
@@ -2818,6 +2826,8 @@ async fn finish_connect(
             state.transcript.query_ready.clear();
             state.transcript.query_full_history_required.clear();
             state.transcript.stale_query_topics.clear();
+            state.transcript.query_peer_links.clear();
+            state.transcript.query_history_sources.clear();
             state.windows.window_states =
                 joined_window_states_from_boot_channels(&outcome.boot.channels);
             state.windows.window_failures.clear();
@@ -4060,7 +4070,12 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     }
 
     let request = SendMessageRequest::plain(body);
-    if let Err(err) = client.send_message(token, network, channel, &request).await {
+    let target = if state.windows.current_query {
+        query_send_target(state, network, channel)
+    } else {
+        channel.clone()
+    };
+    if let Err(err) = client.send_message(token, network, &target, &request).await {
         set_send_failed_status(ui, &err);
     }
 }
@@ -4121,6 +4136,11 @@ async fn handle_attach_file(
     let Some((network, channel)) = state.windows.current_channel.clone() else {
         set_status("attach-no-window", filename);
         return;
+    };
+    let channel = if state.windows.current_query {
+        query_send_target(state, &network, &channel)
+    } else {
+        channel
     };
     if channel == SERVER_WINDOW_NAME {
         let _ = ui.upgrade_in_event_loop(|ui| {
@@ -6925,12 +6945,34 @@ fn write_back_read_cursor(state: &mut WorkerState) {
     let Some((network, target, message_id)) = read_cursor_to_write(state) else {
         return;
     };
-    tokio::spawn(async move {
-        if let Err(err) = client
-            .set_read_cursor(&token, &network, &target, message_id)
-            .await
+    // The peer's windows under newer nicks are read with the open DM: their
+    // cursors move too, so no unread count is left behind on the server.
+    let mut targets = vec![target.clone()];
+    if state.windows.current_query {
+        if let Some(anchor) = find_query_window(&state.transcript.query_windows, &network, &target)
         {
-            persistence::log_line(&format!("read cursor write-back failed: {err:?}"));
+            for followed in followed_query_windows(state, anchor) {
+                let key = window_state_key(&network, &followed.target_nick);
+                if state
+                    .windows
+                    .read_cursors
+                    .get(&key)
+                    .is_none_or(|&cursor| cursor < message_id)
+                {
+                    state.windows.read_cursors.insert(key, message_id);
+                    targets.push(followed.target_nick);
+                }
+            }
+        }
+    }
+    tokio::spawn(async move {
+        for target in targets {
+            if let Err(err) = client
+                .set_read_cursor(&token, &network, &target, message_id)
+                .await
+            {
+                persistence::log_line(&format!("read cursor write-back failed: {err:?}"));
+            }
         }
     });
 }
@@ -7825,15 +7867,15 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     push_window_note(state, ui);
     let mut data = network_groups_data(
         &state.windows.channel_entries,
-        &state.transcript.query_windows,
+        &sidebar_query_windows(state),
         &state.windows.expanded_networks,
         &state.networks.network_connection_states,
         &state.networks.network_ids,
     );
     apply_connecting_labels(&mut data, &state.networks.connecting_networks);
     let window_states = state.windows.window_states.clone();
-    let window_mentions = state.windows.window_mentions.clone();
-    let window_messages = state.windows.window_messages.clone();
+    let window_mentions = merge_followed_query_counts(state, &state.windows.window_mentions);
+    let window_messages = merge_followed_query_counts(state, &state.windows.window_messages);
     let selected = selected_window(state);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
