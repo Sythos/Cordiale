@@ -939,7 +939,8 @@ export component AppWindow inherits Window {
             }
         } else {
             media-open = false;
-            chat-resume = screen == "settings" || screen == "links" || screen == "archive" || screen == "reply" || screen == "umodes" || screen == "radio" || screen == "debug";
+            radio-open = false;
+            chat-resume = screen == "settings" || screen == "links" || screen == "archive" || screen == "reply" || screen == "umodes" || screen == "debug";
         }
     }
     // Set once by Rust before the window is shown: where the splash
@@ -1337,6 +1338,9 @@ export component AppWindow inherits Window {
     // the file, its thumbnail (images only) and the lifetime for this one
     // upload (same menu as `pref-upload-ttl-index`, which it never changes).
     in-out property <bool> upload-confirm-open: false;
+    // The radio station selector: a compact panel above the connected
+    // screen, so the chat pane stays alive behind it.
+    in-out property <bool> radio-open: false;
     in property <string> upload-confirm-name: "";
     in property <string> upload-confirm-size: "";
     in property <string> upload-confirm-kind: "";
@@ -4206,7 +4210,7 @@ export component AppWindow inherits Window {
                                 settings-section = "themes";
                             }
                         }
-                        MenuItem { title: "📻  " + @tr("Radio"); activated => { screen = "radio"; } }
+                        MenuItem { title: "📻  " + @tr("Radio"); activated => { radio-open = true; } }
                         if is-admin : MenuItem {
                             title: "🛡  " + @tr("Admin");
                             activated => {
@@ -7182,8 +7186,46 @@ export component AppWindow inherits Window {
         }
     }
 
-    if screen == "radio" : VerticalBox {
-        padding: 16px;
+    // The radio station selector (see `radio-open`): a framed panel at the
+    // right edge, about as wide as the member column. A click on the backdrop
+    // or Escape closes it; a click inside the panel does not.
+    if radio-open && screen == "connected" : Rectangle {
+        width: parent.width;
+        height: parent.height;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { radio-open = false; }
+        }
+
+        Rectangle {
+            width: min(max(max(members-width, members-min-width), 280px), parent.width - 32px);
+            height: min(480px, parent.height - 32px);
+            x: parent.width - self.width - 16px;
+            y: 16px;
+            border-width: 1px;
+            border-radius: 8px;
+            border-color: #8080806a;
+            background: theme == "dark" ? #242424 : white;
+
+            TouchArea {
+                width: parent.width;
+                height: parent.height;
+            }
+
+            FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        radio-open = false;
+                        return accept;
+                    }
+                    return reject;
+                }
+
+        VerticalLayout {
+        padding: 14px;
         spacing: 8px;
 
         Text {
@@ -7237,14 +7279,18 @@ export component AppWindow inherits Window {
 
             Button {
                 text: @tr("Back");
-                clicked => { screen = "connected"; }
+                clicked => { radio-open = false; }
             }
             Button {
                 text: "⚙  " + @tr("Custom stations");
                 clicked => {
+                    radio-open = false;
                     screen = "settings";
                     settings-section = "radio";
                 }
+            }
+        }
+        }
             }
         }
     }
