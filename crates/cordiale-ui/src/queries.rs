@@ -143,7 +143,127 @@ pub(crate) async fn fetch_query_history(
     // Rows of a window folded into a followed peer's DM go to that DM.
     let key = query_view_key(state, query);
     merge_query_history(state, &key, &rows);
+    note_history_source(state, query, &rows);
     true
+}
+
+/// How far back one query window was loaded. A DM view that folds in the
+/// windows of the peer's older nicks pages each of them from its own oldest
+/// row, because the merged rows do not tell which window a row came from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HistorySource {
+    pub(crate) oldest: Option<i64>,
+    pub(crate) start_reached: bool,
+}
+
+pub(crate) fn history_source_key(query: &QueryWindow) -> (String, String) {
+    query_window_key(&query.network, &query.target_nick)
+}
+
+pub(crate) fn note_history_source(state: &mut WorkerState, query: &QueryWindow, rows: &[Value]) {
+    let Some(oldest) = rows.iter().filter_map(message_id).min() else {
+        return;
+    };
+    let source = state
+        .transcript
+        .query_history_sources
+        .entry(history_source_key(query))
+        .or_default();
+    source.oldest = Some(source.oldest.map_or(oldest, |known| known.min(oldest)));
+}
+
+/// The windows whose older history the open DM pages: its own and the ones
+/// folded into it. Empty when the open window is not a followed DM.
+pub(crate) fn older_history_sources(
+    state: &WorkerState,
+    key: &(String, String),
+) -> Vec<QueryWindow> {
+    if !state.windows.current_query {
+        return Vec::new();
+    }
+    let Some(anchor) = find_query_window(&state.transcript.query_windows, &key.0, &key.1) else {
+        return Vec::new();
+    };
+    let followed = followed_query_windows(state, anchor);
+    if followed.is_empty() {
+        return Vec::new();
+    }
+    std::iter::once(anchor.clone()).chain(followed).collect()
+}
+
+/// Pages `sources` back by one page each, merging the rows into `key`.
+/// Returns whether every window reached its first message, or `None` when a
+/// request failed.
+pub(crate) async fn load_older_query_sources(
+    state: &mut WorkerState,
+    key: &(String, String),
+    sources: &[QueryWindow],
+    merged_oldest: Option<i64>,
+) -> Option<bool> {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return None;
+    };
+    let mut all_reached = true;
+    for source in sources {
+        let source_key = history_source_key(source);
+        let known = state
+            .transcript
+            .query_history_sources
+            .get(&source_key)
+            .copied()
+            .unwrap_or_default();
+        if known.start_reached {
+            continue;
+        }
+        let oldest = known.oldest.or(merged_oldest);
+        let Some(oldest) = oldest.filter(|oldest| {
+            !state
+                .transcript
+                .history_cursors_fetched
+                .contains(&(source_key.clone(), *oldest))
+        }) else {
+            state
+                .transcript
+                .query_history_sources
+                .entry(source_key)
+                .or_default()
+                .start_reached = true;
+            continue;
+        };
+        let rows = match client
+            .fetch_messages_before(
+                &token,
+                &source.network,
+                &source.target_nick,
+                oldest,
+                OLDER_HISTORY_PAGE,
+            )
+            .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                persistence::log_line(&format!("older history fetch failed: {err:?}"));
+                return None;
+            }
+        };
+        state
+            .transcript
+            .history_cursors_fetched
+            .insert((source_key.clone(), oldest));
+        merge_query_history(state, key, &rows);
+        note_history_source(state, source, &rows);
+        let reached = rows.len() < OLDER_HISTORY_PAGE;
+        if reached {
+            state
+                .transcript
+                .query_history_sources
+                .entry(source_key)
+                .or_default()
+                .start_reached = true;
+        }
+        all_reached &= reached;
+    }
+    Some(all_reached)
 }
 
 pub(crate) fn mark_query_ready_after_history(state: &mut WorkerState, identity: &(String, String)) {
@@ -432,12 +552,14 @@ pub(crate) fn note_peer_nick_change(
 /// Picks where a live frame of the query window `query` is stored. A frame
 /// sent by a nick the peer has left means that nick is somebody else now:
 /// the link ends, the windows are separate again and the frame stays in its
-/// own window.
+/// own window. The windows of the ended link are returned too: their cached
+/// rows were merged under one key, so they are dropped here and the caller
+/// reloads each window.
 pub(crate) fn live_query_key(
     state: &mut WorkerState,
     query: &QueryWindow,
     payload: &Value,
-) -> (String, String) {
+) -> ((String, String), Vec<QueryWindow>) {
     let own = (query.network.clone(), query.target_nick.clone());
     let casemapping = network_casemapping(state, &query.network);
     let sender = payload
@@ -452,7 +574,9 @@ pub(crate) fn live_query_key(
                     .iter()
                     .any(|peer| casemapping.nick_eq(peer, &query.target_nick)))
     });
-    let Some(index) = link_index else { return own };
+    let Some(index) = link_index else {
+        return (own, Vec::new());
+    };
     let link = &state.transcript.query_peer_links[index];
     let left = sender.is_some_and(|sender| {
         !casemapping.nick_eq(link.current_peer(), sender)
@@ -467,10 +591,72 @@ pub(crate) fn live_query_key(
             "dm peer link ended on {}: a former nick wrote again",
             query.network
         ));
-        state.transcript.query_peer_links.remove(index);
-        return own;
+        let link = state.transcript.query_peer_links.remove(index);
+        let affected = split_link_caches(state, &link);
+        return (own, affected);
     }
-    query_view_key(state, query)
+    (query_view_key(state, query), Vec::new())
+}
+
+/// Forgets the rows, the paging marks and the read state of the windows of
+/// an ended link, so that each window can be loaded again on its own.
+fn split_link_caches(state: &mut WorkerState, link: &QueryPeerLink) -> Vec<QueryWindow> {
+    let windows = &state.transcript.query_windows;
+    let mut seen = std::collections::HashSet::new();
+    let affected: Vec<QueryWindow> = find_query_window(windows, &link.network, &link.anchor)
+        .into_iter()
+        .chain(
+            link.peers
+                .iter()
+                .filter_map(|peer| find_query_window(windows, &link.network, peer)),
+        )
+        .filter(|query| seen.insert(history_source_key(query)))
+        .cloned()
+        .collect();
+    for query in &affected {
+        let key = (query.network.clone(), query.target_nick.clone());
+        let identity = history_source_key(query);
+        state.transcript.messages.remove(&key);
+        state.transcript.history_start_reached.remove(&key);
+        state
+            .transcript
+            .history_cursors_fetched
+            .retain(|(fetched, _)| fetched != &key && fetched != &identity);
+        state.transcript.query_history_sources.remove(&identity);
+        state
+            .transcript
+            .query_full_history_required
+            .insert(identity);
+    }
+    affected
+}
+
+/// Reloads the latest page of each window after a link ended and shows the
+/// open one again, with the label and the sidebar the new state calls for.
+pub(crate) async fn reload_split_query_windows(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    affected: &[QueryWindow],
+) {
+    for query in affected {
+        if fetch_query_history(state, query, None, None).await {
+            state
+                .transcript
+                .query_full_history_required
+                .remove(&history_source_key(query));
+        }
+    }
+    refresh_network_groups(state, ui);
+    if !state.windows.current_query {
+        return;
+    }
+    let Some((network, nick)) = state.windows.current_channel.clone() else {
+        return;
+    };
+    if let Some(open) = find_query_window(&state.transcript.query_windows, &network, &nick).cloned()
+    {
+        show_query_window(state, ui, &open, &(network, nick));
+    }
 }
 
 /// Drops the links whose anchor window is gone from the snapshot.

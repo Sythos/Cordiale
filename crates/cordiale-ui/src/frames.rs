@@ -914,11 +914,14 @@ pub(crate) async fn handle_frame(
         ) {
             QueryTopicResolution::Active(query) => {
                 let query = query.clone();
-                let key = live_query_key(state, &query, effective_payload);
+                let (key, split) = live_query_key(state, &query, effective_payload);
                 if let Some(insert) =
                     append_query_live_message(state, &key, effective_payload, Some(&frame.event))
                 {
                     show_live_query_message(state, ui, &key, insert);
+                }
+                if !split.is_empty() {
+                    reload_split_query_windows(state, ui, &split).await;
                 }
                 return;
             }

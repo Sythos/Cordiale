@@ -409,7 +409,10 @@ il resto della sezione Sicurezza resta in Cicchetto:
   sommano alla riga del DM e il cursore di lettura viene scritto anche per
   quelle finestre; mute e topic restano quelli di ciascuna finestra e i topic
   di tutte restano sottoscritti. Un messaggio da un nick lasciato dal peer (o dal nick
-  d'apertura) chiude il collegamento: le finestre tornano separate. I
+  d'apertura) chiude il collegamento: le righe e i segni di paginazione delle
+  finestre coinvolte vengono azzerati, ognuna ricarica la propria ultima
+  pagina, e barra laterale ed etichetta si aggiornano. Lo scorrimento verso
+  l'alto pagina ogni finestra dal proprio messaggio più vecchio. I
   collegamenti si azzerano a ogni accesso e cadono con la finestra; la
   riconnessione non ne crea. **Dipendenza dal server (non verificata):** un
   `nick_change` arriva su un topic canale, quindi copre solo i peer che

@@ -1316,6 +1316,9 @@ struct TranscriptState {
     /// remember these identities so their late frames are ignored without
     /// swallowing ordinary channel traffic.
     stale_query_topics: std::collections::HashSet<(String, String)>,
+    /// Per query window, how far back its history was loaded; used to page
+    /// the windows folded into a followed DM one by one.
+    query_history_sources: HashMap<(String, String), HistorySource>,
     /// Client-side view over DM windows whose peer changed nick, built only
     /// from observed `nick_change` events and dropped at every sign-in.
     query_peer_links: Vec<QueryPeerLink>,
@@ -1452,6 +1455,7 @@ impl WorkerState {
                 history_start_reached: std::collections::HashSet::new(),
                 history_cursors_fetched: std::collections::HashSet::new(),
                 stale_query_topics: std::collections::HashSet::new(),
+                query_history_sources: HashMap::new(),
                 query_peer_links: Vec::new(),
             },
             prefs: SettingsState {
@@ -2823,6 +2827,7 @@ async fn finish_connect(
             state.transcript.query_full_history_required.clear();
             state.transcript.stale_query_topics.clear();
             state.transcript.query_peer_links.clear();
+            state.transcript.query_history_sources.clear();
             state.windows.window_states =
                 joined_window_states_from_boot_channels(&outcome.boot.channels);
             state.windows.window_failures.clear();

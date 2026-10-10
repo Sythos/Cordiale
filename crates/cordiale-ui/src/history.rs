@@ -96,6 +96,51 @@ pub(crate) async fn handle_load_older_history(
         .messages
         .get(&key)
         .and_then(|lines| lines.iter().filter_map(|line| line.message_id).min());
+    // A DM that folds in the windows of the peer's older nicks pages each
+    // window from its own oldest row.
+    let sources = older_history_sources(state, &key);
+    if !sources.is_empty() {
+        let position_of = |lines: &[RenderedMessage], id: Option<i64>| {
+            id.and_then(|id| lines.iter().position(|line| line.message_id == Some(id)))
+        };
+        let old_rows = state.transcript.messages.get(&key).map_or(0, Vec::len);
+        let before = position_of(
+            state
+                .transcript
+                .messages
+                .get(&key)
+                .map_or(&[][..], Vec::as_slice),
+            oldest,
+        );
+        let Some(start_reached) = load_older_query_sources(state, &key, &sources, oldest).await
+        else {
+            if state.windows.current_channel.as_ref() == Some(&key) {
+                finish(true, false);
+            }
+            return;
+        };
+        let after = position_of(
+            state
+                .transcript
+                .messages
+                .get(&key)
+                .map_or(&[][..], Vec::as_slice),
+            oldest,
+        );
+        let prepended = match (before, after) {
+            (Some(before), Some(after)) => after.saturating_sub(before),
+            _ => 0,
+        };
+        if start_reached {
+            state.transcript.history_start_reached.insert(key.clone());
+        }
+        publish_held_rows(state);
+        if state.windows.current_channel.as_ref() != Some(&key) {
+            return;
+        }
+        show_older_history(state, ui, &key, old_rows, prepended, start_reached);
+        return;
+    }
     // No line with a Grappa id (a server window), or a cursor already
     // fetched: there is no page left to ask for.
     let Some(oldest) = oldest.filter(|oldest| {
@@ -147,6 +192,19 @@ pub(crate) async fn handle_load_older_history(
     if state.windows.current_channel.as_ref() != Some(&key) {
         return;
     }
+    show_older_history(state, ui, &key, old_rows, prepended, start_reached);
+}
+
+/// Puts the rows of an older page above what the open window shows.
+fn show_older_history(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: &(String, String),
+    old_rows: usize,
+    prepended: usize,
+    start_reached: bool,
+) {
+    let key = key.clone();
     let lines = state
         .transcript
         .messages
