@@ -257,8 +257,14 @@ async fn handle_query_join_reply(
         // selected query will load its latest tail before becoming ready.
         return;
     };
-    let key = (query.network.clone(), query.target_nick.clone());
-    let (high_water, limit) = query_history_fetch_window(state, &identity, &key);
+    let own_key = (query.network.clone(), query.target_nick.clone());
+    let key = query_view_key(state, &query);
+    // A window folded into another DM has no rows of its own to resume from.
+    let (high_water, limit) = if key == own_key {
+        query_history_fetch_window(state, &identity, &key)
+    } else {
+        (None, None)
+    };
 
     // Phoenix's join reply is only the window/cursor seed; it carries no
     // message rows. Fetch the after-page from Grappa, using a known local
@@ -273,15 +279,17 @@ async fn handle_query_join_reply(
         .remove(&identity);
     mark_query_ready_after_history(state, &identity);
 
+    let view_identity = query_window_key(&key.0, &key.1);
     let selected =
         state.windows.current_query
             && state.windows.current_channel.as_ref().is_some_and(
                 |(current_network, current_nick)| {
-                    query_window_key(current_network, current_nick) == identity
+                    query_window_key(current_network, current_nick) == view_identity
                 },
             );
     if selected {
-        show_query_window(state, ui, &query, &key);
+        let shown = query_anchor_window(state, &query);
+        show_query_window(state, ui, &shown, &key);
     }
 }
 
@@ -905,7 +913,8 @@ pub(crate) async fn handle_frame(
             &topic_nick,
         ) {
             QueryTopicResolution::Active(query) => {
-                let key = (query.network.clone(), query.target_nick.clone());
+                let query = query.clone();
+                let key = live_query_key(state, &query, effective_payload);
                 if let Some(insert) =
                     append_query_live_message(state, &key, effective_payload, Some(&frame.event))
                 {
@@ -994,6 +1003,14 @@ pub(crate) async fn handle_frame(
         reply_presence::track_frame(state, &key, effective_payload)
     };
     let members_changed = update_members_from_frame(state, &key, effective_payload);
+    if !already_shown {
+        if let Some((old, new)) = parse_nick_change(effective_payload) {
+            if note_peer_nick_change(state, &network, &old, &new) {
+                refresh_network_groups(state, ui);
+                push_query_peer_label(state, ui);
+            }
+        }
+    }
     if let Some(rewrite) = rewrite {
         reply_presence::apply_draft_rewrite(state, ui, &key, rewrite);
     }
@@ -2000,6 +2017,25 @@ pub(crate) fn apply_members_seeded(
     let key = (network, channel);
     state.transcript.members.insert(key.clone(), members);
     Some(key)
+}
+
+/// The `(old, new)` nicks of a `nick_change` row, in the shape the roster
+/// update reads: `from`/`nick`/`sender` is the old nick, `meta.new_nick` the
+/// new one.
+pub(crate) fn parse_nick_change(payload: &Value) -> Option<(String, String)> {
+    if payload.get("kind").and_then(Value::as_str) != Some("nick_change") {
+        return None;
+    }
+    let old = payload
+        .get("from")
+        .or_else(|| payload.get("nick"))
+        .or_else(|| payload.get("sender"))
+        .and_then(Value::as_str)?;
+    let new = payload
+        .get("meta")
+        .and_then(|meta| meta.get("new_nick"))
+        .and_then(Value::as_str)?;
+    Some((old.to_string(), new.to_string()))
 }
 
 /// Maintains `state.members` from live join/part/quit/nick_change frames,
@@ -6075,6 +6111,7 @@ fn handle_query_windows_list(
 
     let previous_queries = state.transcript.query_windows.clone();
     let selected_closed = apply_query_windows_snapshot(state, snapshot);
+    prune_query_peer_links(state);
     retain_window_counts_for_open_windows(state);
     reconcile_query_topic_tracking(state, &previous_queries);
     drain_pending_own_nick_dms(state);

@@ -9276,3 +9276,159 @@ fn a_duplicate_dm_line_is_not_stored_twice() {
     );
     assert_eq!(state.transcript.messages[&key].len(), 2);
 }
+
+fn peer_link_window(network: &str, nick: &str) -> QueryWindow {
+    QueryWindow {
+        network: network.to_string(),
+        target_nick: nick.to_string(),
+        opened_at: "2026-10-10T10:00:00Z".to_string(),
+        dm_conversation_id: None,
+    }
+}
+
+fn peer_link_state(nicks: &[(&str, &str)]) -> WorkerState {
+    let mut state = WorkerState::new();
+    state.transcript.query_windows = nicks
+        .iter()
+        .map(|(network, nick)| peer_link_window(network, nick))
+        .collect();
+    state
+        .networks
+        .own_nicks
+        .insert("libera".to_string(), "me".to_string());
+    state
+}
+
+#[test]
+fn peer_nick_change_retargets_the_open_dm_before_any_message() {
+    let mut state = peer_link_state(&[("libera", "Alice")]);
+    assert!(note_peer_nick_change(
+        &mut state, "libera", "alice", "Alicia"
+    ));
+    assert_eq!(query_send_target(&state, "libera", "Alice"), "Alicia");
+    let query = peer_link_window("libera", "Alice");
+    let (label, peer) = query_label(&state, &query);
+    assert_eq!(peer, "Alicia");
+    assert!(label.contains("Alicia") && label.contains("Alice"));
+    // The window, its rows and its draft stay under the original key.
+    assert_eq!(
+        query_view_key(&state, &query),
+        ("libera".to_string(), "Alice".to_string())
+    );
+}
+
+#[test]
+fn peer_nick_changes_in_series_and_case_only_keep_the_latest_nick() {
+    let mut state = peer_link_state(&[("libera", "alice")]);
+    assert!(note_peer_nick_change(&mut state, "libera", "alice", "bob"));
+    assert!(note_peer_nick_change(&mut state, "libera", "BOB", "Carol"));
+    assert!(note_peer_nick_change(
+        &mut state, "libera", "carol", "CAROL"
+    ));
+    assert_eq!(query_send_target(&state, "libera", "alice"), "CAROL");
+    assert_eq!(state.transcript.query_peer_links.len(), 1);
+    // Back to the first nick: still the same DM, sent to that spelling.
+    assert!(note_peer_nick_change(
+        &mut state, "libera", "CAROL", "Alice"
+    ));
+    assert_eq!(state.transcript.query_peer_links.len(), 1);
+    assert_eq!(query_send_target(&state, "libera", "alice"), "Alice");
+}
+
+#[test]
+fn peer_nick_change_never_joins_unrelated_conversations() {
+    let mut state = peer_link_state(&[("libera", "alice"), ("libera", "bob"), ("oftc", "alice")]);
+    // The new nick already has a DM of its own: a pre-existing or reused nick.
+    assert!(!note_peer_nick_change(&mut state, "libera", "alice", "bob"));
+    // Our own nick change is not a peer change, in either direction.
+    assert!(!note_peer_nick_change(&mut state, "libera", "me", "me2"));
+    assert!(!note_peer_nick_change(&mut state, "libera", "alice", "ME"));
+    // A nick without a DM is nobody's conversation.
+    assert!(!note_peer_nick_change(&mut state, "libera", "dave", "dan"));
+    assert!(state.transcript.query_peer_links.is_empty());
+    // Networks stay apart.
+    assert!(note_peer_nick_change(&mut state, "oftc", "alice", "ally"));
+    assert_eq!(query_send_target(&state, "oftc", "alice"), "ally");
+    assert_eq!(query_send_target(&state, "libera", "alice"), "alice");
+    assert_eq!(query_send_target(&state, "libera", "bob"), "bob");
+    // A second peer cannot take a nick the first one holds.
+    assert!(!note_peer_nick_change(&mut state, "oftc", "alice", "ally"));
+}
+
+#[test]
+fn followed_window_is_folded_into_the_open_dm() {
+    let mut state = peer_link_state(&[("libera", "alice")]);
+    assert!(note_peer_nick_change(&mut state, "libera", "alice", "ally"));
+    // The peer writes from the new nick: the server opens a second window.
+    state
+        .transcript
+        .query_windows
+        .push(peer_link_window("libera", "ally"));
+    let followed = peer_link_window("libera", "ally");
+    let anchor_key = ("libera".to_string(), "alice".to_string());
+    assert_eq!(query_view_key(&state, &followed), anchor_key);
+    assert_eq!(
+        query_anchor_window(&state, &followed).target_nick,
+        "alice".to_string()
+    );
+    assert_eq!(sidebar_query_windows(&state).len(), 1);
+    assert_eq!(sidebar_query_windows(&state)[0].target_nick, "alice");
+    assert_eq!(
+        followed_query_windows(&state, &peer_link_window("libera", "alice")).len(),
+        1
+    );
+
+    // Rows of both windows land in one conversation, without duplicates.
+    let row = serde_json::json!({"id": 5, "sender": "ally", "body": "hi", "kind": "privmsg"});
+    let key = live_query_key(&mut state, &followed, &row);
+    assert_eq!(key, anchor_key);
+    assert!(append_query_live_message(&mut state, &key, &row, None).is_some());
+    assert!(append_query_live_message(&mut state, &key, &row, None).is_none());
+
+    // Unread counts of the folded window are added to the open DM's row.
+    let mut counts = HashMap::new();
+    counts.insert(window_counts_key("libera", "alice"), 2);
+    counts.insert(window_counts_key("libera", "ally"), 3);
+    let merged = merge_followed_query_counts(&state, &counts);
+    assert_eq!(merged.get(&window_counts_key("libera", "alice")), Some(&5));
+    assert!(!merged.contains_key(&window_counts_key("libera", "ally")));
+}
+
+#[test]
+fn a_former_nick_writing_again_ends_the_link() {
+    let mut state = peer_link_state(&[("libera", "alice")]);
+    assert!(note_peer_nick_change(&mut state, "libera", "alice", "ally"));
+    let anchor = peer_link_window("libera", "alice");
+    // Somebody else now holds the nick the window was opened with.
+    let row = serde_json::json!({"id": 9, "sender": "Alice", "body": "who?"});
+    let key = live_query_key(&mut state, &anchor, &row);
+    assert_eq!(key, ("libera".to_string(), "alice".to_string()));
+    assert!(state.transcript.query_peer_links.is_empty());
+    assert_eq!(query_send_target(&state, "libera", "alice"), "alice");
+}
+
+#[test]
+fn peer_links_are_dropped_with_their_window() {
+    let mut state = peer_link_state(&[("libera", "alice")]);
+    assert!(note_peer_nick_change(&mut state, "libera", "alice", "ally"));
+    state.transcript.query_windows.clear();
+    prune_query_peer_links(&mut state);
+    assert!(state.transcript.query_peer_links.is_empty());
+}
+
+#[test]
+fn nick_change_rows_are_parsed_for_the_peer_link() {
+    let row = serde_json::json!({"kind": "nick_change", "sender": "a", "meta": {"new_nick": "b"}});
+    assert_eq!(
+        parse_nick_change(&row),
+        Some(("a".to_string(), "b".to_string()))
+    );
+    assert_eq!(
+        parse_nick_change(&serde_json::json!({"kind": "join", "sender": "a"})),
+        None
+    );
+    assert_eq!(
+        parse_nick_change(&serde_json::json!({"kind": "nick_change", "sender": "a"})),
+        None
+    );
+}

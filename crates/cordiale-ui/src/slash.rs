@@ -45,6 +45,14 @@ pub(crate) async fn run_slash_command(
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
+    // In a DM the open window keeps its original nick, while the peer may have
+    // moved to a newer one: messages go to the latter, `/close` to the window.
+    let anchor = channel;
+    let channel = if state.windows.current_query {
+        query_send_target(state, &network, &anchor)
+    } else {
+        anchor.clone()
+    };
     let in_channel = !state.windows.current_query && slash::is_channel(&channel);
     let open_channel = || in_channel.then(|| channel.clone());
     if channel == SERVER_WINDOW_NAME
@@ -108,7 +116,7 @@ pub(crate) async fn run_slash_command(
                 state,
                 &network,
                 "close_query_window",
-                serde_json::json!({ "target_nick": channel }),
+                serde_json::json!({ "target_nick": anchor }),
             );
             Ok(())
         }

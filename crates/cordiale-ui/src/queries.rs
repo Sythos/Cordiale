@@ -14,6 +14,8 @@ pub(crate) async fn handle_select_query(
     else {
         return;
     };
+    // A window folded into a followed peer's DM opens that DM.
+    let query = query_anchor_window(state, &query);
     let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };
@@ -45,6 +47,11 @@ pub(crate) async fn handle_select_query(
             .query_full_history_required
             .remove(&identity);
         mark_query_ready_after_history(state, &identity);
+        // The peer's newer-nick windows hold the rest of the conversation;
+        // their rows merge into this view by message ID.
+        for followed in followed_query_windows(state, &query) {
+            fetch_query_history(state, &followed, None, None).await;
+        }
         show_query_window(state, ui, &query, &key);
     }
 }
@@ -71,9 +78,8 @@ pub(crate) fn show_query_window(
     refresh_mention_context(state);
     let query_ready = state.windows.current_query_ready;
     let history_start = state.transcript.history_start_reached.contains(key);
-    let label = format!("{} — {}", query.network, query.target_nick);
+    let (label, peer_nick) = query_label(state, query);
     let window_status = window_status_for(state);
-    let peer_nick = query.target_nick.clone();
     push_peer_away_banner(state, ui);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -134,7 +140,8 @@ pub(crate) async fn fetch_query_history(
     {
         return false;
     }
-    let key = (query.network.clone(), query.target_nick.clone());
+    // Rows of a window folded into a followed peer's DM go to that DM.
+    let key = query_view_key(state, query);
     merge_query_history(state, &key, &rows);
     true
 }
@@ -183,4 +190,314 @@ pub(crate) fn find_query_window<'a>(
     windows
         .iter()
         .find(|window| query_window_key(&window.network, &window.target_nick) == key)
+}
+
+/// A DM window whose peer was seen changing nick. The window (and so its
+/// rows, draft, selection and read state) stays under `anchor`, the nick it
+/// was opened with; `peers` are the nicks the peer took since, oldest first.
+/// The server keeps one query window per nick (protocol 37), so the newer
+/// windows are only folded into this view, never merged on the server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QueryPeerLink {
+    pub(crate) network: String,
+    pub(crate) anchor: String,
+    pub(crate) peers: Vec<String>,
+}
+
+impl QueryPeerLink {
+    /// The nick the peer has now: where outgoing messages go.
+    fn current_peer(&self) -> &str {
+        self.peers
+            .last()
+            .map_or(self.anchor.as_str(), String::as_str)
+    }
+}
+
+fn link_for_anchor<'a>(
+    state: &'a WorkerState,
+    network: &str,
+    anchor: &str,
+) -> Option<&'a QueryPeerLink> {
+    let casemapping = network_casemapping(state, network);
+    state
+        .transcript
+        .query_peer_links
+        .iter()
+        .find(|link| link.network == network && casemapping.nick_eq(&link.anchor, anchor))
+}
+
+fn link_for_peer<'a>(
+    state: &'a WorkerState,
+    network: &str,
+    nick: &str,
+) -> Option<&'a QueryPeerLink> {
+    let casemapping = network_casemapping(state, network);
+    state.transcript.query_peer_links.iter().find(|link| {
+        link.network == network
+            && link
+                .peers
+                .iter()
+                .any(|peer| casemapping.nick_eq(peer, nick))
+    })
+}
+
+/// The nick an outgoing message of the DM window `window_nick` is addressed
+/// to: the peer's latest nick when a nick change was seen, else the window's.
+pub(crate) fn query_send_target(state: &WorkerState, network: &str, window_nick: &str) -> String {
+    link_for_anchor(state, network, window_nick).map_or_else(
+        || window_nick.to_string(),
+        |link| link.current_peer().to_string(),
+    )
+}
+
+/// The key under which the rows and the draft of `query` are shown: the
+/// anchor window's when `query` is a window of the same peer under a newer
+/// nick, its own otherwise.
+pub(crate) fn query_view_key(state: &WorkerState, query: &QueryWindow) -> (String, String) {
+    let own = (query.network.clone(), query.target_nick.clone());
+    let Some(link) = link_for_peer(state, &query.network, &query.target_nick) else {
+        return own;
+    };
+    find_query_window(
+        &state.transcript.query_windows,
+        &query.network,
+        &link.anchor,
+    )
+    .map_or(own, |anchor| {
+        (anchor.network.clone(), anchor.target_nick.clone())
+    })
+}
+
+/// `query` itself, or the anchor window when `query` is one of the folded
+/// windows of a followed peer.
+pub(crate) fn query_anchor_window(state: &WorkerState, query: &QueryWindow) -> QueryWindow {
+    let (network, nick) = query_view_key(state, query);
+    find_query_window(&state.transcript.query_windows, &network, &nick)
+        .cloned()
+        .unwrap_or_else(|| query.clone())
+}
+
+/// The windows folded into `anchor`'s view, for history loading.
+pub(crate) fn followed_query_windows(
+    state: &WorkerState,
+    anchor: &QueryWindow,
+) -> Vec<QueryWindow> {
+    let Some(link) = link_for_anchor(state, &anchor.network, &anchor.target_nick) else {
+        return Vec::new();
+    };
+    link.peers
+        .iter()
+        .filter_map(|peer| {
+            find_query_window(&state.transcript.query_windows, &anchor.network, peer)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Query rows for the sidebar: a window folded into another one is not
+/// listed, its unread counts are added to the anchor's row instead.
+pub(crate) fn sidebar_query_windows(state: &WorkerState) -> Vec<QueryWindow> {
+    state
+        .transcript
+        .query_windows
+        .iter()
+        .filter(|query| {
+            query_view_key(state, query) == (query.network.clone(), query.target_nick.clone())
+        })
+        .cloned()
+        .collect()
+}
+
+pub(crate) fn merge_followed_query_counts(
+    state: &WorkerState,
+    counts: &HashMap<WindowCountsKey, u64>,
+) -> HashMap<WindowCountsKey, u64> {
+    let mut merged = counts.clone();
+    for query in &state.transcript.query_windows {
+        let (network, nick) = query_view_key(state, query);
+        if network == query.network && nick == query.target_nick {
+            continue;
+        }
+        if let Some(count) = merged.remove(&window_counts_key(&query.network, &query.target_nick)) {
+            *merged
+                .entry(window_counts_key(&network, &nick))
+                .or_default() += count;
+        }
+    }
+    merged
+}
+
+/// The header label of a DM and the peer's current nick: the label names
+/// the nick the window was opened with too when the peer has moved on.
+pub(crate) fn query_label(state: &WorkerState, query: &QueryWindow) -> (String, String) {
+    let peer = query_send_target(state, &query.network, &query.target_nick);
+    let label = if peer == query.target_nick {
+        format!("{} — {}", query.network, peer)
+    } else {
+        format!("{} — {} (← {})", query.network, peer, query.target_nick)
+    };
+    (label, peer)
+}
+
+/// Records a peer's nick change seen on `network` and returns whether a DM
+/// view changed. Only an observed `old` → `new` event links windows, and
+/// only when it cannot join two conversations: our own nick is skipped, and
+/// so is a new nick that already has a window of its own (a pre-existing DM
+/// or a reused nick) or belongs to another followed peer.
+pub(crate) fn note_peer_nick_change(
+    state: &mut WorkerState,
+    network: &str,
+    old: &str,
+    new: &str,
+) -> bool {
+    let casemapping = network_casemapping(state, network);
+    if state
+        .networks
+        .own_nicks
+        .get(network)
+        .is_some_and(|own| casemapping.nick_eq(own, old) || casemapping.nick_eq(own, new))
+    {
+        return false;
+    }
+    let existing =
+        state.transcript.query_peer_links.iter().position(|link| {
+            link.network == network && casemapping.nick_eq(link.current_peer(), old)
+        });
+    if casemapping.nick_eq(old, new) {
+        // Case-only change: the peer stays the same, only the spelling moves.
+        let Some(index) = existing else { return false };
+        let link = &mut state.transcript.query_peer_links[index];
+        match link.peers.last_mut() {
+            Some(last) => *last = new.to_string(),
+            None => link.anchor = new.to_string(),
+        }
+        return true;
+    }
+    let owner = |nick: &str| {
+        state.transcript.query_peer_links.iter().position(|link| {
+            link.network == network
+                && (casemapping.nick_eq(&link.anchor, nick)
+                    || link
+                        .peers
+                        .iter()
+                        .any(|peer| casemapping.nick_eq(peer, nick)))
+        })
+    };
+    let has_window =
+        |nick: &str| {
+            state.transcript.query_windows.iter().any(|query| {
+                query.network == network && casemapping.nick_eq(&query.target_nick, nick)
+            })
+        };
+    match existing {
+        Some(index) => {
+            // Back to a nick of the same conversation is fine; any other
+            // known window or link under `new` is somebody else's.
+            let same_conversation = owner(new) == Some(index);
+            if !same_conversation && (has_window(new) || owner(new).is_some()) {
+                return false;
+            }
+            let link = &mut state.transcript.query_peer_links[index];
+            // Coming back to the first nick keeps the link: the windows of
+            // the nicks in between stay folded into this DM.
+            link.peers.retain(|peer| !casemapping.nick_eq(peer, new));
+            link.peers.push(new.to_string());
+            true
+        }
+        None => {
+            if has_window(new) || owner(new).is_some() || owner(old).is_some() {
+                return false;
+            }
+            let Some(anchor) = state
+                .transcript
+                .query_windows
+                .iter()
+                .find(|query| {
+                    query.network == network && casemapping.nick_eq(&query.target_nick, old)
+                })
+                .map(|query| query.target_nick.clone())
+            else {
+                return false;
+            };
+            state.transcript.query_peer_links.push(QueryPeerLink {
+                network: network.to_string(),
+                anchor,
+                peers: vec![new.to_string()],
+            });
+            true
+        }
+    }
+}
+
+/// Picks where a live frame of the query window `query` is stored. A frame
+/// sent by a nick the peer has left means that nick is somebody else now:
+/// the link ends, the windows are separate again and the frame stays in its
+/// own window.
+pub(crate) fn live_query_key(
+    state: &mut WorkerState,
+    query: &QueryWindow,
+    payload: &Value,
+) -> (String, String) {
+    let own = (query.network.clone(), query.target_nick.clone());
+    let casemapping = network_casemapping(state, &query.network);
+    let sender = payload
+        .get("sender")
+        .or_else(|| payload.get("from"))
+        .and_then(Value::as_str);
+    let link_index = state.transcript.query_peer_links.iter().position(|link| {
+        link.network == query.network
+            && (casemapping.nick_eq(&link.anchor, &query.target_nick)
+                || link
+                    .peers
+                    .iter()
+                    .any(|peer| casemapping.nick_eq(peer, &query.target_nick)))
+    });
+    let Some(index) = link_index else { return own };
+    let link = &state.transcript.query_peer_links[index];
+    let left = sender.is_some_and(|sender| {
+        !casemapping.nick_eq(link.current_peer(), sender)
+            && (casemapping.nick_eq(&link.anchor, sender)
+                || link
+                    .peers
+                    .iter()
+                    .any(|peer| casemapping.nick_eq(peer, sender)))
+    });
+    if left {
+        persistence::log_line(&format!(
+            "dm peer link ended on {}: a former nick wrote again",
+            query.network
+        ));
+        state.transcript.query_peer_links.remove(index);
+        return own;
+    }
+    query_view_key(state, query)
+}
+
+/// Drops the links whose anchor window is gone from the snapshot.
+pub(crate) fn prune_query_peer_links(state: &mut WorkerState) {
+    let windows = &state.transcript.query_windows;
+    state
+        .transcript
+        .query_peer_links
+        .retain(|link| find_query_window(windows, &link.network, &link.anchor).is_some());
+}
+
+/// Pushes the open DM's label and peer nick after a link changed, leaving
+/// the compose box, the rows and the scroll position alone.
+pub(crate) fn push_query_peer_label(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    if !state.windows.current_query {
+        return;
+    }
+    let Some((network, nick)) = state.windows.current_channel.as_ref() else {
+        return;
+    };
+    let Some(query) = find_query_window(&state.transcript.query_windows, network, nick) else {
+        return;
+    };
+    let (label, peer) = query_label(state, query);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_current_channel_label(label.into());
+        ui.set_current_query_peer_nick(peer.into());
+    });
 }

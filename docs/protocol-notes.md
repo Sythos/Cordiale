@@ -390,6 +390,32 @@ il resto della sezione Sicurezza resta in Cicchetto:
   del rejoin viene scartato, dove Cicchetto lo assegnerebbe al nick nuovo:
   differenza transitoria, senza effetti oltre il rejoin, lasciata com'è. Il
   conteggio non classifica righe, quindi `dm_with` non serve qui.
+- **DM dopo il cambio nick del peer (vista sul client).** Dal protocollo 37 il
+  server tiene una finestra query per nick, ciascuna con cronologia, cursore
+  di lettura, mute e topic propri. Cordiale non le fonde sul server: tiene un
+  collegamento in memoria (`QueryPeerLink`, `queries.rs`) per ogni DM aperto
+  il cui peer è stato visto cambiare nick. Solo un evento `nick_change`
+  osservato (vecchio nick → nuovo nick, stessa rete, confronto con il
+  casemapping della rete) crea o aggiorna il collegamento; mai la somiglianza
+  dei nick. Regole: il proprio nick è escluso; se il nuovo nick ha già una
+  finestra propria (DM preesistente o nick riusato) o appartiene a un altro
+  collegamento, le finestre restano separate; i cambi di sola maiuscola e le
+  serie aggiornano l'ultimo nick. Effetti: la finestra resta sotto il nick
+  d'apertura (righe, bozza, selezione e scorrimento invariati) e l'invio,
+  anche di allegati e comandi (`/me`, `/notice`), va all'ultimo nick, prima
+  che arrivi un messaggio; la finestra del nuovo nick, quando il server la
+  apre, non compare nella barra laterale, le sue righe confluiscono nel DM
+  aperto (dedup per id, cronologia caricata alla selezione), i non letti si
+  sommano alla riga del DM e il cursore di lettura viene scritto anche per
+  quelle finestre; mute e topic restano quelli di ciascuna finestra e i topic
+  di tutte restano sottoscritti. Un messaggio da un nick lasciato dal peer (o dal nick
+  d'apertura) chiude il collegamento: le finestre tornano separate. I
+  collegamenti si azzerano a ogni accesso e cadono con la finestra; la
+  riconnessione non ne crea. **Dipendenza dal server (non verificata):** un
+  `nick_change` arriva su un topic canale, quindi copre solo i peer che
+  condividono un canale con l'utente. Per un peer presente solo nel DM serve
+  un evento o una ricerca di identità affidabile da Grappa; senza, il DM
+  non viene collegato e il nuovo nick apre una finestra separata.
 - **Self-KICK (Grappa 2321, tag `v1.5.12`).** Un KICK subito dal proprio
   utente non toglie più il canale dallo snapshot di rientro
   (`last_joined_channels`): alla riconnessione il canale viene rientrato,
