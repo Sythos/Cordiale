@@ -1050,29 +1050,33 @@ export component AppWindow inherits Window {
     // A transient status is shown only in the centered dialog. Connection
     // retry timing stays separate so closing that dialog cannot stop it.
     in-out property <bool> status-notice-open: false;
-    // Keep a dismissed video shrink notice closed while its progress text
-    // changes. A new status or an empty status resets this latch. Other
-    // notices clear `status-kind` on dismissal so the same kind can reopen.
-    in-out property <bool> status-notice-dismissed-shrink: false;
+    // Each video shrink has its own notice identity. Closing one notice must
+    // not hide progress from another concurrent upload.
+    in-out property <string> status-shrink-operation-id: "";
+    in-out property <string> status-notice-dismissed-shrink-id: "";
+    callback status-notice-shrink-dismissed(string);
     in-out property <string> connection-status-kind: "";
     changed status-kind => {
         if status-kind == "signed-in" {
             status-notice-open = false;
-            status-notice-dismissed-shrink = false;
+            status-notice-dismissed-shrink-id = "";
             connection-status-kind = "";
         } else if status-kind != "" {
-            if status-kind == "attach-shrinking" && status-notice-dismissed-shrink {
+            if status-kind == "attach-shrinking" && status-shrink-operation-id == status-notice-dismissed-shrink-id {
                 status-notice-open = false;
             } else {
                 status-notice-open = true;
-                status-notice-dismissed-shrink = false;
             }
             if status-kind == "reconnecting" || status-kind == "disconnected" {
                 connection-status-kind = status-kind;
             }
         } else {
             status-notice-open = false;
-            status-notice-dismissed-shrink = false;
+        }
+    }
+    changed status-shrink-operation-id => {
+        if status-kind == "attach-shrinking" {
+            status-notice-open = status-shrink-operation-id != status-notice-dismissed-shrink-id;
         }
     }
     // Seconds left before the next reconnect attempt (`reconnecting` and
@@ -7982,10 +7986,10 @@ export component AppWindow inherits Window {
             key-pressed(event) => {
                 if event.text == Key.Escape {
                     if status-kind == "attach-shrinking" {
-                        status-notice-dismissed-shrink = true;
+                        status-notice-dismissed-shrink-id = status-shrink-operation-id;
+                        status-notice-shrink-dismissed(status-shrink-operation-id);
                     } else {
                         status-kind = "";
-                        status-notice-dismissed-shrink = false;
                     }
                     status-notice-open = false;
                     return accept;
@@ -8021,10 +8025,10 @@ export component AppWindow inherits Window {
                             accessible-label: @tr("Close notice");
                             clicked => {
                                 if status-kind == "attach-shrinking" {
-                                    status-notice-dismissed-shrink = true;
+                                    status-notice-dismissed-shrink-id = status-shrink-operation-id;
+                                    status-notice-shrink-dismissed(status-shrink-operation-id);
                                 } else {
                                     status-kind = "";
-                                    status-notice-dismissed-shrink = false;
                                 }
                                 status-notice-open = false;
                             }

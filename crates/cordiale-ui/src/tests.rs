@@ -5668,6 +5668,46 @@ fn attachment_caps_and_errors_follow_the_category() {
 }
 
 #[test]
+fn video_shrink_notices_track_concurrent_jobs_and_dismiss_each_job_separately() {
+    let mut notices = ShrinkNoticeTracker::default();
+    let first = notices.start("first.mp4 (10%)".into());
+    let second = notices.start("second.mp4 (5%)".into());
+
+    assert_eq!(
+        notices.current(),
+        Some(ShrinkNotice {
+            operation_id: second,
+            message: "second.mp4 (5%)".into(),
+        })
+    );
+    assert_eq!(
+        notices.dismiss(second),
+        Some(ShrinkNotice {
+            operation_id: first,
+            message: "first.mp4 (10%)".into(),
+        })
+    );
+
+    let _ = notices.update(first, "first.mp4 (30%)".into());
+    let _ = notices.update(second, "second.mp4 (25%)".into());
+    assert_eq!(
+        notices.current(),
+        Some(ShrinkNotice {
+            operation_id: first,
+            message: "first.mp4 (30%)".into(),
+        })
+    );
+
+    let _ = notices.finish(second);
+    assert_eq!(notices.current().map(|notice| notice.operation_id), Some(first));
+    let _ = notices.finish(first);
+    assert_eq!(notices.current(), None);
+
+    let next = notices.start("next.mp4".into());
+    assert_eq!(notices.current().map(|notice| notice.operation_id), Some(next));
+}
+
+#[test]
 fn a_video_that_was_not_shrunk_is_reported_and_never_uploaded_as_is() {
     assert_eq!(
         shrink_error_status(&ShrinkError::Unavailable),

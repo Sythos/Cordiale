@@ -52,8 +52,9 @@ mod webauthn_windows;
 mod worker_commands;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -554,8 +555,22 @@ fn main() -> Result<(), slint::PlatformError> {
     push_radio_stations(&ui, &settings.radio_stations);
 
     let (worker_tx, worker_rx) = mpsc::unbounded_channel::<WorkerCommand>();
+    let shrink_notices = Arc::new(Mutex::new(ShrinkNoticeTracker::default()));
+    let dismissed_shrink_notices = Arc::clone(&shrink_notices);
+    let shrink_notice_ui = ui.as_weak();
+    ui.on_status_notice_shrink_dismissed(move |operation_id| {
+        let Ok(operation_id) = operation_id.parse::<u64>() else {
+            return;
+        };
+        let mut notices = dismissed_shrink_notices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = notices.dismiss(operation_id);
+        push_shrink_notice_locked(&shrink_notice_ui, &notices, None);
+    });
     let ui_weak = ui.as_weak();
     let worker_self = worker_tx.clone();
+    let worker_shrink_notices = Arc::clone(&shrink_notices);
     thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().expect("failed to start network runtime");
         runtime.block_on(async move {
@@ -575,7 +590,7 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
             });
-            run_worker(worker_rx, worker_self, ui_weak).await;
+            run_worker(worker_rx, worker_self, ui_weak, worker_shrink_notices).await;
         });
     });
 
@@ -1576,6 +1591,7 @@ async fn run_worker(
     mut commands: mpsc::UnboundedReceiver<WorkerCommand>,
     worker_self: mpsc::UnboundedSender<WorkerCommand>,
     ui: slint::Weak<AppWindow>,
+    shrink_notices: Arc<Mutex<ShrinkNoticeTracker>>,
 ) {
     let mut state = WorkerState::new();
     state.conn.chat_rebuild_tx = Some(worker_self.clone());
@@ -1874,7 +1890,14 @@ async fn run_worker(
                         refresh_network_groups(&state, &ui);
                     }
                     Some(WorkerCommand::AttachFile(path, options)) => {
-                        handle_attach_file(&mut state, &ui, path, options).await;
+                        handle_attach_file(
+                            &mut state,
+                            &ui,
+                            path,
+                            options,
+                            Arc::clone(&shrink_notices),
+                        )
+                        .await;
                     }
                     Some(WorkerCommand::UploadPrefsChanged { ttl, confirm }) => {
                         run_upload_prefs_changed(&mut state, ttl, confirm).await;
@@ -4142,6 +4165,7 @@ async fn handle_attach_file(
     ui: &slint::Weak<AppWindow>,
     path: std::path::PathBuf,
     options: UploadOptions,
+    shrink_notices: Arc<Mutex<ShrinkNoticeTracker>>,
 ) {
     let filename = path
         .file_name()
@@ -4191,6 +4215,7 @@ async fn handle_attach_file(
             .upload_limits
             .as_ref()
             .map(|limits| upload_cap(limits, category));
+        let shrink_notice = begin_shrink_notice(ui, &shrink_notices, filename.clone());
         let job = UploadJob {
             client,
             token,
@@ -4199,6 +4224,7 @@ async fn handle_attach_file(
             ui: ui.clone(),
             filename,
             expire: options.expire,
+            shrink_notice: Some(shrink_notice),
         };
         // The encoder takes as long as the video does: its own task keeps
         // session frames and other commands moving meanwhile.
@@ -4241,6 +4267,7 @@ async fn handle_attach_file(
         ui: ui.clone(),
         filename,
         expire: options.expire,
+        shrink_notice: None,
     };
     upload_and_post(job, mime, category, bytes).await;
 }
@@ -4277,6 +4304,136 @@ struct UploadJob {
     ui: slint::Weak<AppWindow>,
     filename: String,
     expire: Option<i64>,
+    /// Present only while this job is shrinking a video.
+    shrink_notice: Option<ShrinkNoticeOperation>,
+}
+
+type SharedShrinkNoticeTracker = Arc<Mutex<ShrinkNoticeTracker>>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShrinkNotice {
+    operation_id: u64,
+    message: String,
+}
+
+#[derive(Default)]
+struct ShrinkNoticeTracker {
+    next_operation_id: u64,
+    active: BTreeMap<u64, String>,
+    dismissed: HashSet<u64>,
+}
+
+impl ShrinkNoticeTracker {
+    fn start(&mut self, message: String) -> u64 {
+        self.next_operation_id = self.next_operation_id.checked_add(1).unwrap_or(1);
+        let operation_id = self.next_operation_id;
+        self.active.insert(operation_id, message);
+        operation_id
+    }
+
+    fn update(&mut self, operation_id: u64, message: String) -> Option<ShrinkNotice> {
+        if let Some(current) = self.active.get_mut(&operation_id) {
+            *current = message;
+        }
+        self.current()
+    }
+
+    fn dismiss(&mut self, operation_id: u64) -> Option<ShrinkNotice> {
+        if self.active.contains_key(&operation_id) {
+            self.dismissed.insert(operation_id);
+        }
+        self.current()
+    }
+
+    fn finish(&mut self, operation_id: u64) -> Option<ShrinkNotice> {
+        self.active.remove(&operation_id);
+        self.dismissed.remove(&operation_id);
+        self.current()
+    }
+
+    fn current(&self) -> Option<ShrinkNotice> {
+        for (&operation_id, message) in self.active.iter().rev() {
+            if !self.dismissed.contains(&operation_id) {
+                return Some(ShrinkNotice {
+                    operation_id,
+                    message: message.clone(),
+                });
+            }
+        }
+        None
+    }
+}
+
+#[derive(Clone)]
+struct ShrinkNoticeOperation {
+    operation_id: u64,
+    tracker: SharedShrinkNoticeTracker,
+}
+
+fn begin_shrink_notice(
+    ui: &slint::Weak<AppWindow>,
+    tracker: &SharedShrinkNoticeTracker,
+    message: String,
+) -> ShrinkNoticeOperation {
+    let mut state = tracker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let operation_id = state.start(message);
+    push_shrink_notice_locked(ui, &state, None);
+    ShrinkNoticeOperation {
+        operation_id,
+        tracker: Arc::clone(tracker),
+    }
+}
+
+fn update_shrink_notice(
+    ui: &slint::Weak<AppWindow>,
+    operation: &ShrinkNoticeOperation,
+    message: String,
+) {
+    let mut tracker = operation
+        .tracker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = tracker.update(operation.operation_id, message);
+    push_shrink_notice_locked(ui, &tracker, None);
+}
+
+fn finish_shrink_notice(
+    ui: &slint::Weak<AppWindow>,
+    operation: &ShrinkNoticeOperation,
+    terminal_status: Option<(&'static str, String)>,
+) {
+    let mut tracker = operation
+        .tracker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _ = tracker.finish(operation.operation_id);
+    push_shrink_notice_locked(ui, &tracker, terminal_status);
+}
+
+/// Queue the newest non-dismissed video job while the tracker lock is held.
+/// This also keeps updates from concurrent encoders in the same order as the
+/// state changes that produced them.
+fn push_shrink_notice_locked(
+    ui: &slint::Weak<AppWindow>,
+    tracker: &ShrinkNoticeTracker,
+    terminal_status: Option<(&'static str, String)>,
+) {
+    let current = tracker.current();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        if let Some((kind, name)) = terminal_status {
+            ui.set_status_attach_name(name.into());
+            ui.set_status_kind(kind.into());
+        } else if let Some(notice) = current {
+            ui.set_status_shrink_operation_id(notice.operation_id.to_string().into());
+            ui.set_status_attach_name(notice.message.into());
+            ui.set_status_kind("attach-shrinking".into());
+        } else if ui.get_status_kind() == "attach-shrinking" {
+            ui.set_status_kind("".into());
+            ui.set_status_message("".into());
+        }
+    });
 }
 
 fn set_attach_status(ui: &slint::Weak<AppWindow>, kind: &'static str, name: String) {
@@ -4301,6 +4458,7 @@ async fn upload_and_post(
         ui,
         filename,
         expire,
+        shrink_notice: _,
     } = job;
     match client
         .upload_file(&token, &filename, mime, bytes, expire)
@@ -4352,13 +4510,14 @@ fn shrink_error_status(error: &ShrinkError) -> Option<&'static str> {
 }
 
 /// Puts the outcome of a video that was not shrunk in the status bar.
-fn report_shrink_error(ui: &slint::Weak<AppWindow>, name: &str, error: &ShrinkError) {
-    match shrink_error_status(error) {
-        Some(kind) => set_attach_status(ui, kind, name.to_string()),
-        None => {
-            let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("".into()));
-        }
-    }
+fn report_shrink_error(
+    ui: &slint::Weak<AppWindow>,
+    operation: &ShrinkNoticeOperation,
+    name: &str,
+    error: &ShrinkError,
+) {
+    let status = shrink_error_status(error).map(|kind| (kind, name.to_string()));
+    finish_shrink_notice(ui, operation, status);
 }
 
 /// Shrinks the video at `path` into a temporary file, checks the result
@@ -4374,19 +4533,28 @@ async fn shrink_and_upload(
 ) {
     let ui = job.ui.clone();
     let original_name = job.filename.clone();
+    let shrink_notice = job
+        .shrink_notice
+        .as_ref()
+        .expect("video shrink jobs must have a tracked notice")
+        .clone();
     let Ok(original_len) = std::fs::metadata(&path).map(|meta| meta.len()) else {
-        set_attach_status(&ui, "attach-read-failed", original_name.clone());
+        finish_shrink_notice(
+            &ui,
+            &shrink_notice,
+            Some(("attach-read-failed", original_name.clone())),
+        );
         return;
     };
-    set_attach_status(&ui, "attach-shrinking", original_name.clone());
     let progress_ui = ui.clone();
+    let progress_notice = shrink_notice.clone();
     let progress_name = original_name.clone();
     let task_cancel = cancel.clone();
     let shrunk = tokio::task::spawn_blocking(move || {
         video_processing::shrink(&path, &task_cancel, &|percent| {
-            set_attach_status(
+            update_shrink_notice(
                 &progress_ui,
-                "attach-shrinking",
+                &progress_notice,
                 format!("{progress_name} ({percent}%)"),
             );
         })
@@ -4396,40 +4564,50 @@ async fn shrink_and_upload(
         Ok(Ok(video)) => video,
         Ok(Err(error)) => {
             persistence::log_line(&format!("video shrink stopped: {error:?}"));
-            report_shrink_error(&ui, &original_name, &error);
+            report_shrink_error(&ui, &shrink_notice, &original_name, &error);
             return;
         }
         Err(err) => {
             persistence::log_line(&format!("video shrink task failed: {err}"));
-            report_shrink_error(&ui, &original_name, &ShrinkError::Failed(err.to_string()));
+            report_shrink_error(
+                &ui,
+                &shrink_notice,
+                &original_name,
+                &ShrinkError::Failed(err.to_string()),
+            );
             return;
         }
     };
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-        report_shrink_error(&ui, &original_name, &ShrinkError::Cancelled);
+        report_shrink_error(&ui, &shrink_notice, &original_name, &ShrinkError::Cancelled);
         return;
     }
     let shrunk_len = std::fs::metadata(&video.path).map_or(u64::MAX, |meta| meta.len());
     if let Err(error) = video_processing::check_result(original_len, shrunk_len, video_cap) {
-        report_shrink_error(&ui, &original_name, &error);
+        report_shrink_error(&ui, &shrink_notice, &original_name, &error);
         return;
     }
     let bytes = match std::fs::read(&video.path) {
         Ok(bytes) => bytes,
         Err(err) => {
             persistence::log_line(&format!("shrunk video read failed: {err}"));
-            set_attach_status(&ui, "attach-read-failed", original_name.clone());
+            finish_shrink_notice(
+                &ui,
+                &shrink_notice,
+                Some(("attach-read-failed", original_name.clone())),
+            );
             return;
         }
     };
     let (filename, mime) = (video.filename.clone(), video.mime);
     // The temporary folder goes now: the bytes are in memory.
     drop(video);
-    let _ = ui.upgrade_in_event_loop(|ui| {
-        ui.set_status_kind("".into());
-        ui.set_status_message("".into());
-    });
-    let job = UploadJob { filename, ..job };
+    finish_shrink_notice(&ui, &shrink_notice, None);
+    let job = UploadJob {
+        filename,
+        shrink_notice: None,
+        ..job
+    };
     upload_and_post(job, mime, UploadCategory::Video, bytes).await;
 }
 
