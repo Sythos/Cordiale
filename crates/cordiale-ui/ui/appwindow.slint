@@ -1045,13 +1045,14 @@ export component AppWindow inherits Window {
     // raw/passthrough message Rust didn't map to a template).
     // `status-network-count`/`status-channel-count`/`status-protocol-version`
     // fill the `{}` placeholders of the templates that need a number.
-    in property <string> status-kind: "";
+    in-out property <string> status-kind: "";
     in property <string> status-message: "";
     // A transient status is shown only in the centered dialog. Connection
     // retry timing stays separate so closing that dialog cannot stop it.
     in-out property <bool> status-notice-open: false;
     // Keep a dismissed video shrink notice closed while its progress text
-    // changes. A new status or an empty status resets this latch.
+    // changes. A new status or an empty status resets this latch. Other
+    // notices clear `status-kind` on dismissal so the same kind can reopen.
     in-out property <bool> status-notice-dismissed-shrink: false;
     in-out property <string> connection-status-kind: "";
     changed status-kind => {
@@ -7980,8 +7981,13 @@ export component AppWindow inherits Window {
             init => { self.focus(); }
             key-pressed(event) => {
                 if event.text == Key.Escape {
+                    if status-kind == "attach-shrinking" {
+                        status-notice-dismissed-shrink = true;
+                    } else {
+                        status-kind = "";
+                        status-notice-dismissed-shrink = false;
+                    }
                     status-notice-open = false;
-                    status-notice-dismissed-shrink = status-kind == "attach-shrinking";
                     return accept;
                 }
                 return reject;
@@ -8014,8 +8020,13 @@ export component AppWindow inherits Window {
                             text: "✕";
                             accessible-label: @tr("Close notice");
                             clicked => {
+                                if status-kind == "attach-shrinking" {
+                                    status-notice-dismissed-shrink = true;
+                                } else {
+                                    status-kind = "";
+                                    status-notice-dismissed-shrink = false;
+                                }
                                 status-notice-open = false;
-                                status-notice-dismissed-shrink = status-kind == "attach-shrinking";
                             }
                         }
                     }
