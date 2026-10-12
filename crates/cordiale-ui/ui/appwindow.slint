@@ -1045,25 +1045,33 @@ export component AppWindow inherits Window {
     // raw/passthrough message Rust didn't map to a template).
     // `status-network-count`/`status-channel-count`/`status-protocol-version`
     // fill the `{}` placeholders of the templates that need a number.
-    // The dialog clears both values when dismissed, so the same later
-    // notification is a new property change and opens the dialog again.
-    in-out property <string> status-kind: "";
-    in-out property <string> status-message: "";
+    in property <string> status-kind: "";
+    in property <string> status-message: "";
     // A transient status is shown only in the centered dialog. Connection
     // retry timing stays separate so closing that dialog cannot stop it.
     in-out property <bool> status-notice-open: false;
+    // Keep a dismissed video shrink notice closed while its progress text
+    // changes. A new status or an empty status resets this latch.
+    in-out property <bool> status-notice-dismissed-shrink: false;
     in-out property <string> connection-status-kind: "";
     changed status-kind => {
         if status-kind == "signed-in" {
             status-notice-open = false;
+            status-notice-dismissed-shrink = false;
             connection-status-kind = "";
         } else if status-kind != "" {
-            status-notice-open = true;
+            if status-kind == "attach-shrinking" && status-notice-dismissed-shrink {
+                status-notice-open = false;
+            } else {
+                status-notice-open = true;
+                status-notice-dismissed-shrink = false;
+            }
             if status-kind == "reconnecting" || status-kind == "disconnected" {
                 connection-status-kind = status-kind;
             }
         } else {
             status-notice-open = false;
+            status-notice-dismissed-shrink = false;
         }
     }
     // Seconds left before the next reconnect attempt (`reconnecting` and
@@ -7973,8 +7981,7 @@ export component AppWindow inherits Window {
             key-pressed(event) => {
                 if event.text == Key.Escape {
                     status-notice-open = false;
-                    status-kind = "";
-                    status-message = "";
+                    status-notice-dismissed-shrink = status-kind == "attach-shrinking";
                     return accept;
                 }
                 return reject;
@@ -8008,8 +8015,7 @@ export component AppWindow inherits Window {
                             accessible-label: @tr("Close notice");
                             clicked => {
                                 status-notice-open = false;
-                                status-kind = "";
-                                status-message = "";
+                                status-notice-dismissed-shrink = status-kind == "attach-shrinking";
                             }
                         }
                     }

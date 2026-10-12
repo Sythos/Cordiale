@@ -92,6 +92,13 @@ fn services_console_does_not_append_the_same_message_twice() {
 }
 
 #[test]
+fn services_console_clears_only_the_command_that_was_submitted() {
+    assert!(should_clear_service_console_draft("identify", "identify", true));
+    assert!(!should_clear_service_console_draft("help", "help", false));
+    assert!(!should_clear_service_console_draft("identify new", "identify", true));
+}
+
+#[test]
 fn statusmsg_targets_peel_the_longest_prefix_run() {
     let prefixes = cordiale_core::isupport::prefix_symbol_order(None);
     assert_eq!(

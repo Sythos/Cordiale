@@ -1888,7 +1888,7 @@ async fn run_worker(
                         reply_presence::push_reply_presence(&state, &ui);
                     }
                     Some(WorkerCommand::ServiceConsoleSend(command)) => {
-                        send_service_console_command(&mut state, &ui, command).await;
+                        send_service_console_command(&mut state, &ui, command, true).await;
                     }
                     Some(WorkerCommand::ServiceConsoleClose) => {
                         state.service_console = None;
@@ -7343,6 +7343,16 @@ fn record_service_console_line(
         console.lines.remove(0);
     }
     Some(console.lines.join("\n"))
+}
+
+/// Clear the console draft only when success confirms the text still matches
+/// the command that was submitted. Automatic help must never clear user input.
+pub(crate) fn should_clear_service_console_draft(
+    current_draft: &str,
+    submitted_command: &str,
+    clear_after_success: bool,
+) -> bool {
+    clear_after_success && current_draft == submitted_command
 }
 
 /// Returns the plain service text only when a live row belongs to the

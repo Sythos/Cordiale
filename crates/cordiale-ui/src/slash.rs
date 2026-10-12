@@ -553,7 +553,7 @@ async fn open_service_console(
         ui.set_service_console_send_failed(false);
         ui.set_service_console_open(true);
     });
-    send_service_console_command(state, ui, "help".to_string()).await;
+    send_service_console_command(state, ui, "help".to_string(), false).await;
 }
 
 /// Sends the text from the Services console to its service. Keep the draft
@@ -562,7 +562,9 @@ pub(crate) async fn send_service_console_command(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     command: String,
+    clear_after_success: bool,
 ) {
+    let command_for_clear = command.clone();
     let command = command.trim().to_string();
     let Some(console) = state.service_console.as_ref() else {
         return;
@@ -587,8 +589,15 @@ pub(crate) async fn send_service_console_command(
     .await
     {
         Ok(()) => {
-            let _ = ui.upgrade_in_event_loop(|ui| {
-                ui.set_service_console_command("".into());
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let current_draft = ui.get_service_console_command().to_string();
+                if crate::should_clear_service_console_draft(
+                    &current_draft,
+                    &command_for_clear,
+                    clear_after_success,
+                ) {
+                    ui.set_service_console_command("".into());
+                }
                 ui.set_service_console_send_failed(false);
             });
         }
