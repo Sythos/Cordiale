@@ -7313,13 +7313,9 @@ fn capture_service_console_notice(
         return;
     };
     let casemapping = network_casemapping(state, network);
-    let Some((id, body)) = service_console_notice_content(
-        console,
-        network,
-        channel,
-        casemapping,
-        payload,
-    ) else {
+    let Some((id, body)) =
+        service_console_notice_content(console, network, channel, casemapping, payload)
+    else {
         return;
     };
     if console.seen_ids.contains(&id) {
@@ -7369,8 +7365,8 @@ fn service_console_notice_content(
         .get("body")
         .or_else(|| payload.get("message"))
         .and_then(Value::as_str);
-    let service_window = channel == SERVER_WINDOW_NAME
-        || casemapping.nick_eq(channel, &console.service);
+    let service_window =
+        channel == SERVER_WINDOW_NAME || casemapping.nick_eq(channel, &console.service);
     if console.network != network
         || !service_window
         || kind != Some("notice")

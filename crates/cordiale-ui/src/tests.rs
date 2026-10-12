@@ -48,7 +48,13 @@ fn services_console_captures_only_fresh_notices_from_its_service() {
         "body": "not a notice"
     });
     assert_eq!(
-        service_console_notice_content(&console, "libera", "$server", casemapping, &private_message),
+        service_console_notice_content(
+            &console,
+            "libera",
+            "$server",
+            casemapping,
+            &private_message
+        ),
         None
     );
     assert_eq!(
