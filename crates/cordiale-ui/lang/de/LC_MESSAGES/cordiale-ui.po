@@ -3383,3 +3383,31 @@ msgstr "Durch das Verkleinern wurde {} nicht kleiner; es wurde nicht gesendet."
 msgctxt "AppWindow"
 msgid "{} is still larger than the server allows after shrinking, so it was not sent."
 msgstr "Auch verkleinert überschreitet {} die Grenze des Servers; es wurde nicht gesendet."
+
+msgctxt "AppWindow"
+msgid "Close Services console"
+msgstr "Services-Konsole schließen"
+
+msgctxt "AppWindow"
+msgid "Services reply"
+msgstr "Antwort des Dienstes"
+
+msgctxt "AppWindow"
+msgid "Send a command to {}"
+msgstr "Befehl an {} senden"
+
+msgctxt "AppWindow"
+msgid "Command for {}"
+msgstr "Befehl für {}"
+
+msgctxt "AppWindow"
+msgid "Couldn't send that command. Check the connection and try again."
+msgstr "Der Befehl konnte nicht gesendet werden. Prüfe die Verbindung und versuche es erneut."
+
+msgctxt "AppWindow"
+msgid "Notice"
+msgstr "Hinweis"
+
+msgctxt "AppWindow"
+msgid "Close notice"
+msgstr "Hinweis schließen"

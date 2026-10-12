@@ -245,6 +245,10 @@ enum WorkerCommand {
     SendMessage {
         body: String,
     },
+    /// Sends a command from the centered Services console.
+    ServiceConsoleSend(String),
+    /// Stops mirroring notices into the Services console.
+    ServiceConsoleClose,
     /// A picked file and what was chosen for it.
     AttachFile(std::path::PathBuf, UploadOptions),
     UploadPrefsChanged {
@@ -1416,6 +1420,18 @@ struct WorkerState {
     /// The home page's own state (subject, available networks, row
     /// errors, featured channels); its rows come from the snapshots above.
     home: home::HomeState,
+    /// The active centered Services console, if one is open.
+    service_console: Option<ServiceConsoleState>,
+}
+
+/// One open Services console. `since_id` is captured before the help
+/// request, so old or delayed scrollback does not appear as a new reply.
+struct ServiceConsoleState {
+    network: String,
+    service: String,
+    since_id: Option<i64>,
+    seen_ids: std::collections::HashSet<i64>,
+    lines: Vec<String>,
 }
 
 impl WorkerState {
@@ -1530,6 +1546,7 @@ impl WorkerState {
                 peer_away: HashMap::new(),
             },
             home: home::HomeState::default(),
+            service_console: None,
         }
     }
 
@@ -1869,6 +1886,12 @@ async fn run_worker(
                             state.transcript.reply_contexts.remove(&key);
                         }
                         reply_presence::push_reply_presence(&state, &ui);
+                    }
+                    Some(WorkerCommand::ServiceConsoleSend(command)) => {
+                        send_service_console_command(&mut state, &ui, command).await;
+                    }
+                    Some(WorkerCommand::ServiceConsoleClose) => {
+                        state.service_console = None;
                     }
                     Some(WorkerCommand::ComposeTextChanged(text)) => {
                         if let Some(key) = state.windows.current_channel.clone() {
@@ -7275,6 +7298,89 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             presence_noise,
         },
     }
+}
+
+/// Mirrors only new NOTICE lines from the selected service into the open
+/// console. The normal transcript still stores and displays the same rows.
+fn capture_service_console_notice(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    channel: &str,
+    payload: &Value,
+) {
+    let Some(console) = state.service_console.as_ref() else {
+        return;
+    };
+    let casemapping = network_casemapping(state, network);
+    let Some((id, body)) = service_console_notice_content(
+        console,
+        network,
+        channel,
+        casemapping,
+        payload,
+    ) else {
+        return;
+    };
+    if console.seen_ids.contains(&id) {
+        return;
+    }
+
+    let console = state.service_console.as_mut().expect("checked above");
+    let Some(output) = record_service_console_line(console, id, body) else {
+        return;
+    };
+    let _ = ui.upgrade_in_event_loop(move |ui| ui.set_service_console_output(output.into()));
+}
+
+/// Adds one reply once and keeps the visible transcript bounded.
+fn record_service_console_line(
+    console: &mut ServiceConsoleState,
+    id: i64,
+    body: String,
+) -> Option<String> {
+    if !console.seen_ids.insert(id) {
+        return None;
+    }
+    console.lines.push(body);
+    if console.lines.len() > 500 {
+        console.lines.remove(0);
+    }
+    Some(console.lines.join("\n"))
+}
+
+/// Returns the plain service text only when a live row belongs to the
+/// active console and is newer than its pre-request high water mark.
+fn service_console_notice_content(
+    console: &ServiceConsoleState,
+    network: &str,
+    channel: &str,
+    casemapping: cordiale_core::isupport::CaseMapping,
+    payload: &Value,
+) -> Option<(i64, String)> {
+    let id = message_id(payload)?;
+    let kind = payload.get("kind").and_then(Value::as_str);
+    let sender = payload
+        .get("from")
+        .or_else(|| payload.get("nick"))
+        .or_else(|| payload.get("sender"))
+        .and_then(Value::as_str);
+    let body = payload
+        .get("body")
+        .or_else(|| payload.get("message"))
+        .and_then(Value::as_str);
+    let service_window = channel == SERVER_WINDOW_NAME
+        || casemapping.nick_eq(channel, &console.service);
+    if console.network != network
+        || !service_window
+        || kind != Some("notice")
+        || !sender.is_some_and(|sender| casemapping.nick_eq(sender, &console.service))
+        || body.is_none()
+        || console.since_id.is_some_and(|since_id| id <= since_id)
+    {
+        return None;
+    }
+    Some((id, body?.to_string()))
 }
 
 fn message_id(payload: &Value) -> Option<i64> {

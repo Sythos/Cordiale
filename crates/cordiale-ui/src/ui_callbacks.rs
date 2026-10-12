@@ -927,6 +927,16 @@ pub(crate) fn register_composer_callbacks(
         }
     });
 
+    let tx_for_service_console = worker_tx.clone();
+    ui.on_service_console_send_requested(move |command| {
+        let _ = tx_for_service_console.send(WorkerCommand::ServiceConsoleSend(command.to_string()));
+    });
+
+    let tx_for_service_console_close = worker_tx.clone();
+    ui.on_service_console_close_requested(move || {
+        let _ = tx_for_service_console_close.send(WorkerCommand::ServiceConsoleClose);
+    });
+
     let tx_for_draft = worker_tx.clone();
     ui.on_compose_text_changed(move |text| {
         let _ = tx_for_draft.send(WorkerCommand::ComposeTextChanged(text.to_string()));

@@ -1,6 +1,91 @@
 use super::*;
 
 #[test]
+fn services_console_captures_only_fresh_notices_from_its_service() {
+    let console = ServiceConsoleState {
+        network: "libera".into(),
+        service: "NickServ".into(),
+        since_id: Some(40),
+        seen_ids: std::collections::HashSet::new(),
+        lines: Vec::new(),
+    };
+    let casemapping = cordiale_core::isupport::CaseMapping::Rfc1459;
+    let reply = serde_json::json!({
+        "id": 41,
+        "kind": "notice",
+        "from": "NICKSERV",
+        "body": "*** NickServ Help ***"
+    });
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "$server", casemapping, &reply),
+        Some((41, "*** NickServ Help ***".into()))
+    );
+
+    let old_reply = serde_json::json!({
+        "id": 40,
+        "kind": "notice",
+        "from": "NickServ",
+        "body": "old"
+    });
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "$server", casemapping, &old_reply),
+        None
+    );
+    let wrong_sender = serde_json::json!({
+        "id": 42,
+        "kind": "notice",
+        "from": "ChanServ",
+        "body": "other service"
+    });
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "$server", casemapping, &wrong_sender),
+        None
+    );
+    let private_message = serde_json::json!({
+        "id": 42,
+        "kind": "message",
+        "from": "NickServ",
+        "body": "not a notice"
+    });
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "$server", casemapping, &private_message),
+        None
+    );
+    assert_eq!(
+        service_console_notice_content(&console, "other", "$server", casemapping, &reply),
+        None
+    );
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "#help", casemapping, &reply),
+        None
+    );
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "nicksErv", casemapping, &reply),
+        Some((41, "*** NickServ Help ***".into()))
+    );
+}
+
+#[test]
+fn services_console_does_not_append_the_same_message_twice() {
+    let mut console = ServiceConsoleState {
+        network: "libera".into(),
+        service: "ChanServ".into(),
+        since_id: None,
+        seen_ids: std::collections::HashSet::new(),
+        lines: Vec::new(),
+    };
+    assert_eq!(
+        record_service_console_line(&mut console, 71, "First line".into()),
+        Some("First line".into())
+    );
+    assert_eq!(
+        record_service_console_line(&mut console, 71, "Duplicate line".into()),
+        None
+    );
+    assert_eq!(console.lines, vec!["First line".to_string()]);
+}
+
+#[test]
 fn statusmsg_targets_peel_the_longest_prefix_run() {
     let prefixes = cordiale_core::isupport::prefix_symbol_order(None);
     assert_eq!(
