@@ -1045,8 +1045,10 @@ export component AppWindow inherits Window {
     // raw/passthrough message Rust didn't map to a template).
     // `status-network-count`/`status-channel-count`/`status-protocol-version`
     // fill the `{}` placeholders of the templates that need a number.
-    in property <string> status-kind: "";
-    in property <string> status-message: "";
+    // The dialog clears both values when dismissed, so the same later
+    // notification is a new property change and opens the dialog again.
+    in-out property <string> status-kind: "";
+    in-out property <string> status-message: "";
     // A transient status is shown only in the centered dialog. Connection
     // retry timing stays separate so closing that dialog cannot stop it.
     in-out property <bool> status-notice-open: false;
