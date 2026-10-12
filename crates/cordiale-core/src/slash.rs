@@ -17,6 +17,9 @@ pub enum SlashCommand {
     Action(String),
     /// `/msg <nick> <text>`, and the services shortcuts (`/ns identify`).
     Msg { target: String, text: String },
+    /// A bare services shortcut (`/cs`, `/ns`, etc.) opens the service
+    /// console and requests its help output.
+    ServiceConsole(String),
     /// `/notice <target> <text>`.
     Notice { target: String, text: String },
     /// `/query [nick]`: opens a private window, or closes the open one.
@@ -530,11 +533,11 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             None => Usage("/amsg <text>"),
         },
         other => match service_nick(other) {
-            Some(service) if !args.is_empty() => Msg {
+            Some(service) if args.is_empty() => ServiceConsole(service.to_string()),
+            Some(service) => Msg {
                 target: service.to_string(),
                 text: args.to_string(),
             },
-            Some(_) => Usage("/ns <command>"),
             None => Unknown(format!("/{other}")),
         },
     };
@@ -710,6 +713,28 @@ mod tests {
                 text: "identify secret".to_string()
             })
         );
+        for (shortcut, service) in [
+            ("/cs", "ChanServ"),
+            ("/ns", "NickServ"),
+            ("/ms", "MemoServ"),
+            ("/os", "OperServ"),
+            ("/hs", "HelpServ"),
+            ("/rs", "RootServ"),
+        ] {
+            assert_eq!(
+                parse(shortcut),
+                Some(ServiceConsole(service.to_string())),
+                "{shortcut} should open the {service} console"
+            );
+            assert_eq!(
+                parse(&format!("{shortcut} help")),
+                Some(Msg {
+                    target: service.to_string(),
+                    text: "help".to_string(),
+                }),
+                "{shortcut} with a command should keep the direct service shortcut"
+            );
+        }
         assert!(is_service_nick("ChanServ"));
         assert!(!is_service_nick("serv"));
     }

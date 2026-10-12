@@ -1045,8 +1045,40 @@ export component AppWindow inherits Window {
     // raw/passthrough message Rust didn't map to a template).
     // `status-network-count`/`status-channel-count`/`status-protocol-version`
     // fill the `{}` placeholders of the templates that need a number.
-    in property <string> status-kind: "";
+    in-out property <string> status-kind: "";
     in property <string> status-message: "";
+    // A transient status is shown only in the centered dialog. Connection
+    // retry timing stays separate so closing that dialog cannot stop it.
+    in-out property <bool> status-notice-open: false;
+    // Each video shrink has its own notice identity. Closing one notice must
+    // not hide progress from another concurrent upload.
+    in-out property <string> status-shrink-operation-id: "";
+    in-out property <string> status-notice-dismissed-shrink-id: "";
+    callback status-notice-shrink-dismissed(string);
+    in-out property <string> connection-status-kind: "";
+    changed status-kind => {
+        if status-kind == "signed-in" {
+            status-notice-open = false;
+            status-notice-dismissed-shrink-id = "";
+            connection-status-kind = "";
+        } else if status-kind != "" {
+            if status-kind == "attach-shrinking" && status-shrink-operation-id == status-notice-dismissed-shrink-id {
+                status-notice-open = false;
+            } else {
+                status-notice-open = true;
+            }
+            if status-kind == "reconnecting" || status-kind == "disconnected" {
+                connection-status-kind = status-kind;
+            }
+        } else {
+            status-notice-open = false;
+        }
+    }
+    changed status-shrink-operation-id => {
+        if status-kind == "attach-shrinking" {
+            status-notice-open = status-shrink-operation-id != status-notice-dismissed-shrink-id;
+        }
+    }
     // Seconds left before the next reconnect attempt (`reconnecting` and
     // `disconnected`), counted down below; also the wait a `rate-limited`
     // answer asked for.
@@ -1352,6 +1384,15 @@ export component AppWindow inherits Window {
     in-out property <bool> upload-confirm-shrink: false;
     callback upload-confirm-accepted();
     callback upload-confirm-cancelled();
+    // The centered console mirrors only fresh NOTICE replies from the
+    // selected service; it sends commands through the same REST endpoint.
+    in-out property <bool> service-console-open: false;
+    in property <string> service-console-service: "";
+    in property <string> service-console-output: "";
+    in-out property <string> service-console-command: "";
+    in-out property <bool> service-console-send-failed: false;
+    callback service-console-send-requested(string);
+    callback service-console-close-requested();
     // Offered when pasting text of several lines into the one-line compose
     // box.
     out property <string> paste-upload-title: @tr("Paste as a file");
@@ -2685,14 +2726,6 @@ export component AppWindow inherits Window {
             enabled: !connecting;
             clicked => { totp-cancel-requested(); }
         }
-        Text {
-            text: status-text();
-            color: theme == "dark" ? #e57373 : #c0392b;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-            accessible-role: AccessibleRole.text;
-            accessible-live-region: AccessibleLiveness.polite;
-        }
     }
 
     if screen == "share" : VerticalBox {
@@ -2749,14 +2782,6 @@ export component AppWindow inherits Window {
             text: @tr("Cancel");
             enabled: !connecting;
             clicked => { share-screen-requested(false); }
-        }
-        Text {
-            text: status-text();
-            color: theme == "dark" ? #e57373 : #c0392b;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-            accessible-role: AccessibleRole.text;
-            accessible-live-region: AccessibleLiveness.polite;
         }
     }
 
@@ -2820,14 +2845,6 @@ export component AppWindow inherits Window {
             text: @tr("Cancel");
             enabled: !connecting;
             clicked => { recovery-screen-requested(false); }
-        }
-        Text {
-            text: status-text();
-            color: theme == "dark" ? #e57373 : #c0392b;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-            accessible-role: AccessibleRole.text;
-            accessible-live-region: AccessibleLiveness.polite;
         }
     }
 
@@ -2920,14 +2937,6 @@ export component AppWindow inherits Window {
             clicked => { screen = "language"; }
         }
 
-        Text {
-            text: status-text();
-            color: theme == "dark" ? #e57373 : #c0392b;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-            accessible-role: AccessibleRole.text;
-            accessible-live-region: AccessibleLiveness.polite;
-        }
 
         if known-servers.length > 0 : VerticalBox {
             padding-top: 8px;
@@ -2977,7 +2986,7 @@ export component AppWindow inherits Window {
     // Counts down the wait before the next reconnect attempt.
     Timer {
         interval: 1s;
-        running: (status-kind == "reconnecting" || status-kind == "disconnected") && status-retry-secs > 0;
+        running: (connection-status-kind == "reconnecting" || connection-status-kind == "disconnected") && status-retry-secs > 0;
         triggered => { status-retry-secs -= 1; }
     }
 
@@ -3050,22 +3059,6 @@ export component AppWindow inherits Window {
                 font-size: 12px * FontScale.percent / 100;
                 overflow: elide;
                 accessible-role: none;
-            }
-
-            // Once actually signed in, this row of icons is the whole
-            // story — the connecting/error/reconnecting text below only
-            // shows while there's something to report, so a healthy
-            // session doesn't sit under a permanent status paragraph.
-            if status-kind != "signed-in" : Text {
-                text: @tr("Connected to {}", server-url);
-                wrap: word-wrap;
-            }
-
-            if status-kind != "signed-in" : Text {
-                text: status-text();
-                wrap: word-wrap;
-                accessible-role: AccessibleRole.text;
-                accessible-live-region: AccessibleLiveness.polite;
             }
 
             if window-invite-banner != "" : Rectangle {
@@ -7861,6 +7854,195 @@ export component AppWindow inherits Window {
                         text: @tr("Continue");
                         enabled: key-prompt-pin != "";
                         clicked => { key-prompt-submit(key-prompt-pin); }
+                    }
+                }
+            }
+        }
+    }
+
+    // Bare /cs, /ns and the other service shortcuts open this console.
+    // Replies are mirrored here and remain in the normal transcript too.
+    if service-console-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        FocusScope {
+            width: parent.width;
+            height: parent.height;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    service-console-open = false;
+                    service-console-close-requested();
+                    return accept;
+                }
+                return reject;
+            }
+
+            Rectangle {
+                width: min(720px, parent.width - 32px);
+                height: min(640px, parent.height - 32px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-width: 1px;
+                border-radius: 8px;
+                border-color: #8080806a;
+                background: theme == "dark" ? #242424 : white;
+
+                VerticalLayout {
+                    padding: 14px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: service-console-service;
+                            font-size: 18px * FontScale.percent / 100;
+                            font-family: "monospace";
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: "✕";
+                            accessible-label: @tr("Close Services console");
+                            clicked => {
+                                service-console-open = false;
+                                service-console-close-requested();
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: #8080806a;
+                    }
+
+                    TextEdit {
+                        text: service-console-output;
+                        read-only: true;
+                        wrap: word-wrap;
+                        font-family: "monospace";
+                        vertical-stretch: 1;
+                        accessible-label: @tr("Services reply");
+                    }
+
+                    if service-console-send-failed : Text {
+                        text: @tr("Couldn't send that command. Check the connection and try again.");
+                        color: theme == "dark" ? #e57373 : #c0392b;
+                        wrap: word-wrap;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            placeholder-text: @tr("Send a command to {}", service-console-service);
+                            accessible-label: @tr("Command for {}", service-console-service);
+                            text <=> service-console-command;
+                            horizontal-stretch: 1;
+                            init => { self.focus(); }
+                            accepted => {
+                                if service-console-command != "" {
+                                    service-console-send-requested(service-console-command);
+                                }
+                            }
+                        }
+                        Button {
+                            text: @tr("Send");
+                            primary: true;
+                            enabled: service-console-command != "";
+                            clicked => { service-console-send-requested(service-console-command); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // All status notices use one centered Slint dialog. There is no status
+    // text in the top-left panel or below a sign-in form.
+    if status-notice-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        FocusScope {
+            width: parent.width;
+            height: parent.height;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    if status-kind == "attach-shrinking" {
+                        status-notice-dismissed-shrink-id = status-shrink-operation-id;
+                        status-notice-shrink-dismissed(status-shrink-operation-id);
+                    } else {
+                        status-kind = "";
+                    }
+                    status-notice-open = false;
+                    return accept;
+                }
+                return reject;
+            }
+
+            Rectangle {
+                width: min(520px, parent.width - 32px);
+                height: min(280px, parent.height - 32px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-width: 1px;
+                border-radius: 8px;
+                border-color: #8080806a;
+                background: theme == "dark" ? #242424 : white;
+
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 12px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: @tr("Notice");
+                            font-size: 18px * FontScale.percent / 100;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: "✕";
+                            accessible-label: @tr("Close notice");
+                            clicked => {
+                                if status-kind == "attach-shrinking" {
+                                    status-notice-dismissed-shrink-id = status-shrink-operation-id;
+                                    status-notice-shrink-dismissed(status-shrink-operation-id);
+                                } else {
+                                    status-kind = "";
+                                }
+                                status-notice-open = false;
+                            }
+                        }
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
+                        Text {
+                            text: status-text();
+                            wrap: word-wrap;
+                            accessible-role: AccessibleRole.text;
+                            accessible-live-region: AccessibleLiveness.polite;
+                        }
                     }
                 }
             }

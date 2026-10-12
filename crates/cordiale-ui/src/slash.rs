@@ -55,6 +55,10 @@ pub(crate) async fn run_slash_command(
     };
     let in_channel = !state.windows.current_query && slash::is_channel(&channel);
     let open_channel = || in_channel.then(|| channel.clone());
+    if let SlashCommand::ServiceConsole(service) = &command {
+        open_service_console(state, ui, &network, service.clone()).await;
+        return;
+    }
     if channel == SERVER_WINDOW_NAME
         && matches!(&command, SlashCommand::Say(_) | SlashCommand::Action(_))
     {
@@ -64,6 +68,7 @@ pub(crate) async fn run_slash_command(
         return;
     }
     let result: Result<(), GrappaClientError> = match command {
+        SlashCommand::ServiceConsole(_) => unreachable!("handled before request dispatch"),
         SlashCommand::Say(text) => {
             let request = SendMessageRequest::plain(text);
             post_message(&client, &token, &network, &channel, request).await
@@ -515,6 +520,90 @@ pub(crate) async fn run_slash_command(
     if let Err(err) = result {
         persistence::log_line(&format!("{label} failed: {err:?}"));
         set_command_status(ui, "command-failed", label);
+    }
+}
+
+/// Opens one centered Services console, records the current message high
+/// water mark, and asks the selected service for its help text.
+async fn open_service_console(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    service: String,
+) {
+    let since_id = state
+        .transcript
+        .messages
+        .iter()
+        .filter(|((known_network, _), _)| known_network == network)
+        .flat_map(|(_, messages)| messages.iter().filter_map(|message| message.message_id))
+        .max();
+    state.service_console = Some(ServiceConsoleState {
+        network: network.to_string(),
+        service: service.clone(),
+        since_id,
+        seen_ids: std::collections::HashSet::new(),
+        lines: Vec::new(),
+    });
+    let service_for_ui = service.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_service_console_service(service_for_ui.into());
+        ui.set_service_console_output("".into());
+        ui.set_service_console_command("".into());
+        ui.set_service_console_send_failed(false);
+        ui.set_service_console_open(true);
+    });
+    send_service_console_command(state, ui, "help".to_string(), false).await;
+}
+
+/// Sends the text from the Services console to its service. Keep the draft
+/// when the request fails so the user can retry or edit it.
+pub(crate) async fn send_service_console_command(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    command: String,
+    clear_after_success: bool,
+) {
+    let command_for_clear = command.clone();
+    let command = command.trim().to_string();
+    let Some(console) = state.service_console.as_ref() else {
+        return;
+    };
+    if command.is_empty() {
+        return;
+    }
+    let network = console.network.clone();
+    let service = console.service.clone();
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_service_console_send_failed(true));
+        return;
+    };
+    let _ = ui.upgrade_in_event_loop(|ui| ui.set_service_console_send_failed(false));
+    match post_message(
+        &client,
+        &token,
+        &network,
+        &service,
+        SendMessageRequest::plain(command),
+    )
+    .await
+    {
+        Ok(()) => {
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                let current_draft = ui.get_service_console_command().to_string();
+                if crate::should_clear_service_console_draft(
+                    &current_draft,
+                    &command_for_clear,
+                    clear_after_success,
+                ) {
+                    ui.set_service_console_command("".into());
+                }
+                ui.set_service_console_send_failed(false);
+            });
+        }
+        Err(_) => {
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_service_console_send_failed(true));
+        }
     }
 }
 

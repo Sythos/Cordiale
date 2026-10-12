@@ -915,6 +915,7 @@ pub(crate) async fn handle_frame(
             QueryTopicResolution::Active(query) => {
                 let query = query.clone();
                 let (key, split) = live_query_key(state, &query, effective_payload);
+                capture_service_console_notice(state, ui, &key.0, &key.1, effective_payload);
                 if let Some(insert) =
                     append_query_live_message(state, &key, effective_payload, Some(&frame.event))
                 {
@@ -946,6 +947,7 @@ pub(crate) async fn handle_frame(
     let key = (network.clone(), channel.clone());
 
     let line = render_message(effective_payload, Some(&frame.event));
+    capture_service_console_notice(state, ui, &network, &channel, effective_payload);
     let messages = state.transcript.messages.entry(key.clone()).or_default();
     // A reconnect catch-up can already hold a row this push announces.
     let already_shown = line

@@ -1,6 +1,110 @@
 use super::*;
 
 #[test]
+fn services_console_captures_only_fresh_notices_from_its_service() {
+    let console = ServiceConsoleState {
+        network: "libera".into(),
+        service: "NickServ".into(),
+        since_id: Some(40),
+        seen_ids: std::collections::HashSet::new(),
+        lines: Vec::new(),
+    };
+    let casemapping = cordiale_core::isupport::CaseMapping::Rfc1459;
+    let reply = serde_json::json!({
+        "id": 41,
+        "kind": "notice",
+        "from": "NICKSERV",
+        "body": "*** NickServ Help ***"
+    });
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "$server", casemapping, &reply),
+        Some((41, "*** NickServ Help ***".into()))
+    );
+
+    let old_reply = serde_json::json!({
+        "id": 40,
+        "kind": "notice",
+        "from": "NickServ",
+        "body": "old"
+    });
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "$server", casemapping, &old_reply),
+        None
+    );
+    let wrong_sender = serde_json::json!({
+        "id": 42,
+        "kind": "notice",
+        "from": "ChanServ",
+        "body": "other service"
+    });
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "$server", casemapping, &wrong_sender),
+        None
+    );
+    let private_message = serde_json::json!({
+        "id": 42,
+        "kind": "message",
+        "from": "NickServ",
+        "body": "not a notice"
+    });
+    assert_eq!(
+        service_console_notice_content(
+            &console,
+            "libera",
+            "$server",
+            casemapping,
+            &private_message
+        ),
+        None
+    );
+    assert_eq!(
+        service_console_notice_content(&console, "other", "$server", casemapping, &reply),
+        None
+    );
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "#help", casemapping, &reply),
+        None
+    );
+    assert_eq!(
+        service_console_notice_content(&console, "libera", "nicksErv", casemapping, &reply),
+        Some((41, "*** NickServ Help ***".into()))
+    );
+}
+
+#[test]
+fn services_console_does_not_append_the_same_message_twice() {
+    let mut console = ServiceConsoleState {
+        network: "libera".into(),
+        service: "ChanServ".into(),
+        since_id: None,
+        seen_ids: std::collections::HashSet::new(),
+        lines: Vec::new(),
+    };
+    assert_eq!(
+        record_service_console_line(&mut console, 71, "First line".into()),
+        Some("First line".into())
+    );
+    assert_eq!(
+        record_service_console_line(&mut console, 71, "Duplicate line".into()),
+        None
+    );
+    assert_eq!(console.lines, vec!["First line".to_string()]);
+}
+
+#[test]
+fn services_console_clears_only_the_command_that_was_submitted() {
+    assert!(should_clear_service_console_draft(
+        "identify", "identify", true
+    ));
+    assert!(!should_clear_service_console_draft("help", "help", false));
+    assert!(!should_clear_service_console_draft(
+        "identify new",
+        "identify",
+        true
+    ));
+}
+
+#[test]
 fn statusmsg_targets_peel_the_longest_prefix_run() {
     let prefixes = cordiale_core::isupport::prefix_symbol_order(None);
     assert_eq!(
@@ -5561,6 +5665,52 @@ fn attachment_caps_and_errors_follow_the_category() {
     );
     assert_eq!(attachment_error_status(Some(507)), "attach-no-space");
     assert_eq!(attachment_error_status(None), "attach-failed");
+}
+
+#[test]
+fn video_shrink_notices_track_concurrent_jobs_and_dismiss_each_job_separately() {
+    let mut notices = ShrinkNoticeTracker::default();
+    let first = notices.start("first.mp4 (10%)".into());
+    let second = notices.start("second.mp4 (5%)".into());
+
+    assert_eq!(
+        notices.current(),
+        Some(ShrinkNotice {
+            operation_id: second,
+            message: "second.mp4 (5%)".into(),
+        })
+    );
+    assert_eq!(
+        notices.dismiss(second),
+        Some(ShrinkNotice {
+            operation_id: first,
+            message: "first.mp4 (10%)".into(),
+        })
+    );
+
+    let _ = notices.update(first, "first.mp4 (30%)".into());
+    let _ = notices.update(second, "second.mp4 (25%)".into());
+    assert_eq!(
+        notices.current(),
+        Some(ShrinkNotice {
+            operation_id: first,
+            message: "first.mp4 (30%)".into(),
+        })
+    );
+
+    let _ = notices.finish(second);
+    assert_eq!(
+        notices.current().map(|notice| notice.operation_id),
+        Some(first)
+    );
+    let _ = notices.finish(first);
+    assert_eq!(notices.current(), None);
+
+    let next = notices.start("next.mp4".into());
+    assert_eq!(
+        notices.current().map(|notice| notice.operation_id),
+        Some(next)
+    );
 }
 
 #[test]
