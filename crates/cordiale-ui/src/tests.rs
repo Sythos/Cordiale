@@ -5699,12 +5699,18 @@ fn video_shrink_notices_track_concurrent_jobs_and_dismiss_each_job_separately() 
     );
 
     let _ = notices.finish(second);
-    assert_eq!(notices.current().map(|notice| notice.operation_id), Some(first));
+    assert_eq!(
+        notices.current().map(|notice| notice.operation_id),
+        Some(first)
+    );
     let _ = notices.finish(first);
     assert_eq!(notices.current(), None);
 
     let next = notices.start("next.mp4".into());
-    assert_eq!(notices.current().map(|notice| notice.operation_id), Some(next));
+    assert_eq!(
+        notices.current().map(|notice| notice.operation_id),
+        Some(next)
+    );
 }
 
 #[test]
