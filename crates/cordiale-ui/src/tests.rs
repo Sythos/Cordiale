@@ -5851,27 +5851,43 @@ fn a_blank_settings_pattern_is_the_plain_mask_rule() {
 }
 
 #[test]
+fn chat_header_prefixes_the_destination_and_preserves_window_details() {
+    let user = vec!["S".into(), "i".into(), "r".into()];
+    let channel = vec!["r".into(), "n".into(), "t".into()];
+    let details = window_status_line("azzurra", Some(&user), "#grappa", Some(&channel));
+    assert_eq!(
+        format_chat_header("Connected to: https://server.grappa.tls", &details),
+        "Connected to: https://server.grappa.tls - azzurra +Sir - #grappa +rnt"
+    );
+    assert_eq!(format_chat_header("", &details), details);
+    assert_eq!(
+        format_chat_header("Connected to: https://server.grappa.tls", ""),
+        "Connected to: https://server.grappa.tls"
+    );
+}
+
+#[test]
 fn window_status_line_joins_network_and_window_with_their_flags() {
     let modes = |letters: &[&str]| letters.iter().map(|m| m.to_string()).collect::<Vec<_>>();
     let user = modes(&["S", "i", "r"]);
     let channel = modes(&["r", "n", "t"]);
     assert_eq!(
         window_status_line("Azzurra", Some(&user), "#grappa", Some(&channel)),
-        "Azzurra +Sir · #grappa +rnt"
+        "Azzurra +Sir - #grappa +rnt"
     );
     // No snapshot yet, or an empty one: no invented `+`.
     assert_eq!(
         window_status_line("Azzurra", None, "#grappa", None),
-        "Azzurra · #grappa"
+        "Azzurra - #grappa"
     );
     assert_eq!(
         window_status_line("Azzurra", Some(&[]), "#grappa", Some(&[])),
-        "Azzurra · #grappa"
+        "Azzurra - #grappa"
     );
     // A DM or `$server` window carries the user modes only.
     assert_eq!(
         window_status_line("Azzurra", Some(&user), "vjt", None),
-        "Azzurra +Sir · vjt"
+        "Azzurra +Sir - vjt"
     );
 }
 
@@ -5892,7 +5908,7 @@ fn window_status_follows_the_active_window_and_never_leaks_flags() {
     assert_eq!(window_status_for(&state), "");
 
     state.windows.current_channel = Some(("azzurra".into(), "#grappa".into()));
-    assert_eq!(window_status_for(&state), "azzurra +ir · #grappa +nt");
+    assert_eq!(window_status_for(&state), "azzurra +ir - #grappa +nt");
 
     // A live channel-mode snapshot replaces the old flags.
     state.transcript.channel_modes.insert(
@@ -5902,17 +5918,17 @@ fn window_status_follows_the_active_window_and_never_leaks_flags() {
             params: HashMap::new(),
         },
     );
-    assert_eq!(window_status_for(&state), "azzurra +ir · #grappa +m");
+    assert_eq!(window_status_for(&state), "azzurra +ir - #grappa +m");
 
     // Another network's window: its own (missing) snapshots, nothing
     // carried over from the last one.
     state.windows.current_channel = Some(("libera".into(), "#rust".into()));
-    assert_eq!(window_status_for(&state), "libera · #rust");
+    assert_eq!(window_status_for(&state), "libera - #rust");
 
     // The server window and a DM show no channel modes, even when a
     // channel of that name happens to hold a snapshot.
     state.windows.current_channel = Some(("azzurra".into(), SERVER_WINDOW_NAME.into()));
-    assert_eq!(window_status_for(&state), "azzurra +ir · $server");
+    assert_eq!(window_status_for(&state), "azzurra +ir - $server");
     state.transcript.channel_modes.insert(
         ("azzurra".into(), "vjt".into()),
         ChannelModes {
@@ -5922,7 +5938,7 @@ fn window_status_follows_the_active_window_and_never_leaks_flags() {
     );
     state.windows.current_channel = Some(("azzurra".into(), "vjt".into()));
     state.windows.current_query = true;
-    assert_eq!(window_status_for(&state), "azzurra +ir · vjt");
+    assert_eq!(window_status_for(&state), "azzurra +ir - vjt");
 }
 
 #[test]

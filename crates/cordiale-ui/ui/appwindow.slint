@@ -1176,8 +1176,14 @@ export component AppWindow inherits Window {
     // Compact `+nt` snapshot for the selected channel; empty when unknown or
     // when the server confirms there are no channel modes.
     // One-line status above the topic: network + user modes, then the
-    // window + channel modes (`Azzurra +Sir · #grappa +rnt`); "" on home.
+    // window + channel modes (`Azzurra +Sir - #grappa +rnt`); "" on home.
     in property <string> window-status: "";
+    // The authenticated Grappa endpoint, independent of the editable login URL.
+    in property <string> connection-destination: "";
+    pure callback format-chat-header(string, string) -> string;
+    private property <string> chat-header: format-chat-header(
+        connection-destination == "" ? "" : @tr("Connected to: {}", connection-destination),
+        window-status);
     in property <bool> has-selected-channel: false;
     in property <bool> current-query: false;
     // The peer's nick for the open private window — set together with
@@ -3438,13 +3444,13 @@ export component AppWindow inherits Window {
             // Truncated on a narrow window; the full line stays the
             // accessible label.
             if window-status != "" : Text {
-                text: window-status;
+                text: chat-header;
                 font-size: 14px * FontScale.percent / 100;
                 font-weight: 700;
                 overflow: elide;
                 color: palette-active ? palette-accent : Palette.foreground;
                 accessible-role: AccessibleRole.text;
-                accessible-label: window-status;
+                accessible-label: chat-header;
             }
             // The layout gives the topic the box's width, so it wraps at word
             // boundaries and the box grows to fit every line.

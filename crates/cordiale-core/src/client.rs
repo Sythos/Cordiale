@@ -284,6 +284,18 @@ impl GrappaClient {
         &self.base_url
     }
 
+    /// The connection destination for display, without credentials or URL tokens.
+    pub fn display_destination(&self) -> String {
+        let Ok(mut url) = reqwest::Url::parse(&self.base_url) else {
+            return String::new();
+        };
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        url.set_query(None);
+        url.set_fragment(None);
+        url.as_str().trim_end_matches('/').to_string()
+    }
+
     /// `GET /api/config` — the first, unauthenticated call to a server.
     pub async fn fetch_config(&self) -> Result<ConfigResponse, GrappaClientError> {
         let url = format!("{}/api/config", self.base_url);
@@ -3333,6 +3345,22 @@ mod tests {
         body_json, body_string_contains, header, header_regex, method, path, query_param,
     };
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn display_destination_preserves_the_endpoint_without_url_secrets() {
+        let client = GrappaClient::new(
+            "https://alice:password@server.grappa.tls:8443/grappa?token=secret#private",
+        );
+        assert_eq!(
+            client.display_destination(),
+            "https://server.grappa.tls:8443/grappa"
+        );
+        assert_eq!(
+            GrappaClient::new("https://server.grappa.tls").display_destination(),
+            "https://server.grappa.tls"
+        );
+        assert_eq!(GrappaClient::new("invalid url").display_destination(), "");
+    }
 
     #[tokio::test]
     async fn fetch_config_parses_a_successful_response() {

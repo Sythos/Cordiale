@@ -53,8 +53,8 @@ msgid "Switch to server {}"
 msgstr "Cambiar al servidor {}"
 
 msgctxt "AppWindow"
-msgid "Connected to {}"
-msgstr "Conectado a {}"
+msgid "Connected to: {}"
+msgstr "Conectado a: {}"
 
 msgctxt "AppWindow"
 msgid "Settings"

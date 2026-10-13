@@ -558,6 +558,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let shrink_notices = Arc::new(Mutex::new(ShrinkNoticeTracker::default()));
     let dismissed_shrink_notices = Arc::clone(&shrink_notices);
     let shrink_notice_ui = ui.as_weak();
+    ui.on_format_chat_header(|destination, details| {
+        format_chat_header(&destination, &details).into()
+    });
     ui.on_status_notice_shrink_dismissed(move |operation_id| {
         let Ok(operation_id) = operation_id.parse::<u64>() else {
             return;
@@ -3041,8 +3044,15 @@ async fn finish_connect(
             let window_states = state.windows.window_states.clone();
             let window_mentions = state.windows.window_mentions.clone();
             let window_messages = state.windows.window_messages.clone();
+            let connection_destination = state
+                .conn
+                .client
+                .as_ref()
+                .map(GrappaClient::display_destination)
+                .unwrap_or_default();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 ui.set_connecting(false);
+                ui.set_connection_destination(connection_destination.into());
                 ui.set_is_admin(is_admin);
                 if let Some((saved_identifier, saved_server_url)) = saved_profile {
                     ui.set_saved_profile_identifier(saved_identifier.into());
@@ -7026,9 +7036,18 @@ fn format_channel_modes(modes: &[String]) -> String {
     }
 }
 
+/// Prefixes the localized connection destination without changing window details.
+fn format_chat_header(destination: &str, details: &str) -> String {
+    match (destination.is_empty(), details.is_empty()) {
+        (true, _) => details.to_string(),
+        (_, true) => destination.to_string(),
+        _ => format!("{destination} - {details}"),
+    }
+}
+
 /// The one-line status above the topic (issue #110): the network with its
 /// user modes, then the window with its channel modes, as
-/// `Azzurra +Sir · #grappa +rnt`. Flags come only from a server snapshot
+/// `Azzurra +Sir - #grappa +rnt`. Flags come only from a server snapshot
 /// (`umode_changed`, `channel_modes_changed`): none yet, or an empty one,
 /// shows the bare name rather than an invented `+`. A DM or `$server`
 /// window has no channel modes to show.
@@ -7047,7 +7066,7 @@ fn window_status_line(
         }
     };
     format!(
-        "{} · {}",
+        "{} - {}",
         with_modes(network, user_modes),
         with_modes(window, channel_modes)
     )
