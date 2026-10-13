@@ -3443,7 +3443,7 @@ export component AppWindow inherits Window {
 
             // Truncated on a narrow window; the full line stays the
             // accessible label.
-            if window-status != "" : Text {
+            if chat-header != "" : Text {
                 text: chat-header;
                 font-size: 14px * FontScale.percent / 100;
                 font-weight: 700;
