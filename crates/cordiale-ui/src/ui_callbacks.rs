@@ -414,6 +414,7 @@ pub(crate) fn register_navigation_callbacks(
         if let Some(ui) = weak_for_disconnect.upgrade() {
             clear_share_link(&ui);
             ui.set_screen("connect".into());
+            ui.set_connection_destination("".into());
             ui.set_status_kind("".into());
             ui.set_status_message("".into());
             let empty_groups = Rc::new(slint::VecModel::from(Vec::<NetworkGroup>::new()));
