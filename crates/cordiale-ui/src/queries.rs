@@ -56,6 +56,20 @@ pub(crate) async fn handle_select_query(
     }
 }
 
+/// Closes the Grappa query window of a sidebar row. The server answers with
+/// a new `query_windows_list`, which clears the view if this window is open.
+pub(crate) fn handle_close_query(state: &WorkerState, network: &str, nick: &str) {
+    if find_query_window(&state.transcript.query_windows, network, nick).is_none() {
+        return;
+    }
+    send_user_verb(
+        state,
+        network,
+        "close_query_window",
+        serde_json::json!({ "target_nick": nick }),
+    );
+}
+
 pub(crate) fn show_query_window(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,

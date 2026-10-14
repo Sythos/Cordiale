@@ -817,6 +817,10 @@ msgid "Leave channel {} on {}"
 msgstr "Salir del canal {} en {}"
 
 msgctxt "AppWindow"
+msgid "Close conversation with {} on {}"
+msgstr "Cerrar la conversación con {} en {}"
+
+msgctxt "AppWindow"
 msgid "Private conversation with {} on {}"
 msgstr "Conversación privada con {} en {}"
 

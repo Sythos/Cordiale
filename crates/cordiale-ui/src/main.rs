@@ -197,6 +197,10 @@ enum WorkerCommand {
         network: String,
         nick: String,
     },
+    CloseQuery {
+        network: String,
+        nick: String,
+    },
     DismissKickedChannel {
         network: String,
         channel: String,
@@ -1777,6 +1781,9 @@ async fn run_worker(
                     Some(WorkerCommand::SelectQuery { network, nick }) => {
                         write_back_read_cursor(&mut state);
                         handle_select_query(&mut state, &ui, network, nick).await;
+                    }
+                    Some(WorkerCommand::CloseQuery { network, nick }) => {
+                        handle_close_query(&state, &network, &nick);
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
                         handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;
@@ -8096,6 +8103,11 @@ fn network_groups_model(
                             .copied()
                             .map(mention_count_labels)
                             .unwrap_or_default();
+                        let (unread_count, unread_description) = unread_message_count_labels(
+                            window_messages
+                                .get(&window_counts_key(&network, &nick))
+                                .copied(),
+                        );
                         let selected = selected.as_ref().is_some_and(|(key, query)| {
                             *query && *key == window_counts_key(&network, &nick)
                         });
@@ -8105,6 +8117,8 @@ fn network_groups_model(
                             label: label.into(),
                             mention_badge: mention_badge.into(),
                             mentions_description: mentions_description.into(),
+                            unread_count: unread_count.into(),
+                            unread_description: unread_description.into(),
                             selected,
                         }
                     })
