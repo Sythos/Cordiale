@@ -1330,17 +1330,18 @@ export component AppWindow inherits Window {
     // Window width taken by the layout padding (2 x 16px), the four 8px
     // gaps and the two 6px resize handles.
     property <length> layout-fixed-width: 2 * 16px + 4 * 8px + 2 * 6px;
-    // The members column yields to the sidebar's minimum and the chat; the
-    // sidebar then yields to the members column and the chat. Neither
-    // depends on the other's drag state, so there is no binding loop.
+    // Drag limits only: the handles read them while dragging. The column
+    // widths do not read the window width, which would loop with the
+    // window's own layout constraints. The members column yields to the
+    // sidebar's minimum and the chat; the sidebar then yields to the
+    // members column and the chat.
     property <length> members-max-width: max(
         members-min-width,
         min(320px, width - layout-fixed-width - sidebar-min-width - chat-min-width));
-    property <length> members-shown-width: max(members-min-width, min(members-width, members-max-width));
+    property <length> members-limited-width: max(members-min-width, min(members-width, members-max-width));
     property <length> sidebar-max-width: max(
         sidebar-min-width,
-        min(360px, width - layout-fixed-width - members-shown-width - chat-min-width));
-    property <length> sidebar-shown-width: max(sidebar-min-width, min(sidebar-width, sidebar-max-width));
+        min(360px, width - layout-fixed-width - members-limited-width - chat-min-width));
 
     in-out property <string> theme: "light";
     // Color theme in use (Grappa's gallery or a built-in copy); false is
@@ -3017,7 +3018,7 @@ export component AppWindow inherits Window {
         spacing: 8px;
 
         VerticalBox {
-            width: sidebar-shown-width;
+            width: max(sidebar-width, sidebar-min-width);
             spacing: 8px;
 
             HorizontalLayout {
@@ -4154,7 +4155,7 @@ export component AppWindow inherits Window {
         }
 
         VerticalBox {
-            width: members-shown-width;
+            width: max(members-width, members-min-width);
             spacing: 4px;
 
             if current-window-is-joined && !current-query : Text {
