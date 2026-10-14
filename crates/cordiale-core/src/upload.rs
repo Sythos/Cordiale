@@ -100,7 +100,7 @@ pub fn remaining_lifetime_label(remaining_secs: i64) -> Option<String> {
     if remaining_secs < MIN_ANNOUNCED_SECS {
         return None;
     }
-    Some(format!("{}h", remaining_secs.div_ceil(3_600)))
+    Some(format!("{}h", (remaining_secs + 3_599) / 3_600))
 }
 
 /// The chat message announcing an uploaded file, as Cicchetto posts it, with
