@@ -4488,19 +4488,21 @@ async fn upload_and_post(
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let work = async {
-        let Ok(_slot) = UPLOAD_SLOTS.acquire().await else {
+        let Ok(slot) = UPLOAD_SLOTS.acquire().await else {
             return;
         };
         // The file is read only now, so that waiting uploads hold a path
-        // and not the whole file.
-        let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
-        let bytes = match read {
-            Ok(Ok(bytes)) if cap.is_some_and(|cap| bytes.len() as u64 > cap) => {
+        // and not the whole file. The slot goes into the blocking task: a
+        // cancelled upload cannot stop the read, so the slot stays taken
+        // until the read ends.
+        let read = tokio::task::spawn_blocking(move || (slot, std::fs::read(path))).await;
+        let (_slot, bytes) = match read {
+            Ok((_, Ok(bytes))) if cap.is_some_and(|cap| bytes.len() as u64 > cap) => {
                 set_attach_status(&job.ui, "attach-too-large", job.filename);
                 return;
             }
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(err)) => {
+            Ok((slot, Ok(bytes))) => (slot, bytes),
+            Ok((_, Err(err))) => {
                 persistence::log_line(&format!("attachment read failed: {err}"));
                 set_attach_status(&job.ui, "attach-read-failed", job.filename);
                 return;
