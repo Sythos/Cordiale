@@ -4225,6 +4225,11 @@ async fn handle_attach_file(
             .upload_limits
             .as_ref()
             .map(|limits| upload_cap(limits, category));
+        // Too many files already wait: the new one is refused, not queued.
+        let Ok(queued) = UPLOAD_QUEUE.try_acquire() else {
+            set_status("attach-failed", filename);
+            return;
+        };
         let shrink_notice = begin_shrink_notice(ui, &shrink_notices, filename.clone());
         let job = UploadJob {
             client,
@@ -4243,6 +4248,7 @@ async fn handle_attach_file(
             path,
             video_cap,
             state.conn.shrink_cancel.clone(),
+            queued,
         ));
         return;
     }
@@ -4342,23 +4348,15 @@ struct UploadFile {
     path: std::path::PathBuf,
     /// The largest size the server accepts, when it is known.
     cap: Option<u64>,
-    /// Delete `path` when this drops.
-    private: bool,
-}
-
-impl Drop for UploadFile {
-    fn drop(&mut self) {
-        if self.private {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+    /// Holds the private copy: it is deleted when this drops.
+    _copy: Option<tempfile::TempPath>,
 }
 
 /// Copies the file the user confirmed into a private file, so that a change
 /// to the original while the upload waits is not sent. Gives the status key
 /// of the failure.
 fn stage_upload_file(path: &std::path::Path, cap: Option<u64>) -> Result<UploadFile, &'static str> {
-    static NEXT_COPY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    use std::io::Read;
     let meta = std::fs::metadata(path).map_err(|err| {
         persistence::log_line(&format!("attachment read failed: {err}"));
         "attach-read-failed"
@@ -4366,27 +4364,27 @@ fn stage_upload_file(path: &std::path::Path, cap: Option<u64>) -> Result<UploadF
     if cap.is_some_and(|cap| meta.len() > cap) {
         return Err("attach-too-large");
     }
-    let dir = std::env::temp_dir().join("cordiale-upload");
-    std::fs::create_dir_all(&dir).map_err(|err| {
-        persistence::log_line(&format!("attachment folder failed: {err}"));
-        "attach-read-failed"
-    })?;
-    let copy = dir.join(format!(
-        "{}-{}",
-        std::process::id(),
-        NEXT_COPY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    // The guard removes a partial copy if the copy fails.
-    let staged = UploadFile {
-        path: copy,
-        cap,
-        private: true,
-    };
-    std::fs::copy(path, &staged.path).map_err(|err| {
+    let read_failed = |err: std::io::Error| {
         persistence::log_line(&format!("attachment copy failed: {err}"));
         "attach-read-failed"
-    })?;
-    Ok(staged)
+    };
+    let source = std::fs::File::open(path).map_err(read_failed)?;
+    // A new file with a random name, readable by the owner only. It is never
+    // an existing file or a link, and a failed copy deletes it.
+    let mut copy = tempfile::Builder::new()
+        .prefix("cordiale-upload-")
+        .tempfile()
+        .map_err(read_failed)?;
+    // The file may have grown since the check: copy one byte more than the
+    // cap, which is enough for the size check after the read.
+    let limit = cap.map_or(u64::MAX, |cap| cap.saturating_add(1));
+    std::io::copy(&mut source.take(limit), &mut copy).map_err(read_failed)?;
+    let copy = copy.into_temp_path();
+    Ok(UploadFile {
+        path: copy.to_path_buf(),
+        cap,
+        _copy: Some(copy),
+    })
 }
 
 /// Copies the file, then hands it to `upload_and_post`. `queued` is held
@@ -4712,12 +4710,14 @@ fn report_shrink_error(
 /// against the server's cap for videos (the original may be over it), then
 /// uploads the result. Nothing goes up unless the shrunk copy does: a failed
 /// or useless shrink is reported and the original is left alone. `cancel`
-/// is set when the session ends.
+/// is set when the session ends. `_queued` counts this video against
+/// `MAX_QUEUED_UPLOADS` until the task ends.
 async fn shrink_and_upload(
     job: UploadJob,
     path: std::path::PathBuf,
     video_cap: Option<u64>,
     cancel: std::sync::Arc<CancelFlag>,
+    _queued: tokio::sync::SemaphorePermit<'static>,
 ) {
     let ui = job.ui.clone();
     let original_name = job.filename.clone();
@@ -4787,7 +4787,7 @@ async fn shrink_and_upload(
     let file = UploadFile {
         path: video.path.clone(),
         cap: None,
-        private: false,
+        _copy: None,
     };
     upload_and_post(job, mime, UploadCategory::Video, file, cancel).await;
     drop(video);

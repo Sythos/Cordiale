@@ -41,6 +41,9 @@ slint = { version = "1", default-features = false, features = [
     "unstable-winit-030",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+# The private copy of a file waiting to be uploaded: a new file with a random
+# name, readable by the owner only, deleted when dropped.
+tempfile = "3"
 # The radio player: MP3, Ogg Vorbis and FLAC streams, decoded the same way
 # on every platform (ALSA on Linux, WASAPI on Windows, CoreAudio on macOS).
 rodio = { version = "0.22", default-features = false, features = ["playback", "mp3", "vorbis", "flac"] }

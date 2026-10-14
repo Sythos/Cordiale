@@ -1053,6 +1053,7 @@ dependencies = [
  "slint-build",
  "sys-locale",
  "sysinfo",
+ "tempfile",
  "tokio",
  "windows",
  "winresource",
