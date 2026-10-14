@@ -2409,6 +2409,8 @@ export component AppWindow inherits Window {
             return @tr("The server refused the passkey. The authenticator may be the wrong one, or the server expects another origin than {}. If it does, enter it under Passkey origin.", passkey-origin-preview(server-url, passkey-origin));
         } else if status-kind == "passkey-cancelled" {
             return @tr("The passkey request was cancelled, timed out, or found no passkey for this account.");
+        } else if status-kind == "passkey-origin-mismatch" {
+            return @tr("The server asked for a passkey on another host than {}. Cordiale did not start the request.", passkey-origin-preview(server-url, passkey-origin));
         } else if status-kind == "passkey-no-account" {
             return @tr("That account doesn't sign in with a passkey alone. Use its password instead.");
         } else if status-kind == "passkey-busy" {
@@ -5125,6 +5127,7 @@ export component AppWindow inherits Window {
                         : security-passkey-error == "busy" ? @tr("Grappa is busy right now. Try again in a moment.")
                         : security-passkey-error == "throttled" ? @tr("Too many attempts. Wait a few minutes before trying again.")
                         : security-passkey-error == "passkey-cancelled" ? @tr("The passkey request was cancelled, timed out, or found no passkey for this account.")
+                        : security-passkey-error == "passkey-origin-mismatch" ? @tr("The server asked for a passkey on another host than {}. Cordiale did not start the request.", passkey-origin-preview(server-url, passkey-origin))
                         : security-passkey-error == "passkey-failed" ? @tr("The passkey request failed.")
                         : security-passkey-error == "expired" ? @tr("The recovery codes expired before passwordless was turned on. Start again.")
                         : security-passkey-error == "add-failed" ? @tr("Couldn't add the passkey.")
