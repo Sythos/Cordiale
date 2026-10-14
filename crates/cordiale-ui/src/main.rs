@@ -8768,6 +8768,9 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
         });
         let _ = ui.upgrade_in_event_loop(move |ui| {
             if ui.get_media_url().as_str() != href {
+                if let Ok(MediaContent::Image(path)) = &outcome {
+                    temp_files::discard(path);
+                }
                 return;
             }
             match outcome {
@@ -9309,6 +9312,9 @@ fn load_theme_background(
             }
         };
         if THEME_BACKGROUND_GENERATION.load(Ordering::SeqCst) != generation {
+            if let Some(file) = &file {
+                temp_files::discard(file);
+            }
             return;
         }
         let _ = ui.upgrade_in_event_loop(move |ui| {
