@@ -8745,17 +8745,14 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
         };
         let fetched = if on_grappa {
             client
-                .fetch_server_file(&token, &href)
+                .fetch_server_file(&token, &href, limit, text)
                 .await
-                .map(|(bytes, content_type)| {
-                    let cut = text && bytes.len() > limit;
-                    let mut bytes = bytes;
-                    bytes.truncate(limit);
-                    (bytes, content_type, cut)
-                })
-                .map_err(|err| match err.status().map(|status| status.as_u16()) {
-                    Some(404 | 410) => FetchError::Gone,
-                    _ => FetchError::Failed(format!("{err:?}")),
+                .map_err(|err| match err {
+                    GrappaClientError::TooLarge { .. } => FetchError::TooLarge,
+                    err => match err.status().map(|status| status.as_u16()) {
+                        Some(404 | 410) => FetchError::Gone,
+                        _ => FetchError::Failed(format!("{err:?}")),
+                    },
                 })
         } else {
             media::fetch_public(&href, limit, text).await
@@ -9307,8 +9304,16 @@ fn load_theme_background(
     };
     let ui = ui.clone();
     tokio::spawn(async move {
-        let file = match client.fetch_server_file(&token, &background.path).await {
-            Ok((bytes, content_type)) => {
+        let file = match client
+            .fetch_server_file(
+                &token,
+                &background.path,
+                cordiale_core::media::MAX_WALLPAPER_BYTES,
+                false,
+            )
+            .await
+        {
+            Ok((bytes, content_type, _)) => {
                 let extension = avatar_extension(content_type.as_deref()).unwrap_or("webp");
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 std::hash::Hash::hash(&background.path, &mut hasher);
