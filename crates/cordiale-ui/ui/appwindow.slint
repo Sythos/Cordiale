@@ -1325,6 +1325,21 @@ export component AppWindow inherits Window {
     property <length> members-min-width: max(
         actions-probe.preferred-width + 16px,
         members-nick-probe.preferred-width + 40px);
+    // The chat column keeps at least this width; the side columns give way.
+    property <length> chat-min-width: 240px;
+    // Window width taken by the layout padding (2 x 16px), the four 8px
+    // gaps and the two 6px resize handles.
+    property <length> layout-fixed-width: 2 * 16px + 4 * 8px + 2 * 6px;
+    // Drag limits only: the handles read them while dragging. The column
+    // widths do not read the window width, which would loop with the
+    // window's own layout constraints. Each limit leaves room for the
+    // other column at its current width and for the chat.
+    property <length> members-max-width: max(
+        members-min-width,
+        min(320px, root.width - layout-fixed-width - max(sidebar-width, sidebar-min-width) - chat-min-width));
+    property <length> sidebar-max-width: max(
+        sidebar-min-width,
+        min(360px, root.width - layout-fixed-width - max(members-width, members-min-width) - chat-min-width));
 
     in-out property <string> theme: "light";
     // Color theme in use (Grappa's gallery or a built-in copy); false is
@@ -3298,7 +3313,7 @@ export component AppWindow inherits Window {
         ResizeHandle {
             target-width <=> sidebar-width;
             target-min-width: sidebar-min-width;
-            target-max-width: max(360px, sidebar-min-width);
+            target-max-width: sidebar-max-width;
         }
 
         // Channel directory of one network: takes the chat's place, the
@@ -4133,7 +4148,7 @@ export component AppWindow inherits Window {
             target-width <=> members-width;
             grows-left: true;
             target-min-width: members-min-width;
-            target-max-width: max(320px, members-min-width);
+            target-max-width: members-max-width;
         }
 
         VerticalBox {
