@@ -389,9 +389,11 @@ fn is_local_v6(ip: Ipv6Addr) -> bool {
     ip.is_loopback() || ip.is_unspecified() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
 }
 
-/// Largest image and text the viewer downloads.
+/// Largest image, text, avatar and wallpaper the client downloads.
 pub const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+pub const MAX_AVATAR_BYTES: usize = 5 * 1024 * 1024;
+pub const MAX_WALLPAPER_BYTES: usize = 25 * 1024 * 1024;
 
 /// Why a file couldn't be shown.
 #[derive(Debug)]
