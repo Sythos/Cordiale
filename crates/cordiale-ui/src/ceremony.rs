@@ -68,6 +68,8 @@ pub enum CeremonyError {
     Cancelled,
     /// Grappa's options can't be used (the field that failed).
     InvalidOptions(&'static str),
+    /// The RP ID Grappa sent is not the host of the trusted origin.
+    OriginMismatch,
     /// Anything else the platform reported, for the log.
     Failed(String),
 }
@@ -79,6 +81,7 @@ impl std::fmt::Display for CeremonyError {
             CeremonyError::Unsupported => f.write_str("no passkey backend on this system"),
             CeremonyError::Cancelled => f.write_str("cancelled, timed out or no passkey"),
             CeremonyError::InvalidOptions(field) => write!(f, "unusable options: {field}"),
+            CeremonyError::OriginMismatch => f.write_str("rp id does not match the server origin"),
             CeremonyError::Failed(reason) => write!(f, "failed: {reason}"),
         }
     }
@@ -238,8 +241,8 @@ pub fn parent_window(_window: &slint::Window) -> Option<ParentWindow> {
 }
 
 /// Runs the assertion Grappa's `options` ask for, off the async runtime,
-/// and returns the body the passkey doors take. `origin` is Cordiale's
-/// guess at Grappa's passkey origin (see `ceremony_origin`).
+/// and returns the body the passkey doors take. `origin` is the trusted
+/// origin of the server (see `ceremony_origin`).
 pub async fn run_assertion(
     options: &PasskeyOptions<PasskeyRequestOptions>,
     origin: &str,
@@ -271,14 +274,15 @@ pub async fn run_registration(
     .map_err(|err| CeremonyError::Failed(err.to_string()))?
 }
 
-/// The origin to claim for a ceremony on `rp_id`. Grappa's RP ID is its
-/// origin's host, so a guess with another host can't be right; the likely
-/// origin is then plain HTTPS on the RP ID.
-pub fn ceremony_origin(guess: &str, rp_id: &str) -> String {
-    if origin_rp_id(guess) == rp_id {
-        guess.to_string()
+/// The origin to claim for a ceremony on `rp_id`. `trusted` is the origin
+/// of the server the user chose, with its saved override. Grappa's RP ID is
+/// its origin's host, so another RP ID is refused: the server never picks
+/// the origin.
+pub fn ceremony_origin(trusted: &str, rp_id: &str) -> Result<String, CeremonyError> {
+    if origin_rp_id(trusted) == rp_id {
+        Ok(trusted.to_string())
     } else {
-        format!("https://{rp_id}")
+        Err(CeremonyError::OriginMismatch)
     }
 }
 
@@ -303,6 +307,7 @@ pub fn assertion_request(
     if options.rp_id.is_empty() {
         return Err(CeremonyError::InvalidOptions("rp_id"));
     }
+    let origin = ceremony_origin(origin, &options.rp_id)?;
     let challenge = decode(&options.challenge, "challenge")?;
     let allow_credentials = options
         .allow_credentials
@@ -310,7 +315,6 @@ pub fn assertion_request(
         .filter(|credential| credential.kind == "public-key")
         .map(|credential| decode(&credential.id, "allow_credentials"))
         .collect::<Result<Vec<_>, _>>()?;
-    let origin = ceremony_origin(origin, &options.rp_id);
     Ok(AssertionRequest {
         rp_id: options.rp_id.clone(),
         client_data_json: client_data_json(GET, &challenge, &origin),
@@ -327,6 +331,7 @@ pub fn credential_request(
     if options.rp.id.is_empty() {
         return Err(CeremonyError::InvalidOptions("rp.id"));
     }
+    let origin = ceremony_origin(origin, &options.rp.id)?;
     let challenge = decode(&options.challenge, "challenge")?;
     let user_id = decode(&options.user.id, "user.id")?;
     let algorithms: Vec<i32> = options
@@ -339,7 +344,6 @@ pub fn credential_request(
         return Err(CeremonyError::InvalidOptions("pub_key_cred_params"));
     }
     let resident_key = options.authenticator_selection.resident_key.as_deref();
-    let origin = ceremony_origin(origin, &options.rp.id);
     Ok(CredentialRequest {
         rp_id: options.rp.id.clone(),
         rp_name: options.rp.name.clone(),
@@ -488,18 +492,34 @@ mod tests {
     }
 
     #[test]
-    fn the_origin_guess_stands_only_when_its_host_is_the_rp_id() {
+    fn the_trusted_origin_stands_only_when_its_host_is_the_rp_id() {
         assert_eq!(
             ceremony_origin("https://irc.example.org", "irc.example.org"),
-            "https://irc.example.org"
+            Ok("https://irc.example.org".to_string())
         );
+        // A saved override with another port or scheme keeps its host.
         assert_eq!(
             ceremony_origin("http://irc.example.org:4000", "irc.example.org"),
-            "http://irc.example.org:4000"
+            Ok("http://irc.example.org:4000".to_string())
         );
         assert_eq!(
             ceremony_origin("https://10.0.0.5:4443", "irc.example.org"),
-            "https://irc.example.org"
+            Err(CeremonyError::OriginMismatch)
+        );
+    }
+
+    #[test]
+    fn a_foreign_rp_id_is_refused_before_any_prompt() {
+        let assertion = request_options(json!({"challenge": "AAEC", "rp_id": "evil.example"}));
+        assert_eq!(
+            assertion_request(&assertion, "https://irc.example.org"),
+            Err(CeremonyError::OriginMismatch)
+        );
+        let mut options = creation_options();
+        options.rp.id = "evil.example".to_string();
+        assert_eq!(
+            credential_request(&options, "https://irc.example.org"),
+            Err(CeremonyError::OriginMismatch)
         );
     }
 

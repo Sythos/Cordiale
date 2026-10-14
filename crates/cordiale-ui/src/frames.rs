@@ -559,7 +559,9 @@ pub(crate) async fn handle_frame(
     // later-arriving frame, and treats the account-wide badge separately.
     if payload_kind == "read_cursor_set" {
         if let Some(identifier) = state.conn.identifier.clone() {
-            apply_read_cursor_set(state, &identifier, &frame.topic, &frame.payload);
+            if apply_read_cursor_set(state, &identifier, &frame.topic, &frame.payload) {
+                refresh_network_groups(state, ui);
+            }
         }
         return;
     }
@@ -5306,8 +5308,16 @@ fn load_whois_avatar(state: &WorkerState, ui: &slint::Weak<AppWindow>, avatar_ur
     };
     let ui = ui.clone();
     tokio::spawn(async move {
-        let (bytes, content_type) = match client.fetch_server_file(&token, &avatar_url).await {
-            Ok(file) => file,
+        let fetched = client
+            .fetch_server_file(
+                &token,
+                &avatar_url,
+                cordiale_core::media::MAX_AVATAR_BYTES,
+                false,
+            )
+            .await;
+        let (bytes, content_type) = match fetched {
+            Ok((bytes, content_type, _)) => (bytes, content_type),
             Err(err) => {
                 persistence::log_line(&format!("whois avatar fetch failed: {err:?}"));
                 return;
