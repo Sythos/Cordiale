@@ -398,9 +398,7 @@ component ResizeHandle {
     // bound the *target* panel's width instead).
     in-out property <length> target-width;
     in property <length> target-min-width: 120px;
-    // Asked for on every drag step, not bound: the limit reads the window
-    // width and the other column, which a binding would loop on.
-    callback target-max-width() -> length;
+    in property <length> target-max-width: 420px;
 
     // True for a panel on the right of the strip: dragging left grows it,
     // and the strip moves left with the panel, so the pointer stays on it.
@@ -420,7 +418,7 @@ component ResizeHandle {
             if (self.pressed) {
                 target-width = max(
                     target-min-width,
-                    min(target-max-width(), target-width + (grows-left ? self.pressed-x - self.mouse-x : self.mouse-x - self.pressed-x))
+                    min(target-max-width, target-width + (grows-left ? self.pressed-x - self.mouse-x : self.mouse-x - self.pressed-x))
                 );
             }
         }
@@ -1332,6 +1330,16 @@ export component AppWindow inherits Window {
     // Window width taken by the layout padding (2 x 16px), the four 8px
     // gaps and the two 6px resize handles.
     property <length> layout-fixed-width: 2 * 16px + 4 * 8px + 2 * 6px;
+    // Drag limits only: the handles read them while dragging. The column
+    // widths do not read the window width, which would loop with the
+    // window's own layout constraints. Each limit leaves room for the
+    // other column at its current width and for the chat.
+    property <length> members-max-width: max(
+        members-min-width,
+        min(320px, root.width - layout-fixed-width - max(sidebar-width, sidebar-min-width) - chat-min-width));
+    property <length> sidebar-max-width: max(
+        sidebar-min-width,
+        min(360px, root.width - layout-fixed-width - max(members-width, members-min-width) - chat-min-width));
 
     in-out property <string> theme: "light";
     // Color theme in use (Grappa's gallery or a built-in copy); false is
@@ -3306,13 +3314,7 @@ export component AppWindow inherits Window {
         ResizeHandle {
             target-width <=> sidebar-width;
             target-min-width: sidebar-min-width;
-            // Leaves room for the members column at its current width and
-            // for the chat.
-            target-max-width => {
-                return max(
-                    sidebar-min-width,
-                    min(360px, width - layout-fixed-width - max(members-width, members-min-width) - chat-min-width));
-            }
+            target-max-width: sidebar-max-width;
         }
 
         // Channel directory of one network: takes the chat's place, the
@@ -4147,13 +4149,7 @@ export component AppWindow inherits Window {
             target-width <=> members-width;
             grows-left: true;
             target-min-width: members-min-width;
-            // Leaves room for the sidebar at its current width and for the
-            // chat.
-            target-max-width => {
-                return max(
-                    members-min-width,
-                    min(320px, width - layout-fixed-width - max(sidebar-width, sidebar-min-width) - chat-min-width));
-            }
+            target-max-width: members-max-width;
         }
 
         VerticalBox {
