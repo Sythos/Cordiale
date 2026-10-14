@@ -91,6 +91,7 @@ pub(crate) fn sign_in_error_key(err: &GrappaClientError) -> &'static str {
 pub(crate) fn ceremony_error_key(err: &CeremonyError) -> &'static str {
     match err {
         CeremonyError::Cancelled => "passkey-cancelled",
+        CeremonyError::OriginMismatch => "passkey-origin-mismatch",
         CeremonyError::Unsupported
         | CeremonyError::InvalidOptions(_)
         | CeremonyError::Failed(_) => "passkey-failed",
