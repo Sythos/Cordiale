@@ -3109,6 +3109,10 @@ msgid "The server refused the passkey. The authenticator may be the wrong one, o
 msgstr "Il server ha rifiutato la passkey. L'autenticatore potrebbe essere quello sbagliato, oppure il server si aspetta un'origine diversa da {}. In tal caso inseriscila in Origine delle passkey."
 
 msgctxt "AppWindow"
+msgid "The server asked for a passkey on another host than {}. Cordiale did not start the request."
+msgstr "Il server ha chiesto una passkey per un altro host rispetto a {}. Cordiale non ha avviato la richiesta."
+
+msgctxt "AppWindow"
 msgid "Passkey origin (optional)"
 msgstr "Origine passkey (facoltativa)"
 
