@@ -86,6 +86,7 @@ use cordiale_core::rest::{
 use cordiale_core::rest::{PasskeyMode, PasskeyOptions, PasskeyRequestOptions};
 use cordiale_core::session::{spawn_session, SessionEvent, SessionHandle};
 use cordiale_core::share;
+use cordiale_core::slash::AliasError;
 use cordiale_core::theme::{font_family_for, ThemePalette, BUILTIN_THEMES};
 use cordiale_core::upload::{
     attachment_message, mime_for_filename, remaining_lifetime_label, UploadCategory,
@@ -4023,16 +4024,34 @@ fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str, ranking: &Member
         .any(|(name, prefix)| name == identifier && ranking.is_op_or_above(prefix))
 }
 
+/// What `$C` means in an alias: the channel of the open window, the peer of
+/// an open query, nothing in the status window or with no window open.
+fn alias_target(state: &WorkerState) -> Option<String> {
+    let (network, channel) = state.windows.current_channel.as_ref()?;
+    if state.windows.current_query {
+        Some(query_send_target(state, network, channel))
+    } else if channel == SERVER_WINDOW_NAME {
+        None
+    } else {
+        Some(channel.clone())
+    }
+}
+
 async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
     if state.windows.current_query && !state.windows.current_query_ready {
         return;
     }
     let body = if body.trim_start().starts_with('/') {
         let aliases = user_aliases(state).await;
-        match cordiale_core::slash::expand_aliases(&body, &aliases) {
+        let target = alias_target(state);
+        match cordiale_core::slash::expand_aliases(&body, &aliases, target.as_deref()) {
             Ok(line) => line,
-            Err(chain) => {
+            Err(AliasError::TooDeep(chain)) => {
                 set_command_status(ui, "alias-too-deep", chain);
+                return;
+            }
+            Err(AliasError::NoTarget(alias)) => {
+                set_command_status(ui, "alias-no-target", alias);
                 return;
             }
         }

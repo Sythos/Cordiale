@@ -238,7 +238,8 @@ Cordiale also covers:
   `/ping`, op/voice/kick/ban/mode, `/quote`, `/oper`,
   `/connect`/`/disconnect`/`/reconnect`/`/quit`, `/ignore`, `/notify`,
   `/hilight`, `/ame`/`/amsg`, `/alias`/`/unalias` with Cicchetto's alias
-  expansion, `/kb` with a default ban type of nick, host or user@host
+  expansion (plus `$C` for the channel or query peer of the current
+  window, and a built-in `/onotice` alias for `/notice @$C $*`), `/kb` with a default ban type of nick, host or user@host
   chosen in Settings and kept in your Grappa account, `/beep`, the services
   shortcuts), `/np` for the radio,
   and a bare `/umode` that opens the user-mode toggles; a bare `/topic` or
