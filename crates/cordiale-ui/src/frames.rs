@@ -559,7 +559,9 @@ pub(crate) async fn handle_frame(
     // later-arriving frame, and treats the account-wide badge separately.
     if payload_kind == "read_cursor_set" {
         if let Some(identifier) = state.conn.identifier.clone() {
-            apply_read_cursor_set(state, &identifier, &frame.topic, &frame.payload);
+            if apply_read_cursor_set(state, &identifier, &frame.topic, &frame.payload) {
+                refresh_network_groups(state, ui);
+            }
         }
         return;
     }
