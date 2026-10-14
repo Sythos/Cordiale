@@ -444,28 +444,61 @@ async fn lookup(host: String, port: u16) -> std::io::Result<Vec<SocketAddr>> {
     Ok(tokio::net::lookup_host((host, port)).await?.collect())
 }
 
-async fn fetch_public_with<R, F>(
+/// Sends a GET to a public host for a radio stream and returns the response
+/// without reading the body. Every redirect passes the same checks as
+/// [`fetch_public`], and a loopback, private or link-local target is refused
+/// at the first request too, by address or by name. The caller checks the
+/// status and uses this again for each playlist entry. Only the time to the
+/// response headers is limited.
+pub async fn get_public_stream(href: &str) -> Result<reqwest::Response, FetchError> {
+    get_public_stream_with(href, false, lookup).await
+}
+
+async fn get_public_stream_with<R, F>(
     href: &str,
-    max_bytes: usize,
-    cut_when_larger: bool,
+    allow_local_start: bool,
     resolve: R,
-) -> Result<(Vec<u8>, Option<String>, bool), FetchError>
+) -> Result<reqwest::Response, FetchError>
 where
     R: Fn(String, u16) -> F,
     F: Future<Output = std::io::Result<Vec<SocketAddr>>>,
 {
-    let mut url = validated_url(href).map_err(|refusal| FetchError::Failed(refusal.to_string()))?;
-    if url.scheme() == "ftp" {
+    let url = validated_url(href).map_err(|refusal| FetchError::Failed(refusal.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
         return Err(FetchError::Failed(
-            "only http and https can be downloaded".to_string(),
+            "only http and https streams are opened".to_string(),
         ));
     }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        send_following(url, allow_local_start, true, resolve),
+    )
+    .await
+    .unwrap_or_else(|_| Err(FetchError::Failed("the connection timed out".to_string())))
+}
+
+/// Sends a GET to `url` and follows redirects one request at a time, so each
+/// one passes [`redirect_decision_from`] and each name is resolved first. A
+/// connection only uses the addresses that were checked. `local_start` says
+/// whether the first URL may be local; a redirect may only be local when the
+/// URL before it was.
+async fn send_following<R, F>(
+    mut url: reqwest::Url,
+    local_start: bool,
+    icy_metadata: bool,
+    resolve: R,
+) -> Result<reqwest::Response, FetchError>
+where
+    R: Fn(String, u16) -> F,
+    F: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
     let refused = |refusal: RedirectRefusal| FetchError::Failed(refusal.to_string());
     let mut chain: Vec<reqwest::Url> = Vec::new();
-    // The link the user clicked may be local; a redirect only if the last
-    // request was too.
-    let mut last_is_local = true;
-    let mut response = loop {
+    let mut last_is_local = local_start;
+    if !local_start && is_local_host(&url) {
+        return Err(refused(RedirectRefusal::LocalHost));
+    }
+    loop {
         let mut builder = reqwest::Client::builder()
             .user_agent(crate::EXTERNAL_USER_AGENT)
             .no_proxy()
@@ -491,13 +524,17 @@ where
         let http = builder
             .build()
             .map_err(|err| FetchError::Failed(err.without_url().to_string()))?;
-        let response = http.get(url.clone()).send().await.map_err(fetch_error)?;
+        let mut request = http.get(url.clone());
+        if icy_metadata {
+            request = request.header("Icy-MetaData", "1");
+        }
+        let response = request.send().await.map_err(fetch_error)?;
         let location = match response.status().as_u16() {
             301 | 302 | 303 | 307 | 308 => response.headers().get(reqwest::header::LOCATION),
             _ => None,
         };
         let Some(location) = location.and_then(|value| value.to_str().ok()) else {
-            break response;
+            return Ok(response);
         };
         let next = url
             .join(location)
@@ -506,7 +543,27 @@ where
         redirect_decision_from(&chain, &next, is_local).map_err(refused)?;
         last_is_local = is_local;
         url = next;
-    };
+    }
+}
+
+async fn fetch_public_with<R, F>(
+    href: &str,
+    max_bytes: usize,
+    cut_when_larger: bool,
+    resolve: R,
+) -> Result<(Vec<u8>, Option<String>, bool), FetchError>
+where
+    R: Fn(String, u16) -> F,
+    F: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
+    let url = validated_url(href).map_err(|refusal| FetchError::Failed(refusal.to_string()))?;
+    if url.scheme() == "ftp" {
+        return Err(FetchError::Failed(
+            "only http and https can be downloaded".to_string(),
+        ));
+    }
+    // The link the user clicked may be local.
+    let mut response = send_following(url, true, false, resolve).await?;
     let status = response.status().as_u16();
     if status == 404 || status == 410 {
         return Err(FetchError::Gone);
@@ -1072,6 +1129,49 @@ mod tests {
         .await
         .expect("fetch");
         assert_eq!(bytes, [9u8]);
+    }
+
+    #[tokio::test]
+    async fn streams_refuse_local_targets_at_the_first_request() {
+        for href in [
+            "http://127.0.0.1:8000/live",
+            "http://localhost/live",
+            "http://10.0.0.5/live",
+            "http://192.168.1.9/live.pls",
+            "http://169.254.169.254/latest",
+            "http://[::1]/live",
+        ] {
+            let result = get_public_stream(href).await;
+            assert!(
+                matches!(&result, Err(FetchError::Failed(reason)) if reason == "redirect to a local address refused"),
+                "{href}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streams_refuse_names_that_resolve_locally() {
+        for resolved in [
+            &["127.0.0.1"][..],
+            &["10.0.0.5", "192.168.1.9"],
+            &["169.254.169.254"],
+            &["::1"],
+        ] {
+            let result = get_public_stream_with("http://radio.example/live", false, |_, _| {
+                std::future::ready(resolved_to(resolved))
+            })
+            .await;
+            assert!(
+                matches!(&result, Err(FetchError::Failed(reason)) if reason == "redirect to a local address refused"),
+                "{resolved:?}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streams_refuse_other_schemes() {
+        let result = get_public_stream("ftp://radio.example/live").await;
+        assert!(matches!(result, Err(FetchError::Failed(_))), "{result:?}");
     }
 
     #[tokio::test]
