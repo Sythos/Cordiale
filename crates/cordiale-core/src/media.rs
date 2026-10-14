@@ -389,13 +389,23 @@ fn is_local_v4(ip: Ipv4Addr) -> bool {
         || ip.is_link_local()
         || ip.is_unspecified()
         || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
         || first == 0
+        || first >= 240
         || (first == 100 && second & 0xc0 == 64)
+        || (first == 198 && second & 0xfe == 18)
+        || ip.octets()[..3] == [192, 0, 0]
 }
 
 fn is_local_v6(ip: Ipv6Addr) -> bool {
-    let first = ip.segments()[0];
-    ip.is_loopback() || ip.is_unspecified() || first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80
+    let [first, second, ..] = ip.segments();
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || first & 0xfe00 == 0xfc00
+        || first & 0xffc0 == 0xfe80
+        || (first == 0x2001 && second == 0x0db8)
 }
 
 /// Largest image and text the viewer downloads.
@@ -921,6 +931,14 @@ mod tests {
             "https://[fd00::1]/y.png",
             "https://[::ffff:127.0.0.1]/y.png",
             "https://[::ffff:10.1.2.3]/y.png",
+            "https://198.18.0.1/y.png",
+            "https://198.19.255.254/y.png",
+            "https://224.0.0.1/y.png",
+            "https://240.0.0.1/y.png",
+            "https://192.0.0.8/y.png",
+            "https://192.0.2.1/y.png",
+            "https://[ff02::1]/y.png",
+            "https://[2001:db8::1]/y.png",
         ] {
             assert_eq!(
                 redirect_decision(&public, &url(next)),
@@ -932,6 +950,7 @@ mod tests {
             "https://8.8.8.8/y.png",
             "https://172.32.0.1/y.png",
             "https://100.128.0.1/y.png",
+            "https://198.20.0.1/y.png",
             "https://[2001:4860:4860::8888]/y.png",
             "https://b.example/y.png",
         ] {
