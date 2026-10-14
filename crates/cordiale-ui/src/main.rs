@@ -1371,7 +1371,7 @@ struct SessionState {
     own_listener_ready: std::collections::HashSet<String>,
     /// Set to stop the videos being shrunk for the session that ends (see
     /// `cancel_video_shrinks`).
-    shrink_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shrink_cancel: std::sync::Arc<CancelFlag>,
     /// A sign-in waiting for its second factor (issue #118).
     pending_totp: Option<PendingTotp>,
     /// The token confirming a TOTP enrolment started in Settings.
@@ -1469,7 +1469,7 @@ impl WorkerState {
                 server_protocol_version: None,
                 chat_rebuild_tx: None,
                 own_listener_ready: std::collections::HashSet::new(),
-                shrink_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                shrink_cancel: std::sync::Arc::new(CancelFlag::default()),
                 pending_totp: None,
                 totp_enrollment: None,
                 passwordless_recovery_token: None,
@@ -4232,6 +4232,11 @@ async fn handle_attach_file(
             .upload_limits
             .as_ref()
             .map(|limits| upload_cap(limits, category));
+        // Too many files already wait: the new one is refused, not queued.
+        let Ok(queued) = UPLOAD_QUEUE.try_acquire() else {
+            set_status("attach-failed", filename);
+            return;
+        };
         let shrink_notice = begin_shrink_notice(ui, &shrink_notices, filename.clone());
         let job = UploadJob {
             client,
@@ -4250,26 +4255,15 @@ async fn handle_attach_file(
             path,
             video_cap,
             state.conn.shrink_cancel.clone(),
+            queued,
         ));
         return;
     }
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            persistence::log_line(&format!("attachment read failed: {err}"));
-            set_status("attach-read-failed", filename);
-            return;
-        }
-    };
-    let over_cap = state
+    let cap = state
         .prefs
         .upload_limits
         .as_ref()
-        .is_some_and(|limits| bytes.len() as u64 > upload_cap(limits, category));
-    if over_cap {
-        set_status("attach-too-large", filename);
-        return;
-    }
+        .map(|limits| upload_cap(limits, category));
     // No progress or success text: the outcome goes to the log, and a stale
     // status from an earlier attempt is cleared, raw message included.
     let _ = ui.upgrade_in_event_loop(|ui| {
@@ -4286,7 +4280,140 @@ async fn handle_attach_file(
         expire: options.expire,
         shrink_notice: None,
     };
-    upload_and_post(job, mime, category, bytes).await;
+    // Too many files already wait: the new one is refused, not queued.
+    let Ok(queued) = UPLOAD_QUEUE.try_acquire() else {
+        set_status("attach-failed", job.filename);
+        return;
+    };
+    // A slow upload takes up to ten minutes: its own task keeps session
+    // frames and other commands moving meanwhile.
+    tokio::spawn(stage_and_upload(
+        job,
+        mime,
+        category,
+        (path, cap),
+        state.conn.shrink_cancel.clone(),
+        queued,
+    ));
+}
+
+/// How many uploads may be on the wire at once. The others wait for a slot.
+const MAX_ACTIVE_UPLOADS: usize = 3;
+
+/// How many uploads may be accepted at once, those on the wire included. Each
+/// one holds a private copy of its file on disk until it is read.
+const MAX_QUEUED_UPLOADS: usize = 8;
+
+static UPLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_ACTIVE_UPLOADS);
+
+static UPLOAD_QUEUE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_QUEUED_UPLOADS);
+
+/// Set when the session ends. The uploads of that session wait on it, so a
+/// request in flight is dropped at once. Videos being shrunk poll `flag`.
+#[derive(Default)]
+struct CancelFlag {
+    flag: std::sync::atomic::AtomicBool,
+    wake: tokio::sync::Notify,
+}
+
+impl CancelFlag {
+    fn cancel(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.wake.notify_waiters();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Ends when `cancel` is called, or at once if it was called before.
+    async fn cancelled(&self) {
+        let mut wake = std::pin::pin!(self.wake.notified());
+        // Listen first, then look at the flag: a cancel in between is seen.
+        wake.as_mut().enable();
+        if !self.is_cancelled() {
+            wake.await;
+        }
+    }
+}
+
+/// Runs `work` until it ends or `cancel` is set. Gives `None` when the flag
+/// stopped it: the work is dropped, and with it any request in flight.
+async fn run_unless_cancelled<F: std::future::Future>(
+    cancel: &CancelFlag,
+    work: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => None,
+        output = work => Some(output),
+    }
+}
+
+/// A file to upload. A copy made for the upload is deleted when this drops.
+struct UploadFile {
+    path: std::path::PathBuf,
+    /// The largest size the server accepts, when it is known.
+    cap: Option<u64>,
+    /// Holds the private copy: it is deleted when this drops.
+    _copy: Option<tempfile::TempPath>,
+}
+
+/// Copies the file the user confirmed into a private file, so that a change
+/// to the original while the upload waits is not sent. Gives the status key
+/// of the failure.
+fn stage_upload_file(path: &std::path::Path, cap: Option<u64>) -> Result<UploadFile, &'static str> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).map_err(|err| {
+        persistence::log_line(&format!("attachment read failed: {err}"));
+        "attach-read-failed"
+    })?;
+    if cap.is_some_and(|cap| meta.len() > cap) {
+        return Err("attach-too-large");
+    }
+    let read_failed = |err: std::io::Error| {
+        persistence::log_line(&format!("attachment copy failed: {err}"));
+        "attach-read-failed"
+    };
+    let source = std::fs::File::open(path).map_err(read_failed)?;
+    // A new file with a random name, readable by the owner only. It is never
+    // an existing file or a link, and a failed copy deletes it.
+    let mut copy = tempfile::Builder::new()
+        .prefix("cordiale-upload-")
+        .tempfile()
+        .map_err(read_failed)?;
+    // The file may have grown since the check: copy one byte more than the
+    // cap, which is enough for the size check after the read.
+    let limit = cap.map_or(u64::MAX, |cap| cap.saturating_add(1));
+    std::io::copy(&mut source.take(limit), &mut copy).map_err(read_failed)?;
+    let copy = copy.into_temp_path();
+    Ok(UploadFile {
+        path: copy.to_path_buf(),
+        cap,
+        _copy: Some(copy),
+    })
+}
+
+/// Copies the file, then hands it to `upload_and_post`. `queued` is held
+/// until the upload ends.
+async fn stage_and_upload(
+    job: UploadJob,
+    mime: &'static str,
+    category: UploadCategory,
+    (path, cap): (std::path::PathBuf, Option<u64>),
+    cancel: std::sync::Arc<CancelFlag>,
+    queued: tokio::sync::SemaphorePermit<'static>,
+) {
+    let staged = tokio::task::spawn_blocking(move || stage_upload_file(&path, cap)).await;
+    match staged {
+        Ok(Ok(file)) => upload_and_post(job, mime, category, file, cancel).await,
+        Ok(Err(kind)) => set_attach_status(&job.ui, kind, job.filename),
+        Err(err) => {
+            persistence::log_line(&format!("attachment copy task failed: {err}"));
+            set_attach_status(&job.ui, "attach-read-failed", job.filename);
+        }
+    }
+    drop(queued);
 }
 
 /// What the user chose for one upload, fixed when they confirm it (or when
@@ -4303,11 +4430,8 @@ struct UploadOptions {
 /// Stops the videos being shrunk for the session that is ending, so that
 /// they are not uploaded under the next one. Later uploads get a fresh flag.
 fn cancel_video_shrinks(state: &mut WorkerState) {
-    state
-        .conn
-        .shrink_cancel
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    state.conn.shrink_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state.conn.shrink_cancel.cancel();
+    state.conn.shrink_cancel = std::sync::Arc::new(CancelFlag::default());
 }
 
 /// Where an upload goes and how: everything the task that sends it needs,
@@ -4460,12 +4584,61 @@ fn set_attach_status(ui: &slint::Weak<AppWindow>, kind: &'static str, name: Stri
     });
 }
 
-/// Uploads `bytes` and posts the link in the job's window.
+/// Waits for an upload slot, reads the file, uploads it and posts the link
+/// in the job's window. `cancel` is set when the session ends: the upload
+/// stops and no link is posted under the next session.
 async fn upload_and_post(
     job: UploadJob,
     mime: &'static str,
     category: UploadCategory,
+    file: UploadFile,
+    cancel: std::sync::Arc<CancelFlag>,
+) {
+    let work = async {
+        let Ok(slot) = UPLOAD_SLOTS.acquire().await else {
+            return;
+        };
+        let cap = file.cap;
+        // The file is read only now, so that waiting uploads hold a path
+        // and not the whole file. The slot goes into the blocking task: a
+        // cancelled upload cannot stop the read, so the slot stays taken
+        // until the read ends.
+        let read = tokio::task::spawn_blocking(move || {
+            let file = file;
+            (slot, std::fs::read(&file.path))
+        })
+        .await;
+        let (_slot, bytes) = match read {
+            Ok((_, Ok(bytes))) if cap.is_some_and(|cap| bytes.len() as u64 > cap) => {
+                set_attach_status(&job.ui, "attach-too-large", job.filename);
+                return;
+            }
+            Ok((slot, Ok(bytes))) => (slot, bytes),
+            Ok((_, Err(err))) => {
+                persistence::log_line(&format!("attachment read failed: {err}"));
+                set_attach_status(&job.ui, "attach-read-failed", job.filename);
+                return;
+            }
+            Err(err) => {
+                persistence::log_line(&format!("attachment read task failed: {err}"));
+                set_attach_status(&job.ui, "attach-read-failed", job.filename);
+                return;
+            }
+        };
+        send_upload(job, mime, category, bytes, &cancel).await;
+    };
+    if run_unless_cancelled(&cancel, work).await.is_none() {
+        persistence::log_line("attachment upload cancelled");
+    }
+}
+
+/// Uploads `bytes` and posts the link in the job's window.
+async fn send_upload(
+    job: UploadJob,
+    mime: &'static str,
+    category: UploadCategory,
     bytes: Vec<u8>,
+    cancel: &CancelFlag,
 ) {
     let UploadJob {
         client,
@@ -4492,6 +4665,9 @@ async fn upload_and_post(
                 }
                 AttachExpiry::Unknown => None,
             };
+            if cancel.is_cancelled() {
+                return;
+            }
             let request =
                 SendMessageRequest::plain(attachment_message(category, &uploaded.url, remaining));
             if let Err(err) = client
@@ -4541,12 +4717,14 @@ fn report_shrink_error(
 /// against the server's cap for videos (the original may be over it), then
 /// uploads the result. Nothing goes up unless the shrunk copy does: a failed
 /// or useless shrink is reported and the original is left alone. `cancel`
-/// is set when the session ends.
+/// is set when the session ends. `_queued` counts this video against
+/// `MAX_QUEUED_UPLOADS` until the task ends.
 async fn shrink_and_upload(
     job: UploadJob,
     path: std::path::PathBuf,
     video_cap: Option<u64>,
-    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancel: std::sync::Arc<CancelFlag>,
+    _queued: tokio::sync::SemaphorePermit<'static>,
 ) {
     let ui = job.ui.clone();
     let original_name = job.filename.clone();
@@ -4568,7 +4746,7 @@ async fn shrink_and_upload(
     let progress_name = original_name.clone();
     let task_cancel = cancel.clone();
     let shrunk = tokio::task::spawn_blocking(move || {
-        video_processing::shrink(&path, &task_cancel, &|percent| {
+        video_processing::shrink(&path, &task_cancel.flag, &|percent| {
             update_shrink_notice(
                 &progress_ui,
                 &progress_notice,
@@ -4595,7 +4773,7 @@ async fn shrink_and_upload(
             return;
         }
     };
-    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+    if cancel.is_cancelled() {
         report_shrink_error(&ui, &shrink_notice, &original_name, &ShrinkError::Cancelled);
         return;
     }
@@ -4604,28 +4782,22 @@ async fn shrink_and_upload(
         report_shrink_error(&ui, &shrink_notice, &original_name, &error);
         return;
     }
-    let bytes = match std::fs::read(&video.path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            persistence::log_line(&format!("shrunk video read failed: {err}"));
-            finish_shrink_notice(
-                &ui,
-                &shrink_notice,
-                Some(("attach-read-failed", original_name.clone())),
-            );
-            return;
-        }
-    };
     let (filename, mime) = (video.filename.clone(), video.mime);
-    // The temporary folder goes now: the bytes are in memory.
-    drop(video);
     finish_shrink_notice(&ui, &shrink_notice, None);
     let job = UploadJob {
         filename,
         shrink_notice: None,
         ..job
     };
-    upload_and_post(job, mime, UploadCategory::Video, bytes).await;
+    // The cap was checked above. The shrunk file is read when the upload gets
+    // a slot, and the temporary folder goes when `video` drops after that.
+    let file = UploadFile {
+        path: video.path.clone(),
+        cap: None,
+        _copy: None,
+    };
+    upload_and_post(job, mime, UploadCategory::Video, file, cancel).await;
+    drop(video);
 }
 
 /// What the server's `expires_at` says about a fresh upload.
