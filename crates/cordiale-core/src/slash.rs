@@ -143,6 +143,12 @@ pub fn is_channel(name: &str) -> bool {
     name.starts_with(['#', '&', '!', '+'])
 }
 
+/// Whether `name` is only a channel prefix with no channel name after it
+/// (`#`, `&`, `!` or `+`). The server rejects such a target.
+pub fn is_prefix_only_channel(name: &str) -> bool {
+    is_channel(name) && name.chars().count() == 1
+}
+
 /// Whether `target` looks like a channel addressed at one or more membership
 /// levels, using the usual IRC PREFIX symbols until the network snapshot is
 /// available. The UI worker re-checks the target against the network's actual
@@ -209,13 +215,15 @@ fn words(args: &str) -> Vec<String> {
 fn join_channels(list: &str) -> Option<String> {
     let mut channels = list.split(',');
     let head = channels.next().filter(|head| !head.is_empty())?;
-    let mut joined = if is_channel(head) {
+    let mut joined = if is_prefix_only_channel(head) {
+        return None;
+    } else if is_channel(head) {
         head.to_string()
     } else {
         format!("#{head}")
     };
     for channel in channels {
-        if !is_channel(channel) || channel.len() < 2 {
+        if !is_channel(channel) || is_prefix_only_channel(channel) {
             return None;
         }
         joined.push(',');
@@ -737,6 +745,24 @@ mod tests {
         }
         assert!(is_service_nick("ChanServ"));
         assert!(!is_service_nick("serv"));
+    }
+
+    #[test]
+    fn join_rejects_prefix_only_targets() {
+        for line in [
+            "/join #",
+            "/join &",
+            "/join !",
+            "/join +",
+            "/join #,#a",
+            "/join #a,#",
+            "/join #,",
+        ] {
+            assert!(matches!(parse(line), Some(Usage(_))), "{line}");
+        }
+        assert!(is_prefix_only_channel("#"));
+        assert!(!is_prefix_only_channel("#a"));
+        assert!(!is_prefix_only_channel("nick"));
     }
 
     #[test]

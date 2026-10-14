@@ -2841,6 +2841,87 @@ fn parse_joined_event_accepts_live_and_channel_snapshot_topics() {
 }
 
 #[test]
+fn prefix_only_channel_names_are_not_imported() {
+    for name in ["#", "&", "!", "+"] {
+        let pending = serde_json::json!({
+            "kind": "window_pending",
+            "network": "libera",
+            "channel": name,
+            "state": "pending"
+        });
+        assert_eq!(
+            parse_window_pending_event(&pending, "grappa:user:sythos", "sythos"),
+            None
+        );
+        let invited = serde_json::json!({
+            "kind": "window_invited",
+            "network": "libera",
+            "channel": name,
+            "state": "invited",
+            "inviter": "alice"
+        });
+        assert_eq!(
+            parse_window_invited_event(&invited, "grappa:user:sythos", "sythos"),
+            None
+        );
+    }
+
+    for name in ["#", "&", "!", "+"] {
+        let joined = serde_json::json!({
+            "kind": "joined",
+            "network": "libera",
+            "channel": name,
+            "state": "joined"
+        });
+        assert_eq!(
+            parse_joined_event(&joined, "grappa:user:sythos", "sythos"),
+            None
+        );
+        let failed = serde_json::json!({
+            "kind": "join_failed",
+            "network": "libera",
+            "channel": name,
+            "state": "failed",
+            "reason": null,
+            "numeric": null
+        });
+        assert_eq!(
+            parse_join_failed_event(&failed, "grappa:user:sythos", "sythos"),
+            None
+        );
+        let kicked = serde_json::json!({
+            "kind": "kicked",
+            "network": "libera",
+            "channel": name,
+            "state": "kicked",
+            "by": null,
+            "reason": null
+        });
+        assert_eq!(
+            parse_kicked_event(&kicked, "grappa:user:sythos", "sythos"),
+            None
+        );
+    }
+
+    let channels = HashMap::from([(
+        "libera".to_string(),
+        vec![
+            serde_json::json!({"name": "#", "joined": true}),
+            serde_json::json!({"name": "#rust", "joined": true}),
+        ],
+    )]);
+    assert_eq!(
+        channel_entries_from_channels(&channels),
+        vec![(
+            "libera".to_string(),
+            "#rust".to_string(),
+            "#rust".to_string()
+        )]
+    );
+    assert_eq!(joined_window_states_from_boot_channels(&channels).len(), 1);
+}
+
+#[test]
 fn parse_window_pending_accepts_only_live_user_topic_and_exact_fields() {
     let payload = serde_json::json!({
         "kind": "window_pending",
