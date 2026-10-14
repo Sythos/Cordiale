@@ -25,14 +25,18 @@ fn unique_token() -> String {
 }
 
 /// A folder builder with access limited to the current user on Unix.
+#[cfg(unix)]
 fn private_dir_builder() -> std::fs::DirBuilder {
+    use std::os::unix::fs::DirBuilderExt;
     let mut builder = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
+    builder.mode(0o700);
     builder
+}
+
+/// A folder builder; the Windows temporary folder is already per user.
+#[cfg(not(unix))]
+fn private_dir_builder() -> std::fs::DirBuilder {
+    std::fs::DirBuilder::new()
 }
 
 /// Creates a new folder in `parent` that did not exist before. The creation
