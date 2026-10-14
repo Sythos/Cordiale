@@ -1325,6 +1325,22 @@ export component AppWindow inherits Window {
     property <length> members-min-width: max(
         actions-probe.preferred-width + 16px,
         members-nick-probe.preferred-width + 40px);
+    // The chat column keeps at least this width; the side columns give way.
+    property <length> chat-min-width: 240px;
+    // Window width taken by the layout padding (2 x 16px), the four 8px
+    // gaps and the two 6px resize handles.
+    property <length> layout-fixed-width: 2 * 16px + 4 * 8px + 2 * 6px;
+    // The members column yields to the sidebar's minimum and the chat; the
+    // sidebar then yields to the members column and the chat. Neither
+    // depends on the other's drag state, so there is no binding loop.
+    property <length> members-max-width: max(
+        members-min-width,
+        min(320px, width - layout-fixed-width - sidebar-min-width - chat-min-width));
+    property <length> members-shown-width: max(members-min-width, min(members-width, members-max-width));
+    property <length> sidebar-max-width: max(
+        sidebar-min-width,
+        min(360px, width - layout-fixed-width - members-shown-width - chat-min-width));
+    property <length> sidebar-shown-width: max(sidebar-min-width, min(sidebar-width, sidebar-max-width));
 
     in-out property <string> theme: "light";
     // Color theme in use (Grappa's gallery or a built-in copy); false is
@@ -3001,7 +3017,7 @@ export component AppWindow inherits Window {
         spacing: 8px;
 
         VerticalBox {
-            width: max(sidebar-width, sidebar-min-width);
+            width: sidebar-shown-width;
             spacing: 8px;
 
             HorizontalLayout {
@@ -3299,7 +3315,7 @@ export component AppWindow inherits Window {
         ResizeHandle {
             target-width <=> sidebar-width;
             target-min-width: sidebar-min-width;
-            target-max-width: max(360px, sidebar-min-width);
+            target-max-width: sidebar-max-width;
         }
 
         // Channel directory of one network: takes the chat's place, the
@@ -4134,11 +4150,11 @@ export component AppWindow inherits Window {
             target-width <=> members-width;
             grows-left: true;
             target-min-width: members-min-width;
-            target-max-width: max(320px, members-min-width);
+            target-max-width: members-max-width;
         }
 
         VerticalBox {
-            width: max(members-width, members-min-width);
+            width: members-shown-width;
             spacing: 4px;
 
             if current-window-is-joined && !current-query : Text {
