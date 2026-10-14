@@ -593,16 +593,17 @@ impl RadioStream {
     /// Connects to `url`, asking for ICY titles. A playlist URL is
     /// followed to its first stream. The first request, every redirect and
     /// the playlist entry must not point at a loopback, private or
-    /// link-local address.
-    pub async fn open(url: &str) -> Result<Self, RadioError> {
-        let mut response = Self::get(url).await?;
+    /// link-local address. Only `allow_local_start` lets the first request
+    /// go local, for an upload on the user's own Grappa server.
+    pub async fn open(url: &str, allow_local_start: bool) -> Result<Self, RadioError> {
+        let mut response = Self::get(url, allow_local_start).await?;
         if is_playlist(url, response.headers().get(CONTENT_TYPE)) {
             let text = response.text().await?;
             let stream = playlist_urls(&text)
                 .into_iter()
                 .next()
                 .ok_or(RadioError::EmptyPlaylist)?;
-            response = Self::get(&stream).await?;
+            response = Self::get(&stream, false).await?;
         }
         let metaint = response
             .headers()
@@ -621,8 +622,8 @@ impl RadioStream {
         })
     }
 
-    async fn get(url: &str) -> Result<reqwest::Response, RadioError> {
-        let response = crate::media::get_public_stream(url)
+    async fn get(url: &str, allow_local_start: bool) -> Result<reqwest::Response, RadioError> {
+        let response = crate::media::get_public_stream(url, allow_local_start)
             .await
             .map_err(|err| match err {
                 crate::media::FetchError::Failed(reason) => RadioError::Refused(reason),

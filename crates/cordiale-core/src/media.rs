@@ -159,6 +159,20 @@ fn audio_hint(extension: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether `url` is an upload on the Grappa server at `server_base`.
+fn is_server_upload(url: &reqwest::Url, server_base: &str) -> bool {
+    let same_host = reqwest::Url::parse(server_base).is_ok_and(|base| {
+        base.host_str() == url.host_str()
+            && base.port_or_known_default() == url.port_or_known_default()
+    });
+    same_host && matches!(url.scheme(), "http" | "https") && url.path().starts_with("/uploads/")
+}
+
+/// Whether `href` is an upload on the Grappa server at `server_base`.
+pub fn is_upload_link(href: &str, server_base: &str) -> bool {
+    reqwest::Url::parse(href).is_ok_and(|url| is_server_upload(&url, server_base))
+}
+
 /// Where `href` opens, given the Grappa server's base URL: an upload on
 /// Grappa (`/uploads/<slug>.<ext>`) opens images and text in the viewer,
 /// an https image elsewhere opens in the viewer too, the rest in the
@@ -174,12 +188,7 @@ pub fn link_target(href: &str, server_base: &str) -> LinkTarget {
         .map(|(_, extension)| extension.to_ascii_lowercase())
         .unwrap_or_default();
     let image = IMAGE_EXTENSIONS.contains(&extension.as_str());
-    let same_host = reqwest::Url::parse(server_base).is_ok_and(|base| {
-        base.host_str() == url.host_str()
-            && base.port_or_known_default() == url.port_or_known_default()
-    });
-    if same_host && matches!(url.scheme(), "http" | "https") && url.path().starts_with("/uploads/")
-    {
+    if is_server_upload(&url, server_base) {
         if image {
             return LinkTarget::Image;
         }
@@ -447,11 +456,15 @@ async fn lookup(host: String, port: u16) -> std::io::Result<Vec<SocketAddr>> {
 /// Sends a GET to a public host for a radio stream and returns the response
 /// without reading the body. Every redirect passes the same checks as
 /// [`fetch_public`], and a loopback, private or link-local target is refused
-/// at the first request too, by address or by name. The caller checks the
-/// status and uses this again for each playlist entry. Only the time to the
-/// response headers is limited.
-pub async fn get_public_stream(href: &str) -> Result<reqwest::Response, FetchError> {
-    get_public_stream_with(href, false, lookup).await
+/// at the first request too, by address or by name, unless `allow_local_start`
+/// is set for a link on the Grappa server itself. A redirect from a public
+/// host never goes local. The caller checks the status and uses this again for
+/// each playlist entry. Only the time to the response headers is limited.
+pub async fn get_public_stream(
+    href: &str,
+    allow_local_start: bool,
+) -> Result<reqwest::Response, FetchError> {
+    get_public_stream_with(href, allow_local_start, lookup).await
 }
 
 async fn get_public_stream_with<R, F>(
@@ -1141,7 +1154,7 @@ mod tests {
             "http://169.254.169.254/latest",
             "http://[::1]/live",
         ] {
-            let result = get_public_stream(href).await;
+            let result = get_public_stream(href, false).await;
             assert!(
                 matches!(&result, Err(FetchError::Failed(reason)) if reason == "redirect to a local address refused"),
                 "{href}: {result:?}"
@@ -1168,9 +1181,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_uploads_on_the_server_are_upload_links() {
+        let base = "http://192.168.1.2:8080";
+        assert!(is_upload_link(
+            "http://192.168.1.2:8080/uploads/a.mp3",
+            base
+        ));
+        assert!(!is_upload_link("http://192.168.1.2:8080/live.mp3", base));
+        assert!(!is_upload_link("http://10.0.0.5:8080/uploads/a.mp3", base));
+        assert!(!is_upload_link("not a url", base));
+    }
+
     #[tokio::test]
     async fn streams_refuse_other_schemes() {
-        let result = get_public_stream("ftp://radio.example/live").await;
+        let result = get_public_stream("ftp://radio.example/live", false).await;
         assert!(matches!(result, Err(FetchError::Failed(_))), "{result:?}");
     }
 

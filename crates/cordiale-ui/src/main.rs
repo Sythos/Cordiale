@@ -1831,9 +1831,14 @@ async fn run_worker(
                             Ok(url) => {
                                 let href = url.to_string();
                                 match audio_link(&state, &href) {
-                                    Some(hint) => {
-                                        play_audio_link(&mut radio_state, &radio, &ui, &href, hint)
-                                    }
+                                    Some((hint, allow_local)) => play_audio_link(
+                                        &mut radio_state,
+                                        &radio,
+                                        &ui,
+                                        &href,
+                                        hint,
+                                        allow_local,
+                                    ),
                                     None => open_link(&state, &ui, href),
                                 }
                             }
@@ -5279,7 +5284,7 @@ fn tune_radio(
     };
     radio_state.stop();
     let generation = radio_state.generation;
-    radio.play(&station.url, station.hint, generation);
+    radio.play(&station.url, false, station.hint, generation);
     if let Some(source) = station.source {
         let tx = worker_self.clone();
         radio_state.poll = Some(tokio::spawn(async move {
@@ -5312,7 +5317,7 @@ fn tune_radio(
 }
 
 /// The decoder hint when a clicked link is audio the player takes.
-fn audio_link(state: &WorkerState, href: &str) -> Option<&'static str> {
+fn audio_link(state: &WorkerState, href: &str) -> Option<(&'static str, bool)> {
     let base = state
         .conn
         .client
@@ -5320,7 +5325,10 @@ fn audio_link(state: &WorkerState, href: &str) -> Option<&'static str> {
         .map(|client| client.base_url().to_string())
         .unwrap_or_default();
     match cordiale_core::media::link_target(href, &base) {
-        cordiale_core::media::LinkTarget::Audio(hint) => Some(hint),
+        // An upload on the user's own Grappa server may be on the local network.
+        cordiale_core::media::LinkTarget::Audio(hint) => {
+            Some((hint, cordiale_core::media::is_upload_link(href, &base)))
+        }
         _ => None,
     }
 }
@@ -5333,9 +5341,10 @@ fn play_audio_link(
     ui: &slint::Weak<AppWindow>,
     href: &str,
     hint: &'static str,
+    allow_local: bool,
 ) {
     radio_state.stop();
-    radio.play(href, hint, radio_state.generation);
+    radio.play(href, allow_local, hint, radio_state.generation);
     let title = href
         .rsplit('/')
         .next()
