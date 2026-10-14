@@ -405,6 +405,7 @@ fn is_local_v6(ip: Ipv6Addr) -> bool {
         || ip.is_multicast()
         || first & 0xfe00 == 0xfc00
         || first & 0xffc0 == 0xfe80
+        || first & 0xffc0 == 0xfec0
         || (first == 0x2001 && second == 0x0db8)
 }
 
@@ -938,6 +939,7 @@ mod tests {
             "https://192.0.0.8/y.png",
             "https://192.0.2.1/y.png",
             "https://[ff02::1]/y.png",
+            "https://[fec0::1]/y.png",
             "https://[2001:db8::1]/y.png",
         ] {
             assert_eq!(
