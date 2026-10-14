@@ -9658,3 +9658,54 @@ fn nick_change_rows_are_parsed_for_the_peer_link() {
         None
     );
 }
+
+fn upload_test_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("test runtime")
+}
+
+#[test]
+fn upload_work_that_ends_gives_its_output() {
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let output = upload_test_runtime().block_on(run_unless_cancelled(&cancel, async { 7 }));
+    assert_eq!(output, Some(7));
+}
+
+#[test]
+fn slow_upload_stops_when_the_flag_is_set() {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let setter = cancel.clone();
+    let output = upload_test_runtime().block_on(async {
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            setter.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        run_unless_cancelled(&cancel, std::future::pending::<()>()).await
+    });
+    assert_eq!(output, None);
+}
+
+#[test]
+fn upload_does_not_start_when_the_flag_is_already_set() {
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let output = upload_test_runtime().block_on(run_unless_cancelled(&cancel, async { 7 }));
+    assert_eq!(output, None);
+}
+
+#[test]
+fn slow_upload_leaves_the_runtime_free_for_other_work() {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let finished = upload_test_runtime().block_on(async {
+        let slow = tokio::spawn(async move {
+            run_unless_cancelled(&cancel, std::future::pending::<()>()).await
+        });
+        // Other work still runs while the upload is waiting.
+        tokio::task::yield_now().await;
+        let other = tokio::spawn(async { 1 }).await.expect("other task");
+        slow.abort();
+        other
+    });
+    assert_eq!(finished, 1);
+}

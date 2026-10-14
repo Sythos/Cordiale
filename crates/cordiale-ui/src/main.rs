@@ -4279,7 +4279,42 @@ async fn handle_attach_file(
         expire: options.expire,
         shrink_notice: None,
     };
-    upload_and_post(job, mime, category, bytes).await;
+    // A slow upload takes up to ten minutes: its own task keeps session
+    // frames and other commands moving meanwhile.
+    tokio::spawn(upload_and_post(
+        job,
+        mime,
+        category,
+        bytes,
+        state.conn.shrink_cancel.clone(),
+    ));
+}
+
+/// How many uploads may be on the wire at once. The others wait for a slot.
+const MAX_ACTIVE_UPLOADS: usize = 3;
+
+static UPLOAD_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_ACTIVE_UPLOADS);
+
+/// How often a running upload looks at its cancel flag.
+const UPLOAD_CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Runs `work` until it ends or `cancel` is set. Gives `None` when the flag
+/// stopped it: the work is dropped, and with it any request in flight.
+async fn run_unless_cancelled<F: std::future::Future>(
+    cancel: &std::sync::atomic::AtomicBool,
+    work: F,
+) -> Option<F::Output> {
+    let mut work = std::pin::pin!(work);
+    let mut poll = tokio::time::interval(UPLOAD_CANCEL_POLL);
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        tokio::select! {
+            output = &mut work => return Some(output),
+            _ = poll.tick() => {}
+        }
+    }
 }
 
 /// What the user chose for one upload, fixed when they confirm it (or when
@@ -4453,12 +4488,34 @@ fn set_attach_status(ui: &slint::Weak<AppWindow>, kind: &'static str, name: Stri
     });
 }
 
-/// Uploads `bytes` and posts the link in the job's window.
+/// Waits for an upload slot, then uploads `bytes` and posts the link in the
+/// job's window. `cancel` is set when the session ends: the upload stops and
+/// no link is posted under the next session.
 async fn upload_and_post(
     job: UploadJob,
     mime: &'static str,
     category: UploadCategory,
     bytes: Vec<u8>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let work = async {
+        let Ok(_slot) = UPLOAD_SLOTS.acquire().await else {
+            return;
+        };
+        send_upload(job, mime, category, bytes, &cancel).await;
+    };
+    if run_unless_cancelled(&cancel, work).await.is_none() {
+        persistence::log_line("attachment upload cancelled");
+    }
+}
+
+/// Uploads `bytes` and posts the link in the job's window.
+async fn send_upload(
+    job: UploadJob,
+    mime: &'static str,
+    category: UploadCategory,
+    bytes: Vec<u8>,
+    cancel: &std::sync::atomic::AtomicBool,
 ) {
     let UploadJob {
         client,
@@ -4485,6 +4542,9 @@ async fn upload_and_post(
                 }
                 AttachExpiry::Unknown => None,
             };
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
             let request =
                 SendMessageRequest::plain(attachment_message(category, &uploaded.url, remaining));
             if let Err(err) = client
@@ -4618,7 +4678,7 @@ async fn shrink_and_upload(
         shrink_notice: None,
         ..job
     };
-    upload_and_post(job, mime, UploadCategory::Video, bytes).await;
+    upload_and_post(job, mime, UploadCategory::Video, bytes, cancel).await;
 }
 
 /// What the server's `expires_at` says about a fresh upload.
