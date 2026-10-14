@@ -24,6 +24,17 @@ fn unique_token() -> String {
     format!("{:x}-{nanos:x}-{count:x}", std::process::id())
 }
 
+/// A folder builder with access limited to the current user on Unix.
+fn private_dir_builder() -> std::fs::DirBuilder {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+}
+
 /// Creates a new folder in `parent` that did not exist before. The creation
 /// fails when the name is taken, also when it is a symbolic link, so the
 /// caller owns the folder. Access is limited to the current user on Unix.
@@ -31,13 +42,7 @@ fn create_private_dir(parent: &Path) -> std::io::Result<PathBuf> {
     let mut last_error = None;
     for _ in 0..16 {
         let path = parent.join(format!("cordiale-{}", unique_token()));
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        match builder.create(&path) {
+        match private_dir_builder().create(&path) {
             Ok(()) => return Ok(path),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(err),
             Err(err) => return Err(err),
