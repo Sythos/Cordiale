@@ -5342,23 +5342,20 @@ fn load_whois_avatar(state: &WorkerState, ui: &slint::Weak<AppWindow>, avatar_ur
         let Some(extension) = avatar_extension(content_type.as_deref()) else {
             return;
         };
-        // One file per avatar URL: Slint caches images by path.
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            avatar_url.hash(&mut hasher);
-            hasher.finish()
-        };
-        let path = std::env::temp_dir().join(format!("cordiale-avatar-{key:x}.{extension}"));
-        if let Err(err) = std::fs::write(&path, bytes) {
-            persistence::log_line(&format!("whois avatar write failed: {err}"));
-            return;
-        }
+        let path =
+            match crate::temp_files::write_private("avatar", &format!(".{extension}"), &bytes) {
+                Ok(path) => path,
+                Err(err) => {
+                    persistence::log_line(&format!("whois avatar write failed: {err}"));
+                    return;
+                }
+            };
         let _ = ui.upgrade_in_event_loop(move |ui| {
             if let Ok(image) = slint::Image::load_from_path(&path) {
                 ui.set_reply_avatar(image);
                 ui.set_reply_avatar_visible(true);
             }
+            crate::temp_files::discard(&path);
         });
     });
 }
