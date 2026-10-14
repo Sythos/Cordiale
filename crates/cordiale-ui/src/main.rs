@@ -4246,23 +4246,11 @@ async fn handle_attach_file(
         ));
         return;
     }
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            persistence::log_line(&format!("attachment read failed: {err}"));
-            set_status("attach-read-failed", filename);
-            return;
-        }
-    };
-    let over_cap = state
+    let cap = state
         .prefs
         .upload_limits
         .as_ref()
-        .is_some_and(|limits| bytes.len() as u64 > upload_cap(limits, category));
-    if over_cap {
-        set_status("attach-too-large", filename);
-        return;
-    }
+        .map(|limits| upload_cap(limits, category));
     // No progress or success text: the outcome goes to the log, and a stale
     // status from an earlier attempt is cleared, raw message included.
     let _ = ui.upgrade_in_event_loop(|ui| {
@@ -4285,7 +4273,7 @@ async fn handle_attach_file(
         job,
         mime,
         category,
-        bytes,
+        UploadSource::File { path, cap },
         state.conn.shrink_cancel.clone(),
     ));
 }
@@ -4488,19 +4476,55 @@ fn set_attach_status(ui: &slint::Weak<AppWindow>, kind: &'static str, name: Stri
     });
 }
 
-/// Waits for an upload slot, then uploads `bytes` and posts the link in the
-/// job's window. `cancel` is set when the session ends: the upload stops and
-/// no link is posted under the next session.
+/// What an upload sends: bytes already in memory, or a file that is read
+/// when the upload gets its slot.
+enum UploadSource {
+    Bytes(Vec<u8>),
+    /// `cap` is the largest size the server accepts, when it is known.
+    File {
+        path: std::path::PathBuf,
+        cap: Option<u64>,
+    },
+}
+
+/// Waits for an upload slot, then uploads the source and posts the link in
+/// the job's window. `cancel` is set when the session ends: the upload stops
+/// and no link is posted under the next session.
 async fn upload_and_post(
     job: UploadJob,
     mime: &'static str,
     category: UploadCategory,
-    bytes: Vec<u8>,
+    source: UploadSource,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let work = async {
         let Ok(_slot) = UPLOAD_SLOTS.acquire().await else {
             return;
+        };
+        // The file is read only now, so that waiting uploads hold a path
+        // and not the whole file.
+        let bytes = match source {
+            UploadSource::Bytes(bytes) => bytes,
+            UploadSource::File { path, cap } => {
+                let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
+                match read {
+                    Ok(Ok(bytes)) if cap.is_some_and(|cap| bytes.len() as u64 > cap) => {
+                        set_attach_status(&job.ui, "attach-too-large", job.filename);
+                        return;
+                    }
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(err)) => {
+                        persistence::log_line(&format!("attachment read failed: {err}"));
+                        set_attach_status(&job.ui, "attach-read-failed", job.filename);
+                        return;
+                    }
+                    Err(err) => {
+                        persistence::log_line(&format!("attachment read task failed: {err}"));
+                        set_attach_status(&job.ui, "attach-read-failed", job.filename);
+                        return;
+                    }
+                }
+            }
         };
         send_upload(job, mime, category, bytes, &cancel).await;
     };
@@ -4657,28 +4681,21 @@ async fn shrink_and_upload(
         report_shrink_error(&ui, &shrink_notice, &original_name, &error);
         return;
     }
-    let bytes = match std::fs::read(&video.path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            persistence::log_line(&format!("shrunk video read failed: {err}"));
-            finish_shrink_notice(
-                &ui,
-                &shrink_notice,
-                Some(("attach-read-failed", original_name.clone())),
-            );
-            return;
-        }
-    };
     let (filename, mime) = (video.filename.clone(), video.mime);
-    // The temporary folder goes now: the bytes are in memory.
-    drop(video);
     finish_shrink_notice(&ui, &shrink_notice, None);
     let job = UploadJob {
         filename,
         shrink_notice: None,
         ..job
     };
-    upload_and_post(job, mime, UploadCategory::Video, bytes, cancel).await;
+    // The cap was checked above. The shrunk file is read when the upload gets
+    // a slot, and the temporary folder goes when `video` drops after that.
+    let source = UploadSource::File {
+        path: video.path.clone(),
+        cap: None,
+    };
+    upload_and_post(job, mime, UploadCategory::Video, source, cancel).await;
+    drop(video);
 }
 
 /// What the server's `expires_at` says about a fresh upload.
