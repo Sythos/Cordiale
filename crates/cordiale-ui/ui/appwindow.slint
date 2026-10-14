@@ -2365,6 +2365,8 @@ export component AppWindow inherits Window {
             return @tr("The server refused that command ({}).", status-command-hint);
         } else if status-kind == "alias-too-deep" {
             return @tr("That alias expands into too many others: {}", status-command-hint);
+        } else if status-kind == "alias-no-target" {
+            return @tr("The alias {} needs a channel or a private conversation. Open one and try again.", status-command-hint);
         } else if status-kind == "kickban-mask-failed" {
             return @tr("Couldn't build a ban mask for {}, so nobody was banned or kicked; /whois them first or change the default ban type.", status-command-hint);
         } else if status-kind == "command-topic" {

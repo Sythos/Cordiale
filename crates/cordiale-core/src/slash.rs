@@ -556,15 +556,33 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
 /// refused, as in Cicchetto.
 pub const MAX_ALIAS_DEPTH: usize = 5;
 
+/// Aliases every account has; an alias of the same name set by the user wins.
+pub const BUILTIN_ALIASES: &[(&str, &str)] = &[("onotice", "notice @$C $*")];
+
+/// Why [`expand_aliases`] refused a line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasError {
+    /// The alias chain runs deeper than [`MAX_ALIAS_DEPTH`]; holds the chain.
+    TooDeep(String),
+    /// An alias uses `$C` in a window that has no target; holds the alias.
+    NoTarget(String),
+}
+
 /// Expands the user's aliases (`name -> expansion`, names without the
 /// slash) at the head of a slash command, the way Cicchetto does before
 /// dispatching: `$1`..`$9` take one argument (missing ones are empty), `$N-`
 /// the Nth argument and the rest joined by single spaces, `$*` the raw
-/// argument text, and an expansion without placeholders gets the arguments
-/// appended. `/alias` and `/unalias` are never expanded. The short forms
+/// argument text, and an expansion without argument placeholders gets the
+/// arguments appended. `$C` is the `target` of the window where the line was
+/// typed (channel or query peer) and is replaced anywhere, at every step of
+/// the chain. `/alias` and `/unalias` are never expanded. The short forms
 /// `/w` and `/n` become `/whois` and `/names`. Returns the line to parse, or
-/// the alias chain when it runs deeper than [`MAX_ALIAS_DEPTH`].
-pub fn expand_aliases(input: &str, aliases: &HashMap<String, String>) -> Result<String, String> {
+/// the reason it was refused.
+pub fn expand_aliases(
+    input: &str,
+    aliases: &HashMap<String, String>,
+    target: Option<&str>,
+) -> Result<String, AliasError> {
     let line = input.trim();
     let Some(stripped) = line.strip_prefix('/') else {
         return Ok(input.to_string());
@@ -581,17 +599,26 @@ pub fn expand_aliases(input: &str, aliases: &HashMap<String, String>) -> Result<
         if lower == "alias" || lower == "unalias" {
             break;
         }
-        let Some(template) = aliases.iter().find_map(|(name, expansion)| {
-            name.trim_start_matches('/')
-                .eq_ignore_ascii_case(&lower)
-                .then_some(expansion)
-        }) else {
+        let Some(template) = aliases
+            .iter()
+            .find_map(|(name, expansion)| {
+                name.trim_start_matches('/')
+                    .eq_ignore_ascii_case(&lower)
+                    .then_some(expansion.as_str())
+            })
+            .or_else(|| {
+                BUILTIN_ALIASES
+                    .iter()
+                    .find_map(|(name, expansion)| (*name == lower).then_some(*expansion))
+            })
+        else {
             break;
         };
         if depth >= MAX_ALIAS_DEPTH {
-            return Err(chain.join(" → "));
+            return Err(AliasError::TooDeep(chain.join(" → ")));
         }
-        let expanded = substitute_alias(template.trim_start_matches('/'), &rest);
+        let expanded = substitute_alias(template.trim_start_matches('/'), &rest, target)
+            .ok_or_else(|| AliasError::NoTarget(lower.clone()))?;
         let (next_verb, next_rest) = split_word(expanded.trim());
         verb = next_verb.to_string();
         rest = next_rest.to_string();
@@ -614,8 +641,9 @@ pub fn expand_aliases(input: &str, aliases: &HashMap<String, String>) -> Result<
     })
 }
 
-/// Fills an alias template from the arguments typed after it.
-fn substitute_alias(template: &str, rest: &str) -> String {
+/// Fills an alias template from the arguments typed after it and the window
+/// `target`. Returns `None` when the template uses `$C` without a target.
+fn substitute_alias(template: &str, rest: &str, target: Option<&str>) -> Option<String> {
     let args: Vec<&str> = rest.split_whitespace().collect();
     let bytes = template.as_bytes();
     let mut out = String::new();
@@ -643,6 +671,11 @@ fn substitute_alias(template: &str, rest: &str) -> String {
                     substituted = true;
                     continue;
                 }
+                Some(b'C') => {
+                    out.push_str(target?);
+                    index += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -650,13 +683,11 @@ fn substitute_alias(template: &str, rest: &str) -> String {
         out.push(character);
         index += character.len_utf8();
     }
-    if substituted {
+    Some(if substituted || rest.is_empty() {
         out
-    } else if rest.is_empty() {
-        template.to_string()
     } else {
-        format!("{template} {rest}")
-    }
+        format!("{out} {rest}")
+    })
 }
 
 #[cfg(test)]
@@ -965,7 +996,7 @@ mod tests {
         .into_iter()
         .map(|(name, expansion)| (name.to_string(), expansion.to_string()))
         .collect();
-        let expand = |line: &str| expand_aliases(line, &aliases);
+        let expand = |line: &str| expand_aliases(line, &aliases, None);
         assert_eq!(expand("hello"), Ok("hello".to_string()));
         assert_eq!(expand("//k x"), Ok("//k x".to_string()));
         assert_eq!(expand("/me waves"), Ok("/me waves".to_string()));
@@ -980,7 +1011,76 @@ mod tests {
         assert_eq!(expand("/w alice"), Ok("/whois alice".to_string()));
         assert_eq!(expand("/n"), Ok("/names".to_string()));
         assert_eq!(expand("/alias k whois"), Ok("/alias k whois".to_string()));
-        assert!(expand("/loop").is_err());
+        assert!(matches!(expand("/loop"), Err(AliasError::TooDeep(_))));
+    }
+
+    #[test]
+    fn current_target_placeholder() {
+        let aliases: HashMap<String, String> = [
+            ("here", "topic $C"),
+            ("tell", "msg $C $*"),
+            ("at", "notice @$C"),
+            ("word", "say x$Cy"),
+            ("outer", "tell $1-"),
+            ("deep", "here"),
+        ]
+        .into_iter()
+        .map(|(name, expansion)| (name.to_string(), expansion.to_string()))
+        .collect();
+        let expand = |line: &str, target| expand_aliases(line, &aliases, target);
+        assert_eq!(
+            expand("/here", Some("#rust")),
+            Ok("/topic #rust".to_string())
+        );
+        assert_eq!(expand("/here", Some("bob")), Ok("/topic bob".to_string()));
+        assert_eq!(
+            expand("/at hi", Some("#rust")),
+            Ok("/notice @#rust hi".to_string())
+        );
+        assert_eq!(
+            expand("/word", Some("#rust")),
+            Ok("/say x#rusty".to_string())
+        );
+        assert_eq!(
+            expand("/outer a b", Some("bob")),
+            Ok("/msg bob a b".to_string())
+        );
+        assert_eq!(
+            expand("/deep", Some("#rust")),
+            Ok("/topic #rust".to_string())
+        );
+        assert_eq!(
+            expand("/deep", None),
+            Err(AliasError::NoTarget("here".to_string()))
+        );
+        assert_eq!(
+            expand("/outer a", None),
+            Err(AliasError::NoTarget("tell".to_string()))
+        );
+        // Aliases without `$C` still work in a window with no target.
+        assert_eq!(expand("/w bob", None), Ok("/whois bob".to_string()));
+    }
+
+    #[test]
+    fn builtin_onotice_alias() {
+        let none = HashMap::new();
+        assert_eq!(
+            expand_aliases("/onotice hello all", &none, Some("#rust")),
+            Ok("/notice @#rust hello all".to_string())
+        );
+        assert_eq!(
+            expand_aliases("/ONOTICE", &none, Some("#rust")),
+            Ok("/notice @#rust".to_string())
+        );
+        assert_eq!(
+            expand_aliases("/onotice hi", &none, None),
+            Err(AliasError::NoTarget("onotice".to_string()))
+        );
+        let own: HashMap<String, String> = [("onotice".to_string(), "me $*".to_string())].into();
+        assert_eq!(
+            expand_aliases("/onotice hi", &own, Some("#rust")),
+            Ok("/me hi".to_string())
+        );
     }
 
     #[test]

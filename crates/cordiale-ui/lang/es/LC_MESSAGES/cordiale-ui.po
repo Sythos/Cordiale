@@ -1197,6 +1197,10 @@ msgid "That alias expands into too many others: {}"
 msgstr "Este alias se expande en demasiados otros: {}"
 
 msgctxt "AppWindow"
+msgid "The alias {} needs a channel or a private conversation. Open one and try again."
+msgstr "El alias {} necesita un canal o una conversación privada. Abre uno e inténtalo de nuevo."
+
+msgctxt "AppWindow"
 msgid "The server refused that command ({})."
 msgstr "El servidor rechazó ese comando ({})."
 
