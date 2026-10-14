@@ -92,25 +92,15 @@ pub fn mime_for_filename(filename: &str) -> Option<(&'static str, UploadCategory
 /// Shortest remaining lifetime worth announcing, in seconds (0,01 h).
 const MIN_ANNOUNCED_SECS: i64 = 36;
 
-/// The remaining lifetime of an upload as hours with a decimal comma and no
-/// trailing zeros (`24h`, `1,5h`). It is rounded down, to a tenth of an hour
-/// (hundredths below that), so the text never promises more than the server
-/// keeps. `None` when under 0,01 h is left or the time has passed: such an
-/// upload isn't announced as live.
+/// The remaining lifetime of an upload as whole hours (`24h`). It is rounded
+/// up to the next whole hour; exact hours stay unchanged. `None` when under
+/// 0,01 h is left or the time has passed: such an upload isn't announced as
+/// live.
 pub fn remaining_lifetime_label(remaining_secs: i64) -> Option<String> {
     if remaining_secs < MIN_ANNOUNCED_SECS {
         return None;
     }
-    let tenths = remaining_secs / 360;
-    if tenths == 0 {
-        return Some(format!("0,{:02}h", remaining_secs / 36));
-    }
-    let (hours, tenth) = (tenths / 10, tenths % 10);
-    Some(if tenth == 0 {
-        format!("{hours}h")
-    } else {
-        format!("{hours},{tenth}h")
-    })
+    Some(format!("{}h", remaining_secs.div_ceil(3_600)))
 }
 
 /// The chat message announcing an uploaded file, as Cicchetto posts it, with
@@ -175,20 +165,23 @@ mod tests {
     }
 
     #[test]
-    fn formats_whole_and_fractional_hours() {
+    fn keeps_exact_whole_hours() {
         assert_eq!(remaining_lifetime_label(86_400).as_deref(), Some("24h"));
-        assert_eq!(remaining_lifetime_label(5_400).as_deref(), Some("1,5h"));
         assert_eq!(remaining_lifetime_label(3_600).as_deref(), Some("1h"));
         assert_eq!(remaining_lifetime_label(259_200).as_deref(), Some("72h"));
-        assert_eq!(remaining_lifetime_label(360).as_deref(), Some("0,1h"));
     }
 
     #[test]
-    fn rounds_the_lifetime_down() {
-        assert_eq!(remaining_lifetime_label(86_399).as_deref(), Some("23,9h"));
-        assert_eq!(remaining_lifetime_label(5_759).as_deref(), Some("1,5h"));
-        assert_eq!(remaining_lifetime_label(359).as_deref(), Some("0,09h"));
-        assert_eq!(remaining_lifetime_label(36).as_deref(), Some("0,01h"));
+    fn rounds_the_lifetime_up() {
+        assert_eq!(remaining_lifetime_label(86_399).as_deref(), Some("24h"));
+        assert_eq!(remaining_lifetime_label(5_400).as_deref(), Some("2h"));
+        assert_eq!(remaining_lifetime_label(3_601).as_deref(), Some("2h"));
+    }
+
+    #[test]
+    fn small_positive_lifetimes_show_one_hour() {
+        assert_eq!(remaining_lifetime_label(360).as_deref(), Some("1h"));
+        assert_eq!(remaining_lifetime_label(36).as_deref(), Some("1h"));
     }
 
     #[test]
