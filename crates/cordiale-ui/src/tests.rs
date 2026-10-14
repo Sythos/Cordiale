@@ -7089,7 +7089,7 @@ fn expiry_at(text: &str) -> chrono::DateTime<chrono::Utc> {
 fn attach_expiry_counts_from_the_returned_expiry() {
     let now = expiry_at("2026-10-07T10:00:00Z");
     let live = |text: &str| AttachExpiry::Live(text.to_string());
-    assert_eq!(attach_expiry("2026-10-07T11:30:00Z", now), live("1,5h"));
+    assert_eq!(attach_expiry("2026-10-07T11:30:00Z", now), live("2h"));
     // Offsets are honoured, not read as UTC.
     assert_eq!(attach_expiry("2026-10-07T13:00:00+02:00", now), live("1h"));
 }
@@ -7100,9 +7100,11 @@ fn attach_expiry_shrinks_with_the_time_spent_before_posting() {
     let live = |text: &str| AttachExpiry::Live(text.to_string());
     let at_start = expiry_at("2026-10-07T10:00:00Z");
     assert_eq!(attach_expiry(expires, at_start), live("24h"));
-    // A minute lost to processing is shown, and rounded down.
+    // A minute lost to processing is rounded up to the next whole hour.
     let later = expiry_at("2026-10-07T10:01:00Z");
-    assert_eq!(attach_expiry(expires, later), live("23,9h"));
+    assert_eq!(attach_expiry(expires, later), live("24h"));
+    let one_hour_later = expiry_at("2026-10-07T11:00:00Z");
+    assert_eq!(attach_expiry(expires, one_hour_later), live("23h"));
 }
 
 #[test]
