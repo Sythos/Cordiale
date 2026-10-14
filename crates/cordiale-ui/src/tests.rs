@@ -9704,19 +9704,19 @@ fn upload_test_runtime() -> tokio::runtime::Runtime {
 
 #[test]
 fn upload_work_that_ends_gives_its_output() {
-    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let cancel = CancelFlag::default();
     let output = upload_test_runtime().block_on(run_unless_cancelled(&cancel, async { 7 }));
     assert_eq!(output, Some(7));
 }
 
 #[test]
 fn slow_upload_stops_when_the_flag_is_set() {
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel = std::sync::Arc::new(CancelFlag::default());
     let setter = cancel.clone();
     let output = upload_test_runtime().block_on(async {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            setter.store(true, std::sync::atomic::Ordering::Relaxed);
+            setter.cancel();
         });
         run_unless_cancelled(&cancel, std::future::pending::<()>()).await
     });
@@ -9725,14 +9725,37 @@ fn slow_upload_stops_when_the_flag_is_set() {
 
 #[test]
 fn upload_does_not_start_when_the_flag_is_already_set() {
-    let cancel = std::sync::atomic::AtomicBool::new(true);
+    let cancel = CancelFlag::default();
+    cancel.cancel();
     let output = upload_test_runtime().block_on(run_unless_cancelled(&cancel, async { 7 }));
     assert_eq!(output, None);
 }
 
 #[test]
+fn staged_upload_keeps_the_content_the_user_confirmed() {
+    let dir = std::env::temp_dir().join(format!("cordiale-stage-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("test folder");
+    let original = dir.join("picture.png");
+    std::fs::write(&original, b"confirmed").expect("write original");
+    let staged = stage_upload_file(&original, None).expect("staged copy");
+    std::fs::write(&original, b"replaced").expect("replace original");
+    assert_eq!(
+        std::fs::read(&staged.path).expect("read copy"),
+        b"confirmed"
+    );
+    let copy = staged.path.clone();
+    drop(staged);
+    assert!(!copy.exists());
+    assert_eq!(
+        stage_upload_file(&original, Some(3)).err(),
+        Some("attach-too-large")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn slow_upload_leaves_the_runtime_free_for_other_work() {
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel = std::sync::Arc::new(CancelFlag::default());
     let finished = upload_test_runtime().block_on(async {
         let slow = tokio::spawn(async move {
             run_unless_cancelled(&cancel, std::future::pending::<()>()).await
