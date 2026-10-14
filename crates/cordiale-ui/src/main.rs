@@ -4273,7 +4273,7 @@ async fn handle_attach_file(
         job,
         mime,
         category,
-        UploadSource::File { path, cap },
+        (path, cap),
         state.conn.shrink_cancel.clone(),
     ));
 }
@@ -4476,25 +4476,15 @@ fn set_attach_status(ui: &slint::Weak<AppWindow>, kind: &'static str, name: Stri
     });
 }
 
-/// What an upload sends: bytes already in memory, or a file that is read
-/// when the upload gets its slot.
-enum UploadSource {
-    Bytes(Vec<u8>),
-    /// `cap` is the largest size the server accepts, when it is known.
-    File {
-        path: std::path::PathBuf,
-        cap: Option<u64>,
-    },
-}
-
-/// Waits for an upload slot, then uploads the source and posts the link in
-/// the job's window. `cancel` is set when the session ends: the upload stops
-/// and no link is posted under the next session.
+/// Waits for an upload slot, reads the file, uploads it and posts the link
+/// in the job's window. `cap` is the largest size the server accepts, when
+/// it is known. `cancel` is set when the session ends: the upload stops and
+/// no link is posted under the next session.
 async fn upload_and_post(
     job: UploadJob,
     mime: &'static str,
     category: UploadCategory,
-    source: UploadSource,
+    (path, cap): (std::path::PathBuf, Option<u64>),
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let work = async {
@@ -4503,27 +4493,22 @@ async fn upload_and_post(
         };
         // The file is read only now, so that waiting uploads hold a path
         // and not the whole file.
-        let bytes = match source {
-            UploadSource::Bytes(bytes) => bytes,
-            UploadSource::File { path, cap } => {
-                let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
-                match read {
-                    Ok(Ok(bytes)) if cap.is_some_and(|cap| bytes.len() as u64 > cap) => {
-                        set_attach_status(&job.ui, "attach-too-large", job.filename);
-                        return;
-                    }
-                    Ok(Ok(bytes)) => bytes,
-                    Ok(Err(err)) => {
-                        persistence::log_line(&format!("attachment read failed: {err}"));
-                        set_attach_status(&job.ui, "attach-read-failed", job.filename);
-                        return;
-                    }
-                    Err(err) => {
-                        persistence::log_line(&format!("attachment read task failed: {err}"));
-                        set_attach_status(&job.ui, "attach-read-failed", job.filename);
-                        return;
-                    }
-                }
+        let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
+        let bytes = match read {
+            Ok(Ok(bytes)) if cap.is_some_and(|cap| bytes.len() as u64 > cap) => {
+                set_attach_status(&job.ui, "attach-too-large", job.filename);
+                return;
+            }
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(err)) => {
+                persistence::log_line(&format!("attachment read failed: {err}"));
+                set_attach_status(&job.ui, "attach-read-failed", job.filename);
+                return;
+            }
+            Err(err) => {
+                persistence::log_line(&format!("attachment read task failed: {err}"));
+                set_attach_status(&job.ui, "attach-read-failed", job.filename);
+                return;
             }
         };
         send_upload(job, mime, category, bytes, &cancel).await;
@@ -4690,10 +4675,7 @@ async fn shrink_and_upload(
     };
     // The cap was checked above. The shrunk file is read when the upload gets
     // a slot, and the temporary folder goes when `video` drops after that.
-    let source = UploadSource::File {
-        path: video.path.clone(),
-        cap: None,
-    };
+    let source = (video.path.clone(), None);
     upload_and_post(job, mime, UploadCategory::Video, source, cancel).await;
     drop(video);
 }
