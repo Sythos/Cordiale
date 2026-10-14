@@ -56,6 +56,17 @@ use crate::rest::{
     UploadResponse,
 };
 
+/// Refuses a history target that is only a channel prefix: the server
+/// answers such a request with HTTP 400, so no request is sent.
+fn ensure_history_target(channel_name: &str) -> Result<(), GrappaClientError> {
+    if crate::slash::is_prefix_only_channel(channel_name) {
+        return Err(GrappaClientError::InvalidUrl(
+            "channel name has no name after its prefix".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// A Grappa server reached over REST, identified by its base URL.
 #[derive(Clone)]
 pub struct GrappaClient {
@@ -786,6 +797,7 @@ impl GrappaClient {
         after_id: Option<i64>,
         limit: Option<usize>,
     ) -> Result<Vec<Value>, GrappaClientError> {
+        ensure_history_target(channel_name)?;
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
@@ -830,6 +842,7 @@ impl GrappaClient {
         before_id: i64,
         limit: usize,
     ) -> Result<Vec<Value>, GrappaClientError> {
+        ensure_history_target(channel_name)?;
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
@@ -866,6 +879,7 @@ impl GrappaClient {
         around_id: i64,
         limit: usize,
     ) -> Result<Vec<Value>, GrappaClientError> {
+        ensure_history_target(channel_name)?;
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
@@ -904,6 +918,7 @@ impl GrappaClient {
         after_id: i64,
         cap: Option<u64>,
     ) -> Result<u64, GrappaClientError> {
+        ensure_history_target(channel_name)?;
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
@@ -4578,6 +4593,53 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["id"], 812);
+    }
+
+    #[tokio::test]
+    async fn history_fetches_for_a_prefix_only_channel_send_no_request() {
+        let mock_server = MockServer::start().await;
+        let client = GrappaClient::new(mock_server.uri());
+
+        assert!(client
+            .fetch_messages("abc123", "libera", "#", None, None)
+            .await
+            .is_err());
+        assert!(client
+            .fetch_messages_before("abc123", "libera", "&", 5, 50)
+            .await
+            .is_err());
+        assert!(client
+            .fetch_messages_around("abc123", "libera", "!", 5, 50)
+            .await
+            .is_err());
+        assert!(client
+            .fetch_messages_count("abc123", "libera", "+", 5, None)
+            .await
+            .is_err());
+        assert!(mock_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn history_http_400_is_one_final_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/channels/%23rust/messages"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let error = client
+            .fetch_messages("abc123", "libera", "#rust", None, None)
+            .await
+            .expect_err("HTTP 400 is an error");
+
+        assert_eq!(error.status(), Some(StatusCode::BAD_REQUEST));
     }
 
     #[tokio::test]

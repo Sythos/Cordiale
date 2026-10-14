@@ -409,6 +409,9 @@ pub(crate) fn channel_entries_from_channels(
                 .and_then(|field| field.as_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("channel #{}", index + 1));
+            if cordiale_core::slash::is_prefix_only_channel(&channel) {
+                continue;
+            }
             let label = channel.clone();
             entries.push((network.clone(), channel, label));
         }
@@ -548,7 +551,9 @@ pub(crate) fn joined_window_states_from_boot_channels(
                 .get("name")
                 .or_else(|| entry.get("channel"))
                 .and_then(Value::as_str)
-                .filter(|channel| !channel.is_empty())
+                .filter(|channel| {
+                    !channel.is_empty() && !cordiale_core::slash::is_prefix_only_channel(channel)
+                })
             else {
                 continue;
             };

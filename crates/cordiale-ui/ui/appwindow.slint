@@ -3189,6 +3189,9 @@ export component AppWindow inherits Window {
                     alignment: start;
                     spacing: 0px;
                     padding-top: group.separator-before ? 8px : 0px;
+                    // Gutter for the overlay scrollbar, so it never covers
+                    // the row buttons and the unread counts.
+                    padding-right: 14px;
 
                     if group.separator-before : Rectangle {
                         height: 1px;

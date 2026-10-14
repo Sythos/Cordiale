@@ -53,6 +53,7 @@ pub enum PlayerEvent {
 enum Command {
     Play {
         url: String,
+        allow_local: bool,
         hint: &'static str,
         generation: u64,
     },
@@ -75,9 +76,12 @@ impl RadioPlayer {
     }
 
     /// Tunes `url`; `hint` is the decoder's format hint (`mp3` or `ogg`).
-    pub fn play(&self, url: &str, hint: &'static str, generation: u64) {
+    /// `allow_local` lets the first request go to a local address; only an
+    /// upload on the user's own Grappa server sets it.
+    pub fn play(&self, url: &str, allow_local: bool, hint: &'static str, generation: u64) {
         let _ = self.commands.send(Command::Play {
             url: url.to_string(),
+            allow_local,
             hint,
             generation,
         });
@@ -103,6 +107,7 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
         match command {
             Command::Play {
                 url,
+                allow_local,
                 hint,
                 generation,
             } => {
@@ -127,6 +132,7 @@ fn audio_thread(commands: Receiver<Command>, on_event: EventSink) {
                 let cancelled = Arc::new(AtomicBool::new(false));
                 start_stream(
                     url,
+                    allow_local,
                     hint,
                     generation,
                     Arc::clone(&player),
@@ -164,6 +170,7 @@ const BLOCK_FRAMES: usize = 1024;
 
 fn start_stream(
     url: String,
+    allow_local: bool,
     hint: &'static str,
     generation: u64,
     player: Arc<rodio::Player>,
@@ -174,7 +181,14 @@ fn start_stream(
     let network_cancelled = Arc::clone(&cancelled);
     let network_events = Arc::clone(&on_event);
     thread::spawn(move || {
-        network_thread(url, generation, bytes_tx, network_cancelled, network_events)
+        network_thread(
+            url,
+            allow_local,
+            generation,
+            bytes_tx,
+            network_cancelled,
+            network_events,
+        )
     });
     thread::spawn(move || {
         decoder_thread(hint, generation, bytes_rx, player, cancelled, on_event);
@@ -183,6 +197,7 @@ fn start_stream(
 
 fn network_thread(
     url: String,
+    allow_local: bool,
     generation: u64,
     bytes: SyncSender<Vec<u8>>,
     cancelled: Arc<AtomicBool>,
@@ -199,7 +214,7 @@ fn network_thread(
         }
     };
     runtime.block_on(async {
-        let mut stream = match RadioStream::open(&url).await {
+        let mut stream = match RadioStream::open(&url, allow_local).await {
             Ok(stream) => stream,
             Err(err) => {
                 on_event(generation, PlayerEvent::Failed(err.to_string()));

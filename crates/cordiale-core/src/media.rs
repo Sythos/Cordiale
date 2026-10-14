@@ -159,6 +159,20 @@ fn audio_hint(extension: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether `url` is an upload on the Grappa server at `server_base`.
+fn is_server_upload(url: &reqwest::Url, server_base: &str) -> bool {
+    let same_host = reqwest::Url::parse(server_base).is_ok_and(|base| {
+        base.host_str() == url.host_str()
+            && base.port_or_known_default() == url.port_or_known_default()
+    });
+    same_host && matches!(url.scheme(), "http" | "https") && url.path().starts_with("/uploads/")
+}
+
+/// Whether `href` is an upload on the Grappa server at `server_base`.
+pub fn is_upload_link(href: &str, server_base: &str) -> bool {
+    reqwest::Url::parse(href).is_ok_and(|url| is_server_upload(&url, server_base))
+}
+
 /// Where `href` opens, given the Grappa server's base URL: an upload on
 /// Grappa (`/uploads/<slug>.<ext>`) opens images and text in the viewer,
 /// an https image elsewhere opens in the viewer too, the rest in the
@@ -174,12 +188,7 @@ pub fn link_target(href: &str, server_base: &str) -> LinkTarget {
         .map(|(_, extension)| extension.to_ascii_lowercase())
         .unwrap_or_default();
     let image = IMAGE_EXTENSIONS.contains(&extension.as_str());
-    let same_host = reqwest::Url::parse(server_base).is_ok_and(|base| {
-        base.host_str() == url.host_str()
-            && base.port_or_known_default() == url.port_or_known_default()
-    });
-    if same_host && matches!(url.scheme(), "http" | "https") && url.path().starts_with("/uploads/")
-    {
+    if is_server_upload(&url, server_base) {
         if image {
             return LinkTarget::Image;
         }
@@ -380,19 +389,30 @@ fn is_local_v4(ip: Ipv4Addr) -> bool {
         || ip.is_link_local()
         || ip.is_unspecified()
         || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
         || first == 0
+        || first >= 240
         || (first == 100 && second & 0xc0 == 64)
+        || (first == 198 && second & 0xfe == 18)
+        || ip.octets()[..3] == [192, 0, 0]
 }
 
 fn is_local_v6(ip: Ipv6Addr) -> bool {
-    let [first, second, ..] = ip.segments();
+    let [first, second, third, ..] = ip.segments();
     ip.is_loopback()
         || ip.is_unspecified()
+        || ip.is_multicast()
         || first & 0xfe00 == 0xfc00
         || first & 0xffc0 == 0xfe80
+        || first & 0xffc0 == 0xfec0
         // Documentation prefixes: 2001:db8::/32 and 3fff::/20 (RFC 9637).
         || (first == 0x2001 && second == 0x0db8)
         || (first == 0x3fff && second & 0xf000 == 0)
+        // Benchmarking prefix (RFC 5180).
+        || (first == 0x2001 && second == 0x0002 && third == 0)
+        // Local-use NAT64 prefix (RFC 8215): it translates to IPv4 hosts.
+        || (first == 0x0064 && second == 0xff9b && third == 0x0001)
 }
 
 /// Largest image, text, avatar and wallpaper the client downloads.
@@ -452,28 +472,65 @@ async fn lookup(host: String, port: u16) -> std::io::Result<Vec<SocketAddr>> {
     Ok(tokio::net::lookup_host((host, port)).await?.collect())
 }
 
-async fn fetch_public_with<R, F>(
+/// Sends a GET to a public host for a radio stream and returns the response
+/// without reading the body. Every redirect passes the same checks as
+/// [`fetch_public`], and a loopback, private or link-local target is refused
+/// at the first request too, by address or by name, unless `allow_local_start`
+/// is set for a link on the Grappa server itself. A redirect from a public
+/// host never goes local. The caller checks the status and uses this again for
+/// each playlist entry. Only the time to the response headers is limited.
+pub async fn get_public_stream(
     href: &str,
-    max_bytes: usize,
-    cut_when_larger: bool,
+    allow_local_start: bool,
+) -> Result<reqwest::Response, FetchError> {
+    get_public_stream_with(href, allow_local_start, lookup).await
+}
+
+async fn get_public_stream_with<R, F>(
+    href: &str,
+    allow_local_start: bool,
     resolve: R,
-) -> Result<(Vec<u8>, Option<String>, bool), FetchError>
+) -> Result<reqwest::Response, FetchError>
 where
     R: Fn(String, u16) -> F,
     F: Future<Output = std::io::Result<Vec<SocketAddr>>>,
 {
-    let mut url = validated_url(href).map_err(|refusal| FetchError::Failed(refusal.to_string()))?;
-    if url.scheme() == "ftp" {
+    let url = validated_url(href).map_err(|refusal| FetchError::Failed(refusal.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
         return Err(FetchError::Failed(
-            "only http and https can be downloaded".to_string(),
+            "only http and https streams are opened".to_string(),
         ));
     }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        send_following(url, allow_local_start, true, resolve),
+    )
+    .await
+    .unwrap_or_else(|_| Err(FetchError::Failed("the connection timed out".to_string())))
+}
+
+/// Sends a GET to `url` and follows redirects one request at a time, so each
+/// one passes [`redirect_decision_from`] and each name is resolved first. A
+/// connection only uses the addresses that were checked. `local_start` says
+/// whether the first URL may be local; a redirect may only be local when the
+/// URL before it was.
+async fn send_following<R, F>(
+    mut url: reqwest::Url,
+    local_start: bool,
+    icy_metadata: bool,
+    resolve: R,
+) -> Result<reqwest::Response, FetchError>
+where
+    R: Fn(String, u16) -> F,
+    F: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
     let refused = |refusal: RedirectRefusal| FetchError::Failed(refusal.to_string());
     let mut chain: Vec<reqwest::Url> = Vec::new();
-    // The link the user clicked may be local; a redirect only if the last
-    // request was too.
-    let mut last_is_local = true;
-    let mut response = loop {
+    let mut last_is_local = local_start;
+    if !local_start && is_local_host(&url) {
+        return Err(refused(RedirectRefusal::LocalHost));
+    }
+    loop {
         let mut builder = reqwest::Client::builder()
             .user_agent(crate::EXTERNAL_USER_AGENT)
             .no_proxy()
@@ -499,13 +556,17 @@ where
         let http = builder
             .build()
             .map_err(|err| FetchError::Failed(err.without_url().to_string()))?;
-        let response = http.get(url.clone()).send().await.map_err(fetch_error)?;
+        let mut request = http.get(url.clone());
+        if icy_metadata {
+            request = request.header("Icy-MetaData", "1");
+        }
+        let response = request.send().await.map_err(fetch_error)?;
         let location = match response.status().as_u16() {
             301 | 302 | 303 | 307 | 308 => response.headers().get(reqwest::header::LOCATION),
             _ => None,
         };
         let Some(location) = location.and_then(|value| value.to_str().ok()) else {
-            break response;
+            return Ok(response);
         };
         let next = url
             .join(location)
@@ -514,7 +575,27 @@ where
         redirect_decision_from(&chain, &next, is_local).map_err(refused)?;
         last_is_local = is_local;
         url = next;
-    };
+    }
+}
+
+async fn fetch_public_with<R, F>(
+    href: &str,
+    max_bytes: usize,
+    cut_when_larger: bool,
+    resolve: R,
+) -> Result<(Vec<u8>, Option<String>, bool), FetchError>
+where
+    R: Fn(String, u16) -> F,
+    F: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+{
+    let url = validated_url(href).map_err(|refusal| FetchError::Failed(refusal.to_string()))?;
+    if url.scheme() == "ftp" {
+        return Err(FetchError::Failed(
+            "only http and https can be downloaded".to_string(),
+        ));
+    }
+    // The link the user clicked may be local.
+    let mut response = send_following(url, true, false, resolve).await?;
     let status = response.status().as_u16();
     if status == 404 || status == 410 {
         return Err(FetchError::Gone);
@@ -862,6 +943,17 @@ mod tests {
             "https://[3fff:fff::1]/y.png",
             "https://[::ffff:127.0.0.1]/y.png",
             "https://[::ffff:10.1.2.3]/y.png",
+            "https://198.18.0.1/y.png",
+            "https://198.19.255.254/y.png",
+            "https://224.0.0.1/y.png",
+            "https://240.0.0.1/y.png",
+            "https://192.0.0.8/y.png",
+            "https://192.0.2.1/y.png",
+            "https://[ff02::1]/y.png",
+            "https://[fec0::1]/y.png",
+            "https://[64:ff9b:1::a00:1]/y.png",
+            "https://[2001:2::1]/y.png",
+            "https://[2001:db8::1]/y.png",
         ] {
             assert_eq!(
                 redirect_decision(&public, &url(next)),
@@ -873,6 +965,7 @@ mod tests {
             "https://8.8.8.8/y.png",
             "https://172.32.0.1/y.png",
             "https://100.128.0.1/y.png",
+            "https://198.20.0.1/y.png",
             "https://[2001:4860:4860::8888]/y.png",
             "https://[3fff:1000::1]/y.png",
             "https://b.example/y.png",
@@ -1084,6 +1177,61 @@ mod tests {
         .await
         .expect("fetch");
         assert_eq!(bytes, [9u8]);
+    }
+
+    #[tokio::test]
+    async fn streams_refuse_local_targets_at_the_first_request() {
+        for href in [
+            "http://127.0.0.1:8000/live",
+            "http://localhost/live",
+            "http://10.0.0.5/live",
+            "http://192.168.1.9/live.pls",
+            "http://169.254.169.254/latest",
+            "http://[::1]/live",
+        ] {
+            let result = get_public_stream(href, false).await;
+            assert!(
+                matches!(&result, Err(FetchError::Failed(reason)) if reason == "redirect to a local address refused"),
+                "{href}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streams_refuse_names_that_resolve_locally() {
+        for resolved in [
+            &["127.0.0.1"][..],
+            &["10.0.0.5", "192.168.1.9"],
+            &["169.254.169.254"],
+            &["::1"],
+        ] {
+            let result = get_public_stream_with("http://radio.example/live", false, |_, _| {
+                std::future::ready(resolved_to(resolved))
+            })
+            .await;
+            assert!(
+                matches!(&result, Err(FetchError::Failed(reason)) if reason == "redirect to a local address refused"),
+                "{resolved:?}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_uploads_on_the_server_are_upload_links() {
+        let base = "http://192.168.1.2:8080";
+        assert!(is_upload_link(
+            "http://192.168.1.2:8080/uploads/a.mp3",
+            base
+        ));
+        assert!(!is_upload_link("http://192.168.1.2:8080/live.mp3", base));
+        assert!(!is_upload_link("http://10.0.0.5:8080/uploads/a.mp3", base));
+        assert!(!is_upload_link("not a url", base));
+    }
+
+    #[tokio::test]
+    async fn streams_refuse_other_schemes() {
+        let result = get_public_stream("ftp://radio.example/live", false).await;
+        assert!(matches!(result, Err(FetchError::Failed(_))), "{result:?}");
     }
 
     #[tokio::test]

@@ -559,6 +559,8 @@ pub fn playlist_urls(playlist: &str) -> Vec<String> {
 #[derive(Debug)]
 pub enum RadioError {
     Http(reqwest::Error),
+    /// A request that was refused or failed before a response came.
+    Refused(String),
     /// A playlist that lists no stream.
     EmptyPlaylist,
 }
@@ -567,6 +569,7 @@ impl std::fmt::Display for RadioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Http(err) => write!(f, "{err}"),
+            Self::Refused(reason) => write!(f, "{reason}"),
             Self::EmptyPlaylist => write!(f, "the playlist lists no stream"),
         }
     }
@@ -588,19 +591,19 @@ pub struct RadioStream {
 
 impl RadioStream {
     /// Connects to `url`, asking for ICY titles. A playlist URL is
-    /// followed to its first stream.
-    pub async fn open(url: &str) -> Result<Self, RadioError> {
-        let http = reqwest::Client::builder()
-            .user_agent(crate::EXTERNAL_USER_AGENT)
-            .build()?;
-        let mut response = Self::get(&http, url).await?;
+    /// followed to its first stream. The first request, every redirect and
+    /// the playlist entry must not point at a loopback, private or
+    /// link-local address. Only `allow_local_start` lets the first request
+    /// go local, for an upload on the user's own Grappa server.
+    pub async fn open(url: &str, allow_local_start: bool) -> Result<Self, RadioError> {
+        let mut response = Self::get(url, allow_local_start).await?;
         if is_playlist(url, response.headers().get(CONTENT_TYPE)) {
             let text = response.text().await?;
             let stream = playlist_urls(&text)
                 .into_iter()
                 .next()
                 .ok_or(RadioError::EmptyPlaylist)?;
-            response = Self::get(&http, &stream).await?;
+            response = Self::get(&stream, false).await?;
         }
         let metaint = response
             .headers()
@@ -619,12 +622,14 @@ impl RadioStream {
         })
     }
 
-    async fn get(http: &reqwest::Client, url: &str) -> Result<reqwest::Response, reqwest::Error> {
-        http.get(url)
-            .header("Icy-MetaData", "1")
-            .send()
-            .await?
-            .error_for_status()
+    async fn get(url: &str, allow_local_start: bool) -> Result<reqwest::Response, RadioError> {
+        let response = crate::media::get_public_stream(url, allow_local_start)
+            .await
+            .map_err(|err| match err {
+                crate::media::FetchError::Failed(reason) => RadioError::Refused(reason),
+                _ => RadioError::Refused("the stream could not be opened".to_string()),
+            })?;
+        Ok(response.error_for_status()?)
     }
 
     /// The next audio and titles; `None` when the server ends the stream.
