@@ -49,6 +49,8 @@ struct QueryEntry {
     label: string,
     mention-badge: string,
     mentions-description: string,
+    unread-count: string,
+    unread-description: string,
     selected: bool,
 }
 
@@ -1566,6 +1568,7 @@ export component AppWindow inherits Window {
     callback channel-selected(string, string);
     callback channel-part-requested(string, string);
     callback query-selected(string, string);
+    callback query-close-requested(string, string);
     callback window-invite-join-requested(string, string);
     callback window-invite-decline-requested(string, string);
     callback kicked-channel-dismiss-requested(string, string);
@@ -3299,14 +3302,36 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        for query in group.queries : Button {
-                            horizontal-stretch: 1;
-                            text: (query.selected ? "● " : "") + "↳ " + query.label + query.mention-badge;
-                            primary: query.selected;
-                            accessible-label: @tr("Private conversation with {} on {}", query.nick, query.network)
-                                + query.mentions-description
-                                + (query.selected ? " — current" : "");
-                            clicked => { query-selected(query.network, query.nick); }
+                        for query in group.queries : HorizontalLayout {
+                            spacing: 4px;
+
+                            Button {
+                                horizontal-stretch: 1;
+                                text: (query.selected ? "● " : "") + "↳ " + query.label + query.mention-badge;
+                                primary: query.selected;
+                                accessible-label: @tr("Private conversation with {} on {}", query.nick, query.network)
+                                    + query.mentions-description
+                                    + (query.selected ? " — current" : "");
+                                clicked => { query-selected(query.network, query.nick); }
+                            }
+
+                            if query.unread-description != "" : Text {
+                                text: query.unread-count;
+                                accessible-label: query.unread-description;
+                                accessible-role: AccessibleRole.text;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                min-width: 28px;
+                                font-size: 12px * FontScale.percent / 100;
+                                font-weight: 700;
+                            }
+
+                            Button {
+                                text: "×";
+                                accessible-label: @tr("Close conversation with {} on {}", query.nick, query.network);
+                                width: 28px;
+                                clicked => { query-close-requested(query.network, query.nick); }
+                            }
                         }
                     }
                 }

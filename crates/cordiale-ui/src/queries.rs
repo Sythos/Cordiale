@@ -56,6 +56,40 @@ pub(crate) async fn handle_select_query(
     }
 }
 
+/// Closes the Grappa query window of a sidebar row. The server answers with
+/// a new `query_windows_list`, which clears the view if this window is open.
+/// A row folded from newer-nick windows closes all of them, and the read
+/// cursor of the open window is saved first.
+pub(crate) fn handle_close_query(state: &mut WorkerState, network: &str, nick: &str) {
+    let Some(anchor) = find_query_window(&state.transcript.query_windows, network, nick).cloned()
+    else {
+        return;
+    };
+    let is_open = state.windows.current_query
+        && state
+            .windows
+            .current_channel
+            .as_ref()
+            .is_some_and(|(open_network, open_nick)| open_network == network && open_nick == nick);
+    if is_open {
+        write_back_read_cursor(state);
+    }
+    let mut nicks = vec![anchor.target_nick.clone()];
+    nicks.extend(
+        followed_query_windows(state, &anchor)
+            .into_iter()
+            .map(|followed| followed.target_nick),
+    );
+    for target_nick in nicks {
+        send_user_verb(
+            state,
+            network,
+            "close_query_window",
+            serde_json::json!({ "target_nick": target_nick }),
+        );
+    }
+}
+
 pub(crate) fn show_query_window(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
