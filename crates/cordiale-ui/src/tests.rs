@@ -2866,6 +2866,43 @@ fn prefix_only_channel_names_are_not_imported() {
         );
     }
 
+    for name in ["#", "&", "!", "+"] {
+        let joined = serde_json::json!({
+            "kind": "joined",
+            "network": "libera",
+            "channel": name,
+            "state": "joined"
+        });
+        assert_eq!(
+            parse_joined_event(&joined, "grappa:user:sythos", "sythos"),
+            None
+        );
+        let failed = serde_json::json!({
+            "kind": "join_failed",
+            "network": "libera",
+            "channel": name,
+            "state": "failed",
+            "reason": null,
+            "numeric": null
+        });
+        assert_eq!(
+            parse_join_failed_event(&failed, "grappa:user:sythos", "sythos"),
+            None
+        );
+        let kicked = serde_json::json!({
+            "kind": "kicked",
+            "network": "libera",
+            "channel": name,
+            "state": "kicked",
+            "by": null,
+            "reason": null
+        });
+        assert_eq!(
+            parse_kicked_event(&kicked, "grappa:user:sythos", "sythos"),
+            None
+        );
+    }
+
     let channels = HashMap::from([(
         "libera".to_string(),
         vec![

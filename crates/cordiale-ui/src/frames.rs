@@ -1358,6 +1358,9 @@ pub(crate) fn parse_joined_event(
 
     let network = payload.get("network").and_then(Value::as_str)?;
     let channel = payload.get("channel").and_then(Value::as_str)?;
+    if cordiale_core::slash::is_prefix_only_channel(channel) {
+        return None;
+    }
     let user_topic = format!("grappa:user:{identifier}");
     if topic != user_topic && !channel_topic_matches(identifier, topic, network, channel) {
         return None;
@@ -1383,6 +1386,9 @@ pub(crate) fn parse_join_failed_event(
 
     let network = object.get("network")?.as_str()?;
     let channel = object.get("channel")?.as_str()?;
+    if cordiale_core::slash::is_prefix_only_channel(channel) {
+        return None;
+    }
     let reason = match object.get("reason")? {
         Value::Null => None,
         Value::String(value) => Some(value.clone()),
@@ -1423,6 +1429,9 @@ pub(crate) fn parse_kicked_event(
 
     let network = object.get("network")?.as_str()?;
     let channel = object.get("channel")?.as_str()?;
+    if cordiale_core::slash::is_prefix_only_channel(channel) {
+        return None;
+    }
     let by = match object.get("by")? {
         Value::Null => None,
         Value::String(value) => Some(value.clone()),
