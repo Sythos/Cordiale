@@ -1523,7 +1523,10 @@ pub(crate) fn parse_window_pending_event(
 
     let network = payload.get("network").and_then(Value::as_str)?;
     let channel = payload.get("channel").and_then(Value::as_str)?;
-    if network.is_empty() || channel.is_empty() {
+    if network.is_empty()
+        || channel.is_empty()
+        || cordiale_core::slash::is_prefix_only_channel(channel)
+    {
         return None;
     }
 
@@ -1644,7 +1647,11 @@ pub(crate) fn parse_window_invited_event(
     let network = payload.get("network").and_then(Value::as_str)?;
     let channel = payload.get("channel").and_then(Value::as_str)?;
     let inviter = payload.get("inviter").and_then(Value::as_str)?;
-    if network.is_empty() || channel.is_empty() || inviter.is_empty() {
+    if network.is_empty()
+        || channel.is_empty()
+        || inviter.is_empty()
+        || cordiale_core::slash::is_prefix_only_channel(channel)
+    {
         return None;
     }
 
