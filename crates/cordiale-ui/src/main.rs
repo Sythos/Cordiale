@@ -1783,7 +1783,7 @@ async fn run_worker(
                         handle_select_query(&mut state, &ui, network, nick).await;
                     }
                     Some(WorkerCommand::CloseQuery { network, nick }) => {
-                        handle_close_query(&state, &network, &nick);
+                        handle_close_query(&mut state, &network, &nick);
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
                         handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;
