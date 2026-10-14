@@ -407,6 +407,8 @@ fn is_local_v6(ip: Ipv6Addr) -> bool {
         || first & 0xffc0 == 0xfe80
         || first & 0xffc0 == 0xfec0
         || (first == 0x2001 && second == 0x0db8)
+        // Benchmarking prefix (RFC 5180).
+        || (first == 0x2001 && second == 0x0002 && third == 0)
         // Local-use NAT64 prefix (RFC 8215): it translates to IPv4 hosts.
         || (first == 0x0064 && second == 0xff9b && third == 0x0001)
 }
@@ -945,6 +947,7 @@ mod tests {
             "https://[ff02::1]/y.png",
             "https://[fec0::1]/y.png",
             "https://[64:ff9b:1::a00:1]/y.png",
+            "https://[2001:2::1]/y.png",
             "https://[2001:db8::1]/y.png",
         ] {
             assert_eq!(
