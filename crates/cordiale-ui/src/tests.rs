@@ -8918,6 +8918,42 @@ fn malformed_or_foreign_read_cursor_events_leave_state_unchanged() {
 }
 
 #[test]
+fn read_cursor_event_reports_change_only_for_new_cursor_or_badge() {
+    let topic = channel_topic("sythos", "libera", "#rust");
+    let mut state = WorkerState::new();
+    let event = |cursor: u64, badge: u64| {
+        serde_json::json!({
+            "kind": "read_cursor_set",
+            "last_read_message_id": cursor,
+            "badge_count": badge
+        })
+    };
+
+    assert!(apply_read_cursor_set(
+        &mut state,
+        "sythos",
+        &topic,
+        &event(10, 3)
+    ));
+    assert_eq!(state.windows.badge_count, 3);
+    // A duplicate event changes nothing and needs no refresh.
+    assert!(!apply_read_cursor_set(
+        &mut state,
+        "sythos",
+        &topic,
+        &event(10, 3)
+    ));
+    // A confirmed own send keeps the cursor and lowers the badge.
+    assert!(apply_read_cursor_set(
+        &mut state,
+        "sythos",
+        &topic,
+        &event(10, 0)
+    ));
+    assert_eq!(state.windows.badge_count, 0);
+}
+
+#[test]
 fn read_cursor_badge_normalizes_values_like_cicchetto() {
     let cases = [
         (serde_json::json!(0), 0),

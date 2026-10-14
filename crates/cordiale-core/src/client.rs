@@ -87,6 +87,10 @@ pub enum GrappaClientError {
         /// `Retry-After` header, else the body's `retry_after_ms`.
         retry_after: Option<Duration>,
     },
+    /// A download is larger than the limit set for its purpose.
+    TooLarge {
+        limit: usize,
+    },
 }
 
 impl GrappaClientError {
@@ -98,7 +102,7 @@ impl GrappaClientError {
     pub fn status(&self) -> Option<StatusCode> {
         match self {
             GrappaClientError::Http(err) => err.status(),
-            GrappaClientError::InvalidUrl(_) => None,
+            GrappaClientError::InvalidUrl(_) | GrappaClientError::TooLarge { .. } => None,
             GrappaClientError::Rejected { status, .. } => Some(*status),
         }
     }
@@ -2806,12 +2810,18 @@ impl GrappaClient {
     /// Downloads a file Grappa serves behind authentication (a cached WHOIS
     /// avatar): `path_or_url` is a server path (`/…`) or a URL on the same
     /// server. The bearer token is never sent anywhere else, so any other
-    /// URL is refused. Returns the bytes and the `Content-Type`, if any.
+    /// URL is refused. Returns the bytes, the `Content-Type` (if any) and
+    /// whether the file was cut. The body is read in chunks and stops at
+    /// `max_bytes`: a larger file is cut there when `cut_when_larger` is set
+    /// (text) and is refused with `TooLarge` otherwise. A `Content-Length`
+    /// over the limit is refused before any byte is read.
     pub async fn fetch_server_file(
         &self,
         token: &str,
         path_or_url: &str,
-    ) -> Result<(Vec<u8>, Option<String>), GrappaClientError> {
+        max_bytes: usize,
+        cut_when_larger: bool,
+    ) -> Result<(Vec<u8>, Option<String>, bool), GrappaClientError> {
         let base = self.base_url.trim_end_matches('/');
         let url = if path_or_url.starts_with('/') {
             format!("{base}{path_or_url}")
@@ -2820,7 +2830,7 @@ impl GrappaClient {
         } else {
             return Err(GrappaClientError::InvalidUrl(path_or_url.to_string()));
         };
-        let response = self
+        let mut response = self
             .http
             .get(url)
             .bearer_auth(token)
@@ -2832,7 +2842,26 @@ impl GrappaClient {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        Ok((response.bytes().await?.to_vec(), content_type))
+        let too_large = GrappaClientError::TooLarge { limit: max_bytes };
+        if !cut_when_larger
+            && response
+                .content_length()
+                .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(too_large);
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() > max_bytes {
+                if cut_when_larger {
+                    bytes.truncate(max_bytes);
+                    return Ok((bytes, content_type, true));
+                }
+                return Err(too_large);
+            }
+        }
+        Ok((bytes, content_type, false))
     }
 
     /// `GET /themes` — the public theme gallery (published themes and
@@ -6351,18 +6380,49 @@ mod tests {
             .await;
 
         let client = GrappaClient::new(mock_server.uri());
-        let (bytes, content_type) = client
-            .fetch_server_file("t", "/avatars/bob.png")
+        let (bytes, content_type, cut) = client
+            .fetch_server_file("t", "/avatars/bob.png", 1024, false)
             .await
             .expect("path");
         assert_eq!(bytes, vec![1, 2, 3]);
         assert_eq!(content_type.as_deref(), Some("image/png"));
+        assert!(!cut);
         let same_server = format!("{}/avatars/bob.png", mock_server.uri());
-        assert!(client.fetch_server_file("t", &same_server).await.is_ok());
         assert!(client
-            .fetch_server_file("t", "https://elsewhere.example/a.png")
+            .fetch_server_file("t", &same_server, 1024, false)
+            .await
+            .is_ok());
+        assert!(client
+            .fetch_server_file("t", "https://elsewhere.example/a.png", 1024, false)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn server_files_obey_the_byte_limit() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/files/ten"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![7u8; 10]))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let below = client.fetch_server_file("t", "/files/ten", 11, false).await;
+        assert_eq!(below.expect("below the limit").0.len(), 10);
+        let at = client.fetch_server_file("t", "/files/ten", 10, false).await;
+        assert_eq!(at.expect("at the limit").0.len(), 10);
+        let above = client.fetch_server_file("t", "/files/ten", 9, false).await;
+        assert!(matches!(
+            above,
+            Err(GrappaClientError::TooLarge { limit: 9 })
+        ));
+        let (bytes, _, cut) = client
+            .fetch_server_file("t", "/files/ten", 9, true)
+            .await
+            .expect("cut text");
+        assert_eq!(bytes.len(), 9);
+        assert!(cut);
     }
 
     #[tokio::test]
