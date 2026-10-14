@@ -3073,7 +3073,6 @@ export component AppWindow inherits Window {
                 background: theme == "dark" ? #3a321f : #fff2bf;
                 border-width: 1px;
                 border-color: theme == "dark" ? #c99b2e : #b58a00;
-                padding: 6px;
                 HorizontalBox {
                     spacing: 4px;
                     Text {
@@ -3104,7 +3103,6 @@ export component AppWindow inherits Window {
                 background: theme == "dark" ? #1f2d3a : #e3f0ff;
                 border-width: 1px;
                 border-color: theme == "dark" ? #4a7fb0 : #3d7cc9;
-                padding: 6px;
                 VerticalBox {
                     spacing: 2px;
                     Text {
@@ -3144,7 +3142,6 @@ export component AppWindow inherits Window {
                 background: theme == "dark" ? #2a2438 : #f0eaff;
                 border-width: 1px;
                 border-color: theme == "dark" ? #8a74c9 : #6b4fc0;
-                padding: 6px;
                 VerticalBox {
                     spacing: 2px;
                     Text {
@@ -7451,8 +7448,8 @@ export component AppWindow inherits Window {
         }
         if media-kind == "image" && media-zoom : Flickable {
             vertical-stretch: 1;
-            viewport-width: media-image.width * 1px;
-            viewport-height: media-image.height * 1px;
+            content-width: media-image.width * 1px;
+            content-height: media-image.height * 1px;
 
             Image {
                 source: media-image;
@@ -8114,8 +8111,8 @@ export component LinksGraphWindow inherits Window {
         Flickable {
             vertical-stretch: 1;
             min-height: 300px;
-            viewport-width: canvas-size * 1px * zoom;
-            viewport-height: canvas-size * 1px * zoom;
+            content-width: canvas-size * 1px * zoom;
+            content-height: canvas-size * 1px * zoom;
 
             Rectangle {
                 width: canvas-size * 1px * zoom;
