@@ -45,6 +45,7 @@ mod reply;
 mod reply_presence;
 mod slash;
 mod taskbar;
+mod temp_files;
 mod totp;
 mod ui_callbacks;
 #[cfg(windows)]
@@ -686,6 +687,7 @@ fn main() -> Result<(), slint::PlatformError> {
     if worker_tx.send(WorkerCommand::Quit(done_tx)).is_ok() {
         let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
     }
+    temp_files::cleanup_all();
     result
 }
 
@@ -4742,19 +4744,11 @@ const PASTE_UPLOAD_LINES: usize = 2;
 /// `paste.txt`). `None` lets the compose box paste as usual.
 fn clipboard_upload(ui: &AppWindow) -> Option<std::path::PathBuf> {
     let mut clipboard = arboard::Clipboard::new().ok()?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis())
-        .unwrap_or_default();
-    let folder = std::env::temp_dir()
-        .join("cordiale-paste")
-        .join(stamp.to_string());
     if let Ok(image) = clipboard.get_image() {
         let width = u32::try_from(image.width).ok()?;
         let height = u32::try_from(image.height).ok()?;
         let pixels = image::RgbaImage::from_raw(width, height, image.bytes.into_owned())?;
-        std::fs::create_dir_all(&folder).ok()?;
-        let path = folder.join("image.png");
+        let path = temp_files::private_subdir().ok()?.join("image.png");
         if let Err(err) = pixels.save_with_format(&path, image::ImageFormat::Png) {
             persistence::log_line(&format!("pasted image not saved: {err}"));
             return None;
@@ -4776,8 +4770,7 @@ fn clipboard_upload(ui: &AppWindow) -> Option<std::path::PathBuf> {
     if !matches!(answer, rfd::MessageDialogResult::Yes) {
         return None;
     }
-    std::fs::create_dir_all(&folder).ok()?;
-    let path = folder.join("paste.txt");
+    let path = temp_files::private_subdir().ok()?.join("paste.txt");
     std::fs::write(&path, text).ok()?;
     Some(path)
 }
@@ -8768,14 +8761,8 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
                 .or_else(|| href.rsplit('.').next().filter(|ext| ext.len() <= 4))
                 .unwrap_or("png")
                 .to_ascii_lowercase();
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(&href, &mut hasher);
-            let path = std::env::temp_dir().join(format!(
-                "cordiale-media-{:016x}.{extension}",
-                std::hash::Hasher::finish(&hasher)
-            ));
-            match std::fs::write(&path, bytes) {
-                Ok(()) => MediaContent::Image(path),
+            match temp_files::write_private("media", &format!(".{extension}"), &bytes) {
+                Ok(path) => MediaContent::Image(path),
                 Err(err) => MediaContent::Failed(err.to_string()),
             }
         });
@@ -8784,16 +8771,20 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
                 return;
             }
             match outcome {
-                Ok(MediaContent::Image(path)) => match slint::Image::load_from_path(&path) {
-                    Ok(image) => {
-                        ui.set_media_image(image);
-                        ui.set_media_kind("image".into());
+                Ok(MediaContent::Image(path)) => {
+                    let loaded = slint::Image::load_from_path(&path);
+                    temp_files::discard(&path);
+                    match loaded {
+                        Ok(image) => {
+                            ui.set_media_image(image);
+                            ui.set_media_kind("image".into());
+                        }
+                        Err(_) => {
+                            ui.set_media_error("unsupported image".into());
+                            ui.set_media_kind("failed".into());
+                        }
                     }
-                    Err(_) => {
-                        ui.set_media_error("unsupported image".into());
-                        ui.set_media_kind("failed".into());
-                    }
-                },
+                }
                 Ok(MediaContent::Text(body, cut)) => {
                     ui.set_media_text(body.into());
                     ui.set_media_truncated(cut);
@@ -9310,13 +9301,7 @@ fn load_theme_background(
         let file = match client.fetch_server_file(&token, &background.path).await {
             Ok((bytes, content_type)) => {
                 let extension = avatar_extension(content_type.as_deref()).unwrap_or("webp");
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                std::hash::Hash::hash(&background.path, &mut hasher);
-                let path = std::env::temp_dir().join(format!(
-                    "cordiale-wallpaper-{:016x}.{extension}",
-                    std::hash::Hasher::finish(&hasher)
-                ));
-                std::fs::write(&path, bytes).ok().map(|()| path)
+                temp_files::write_private("wallpaper", &format!(".{extension}"), &bytes).ok()
             }
             Err(err) => {
                 persistence::log_line(&format!("theme wallpaper unavailable: {err:?}"));
@@ -9327,7 +9312,11 @@ fn load_theme_background(
             return;
         }
         let _ = ui.upgrade_in_event_loop(move |ui| {
-            let image = file.and_then(|file| slint::Image::load_from_path(&file).ok());
+            let image = file.and_then(|file| {
+                let image = slint::Image::load_from_path(&file).ok();
+                temp_files::discard(&file);
+                image
+            });
             match image {
                 Some(image) => {
                     ui.set_palette_background(image);
