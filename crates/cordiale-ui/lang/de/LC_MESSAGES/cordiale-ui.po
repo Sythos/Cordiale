@@ -2637,6 +2637,14 @@ msgid "Couldn't join that channel."
 msgstr "Diesem Kanal konnte nicht beigetreten werden."
 
 msgctxt "AppWindow"
+msgid "That channel name isn't valid."
+msgstr "Dieser Kanalname ist ungültig."
+
+msgctxt "AppWindow"
+msgid "{}: that channel name isn't valid."
+msgstr "{}: Dieser Kanalname ist ungültig."
+
+msgctxt "AppWindow"
 msgid "Close channel list"
 msgstr "Kanalliste schließen"
 

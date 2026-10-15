@@ -2299,6 +2299,8 @@ export component AppWindow inherits Window {
             return @tr("Couldn't refresh the channel list. Is the network connected?");
         } else if directory-error == "directory-join-failed" {
             return @tr("Couldn't join that channel.");
+        } else if directory-error == "directory-join-invalid" {
+            return @tr("That channel name isn't valid.");
         } else {
             return directory-error;
         }
@@ -2421,6 +2423,8 @@ export component AppWindow inherits Window {
             return @tr("Could not load the server messages. Live messages may still arrive.");
         } else if status-kind == "command-failed" {
             return @tr("{} failed.", status-command-hint);
+        } else if status-kind == "invalid-channel" {
+            return @tr("{}: that channel name isn't valid.", status-command-hint);
         } else if status-kind == "command-usage" {
             return @tr("That command is missing an argument, for example: /whowas <nick>.");
         } else if status-kind == "session-severed-flood" {

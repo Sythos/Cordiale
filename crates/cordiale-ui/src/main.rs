@@ -6459,6 +6459,12 @@ fn ignore_error_key(err: &GrappaClientError) -> &'static str {
     }
 }
 
+/// Grappa refuses a channel name it cannot use with the `invalid_channel`
+/// code on join, part and topic calls.
+fn is_invalid_channel(err: &GrappaClientError) -> bool {
+    err.code() == Some("invalid_channel")
+}
+
 /// The Settings text-pattern field: blank means no pattern; anything else
 /// goes to Grappa trimmed, and Grappa refuses a CR/LF-bearing one itself.
 fn ignore_pattern_from_ui(pattern: &str) -> Option<String> {
@@ -11027,7 +11033,11 @@ async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
         if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
             persistence::log_line(&format!("directory join failed: {err:?}"));
             if let Some(view) = state.panels.directory.as_mut() {
-                view.error = Some("directory-join-failed");
+                view.error = Some(if is_invalid_channel(&err) {
+                    "directory-join-invalid"
+                } else {
+                    "directory-join-failed"
+                });
             }
             push_directory(state, ui, false);
             return;

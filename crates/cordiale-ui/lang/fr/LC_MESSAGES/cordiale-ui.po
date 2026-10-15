@@ -2637,6 +2637,14 @@ msgid "Couldn't join that channel."
 msgstr "Impossible de rejoindre ce salon."
 
 msgctxt "AppWindow"
+msgid "That channel name isn't valid."
+msgstr "Le nom de ce salon n'est pas valide."
+
+msgctxt "AppWindow"
+msgid "{}: that channel name isn't valid."
+msgstr "{} : le nom de ce salon n'est pas valide."
+
+msgctxt "AppWindow"
 msgid "Close channel list"
 msgstr "Fermer la liste des salons"
 
