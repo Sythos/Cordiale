@@ -519,7 +519,12 @@ pub(crate) async fn run_slash_command(
     };
     if let Err(err) = result {
         persistence::log_line(&format!("{label} failed: {err:?}"));
-        set_command_status(ui, "command-failed", label);
+        let kind = if is_invalid_channel(&err) {
+            "invalid-channel"
+        } else {
+            "command-failed"
+        };
+        set_command_status(ui, kind, label);
     }
 }
 

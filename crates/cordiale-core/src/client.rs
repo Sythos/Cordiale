@@ -969,12 +969,8 @@ impl GrappaClient {
             url.query_pairs_mut().append_pair("reason", reason);
         }
 
-        self.http
-            .delete(url)
-            .bearer_auth(token)
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = self.http.delete(url).bearer_auth(token).send().await?;
+        reject_with_code(response).await?;
         Ok(())
     }
 
@@ -3177,13 +3173,14 @@ impl GrappaClient {
         if let Some(key) = key.filter(|key| !key.is_empty()) {
             body["key"] = Value::from(key);
         }
-        self.http
+        let response = self
+            .http
             .post(url)
             .bearer_auth(token)
             .json(&body)
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        reject_with_code(response).await?;
         Ok(())
     }
 
@@ -3200,13 +3197,14 @@ impl GrappaClient {
         url.path_segments_mut()
             .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
             .extend(["networks", network_slug, "channels", channel, "topic"]);
-        self.http
+        let response = self
+            .http
             .post(url)
             .bearer_auth(token)
             .json(&serde_json::json!({ "body": topic }))
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        reject_with_code(response).await?;
         Ok(())
     }
 
@@ -4699,6 +4697,53 @@ mod tests {
             .part_channel("abc123", "libera", "#rust", Some("away for now & later"))
             .await
             .expect("part_channel with reason");
+    }
+
+    #[tokio::test]
+    async fn channel_calls_keep_the_invalid_channel_code() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels"))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_json(serde_json::json!({"error": "invalid_channel"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/channels/bad/topic"))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_json(serde_json::json!({"error": "invalid_channel"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/channels/bad"))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_json(serde_json::json!({"error": "invalid_channel"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let join = client
+            .join_channel("abc123", "libera", "bad", None)
+            .await
+            .expect_err("422 invalid_channel");
+        assert_eq!(join.status(), Some(StatusCode::UNPROCESSABLE_ENTITY));
+        assert_eq!(join.code(), Some("invalid_channel"));
+        let topic = client
+            .set_topic("abc123", "libera", "bad", "text")
+            .await
+            .expect_err("422 invalid_channel");
+        assert_eq!(topic.code(), Some("invalid_channel"));
+        let part = client
+            .part_channel("abc123", "libera", "bad", None)
+            .await
+            .expect_err("422 invalid_channel");
+        assert_eq!(part.code(), Some("invalid_channel"));
     }
 
     #[tokio::test]

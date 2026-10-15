@@ -152,6 +152,10 @@ pub(crate) async fn handle_part_channel(
         .await
     {
         persistence::log_line(&format!("channel part failed: {error:?}"));
+        if is_invalid_channel(&error) {
+            set_command_status(ui, "invalid-channel", channel);
+            return;
+        }
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("part-failed".into()));
         return;
