@@ -48,7 +48,6 @@ SetCompressor /SOLID lzma
 Name "${APP_NAME}"
 OutFile "${OUT_FILE}"
 Icon "${ICON_PATH}"
-UninstallIcon "${ICON_PATH}"
 InstallDir "$PROGRAMFILES64\${APP_NAME}"
 RequestExecutionLevel admin
 VIProductVersion "${PRODUCT_VERSION}"
@@ -71,7 +70,6 @@ Section "Install"
 
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
   CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\uninstall.exe"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -99,6 +97,7 @@ Section "Uninstall"
   RMDir "$INSTDIR"
 
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
+  ; Older installers created this shortcut.
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
 
