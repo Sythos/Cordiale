@@ -7638,6 +7638,35 @@ fn parse_mentions_bundle_keeps_order_and_null_bodies() {
 }
 
 #[test]
+fn parse_mentions_bundle_warns_only_when_the_list_is_truncated() {
+    let topic = "grappa:user:vjt";
+    let mut payload = serde_json::json!({
+        "kind": "mentions_bundle",
+        "network": "libera",
+        "away_started_at": "2026-09-23T08:00:00Z",
+        "away_ended_at": "2026-09-23T09:00:00Z",
+        "away_reason": null,
+        "messages": [{"server_time": 1790000000000_i64, "channel": "#rust", "sender": "alice", "body": "x", "kind": "privmsg"}]
+    });
+    let has_warning = |payload: &Value| {
+        parse_mentions_bundle(payload, topic, "vjt")
+            .expect("valid bundle")
+            .rows
+            .iter()
+            .any(|row| row.0 == "mentions-truncated")
+    };
+    assert!(!has_warning(&payload));
+    payload["truncated"] = serde_json::json!(false);
+    assert!(!has_warning(&payload));
+    payload["truncated"] = serde_json::json!(true);
+    assert!(has_warning(&payload));
+    // The warning row comes before the messages.
+    let view = parse_mentions_bundle(&payload, topic, "vjt").expect("valid bundle");
+    assert_eq!(view.rows.len(), 3);
+    assert_eq!(view.rows[1].0, "mentions-truncated");
+}
+
+#[test]
 fn parse_server_settings_changed_requires_the_core_caps() {
     let topic = "grappa:user:vjt";
     let payload = serde_json::json!({

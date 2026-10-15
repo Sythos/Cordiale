@@ -4763,6 +4763,10 @@ pub(crate) fn parse_mentions_bundle(
     if let Some(reason) = reason {
         rows.push(("mentions-away-reason".to_string(), reason));
     }
+    // Optional marker: the server cut the list at its limit.
+    if payload.get("truncated").and_then(Value::as_bool) == Some(true) {
+        rows.push(("mentions-truncated".to_string(), String::new()));
+    }
     let messages = payload.get("messages")?.as_array()?;
     for message in messages {
         let server_time = message.get("server_time")?.as_i64()?;
