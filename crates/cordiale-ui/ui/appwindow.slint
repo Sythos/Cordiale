@@ -2152,6 +2152,8 @@ export component AppWindow inherits Window {
             return @tr("Away");
         } else if key == "mentions-away-reason" {
             return @tr("Away message");
+        } else if key == "mentions-truncated" {
+            return @tr("The list reached a limit. It may not show every mention.");
         } else if key == "mentions-empty" {
             return @tr("Nobody mentioned you.");
         } else if key == "lusers-total-users" {

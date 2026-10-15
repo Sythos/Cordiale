@@ -521,6 +521,10 @@ msgid "Away message"
 msgstr "Message d'absence"
 
 msgctxt "AppWindow"
+msgid "The list reached a limit. It may not show every mention."
+msgstr "La liste a atteint une limite. Elle peut ne pas montrer toutes les mentions."
+
+msgctxt "AppWindow"
 msgid "Nobody mentioned you."
 msgstr "Personne ne t'a mentionné."
 
