@@ -9151,21 +9151,17 @@ fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isu
 }
 
 /// The longest sidebar row label, as displayed, measured by the Slint probe
-/// that sets the sidebar's minimum width. Rows are compared by an estimated
-/// width (wide characters count twice); the probe then measures the real
-/// text. Channel and query rows include the bullet of the open row, the
+/// that sets the sidebar's minimum width. Rows are compared by display width
+/// (wide characters count twice, joiners and combining marks add nothing);
+/// the probe then measures the real text. Channel and query rows include the bullet of the open row, the
 /// widest form that row can take.
 fn widest_sidebar_label(groups: &[NetworkGroup]) -> String {
     use slint::Model as _;
 
-    fn estimated_width(text: &str) -> usize {
-        text.chars()
-            .map(|c| if c.len_utf8() >= 3 { 2 } else { 1 })
-            .sum()
-    }
+    use unicode_width::UnicodeWidthStr as _;
 
     fn keep_longer(widest: &mut String, candidate: String) {
-        if estimated_width(&candidate) > estimated_width(widest) {
+        if candidate.width() > widest.width() {
             *widest = candidate;
         }
     }

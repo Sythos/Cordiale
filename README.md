@@ -102,10 +102,11 @@ using its Grappa bearer or the login password kept in the OS keyring if the
 bearer is rejected. It restores the last selected channel when that channel
 is still joined. The login password stays in the native keyring (Windows
 Credential Manager, macOS Keychain, or Linux Secret Service), never in
-Cordiale's own files; without a keyring it is not stored. The eject button
-at the top of the sidebar, or Switch account in the Actions menu, signs out
-and turns off automatic sign-in until the next successful sign-in. The
-icons at the top of the sidebar (Home, Admin, Settings, Disconnect) show
+Cordiale's own files; without a keyring it is not stored. The Disconnect
+button in the Account card of the Home pane, or Switch account in the
+Actions menu, signs out and turns off automatic sign-in until the next
+successful sign-in. The icons at the top of the sidebar (Home, Admin,
+Settings, Debug) show
 their name in a tooltip on hover, and under the icons on keyboard focus.
 On Windows, launching the desktop app opens its UI without an extra console
 window; the release workflow checks the GUI subsystem in both x64 and ARM64

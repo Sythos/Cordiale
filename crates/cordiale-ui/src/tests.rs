@@ -4649,6 +4649,29 @@ fn widest_sidebar_label_counts_wide_characters_twice() {
 }
 
 #[test]
+fn widest_sidebar_label_ignores_joiners_and_combining_marks() {
+    // The joined emoji sequence is 2 columns wide, so the longer ASCII name
+    // wins although the sequence has more bytes.
+    let channels = vec![
+        ChannelEntry {
+            label: "#abcdef".into(),
+            ..Default::default()
+        },
+        ChannelEntry {
+            label: "👨\u{200d}👩\u{200d}👧\u{200d}👦e\u{301}e\u{301}".into(),
+            ..Default::default()
+        },
+    ];
+    let groups = vec![NetworkGroup {
+        network: "n".into(),
+        channels: Rc::new(slint::VecModel::from(channels)).into(),
+        parked: true,
+        ..Default::default()
+    }];
+    assert_eq!(widest_sidebar_label(&groups), "● #abcdef");
+}
+
+#[test]
 fn fit_columns_keeps_wide_windows_unchanged() {
     let fitted = fit_columns(1200.0, 220.0, 160.0, 200.0, 125.0, 316.0, 360.0);
     assert_eq!(fitted.sidebar, 220.0);

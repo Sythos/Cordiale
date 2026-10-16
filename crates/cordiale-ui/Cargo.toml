@@ -41,6 +41,9 @@ slint = { version = "1", default-features = false, features = [
     "unstable-winit-030",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+# Display width of the sidebar rows, for the sidebar's minimum width; Slint
+# already brings the crate in.
+unicode-width = "0.2"
 # The private copy of a file waiting to be uploaded: a new file with a random
 # name, readable by the owner only, deleted when dropped.
 tempfile = "3"
