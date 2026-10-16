@@ -1015,6 +1015,9 @@ export component AppWindow inherits Window {
     // disconnect) start it afresh, and so does coming back with no window
     // selected.
     changed screen => {
+        // The side columns are fitted to the window when the connected
+        // screen opens.
+        fit-columns();
         if screen == "connected" {
             if !has-selected-channel {
                 chat-resume = false;
@@ -1457,7 +1460,6 @@ export component AppWindow inherits Window {
     changed width => { fit-columns(); }
     changed sidebar-min-width => { fit-columns(); }
     changed members-min-width => { fit-columns(); }
-    changed screen => { fit-columns(); }
 
     in-out property <string> theme: "light";
     // Color theme in use (Grappa's gallery or a built-in copy); false is
