@@ -4620,8 +4620,70 @@ fn widest_sidebar_label_picks_the_longest_row() {
             ..Default::default()
         },
     ];
-    assert_eq!(widest_sidebar_label(&groups), "#a-much-longer-channel (2)");
+    assert_eq!(
+        widest_sidebar_label(&groups),
+        "● #a-much-longer-channel (2)"
+    );
     assert_eq!(widest_sidebar_label(&[]), "");
+}
+
+#[test]
+fn widest_sidebar_label_counts_wide_characters_twice() {
+    let channels = vec![
+        ChannelEntry {
+            label: "#abcd".into(),
+            ..Default::default()
+        },
+        ChannelEntry {
+            label: "#ab🎉🎉".into(),
+            ..Default::default()
+        },
+    ];
+    let groups = vec![NetworkGroup {
+        network: "n".into(),
+        channels: Rc::new(slint::VecModel::from(channels)).into(),
+        parked: true,
+        ..Default::default()
+    }];
+    assert_eq!(widest_sidebar_label(&groups), "● #ab🎉🎉");
+}
+
+#[test]
+fn fit_columns_keeps_wide_windows_unchanged() {
+    let fitted = fit_columns(1200.0, 220.0, 160.0, 200.0, 125.0, 316.0, 360.0);
+    assert_eq!(fitted.sidebar, 220.0);
+    assert_eq!(fitted.members, 160.0);
+}
+
+#[test]
+fn fit_columns_shrinks_members_before_the_sidebar() {
+    // 800 - 316 leaves 484 for both columns: members give 36.
+    let fitted = fit_columns(800.0, 300.0, 220.0, 200.0, 125.0, 316.0, 360.0);
+    assert_eq!(fitted.sidebar, 300.0);
+    assert_eq!(fitted.members, 184.0);
+    // 700 - 316 leaves 384: members reach 125, the sidebar gives the rest.
+    let fitted = fit_columns(700.0, 300.0, 220.0, 200.0, 125.0, 316.0, 360.0);
+    assert_eq!(fitted.members, 125.0);
+    assert_eq!(fitted.sidebar, 259.0);
+}
+
+#[test]
+fn fit_columns_never_goes_below_the_minimums() {
+    let fitted = fit_columns(300.0, 400.0, 50.0, 200.0, 125.0, 316.0, 360.0);
+    assert_eq!(fitted.sidebar, 200.0);
+    assert_eq!(fitted.members, 125.0);
+}
+
+#[test]
+fn fit_columns_caps_the_sidebar_and_ignores_an_unknown_window() {
+    let fitted = fit_columns(2000.0, 500.0, 160.0, 200.0, 125.0, 316.0, 360.0);
+    assert_eq!(fitted.sidebar, 360.0);
+    let fitted = fit_columns(0.0, 250.0, 160.0, 200.0, 125.0, 316.0, 360.0);
+    assert_eq!(fitted.sidebar, 250.0);
+    assert_eq!(fitted.members, 160.0);
+    // A minimum above the cap wins over the cap.
+    let fitted = fit_columns(2000.0, 500.0, 160.0, 400.0, 125.0, 316.0, 360.0);
+    assert_eq!(fitted.sidebar, 400.0);
 }
 
 #[test]

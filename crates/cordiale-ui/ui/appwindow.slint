@@ -26,6 +26,12 @@ global FontScale {
     in-out property <int> percent: 100;
 }
 
+// Widths of the two side columns, as fitted to the window.
+struct ColumnWidths {
+    sidebar: length,
+    members: length,
+}
+
 // One joined channel under a network, in the sidebar's expandable list.
 struct ChannelEntry {
     network: string,
@@ -406,6 +412,9 @@ component ResizeHandle {
     // and the strip moves left with the panel, so the pointer stays on it.
     in property <bool> grows-left: false;
 
+    // Sent when the pointer is released after a drag.
+    callback drag-finished();
+
     width: 6px;
 
     Rectangle {
@@ -422,6 +431,11 @@ component ResizeHandle {
                     target-min-width,
                     min(target-max-width, target-width + (grows-left ? self.pressed-x - self.mouse-x : self.mouse-x - self.pressed-x))
                 );
+            }
+        }
+        pointer-event(event) => {
+            if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                root.drag-finished();
             }
         }
     }
@@ -588,18 +602,25 @@ struct EditorColor {
 // Slint's tooltip (an input-transparent popup: it never takes a click);
 // keyboard focus is reported through `has-focus` so the sidebar can name
 // the focused button under the icons.
-component TopMenuButton {
+component TopMenuButton inherits Rectangle {
     in property <string> icon;
     in property <string> label;
     in property <bool> dark;
     out property <bool> has-focus: button.has-focus;
     callback clicked();
 
+    // A fixed square: the sidebar derives its minimum width from this size,
+    // so the icon button must not grow with its emoji.
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    max-width: 32px;
+
     button := Button {
         text: root.icon;
         accessible-label: root.label;
-        width: 32px;
-        height: 32px;
+        width: parent.width;
+        height: parent.height;
         clicked => { root.clicked(); }
 
         // Slint's tooltip: an input-transparent popup next to the pointer,
@@ -624,6 +645,62 @@ component TopMenuButton {
                     }
                 }
             }
+        }
+    }
+}
+
+// The label button of a channel or query row in the sidebar. A long name is
+// elided instead of widening the row, so the cells after it (unread count,
+// remove button) keep the same place in every row. Click, Enter or Space
+// activates it.
+component SidebarRowButton inherits Rectangle {
+    in property <string> text;
+    in property <string> a11y-label;
+    in property <bool> selected: false;
+    callback activated();
+
+    min-width: 0px;
+    min-height: 32px;
+    border-radius: 4px;
+    border-width: focus.has-focus ? 2px : 1px;
+    border-color: focus.has-focus ? Palette.accent-background : Palette.border;
+    background: selected ? Palette.accent-background : (touch.has-hover ? Palette.control-background.brighter(0.15) : Palette.control-background);
+    accessible-role: button;
+    accessible-label: a11y-label;
+    accessible-action-default => { activated(); }
+
+    // Under the touch area, and not focused by the click itself, like
+    // `DirectoryEntry`.
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.activated();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            focus.focus();
+            root.activated();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+
+        Text {
+            text: root.text;
+            min-width: 0px;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+            overflow: elide;
+            color: root.selected ? Palette.accent-foreground : Palette.control-foreground;
         }
     }
 }
@@ -910,6 +987,11 @@ export component AppWindow inherits Window {
     // alone would suggest.
     preferred-width: 900px;
     preferred-height: 600px;
+    // On the connected screen the two side columns and the chat keep their
+    // minimums, so no control leaves its column. Other screens set none.
+    min-width: screen == "connected"
+        ? sidebar-min-width + members-min-width + chat-min-width + layout-fixed-width
+        : 0px;
 
     // Without this, std-widgets (Button/LineEdit/CheckBox/ListView/...)
     // silently follow the OS's own dark/light setting, independent of
@@ -1315,15 +1397,32 @@ export component AppWindow inherits Window {
     // average-width characters as long as the average member label.
     in property <string> sidebar-widest-label: "";
     in property <string> members-average-nick: "";
-    // The sidebar never gets narrower than its widest row (plus the row
-    // indent, the part button and the box padding) nor than the top row of
-    // five 32px icon buttons (4px spacing, 12px box padding per side); the
-    // member column never narrower than the average member label or its
+    // Fixed parts of the sidebar, shared by the rows and the minimum width.
+    property <length> sidebar-padding: 8px;
+    property <length> sidebar-row-spacing: 4px;
+    property <length> sidebar-row-indent: 16px;
+    // The unread-count cell and the [X] cell of a row: reserved in every row.
+    property <length> sidebar-cell-width: 28px;
+    // Gutter that keeps the overlay scrollbar off the row cells.
+    property <length> sidebar-scroll-gutter: 14px;
+    property <length> top-icon-size: 32px;
+    property <length> top-icon-spacing: 4px;
+    property <int> top-icon-count: is-admin ? 4 : 3;
+    property <length> sidebar-hard-max-width: 360px;
+    // The sidebar never gets narrower than its widest row (the label, the
+    // two cells, their spacing, the row indent, the scrollbar gutter and the
+    // box padding) nor than the top row of icon buttons; it never gets wider
+    // than `sidebar-hard-max-width` unless the icons need more. The member
+    // column is never narrower than the average member label or its
     // Actions button.
-    property <length> sidebar-icons-min-width: 5 * 32px + 4 * 4px + 2 * 12px;
+    property <length> sidebar-icons-min-width:
+        top-icon-count * top-icon-size + (top-icon-count - 1) * top-icon-spacing + 2 * sidebar-padding;
+    property <length> sidebar-rows-min-width:
+        sidebar-label-probe.preferred-width + sidebar-row-indent + 2 * sidebar-cell-width
+        + 2 * sidebar-row-spacing + sidebar-scroll-gutter + 2 * sidebar-padding;
     property <length> sidebar-min-width: max(
         max(120px, sidebar-icons-min-width),
-        sidebar-label-probe.preferred-width + 90px);
+        min(sidebar-rows-min-width, sidebar-hard-max-width));
     property <length> members-min-width: max(
         actions-probe.preferred-width + 16px,
         members-nick-probe.preferred-width + 40px);
@@ -1341,7 +1440,26 @@ export component AppWindow inherits Window {
         min(320px, root.width - layout-fixed-width - max(sidebar-width, sidebar-min-width) - chat-min-width));
     property <length> sidebar-max-width: max(
         sidebar-min-width,
-        min(360px, root.width - layout-fixed-width - max(members-width, members-min-width) - chat-min-width));
+        min(sidebar-hard-max-width, root.width - layout-fixed-width - max(members-width, members-min-width) - chat-min-width));
+
+    // Fits both side columns into the window. It reads the window width, so
+    // only event handlers call it, never a width binding (that would loop
+    // with the window's own layout constraints).
+    pure callback fit-column-widths(length, length, length, length, length, length, length) -> ColumnWidths;
+    function fit-columns() {
+        if (screen == "connected") {
+            let fitted = fit-column-widths(
+                root.width, sidebar-width, members-width,
+                sidebar-min-width, members-min-width,
+                chat-min-width + layout-fixed-width, sidebar-hard-max-width);
+            sidebar-width = fitted.sidebar;
+            members-width = fitted.members;
+        }
+    }
+    changed width => { fit-columns(); }
+    changed sidebar-min-width => { fit-columns(); }
+    changed members-min-width => { fit-columns(); }
+    changed screen => { fit-columns(); }
 
     in-out property <string> theme: "light";
     // Color theme in use (Grappa's gallery or a built-in copy); false is
@@ -3031,10 +3149,11 @@ export component AppWindow inherits Window {
         VerticalBox {
             width: max(sidebar-width, sidebar-min-width);
             spacing: 8px;
+            padding: sidebar-padding;
 
             HorizontalLayout {
                 alignment: start;
-                spacing: 4px;
+                spacing: top-icon-spacing;
 
                 home-button := TopMenuButton {
                     icon: "🏠";
@@ -3070,26 +3189,16 @@ export component AppWindow inherits Window {
                     dark: theme == "dark";
                     clicked => { screen = "settings"; }
                 }
-
-                // Signing out is how the user switches accounts: it also
-                // turns off the automatic sign-in at the next launch.
-                disconnect-button := TopMenuButton {
-                    icon: "⏏";
-                    label: @tr("Disconnect");
-                    dark: theme == "dark";
-                    clicked => { disconnect-requested(); }
-                }
             }
 
             // The focused button's name, for keyboard users (hover has the
             // tooltip): a line under the icons, only while one has focus, so
             // nothing is covered.
-            if home-button.has-focus || admin-button-focused || debug-button.has-focus || settings-button.has-focus || disconnect-button.has-focus : Text {
+            if home-button.has-focus || admin-button-focused || debug-button.has-focus || settings-button.has-focus : Text {
                 text: home-button.has-focus ? @tr("Home")
                     : admin-button-focused ? @tr("Admin")
                     : debug-button.has-focus ? @tr("Debug")
-                    : settings-button.has-focus ? @tr("Settings")
-                    : @tr("Disconnect");
+                    : @tr("Settings");
                 font-size: 12px * FontScale.percent / 100;
                 overflow: elide;
                 accessible-role: none;
@@ -3202,7 +3311,7 @@ export component AppWindow inherits Window {
                     padding-top: group.separator-before ? 8px : 0px;
                     // Gutter for the overlay scrollbar, so it never covers
                     // the row buttons and the unread counts.
-                    padding-right: 14px;
+                    padding-right: sidebar-scroll-gutter;
 
                     if group.separator-before : Rectangle {
                         height: 1px;
@@ -3246,7 +3355,7 @@ export component AppWindow inherits Window {
                     // network row, with no gap between them.
                     if group.expanded : VerticalLayout {
                         alignment: start;
-                        padding-left: 16px;
+                        padding-left: sidebar-row-indent;
                         spacing: 0px;
 
                         // Channel directory of this network (`/list`),
@@ -3260,16 +3369,16 @@ export component AppWindow inherits Window {
                         }
 
                         for entry in group.channels : HorizontalLayout {
-                            spacing: 4px;
+                            spacing: sidebar-row-spacing;
 
-                            Button {
+                            SidebarRowButton {
                                 horizontal-stretch: 1;
                                 text: (entry.selected ? "● " : "") + (entry.invited ? "🔔 " : "") + entry.label + entry.mention-badge;
-                                // The filled (primary) style marks the open
+                                // The filled (accent) style marks the open
                                 // channel; the bullet keeps it readable when
                                 // a theme gives the two styles little contrast.
-                                primary: entry.selected;
-                                accessible-label: entry.label + entry.mentions-description
+                                selected: entry.selected;
+                                a11y-label: entry.label + entry.mentions-description
                                     + (entry.selected ? " — current" : "")
                                     + (entry.invited
                                         ? " — invited"
@@ -3280,65 +3389,88 @@ export component AppWindow inherits Window {
                                 // muted, selectable pseudo-windows; details
                                 // remain in session state, not in the row.
                                 opacity: (entry.failed || entry.kicked) ? 0.55 : 1.0;
-                                clicked => { channel-selected(entry.network, entry.channel); }
+                                activated => { channel-selected(entry.network, entry.channel); }
                             }
 
-                            if entry.unread-description != "" : Text {
-                                text: entry.unread-count;
-                                accessible-label: entry.unread-description;
-                                accessible-role: AccessibleRole.text;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                                min-width: 28px;
-                                font-size: 12px * FontScale.percent / 100;
-                                font-weight: 700;
-                            }
+                            // The unread cell and the [X] cell are reserved
+                            // in every row, so the cells line up in a column.
+                            Rectangle {
+                                width: sidebar-cell-width;
 
-                            if entry.kicked : Button {
-                                text: "×";
-                                accessible-label: @tr("Dismiss kicked channel {}", entry.label);
-                                width: 28px;
-                                clicked => {
-                                    kicked-channel-dismiss-requested(entry.network, entry.channel);
+                                if entry.unread-description != "" : Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: entry.unread-count;
+                                    accessible-label: entry.unread-description;
+                                    accessible-role: AccessibleRole.text;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    font-size: 12px * FontScale.percent / 100;
+                                    font-weight: 700;
                                 }
                             }
-                            if entry.joined : Button {
-                                text: "×";
-                                accessible-label: @tr("Leave channel {} on {}", entry.channel, entry.network);
-                                width: 28px;
-                                clicked => { channel-part-requested(entry.network, entry.channel); }
+
+                            Rectangle {
+                                width: sidebar-cell-width;
+
+                                if entry.kicked : Button {
+                                    text: "×";
+                                    accessible-label: @tr("Dismiss kicked channel {}", entry.label);
+                                    width: parent.width;
+                                    height: parent.height;
+                                    clicked => {
+                                        kicked-channel-dismiss-requested(entry.network, entry.channel);
+                                    }
+                                }
+                                if entry.joined : Button {
+                                    text: "×";
+                                    accessible-label: @tr("Leave channel {} on {}", entry.channel, entry.network);
+                                    width: parent.width;
+                                    height: parent.height;
+                                    clicked => { channel-part-requested(entry.network, entry.channel); }
+                                }
                             }
                         }
 
                         for query in group.queries : HorizontalLayout {
-                            spacing: 4px;
+                            spacing: sidebar-row-spacing;
 
-                            Button {
+                            SidebarRowButton {
                                 horizontal-stretch: 1;
                                 text: (query.selected ? "● " : "") + "↳ " + query.label + query.mention-badge;
-                                primary: query.selected;
-                                accessible-label: @tr("Private conversation with {} on {}", query.nick, query.network)
+                                selected: query.selected;
+                                a11y-label: @tr("Private conversation with {} on {}", query.nick, query.network)
                                     + query.mentions-description
                                     + (query.selected ? " — current" : "");
-                                clicked => { query-selected(query.network, query.nick); }
+                                activated => { query-selected(query.network, query.nick); }
                             }
 
-                            if query.unread-description != "" : Text {
-                                text: query.unread-count;
-                                accessible-label: query.unread-description;
-                                accessible-role: AccessibleRole.text;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                                min-width: 28px;
-                                font-size: 12px * FontScale.percent / 100;
-                                font-weight: 700;
+                            Rectangle {
+                                width: sidebar-cell-width;
+
+                                if query.unread-description != "" : Text {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    text: query.unread-count;
+                                    accessible-label: query.unread-description;
+                                    accessible-role: AccessibleRole.text;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                    font-size: 12px * FontScale.percent / 100;
+                                    font-weight: 700;
+                                }
                             }
 
-                            Button {
-                                text: "×";
-                                accessible-label: @tr("Close conversation with {} on {}", query.nick, query.network);
-                                width: 28px;
-                                clicked => { query-close-requested(query.network, query.nick); }
+                            Rectangle {
+                                width: sidebar-cell-width;
+
+                                Button {
+                                    text: "×";
+                                    accessible-label: @tr("Close conversation with {} on {}", query.nick, query.network);
+                                    width: parent.width;
+                                    height: parent.height;
+                                    clicked => { query-close-requested(query.network, query.nick); }
+                                }
                             }
                         }
                     }
@@ -3350,11 +3482,13 @@ export component AppWindow inherits Window {
             target-width <=> sidebar-width;
             target-min-width: sidebar-min-width;
             target-max-width: sidebar-max-width;
+            drag-finished => { fit-columns(); }
         }
 
         // Channel directory of one network: takes the chat's place, the
         // sidebar stays (Cicchetto's `$list` window).
         if directory-open : VerticalBox {
+            min-width: chat-min-width;
             spacing: 8px;
 
             HorizontalLayout {
@@ -3489,6 +3623,7 @@ export component AppWindow inherits Window {
         }
 
         if !directory-open : VerticalBox {
+            min-width: chat-min-width;
             spacing: 8px;
 
             // Truncated on a narrow window; the full line stays the
@@ -3752,6 +3887,23 @@ export component AppWindow inherits Window {
                                 color: theme == "dark" ? #e57373 : #c0392b;
                                 accessible-role: AccessibleRole.text;
                                 accessible-live-region: AccessibleLiveness.polite;
+                            }
+                        }
+                    }
+
+                    // Signing out is how the user switches accounts: it also
+                    // turns off the automatic sign-in at the next launch. The
+                    // per-network Disconnect buttons above only drop a network.
+                    SectionCard {
+                        icon: "⏏";
+                        title: @tr("Account");
+
+                        HorizontalLayout {
+                            alignment: start;
+
+                            Button {
+                                text: @tr("Disconnect");
+                                clicked => { disconnect-requested(); }
                             }
                         }
                     }
@@ -4185,6 +4337,7 @@ export component AppWindow inherits Window {
             grows-left: true;
             target-min-width: members-min-width;
             target-max-width: members-max-width;
+            drag-finished => { fit-columns(); }
         }
 
         VerticalBox {

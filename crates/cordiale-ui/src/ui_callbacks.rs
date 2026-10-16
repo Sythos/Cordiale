@@ -126,6 +126,23 @@ pub(crate) fn register_connect_callbacks(
         passkey_origin(&server_url, Some(origin.as_str())).into()
     });
     ui.on_passkey_origin_valid(|origin| !matches!(check_override(&origin), OverrideCheck::Invalid));
+    ui.on_fit_column_widths(
+        |window, sidebar, members, sidebar_min, members_min, reserved, sidebar_max| {
+            let fitted = fit_columns(
+                window,
+                sidebar,
+                members,
+                sidebar_min,
+                members_min,
+                reserved,
+                sidebar_max,
+            );
+            ColumnWidths {
+                sidebar: fitted.sidebar,
+                members: fitted.members,
+            }
+        },
+    );
     ui.on_cleartext_key(|server_url, origin| {
         cleartext::confirmation_key(&server_url, &origin).into()
     });
