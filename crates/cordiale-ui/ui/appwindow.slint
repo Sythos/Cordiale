@@ -1414,7 +1414,7 @@ export component AppWindow inherits Window {
     // column is never narrower than the average member label or its
     // Actions button.
     property <length> sidebar-icons-min-width:
-        top-icon-count * top-icon-size + (top-icon-count - 1) * top-icon-spacing + 2 * sidebar-padding;
+        top-icon-size * top-icon-count + top-icon-spacing * (top-icon-count - 1) + 2 * sidebar-padding;
     property <length> sidebar-rows-min-width:
         sidebar-label-probe.preferred-width + sidebar-row-indent + 2 * sidebar-cell-width
         + 2 * sidebar-row-spacing + sidebar-scroll-gutter + 2 * sidebar-padding;
@@ -3392,12 +3392,10 @@ export component AppWindow inherits Window {
 
                             // The unread cell and the [X] cell are reserved
                             // in every row, so the cells line up in a column.
-                            Rectangle {
+                            HorizontalLayout {
                                 width: sidebar-cell-width;
 
                                 if entry.unread-description != "" : Text {
-                                    width: parent.width;
-                                    height: parent.height;
                                     text: entry.unread-count;
                                     accessible-label: entry.unread-description;
                                     accessible-role: AccessibleRole.text;
@@ -3408,14 +3406,12 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Rectangle {
+                            HorizontalLayout {
                                 width: sidebar-cell-width;
 
                                 if entry.kicked : Button {
                                     text: "×";
                                     accessible-label: @tr("Dismiss kicked channel {}", entry.label);
-                                    width: parent.width;
-                                    height: parent.height;
                                     clicked => {
                                         kicked-channel-dismiss-requested(entry.network, entry.channel);
                                     }
@@ -3423,8 +3419,6 @@ export component AppWindow inherits Window {
                                 if entry.joined : Button {
                                     text: "×";
                                     accessible-label: @tr("Leave channel {} on {}", entry.channel, entry.network);
-                                    width: parent.width;
-                                    height: parent.height;
                                     clicked => { channel-part-requested(entry.network, entry.channel); }
                                 }
                             }
@@ -3443,12 +3437,10 @@ export component AppWindow inherits Window {
                                 activated => { query-selected(query.network, query.nick); }
                             }
 
-                            Rectangle {
+                            HorizontalLayout {
                                 width: sidebar-cell-width;
 
                                 if query.unread-description != "" : Text {
-                                    width: parent.width;
-                                    height: parent.height;
                                     text: query.unread-count;
                                     accessible-label: query.unread-description;
                                     accessible-role: AccessibleRole.text;
@@ -3459,14 +3451,12 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Rectangle {
+                            HorizontalLayout {
                                 width: sidebar-cell-width;
 
                                 Button {
                                     text: "×";
                                     accessible-label: @tr("Close conversation with {} on {}", query.nick, query.network);
-                                    width: parent.width;
-                                    height: parent.height;
                                     clicked => { query-close-requested(query.network, query.nick); }
                                 }
                             }
