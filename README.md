@@ -133,13 +133,11 @@ Cordiale also covers:
   and a scoped client token cannot use Grappa's account-security endpoints.
   Builds made with the optional `ctap-hid` cargo feature do the same on
   Linux and macOS with a USB security key and its PIN (CI builds and lints
-  it on Linux and macOS, but it hasn't been tried with a real key yet; the
-  release packages leave it off). Elsewhere, passkey-only sign-in still
+  it on Linux and macOS; the release packages leave it off). Elsewhere, passkey-only sign-in still
   needs a share link or client token from Cicchetto; an account whose
   passkey is backed by recovery codes can sign
   in with one of those, and a passwordless account can sign in from the
-  connect screen with a one-time recovery code (not yet checked against a
-  live server). Settings > Security also lists the account's passkeys and
+  connect screen with a one-time recovery code. Settings > Security also lists the account's passkeys and
   deletes them with the password.
 - **Cleartext warning:** an `http://` server address that isn't this device
   (anything but `localhost`, `*.localhost`, `127.0.0.0/8` and `::1`) shows a
@@ -159,8 +157,7 @@ Cordiale also covers:
 - **Session sharing:** Settings > Security makes a single-use link and QR
   code (valid ten minutes) that signs another device into the same account,
   and the connect screen signs in with such a link or token from another
-  device, for example one made in Cicchetto after a passkey sign-in. Not yet
-  checked against a live server.
+  device, for example one made in Cicchetto after a passkey sign-in.
 - **Connection and presence:** Cordiale declares the protocol revision it
   was checked against (`client_proto=37`) and, if Grappa refuses the
   upgrade with `426`, stops and asks you to update instead of retrying.
