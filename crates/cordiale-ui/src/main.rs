@@ -9151,13 +9151,17 @@ fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isu
 }
 
 /// The longest sidebar row label, as displayed, measured by the Slint probe
-/// that sets the sidebar's minimum width. Lengths are compared in
-/// characters; the probe then measures the real text.
+/// that sets the sidebar's minimum width. Rows are compared by display width
+/// (wide characters count twice, joiners and combining marks add nothing);
+/// the probe then measures the real text. Channel and query rows include the bullet of the open row, the
+/// widest form that row can take.
 fn widest_sidebar_label(groups: &[NetworkGroup]) -> String {
     use slint::Model as _;
 
+    use unicode_width::UnicodeWidthStr as _;
+
     fn keep_longer(widest: &mut String, candidate: String) {
-        if candidate.chars().count() > widest.chars().count() {
+        if candidate.width() > widest.width() {
             *widest = candidate;
         }
     }
@@ -9176,17 +9180,55 @@ fn widest_sidebar_label(groups: &[NetworkGroup]) -> String {
             let invited = if entry.invited { "🔔 " } else { "" };
             keep_longer(
                 &mut widest,
-                format!("{invited}{}{}", entry.label, entry.mention_badge),
+                format!("● {invited}{}{}", entry.label, entry.mention_badge),
             );
         }
         for query in group.queries.iter() {
             keep_longer(
                 &mut widest,
-                format!("↳ {}{}", query.label, query.mention_badge),
+                format!("● ↳ {}{}", query.label, query.mention_badge),
             );
         }
     }
     widest
+}
+
+/// Column widths of the connected screen, in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FittedColumns {
+    sidebar: f32,
+    members: f32,
+}
+
+/// Fits the sidebar and member columns into the window. Both stay at or
+/// above their minimum; the sidebar stays at or below `sidebar_max`. When
+/// the two do not leave `reserved` (the chat minimum plus the fixed layout
+/// width) free, the member column gives way first, then the sidebar. A
+/// window too narrow for the minimums keeps them.
+fn fit_columns(
+    window: f32,
+    sidebar: f32,
+    members: f32,
+    sidebar_min: f32,
+    members_min: f32,
+    reserved: f32,
+    sidebar_max: f32,
+) -> FittedColumns {
+    let sidebar_max = sidebar_max.max(sidebar_min);
+    let mut sidebar = sidebar.clamp(sidebar_min, sidebar_max);
+    let mut members = members.max(members_min);
+    if window > 0.0 {
+        let mut excess = sidebar + members - (window - reserved);
+        if excess > 0.0 {
+            let cut = excess.min(members - members_min);
+            members -= cut;
+            excess -= cut;
+        }
+        if excess > 0.0 {
+            sidebar -= excess.min(sidebar - sidebar_min);
+        }
+    }
+    FittedColumns { sidebar, members }
 }
 
 /// A run of `n` characters as long as the average member label as shown in
