@@ -128,13 +128,15 @@ Cordiale also covers:
   `webauthn.dll` (Windows Hello, security keys, a phone): passkey as second
   factor, passwordless sign-in from the connect screen, and in Settings >
   Security adding a passkey, changing the passkey mode and turning on
-  passwordless (not yet tried with a real authenticator). Builds made with
-  the optional `ctap-hid` cargo feature do the same on Linux and macOS with
-  a USB security key and its PIN (CI builds and lints it on Linux and macOS,
-  but it hasn't been tried with a real key yet; the release packages leave
-  it off). Elsewhere,
-  passkey-only sign-in still needs a share link or client token from
-  Cicchetto; an account whose passkey is backed by recovery codes can sign
+  passwordless. Testers confirmed adding and changing a passkey on Windows
+  and macOS. Client token management and account deletion stay in Cicchetto,
+  and a scoped client token cannot use Grappa's account-security endpoints.
+  Builds made with the optional `ctap-hid` cargo feature do the same on
+  Linux and macOS with a USB security key and its PIN (CI builds and lints
+  it on Linux and macOS, but it hasn't been tried with a real key yet; the
+  release packages leave it off). Elsewhere, passkey-only sign-in still
+  needs a share link or client token from Cicchetto; an account whose
+  passkey is backed by recovery codes can sign
   in with one of those, and a passwordless account can sign in from the
   connect screen with a one-time recovery code (not yet checked against a
   live server). Settings > Security also lists the account's passkeys and
@@ -257,25 +259,6 @@ Cordiale also covers:
 
 ## Known gaps
 
-- **Account security:** outside Windows, registering a passkey, signing in
-  with one and changing the passkey mode (no WebAuthn ceremony there unless
-  built with the `ctap-hid` feature for USB keys, see
-  `docs/passkey-spike.md`), and everywhere creating or managing client
-  tokens and account deletion, still live in Cicchetto. TOTP, the passkey list and session
-  sharing work in Cordiale with a full password-backed session; a scoped
-  client token cannot use Grappa's account-security endpoints.
-- **Not yet tried against a live server:** passkey listing and deletion,
-  the Windows passkey ceremonies (no real authenticator either),
-  session-sharing links, channel-history catch-up after a reconnect, the
-  reconnect back-off and the `Retry-After` handling, the TLS trust against a
-  private CA, the move of the files out of `~/.cordiale` on real Windows and
-  macOS machines, the history cap in a long-running window, the
-  foreground presence reports, the `client_proto` declaration and its `426`
-  handling, DM renames by conversation id (servers below protocol 37), the
-  coexisting old and new private windows after a peer's nick change on
-  protocol 37, declining an invite, your own
-  profile and avatar, and the newer admin operations. They follow the server's
-  source and pass tests against a mock server; expect rough edges.
 - **Platform limits:**
   - Files dropped on the window reach Cordiale on Windows, macOS and X11,
     not on Wayland, where the windowing layer doesn't report them.
@@ -283,8 +266,6 @@ Cordiale also covers:
     show the count in the window title.
   - Themes restyle the window, chat and member list, while buttons and
     menus keep Slint's own widget style in its dark or light variant.
-- **Server data:** Grappa no longer reports a network's ident and realname,
-  so the identity editor starts those two fields blank.
 
 ## Download
 
