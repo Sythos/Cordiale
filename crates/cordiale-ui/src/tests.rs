@@ -4639,10 +4639,10 @@ fn widest_sidebar_label_counts_wide_characters_twice() {
             ..Default::default()
         },
     ];
+    // The network row ("▾ 🔌 n", 6 columns) is narrower than both channels.
     let groups = vec![NetworkGroup {
         network: "n".into(),
         channels: Rc::new(slint::VecModel::from(channels)).into(),
-        parked: true,
         ..Default::default()
     }];
     assert_eq!(widest_sidebar_label(&groups), "● #ab🎉🎉");
@@ -4650,22 +4650,21 @@ fn widest_sidebar_label_counts_wide_characters_twice() {
 
 #[test]
 fn widest_sidebar_label_ignores_joiners_and_combining_marks() {
-    // The joined emoji sequence is 2 columns wide, so the longer ASCII name
-    // wins although the sequence has more bytes.
+    // Zero-width joiners and combining marks add no columns: the second
+    // label has more characters and bytes, but is 6 columns wide against 7.
     let channels = vec![
         ChannelEntry {
             label: "#abcdef".into(),
             ..Default::default()
         },
         ChannelEntry {
-            label: "👨\u{200d}👩\u{200d}👧\u{200d}👦e\u{301}e\u{301}".into(),
+            label: "#a\u{200d}\u{200d}\u{200d}e\u{301}e\u{301}e\u{301}e\u{301}".into(),
             ..Default::default()
         },
     ];
     let groups = vec![NetworkGroup {
         network: "n".into(),
         channels: Rc::new(slint::VecModel::from(channels)).into(),
-        parked: true,
         ..Default::default()
     }];
     assert_eq!(widest_sidebar_label(&groups), "● #abcdef");
