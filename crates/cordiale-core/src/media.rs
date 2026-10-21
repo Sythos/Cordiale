@@ -122,7 +122,9 @@ fn trim_trailing(mut url: &str) -> &str {
             return url;
         };
         let strip = match last {
-            '.' | ',' | ';' | ':' | '!' | '?' | ']' | '}' | '\'' => true,
+            '.' | ',' | ';' | ':' | '!' | '?' | ']' | '}' | '\'' | '”' | '’' | '»' | '›' => {
+                true
+            }
             ')' => url.matches('(').count() < url.matches(')').count(),
             _ => false,
         };
@@ -664,6 +666,27 @@ mod tests {
         );
         assert!(find_links("ftp:// and http:// alone").is_empty());
         assert!(find_links("user@host.org/x mail").is_empty());
+    }
+
+    #[test]
+    fn unicode_closing_quotes_are_left_out_of_links() {
+        for quote in ['”', '’', '»', '›'] {
+            let text = format!("See (https://example.org/path){quote}");
+            assert_eq!(
+                hrefs(&text),
+                vec![(
+                    "https://example.org/path".to_string(),
+                    "https://example.org/path".to_string()
+                )]
+            );
+        }
+        assert_eq!(
+            hrefs("See (http://w.org/wiki/A_(b))”"),
+            vec![(
+                "http://w.org/wiki/A_(b)".to_string(),
+                "http://w.org/wiki/A_(b)".to_string()
+            )]
+        );
     }
 
     #[test]
