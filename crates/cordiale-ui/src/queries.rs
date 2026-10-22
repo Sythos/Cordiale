@@ -10,6 +10,8 @@ pub(crate) async fn handle_select_query(
     network: String,
     nick: String,
 ) {
+    // Later navigation ends a delayed rename focus.
+    state.transcript.pending_query_focus = None;
     let Some(query) = find_query_window(&state.transcript.query_windows, &network, &nick).cloned()
     else {
         return;

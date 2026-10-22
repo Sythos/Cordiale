@@ -1834,6 +1834,7 @@ async fn run_worker(
                         close_directory(&mut state, &ui);
                     }
                     Some(WorkerCommand::DirectoryOpen(network)) => {
+                        state.transcript.pending_query_focus = None;
                         run_directory_open(&mut state, &ui, network).await;
                     }
                     Some(WorkerCommand::DirectoryActivate(channel)) => {
@@ -2472,6 +2473,7 @@ async fn run_worker(
                         handle_rebuild_chat(&mut state, &ui, &key, trim);
                     }
                     Some(WorkerCommand::GoHome) => {
+                        state.transcript.pending_query_focus = None;
                         write_back_read_cursor(&mut state);
                         close_directory(&mut state, &ui);
                         if let Some(previous) = state.windows.current_channel.take() {

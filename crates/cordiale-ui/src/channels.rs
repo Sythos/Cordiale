@@ -6,6 +6,8 @@ pub(crate) async fn handle_select_channel(
     network: String,
     channel: String,
 ) {
+    // Later navigation ends a delayed rename focus.
+    state.transcript.pending_query_focus = None;
     let Some(identifier) = state.conn.identifier.clone() else {
         return;
     };

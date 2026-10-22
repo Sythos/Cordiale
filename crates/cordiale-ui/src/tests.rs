@@ -10154,6 +10154,31 @@ fn rename_focus_ends_after_later_navigation() {
 }
 
 #[test]
+fn rename_focus_ends_after_leaving_and_returning() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    let origin = ("libera".to_string(), "Old".to_string());
+    state.windows.current_channel = Some(origin.clone());
+    upload_test_runtime().block_on(async {
+        handle_open_rename_target(&mut state, &ui, "New".to_string()).await;
+        // The user selects another window, then returns to the origin one.
+        handle_select_channel(&mut state, &ui, "libera".to_string(), "#other".to_string()).await;
+    });
+    state.windows.current_channel = Some(origin.clone());
+    state.transcript.query_windows = vec![QueryWindow {
+        network: "libera".to_string(),
+        target_nick: "New".to_string(),
+        opened_at: "2026-09-21T10:00:00Z".to_string(),
+        dm_conversation_id: None,
+    }];
+    upload_test_runtime().block_on(async {
+        focus_pending_query(&mut state, &ui).await;
+    });
+    assert!(state.transcript.pending_query_focus.is_none());
+    assert_eq!(state.windows.current_channel, Some(origin));
+}
+
+#[test]
 fn rename_action_ignores_the_own_nick() {
     let mut state = WorkerState::new();
     let ui = slint::Weak::<AppWindow>::default();
