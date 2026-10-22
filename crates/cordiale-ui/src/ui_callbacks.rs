@@ -583,6 +583,11 @@ pub(crate) fn register_member_callbacks(
     ui.on_member_query_requested(move |nick| {
         let _ = tx_for_query.send(WorkerCommand::MemberQuery(nick.to_string()));
     });
+
+    let tx_for_rename_target = worker_tx.clone();
+    ui.on_rename_target_requested(move |nick| {
+        let _ = tx_for_rename_target.send(WorkerCommand::OpenRenameTarget(nick.to_string()));
+    });
 }
 
 /// Channel, network and query selection, the Home network actions, invites and dismissals.

@@ -1557,6 +1557,7 @@ fn query_windows_snapshot_migrates_cache_on_case_only_nick_change() {
             message_id: Some(1),
             server_time: Some(1),
             presence_noise: false,
+            rename_to: None,
         }],
     );
     state
@@ -1683,6 +1684,7 @@ fn state_with_selected_query(
             message_id: Some(1),
             server_time: Some(1),
             presence_noise: false,
+            rename_to: None,
         }],
     );
     state
@@ -8820,6 +8822,7 @@ fn read_cursor_write_back_is_forward_only() {
         message_id: Some(id),
         server_time: Some(id),
         presence_noise: false,
+        rename_to: None,
     };
     assert_eq!(read_cursor_to_write(&mut state), None);
     state.windows.current_channel = Some(key.clone());
@@ -8870,6 +8873,7 @@ fn catch_up_anchors_cover_joined_channels_and_keep_the_first_one() {
         message_id: Some(id),
         server_time: Some(id),
         presence_noise: false,
+        rename_to: None,
     };
     let mut state = WorkerState::new();
     let joined = ("libera".to_string(), "#rust".to_string());
@@ -8925,6 +8929,7 @@ fn history_tail_replaces_old_rows_keeps_live_ones_and_marks_the_hole() {
         message_id: Some(id),
         server_time: Some(id),
         presence_noise: false,
+        rename_to: None,
     };
     let mut messages = vec![line(1), line(2), line(900)];
     // The tail arrives newest first, like the default page.
@@ -8946,6 +8951,7 @@ fn history_tail_without_rows_leaves_the_window_alone() {
         message_id: Some(4),
         server_time: Some(4),
         presence_noise: false,
+        rename_to: None,
     }];
     replace_with_history_tail(&mut messages, Vec::new());
     assert_eq!(messages.len(), 1);
@@ -9508,6 +9514,7 @@ fn history_row(id: Option<i64>, server_time: Option<i64>) -> RenderedMessage {
         message_id: id,
         server_time,
         presence_noise: false,
+        rename_to: None,
     }
 }
 
@@ -10026,4 +10033,95 @@ fn slow_upload_leaves_the_runtime_free_for_other_work() {
         other
     });
     assert_eq!(finished, 1);
+}
+
+fn rename_payload(new_nick: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "nick_change",
+        "sender": "old",
+        "channel": "old",
+        "dm_with": null,
+        "meta": {"new_nick": new_nick},
+        "id": 5
+    })
+}
+
+#[test]
+fn rename_row_keeps_the_new_nick_as_structured_target() {
+    let row = render_message(&rename_payload(serde_json::json!("new")), None);
+    assert_eq!(row.text, "* old is now known as new");
+    assert_eq!(row.rename_to.as_deref(), Some("new"));
+    assert_eq!(rename_row_parts(&row), ("* old is now known as", "new"));
+}
+
+#[test]
+fn rename_row_without_a_valid_new_nick_has_no_action() {
+    for new_nick in [
+        serde_json::json!(null),
+        serde_json::json!(""),
+        serde_json::json!(42),
+        serde_json::json!("two words"),
+        serde_json::json!("#channel"),
+        serde_json::json!("a,b"),
+    ] {
+        let row = render_message(&rename_payload(new_nick), None);
+        assert_eq!(row.rename_to, None);
+        assert_eq!(rename_row_parts(&row), (row.text.as_str(), ""));
+    }
+    let missing = render_message(
+        &serde_json::json!({"kind": "nick_change", "sender": "old", "id": 6}),
+        None,
+    );
+    assert_eq!(missing.rename_to, None);
+    assert!(missing.text.contains("old is now known as"));
+}
+
+#[test]
+fn rename_target_with_markdown_characters_stays_plain_data() {
+    let nick = "[a]_*b*`c`|{x}^";
+    let row = render_message(&rename_payload(serde_json::json!(nick)), None);
+    assert_eq!(row.rename_to.as_deref(), Some(nick));
+    let (head, target) = rename_row_parts(&row);
+    assert_eq!(target, nick);
+    assert_eq!(head, "* old is now known as");
+    assert!(!head.contains(nick));
+}
+
+#[test]
+fn other_rows_have_no_rename_target() {
+    for kind in ["join", "part", "quit", "mode", "privmsg"] {
+        assert_eq!(presence_row(kind).rename_to, None, "{kind}");
+    }
+}
+
+#[test]
+fn rename_action_waits_for_the_server_snapshot() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    state.windows.current_channel = Some(("libera".to_string(), "Old".to_string()));
+    upload_test_runtime().block_on(async {
+        handle_open_rename_target(&mut state, &ui, "New".to_string()).await;
+    });
+    assert!(state.transcript.query_windows.is_empty());
+    assert_eq!(
+        state.transcript.pending_query_focus,
+        Some(("libera".to_string(), "New".to_string()))
+    );
+    // A snapshot that does not list the nick ends the request.
+    upload_test_runtime().block_on(async {
+        focus_pending_query(&mut state, &ui).await;
+    });
+    assert_eq!(state.transcript.pending_query_focus, None);
+    assert!(state.transcript.query_windows.is_empty());
+}
+
+#[test]
+fn rename_action_ignores_an_invalid_nick() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    state.windows.current_channel = Some(("libera".to_string(), "Old".to_string()));
+    upload_test_runtime().block_on(async {
+        handle_open_rename_target(&mut state, &ui, "bad nick".to_string()).await;
+    });
+    assert_eq!(state.transcript.pending_query_focus, None);
 }

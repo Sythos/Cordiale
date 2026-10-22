@@ -419,6 +419,21 @@ il resto della sezione Sicurezza resta in Cicchetto:
   condividono un canale con l'utente. Per un peer presente solo nel DM serve
   un evento o una ricerca di identità affidabile da Grappa; senza, il DM
   non viene collegato e il nuovo nick apre una finestra separata.
+- **Riga di rinomina sul topic della query vecchia (Grappa 2368/2399).**
+  Quando il peer cambia nick, Grappa aggiunge una sola riga `nick_change`
+  (`sender` e `channel` = vecchio nick, `meta.new_nick` = nuovo nick,
+  `dm_with` nullo) alla finestra query del vecchio nick, solo se è già
+  aperta. Non crea la finestra del nuovo nick e non sposta righe, cursori
+  né mute. Il server la manda solo a chi condivide un canale col peer al
+  momento del cambio. Il Denoise per canale può nasconderla dalla cronologia
+  REST; la riga live arriva comunque. Forma e versione del protocollo non
+  cambiano. In Cordiale il nuovo nick della riga (letto da `meta.new_nick`,
+  mai dal testo) è un'azione: invia `open_query_window` sulla rete della
+  finestra aperta e, quando `query_windows_list` elenca il nick, seleziona
+  quella query. Con un `QueryPeerLink` attivo la selezione apre il DM già
+  aperto (`query_anchor_window`), senza una seconda finestra visibile. Un
+  nick già elencato si seleziona subito. Il collegamento non cambia per
+  effetto del clic: lo crea solo l'evento osservato.
 - **Self-KICK (Grappa 2321, tag `v1.5.12`).** Un KICK subito dal proprio
   utente non toglie più il canale dallo snapshot di rientro
   (`last_joined_channels`): alla riconnessione il canale viene rientrato,
