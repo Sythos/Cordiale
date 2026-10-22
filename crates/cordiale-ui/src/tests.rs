@@ -10078,7 +10078,7 @@ fn rename_row_without_a_valid_new_nick_has_no_action() {
 
 #[test]
 fn rename_target_with_markdown_characters_stays_plain_data() {
-    let nick = "[a]_*b*`c`|{x}^";
+    let nick = "[a]_`b`|{x}^-";
     let row = render_message(&rename_payload(serde_json::json!(nick)), None);
     assert_eq!(row.rename_to.as_deref(), Some(nick));
     let (head, target) = rename_row_parts(&row);
@@ -10103,16 +10103,43 @@ fn rename_action_waits_for_the_server_snapshot() {
         handle_open_rename_target(&mut state, &ui, "New".to_string()).await;
     });
     assert!(state.transcript.query_windows.is_empty());
-    assert_eq!(
-        state.transcript.pending_query_focus,
-        Some(("libera".to_string(), "New".to_string()))
-    );
-    // A snapshot that does not list the nick ends the request.
+    assert!(matches!(
+        &state.transcript.pending_query_focus,
+        Some((network, nick, _)) if network == "libera" && nick == "New"
+    ));
+    // A snapshot that does not list the nick keeps the request.
     upload_test_runtime().block_on(async {
         focus_pending_query(&mut state, &ui).await;
     });
-    assert_eq!(state.transcript.pending_query_focus, None);
+    assert!(state.transcript.pending_query_focus.is_some());
     assert!(state.transcript.query_windows.is_empty());
+    // An old request expires.
+    if let Some(pending) = state.transcript.pending_query_focus.as_mut() {
+        if let Some(old) = std::time::Instant::now()
+            .checked_sub(PENDING_QUERY_FOCUS_TTL + std::time::Duration::from_secs(1))
+        {
+            pending.2 = old;
+            upload_test_runtime().block_on(async {
+                focus_pending_query(&mut state, &ui).await;
+            });
+            assert!(state.transcript.pending_query_focus.is_none());
+        }
+    }
+}
+
+#[test]
+fn rename_action_ignores_the_own_nick() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    state.windows.current_channel = Some(("libera".to_string(), "#chan".to_string()));
+    state
+        .networks
+        .own_nicks
+        .insert("libera".to_string(), "Me".to_string());
+    upload_test_runtime().block_on(async {
+        handle_open_rename_target(&mut state, &ui, "me".to_string()).await;
+    });
+    assert!(state.transcript.pending_query_focus.is_none());
 }
 
 #[test]

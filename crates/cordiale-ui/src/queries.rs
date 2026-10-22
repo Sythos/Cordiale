@@ -72,11 +72,22 @@ pub(crate) async fn handle_open_rename_target(
     let Some((network, _)) = state.windows.current_channel.clone() else {
         return;
     };
+    // A rename row of the user's own nick is not a peer to talk to.
+    let casemapping = network_casemapping(state, &network);
+    if state
+        .networks
+        .own_nicks
+        .get(&network)
+        .is_some_and(|own| casemapping.nick_eq(own, &nick))
+    {
+        return;
+    }
     if find_query_window(&state.transcript.query_windows, &network, &nick).is_some() {
         handle_select_query(state, ui, network, nick).await;
         return;
     }
-    state.transcript.pending_query_focus = Some((network.clone(), nick.clone()));
+    state.transcript.pending_query_focus =
+        Some((network.clone(), nick.clone(), std::time::Instant::now()));
     send_user_verb(
         state,
         &network,
@@ -86,16 +97,25 @@ pub(crate) async fn handle_open_rename_target(
 }
 
 /// After a `query_windows_list` snapshot: selects the query a rename row
-/// asked for if the snapshot lists it. The request ends either way, so a
-/// refused open never selects a later window by surprise.
+/// asked for if the snapshot lists it. A snapshot without the nick (for
+/// example from another session) keeps the request. The request ends when
+/// the nick is listed or after `PENDING_QUERY_FOCUS_TTL`.
 pub(crate) async fn focus_pending_query(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    let Some((network, nick)) = state.transcript.pending_query_focus.take() else {
+    let Some((network, nick, asked_at)) = state.transcript.pending_query_focus.clone() else {
         return;
     };
+    if asked_at.elapsed() > PENDING_QUERY_FOCUS_TTL {
+        state.transcript.pending_query_focus = None;
+        return;
+    }
     if find_query_window(&state.transcript.query_windows, &network, &nick).is_some() {
+        state.transcript.pending_query_focus = None;
         handle_select_query(state, ui, network, nick).await;
     }
 }
+
+/// How long a rename row's open request waits for the server snapshot.
+pub(crate) const PENDING_QUERY_FOCUS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Closes the Grappa query window of a sidebar row. The server answers with
 /// a new `query_windows_list`, which clears the view if this window is open.
