@@ -3443,3 +3443,7 @@ msgstr "Aviso"
 msgctxt "AppWindow"
 msgid "Close notice"
 msgstr "Cerrar aviso"
+
+msgctxt "RenameTarget"
+msgid "Open a conversation with {}"
+msgstr "Abre una conversación con {}"

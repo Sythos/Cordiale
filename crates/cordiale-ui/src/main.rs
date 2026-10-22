@@ -480,6 +480,9 @@ enum WorkerCommand {
         verb: String,
     },
     MemberQuery(String),
+    /// The new nick of a peer rename row was clicked: open its query on the
+    /// network of the open window, then select it once the server lists it.
+    OpenRenameTarget(String),
 }
 
 /// The authentication action the user explicitly chose on the connect
@@ -1328,6 +1331,10 @@ struct TranscriptState {
     /// emits after opening a sender's query. Hold only a small FIFO until that
     /// snapshot either confirms the query or proves it should be discarded.
     pending_own_nick_dms: VecDeque<PendingOwnNickDm>,
+    /// `(network, nick, asked at)` of a query asked for by a rename row, to
+    /// select once a `query_windows_list` snapshot lists it. It expires, so a
+    /// refused open does not select a later window.
+    pending_query_focus: Option<(String, String, std::time::Instant)>,
     /// Query topics whose Phoenix join was acknowledged successfully. Keys
     /// use the same network + ASCII-folded target identity as the snapshot.
     query_joined: std::collections::HashSet<(String, String)>,
@@ -1493,6 +1500,7 @@ impl WorkerState {
                 reply_contexts: HashMap::new(),
                 query_windows: Vec::new(),
                 pending_own_nick_dms: VecDeque::new(),
+                pending_query_focus: None,
                 query_joined: std::collections::HashSet::new(),
                 query_ready: std::collections::HashSet::new(),
                 query_full_history_required: std::collections::HashSet::new(),
@@ -2516,6 +2524,9 @@ async fn run_worker(
                     Some(WorkerCommand::MemberQuery(nick)) => {
                         send_member_query(&state, &nick);
                     }
+                    Some(WorkerCommand::OpenRenameTarget(nick)) => {
+                        handle_open_rename_target(&mut state, &ui, nick).await;
+                    }
                 }
             }
 
@@ -2547,7 +2558,15 @@ async fn run_worker(
                         }
                     }
                     Some(SessionEvent::Frame(frame)) => {
+                        let is_query_snapshot = frame
+                            .payload
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            == Some("query_windows_list");
                         handle_frame(&mut state, &ui, frame).await;
+                        if is_query_snapshot {
+                            focus_pending_query(&mut state, &ui).await;
+                        }
                     }
                     Some(SessionEvent::Disconnected { reason, .. }) if state.conn.session.is_none() => {
                         // A deliberately ended session (sign-out, revoked
@@ -2890,6 +2909,7 @@ async fn finish_connect(
             state.transcript.query_windows.clear();
             state.conn.server_protocol_version = Some(outcome.compatibility.protocol_version);
             state.transcript.pending_own_nick_dms.clear();
+            state.transcript.pending_query_focus = None;
             state.transcript.query_joined.clear();
             state.transcript.query_ready.clear();
             state.transcript.query_full_history_required.clear();
@@ -7544,6 +7564,20 @@ struct RenderedMessage {
     /// A join/part/quit/nick-change/mode line that Denoise hides; it stays
     /// in the stored history so toggling Denoise off brings it back.
     presence_noise: bool,
+    /// The new nick of a peer rename line, read from `meta.new_nick`. It is
+    /// `Some` only for a valid nick; the row then shows it as an action.
+    rename_to: Option<String>,
+}
+
+/// Whether `nick` can be the target of a rename action: one token with no
+/// whitespace, control or IRC list/channel/prefix characters.
+fn valid_rename_target(nick: &str) -> bool {
+    !nick.is_empty()
+        && nick.chars().count() <= 64
+        && !nick.starts_with(['#', '&', '+', '!', ':'])
+        && !nick
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || ",@*?".contains(ch))
 }
 
 /// Shared `from`/`nick`/`sender` + `body`/`message` extraction for both
@@ -7578,6 +7612,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
         .or_else(|| payload.get("reason").and_then(Value::as_str))
         .filter(|reason| !reason.is_empty());
 
+    let mut rename_to = None;
     let event_text = match kind {
         Some("join") => Some(format!("→ {} joined", nick.unwrap_or("someone"))),
         Some("part") => Some(match reason {
@@ -7597,6 +7632,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
                 .and_then(|meta| meta.get("new_nick"))
                 .and_then(Value::as_str)
                 .unwrap_or("someone else");
+            rename_to = Some(new_nick.to_string()).filter(|nick| valid_rename_target(nick));
             Some(format!(
                 "* {} is now known as {new_nick}",
                 nick.unwrap_or("someone")
@@ -7667,6 +7703,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             message_id: message_id(payload),
             server_time: server_time(payload),
             presence_noise,
+            rename_to,
         };
     }
 
@@ -7685,6 +7722,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             message_id: message_id(payload),
             server_time: server_time(payload),
             presence_noise,
+            rename_to: None,
         },
         (None, Some(body)) => RenderedMessage {
             timestamp,
@@ -7694,6 +7732,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             message_id: message_id(payload),
             server_time: server_time(payload),
             presence_noise,
+            rename_to: None,
         },
         _ => RenderedMessage {
             timestamp,
@@ -7705,6 +7744,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             message_id: message_id(payload),
             server_time: server_time(payload),
             presence_noise,
+            rename_to: None,
         },
     }
 }
@@ -8769,8 +8809,11 @@ fn chat_line_from_message(
     } else {
         (0, 0, 0)
     };
+    // A rename row shows its sentence up to the new nick as text; the nick
+    // itself is a separate action, so it never passes through the markup.
+    let (display_text, rename_target) = rename_row_parts(message);
     let runs: Vec<(String, (u8, u8, u8), bool)> =
-        cordiale_core::formatting::parse_mirc_text(&message.text)
+        cordiale_core::formatting::parse_mirc_text(display_text)
             .into_iter()
             .map(|segment| {
                 let color = segment
@@ -8805,6 +8848,20 @@ fn chat_line_from_message(
             .unwrap_or_default()
             .into(),
         mention,
+        rename_target: rename_target.into(),
+    }
+}
+
+/// The text a row shows as ordinary text, and the new nick of its rename
+/// action (empty for none). The action exists only when the row text ends
+/// with the structured nick, so the plain line stays complete without it.
+fn rename_row_parts(message: &RenderedMessage) -> (&str, &str) {
+    let Some(target) = message.rename_to.as_deref() else {
+        return (&message.text, "");
+    };
+    match message.text.strip_suffix(target) {
+        Some(head) if head.ends_with(' ') => (head.trim_end(), target),
+        _ => (&message.text, ""),
     }
 }
 

@@ -226,6 +226,9 @@ struct ChatLine {
     // Mentions the user (own nick or a /hilight pattern), as Cicchetto
     // marks it: the mention background.
     mention: bool,
+    // The new nick of a peer rename line (`body` then holds only the text
+    // before it); empty when the row has no such action.
+    rename-target: string,
 }
 
 // One row in the admin Sessions list.
@@ -699,6 +702,54 @@ component SidebarRowButton inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
             color: root.selected ? Palette.accent-foreground : Palette.control-foreground;
+        }
+    }
+}
+
+// The new nick in a peer rename line: a link-styled action that asks the
+// worker to open or focus the conversation with that nick. Click, Enter or
+// Space activates it. The nick is shown as plain `Text`, never as markup.
+component RenameTarget inherits Rectangle {
+    in property <string> nick;
+    in property <color> link-color;
+    in property <bool> italic;
+    callback activated();
+
+    border-radius: 3px;
+    border-width: focus.has-focus ? 1px : 0px;
+    border-color: link-color;
+    accessible-role: button;
+    accessible-label: @tr("Open a conversation with {}", nick);
+    accessible-action-default => { activated(); }
+
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.activated();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            focus.focus();
+            root.activated();
+        }
+    }
+
+    // The layout gives the rectangle the text's width; the left padding is
+    // the space after the sentence before the nick.
+    HorizontalLayout {
+        padding-left: 4px;
+        Text {
+            text: root.nick;
+            color: root.link-color;
+            font-italic: root.italic;
+            overflow: elide;
         }
     }
 }
@@ -1686,6 +1737,7 @@ export component AppWindow inherits Window {
     callback member-whois-requested(string);
     callback member-ctcp-requested(string, string); // nick, verb
     callback member-query-requested(string);
+    callback rename-target-requested(string); // new nick of a rename row
     callback channel-selected(string, string);
     callback channel-part-requested(string, string);
     callback query-selected(string, string);
@@ -4135,11 +4187,18 @@ export component AppWindow inherits Window {
                             text: line.body;
                             default-color: theme == "dark" ? white : black;
                             link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
-                            horizontal-stretch: 1;
+                            horizontal-stretch: line.rename-target == "" ? 1 : 0;
                             // The longest word must not set the row's minimum
                             // width; the row's clip trims what doesn't fit.
                             min-width: 0px;
                             link-clicked(href) => { chat-link-clicked(href); }
+                        }
+
+                        if line.rename-target != "" : RenameTarget {
+                            nick: line.rename-target;
+                            italic: line.italic;
+                            link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
+                            activated => { rename-target-requested(line.rename-target); }
                         }
                     }
                 }
