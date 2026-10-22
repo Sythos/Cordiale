@@ -69,9 +69,10 @@ pub(crate) async fn handle_open_rename_target(
     if !valid_rename_target(&nick) {
         return;
     }
-    let Some((network, _)) = state.windows.current_channel.clone() else {
+    let Some(origin) = state.windows.current_channel.clone() else {
         return;
     };
+    let network = origin.0.clone();
     // A rename row of the user's own nick is not a peer to talk to.
     let casemapping = network_casemapping(state, &network);
     if state
@@ -86,8 +87,12 @@ pub(crate) async fn handle_open_rename_target(
         handle_select_query(state, ui, network, nick).await;
         return;
     }
-    state.transcript.pending_query_focus =
-        Some((network.clone(), nick.clone(), std::time::Instant::now()));
+    state.transcript.pending_query_focus = Some((
+        network.clone(),
+        nick.clone(),
+        std::time::Instant::now(),
+        origin,
+    ));
     send_user_verb(
         state,
         &network,
@@ -99,12 +104,16 @@ pub(crate) async fn handle_open_rename_target(
 /// After a `query_windows_list` snapshot: selects the query a rename row
 /// asked for if the snapshot lists it. A snapshot without the nick (for
 /// example from another session) keeps the request. The request ends when
-/// the nick is listed or after `PENDING_QUERY_FOCUS_TTL`.
+/// the nick is listed, after `PENDING_QUERY_FOCUS_TTL`, or when the user has
+/// left the window of the click.
 pub(crate) async fn focus_pending_query(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    let Some((network, nick, asked_at)) = state.transcript.pending_query_focus.clone() else {
+    let Some((network, nick, asked_at, origin)) = state.transcript.pending_query_focus.clone()
+    else {
         return;
     };
-    if asked_at.elapsed() > PENDING_QUERY_FOCUS_TTL {
+    if asked_at.elapsed() > PENDING_QUERY_FOCUS_TTL
+        || state.windows.current_channel.as_ref() != Some(&origin)
+    {
         state.transcript.pending_query_focus = None;
         return;
     }

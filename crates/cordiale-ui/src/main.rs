@@ -1331,10 +1331,11 @@ struct TranscriptState {
     /// emits after opening a sender's query. Hold only a small FIFO until that
     /// snapshot either confirms the query or proves it should be discarded.
     pending_own_nick_dms: VecDeque<PendingOwnNickDm>,
-    /// `(network, nick, asked at)` of a query asked for by a rename row, to
-    /// select once a `query_windows_list` snapshot lists it. It expires, so a
-    /// refused open does not select a later window.
-    pending_query_focus: Option<(String, String, std::time::Instant)>,
+    /// `(network, nick, asked at, origin window)` of a query asked for by a
+    /// rename row, to select once a `query_windows_list` snapshot lists it.
+    /// It expires, so a refused open does not select a later window. It also
+    /// ends if the open window is no longer the origin one.
+    pending_query_focus: Option<(String, String, std::time::Instant, (String, String))>,
     /// Query topics whose Phoenix join was acknowledged successfully. Keys
     /// use the same network + ASCII-folded target identity as the snapshot.
     query_joined: std::collections::HashSet<(String, String)>,

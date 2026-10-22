@@ -10105,7 +10105,8 @@ fn rename_action_waits_for_the_server_snapshot() {
     assert!(state.transcript.query_windows.is_empty());
     assert!(matches!(
         &state.transcript.pending_query_focus,
-        Some((network, nick, _)) if network == "libera" && nick == "New"
+        Some((network, nick, _, origin))
+            if network == "libera" && nick == "New" && origin.1 == "Old"
     ));
     // A snapshot that does not list the nick keeps the request.
     upload_test_runtime().block_on(async {
@@ -10125,6 +10126,31 @@ fn rename_action_waits_for_the_server_snapshot() {
             assert!(state.transcript.pending_query_focus.is_none());
         }
     }
+}
+
+#[test]
+fn rename_focus_ends_after_later_navigation() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    state.windows.current_channel = Some(("libera".to_string(), "Old".to_string()));
+    upload_test_runtime().block_on(async {
+        handle_open_rename_target(&mut state, &ui, "New".to_string()).await;
+    });
+    assert!(state.transcript.pending_query_focus.is_some());
+    // The user moves to another window before the snapshot arrives.
+    let other = ("libera".to_string(), "#other".to_string());
+    state.windows.current_channel = Some(other.clone());
+    state.transcript.query_windows = vec![QueryWindow {
+        network: "libera".to_string(),
+        target_nick: "New".to_string(),
+        opened_at: "2026-09-21T10:00:00Z".to_string(),
+        dm_conversation_id: None,
+    }];
+    upload_test_runtime().block_on(async {
+        focus_pending_query(&mut state, &ui).await;
+    });
+    assert!(state.transcript.pending_query_focus.is_none());
+    assert_eq!(state.windows.current_channel, Some(other));
 }
 
 #[test]
