@@ -4612,6 +4612,17 @@ fn handle_peer_away(
     }
 }
 
+/// Reads the resolved auto-away default (protocol 39) from a
+/// `server_settings_changed` payload: whole seconds, `0` = off. A server older
+/// than 39 sends no `auto_away` subtree, and a malformed value is dropped
+/// too, so the caller shows no number instead of a guess.
+pub(crate) fn parse_server_auto_away_default(payload: &Value) -> Option<u64> {
+    payload
+        .get("auto_away")?
+        .get("default_debounce_seconds")?
+        .as_u64()
+}
+
 /// Validates `server_settings_changed` like Cicchetto: `upload.active_host`
 /// in `embedded | litterbox` and the image/video/document/audio/global caps
 /// positive integers are required; the optional fields and
@@ -4658,6 +4669,17 @@ fn handle_server_settings_changed(
         persistence::log_line("server_settings_changed rejected: invalid carrier or payload");
         return;
     };
+    let auto_away_default = parse_server_auto_away_default(payload);
+    if state.prefs.server_auto_away_default != auto_away_default {
+        state.prefs.server_auto_away_default = auto_away_default;
+        let text = auto_away_default
+            .map(|seconds| seconds.to_string())
+            .unwrap_or_default();
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_server_auto_away_default(text.into());
+        });
+    }
     if state.prefs.upload_limits.as_ref() == Some(&limits) {
         return;
     }

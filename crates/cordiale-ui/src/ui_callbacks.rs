@@ -455,6 +455,7 @@ pub(crate) fn register_navigation_callbacks(
             ui.set_dcc_offers(slint::ModelRc::default());
             ui.set_personal_prefs_loaded(false);
             ui.set_server_upload_limits_known(false);
+            ui.set_server_auto_away_default("".into());
         }
     });
 

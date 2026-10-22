@@ -57,6 +57,18 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// that speaks 37.
 pub const CLIENT_PROTOCOL_VERSION: u32 = 37;
 
+/// The first Grappa `protocol_version` that reads the `before_time`,
+/// `after_time` and `around_time` history cursors. An older server ignores
+/// them and answers with the latest page, so a client must not send them
+/// there.
+pub const TIME_CURSOR_MIN_PROTOCOL_VERSION: u32 = 40;
+
+/// Whether a server that announced `protocol_version` reads the time
+/// cursors. An unknown version (`None`) counts as no: keep the id cursors.
+pub fn supports_time_cursors(protocol_version: Option<u32>) -> bool {
+    protocol_version.is_some_and(|version| version >= TIME_CURSOR_MIN_PROTOCOL_VERSION)
+}
+
 /// The bootstrap compatibility fields from `GET /api/config`, and echoed
 /// again in the WebSocket user-topic join response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +111,14 @@ mod tests {
             min_protocol_version: 1,
         };
         assert!(compat.supported_by_cordiale());
+    }
+
+    #[test]
+    fn time_cursors_need_a_server_at_version_40_or_newer() {
+        assert!(!supports_time_cursors(None));
+        assert!(!supports_time_cursors(Some(39)));
+        assert!(supports_time_cursors(Some(40)));
+        assert!(supports_time_cursors(Some(46)));
     }
 
     #[test]

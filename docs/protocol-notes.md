@@ -1207,3 +1207,61 @@ letto in una spec:
 - Il modello dominio iniziale (network/channel/query/message) può basarsi
   sui campi qui documentati; i campi non documentati vanno trattati come
   opachi/opzionali, mai assunti.
+
+---
+
+## 8. Protocolli 38–46: stato in Cordiale (2026-10-22)
+
+Fonte: `docs/CLIENT_PROTOCOL.md` e `lib/grappa/protocol.ex` di
+`vjt/grappa-irc` al commit `f88df4fa` (`@protocol_version` 46,
+`@min_protocol_version` 1). `CLIENT_PROTOCOL_VERSION` resta 37 e non misura
+le singole funzioni: dichiara l'ultima revisione riletta per intero sul
+sorgente. Il floor interno `MIN_SUPPORTED_PROTOCOL_VERSION` resta 1: nessuna
+voce qui sotto lo richiede.
+
+| Versione | Contenuto | Stato in Cordiale |
+|---|---|---|
+| 38 | `GET`/`PUT /me/settings/ban-mask-form` | Già supportato (`fetch_ban_mask_form`, `set_ban_mask_form`; issue 271). Assente o 404 = `host`. |
+| 39 | Default server dell'auto-away: `auto_away.default_debounce_seconds` in `server_settings_changed` (snapshot dopo il join e push) | Supportato. Il valore risolto (secondi, `0` = spento) si legge a ogni `server_settings_changed`, resta separato dall'override dell'utente (`auto_away_debounce_changed`) e compare sotto il campo del ritardo in Settings. Se il sottoalbero manca (server < 39) o il valore non è un intero non negativo, non si mostra nessun numero. |
+| 40 | Cursori a tempo `before_time`, `after_time`, `around_time` (millisecondi epoch) sulla cronologia | Livello REST pronto: `GrappaClient::fetch_messages_by_time` con `HistoryTimeCursor`. Un solo cursore per chiamata, quindi mai insieme a un cursore a id (il server risponde 400 a due qualsiasi dei sei). Rifiutato prima dell'invio sotto la 40 o con versione ignota, perché un server vecchio ignora il parametro e risponde con l'ultima pagina. Nessun chiamante nella UI: serve solo alla parità di protocollo e non blocca l'E2E. La cronologia in uso resta a id. |
+| 41 | `truncated` in `mentions_bundle` | Già supportato (`frames.rs`, riga `mentions-truncated`). |
+| 42 | Relay E2E: `POST /networks/:id/e2e/messages`, evento `e2e_message` | In attesa del contratto per dispositivo (vedi sotto). Non implementato. |
+| 43 | Coda offline: `GET /networks/:id/e2e/inbox`, `POST …/inbox/ack`, `id` in `e2e_message` | In attesa del contratto per dispositivo. Non implementato. |
+| 44 | Bundle di chiavi: `POST`/`GET`/`DELETE /networks/:id/e2e/keys` | In attesa del contratto per dispositivo. Non implementato. |
+| 45 | Buste di inbox e 202 dell'invio dichiarate nello schema generato | Nessun nuovo byte sul filo e nessun endpoint nuovo: non richiede codice. |
+| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Fuori da questa issue. |
+
+### Contratto E2E: cosa manca (v42–v44)
+
+Le rotte e gli eventi di §4f sono pubblicati, ma descrivono **un solo
+bundle per account e rete**: `POST /e2e/keys` non porta un identificativo di
+dispositivo, `GET /e2e/inbox` e `e2e_message` non dicono a quale dispositivo
+è destinato un messaggio, e `DELETE /e2e/keys` butta via l'intero bundle.
+La decisione di issue 2430 (commento 6344779758, 2026-10-22) chiede
+un'identità Olm per dispositivo, la chiave pubblica per dispositivo e il
+destinatario-dispositivo nel frame. Finché Grappa non pubblica:
+
+- l'identificativo del dispositivo e dove compare (corpo di
+  `POST /e2e/keys`, query di `GET`/`DELETE`, campo di `e2e_message`, corpo
+  dell'invio);
+- se la coda offline è per dispositivo e come si conferma un elemento
+  (`ack` per `id` è oggi per account);
+- come un dispositivo nuovo viene firmato da uno già fidato;
+
+Cordiale non scrive tipi di richiesta, risposta o evento per v42–v44: un
+formato indovinato romperebbe l'interoperabilità e metterebbe in dubbio
+l'invio di chiavi pubbliche per il dispositivo sbagliato. Valgono già, e
+andranno rispettate quando si implementa: consegna **almeno una volta** (si
+deduplica per `id`), `ack` dopo l'elaborazione locale anche di un elemento
+non decifrabile, `ack` idempotente (riprovabile), eventi sconosciuti non
+fatali (già così: un kind non censito si scarta in silenzio).
+
+### Cronologia a tempo (v40): regole del server da rispettare
+
+- Unità: millisecondi epoch decimali, da `0` a int64 massimo; ISO-8601,
+  numeri negativi, frazioni e valori vuoti sono 400.
+- Il limite è stretto e vale solo su `server_time`: le righe dello stesso
+  millisecondo restano fuori da `before_time` e da `after_time`. Per non
+  perdere righe, la prima query è a tempo e le successive a id.
+- Controllare `protocol_version >= 40` prima di inviarli (obbligatorio, a
+  differenza di `cap`): `supports_time_cursors` in `protocol.rs`.

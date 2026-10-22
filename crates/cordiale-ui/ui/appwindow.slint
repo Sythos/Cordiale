@@ -1376,6 +1376,9 @@ export component AppWindow inherits Window {
     // Upload limits from `server_settings_changed`, hidden until announced.
     in property <bool> server-upload-limits-known: false;
     in property <UploadLimitsRow> server-upload-limits;
+    // Server auto-away default in seconds from `server_settings_changed`
+    // ("0" = off); "" while the server does not announce it.
+    in property <string> server-auto-away-default: "";
     // "" while running, then "succeeded" or "failed" from `recover_result`.
     in property <string> recover-outcome: "";
     in property <string> recover-outcome-reason: "";
@@ -4635,6 +4638,13 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 0;
                             min-width: 90px;
                         }
+                    }
+                    if server-auto-away-default != "" : Text {
+                        text: server-auto-away-default == "0"
+                            ? @tr("Empty uses the server default: auto-away is off.")
+                            : @tr("Empty uses the server default: {} seconds.", server-auto-away-default);
+                        wrap: word-wrap;
+                        color: palette-muted;
                     }
                     CheckBox {
                         text: @tr("Look up other users' profiles (CTCP USERINFO)");
