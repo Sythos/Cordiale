@@ -67,6 +67,28 @@ fn ensure_history_target(channel_name: &str) -> Result<(), GrappaClientError> {
     Ok(())
 }
 
+/// A history cut by time (protocol 40). Each value is decimal epoch
+/// milliseconds, the unit of a row's `server_time`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryTimeCursor {
+    /// Rows with `server_time` below the bound, newest first.
+    Before(i64),
+    /// Rows with `server_time` above the bound, oldest first.
+    After(i64),
+    /// Half the page at or below the bound, half above it, newest first.
+    Around(i64),
+}
+
+impl HistoryTimeCursor {
+    fn query_pair(self) -> (&'static str, i64) {
+        match self {
+            Self::Before(millis) => ("before_time", millis),
+            Self::After(millis) => ("after_time", millis),
+            Self::Around(millis) => ("around_time", millis),
+        }
+    }
+}
+
 /// A Grappa server reached over REST, identified by its base URL.
 #[derive(Clone)]
 pub struct GrappaClient {
@@ -893,6 +915,63 @@ impl GrappaClient {
             ]);
         url.query_pairs_mut()
             .append_pair("around", &around_id.to_string())
+            .append_pair("limit", &limit.to_string());
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<Vec<Value>>().await?)
+    }
+
+    /// `GET /networks/:slug/channels/:channel/messages?before_time=|after_time=|around_time=<ms>&limit=`
+    /// (protocol 40) — a page of history cut at a time, for a caller that
+    /// holds a timestamp and no message id (an IRCv3 `chathistory`
+    /// selector). The cursor is a single [`HistoryTimeCursor`], so it can
+    /// never be sent beside an id cursor (the server answers 400 for any two
+    /// of the six). The bound is strict: rows stamped with the bound
+    /// millisecond are left out, so page on by id after the first query.
+    ///
+    /// `server_protocol_version` is the version the server announced. A
+    /// server below 40 would ignore the parameter and answer with the latest
+    /// page, so the call is refused there and the caller keeps its id
+    /// cursors. A negative bound is refused too (the server answers 400).
+    pub async fn fetch_messages_by_time(
+        &self,
+        token: &str,
+        network_slug: &str,
+        channel_name: &str,
+        cursor: HistoryTimeCursor,
+        limit: usize,
+        server_protocol_version: Option<u32>,
+    ) -> Result<Vec<Value>, GrappaClientError> {
+        ensure_history_target(channel_name)?;
+        if !crate::protocol::supports_time_cursors(server_protocol_version) {
+            return Err(GrappaClientError::InvalidUrl(
+                "the server does not read time cursors before protocol 40".to_string(),
+            ));
+        }
+        let (name, millis) = cursor.query_pair();
+        if millis < 0 {
+            return Err(GrappaClientError::InvalidUrl(
+                "a time cursor is a count of milliseconds, never negative".to_string(),
+            ));
+        }
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend([
+                "networks",
+                network_slug,
+                "channels",
+                channel_name,
+                "messages",
+            ]);
+        url.query_pairs_mut()
+            .append_pair(name, &millis.to_string())
             .append_pair("limit", &limit.to_string());
         let response = self
             .http
@@ -6695,6 +6774,82 @@ mod tests {
             .await
             .expect("older page");
         assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_by_time_sends_one_time_cursor_in_milliseconds() {
+        use wiremock::matchers::query_param_is_missing;
+
+        let cases = [
+            (HistoryTimeCursor::Before(1_791_712_800_000), "before_time"),
+            (HistoryTimeCursor::After(0), "after_time"),
+            (HistoryTimeCursor::Around(i64::MAX), "around_time"),
+        ];
+        for (cursor, name) in cases {
+            let (_, millis) = cursor.query_pair();
+            let mock_server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/networks/libera/channels/%23rust/messages"))
+                .and(query_param(name, millis.to_string()))
+                .and(query_param("limit", "50"))
+                .and(query_param_is_missing("before"))
+                .and(query_param_is_missing("after"))
+                .and(query_param_is_missing("around"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!([{ "id": 7 }])),
+                )
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+
+            let client = GrappaClient::new(mock_server.uri());
+            let rows = client
+                .fetch_messages_by_time("t", "libera", "#rust", cursor, 50, Some(40))
+                .await
+                .expect(name);
+            assert_eq!(rows.len(), 1, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_messages_by_time_refuses_without_sending_a_request() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        // A server below 40 would answer with the latest page, so the id
+        // cursors stay in use there; an unknown version counts as older.
+        for version in [None, Some(39)] {
+            let err = client
+                .fetch_messages_by_time(
+                    "t",
+                    "libera",
+                    "#rust",
+                    HistoryTimeCursor::Before(1),
+                    50,
+                    version,
+                )
+                .await
+                .expect_err("older server");
+            assert!(matches!(err, GrappaClientError::InvalidUrl(_)));
+        }
+        // A negative bound is a 400 on the server, so it is not sent.
+        let err = client
+            .fetch_messages_by_time(
+                "t",
+                "libera",
+                "#rust",
+                HistoryTimeCursor::After(-1),
+                50,
+                Some(40),
+            )
+            .await
+            .expect_err("negative bound");
+        assert!(matches!(err, GrappaClientError::InvalidUrl(_)));
     }
 
     #[tokio::test]

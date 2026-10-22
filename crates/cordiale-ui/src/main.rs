@@ -1208,6 +1208,9 @@ struct SettingsState {
     /// Upload limits from the latest `server_settings_changed`, shown read
     /// only in Settings (Cordiale doesn't upload files yet).
     upload_limits: Option<UploadLimits>,
+    /// Resolved auto-away delay the server applies when the subject set no
+    /// value (protocol 39): seconds, `0` = off, `None` = not announced.
+    server_auto_away_default: Option<u64>,
     /// Last push-notification map read from Grappa; edits overlay the
     /// toggles Cordiale shows and send the whole map back.
     notification_prefs: Option<serde_json::Map<String, Value>>,
@@ -1512,6 +1515,7 @@ impl WorkerState {
                 settings_network: None,
                 profile_baseline: ProfileFields::default(),
                 upload_limits: None,
+                server_auto_away_default: None,
                 notification_prefs: None,
                 web_bundle: None,
                 watch_patterns: Vec::new(),
@@ -2935,6 +2939,7 @@ async fn finish_connect(
             state.panels.mentions_bundles.clear();
             state.panels.mention_jumps.clear();
             state.prefs.upload_limits = None;
+            state.prefs.server_auto_away_default = None;
             cancel_video_shrinks(state);
             state.prefs.web_bundle = None;
             state.networks.own_nicks = network_nicks_from_boot(&outcome);
@@ -3086,6 +3091,7 @@ async fn finish_connect(
                 ui.set_dcc_offers(slint::ModelRc::default());
                 ui.set_personal_prefs_loaded(false);
                 ui.set_server_upload_limits_known(false);
+                ui.set_server_auto_away_default("".into());
                 ui.set_current_query(false);
                 ui.set_current_server_window(false);
                 ui.set_current_query_ready(false);

@@ -7808,6 +7808,69 @@ fn parse_server_settings_changed_requires_the_core_caps() {
 }
 
 #[test]
+fn parse_server_auto_away_default_reads_the_resolved_seconds() {
+    // The after-join snapshot and a later push use the same shape.
+    let snapshot = serde_json::json!({
+        "kind": "server_settings_changed",
+        "auto_away": { "default_debounce_seconds": 600 }
+    });
+    assert_eq!(parse_server_auto_away_default(&snapshot), Some(600));
+
+    // A runtime change replaces the value; nothing is cached.
+    let pushed = serde_json::json!({
+        "kind": "server_settings_changed",
+        "auto_away": { "default_debounce_seconds": 1800 }
+    });
+    assert_eq!(parse_server_auto_away_default(&pushed), Some(1800));
+
+    // Zero means auto-away is off and is not the same as missing.
+    let off = serde_json::json!({
+        "kind": "server_settings_changed",
+        "auto_away": { "default_debounce_seconds": 0 }
+    });
+    assert_eq!(parse_server_auto_away_default(&off), Some(0));
+
+    // A server older than 39 has no subtree: no number is invented.
+    let older = serde_json::json!({ "kind": "server_settings_changed" });
+    assert_eq!(parse_server_auto_away_default(&older), None);
+
+    // Malformed values are dropped, not guessed.
+    for bad in [
+        serde_json::json!(null),
+        serde_json::json!(-1),
+        serde_json::json!("600"),
+        serde_json::json!(1.5),
+    ] {
+        let payload = serde_json::json!({ "auto_away": { "default_debounce_seconds": bad } });
+        assert_eq!(parse_server_auto_away_default(&payload), None);
+    }
+}
+
+#[test]
+fn server_auto_away_default_stays_apart_from_the_user_override() {
+    // The user override has its own type and parser; the server default
+    // never changes it, and an override of `null` still defers to the server.
+    let topic = "grappa:user:vjt";
+    let override_payload = serde_json::json!({
+        "kind": "auto_away_debounce_changed",
+        "auto_away_debounce_seconds": 120
+    });
+    assert_eq!(
+        parse_auto_away_debounce_changed(&override_payload, topic, "vjt"),
+        Some(AutoAwayDebounce::Seconds(120))
+    );
+    let deferred = serde_json::json!({
+        "kind": "auto_away_debounce_changed",
+        "auto_away_debounce_seconds": null,
+        "auto_away": { "default_debounce_seconds": 600 }
+    });
+    assert_eq!(
+        parse_auto_away_debounce_changed(&deferred, topic, "vjt"),
+        Some(AutoAwayDebounce::ServerDefault)
+    );
+}
+
+#[test]
 fn parse_bundle_hash_treats_version_as_optional() {
     let topic = "grappa:user:vjt";
     assert_eq!(

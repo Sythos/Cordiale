@@ -291,3 +291,16 @@ attivo cambia solo a risposta riuscita; assente o 404 (server pre-38) vale
 riletta sul sorgente upstream (issue upstream 2347), e va riallineata quando
 Cicchetto fissa dove salva l'impostazione. Il menu Kickban e le voci Ban nick
 / Ban host (issue 246) non ci sono ancora: potranno usare `BanType::mask`.
+
+**Aggiornamento (2026-10-22)**: stato dei protocolli 38–46 (issue 345).
+Il dettaglio sta in `protocol-notes.md` §8; `client_proto` resta 37.
+
+| Protocollo | Funzione | Stato |
+|---|---|---|
+| 38 | Forma della maschera di ban per account | Già supportato |
+| 39 | Default server dell'auto-away in Settings | Supportato; senza il campo (server < 39) non si mostra nessun numero |
+| 40 | Cursori di cronologia a tempo | Solo livello REST (`fetch_messages_by_time`); la UI usa ancora gli id. Opzionale, non serve all'E2E |
+| 41 | Marcatore `truncated` delle menzioni | Già supportato |
+| 42–44 | Relay, coda offline e bundle di chiavi E2E | In attesa del contratto per dispositivo di Grappa; non implementato |
+| 45 | Buste E2E dichiarate nello schema | Nessun cambio sul filo, niente da fare |
+| 46 | Pacing e `expires_at` | Fuori ambito (issue 346) |

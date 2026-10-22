@@ -865,6 +865,14 @@ msgid "Server upload limits ({}): images {}, videos {}, documents {}, audio {}."
 msgstr "Limites d'envoi du serveur ({}) : images {}, vidéos {}, documents {}, audio {}."
 
 msgctxt "AppWindow"
+msgid "Empty uses the server default: auto-away is off."
+msgstr "Si vide, la valeur du serveur s'applique : l'absence automatique est désactivée."
+
+msgctxt "AppWindow"
+msgid "Empty uses the server default: {} seconds."
+msgstr "Si vide, la valeur du serveur s'applique : {} secondes."
+
+msgctxt "AppWindow"
 msgid "Server upload limits ({}): images {}, videos {} (up to {} s), documents {}, audio {}."
 msgstr "Limites d'envoi du serveur ({}) : images {}, vidéos {} (jusqu'à {} s), documents {}, audio {}."
 

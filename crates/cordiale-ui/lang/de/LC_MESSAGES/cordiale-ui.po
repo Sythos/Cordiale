@@ -865,6 +865,14 @@ msgid "Server upload limits ({}): images {}, videos {}, documents {}, audio {}."
 msgstr "Server-Upload-Limits ({}): Bilder {}, Videos {}, Dokumente {}, Audio {}."
 
 msgctxt "AppWindow"
+msgid "Empty uses the server default: auto-away is off."
+msgstr "Leer gilt der Serverstandard: Auto-Abwesenheit ist aus."
+
+msgctxt "AppWindow"
+msgid "Empty uses the server default: {} seconds."
+msgstr "Leer gilt der Serverstandard: {} Sekunden."
+
+msgctxt "AppWindow"
 msgid "Server upload limits ({}): images {}, videos {} (up to {} s), documents {}, audio {}."
 msgstr "Server-Upload-Limits ({}): Bilder {}, Videos {} (bis zu {} s), Dokumente {}, Audio {}."
 
