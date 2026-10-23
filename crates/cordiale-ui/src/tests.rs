@@ -4382,11 +4382,74 @@ fn render_message_reads_the_message_envelopes_inner_row() {
 }
 
 #[test]
+fn render_message_appends_the_event_mask_to_join_part_and_quit() {
+    let join = serde_json::json!({
+        "kind": "join", "sender": "TestNick", "channel": "#example",
+        "meta": {"userhost": "~user@192.0.2.15"}
+    });
+    assert_eq!(
+        render_message(&join, None).text,
+        "→ TestNick has joined #example (~user@192.0.2.15)"
+    );
+    let part = serde_json::json!({
+        "kind": "part", "sender": "TestNick", "channel": "#example",
+        "body": "Leaving the channel", "meta": {"user": "~user", "host": "192.0.2.15"}
+    });
+    assert_eq!(
+        render_message(&part, None).text,
+        "← TestNick has left #example (Leaving the channel) (~user@192.0.2.15)"
+    );
+    let part_plain = serde_json::json!({
+        "kind": "part", "sender": "TestNick", "channel": "#example",
+        "body": "", "userhost": "~user@192.0.2.15"
+    });
+    assert_eq!(
+        render_message(&part_plain, None).text,
+        "← TestNick has left #example (~user@192.0.2.15)"
+    );
+    let quit = serde_json::json!({
+        "kind": "quit", "sender": "TestNick", "body": "Quit: Client closed",
+        "meta": {"userhost": "~user@2001:db8::1"}
+    });
+    assert_eq!(
+        render_message(&quit, None).text,
+        "⇐ TestNick has quit (Quit: Client closed) (~user@2001:db8::1)"
+    );
+    let quit_plain = serde_json::json!({
+        "kind": "quit", "sender": "TestNick",
+        "meta": {"user": "~user", "host": "2001:db8::1"}
+    });
+    assert_eq!(
+        render_message(&quit_plain, None).text,
+        "⇐ TestNick has quit (~user@2001:db8::1)"
+    );
+}
+
+#[test]
+fn render_message_shows_no_mask_when_the_event_has_none() {
+    let join = serde_json::json!({"kind": "join", "sender": "TestNick", "channel": "#example"});
+    assert_eq!(
+        render_message(&join, None).text,
+        "→ TestNick has joined #example"
+    );
+    let part = serde_json::json!({
+        "kind": "part", "sender": "TestNick", "channel": "#example", "body": "bye",
+        "meta": {"host": "192.0.2.15"}
+    });
+    assert_eq!(
+        render_message(&part, None).text,
+        "← TestNick has left #example (bye)"
+    );
+    let quit = serde_json::json!({"kind": "quit", "sender": "TestNick", "meta": {"mask": "no-at"}});
+    assert_eq!(render_message(&quit, None).text, "⇐ TestNick has quit");
+}
+
+#[test]
 fn render_message_reads_part_quit_and_kick_reasons_from_the_body() {
     let part = serde_json::json!({"kind": "part", "sender": "vjt", "body": "bye"});
-    assert_eq!(render_message(&part, None).text, "← vjt left (bye)");
+    assert_eq!(render_message(&part, None).text, "← vjt has left (bye)");
     let quit = serde_json::json!({"kind": "quit", "sender": "vjt", "body": ""});
-    assert_eq!(render_message(&quit, None).text, "⇐ vjt quit");
+    assert_eq!(render_message(&quit, None).text, "⇐ vjt has quit");
 
     let kick = serde_json::json!({
         "kind": "kick",
