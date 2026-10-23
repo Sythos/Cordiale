@@ -1,0 +1,51 @@
+{
+  "valid": [
+    {
+      "case": "keyreq with no priority",
+      "request": {"target": "vjt-claude", "verb": "keyreq", "payload": "eyJ2IjoyfQ=="},
+      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"keyreq\",\"payload\":\"eyJ2IjoyfQ==\"}"
+    },
+    {
+      "case": "text msg with explicit priority",
+      "request": {"target": "vjt-claude", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "text"},
+      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"msg\",\"payload\":\"eyJ2IjoyfQ==\",\"priority\":\"text\"}"
+    },
+    {
+      "case": "control msg with an order deadline",
+      "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000},
+      "wire": "{\"target\":\"bot\",\"verb\":\"msg\",\"payload\":\"eyJ2IjoyfQ==\",\"priority\":\"control\",\"expires_at\":1790000000}"
+    },
+    {
+      "case": "control pkmsg with an order deadline and unpadded payload",
+      "request": {"target": "bot", "verb": "pkmsg", "payload": "eyJ2IjoyfQ", "priority": "control", "expires_at": 1},
+      "wire": "{\"target\":\"bot\",\"verb\":\"pkmsg\",\"payload\":\"eyJ2IjoyfQ\",\"priority\":\"control\",\"expires_at\":1}"
+    },
+    {
+      "case": "nack",
+      "request": {"target": "vjt-claude", "verb": "nack", "payload": "eyJ2IjoyfQ=="},
+      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"nack\",\"payload\":\"eyJ2IjoyfQ==\"}"
+    }
+  ],
+  "invalid": [
+    {"case": "not an object", "request": [1], "error": "BadFieldType"},
+    {"case": "unknown verb", "request": {"target": "bot", "verb": "keys", "payload": "eyJ2IjoyfQ=="}, "error": "BadVerb"},
+    {"case": "missing target", "request": {"verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "MissingField"},
+    {"case": "unknown field", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "extra": 1}, "error": "UnknownField"},
+    {"case": "target of the wrong type", "request": {"target": 5, "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadFieldType"},
+    {"case": "channel target", "request": {"target": "#chan", "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadTarget"},
+    {"case": "payload is not base64", "request": {"target": "bot", "verb": "msg", "payload": "***"}, "error": "BadPayload"},
+    {"case": "unknown priority", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "urgent"}, "error": "BadPriority"},
+    {"case": "null priority", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": null}, "error": "BadFieldType"},
+    {"case": "deadline on keyreq", "request": {"target": "bot", "verb": "keyreq", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000}, "error": "BadExpiry"},
+    {"case": "deadline on nack", "request": {"target": "bot", "verb": "nack", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000}, "error": "BadExpiry"},
+    {"case": "deadline on text msg", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "text", "expires_at": 1790000000}, "error": "BadExpiry"},
+    {"case": "deadline with no priority", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "expires_at": 1790000000}, "error": "BadExpiry"},
+    {"case": "deadline is zero", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 0}, "error": "BadExpiry"},
+    {"case": "deadline is negative", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": -5}, "error": "BadExpiry"},
+    {"case": "deadline has a fraction", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000.5}, "error": "BadExpiry"},
+    {"case": "deadline is a float with no fraction", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000.0}, "error": "BadExpiry"},
+    {"case": "deadline above int64", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 9223372036854775808}, "error": "BadExpiry"},
+    {"case": "deadline is a string", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": "1790000000"}, "error": "BadFieldType"},
+    {"case": "deadline is null", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": null}, "error": "BadFieldType"}
+  ]
+}
