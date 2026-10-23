@@ -1244,7 +1244,13 @@ voce qui sotto lo richiede.
 | 43 | Coda offline: `GET /networks/:id/e2e/inbox`, `POST …/inbox/ack`, `id` in `e2e_message` | In attesa del contratto per dispositivo. Non implementato. |
 | 44 | Bundle di chiavi: `POST`/`GET`/`DELETE /networks/:id/e2e/keys` | In attesa del contratto per dispositivo. Non implementato. |
 | 45 | Buste di inbox e 202 dell'invio dichiarate nello schema generato | Nessun nuovo byte sul filo e nessun endpoint nuovo: non richiede codice. |
-| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Fuori da questa issue. |
+| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Restano da tipizzare risposta, rifiuti ed evento `e2e_send_dropped`. Il pacing a runtime è dell'issue 359. |
+
+`E2eSendRequest` (fonte: CLIENT_PROTOCOL §4f, PR 2446 di Grappa) è rigorosa:
+campo mancante, sconosciuto o di tipo sbagliato è un errore tipizzato
+(`WireError`). `expires_at` è un intero positivo (secondi Unix, al massimo
+int64), ammesso solo con `priority: "control"` e verbo `msg` o `pkmsg`.
+Stringhe, `null` e numeri con frazione (anche `1.0`) sono rifiutati.
 
 ### Contratto E2E: cosa manca (v42–v44)
 
