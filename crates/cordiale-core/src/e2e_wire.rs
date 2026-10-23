@@ -50,6 +50,38 @@ pub const SIGNATURE_TEXT_LEN: usize = 86;
 /// Length of a `did`: 8 bytes in unpadded base64url.
 pub const DID_LEN: usize = 11;
 
+/// Lifetime of an X1 pairing rendezvous, in seconds.
+pub const PAIRING_LIFETIME_SECS: u64 = 300;
+
+/// Largest X1 pairing message, in bytes: 16 KiB.
+pub const PAIRING_MESSAGE_MAX_BYTES: usize = 16 * 1024;
+
+/// Largest total size of the messages in one X1 rendezvous: 64 KiB.
+pub const PAIRING_TOTAL_MAX_BYTES: usize = 64 * 1024;
+
+/// Largest number of messages in one X1 rendezvous.
+pub const PAIRING_MAX_MESSAGES: usize = 64;
+
+/// Storage limit of one device inbox for S1 copies: 4 MiB.
+pub const INBOX_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Storage limit of one device inbox for one sender: 1 MiB.
+pub const INBOX_SENDER_MAX_BYTES: usize = 1024 * 1024;
+
+/// Lifetime of an S1 inbox copy, in seconds: seven days.
+pub const INBOX_EXPIRY_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Check whether the relay accepts one more X1 pairing message.
+///
+/// `count` and `total_bytes` describe the messages already stored.
+pub fn pairing_message_fits(count: usize, total_bytes: usize, next_len: usize) -> bool {
+    next_len <= PAIRING_MESSAGE_MAX_BYTES
+        && count < PAIRING_MAX_MESSAGES
+        && total_bytes
+            .checked_add(next_len)
+            .is_some_and(|sum| sum <= PAIRING_TOTAL_MAX_BYTES)
+}
+
 /// Address used when a frame is not for one device.
 pub const WILDCARD: &str = "*";
 
@@ -72,6 +104,13 @@ pub enum WireError {
     FragmentMismatch,
     DuplicateDevice,
     BadDeviceCount,
+    BadTarget,
+    BadPayload,
+    BadPriority,
+    BadExpiry,
+    MissingField,
+    BadFieldType,
+    UnknownField,
 }
 
 /// Frame verb of the wire v2.
@@ -463,9 +502,50 @@ pub fn parse_payload(text: &str) -> Result<Value, WireError> {
     serde_json::from_str(text).map_err(|_| WireError::BadJson)
 }
 
+/// Reads a JSON object, or fails with `BadFieldType`.
+pub fn as_object(value: &Value) -> Result<&serde_json::Map<String, Value>, WireError> {
+    value.as_object().ok_or(WireError::BadFieldType)
+}
+
+/// Reads a required string field: absent is `MissingField`, any other type
+/// (including null) is `BadFieldType`.
+pub fn required_str<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, WireError> {
+    map.get(key)
+        .ok_or(WireError::MissingField)?
+        .as_str()
+        .ok_or(WireError::BadFieldType)
+}
+
+/// Fails with `UnknownField` when `map` holds a key outside `allowed`. Use it
+/// on what Cordiale sends: server answers are additive and skip this check.
+pub fn reject_unknown_fields(
+    map: &serde_json::Map<String, Value>,
+    allowed: &[&str],
+) -> Result<(), WireError> {
+    if map.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(WireError::UnknownField);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pairing_message_fits_checks_every_limit() {
+        assert!(pairing_message_fits(0, 0, PAIRING_MESSAGE_MAX_BYTES));
+        assert!(!pairing_message_fits(0, 0, PAIRING_MESSAGE_MAX_BYTES + 1));
+        assert!(pairing_message_fits(PAIRING_MAX_MESSAGES - 1, 0, 1));
+        assert!(!pairing_message_fits(PAIRING_MAX_MESSAGES, 0, 1));
+        assert!(pairing_message_fits(1, PAIRING_TOTAL_MAX_BYTES - 10, 10));
+        assert!(!pairing_message_fits(1, PAIRING_TOTAL_MAX_BYTES - 10, 11));
+        assert!(!pairing_message_fits(1, usize::MAX, 1));
+    }
 
     fn key_text(byte: u8) -> String {
         STANDARD_NO_PAD.encode([byte; 32])
@@ -762,6 +842,21 @@ mod tests {
         let did = did_from_key_text(&key_text(1)).unwrap();
         let text = format!("\u{1}E2E KEYREQ AAAA 1/1 {did} * {{\"ver\":\n1}}\u{1}");
         assert_eq!(parse_frame(&text), Err(WireError::BadFrame));
+    }
+
+    #[test]
+    fn object_helpers_tell_missing_from_wrong_type() {
+        let value = json!({"a": "x", "b": null});
+        let map = as_object(&value).unwrap();
+        assert_eq!(required_str(map, "a"), Ok("x"));
+        assert_eq!(required_str(map, "b"), Err(WireError::BadFieldType));
+        assert_eq!(required_str(map, "c"), Err(WireError::MissingField));
+        assert_eq!(as_object(&json!([1])), Err(WireError::BadFieldType));
+        assert_eq!(reject_unknown_fields(map, &["a", "b"]), Ok(()));
+        assert_eq!(
+            reject_unknown_fields(map, &["a"]),
+            Err(WireError::UnknownField)
+        );
     }
 
     #[test]
