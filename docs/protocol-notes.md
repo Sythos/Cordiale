@@ -1252,6 +1252,20 @@ campo mancante, sconosciuto o di tipo sbagliato è un errore tipizzato
 int64), ammesso solo con `priority: "control"` e verbo `msg` o `pkmsg`.
 Stringhe, `null` e numeri con frazione (anche `1.0`) sono rifiutati.
 
+**Issue 383, prima parte (fonti di Grappa non lette).** Fatto: il token
+`NETWORK` grezzo (protocollo 47) in `IsupportState::network` (assente o `null`
+= `None`, nessuna normalizzazione; il nome del campo `network` è un'ipotesi da
+verificare); `SendDropped` in `e2e_pacing.rs` per l'evento `e2e_send_dropped`
+(campi `id` e `reason`: ipotesi da verificare, fixture `send_dropped.json`);
+`E2eOperation` in `e2e_protocol.rs` (rotte e versioni minime 42–44; intervallo
+KEYS da 15 s separato dal fake-lag da 22 s, che non è un intervallo del
+client). **Da fare, dopo la lettura delle PR 2446, 2448, 2451 e 2452 di
+Grappa:** risposta e rifiuto dell'invio (46) con forma esatta, richieste,
+risposte, eventi e motivi di chiusura del pairing (48), righe dispositivo,
+liste firmate, bundle pubblici, messaggi di inbox e frame v2 del candidato 49
+dietro un solo modulo, con il marcatore nelle fixture. Cordiale non dichiara
+un contratto 49 definitivo.
+
 ### Contratto E2E: cosa manca (v42–v44)
 
 Le rotte e gli eventi di §4f sono pubblicati, ma descrivono **un solo
