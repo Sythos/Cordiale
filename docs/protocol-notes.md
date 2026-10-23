@@ -1285,6 +1285,15 @@ i due vettori `did` del commento 6348464388 (non letti qui), il testo firmato
 (separatore delle chiavi da confermare), verifica delle firme, motore Olm,
 protocolli 46–49, pairing X1, X2 e S1.
 
+**Issue 360: divisa in sotto-issue (decisione del maintainer).** Le tre fasi
+(X1, X2, S1) sono lavori separati, nell'ordine X1, X2, S1. In questo passo
+`e2e_wire.rs` riceve solo i limiti già concordati, come costanti e una
+funzione pura: durata del rendezvous X1 (300 s), messaggio da 16 KiB, 64 KiB e
+64 messaggi per rendezvous, inbox S1 da 4 MiB, 1 MiB per mittente e scadenza
+di sette giorni. Non ci sono ancora rotte REST, tipi di evento, ECIES, codice
+di controllo né motore Olm: i percorsi esatti e i payload di X1 non sono nel
+repository e X2 e S1 dipendono dal contratto finale del protocollo 49.
+
 ### Cronologia a tempo (v40): regole del server da rispettare
 
 - Unità: millisecondi epoch decimali, da `0` a int64 massimo; ISO-8601,
