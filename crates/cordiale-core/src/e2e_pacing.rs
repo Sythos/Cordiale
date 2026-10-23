@@ -224,12 +224,10 @@ impl ReassemblyGate {
     }
 
     /// A reassembly is active until `timeout` has passed since its last
-    /// fragment. At exactly `timeout` it is no longer active. State of a
-    /// different casemapping is not active: the next write clears it.
-    pub fn is_active(&self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
-        if self.casemapping != Some(casemapping) {
-            return false;
-        }
+    /// fragment. At exactly `timeout` it is no longer active. A different
+    /// casemapping clears the state of the old one.
+    pub fn is_active(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
+        self.sync_casemapping(casemapping);
         self.last_fragment
             .get(&nick_key(nick, casemapping))
             .is_some_and(|messages| {
@@ -239,7 +237,7 @@ impl ReassemblyGate {
             })
     }
 
-    pub fn may_send_keyreq(&self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
+    pub fn may_send_keyreq(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
         !self.is_active(nick, casemapping, now)
     }
 }
@@ -630,6 +628,15 @@ mod tests {
         assert!(gate.is_active("[bob]", RFC, secs(3)));
         gate.finish("{bob}", "B", RFC);
         assert!(gate.may_send_keyreq("[bob]", RFC, secs(3)));
+    }
+
+    #[test]
+    fn gate_read_clears_state_when_casemapping_changes() {
+        let mut gate = ReassemblyGate::new(secs(10));
+        gate.note_fragment("[bob]", "A", ASCII, secs(0));
+        assert!(!gate.is_active("[bob]", RFC, secs(1)));
+        assert!(!gate.is_active("[bob]", ASCII, secs(2)));
+        assert!(gate.may_send_keyreq("[bob]", ASCII, secs(2)));
     }
 
     #[test]
