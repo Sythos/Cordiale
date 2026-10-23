@@ -1,0 +1,634 @@
+// MIT License
+//
+// Copyright (c) 2026 Sythos
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+//! Pure helpers for the per-device E2E wire v2 (phase 1).
+//!
+//! This module covers the parts of the agreed wire that do not depend on the
+//! open protocol 49 schemas: frame text, fragment checks, device ids (`did`),
+//! strict key and signature text, version numbers, the recipient binding and
+//! the signed-list version rule. It holds no key material and does no crypto
+//! beyond SHA-256. Signature checks, Olm sessions and the REST and event
+//! types come in later phases.
+
+use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+use base64::Engine as _;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+/// A signed device list holds 1 to 4 devices.
+pub const MAX_LIST_DEVICES: usize = 4;
+
+/// Highest accepted value for `ver` and `lv`: 2^31 - 1.
+pub const MAX_VERSION: u32 = i32::MAX as u32;
+
+/// Length of an unpadded standard base64 Ed25519 or Curve25519 key.
+pub const KEY_TEXT_LEN: usize = 43;
+
+/// Length of an unpadded standard base64 Ed25519 signature.
+pub const SIGNATURE_TEXT_LEN: usize = 86;
+
+/// Length of a `did`: 8 bytes in unpadded base64url.
+pub const DID_LEN: usize = 11;
+
+/// Address used when a frame is not for one device.
+pub const WILDCARD: &str = "*";
+
+const FRAME_PREFIX: &str = "\u{1}E2E ";
+const FRAME_SUFFIX: char = '\u{1}';
+
+/// Why a wire value is rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireError {
+    BadFrame,
+    BadVerb,
+    BadMsgid,
+    BadFragment,
+    BadDid,
+    BadKey,
+    BadSignature,
+    BadVersion,
+    BadAddress,
+    BadJson,
+    FragmentMismatch,
+    DuplicateDevice,
+    BadDeviceCount,
+}
+
+/// Frame verb of the wire v2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verb {
+    KeyReq,
+    Keys,
+    PkMsg,
+    Msg,
+    Nack,
+}
+
+impl Verb {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verb::KeyReq => "KEYREQ",
+            Verb::Keys => "KEYS",
+            Verb::PkMsg => "PKMSG",
+            Verb::Msg => "MSG",
+            Verb::Nack => "NACK",
+        }
+    }
+
+    fn parse(text: &str) -> Result<Self, WireError> {
+        match text {
+            "KEYREQ" => Ok(Verb::KeyReq),
+            "KEYS" => Ok(Verb::Keys),
+            "PKMSG" => Ok(Verb::PkMsg),
+            "MSG" => Ok(Verb::Msg),
+            "NACK" => Ok(Verb::Nack),
+            _ => Err(WireError::BadVerb),
+        }
+    }
+}
+
+/// One fragment of a wire message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Frame {
+    pub verb: Verb,
+    pub msgid: String,
+    pub index: u32,
+    pub total: u32,
+    pub from: String,
+    pub to: String,
+    pub chunk: String,
+}
+
+fn is_std_b64_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '+' || c == '/'
+}
+
+fn is_url_b64_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Decodes unpadded standard base64 and rejects any non-canonical text.
+fn decode_canonical(text: &str, expected_len: usize) -> Option<Vec<u8>> {
+    if text.len() != expected_len || !text.chars().all(is_std_b64_char) {
+        return None;
+    }
+    let raw = STANDARD_NO_PAD.decode(text).ok()?;
+    (STANDARD_NO_PAD.encode(&raw) == text).then_some(raw)
+}
+
+/// Decodes a 43-character Ed25519 or Curve25519 public key.
+pub fn decode_key(text: &str) -> Result<[u8; 32], WireError> {
+    decode_canonical(text, KEY_TEXT_LEN)
+        .and_then(|raw| <[u8; 32]>::try_from(raw).ok())
+        .ok_or(WireError::BadKey)
+}
+
+/// Decodes an 86-character Ed25519 signature.
+pub fn decode_signature(text: &str) -> Result<[u8; 64], WireError> {
+    decode_canonical(text, SIGNATURE_TEXT_LEN)
+        .and_then(|raw| <[u8; 64]>::try_from(raw).ok())
+        .ok_or(WireError::BadSignature)
+}
+
+/// The `did` of a raw Ed25519 key: base64url of the first 8 bytes of its
+/// SHA-256 hash.
+pub fn did_from_raw_key(key: &[u8; 32]) -> String {
+    let hash = Sha256::digest(key);
+    URL_SAFE_NO_PAD.encode(&hash[..8])
+}
+
+/// The `did` of an Ed25519 key given as standard base64 text.
+pub fn did_from_key_text(key: &str) -> Result<String, WireError> {
+    decode_key(key).map(|raw| did_from_raw_key(&raw))
+}
+
+/// True when the text has the shape of a `did`. This does not prove that it
+/// belongs to a key: derive it from the checked key for that.
+pub fn is_did_shape(text: &str) -> bool {
+    text.len() == DID_LEN
+        && text.chars().all(is_url_b64_char)
+        && URL_SAFE_NO_PAD
+            .decode(text)
+            .map(|raw| URL_SAFE_NO_PAD.encode(raw) == text)
+            .unwrap_or(false)
+}
+
+/// Reads `ver` or `lv`: an integral number from 1 to 2^31 - 1. A number such
+/// as `1.0` is accepted. Booleans, strings, null and fractions are not.
+pub fn parse_version(value: &Value) -> Result<u32, WireError> {
+    let Value::Number(number) = value else {
+        return Err(WireError::BadVersion);
+    };
+    let version = if let Some(unsigned) = number.as_u64() {
+        unsigned
+    } else {
+        let float = number.as_f64().ok_or(WireError::BadVersion)?;
+        if !float.is_finite()
+            || float.fract() != 0.0
+            || float < 1.0
+            || float > f64::from(MAX_VERSION)
+        {
+            return Err(WireError::BadVersion);
+        }
+        float as u64
+    };
+    u32::try_from(version)
+        .ok()
+        .filter(|v| (1..=MAX_VERSION).contains(v))
+        .ok_or(WireError::BadVersion)
+}
+
+/// Text the master key signs to certify a device id block.
+pub fn device_id_signed_text(curve25519_key: &str, master_ed25519_key: &str) -> String {
+    format!("irc-e2e:v2:id:{curve25519_key}:{master_ed25519_key}")
+}
+
+/// The `fb` binding: the first 16 bytes of SHA-256 over the sender and
+/// recipient Ed25519 keys, as unpadded standard base64.
+pub fn recipient_binding(sender_ed25519_key: &str, recipient_ed25519_key: &str) -> String {
+    let text = format!("irc-e2e:v2:bind:{sender_ed25519_key}:{recipient_ed25519_key}");
+    let hash = Sha256::digest(text.as_bytes());
+    STANDARD_NO_PAD.encode(&hash[..16])
+}
+
+/// Checks the device keys of one signed list: 1 to 4 valid keys, no repeats,
+/// no repeated `did`.
+pub fn check_list_devices(keys: &[String]) -> Result<(), WireError> {
+    if keys.is_empty() || keys.len() > MAX_LIST_DEVICES {
+        return Err(WireError::BadDeviceCount);
+    }
+    let mut dids: Vec<String> = Vec::with_capacity(keys.len());
+    for key in keys {
+        let did = did_from_key_text(key)?;
+        if dids.contains(&did) {
+            return Err(WireError::DuplicateDevice);
+        }
+        dids.push(did);
+    }
+    Ok(())
+}
+
+/// What to do with a signed list that passed its signature check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListDecision {
+    /// Higher version: replace the stored set.
+    Replace,
+    /// Equal version and same keys: nothing changes.
+    NoOp,
+    /// Lower version, or equal version with other keys: ignore it.
+    Ignore,
+}
+
+/// Applies the version rule of the signed list. A first list is always
+/// accepted.
+pub fn decide_list(
+    stored: Option<(u32, &[String])>,
+    new_version: u32,
+    new_keys: &[String],
+) -> ListDecision {
+    let Some((version, keys)) = stored else {
+        return ListDecision::Replace;
+    };
+    if new_version > version {
+        return ListDecision::Replace;
+    }
+    if new_version < version {
+        return ListDecision::Ignore;
+    }
+    let mut old: Vec<&String> = keys.iter().collect();
+    let mut new: Vec<&String> = new_keys.iter().collect();
+    old.sort();
+    new.sort();
+    if old == new {
+        ListDecision::NoOp
+    } else {
+        ListDecision::Ignore
+    }
+}
+
+fn check_msgid(msgid: &str) -> Result<(), WireError> {
+    if msgid.is_empty() || !msgid.chars().all(is_std_b64_char) {
+        return Err(WireError::BadMsgid);
+    }
+    Ok(())
+}
+
+fn check_address(text: &str) -> Result<(), WireError> {
+    if text == WILDCARD || is_did_shape(text) {
+        Ok(())
+    } else {
+        Err(WireError::BadAddress)
+    }
+}
+
+/// Checks the `from` and `to` pair that each verb allows.
+pub fn check_addresses(verb: Verb, from: &str, to: &str) -> Result<(), WireError> {
+    check_address(from)?;
+    check_address(to)?;
+    let from_any = from == WILDCARD;
+    let to_any = to == WILDCARD;
+    let ok = match verb {
+        Verb::KeyReq => !from_any && to_any,
+        Verb::Keys => from_any && !to_any,
+        Verb::PkMsg | Verb::Msg => !from_any,
+        Verb::Nack => !from_any && !to_any,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(WireError::BadAddress)
+    }
+}
+
+fn parse_count(text: &str) -> Result<u32, WireError> {
+    if text.is_empty() || text.len() > 9 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(WireError::BadFragment);
+    }
+    text.parse().map_err(|_| WireError::BadFragment)
+}
+
+/// Parses one frame. The chunk must be non-empty ASCII text.
+pub fn parse_frame(text: &str) -> Result<Frame, WireError> {
+    let body = text
+        .strip_prefix(FRAME_PREFIX)
+        .and_then(|rest| rest.strip_suffix(FRAME_SUFFIX))
+        .ok_or(WireError::BadFrame)?;
+    if !body.is_ascii() || body.bytes().any(|b| b.is_ascii_control()) {
+        return Err(WireError::BadFrame);
+    }
+    let mut parts = body.splitn(6, ' ');
+    let verb = Verb::parse(parts.next().ok_or(WireError::BadFrame)?)?;
+    let msgid = parts.next().ok_or(WireError::BadFrame)?;
+    let fragment = parts.next().ok_or(WireError::BadFrame)?;
+    let from = parts.next().ok_or(WireError::BadFrame)?;
+    let to = parts.next().ok_or(WireError::BadFrame)?;
+    let chunk = parts.next().ok_or(WireError::BadFrame)?;
+    check_msgid(msgid)?;
+    let (index, total) = fragment.split_once('/').ok_or(WireError::BadFragment)?;
+    let (index, total) = (parse_count(index)?, parse_count(total)?);
+    if index == 0 || index > total {
+        return Err(WireError::BadFragment);
+    }
+    check_addresses(verb, from, to)?;
+    if chunk.is_empty() || chunk.contains(FRAME_SUFFIX) {
+        return Err(WireError::BadFrame);
+    }
+    Ok(Frame {
+        verb,
+        msgid: msgid.to_string(),
+        index,
+        total,
+        from: from.to_string(),
+        to: to.to_string(),
+        chunk: chunk.to_string(),
+    })
+}
+
+/// Formats one frame. It applies the same checks as `parse_frame`.
+pub fn format_frame(frame: &Frame) -> Result<String, WireError> {
+    let text = format!(
+        "{FRAME_PREFIX}{} {} {}/{} {} {} {}{FRAME_SUFFIX}",
+        frame.verb.as_str(),
+        frame.msgid,
+        frame.index,
+        frame.total,
+        frame.from,
+        frame.to,
+        frame.chunk
+    );
+    // A field with a space would shift the others on re-parse: the parsed
+    // frame must equal the input.
+    if parse_frame(&text)? != *frame {
+        return Err(WireError::BadFrame);
+    }
+    Ok(text)
+}
+
+/// Joins the fragments of one message in index order. Any change of verb,
+/// msgid, `from`, `to` or total, a missing index or a repeated index drops
+/// the whole message.
+pub fn assemble_fragments(frames: &[Frame]) -> Result<String, WireError> {
+    let first = frames.first().ok_or(WireError::BadFragment)?;
+    if frames.len() != first.total as usize {
+        return Err(WireError::BadFragment);
+    }
+    let mut chunks: Vec<Option<&str>> = vec![None; frames.len()];
+    for frame in frames {
+        if frame.verb != first.verb
+            || frame.msgid != first.msgid
+            || frame.from != first.from
+            || frame.to != first.to
+            || frame.total != first.total
+        {
+            return Err(WireError::FragmentMismatch);
+        }
+        let slot = chunks
+            .get_mut(frame.index as usize - 1)
+            .ok_or(WireError::BadFragment)?;
+        if slot.replace(&frame.chunk).is_some() {
+            return Err(WireError::BadFragment);
+        }
+    }
+    Ok(chunks.into_iter().flatten().collect())
+}
+
+/// Parses a chunk or a joined payload as strict JSON text: ASCII only, no
+/// control characters (compact JSON has no raw tab or line break).
+/// `serde_json` already rejects `NaN` and `Infinity`.
+pub fn parse_payload(text: &str) -> Result<Value, WireError> {
+    if !text.is_ascii() || text.bytes().any(|b| b.is_ascii_control()) {
+        return Err(WireError::BadJson);
+    }
+    serde_json::from_str(text).map_err(|_| WireError::BadJson)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn key_text(byte: u8) -> String {
+        STANDARD_NO_PAD.encode([byte; 32])
+    }
+
+    fn frame(verb: Verb, from: &str, to: &str, index: u32, total: u32, chunk: &str) -> Frame {
+        Frame {
+            verb,
+            msgid: "AAAAAAAAAAAAAAAAAAAAAA".to_string(),
+            index,
+            total,
+            from: from.to_string(),
+            to: to.to_string(),
+            chunk: chunk.to_string(),
+        }
+    }
+
+    #[test]
+    fn did_has_eleven_url_safe_characters() {
+        for byte in 0..=255u8 {
+            let did = did_from_raw_key(&[byte; 32]);
+            assert_eq!(did.len(), DID_LEN);
+            assert!(is_did_shape(&did), "{did}");
+            assert!(!did.contains('+') && !did.contains('/') && !did.contains('='));
+        }
+    }
+
+    #[test]
+    fn did_matches_the_hash_prefix() {
+        let hash = Sha256::digest([7u8; 32]);
+        assert_eq!(
+            did_from_key_text(&key_text(7)).unwrap(),
+            URL_SAFE_NO_PAD.encode(&hash[..8])
+        );
+    }
+
+    #[test]
+    fn did_shape_rejects_standard_base64_and_wrong_length() {
+        assert!(!is_did_shape("abc+defghij"));
+        assert!(!is_did_shape("abc/defghij"));
+        assert!(!is_did_shape("abcdefghij"));
+        assert!(!is_did_shape("abcdefghijkl"));
+        assert!(!is_did_shape("abcdefghij="));
+        // The last character of an 11-character did carries only 4 bits.
+        assert!(!is_did_shape("AAAAAAAAAAB"));
+        assert!(is_did_shape("AAAAAAAAAAA"));
+    }
+
+    #[test]
+    fn key_text_is_strict() {
+        assert!(decode_key(&key_text(1)).is_ok());
+        assert_eq!(
+            decode_key(&format!("{}=", key_text(1))),
+            Err(WireError::BadKey)
+        );
+        assert_eq!(decode_key(&key_text(1)[..42]), Err(WireError::BadKey));
+        assert_eq!(decode_key("-".repeat(43).as_str()), Err(WireError::BadKey));
+        // Non-canonical final character: trailing bits are not zero.
+        let mut text = key_text(0);
+        text.replace_range(42..43, "B");
+        assert_eq!(decode_key(&text), Err(WireError::BadKey));
+    }
+
+    #[test]
+    fn signature_text_is_strict() {
+        let good = STANDARD_NO_PAD.encode([9u8; 64]);
+        assert_eq!(good.len(), SIGNATURE_TEXT_LEN);
+        assert!(decode_signature(&good).is_ok());
+        assert_eq!(decode_signature(&good[..85]), Err(WireError::BadSignature));
+        assert_eq!(decode_signature(&key_text(9)), Err(WireError::BadSignature));
+    }
+
+    #[test]
+    fn version_accepts_integral_numbers_only() {
+        assert_eq!(parse_version(&json!(1)), Ok(1));
+        assert_eq!(parse_version(&json!(1.0)), Ok(1));
+        assert_eq!(parse_version(&json!(2147483647)), Ok(MAX_VERSION));
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!(2147483648u64),
+            json!(true),
+            json!("1"),
+            json!(null),
+        ] {
+            assert_eq!(parse_version(&bad), Err(WireError::BadVersion), "{bad}");
+        }
+    }
+
+    #[test]
+    fn signed_texts_follow_the_agreed_shape() {
+        assert_eq!(device_id_signed_text("CUR", "MAS"), "irc-e2e:v2:id:CUR:MAS");
+        let binding = recipient_binding(&key_text(1), &key_text(2));
+        assert_eq!(binding.len(), 22);
+        assert_ne!(binding, recipient_binding(&key_text(2), &key_text(1)));
+    }
+
+    #[test]
+    fn list_holds_one_to_four_distinct_devices() {
+        assert_eq!(check_list_devices(&[]), Err(WireError::BadDeviceCount));
+        let five: Vec<String> = (1..=5).map(key_text).collect();
+        assert_eq!(check_list_devices(&five), Err(WireError::BadDeviceCount));
+        assert!(check_list_devices(&five[..4]).is_ok());
+        let repeat = vec![key_text(1), key_text(1)];
+        assert_eq!(check_list_devices(&repeat), Err(WireError::DuplicateDevice));
+        assert_eq!(
+            check_list_devices(&["bad".to_string()]),
+            Err(WireError::BadKey)
+        );
+    }
+
+    #[test]
+    fn list_version_rule() {
+        let a = vec![key_text(1), key_text(2)];
+        let b = vec![key_text(1), key_text(3)];
+        assert_eq!(decide_list(None, 1, &a), ListDecision::Replace);
+        assert_eq!(decide_list(Some((1, &a)), 2, &b), ListDecision::Replace);
+        assert_eq!(decide_list(Some((2, &a)), 1, &b), ListDecision::Ignore);
+        let reordered = vec![key_text(2), key_text(1)];
+        assert_eq!(
+            decide_list(Some((2, &a)), 2, &reordered),
+            ListDecision::NoOp
+        );
+        assert_eq!(decide_list(Some((2, &a)), 2, &b), ListDecision::Ignore);
+    }
+
+    #[test]
+    fn frame_round_trip() {
+        let from = did_from_key_text(&key_text(1)).unwrap();
+        let to = did_from_key_text(&key_text(2)).unwrap();
+        let sent = frame(Verb::Nack, &from, &to, 1, 1, r#"{"ver":1}"#);
+        let text = format_frame(&sent).unwrap();
+        assert!(text.starts_with("\u{1}E2E NACK "));
+        assert!(text.ends_with('\u{1}'));
+        assert_eq!(parse_frame(&text).unwrap(), sent);
+    }
+
+    #[test]
+    fn frame_address_pairs_per_verb() {
+        let did = did_from_key_text(&key_text(1)).unwrap();
+        let other = did_from_key_text(&key_text(2)).unwrap();
+        assert!(check_addresses(Verb::KeyReq, &did, "*").is_ok());
+        assert!(check_addresses(Verb::KeyReq, "*", &did).is_err());
+        assert!(check_addresses(Verb::Keys, "*", &did).is_ok());
+        assert!(check_addresses(Verb::Keys, &did, "*").is_err());
+        assert!(check_addresses(Verb::Msg, &did, "*").is_ok());
+        assert!(check_addresses(Verb::PkMsg, &did, &other).is_ok());
+        assert!(check_addresses(Verb::Msg, "*", &did).is_err());
+        assert!(check_addresses(Verb::Nack, &did, &other).is_ok());
+        assert!(check_addresses(Verb::Nack, &did, "*").is_err());
+        assert!(check_addresses(Verb::Msg, "abc+defghij", "*").is_err());
+    }
+
+    #[test]
+    fn frame_parser_rejects_bad_input() {
+        let did = did_from_key_text(&key_text(1)).unwrap();
+        let ok = format!("\u{1}E2E KEYREQ AAAA 1/1 {did} * {{}}\u{1}");
+        assert!(parse_frame(&ok).is_ok());
+        for bad in [
+            format!("E2E KEYREQ AAAA 1/1 {did} * {{}}"),
+            format!("\u{1}E2E HELLO AAAA 1/1 {did} * {{}}\u{1}"),
+            format!("\u{1}E2E KEYREQ AAAA 0/1 {did} * {{}}\u{1}"),
+            format!("\u{1}E2E KEYREQ AAAA 2/1 {did} * {{}}\u{1}"),
+            format!("\u{1}E2E KEYREQ AAAA 1-1 {did} * {{}}\u{1}"),
+            format!("\u{1}E2E KEYREQ AA=A 1/1 {did} * {{}}\u{1}"),
+            format!("\u{1}E2E KEYREQ AAAA 1/1 {did} *\u{1}"),
+            format!("\u{1}E2E KEYREQ AAAA 1/1 {did} * caf\u{e9}\u{1}"),
+        ] {
+            assert!(parse_frame(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn fragments_join_in_order_and_reject_changes() {
+        let did = did_from_key_text(&key_text(1)).unwrap();
+        let one = frame(Verb::Msg, &did, "*", 1, 2, "{\"a\":");
+        let two = frame(Verb::Msg, &did, "*", 2, 2, "1}");
+        assert_eq!(
+            assemble_fragments(&[two.clone(), one.clone()]).unwrap(),
+            "{\"a\":1}"
+        );
+        assert!(assemble_fragments(std::slice::from_ref(&one)).is_err());
+        assert!(assemble_fragments(&[one.clone(), one.clone()]).is_err());
+        let mut other = two.clone();
+        other.msgid = "BBBB".to_string();
+        assert_eq!(
+            assemble_fragments(&[one.clone(), other]),
+            Err(WireError::FragmentMismatch)
+        );
+        let mut moved = two;
+        moved.to = did.clone();
+        assert_eq!(
+            assemble_fragments(&[one, moved]),
+            Err(WireError::FragmentMismatch)
+        );
+        assert!(assemble_fragments(&[]).is_err());
+    }
+
+    #[test]
+    fn payload_must_be_ascii_json() {
+        assert!(parse_payload(r#"{"ver":1}"#).is_ok());
+        assert_eq!(parse_payload("{\"a\":\"\u{e9}\"}"), Err(WireError::BadJson));
+        assert_eq!(parse_payload("{\"a\":NaN}"), Err(WireError::BadJson));
+        assert_eq!(parse_payload("{\"a\":Infinity}"), Err(WireError::BadJson));
+        assert_eq!(parse_payload("{\"ver\":\n1}"), Err(WireError::BadJson));
+        assert_eq!(parse_payload("{\"ver\":\t1}"), Err(WireError::BadJson));
+    }
+
+    #[test]
+    fn frame_rejects_control_characters() {
+        let did = did_from_key_text(&key_text(1)).unwrap();
+        let text = format!("\u{1}E2E KEYREQ AAAA 1/1 {did} * {{\"ver\":\n1}}\u{1}");
+        assert_eq!(parse_frame(&text), Err(WireError::BadFrame));
+    }
+
+    #[test]
+    fn format_rejects_a_field_with_a_space() {
+        let did = did_from_key_text(&key_text(1)).unwrap();
+        let mut bad = frame(Verb::KeyReq, &did, "*", 1, 1, "{}");
+        bad.msgid = format!("AAAA 1/1 {did} *");
+        bad.index = 0;
+        assert!(format_frame(&bad).is_err());
+        bad.index = 1;
+        assert!(format_frame(&bad).is_err());
+    }
+}
