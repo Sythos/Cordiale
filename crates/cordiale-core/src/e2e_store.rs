@@ -571,8 +571,12 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["history.bin", "history.bin.lock"]);
-        let lock = fs::read(dir.join("history.bin.lock")).expect("read lock");
-        assert!(lock.is_empty());
+        // The lock is held, and Windows refuses to read a locked file: check
+        // the length from the metadata.
+        let lock_len = fs::metadata(dir.join("history.bin.lock"))
+            .expect("lock metadata")
+            .len();
+        assert_eq!(lock_len, 0);
         let _ = fs::remove_dir_all(&dir);
     }
 
