@@ -191,7 +191,8 @@ pub struct InboxItem {
     pub ciphertext: String,
 }
 
-/// What the drain did with one item. Each outcome is acknowledged.
+/// What the drain did with one item. The caller acknowledges every outcome
+/// except [`DrainOutcome::StoreFailed`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainOutcome {
     Stored,
@@ -200,22 +201,35 @@ pub enum DrainOutcome {
     /// The copy is older than the pairing of this device: no old history.
     BeforePairing,
     Undecryptable,
+    /// The sink could not write the copy. The item is not marked as seen.
+    /// Do not acknowledge it: it stays in the inbox for the next drain.
+    StoreFailed,
+}
+
+impl DrainOutcome {
+    /// True when the caller acknowledges the item.
+    pub fn acknowledge(self) -> bool {
+        self != DrainOutcome::StoreFailed
+    }
 }
 
 /// Processes the items of the inbox of one device.
 ///
 /// `seen` holds the ids already stored by this device. `paired_at` is the
 /// time at which this device joined the account. The sink gets the plaintext
-/// of each stored item and writes it to the encrypted history. The returned
-/// list has one entry for each item, in order: the caller acknowledges every
-/// id in it, also the ids of items that it did not store.
-pub fn drain_inbox(
+/// of each item and writes it to the encrypted history. An item is marked as
+/// seen only when the sink succeeds. The returned list has one entry for each
+/// item, in order: the caller acknowledges the ids for which
+/// [`DrainOutcome::acknowledge`] is true, also the ids of items that it did
+/// not store. The error of the sink is dropped, so the outcome holds no
+/// detail of the store.
+pub fn drain_inbox<E>(
     items: &[InboxItem],
     now: u64,
     paired_at: u64,
     seen: &mut HashSet<String>,
     cipher: &mut dyn CopyCipher,
-    mut sink: impl FnMut(&InboxItem, Vec<u8>),
+    mut sink: impl FnMut(&InboxItem, Vec<u8>) -> Result<(), E>,
 ) -> Vec<(String, DrainOutcome)> {
     items
         .iter()
@@ -227,9 +241,12 @@ pub fn drain_inbox(
             } else if item.created_at < paired_at {
                 DrainOutcome::BeforePairing
             } else if let Some(plain) = cipher.decrypt(&item.sender_did, &item.ciphertext) {
-                seen.insert(item.id.clone());
-                sink(item, plain);
-                DrainOutcome::Stored
+                if sink(item, plain).is_ok() {
+                    seen.insert(item.id.clone());
+                    DrainOutcome::Stored
+                } else {
+                    DrainOutcome::StoreFailed
+                }
             } else {
                 DrainOutcome::Undecryptable
             };
@@ -388,6 +405,7 @@ mod tests {
         let items = [item("a", 500, "ct:olleh")];
         let out = drain_inbox(&items, 600, 0, &mut seen, &mut cipher, |i, plain| {
             stored.push((i.id.clone(), plain));
+            Ok::<(), ()>(())
         });
         assert_eq!(out, [("a".to_owned(), DrainOutcome::Stored)]);
         assert_eq!(stored, [("a".to_owned(), b"hello".to_vec())]);
@@ -399,7 +417,10 @@ mod tests {
         let mut seen = HashSet::new();
         let mut count = 0;
         let items = [item("a", 500, "ct:x"), item("a", 500, "ct:x")];
-        let out = drain_inbox(&items, 600, 0, &mut seen, &mut cipher, |_, _| count += 1);
+        let out = drain_inbox(&items, 600, 0, &mut seen, &mut cipher, |_, _| {
+            count += 1;
+            Ok::<(), ()>(())
+        });
         assert_eq!(count, 1);
         assert_eq!(out[1], ("a".to_owned(), DrainOutcome::Duplicate));
     }
@@ -411,7 +432,10 @@ mod tests {
         let mut count = 0;
         let now = 10 + INBOX_EXPIRY_SECS;
         let items = [item("old", 10, "ct:x"), item("bad", now, "garbage")];
-        let out = drain_inbox(&items, now, 0, &mut seen, &mut cipher, |_, _| count += 1);
+        let out = drain_inbox(&items, now, 0, &mut seen, &mut cipher, |_, _| {
+            count += 1;
+            Ok::<(), ()>(())
+        });
         assert_eq!(count, 0);
         assert_eq!(out[0].1, DrainOutcome::Expired);
         assert_eq!(out[1].1, DrainOutcome::Undecryptable);
@@ -425,9 +449,35 @@ mod tests {
         let items = [item("before", 100, "ct:x"), item("after", 300, "ct:x")];
         let out = drain_inbox(&items, 400, 200, &mut seen, &mut cipher, |i, _| {
             ids.push(i.id.clone());
+            Ok::<(), ()>(())
         });
         assert_eq!(out[0].1, DrainOutcome::BeforePairing);
         assert_eq!(ids, ["after"]);
+    }
+
+    #[test]
+    fn failed_write_keeps_the_item_for_the_next_drain() {
+        let mut cipher = FakeCipher::default();
+        let mut seen = HashSet::new();
+        let mut rows = Vec::new();
+        let mut calls = 0;
+        let items = [item("a", 500, "ct:x")];
+        let mut sink = |i: &InboxItem, plain: Vec<u8>| {
+            calls += 1;
+            if calls == 1 {
+                return Err(());
+            }
+            rows.push((i.id.clone(), plain));
+            Ok(())
+        };
+        let first = drain_inbox(&items, 600, 0, &mut seen, &mut cipher, &mut sink);
+        assert_eq!(first[0].1, DrainOutcome::StoreFailed);
+        assert!(!first[0].1.acknowledge());
+        assert!(seen.is_empty());
+        let second = drain_inbox(&items, 600, 0, &mut seen, &mut cipher, &mut sink);
+        assert_eq!(second[0].1, DrainOutcome::Stored);
+        assert!(second[0].1.acknowledge());
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]
@@ -437,10 +487,14 @@ mod tests {
         let mut seen_c = HashSet::new();
         let items_b = [item("m1.dev-b", 500, "ct:x")];
         let items_c = [item("m1.dev-c", 500, "ct:x")];
-        let out_b = drain_inbox(&items_b, 600, 0, &mut seen_b, &mut cipher, |_, _| {});
+        let out_b = drain_inbox(&items_b, 600, 0, &mut seen_b, &mut cipher, |_, _| {
+            Ok::<(), ()>(())
+        });
         assert_eq!(out_b.len(), 1);
         assert!(seen_c.is_empty());
-        let out_c = drain_inbox(&items_c, 600, 0, &mut seen_c, &mut cipher, |_, _| {});
+        let out_c = drain_inbox(&items_c, 600, 0, &mut seen_c, &mut cipher, |_, _| {
+            Ok::<(), ()>(())
+        });
         assert_eq!(out_c[0].1, DrainOutcome::Stored);
         assert!(seen_b.contains("m1.dev-b") && !seen_b.contains("m1.dev-c"));
     }
