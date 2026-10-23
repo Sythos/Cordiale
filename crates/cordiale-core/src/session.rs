@@ -43,6 +43,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
 use crate::backoff::{random_unit, Backoff};
+use crate::e2e_pacing::{SendBook, SendDropped};
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
 use crate::websocket::{PhoenixSocket, PhoenixSocketError};
 
@@ -240,6 +241,14 @@ impl SessionHandle {
         let _ = self.commands.send(SessionCommand::Close { flushed });
         done
     }
+}
+
+/// Route one session frame into the local E2E send book. Call it for every
+/// `SessionEvent::Frame`. Return the drop event when the frame is an
+/// `e2e_send_dropped` that changed a send; any other frame, an unknown send
+/// and a repeated event return `None` and change nothing.
+pub fn route_e2e_send_dropped(book: &mut SendBook, frame: &PhoenixMessage) -> Option<SendDropped> {
+    book.apply_payload(&frame.payload)
 }
 
 /// Starts a session: connects, joins `grappa:user:{user}`, and spawns the
@@ -720,6 +729,38 @@ mod tests {
             event: "phx_reply".to_string(),
             payload,
         }
+    }
+
+    #[test]
+    fn frame_with_a_drop_event_updates_only_its_send() {
+        use crate::e2e_pacing::{DropReason, SendKey, SendStatus};
+        let mut book = SendBook::new();
+        let first = SendKey::new("libera", "bob", "m1");
+        let second = SendKey::new("libera", "bob", "m2");
+        book.start(first.clone());
+        book.start(second.clone());
+        let frame = reply(
+            "1",
+            serde_json::json!({
+                "kind": "e2e_send_dropped",
+                "network": "libera",
+                "target": "bob",
+                "message_id": "m1",
+                "reason": "send_failed"
+            }),
+        );
+        let event = route_e2e_send_dropped(&mut book, &frame).expect("routed");
+        assert_eq!(event.reason, DropReason::SendFailed);
+        assert_eq!(
+            book.status(&first),
+            Some(SendStatus::Dropped(DropReason::SendFailed))
+        );
+        assert_eq!(book.status(&second), Some(SendStatus::Pending));
+        // The same frame again changes nothing.
+        assert!(route_e2e_send_dropped(&mut book, &frame).is_none());
+        // A frame of another kind is ignored.
+        let other = reply("2", serde_json::json!({"kind": "message"}));
+        assert!(route_e2e_send_dropped(&mut book, &other).is_none());
     }
 
     #[test]

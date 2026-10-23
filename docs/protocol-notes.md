@@ -1244,7 +1244,7 @@ voce qui sotto lo richiede.
 | 43 | Coda offline: `GET /networks/:id/e2e/inbox`, `POST …/inbox/ack`, `id` in `e2e_message` | In attesa del contratto per dispositivo. Non implementato. |
 | 44 | Bundle di chiavi: `POST`/`GET`/`DELETE /networks/:id/e2e/keys` | In attesa del contratto per dispositivo. Non implementato. |
 | 45 | Buste di inbox e 202 dell'invio dichiarate nello schema generato | Nessun nuovo byte sul filo e nessun endpoint nuovo: non richiede codice. |
-| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Restano da tipizzare risposta, rifiuti ed evento `e2e_send_dropped`. Il pacing a runtime è dell'issue 359. |
+| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Issue 384: `GrappaClient::send_e2e_message` (`POST /networks/:id/e2e/messages`) classifica 202, 422 `too_late` e 400 con `classify_send_response`; `SendBook` e `route_e2e_send_dropped` (`session.rs`) applicano una volta sola l'evento `e2e_send_dropped`, per chiave rete, destinatario e id messaggio. **Non verificato sul sorgente di Grappa:** i nomi dei campi dell'evento (`network`, `target`, `message_id`, `reason`) sono un'ipotesi da controllare sul contratto del protocollo 47; il corpo del 202 non si legge. Il pacing a runtime è dell'issue 359. |
 
 `E2eSendRequest` (fonte: CLIENT_PROTOCOL §4f, PR 2446 di Grappa) è rigorosa:
 campo mancante, sconosciuto o di tipo sbagliato è un errore tipizzato
