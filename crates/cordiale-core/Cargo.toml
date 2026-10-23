@@ -29,6 +29,10 @@ futures-util = { version = "0.3", features = ["sink"] }
 # it links FFmpeg, which a build has to provide (system libraries, or the
 # `static` feature of this crate to build them).
 ffmpeg-next = { version = "9", optional = true }
+# Ed25519 checks and Olm for the per-device E2E engine (`e2e_device.rs`):
+# pure Rust, Apache-2.0, encrypted pickles. 0.10 is the newest release for
+# the pinned toolchain.
+vodozemac = "0.10.0"
 chacha20poly1305 = "0.11"
 zeroize = "1"
 caseless = "0.2"
