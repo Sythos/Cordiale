@@ -312,7 +312,7 @@ pub fn parse_frame(text: &str) -> Result<Frame, WireError> {
         .strip_prefix(FRAME_PREFIX)
         .and_then(|rest| rest.strip_suffix(FRAME_SUFFIX))
         .ok_or(WireError::BadFrame)?;
-    if !body.is_ascii() {
+    if !body.is_ascii() || body.bytes().any(|b| b.is_ascii_control()) {
         return Err(WireError::BadFrame);
     }
     let mut parts = body.splitn(6, ' ');
@@ -355,7 +355,11 @@ pub fn format_frame(frame: &Frame) -> Result<String, WireError> {
         frame.to,
         frame.chunk
     );
-    parse_frame(&text)?;
+    // A field with a space would shift the others on re-parse: the parsed
+    // frame must equal the input.
+    if parse_frame(&text)? != *frame {
+        return Err(WireError::BadFrame);
+    }
     Ok(text)
 }
 
@@ -388,10 +392,10 @@ pub fn assemble_fragments(frames: &[Frame]) -> Result<String, WireError> {
 }
 
 /// Parses a chunk or a joined payload as strict JSON text: ASCII only, no
-/// control characters outside strings. `serde_json` already rejects `NaN`
-/// and `Infinity`.
+/// control characters (compact JSON has no raw tab or line break).
+/// `serde_json` already rejects `NaN` and `Infinity`.
 pub fn parse_payload(text: &str) -> Result<Value, WireError> {
-    if !text.is_ascii() {
+    if !text.is_ascii() || text.bytes().any(|b| b.is_ascii_control()) {
         return Err(WireError::BadJson);
     }
     serde_json::from_str(text).map_err(|_| WireError::BadJson)
@@ -583,7 +587,7 @@ mod tests {
             assemble_fragments(&[two.clone(), one.clone()]).unwrap(),
             "{\"a\":1}"
         );
-        assert!(assemble_fragments(&[one.clone()]).is_err());
+        assert!(assemble_fragments(std::slice::from_ref(&one)).is_err());
         assert!(assemble_fragments(&[one.clone(), one.clone()]).is_err());
         let mut other = two.clone();
         other.msgid = "BBBB".to_string();
@@ -606,5 +610,25 @@ mod tests {
         assert_eq!(parse_payload("{\"a\":\"\u{e9}\"}"), Err(WireError::BadJson));
         assert_eq!(parse_payload("{\"a\":NaN}"), Err(WireError::BadJson));
         assert_eq!(parse_payload("{\"a\":Infinity}"), Err(WireError::BadJson));
+        assert_eq!(parse_payload("{\"ver\":\n1}"), Err(WireError::BadJson));
+        assert_eq!(parse_payload("{\"ver\":\t1}"), Err(WireError::BadJson));
+    }
+
+    #[test]
+    fn frame_rejects_control_characters() {
+        let did = did_from_key_text(&key_text(1)).unwrap();
+        let text = format!("\u{1}E2E KEYREQ AAAA 1/1 {did} * {{\"ver\":\n1}}\u{1}");
+        assert_eq!(parse_frame(&text), Err(WireError::BadFrame));
+    }
+
+    #[test]
+    fn format_rejects_a_field_with_a_space() {
+        let did = did_from_key_text(&key_text(1)).unwrap();
+        let mut bad = frame(Verb::KeyReq, &did, "*", 1, 1, "{}");
+        bad.msgid = format!("AAAA 1/1 {did} *");
+        bad.index = 0;
+        assert!(format_frame(&bad).is_err());
+        bad.index = 1;
+        assert!(format_frame(&bad).is_err());
     }
 }
