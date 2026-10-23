@@ -534,6 +534,7 @@ pub fn reject_unknown_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn pairing_message_fits_checks_every_limit() {
