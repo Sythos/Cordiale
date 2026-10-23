@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_json = { version = "1", features = ["raw_value"] }
 base64 = "0.23"
 sha2 = "0.11"
 dirs = "7"
@@ -33,6 +33,8 @@ ffmpeg-next = { version = "9", optional = true }
 # pure Rust, Apache-2.0, encrypted pickles. 0.10 is the newest release for
 # the pinned toolchain.
 vodozemac = "0.10.0"
+chacha20poly1305 = "0.11"
+zeroize = "1"
 
 [features]
 video-shrink = ["dep:ffmpeg-next"]

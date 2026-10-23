@@ -31,6 +31,7 @@
 
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
+use serde_json::value::RawValue;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -174,15 +175,11 @@ pub fn is_did_shape(text: &str) -> bool {
 
 /// Reads `ver` or `lv`: an integral number from 1 to 2^31 - 1. A number such
 /// as `1.0` is accepted. Booleans, strings, null and fractions are not.
-pub fn parse_version(value: &Value) -> Result<u32, WireError> {
-    let Value::Number(number) = value else {
-        return Err(WireError::BadVersion);
-    };
-    let version = if let Some(unsigned) = number.as_u64() {
-        unsigned
-    } else {
-        integral_decimal(&number.to_string()).ok_or(WireError::BadVersion)?
-    };
+///
+/// The field comes as raw JSON text (`RawValue`), so the exact number text
+/// is kept for this field only. A `Value` would round it through `f64`.
+pub fn parse_version(raw: &RawValue) -> Result<u32, WireError> {
+    let version = integral_decimal(raw.get()).ok_or(WireError::BadVersion)?;
     u32::try_from(version)
         .ok()
         .filter(|v| (1..=MAX_VERSION).contains(v))
@@ -226,6 +223,44 @@ fn integral_decimal(text: &str) -> Option<u64> {
 /// Text the master key signs to certify a device id block.
 pub fn device_id_signed_text(curve25519_key: &str, master_ed25519_key: &str) -> String {
     format!("irc-e2e:v2:id:{curve25519_key}:{master_ed25519_key}")
+}
+
+fn check_version(version: u32) -> Result<(), WireError> {
+    if (1..=MAX_VERSION).contains(&version) {
+        Ok(())
+    } else {
+        Err(WireError::BadVersion)
+    }
+}
+
+/// Text the master key signs to certify one device: `irc-e2e:v2:dev:<N>:<E>`.
+///
+/// `first_list_version` is N, the first accepted list version that holds the
+/// device. `device_ed25519_key` is E, the public device key. Candidate format:
+/// the final contract is not approved yet. Returns the exact UTF-8 bytes for
+/// signing, apart from any signature or `did` text.
+pub fn device_certificate_signed_text(
+    first_list_version: u32,
+    device_ed25519_key: &str,
+) -> Result<Vec<u8>, WireError> {
+    check_version(first_list_version)?;
+    decode_key(device_ed25519_key)?;
+    Ok(format!("irc-e2e:v2:dev:{first_list_version}:{device_ed25519_key}").into_bytes())
+}
+
+/// Text the master key signs for one device list:
+/// `irc-e2e:v2:list:<N>:<E1>,<E2>,...`.
+///
+/// The keys keep the order of the caller: this function does not sort them.
+/// The caller applies the key order of the final contract. Candidate format:
+/// the final contract is not approved yet.
+pub fn signed_list_signed_text(
+    list_version: u32,
+    device_keys: &[String],
+) -> Result<Vec<u8>, WireError> {
+    check_version(list_version)?;
+    check_list_devices(device_keys)?;
+    Ok(format!("irc-e2e:v2:list:{list_version}:{}", device_keys.join(",")).into_bytes())
 }
 
 /// The `fb` binding: the first 16 bytes of SHA-256 over the sender and
@@ -431,7 +466,6 @@ pub fn parse_payload(text: &str) -> Result<Value, WireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn key_text(byte: u8) -> String {
         STANDARD_NO_PAD.encode([byte; 32])
@@ -466,6 +500,58 @@ mod tests {
             did_from_key_text(&key_text(7)).unwrap(),
             URL_SAFE_NO_PAD.encode(&hash[..8])
         );
+    }
+
+    fn raw_key(hex: &str) -> [u8; 32] {
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        <[u8; 32]>::try_from(bytes).unwrap()
+    }
+
+    /// (raw key in hex, standard unpadded key text, expected did)
+    const DID_VECTORS: [(&str, &str, &str); 2] = [
+        // RFC 8032 test key.
+        (
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+            "If4x36FUomE",
+        ),
+        // Vector 70: the did holds both base64url characters.
+        (
+            "ee5d35c971a86ab62d114de7c07174d7f088a3cfebf14d25274d539d42d3f486",
+            "7l01yXGoarYtEU3nwHF01/CIo8/r8U0lJ01TnULT9IY",
+            "_Uw_z3-OAsk",
+        ),
+    ];
+
+    #[test]
+    fn did_matches_the_approved_vectors() {
+        for (hex, text, did) in DID_VECTORS {
+            let raw = raw_key(hex);
+            assert_eq!(STANDARD_NO_PAD.encode(raw), text);
+            assert_eq!(did_from_raw_key(&raw), did);
+            assert_eq!(did_from_key_text(text).unwrap(), did);
+            assert!(is_did_shape(did));
+        }
+    }
+
+    #[test]
+    fn did_hashes_the_raw_key_not_its_text() {
+        let (_, text, did) = DID_VECTORS[0];
+        let from_text = Sha256::digest(text.as_bytes());
+        assert_ne!(URL_SAFE_NO_PAD.encode(&from_text[..8]), did);
+    }
+
+    #[test]
+    fn did_vector_70_uses_hyphen_and_underscore() {
+        let (hex, _, did) = DID_VECTORS[1];
+        assert!(did.contains('-') && did.contains('_'));
+        assert!(is_did_shape(did));
+        assert_eq!(did_from_raw_key(&raw_key(hex)), did);
+        // The standard-base64 form of the same bytes is not a did.
+        assert!(!is_did_shape("/Uw/z3+OAsk"));
     }
 
     #[test]
@@ -506,38 +592,43 @@ mod tests {
 
     #[test]
     fn version_accepts_integral_numbers_only() {
-        assert_eq!(parse_version(&json!(1)), Ok(1));
-        assert_eq!(parse_version(&json!(1.0)), Ok(1));
-        assert_eq!(parse_version(&json!(2147483647)), Ok(MAX_VERSION));
-        let exact = |text: &str| serde_json::from_str::<Value>(text).unwrap();
-        assert_eq!(parse_version(&exact("1e0")), Ok(1));
-        assert_eq!(parse_version(&exact("20E-1")), Ok(2));
-        assert_eq!(parse_version(&exact("1.00")), Ok(1));
-        assert_eq!(parse_version(&exact("0.5e1")), Ok(5));
+        let raw = |text: &str| RawValue::from_string(text.to_string()).unwrap();
+        assert_eq!(parse_version(&raw("1")), Ok(1));
+        assert_eq!(parse_version(&raw("1.0")), Ok(1));
+        assert_eq!(parse_version(&raw("2147483647")), Ok(MAX_VERSION));
+        assert_eq!(parse_version(&raw("1e0")), Ok(1));
+        assert_eq!(parse_version(&raw("20E-1")), Ok(2));
+        assert_eq!(parse_version(&raw("1.00")), Ok(1));
+        assert_eq!(parse_version(&raw("0.5e1")), Ok(5));
         for bad in [
             "1.00000000000000001",
             "0.15e1",
             "1e-1",
             "0.0",
             "2147483648.0",
+            "0",
+            "-1",
+            "1.5",
+            "2147483648",
+            "true",
+            "\"1\"",
+            "null",
+            "[1]",
+            "{\"a\":1}",
         ] {
             assert_eq!(
-                parse_version(&exact(bad)),
+                parse_version(&raw(bad)),
                 Err(WireError::BadVersion),
                 "{bad}"
             );
         }
-        for bad in [
-            json!(0),
-            json!(-1),
-            json!(1.5),
-            json!(2147483648u64),
-            json!(true),
-            json!("1"),
-            json!(null),
-        ] {
-            assert_eq!(parse_version(&bad), Err(WireError::BadVersion), "{bad}");
-        }
+    }
+
+    #[test]
+    fn payload_numbers_are_plain_values() {
+        let value = parse_payload(r#"{"$serde_json::private::Number":"1"}"#).unwrap();
+        assert!(value.is_object());
+        assert!(parse_payload(r#"{"ver":1}"#).unwrap()["ver"].is_number());
     }
 
     #[test]
@@ -682,5 +773,102 @@ mod tests {
         assert!(format_frame(&bad).is_err());
         bad.index = 1;
         assert!(format_frame(&bad).is_err());
+    }
+
+    const KEY_A: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const KEY_B: &str = "//////////////////////////////////////////8";
+
+    #[test]
+    fn device_certificate_text_is_exact() {
+        assert_eq!(
+            device_certificate_signed_text(3, KEY_A).unwrap(),
+            b"irc-e2e:v2:dev:3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_vec()
+        );
+        assert_eq!(
+            device_certificate_signed_text(MAX_VERSION, KEY_B).unwrap(),
+            b"irc-e2e:v2:dev:2147483647://////////////////////////////////////////8".to_vec()
+        );
+    }
+
+    #[test]
+    fn device_certificate_text_changes_with_each_field() {
+        let base = device_certificate_signed_text(3, KEY_A).unwrap();
+        assert_ne!(base, device_certificate_signed_text(4, KEY_A).unwrap());
+        assert_ne!(base, device_certificate_signed_text(3, KEY_B).unwrap());
+    }
+
+    #[test]
+    fn device_certificate_text_rejects_bad_input() {
+        assert_eq!(
+            device_certificate_signed_text(0, KEY_A),
+            Err(WireError::BadVersion)
+        );
+        assert_eq!(
+            device_certificate_signed_text(MAX_VERSION + 1, KEY_A),
+            Err(WireError::BadVersion)
+        );
+        assert_eq!(
+            device_certificate_signed_text(1, &KEY_A[..42]),
+            Err(WireError::BadKey)
+        );
+        assert_eq!(
+            device_certificate_signed_text(1, "A:A"),
+            Err(WireError::BadKey)
+        );
+    }
+
+    #[test]
+    fn signed_list_text_is_exact() {
+        let one = vec![KEY_A.to_string()];
+        assert_eq!(
+            signed_list_signed_text(1, &one).unwrap(),
+            b"irc-e2e:v2:list:1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_vec()
+        );
+        let two = vec![KEY_A.to_string(), KEY_B.to_string()];
+        assert_eq!(
+            signed_list_signed_text(12, &two).unwrap(),
+            b"irc-e2e:v2:list:12:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,//////////////////////////////////////////8"
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn signed_list_text_follows_caller_order_and_version() {
+        let ab = vec![KEY_A.to_string(), KEY_B.to_string()];
+        let ba = vec![KEY_B.to_string(), KEY_A.to_string()];
+        let base = signed_list_signed_text(2, &ab).unwrap();
+        assert_ne!(base, signed_list_signed_text(2, &ba).unwrap());
+        assert_ne!(base, signed_list_signed_text(3, &ab).unwrap());
+        assert_ne!(base, signed_list_signed_text(2, &ab[..1]).unwrap());
+    }
+
+    #[test]
+    fn signed_list_text_rejects_bad_lists() {
+        let a = KEY_A.to_string();
+        assert_eq!(
+            signed_list_signed_text(0, std::slice::from_ref(&a)),
+            Err(WireError::BadVersion)
+        );
+        assert_eq!(
+            signed_list_signed_text(1, &[]),
+            Err(WireError::BadDeviceCount)
+        );
+        assert_eq!(
+            signed_list_signed_text(1, &[a.clone(), a.clone()]),
+            Err(WireError::DuplicateDevice)
+        );
+        assert_eq!(
+            signed_list_signed_text(1, &[a.clone(), format!("{KEY_A},{KEY_B}")]),
+            Err(WireError::BadKey)
+        );
+        assert_eq!(
+            signed_list_signed_text(1, &[a, String::new()]),
+            Err(WireError::BadKey)
+        );
+        let five: Vec<String> = (0..5u8).map(key_text).collect();
+        assert_eq!(
+            signed_list_signed_text(1, &five),
+            Err(WireError::BadDeviceCount)
+        );
     }
 }
