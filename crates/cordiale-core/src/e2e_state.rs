@@ -91,7 +91,6 @@ impl E2eStateStore {
     /// open is an error: it is never replaced by an empty state. Another
     /// open handle on the same path gives `InUse`.
     pub fn open(path: PathBuf, provider: &dyn E2eKeyProvider) -> Result<Self, E2eStoreError> {
-        let key = provider.load_or_create_key()?;
         if let Some(parent) = path.parent() {
             create_private_dir_all(parent)?;
         }
@@ -107,6 +106,9 @@ impl E2eStateStore {
             Err(fs::TryLockError::WouldBlock) => return Err(E2eStoreError::InUse),
             Err(fs::TryLockError::Error(err)) => return Err(err.into()),
         }
+        // Take the key only under the state lock, so that two openers of
+        // the same path never create the key in parallel.
+        let key = provider.load_or_create_key()?;
         let mut store = E2eStateStore {
             path,
             _lock: lock,
@@ -276,7 +278,7 @@ mod tests {
         let one_time = *peer.one_time_keys().values().next().expect("one-time key");
         account
             .create_outbound_session(
-                vodozemac::olm::SessionConfig::version_2(),
+                vodozemac::olm::SessionConfig::version_1(),
                 peer.identity_keys().curve25519,
                 one_time,
             )
