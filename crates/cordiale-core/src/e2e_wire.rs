@@ -513,9 +513,10 @@ mod tests {
         assert_eq!(parse_version(&exact("1e0")), Ok(1));
         assert_eq!(parse_version(&exact("20E-1")), Ok(2));
         assert_eq!(parse_version(&exact("1.00")), Ok(1));
+        assert_eq!(parse_version(&exact("0.5e1")), Ok(5));
         for bad in [
             "1.00000000000000001",
-            "0.5e1",
+            "0.15e1",
             "1e-1",
             "0.0",
             "2147483648.0",
