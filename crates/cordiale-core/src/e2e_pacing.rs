@@ -30,6 +30,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::isupport::CaseMapping;
+
 /// Minimum time between two KEYS answers to the same nickname.
 pub const KEYS_ANSWER_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -66,8 +68,10 @@ impl Default for MonotonicClock {
     }
 }
 
-fn nick_key(nick: &str) -> String {
-    nick.to_ascii_lowercase()
+/// Nicknames are folded with the casemapping of the network. The caller
+/// passes the current mapping of that network on every call.
+fn nick_key(nick: &str, casemapping: CaseMapping) -> String {
+    casemapping.fold(nick)
 }
 
 /// Per-nickname limit: one event in each interval. The exact end of the
@@ -88,8 +92,8 @@ impl IntervalLimiter {
 
     /// Record the event and return `true` when the interval has passed.
     /// A refused event does not start a new interval.
-    pub fn try_acquire(&mut self, nick: &str, now: Duration) -> bool {
-        let key = nick_key(nick);
+    pub fn try_acquire(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
+        let key = nick_key(nick, casemapping);
         if let Some(last) = self.last.get(&key) {
             if now.saturating_sub(*last) < self.interval {
                 return false;
@@ -99,8 +103,8 @@ impl IntervalLimiter {
         true
     }
 
-    pub fn forget(&mut self, nick: &str) {
-        self.last.remove(&nick_key(nick));
+    pub fn forget(&mut self, nick: &str, casemapping: CaseMapping) {
+        self.last.remove(&nick_key(nick, casemapping));
     }
 }
 
@@ -131,8 +135,8 @@ impl OneTimeKeyPacer {
         }
     }
 
-    pub fn choose(&mut self, nick: &str, now: Duration) -> KeyChoice {
-        if self.limiter.try_acquire(nick, now) {
+    pub fn choose(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> KeyChoice {
+        if self.limiter.try_acquire(nick, casemapping, now) {
             KeyChoice::OneTime
         } else {
             KeyChoice::Fallback
@@ -146,12 +150,13 @@ impl Default for OneTimeKeyPacer {
     }
 }
 
-/// Tracks KEYS reassembly per nickname. A KEYREQ is blocked while a
-/// reassembly is active. Each new fragment restarts the timer.
+/// Tracks KEYS reassembly per nickname and per message id. A KEYREQ is
+/// blocked while any reassembly of the nickname is active. Each new fragment
+/// restarts the timer of its own message only.
 #[derive(Debug, Clone)]
 pub struct ReassemblyGate {
     timeout: Duration,
-    last_fragment: HashMap<String, Duration>,
+    last_fragment: HashMap<String, HashMap<String, Duration>>,
 }
 
 impl ReassemblyGate {
@@ -162,26 +167,49 @@ impl ReassemblyGate {
         }
     }
 
-    /// A KEYS fragment arrived: start or restart the timer.
-    pub fn note_fragment(&mut self, nick: &str, now: Duration) {
-        self.last_fragment.insert(nick_key(nick), now);
+    /// A KEYS fragment of message `msgid` arrived: start or restart its timer.
+    pub fn note_fragment(
+        &mut self,
+        nick: &str,
+        msgid: &str,
+        casemapping: CaseMapping,
+        now: Duration,
+    ) {
+        let timeout = self.timeout;
+        let messages = self
+            .last_fragment
+            .entry(nick_key(nick, casemapping))
+            .or_default();
+        messages.retain(|_, last| now.saturating_sub(*last) < timeout);
+        messages.insert(msgid.to_string(), now);
     }
 
-    /// The reassembly ended (complete, failed or cancelled).
-    pub fn finish(&mut self, nick: &str) {
-        self.last_fragment.remove(&nick_key(nick));
+    /// The reassembly of message `msgid` ended (complete, failed or
+    /// cancelled). Other messages of the nickname stay active.
+    pub fn finish(&mut self, nick: &str, msgid: &str, casemapping: CaseMapping) {
+        let key = nick_key(nick, casemapping);
+        if let Some(messages) = self.last_fragment.get_mut(&key) {
+            messages.remove(msgid);
+            if messages.is_empty() {
+                self.last_fragment.remove(&key);
+            }
+        }
     }
 
-    /// A reassembly is active until `timeout` has passed since the last
+    /// A reassembly is active until `timeout` has passed since its last
     /// fragment. At exactly `timeout` it is no longer active.
-    pub fn is_active(&self, nick: &str, now: Duration) -> bool {
+    pub fn is_active(&self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
         self.last_fragment
-            .get(&nick_key(nick))
-            .is_some_and(|last| now.saturating_sub(*last) < self.timeout)
+            .get(&nick_key(nick, casemapping))
+            .is_some_and(|messages| {
+                messages
+                    .values()
+                    .any(|last| now.saturating_sub(*last) < self.timeout)
+            })
     }
 
-    pub fn may_send_keyreq(&self, nick: &str, now: Duration) -> bool {
-        !self.is_active(nick, now)
+    pub fn may_send_keyreq(&self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
+        !self.is_active(nick, casemapping, now)
     }
 }
 
@@ -320,59 +348,122 @@ mod tests {
         Duration::from_secs(n)
     }
 
+    const ASCII: CaseMapping = CaseMapping::Ascii;
+    const RFC: CaseMapping = CaseMapping::Rfc1459;
+
     #[test]
     fn keys_answer_interval_is_not_the_fake_lag_bank() {
         assert_eq!(KEYS_ANSWER_INTERVAL, secs(15));
         assert_eq!(FAKE_LAG_BANK, secs(22));
         let mut limiter = keys_answer_limiter();
-        assert!(limiter.try_acquire("Bob", secs(0)));
-        assert!(limiter.try_acquire("bob", secs(15)));
+        assert!(limiter.try_acquire("Bob", ASCII, secs(0)));
+        assert!(limiter.try_acquire("bob", ASCII, secs(15)));
     }
 
     #[test]
     fn keys_answer_boundary_and_per_nick() {
         let mut limiter = keys_answer_limiter();
-        assert!(limiter.try_acquire("bob", secs(100)));
-        assert!(!limiter.try_acquire("BOB", secs(114)));
-        assert!(limiter.try_acquire("carol", secs(114)));
+        assert!(limiter.try_acquire("bob", ASCII, secs(100)));
+        assert!(!limiter.try_acquire("BOB", ASCII, secs(114)));
+        assert!(limiter.try_acquire("carol", ASCII, secs(114)));
         // The refused try did not restart the window.
-        assert!(limiter.try_acquire("bob", secs(115)));
+        assert!(limiter.try_acquire("bob", ASCII, secs(115)));
+    }
+
+    #[test]
+    fn keys_answer_folds_rfc1459_nicks() {
+        let mut limiter = keys_answer_limiter();
+        assert!(limiter.try_acquire("[bob]", RFC, secs(0)));
+        assert!(!limiter.try_acquire("{bob}", RFC, secs(14)));
+        assert!(limiter.try_acquire("{bob}", RFC, secs(15)));
+    }
+
+    #[test]
+    fn ascii_keeps_bracket_nicks_apart() {
+        let mut limiter = keys_answer_limiter();
+        assert!(limiter.try_acquire("[bob]", ASCII, secs(0)));
+        assert!(limiter.try_acquire("{bob}", ASCII, secs(1)));
+    }
+
+    #[test]
+    fn tilde_folds_only_under_rfc1459() {
+        let mut limiter = keys_answer_limiter();
+        assert!(limiter.try_acquire("bob~", RFC, secs(0)));
+        assert!(!limiter.try_acquire("bob^", RFC, secs(1)));
+        let strict = CaseMapping::Rfc1459Strict;
+        assert!(limiter.try_acquire("amy~", strict, secs(0)));
+        assert!(limiter.try_acquire("amy^", strict, secs(1)));
     }
 
     #[test]
     fn one_time_key_once_per_minute() {
         let mut pacer = OneTimeKeyPacer::new();
-        assert_eq!(pacer.choose("bob", secs(0)), KeyChoice::OneTime);
-        assert_eq!(pacer.choose("bob", secs(59)), KeyChoice::Fallback);
-        assert_eq!(pacer.choose("carol", secs(59)), KeyChoice::OneTime);
-        assert_eq!(pacer.choose("bob", secs(60)), KeyChoice::OneTime);
+        assert_eq!(pacer.choose("bob", ASCII, secs(0)), KeyChoice::OneTime);
+        assert_eq!(pacer.choose("bob", ASCII, secs(59)), KeyChoice::Fallback);
+        assert_eq!(pacer.choose("carol", ASCII, secs(59)), KeyChoice::OneTime);
+        assert_eq!(pacer.choose("bob", ASCII, secs(60)), KeyChoice::OneTime);
+    }
+
+    #[test]
+    fn one_time_key_folds_rfc1459_nicks() {
+        let mut pacer = OneTimeKeyPacer::new();
+        assert_eq!(pacer.choose("[bob]", RFC, secs(0)), KeyChoice::OneTime);
+        assert_eq!(pacer.choose("{bob}", RFC, secs(30)), KeyChoice::Fallback);
     }
 
     #[test]
     fn keyreq_blocked_during_reassembly() {
         let mut gate = ReassemblyGate::new(secs(10));
-        assert!(gate.may_send_keyreq("bob", secs(0)));
-        gate.note_fragment("bob", secs(0));
-        assert!(!gate.may_send_keyreq("bob", secs(9)));
-        assert!(gate.may_send_keyreq("alice", secs(9)));
-        assert!(gate.may_send_keyreq("bob", secs(10)));
+        assert!(gate.may_send_keyreq("bob", ASCII, secs(0)));
+        gate.note_fragment("bob", "A", ASCII, secs(0));
+        assert!(!gate.may_send_keyreq("bob", ASCII, secs(9)));
+        assert!(gate.may_send_keyreq("alice", ASCII, secs(9)));
+        assert!(gate.may_send_keyreq("bob", ASCII, secs(10)));
+    }
+
+    #[test]
+    fn reassembly_gate_folds_rfc1459_nicks() {
+        let mut gate = ReassemblyGate::new(secs(10));
+        gate.note_fragment("[bob]", "A", RFC, secs(0));
+        assert!(!gate.may_send_keyreq("{bob}", RFC, secs(5)));
+        assert!(gate.may_send_keyreq("{bob}", ASCII, secs(5)));
     }
 
     #[test]
     fn new_fragment_restarts_the_timer() {
         let mut gate = ReassemblyGate::new(secs(10));
-        gate.note_fragment("bob", secs(0));
-        gate.note_fragment("bob", secs(8));
-        assert!(gate.is_active("bob", secs(17)));
-        assert!(!gate.is_active("bob", secs(18)));
+        gate.note_fragment("bob", "A", ASCII, secs(0));
+        gate.note_fragment("bob", "A", ASCII, secs(8));
+        assert!(gate.is_active("bob", ASCII, secs(17)));
+        assert!(!gate.is_active("bob", ASCII, secs(18)));
     }
 
     #[test]
     fn finish_cancels_reassembly() {
         let mut gate = ReassemblyGate::new(secs(10));
-        gate.note_fragment("bob", secs(0));
-        gate.finish("bob");
-        assert!(gate.may_send_keyreq("bob", secs(1)));
+        gate.note_fragment("bob", "A", ASCII, secs(0));
+        gate.finish("bob", "A", ASCII);
+        assert!(gate.may_send_keyreq("bob", ASCII, secs(1)));
+    }
+
+    #[test]
+    fn overlapping_reassemblies_keep_the_gate_closed() {
+        let mut gate = ReassemblyGate::new(secs(10));
+        gate.note_fragment("bob", "A", ASCII, secs(0));
+        gate.note_fragment("bob", "B", ASCII, secs(1));
+        gate.finish("bob", "A", ASCII);
+        assert!(!gate.may_send_keyreq("bob", ASCII, secs(2)));
+        gate.finish("bob", "B", ASCII);
+        assert!(gate.may_send_keyreq("bob", ASCII, secs(2)));
+    }
+
+    #[test]
+    fn expired_reassembly_does_not_hide_an_active_one() {
+        let mut gate = ReassemblyGate::new(secs(10));
+        gate.note_fragment("bob", "A", ASCII, secs(0));
+        gate.note_fragment("bob", "B", ASCII, secs(8));
+        assert!(gate.is_active("bob", ASCII, secs(12)));
+        assert!(!gate.is_active("bob", ASCII, secs(18)));
     }
 
     #[test]
