@@ -181,20 +181,46 @@ pub fn parse_version(value: &Value) -> Result<u32, WireError> {
     let version = if let Some(unsigned) = number.as_u64() {
         unsigned
     } else {
-        let float = number.as_f64().ok_or(WireError::BadVersion)?;
-        if !float.is_finite()
-            || float.fract() != 0.0
-            || float < 1.0
-            || float > f64::from(MAX_VERSION)
-        {
-            return Err(WireError::BadVersion);
-        }
-        float as u64
+        integral_decimal(&number.to_string()).ok_or(WireError::BadVersion)?
     };
     u32::try_from(version)
         .ok()
         .filter(|v| (1..=MAX_VERSION).contains(v))
         .ok_or(WireError::BadVersion)
+}
+
+/// Reads the exact decimal text of a JSON number as a whole number. A number
+/// such as `1.0` or `1e0` is whole. A fraction is not, however small it is.
+/// The text is not rounded through `f64`.
+fn integral_decimal(text: &str) -> Option<u64> {
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i64>().ok()?),
+        None => (text, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Some(0);
+    }
+    let shift = exponent.checked_sub(i64::try_from(fraction.len()).ok()?)?;
+    let scaled = if shift >= 0 {
+        if digits.len() as u64 + shift as u64 > 19 {
+            return None;
+        }
+        format!("{digits}{}", "0".repeat(shift as usize))
+    } else {
+        let cut = usize::try_from(shift.unsigned_abs()).ok()?;
+        let keep = digits.len().checked_sub(cut)?;
+        if !digits[keep..].bytes().all(|b| b == b'0') {
+            return None;
+        }
+        digits[..keep].to_string()
+    };
+    scaled.parse().ok()
 }
 
 /// Text the master key signs to certify a device id block.
@@ -381,8 +407,9 @@ pub fn assemble_fragments(frames: &[Frame]) -> Result<String, WireError> {
         {
             return Err(WireError::FragmentMismatch);
         }
-        let slot = chunks
-            .get_mut(frame.index as usize - 1)
+        let slot = (frame.index as usize)
+            .checked_sub(1)
+            .and_then(|position| chunks.get_mut(position))
             .ok_or(WireError::BadFragment)?;
         if slot.replace(&frame.chunk).is_some() {
             return Err(WireError::BadFragment);
@@ -482,6 +509,24 @@ mod tests {
         assert_eq!(parse_version(&json!(1)), Ok(1));
         assert_eq!(parse_version(&json!(1.0)), Ok(1));
         assert_eq!(parse_version(&json!(2147483647)), Ok(MAX_VERSION));
+        let exact = |text: &str| serde_json::from_str::<Value>(text).unwrap();
+        assert_eq!(parse_version(&exact("1e0")), Ok(1));
+        assert_eq!(parse_version(&exact("20E-1")), Ok(2));
+        assert_eq!(parse_version(&exact("1.00")), Ok(1));
+        assert_eq!(parse_version(&exact("0.5e1")), Ok(5));
+        for bad in [
+            "1.00000000000000001",
+            "0.15e1",
+            "1e-1",
+            "0.0",
+            "2147483648.0",
+        ] {
+            assert_eq!(
+                parse_version(&exact(bad)),
+                Err(WireError::BadVersion),
+                "{bad}"
+            );
+        }
         for bad in [
             json!(0),
             json!(-1),
@@ -602,6 +647,13 @@ mod tests {
             Err(WireError::FragmentMismatch)
         );
         assert!(assemble_fragments(&[]).is_err());
+    }
+
+    #[test]
+    fn fragment_index_zero_is_rejected() {
+        let did = did_from_key_text(&key_text(1)).unwrap();
+        let zero = frame(Verb::Msg, &did, "*", 0, 1, "{}");
+        assert_eq!(assemble_fragments(&[zero]), Err(WireError::BadFragment));
     }
 
     #[test]
