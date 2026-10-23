@@ -284,22 +284,65 @@ pub fn device_certificate_signed_text(
 ) -> Result<Vec<u8>, WireError> {
     check_version(first_list_version)?;
     decode_key(device_ed25519_key)?;
-    Ok(format!("irc-e2e:v2:dev:{first_list_version}:{device_ed25519_key}").into_bytes())
+    Ok(
+        format!("{DEVICE_CERTIFICATE_PREFIX}{first_list_version}:{device_ed25519_key}")
+            .into_bytes(),
+    )
+}
+
+const DEVICE_CERTIFICATE_PREFIX: &str = "irc-e2e:v2:dev:";
+
+/// Reads the signed text of a device certificate back into `(N, E)`.
+///
+/// Strict inverse of [`device_certificate_signed_text`]: the version is plain
+/// decimal without sign or leading zero, and the key is canonical. Any other
+/// text is rejected, so a verifier checks the signature only over bytes that
+/// this module would build itself. Candidate format, like the builder.
+pub fn parse_device_certificate_signed_text(bytes: &[u8]) -> Result<(u32, String), WireError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| WireError::BadPayload)?;
+    let rest = text
+        .strip_prefix(DEVICE_CERTIFICATE_PREFIX)
+        .ok_or(WireError::BadPayload)?;
+    let (version, key) = rest.split_once(':').ok_or(WireError::BadPayload)?;
+    if version.is_empty()
+        || version.len() > 10
+        || version.starts_with('0')
+        || !version.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(WireError::BadVersion);
+    }
+    let version: u32 = version.parse().map_err(|_| WireError::BadVersion)?;
+    check_version(version)?;
+    decode_key(key)?;
+    Ok((version, key.to_string()))
+}
+
+/// The device keys of a list in the candidate order: ascending by the raw
+/// 32 bytes of each key. The final contract does not confirm this order yet.
+/// Rejects an invalid list before it sorts.
+pub fn sort_list_keys(device_keys: &[String]) -> Result<Vec<String>, WireError> {
+    check_list_devices(device_keys)?;
+    let mut keyed = Vec::with_capacity(device_keys.len());
+    for key in device_keys {
+        keyed.push((decode_key(key)?, key.clone()));
+    }
+    keyed.sort();
+    Ok(keyed.into_iter().map(|(_, key)| key).collect())
 }
 
 /// Text the master key signs for one device list:
 /// `irc-e2e:v2:list:<N>:<E1>,<E2>,...`.
 ///
-/// The keys keep the order of the caller: this function does not sort them.
-/// The caller applies the key order of the final contract. Candidate format:
-/// the final contract is not approved yet.
+/// The keys are the full keys, sorted by [`sort_list_keys`] whatever the
+/// order of the caller, and joined by a comma. Candidate format: the order
+/// and the separator are not approved by the final contract yet.
 pub fn signed_list_signed_text(
     list_version: u32,
     device_keys: &[String],
 ) -> Result<Vec<u8>, WireError> {
     check_version(list_version)?;
-    check_list_devices(device_keys)?;
-    Ok(format!("irc-e2e:v2:list:{list_version}:{}", device_keys.join(",")).into_bytes())
+    let sorted = sort_list_keys(device_keys)?;
+    Ok(format!("irc-e2e:v2:list:{list_version}:{}", sorted.join(",")).into_bytes())
 }
 
 /// The `fb` binding: the first 16 bytes of SHA-256 over the sender and
@@ -928,13 +971,116 @@ mod tests {
     }
 
     #[test]
-    fn signed_list_text_follows_caller_order_and_version() {
+    fn signed_list_text_ignores_caller_order_and_follows_version() {
         let ab = vec![KEY_A.to_string(), KEY_B.to_string()];
         let ba = vec![KEY_B.to_string(), KEY_A.to_string()];
         let base = signed_list_signed_text(2, &ab).unwrap();
-        assert_ne!(base, signed_list_signed_text(2, &ba).unwrap());
+        assert_eq!(base, signed_list_signed_text(2, &ba).unwrap());
         assert_ne!(base, signed_list_signed_text(3, &ab).unwrap());
         assert_ne!(base, signed_list_signed_text(2, &ab[..1]).unwrap());
+    }
+
+    #[test]
+    fn list_keys_sort_by_raw_bytes_not_by_text() {
+        // Raw 0xFB bytes encode as "+": it sorts before "A" as text, but
+        // after the all-zero key as raw bytes.
+        let high = STANDARD_NO_PAD.encode([0xFBu8; 32]);
+        assert!(high.as_str() < KEY_A);
+        let keys = vec![high.clone(), KEY_B.to_string(), KEY_A.to_string()];
+        assert_eq!(
+            sort_list_keys(&keys).unwrap(),
+            vec![KEY_A.to_string(), high, KEY_B.to_string()]
+        );
+    }
+
+    #[test]
+    fn sort_rejects_an_invalid_list() {
+        assert_eq!(sort_list_keys(&[]), Err(WireError::BadDeviceCount));
+        assert_eq!(
+            sort_list_keys(&[KEY_A.to_string(), KEY_A.to_string()]),
+            Err(WireError::DuplicateDevice)
+        );
+        assert_eq!(
+            sort_list_keys(&[KEY_A.to_string(), "short".to_string()]),
+            Err(WireError::BadKey)
+        );
+    }
+
+    #[test]
+    fn device_certificate_text_round_trips() {
+        for (version, key) in [(1, KEY_A), (3, KEY_B), (MAX_VERSION, KEY_A)] {
+            let bytes = device_certificate_signed_text(version, key).unwrap();
+            assert_eq!(
+                parse_device_certificate_signed_text(&bytes),
+                Ok((version, key.to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn device_certificate_parser_rejects_non_canonical_text() {
+        let parse = |text: String| parse_device_certificate_signed_text(text.as_bytes());
+        let p = DEVICE_CERTIFICATE_PREFIX;
+        assert_eq!(parse(format!("{p}03:{KEY_A}")), Err(WireError::BadVersion));
+        assert_eq!(parse(format!("{p}0:{KEY_A}")), Err(WireError::BadVersion));
+        assert_eq!(parse(format!("{p}+3:{KEY_A}")), Err(WireError::BadVersion));
+        assert_eq!(parse(format!("{p}:{KEY_A}")), Err(WireError::BadVersion));
+        assert_eq!(
+            parse(format!("{p}2147483648:{KEY_A}")),
+            Err(WireError::BadVersion)
+        );
+        assert_eq!(
+            parse(format!("{p}99999999999:{KEY_A}")),
+            Err(WireError::BadVersion)
+        );
+        assert_eq!(parse(format!("{p}3:{KEY_A}=")), Err(WireError::BadKey));
+        assert_eq!(
+            parse(format!("{p}3:{}", &KEY_A[..42])),
+            Err(WireError::BadKey)
+        );
+        assert_eq!(parse(format!("{p}3:{KEY_A}:x")), Err(WireError::BadKey));
+        assert_eq!(parse(format!("{p}3")), Err(WireError::BadPayload));
+        assert_eq!(
+            parse(format!("irc-e2e:v2:id:3:{KEY_A}")),
+            Err(WireError::BadPayload)
+        );
+        assert_eq!(
+            parse_device_certificate_signed_text(&[0xFF, 0xFE]),
+            Err(WireError::BadPayload)
+        );
+    }
+
+    #[test]
+    fn did_rejects_a_wrong_alphabet_padding_and_key_size() {
+        // Standard alphabet, padding, length: not a did.
+        assert!(!is_did_shape("+Uw/z3-OAsk"));
+        assert!(!is_did_shape("If4x36FUomE="));
+        assert!(!is_did_shape("If4x36FUom"));
+        assert!(!is_did_shape(""));
+        // A key text of the wrong size or with padding gives no did.
+        let (_, text, _) = DID_VECTORS[0];
+        assert_eq!(did_from_key_text(&text[..42]), Err(WireError::BadKey));
+        assert_eq!(
+            did_from_key_text(&format!("{text}=")),
+            Err(WireError::BadKey)
+        );
+        assert_eq!(
+            did_from_key_text(&format!("{text}A")),
+            Err(WireError::BadKey)
+        );
+        assert_eq!(
+            did_from_key_text(&STANDARD_NO_PAD.encode([1u8; 31])),
+            Err(WireError::BadKey)
+        );
+        assert_eq!(
+            did_from_key_text(&STANDARD_NO_PAD.encode([1u8; 33])),
+            Err(WireError::BadKey)
+        );
+        // URL-safe characters are not valid in a key text.
+        assert_eq!(
+            did_from_key_text(&text.replace('/', "_")),
+            Err(WireError::BadKey)
+        );
     }
 
     #[test]
