@@ -27,7 +27,7 @@
 //! four states stay separate: KEYS answer pacing, the fake-lag bank (a
 //! constant that no pacer here uses), KEYS reassembly and send status.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -40,8 +40,33 @@ pub const KEYS_ANSWER_INTERVAL: Duration = Duration::from_secs(15);
 /// Fake-lag bank of the relay. It is not a pacing interval of the client.
 pub const FAKE_LAG_BANK: Duration = Duration::from_secs(22);
 
+/// Minimum time between two KEYREQ to the same nickname (protocol 46).
+pub const KEYREQ_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Pacing values of the MD-3 candidate (irc-olm PR #4). They are not final.
+/// Update path: change only this module when the candidate is merged or
+/// changes, and check the tests that name a value.
+pub mod md3_candidate {
+    use std::time::Duration;
+
+    /// Minimum time between two re-key requests to the same nickname.
+    pub const REKEY_INTERVAL: Duration = Duration::from_secs(60);
+
+    /// An outgoing message that waits longer than this is dropped.
+    pub const OUTGOING_QUEUE_TTL: Duration = Duration::from_secs(90);
+
+    /// Minimum time between two one-time key requests to the same nickname.
+    pub const ONE_TIME_KEY_INTERVAL: Duration = Duration::from_secs(60);
+
+    /// Most one-time key requests to all nicknames in `ONE_TIME_KEY_WINDOW`.
+    pub const ONE_TIME_KEY_GLOBAL_LIMIT: usize = 30;
+
+    /// Window of the global one-time key limit.
+    pub const ONE_TIME_KEY_WINDOW: Duration = Duration::from_secs(3600);
+}
+
 /// Minimum time between two one-time key requests to the same nickname.
-pub const ONE_TIME_KEY_INTERVAL: Duration = Duration::from_secs(60);
+pub const ONE_TIME_KEY_INTERVAL: Duration = md3_candidate::ONE_TIME_KEY_INTERVAL;
 
 /// A send must arrive at least this long before its deadline.
 pub const SEND_SAFETY_MARGIN: Duration = Duration::from_secs(2);
@@ -138,21 +163,69 @@ pub enum KeyChoice {
     Fallback,
 }
 
-/// Decides between a one-time key and the fallback, per nickname.
+/// Global limit: at most `limit` events in any window of `window`.
+#[derive(Debug, Clone)]
+pub struct WindowLimiter {
+    limit: usize,
+    window: Duration,
+    events: VecDeque<Duration>,
+}
+
+impl WindowLimiter {
+    pub fn new(limit: usize, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            events: VecDeque::new(),
+        }
+    }
+
+    /// Whether `try_acquire` would succeed. It records nothing.
+    pub fn is_ready(&mut self, now: Duration) -> bool {
+        while self
+            .events
+            .front()
+            .is_some_and(|first| now.saturating_sub(*first) >= self.window)
+        {
+            self.events.pop_front();
+        }
+        self.events.len() < self.limit
+    }
+
+    pub fn try_acquire(&mut self, now: Duration) -> bool {
+        if !self.is_ready(now) {
+            return false;
+        }
+        self.events.push_back(now);
+        true
+    }
+}
+
+/// Decides between a one-time key and the fallback. The limit of one request
+/// for each nickname and the global hourly limit both apply. A refused
+/// request does not use any limit.
 #[derive(Debug, Clone)]
 pub struct OneTimeKeyPacer {
     limiter: IntervalLimiter,
+    global: WindowLimiter,
 }
 
 impl OneTimeKeyPacer {
     pub fn new() -> Self {
         Self {
             limiter: IntervalLimiter::new(ONE_TIME_KEY_INTERVAL),
+            global: WindowLimiter::new(
+                md3_candidate::ONE_TIME_KEY_GLOBAL_LIMIT,
+                md3_candidate::ONE_TIME_KEY_WINDOW,
+            ),
         }
     }
 
     pub fn choose(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> KeyChoice {
-        if self.limiter.try_acquire(nick, casemapping, now) {
+        if self.global.is_ready(now)
+            && self.limiter.try_acquire(nick, casemapping, now)
+            && self.global.try_acquire(now)
+        {
             KeyChoice::OneTime
         } else {
             KeyChoice::Fallback
@@ -241,6 +314,79 @@ impl ReassemblyGate {
 
     pub fn may_send_keyreq(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
         !self.is_active(nick, casemapping, now)
+    }
+}
+
+/// Why a KEYREQ may not go out now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyReqRefusal {
+    /// A fragmented KEYS answer of the nickname is being reassembled.
+    Reassembling,
+    /// The last KEYREQ to the nickname is less than 30 seconds old.
+    Interval,
+}
+
+/// KEYREQ pacing: one request for each nickname in 30 seconds, and none while
+/// a KEYS answer of that nickname is in reassembly.
+///
+/// The reassembly timeout is a parameter. It must equal the timeout that the
+/// server uses for a fragmented KEYS answer (Grappa, protocol 46). This
+/// repository has no copy of that rule, so the caller owns the value.
+#[derive(Debug, Clone)]
+pub struct KeyReqPacer {
+    limiter: IntervalLimiter,
+    gate: ReassemblyGate,
+}
+
+impl KeyReqPacer {
+    pub fn new(reassembly_timeout: Duration) -> Self {
+        Self {
+            limiter: IntervalLimiter::new(KEYREQ_INTERVAL),
+            gate: ReassemblyGate::new(reassembly_timeout),
+        }
+    }
+
+    /// A changed casemapping clears both the interval and the reassembly
+    /// state. Every public call starts here, so the two halves never differ.
+    fn sync_casemapping(&mut self, casemapping: CaseMapping) {
+        self.limiter.sync_casemapping(casemapping);
+        self.gate.sync_casemapping(casemapping);
+    }
+
+    /// A KEYS fragment arrived: the timer of its message restarts.
+    pub fn note_fragment(
+        &mut self,
+        nick: &str,
+        msgid: &str,
+        casemapping: CaseMapping,
+        now: Duration,
+    ) {
+        self.sync_casemapping(casemapping);
+        self.gate.note_fragment(nick, msgid, casemapping, now);
+    }
+
+    /// The reassembly of a KEYS answer ended.
+    pub fn finish(&mut self, nick: &str, msgid: &str, casemapping: CaseMapping) {
+        self.sync_casemapping(casemapping);
+        self.gate.finish(nick, msgid, casemapping);
+    }
+
+    /// Ask to send a KEYREQ. A refusal uses no interval.
+    pub fn try_send(
+        &mut self,
+        nick: &str,
+        casemapping: CaseMapping,
+        now: Duration,
+    ) -> Result<(), KeyReqRefusal> {
+        self.sync_casemapping(casemapping);
+        if !self.gate.may_send_keyreq(nick, casemapping, now) {
+            return Err(KeyReqRefusal::Reassembling);
+        }
+        if self.limiter.try_acquire(nick, casemapping, now) {
+            Ok(())
+        } else {
+            Err(KeyReqRefusal::Interval)
+        }
     }
 }
 
@@ -888,6 +1034,23 @@ mod tests {
     }
 
     #[test]
+    fn keyreq_pacer_clears_both_halves_when_fragment_changes_casemapping() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(0)), Ok(()));
+        pacer.note_fragment("[bob]", "A", RFC, secs(1));
+        pacer.finish("[bob]", "A", RFC);
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(2)), Ok(()));
+    }
+
+    #[test]
+    fn keyreq_pacer_clears_fragment_state_when_casemapping_returns() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(0)), Ok(()));
+        pacer.note_fragment("[bob]", "A", RFC, secs(1));
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(2)), Ok(()));
+    }
+
+    #[test]
     fn remove_drops_a_send_entry() {
         let mut tracker = SendTracker::new();
         tracker.start("m1");
@@ -902,5 +1065,75 @@ mod tests {
         let clock = MonotonicClock::new();
         let a = clock.now();
         assert!(clock.now() >= a);
+    }
+
+    #[test]
+    fn keyreq_once_per_nick_every_30_seconds() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        assert_eq!(pacer.try_send("bob", ASCII, secs(0)), Ok(()));
+        assert_eq!(
+            pacer.try_send("BOB", ASCII, secs(29)),
+            Err(KeyReqRefusal::Interval)
+        );
+        assert_eq!(pacer.try_send("carol", ASCII, secs(29)), Ok(()));
+        assert_eq!(pacer.try_send("bob", ASCII, secs(30)), Ok(()));
+    }
+
+    #[test]
+    fn keyreq_waits_for_reassembly_and_keeps_its_interval() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        pacer.note_fragment("bob", "A", ASCII, secs(0));
+        assert_eq!(
+            pacer.try_send("bob", ASCII, secs(5)),
+            Err(KeyReqRefusal::Reassembling)
+        );
+        // A new fragment restarts the timer.
+        pacer.note_fragment("bob", "A", ASCII, secs(8));
+        assert_eq!(
+            pacer.try_send("bob", ASCII, secs(17)),
+            Err(KeyReqRefusal::Reassembling)
+        );
+        // A refusal used no interval: the first send goes at once.
+        assert_eq!(pacer.try_send("bob", ASCII, secs(18)), Ok(()));
+        assert_eq!(
+            pacer.try_send("bob", ASCII, secs(40)),
+            Err(KeyReqRefusal::Interval)
+        );
+        pacer.note_fragment("bob", "B", ASCII, secs(48));
+        pacer.finish("bob", "B", ASCII);
+        assert_eq!(pacer.try_send("bob", ASCII, secs(48)), Ok(()));
+    }
+
+    #[test]
+    fn keys_interval_and_fake_lag_bank_are_separate_values() {
+        let mut limiter = keys_answer_limiter();
+        assert!(limiter.try_acquire("bob", ASCII, secs(0)));
+        assert!(!limiter.try_acquire("bob", ASCII, secs(14)));
+        // 15 seconds is enough, although the bank is 22 seconds.
+        assert!(limiter.try_acquire("bob", ASCII, secs(15)));
+        assert!(KEYS_ANSWER_INTERVAL < FAKE_LAG_BANK);
+    }
+
+    #[test]
+    fn one_time_key_global_limit_per_hour() {
+        let mut pacer = OneTimeKeyPacer::new();
+        for i in 0..30u64 {
+            let nick = format!("nick{i}");
+            assert_eq!(pacer.choose(&nick, ASCII, secs(i)), KeyChoice::OneTime);
+        }
+        assert_eq!(pacer.choose("extra", ASCII, secs(30)), KeyChoice::Fallback);
+        // A refused request used no per-nick interval.
+        assert_eq!(pacer.choose("extra", ASCII, secs(3600)), KeyChoice::OneTime);
+        // The first grant has left the window at 3600 seconds.
+        assert_eq!(pacer.choose("later", ASCII, secs(3601)), KeyChoice::OneTime);
+    }
+
+    #[test]
+    fn candidate_values_are_the_md3_numbers() {
+        assert_eq!(md3_candidate::REKEY_INTERVAL, secs(60));
+        assert_eq!(md3_candidate::OUTGOING_QUEUE_TTL, secs(90));
+        assert_eq!(md3_candidate::ONE_TIME_KEY_INTERVAL, secs(60));
+        assert_eq!(md3_candidate::ONE_TIME_KEY_GLOBAL_LIMIT, 30);
+        assert_eq!(md3_candidate::ONE_TIME_KEY_WINDOW, secs(3600));
     }
 }
