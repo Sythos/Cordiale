@@ -30,6 +30,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
+
+use crate::e2e_wire::{as_object, required_str, WireError};
 use crate::isupport::CaseMapping;
 
 /// Minimum time between two KEYS answers to the same nickname.
@@ -308,6 +311,33 @@ impl DropReason {
     }
 }
 
+/// Typed `e2e_send_dropped` event (protocol 46).
+///
+/// Candidate shape: `id` (send id) and `reason`. Unknown fields are ignored,
+/// because events are additive. A missing or wrongly typed field, or an
+/// unknown reason, is an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendDropped {
+    pub id: String,
+    pub reason: DropReason,
+}
+
+impl SendDropped {
+    pub fn from_value(value: &Value) -> Result<Self, WireError> {
+        let map = as_object(value)?;
+        let id = required_str(map, "id")?;
+        if id.is_empty() {
+            return Err(WireError::MissingField);
+        }
+        let reason =
+            DropReason::from_wire(required_str(map, "reason")?).ok_or(WireError::BadFieldType)?;
+        Ok(Self {
+            id: id.to_string(),
+            reason,
+        })
+    }
+}
+
 /// Local status of one send. No variant means "delivered": the relay gives no
 /// such proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,6 +415,33 @@ mod tests {
 
     const ASCII: CaseMapping = CaseMapping::Ascii;
     const RFC: CaseMapping = CaseMapping::Rfc1459;
+
+    #[test]
+    fn send_dropped_fixtures() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/e2e/send_dropped.json"))
+                .expect("fixture is JSON");
+        for case in cases["valid"].as_array().expect("valid cases") {
+            let event = SendDropped::from_value(&case["event"]).expect("valid event");
+            assert_eq!(
+                event.id,
+                case["id"].as_str().expect("id"),
+                "{}",
+                case["case"]
+            );
+            let reason = DropReason::from_wire(case["reason"].as_str().expect("reason"));
+            assert_eq!(Some(event.reason), reason, "{}", case["case"]);
+        }
+        for case in cases["invalid"].as_array().expect("invalid cases") {
+            let error = SendDropped::from_value(&case["event"]).expect_err("invalid event");
+            assert_eq!(
+                format!("{error:?}"),
+                case["error"].as_str().expect("error"),
+                "{}",
+                case["case"]
+            );
+        }
+    }
 
     #[test]
     fn keys_answer_interval_is_not_the_fake_lag_bank() {

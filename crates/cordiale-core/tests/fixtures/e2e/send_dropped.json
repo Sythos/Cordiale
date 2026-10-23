@@ -1,0 +1,16 @@
+{
+  "valid": [
+    {"case": "late", "event": {"kind": "e2e_send_dropped", "id": "s1", "reason": "late"}, "id": "s1", "reason": "late"},
+    {"case": "send failed", "event": {"id": "s2", "reason": "send_failed"}, "id": "s2", "reason": "send_failed"},
+    {"case": "session ended with an unknown extra field", "event": {"id": "s3", "reason": "session_ended", "future": {"a": 1}}, "id": "s3", "reason": "session_ended"}
+  ],
+  "invalid": [
+    {"case": "not an object", "event": "late", "error": "BadFieldType"},
+    {"case": "missing id", "event": {"reason": "late"}, "error": "MissingField"},
+    {"case": "empty id", "event": {"id": "", "reason": "late"}, "error": "MissingField"},
+    {"case": "id of the wrong type", "event": {"id": 5, "reason": "late"}, "error": "BadFieldType"},
+    {"case": "missing reason", "event": {"id": "s1"}, "error": "MissingField"},
+    {"case": "null reason", "event": {"id": "s1", "reason": null}, "error": "BadFieldType"},
+    {"case": "unknown reason", "event": {"id": "s1", "reason": "expired"}, "error": "BadFieldType"}
+  ]
+}
