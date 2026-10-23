@@ -1294,6 +1294,15 @@ i due vettori `did` del commento 6348464388 (non letti qui), il testo firmato
 il resto dei protocolli 46–49 (del 46 c'è solo la richiesta di invio),
 pairing X1, X2 e S1.
 
+**Issue 360: divisa in sotto-issue (decisione del maintainer).** Le tre fasi
+(X1, X2, S1) sono lavori separati, nell'ordine X1, X2, S1. In questo passo
+`e2e_wire.rs` riceve solo i limiti già concordati, come costanti e una
+funzione pura: durata del rendezvous X1 (300 s), messaggio da 16 KiB, 64 KiB e
+64 messaggi per rendezvous, inbox S1 da 4 MiB, 1 MiB per mittente e scadenza
+di sette giorni. Non ci sono ancora rotte REST, tipi di evento, ECIES, codice
+di controllo né motore Olm: i percorsi esatti e i payload di X1 non sono nel
+repository e X2 e S1 dipendono dal contratto finale del protocollo 49.
+
 **Fase 2 (issue 356): testo firmato di certificato e lista, formato candidato.**
 `e2e_wire.rs` ha due costruttori che restituiscono byte UTF-8 esatti, senza
 JSON: `device_certificate_signed_text(N, E)` dà `irc-e2e:v2:dev:<N>:<E>` e
