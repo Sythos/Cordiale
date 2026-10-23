@@ -31,6 +31,7 @@
 
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
+use serde_json::value::RawValue;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -174,15 +175,11 @@ pub fn is_did_shape(text: &str) -> bool {
 
 /// Reads `ver` or `lv`: an integral number from 1 to 2^31 - 1. A number such
 /// as `1.0` is accepted. Booleans, strings, null and fractions are not.
-pub fn parse_version(value: &Value) -> Result<u32, WireError> {
-    let Value::Number(number) = value else {
-        return Err(WireError::BadVersion);
-    };
-    let version = if let Some(unsigned) = number.as_u64() {
-        unsigned
-    } else {
-        integral_decimal(&number.to_string()).ok_or(WireError::BadVersion)?
-    };
+///
+/// The field comes as raw JSON text (`RawValue`), so the exact number text
+/// is kept for this field only. A `Value` would round it through `f64`.
+pub fn parse_version(raw: &RawValue) -> Result<u32, WireError> {
+    let version = integral_decimal(raw.get()).ok_or(WireError::BadVersion)?;
     u32::try_from(version)
         .ok()
         .filter(|v| (1..=MAX_VERSION).contains(v))
@@ -431,7 +428,6 @@ pub fn parse_payload(text: &str) -> Result<Value, WireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn key_text(byte: u8) -> String {
         STANDARD_NO_PAD.encode([byte; 32])
@@ -506,38 +502,43 @@ mod tests {
 
     #[test]
     fn version_accepts_integral_numbers_only() {
-        assert_eq!(parse_version(&json!(1)), Ok(1));
-        assert_eq!(parse_version(&json!(1.0)), Ok(1));
-        assert_eq!(parse_version(&json!(2147483647)), Ok(MAX_VERSION));
-        let exact = |text: &str| serde_json::from_str::<Value>(text).unwrap();
-        assert_eq!(parse_version(&exact("1e0")), Ok(1));
-        assert_eq!(parse_version(&exact("20E-1")), Ok(2));
-        assert_eq!(parse_version(&exact("1.00")), Ok(1));
-        assert_eq!(parse_version(&exact("0.5e1")), Ok(5));
+        let raw = |text: &str| RawValue::from_string(text.to_string()).unwrap();
+        assert_eq!(parse_version(&raw("1")), Ok(1));
+        assert_eq!(parse_version(&raw("1.0")), Ok(1));
+        assert_eq!(parse_version(&raw("2147483647")), Ok(MAX_VERSION));
+        assert_eq!(parse_version(&raw("1e0")), Ok(1));
+        assert_eq!(parse_version(&raw("20E-1")), Ok(2));
+        assert_eq!(parse_version(&raw("1.00")), Ok(1));
+        assert_eq!(parse_version(&raw("0.5e1")), Ok(5));
         for bad in [
             "1.00000000000000001",
             "0.15e1",
             "1e-1",
             "0.0",
             "2147483648.0",
+            "0",
+            "-1",
+            "1.5",
+            "2147483648",
+            "true",
+            "\"1\"",
+            "null",
+            "[1]",
+            "{\"a\":1}",
         ] {
             assert_eq!(
-                parse_version(&exact(bad)),
+                parse_version(&raw(bad)),
                 Err(WireError::BadVersion),
                 "{bad}"
             );
         }
-        for bad in [
-            json!(0),
-            json!(-1),
-            json!(1.5),
-            json!(2147483648u64),
-            json!(true),
-            json!("1"),
-            json!(null),
-        ] {
-            assert_eq!(parse_version(&bad), Err(WireError::BadVersion), "{bad}");
-        }
+    }
+
+    #[test]
+    fn payload_numbers_are_plain_values() {
+        let value = parse_payload(r#"{"$serde_json::private::Number":"1"}"#).unwrap();
+        assert!(value.is_object());
+        assert!(parse_payload(r#"{"ver":1}"#).unwrap()["ver"].is_number());
     }
 
     #[test]
