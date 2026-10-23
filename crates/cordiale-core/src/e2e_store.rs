@@ -22,15 +22,16 @@
 
 //! Encrypted local history of E2E conversations.
 //!
-//! The history lives in one file, sealed with XChaCha20-Poly1305. The key
+//! The history lives in one file of sealed records, one for each row, with
+//! XChaCha20-Poly1305. An append writes one record. The key
 //! comes from the native OS keyring only: the store never uses the
 //! obfuscated fallback of `credentials.rs`, and it fails closed when no
 //! keyring is reachable. Search runs on the decrypted rows in memory; no
 //! index, cache or temporary copy of the clear text goes to disk. This file
 //! is kept apart from `settings.json` and from the normal history.
 
-use std::fs;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -47,9 +48,12 @@ const HISTORY_FILE_NAME: &str = "e2e_history.bin";
 const KEY_SERVICE: &str = "cordiale-e2e";
 const KEY_USERNAME: &str = "history-key";
 const KEY_LEN: usize = 32;
-/// File header; also bound to every ciphertext as associated data.
+/// File header; also bound to every record as associated data, with the
+/// index of the record.
 const MAGIC: &[u8] = b"CORDIALE-E2E-HISTORY-1";
 const NONCE_LEN: usize = 24;
+/// Size of the length field in front of each record.
+const LEN_FIELD: usize = 4;
 
 #[derive(Debug)]
 pub enum E2eStoreError {
@@ -58,7 +62,10 @@ pub enum E2eStoreError {
     /// The key store answered with a failure.
     Key(String),
     NoDataDir,
-    /// The history file does not open with the key (damaged or wrong key).
+    /// Another handle or process has this history open.
+    InUse,
+    /// The history file does not open with the key (damaged or wrong key,
+    /// or a record cut short by a crash).
     Corrupted,
     Io(io::Error),
 }
@@ -91,8 +98,8 @@ impl E2eKeyProvider for KeyringKeyProvider {
             return decode_key(&text);
         }
         let key = Key::<XChaCha20Poly1305>::generate();
-        let mut bytes = [0u8; KEY_LEN];
-        bytes.copy_from_slice(key.as_slice());
+        let mut bytes =
+            <[u8; KEY_LEN]>::try_from(key.as_slice()).map_err(|_| E2eStoreError::Corrupted)?;
         let mut text = STANDARD_NO_PAD.encode(bytes);
         let result = keyring
             .set_secret(KEY_SERVICE, KEY_USERNAME, &text)
@@ -129,11 +136,17 @@ pub struct E2eMessage {
 }
 
 /// The sealed history. The decrypted rows stay in memory until `close` or
-/// drop, which overwrite the texts.
+/// drop, which overwrite the texts. An exclusive lock on a sidecar file
+/// keeps a second handle or process from writing the same history.
 pub struct E2eHistoryStore {
     path: PathBuf,
+    /// Held for the life of the store; dropping it releases the lock.
+    _lock: File,
     key: [u8; KEY_LEN],
+    /// Rows in order of `sent_at`.
     messages: Vec<E2eMessage>,
+    /// Number of records in the file; the next record gets this index.
+    records: u64,
 }
 
 impl E2eHistoryStore {
@@ -146,30 +159,59 @@ impl E2eHistoryStore {
     }
 
     /// Opens (or starts empty) the history at `path`. A file that does not
-    /// open is an error: it is never replaced by an empty history.
+    /// open is an error: it is never replaced by an empty history. Another
+    /// open handle on the same path gives `InUse`.
     pub fn open(path: PathBuf, provider: &dyn E2eKeyProvider) -> Result<Self, E2eStoreError> {
         let key = provider.load_or_create_key()?;
+        if let Some(parent) = path.parent() {
+            create_private_dir_all(parent)?;
+        }
+        let mut lock_path = path.clone().into_os_string();
+        lock_path.push(".lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path)?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Err(E2eStoreError::InUse),
+            Err(fs::TryLockError::Error(err)) => return Err(err.into()),
+        }
         let mut store = E2eHistoryStore {
             path,
+            _lock: lock,
             key,
             messages: Vec::new(),
+            records: 0,
         };
         if store.path.exists() {
-            store.messages = store.read_file()?;
+            let (rows, records) = store.read_file()?;
+            store.messages = rows;
+            store.records = records;
         }
         Ok(store)
     }
 
-    /// Adds one row and writes the sealed file. On a write failure the
-    /// row is not kept.
+    /// Adds one row as one new record. On a write failure the row is not
+    /// kept.
     pub fn append(&mut self, message: E2eMessage) -> Result<(), E2eStoreError> {
-        self.messages.push(message);
-        if let Err(err) = self.write_file() {
-            if let Some(mut dropped) = self.messages.pop() {
-                dropped.text.zeroize();
+        let record = match self.seal_record(&message, self.records) {
+            Ok(record) => record,
+            Err(err) => {
+                wipe(vec![message]);
+                return Err(err);
             }
+        };
+        if let Err(err) = self.append_record(&record) {
+            wipe(vec![message]);
             return Err(err);
         }
+        self.records += 1;
+        let at = self
+            .messages
+            .partition_point(|row| row.sent_at <= message.sent_at);
+        self.messages.insert(at, message);
         Ok(())
     }
 
@@ -181,8 +223,8 @@ impl E2eHistoryStore {
             .collect()
     }
 
-    /// Case-insensitive search in memory. `None` searches every E2E
-    /// conversation; normal IRC history is never part of it.
+    /// Case-insensitive search in memory, oldest first. `None` searches
+    /// every E2E conversation; normal IRC history is never part of it.
     pub fn search(&self, conversation_id: Option<&str>, needle: &str) -> Vec<&E2eMessage> {
         let needle = needle.to_lowercase();
         if needle.is_empty() {
@@ -215,12 +257,12 @@ impl E2eHistoryStore {
             .filter(|message| message.conversation_id != conversation_id)
             .cloned()
             .collect();
-        let old = std::mem::replace(&mut self.messages, kept);
-        if let Err(err) = self.write_file() {
-            self.messages = old;
+        if let Err(err) = self.rewrite_file(&kept) {
+            wipe(kept);
             return Err(err);
         }
-        wipe(old);
+        self.records = kept.len() as u64;
+        wipe(std::mem::replace(&mut self.messages, kept));
         Ok(())
     }
 
@@ -232,6 +274,7 @@ impl E2eHistoryStore {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err.into()),
         }
+        self.records = 0;
         wipe(std::mem::take(&mut self.messages));
         Ok(())
     }
@@ -245,51 +288,109 @@ impl E2eHistoryStore {
         XChaCha20Poly1305::new(&Key::<XChaCha20Poly1305>::from(self.key))
     }
 
-    fn read_file(&self) -> Result<Vec<E2eMessage>, E2eStoreError> {
-        let data = fs::read(&self.path)?;
-        if data.len() < MAGIC.len() + NONCE_LEN || !data.starts_with(MAGIC) {
-            return Err(E2eStoreError::Corrupted);
-        }
-        let (nonce, sealed) = data[MAGIC.len()..].split_at(NONCE_LEN);
-        let nonce =
-            Nonce::<XChaCha20Poly1305>::try_from(nonce).map_err(|_| E2eStoreError::Corrupted)?;
-        let mut plain = self
-            .cipher()
-            .decrypt(
-                &nonce,
-                Payload {
-                    msg: sealed,
-                    aad: MAGIC,
-                },
-            )
-            .map_err(|_| E2eStoreError::Corrupted)?;
-        let parsed = serde_json::from_slice(&plain).map_err(|_| E2eStoreError::Corrupted);
-        plain.zeroize();
-        parsed
-    }
-
-    fn write_file(&self) -> Result<(), E2eStoreError> {
-        let mut plain = serde_json::to_vec(&self.messages).map_err(io::Error::other)?;
+    /// Seals one row as `[length][nonce][ciphertext]`. The record index is
+    /// part of the associated data, so records cannot be swapped.
+    fn seal_record(&self, message: &E2eMessage, index: u64) -> Result<Vec<u8>, E2eStoreError> {
+        let mut plain = serde_json::to_vec(message).map_err(io::Error::other)?;
         let nonce = Nonce::<XChaCha20Poly1305>::generate();
         let sealed = self.cipher().encrypt(
             &nonce,
             Payload {
                 msg: &plain,
-                aad: MAGIC,
+                aad: &record_aad(index),
             },
         );
         plain.zeroize();
         let sealed = sealed.map_err(|_| E2eStoreError::Corrupted)?;
-        let mut out = Vec::with_capacity(MAGIC.len() + NONCE_LEN + sealed.len());
-        out.extend_from_slice(MAGIC);
+        let len = u32::try_from(sealed.len()).map_err(|_| E2eStoreError::Corrupted)?;
+        let mut out = Vec::with_capacity(LEN_FIELD + NONCE_LEN + sealed.len());
+        out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(nonce.as_slice());
         out.extend_from_slice(&sealed);
-        if let Some(parent) = self.path.parent() {
-            create_private_dir_all(parent)?;
+        Ok(out)
+    }
+
+    fn read_file(&self) -> Result<(Vec<E2eMessage>, u64), E2eStoreError> {
+        let data = fs::read(&self.path)?;
+        let mut rows = Vec::new();
+        if let Err(err) = self.read_records(&data, &mut rows) {
+            wipe(rows);
+            return Err(err);
+        }
+        let records = rows.len() as u64;
+        rows.sort_by_key(|row| row.sent_at);
+        Ok((rows, records))
+    }
+
+    fn read_records(&self, data: &[u8], rows: &mut Vec<E2eMessage>) -> Result<(), E2eStoreError> {
+        let corrupted = || E2eStoreError::Corrupted;
+        if !data.starts_with(MAGIC) {
+            return Err(corrupted());
+        }
+        let cipher = self.cipher();
+        let mut rest = &data[MAGIC.len()..];
+        while !rest.is_empty() {
+            if rest.len() < LEN_FIELD + NONCE_LEN {
+                return Err(corrupted());
+            }
+            let len = u32::from_le_bytes(
+                <[u8; LEN_FIELD]>::try_from(&rest[..LEN_FIELD]).map_err(|_| corrupted())?,
+            ) as usize;
+            let body = &rest[LEN_FIELD..];
+            if body.len() - NONCE_LEN < len {
+                return Err(corrupted());
+            }
+            let nonce = Nonce::<XChaCha20Poly1305>::try_from(&body[..NONCE_LEN])
+                .map_err(|_| corrupted())?;
+            let sealed = &body[NONCE_LEN..NONCE_LEN + len];
+            let mut plain = cipher
+                .decrypt(
+                    &nonce,
+                    Payload {
+                        msg: sealed,
+                        aad: &record_aad(rows.len() as u64),
+                    },
+                )
+                .map_err(|_| corrupted())?;
+            let parsed = serde_json::from_slice(&plain).map_err(|_| corrupted());
+            plain.zeroize();
+            rows.push(parsed?);
+            rest = &body[NONCE_LEN + len..];
+        }
+        Ok(())
+    }
+
+    /// Writes one record at the end of the file. A failed write cuts the
+    /// file back to its old length.
+    fn append_record(&self, record: &[u8]) -> Result<(), E2eStoreError> {
+        if !self.path.exists() {
+            write_atomic(&self.path, MAGIC)?;
+        }
+        let mut file = OpenOptions::new().write(true).open(&self.path)?;
+        let old_len = file.seek(SeekFrom::End(0))?;
+        let written = file.write_all(record).and_then(|()| file.sync_data());
+        if let Err(err) = written {
+            let _ = file.set_len(old_len);
+            return Err(err.into());
+        }
+        Ok(())
+    }
+
+    /// Replaces the file with one record for each of `rows`.
+    fn rewrite_file(&self, rows: &[E2eMessage]) -> Result<(), E2eStoreError> {
+        let mut out = MAGIC.to_vec();
+        for (index, row) in rows.iter().enumerate() {
+            out.extend_from_slice(&self.seal_record(row, index as u64)?);
         }
         write_atomic(&self.path, &out)?;
         Ok(())
     }
+}
+
+fn record_aad(index: u64) -> Vec<u8> {
+    let mut aad = MAGIC.to_vec();
+    aad.extend_from_slice(&index.to_le_bytes());
+    aad
 }
 
 impl Drop for E2eHistoryStore {
@@ -331,6 +432,12 @@ mod tests {
         }
     }
 
+    /// A random key for one test; no key is written in the source.
+    fn fresh_key() -> FixedKey {
+        let key = Key::<XChaCha20Poly1305>::generate();
+        FixedKey(<[u8; KEY_LEN]>::try_from(key.as_slice()).expect("key length"))
+    }
+
     fn scratch_dir(name: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -343,21 +450,25 @@ mod tests {
         dir
     }
 
-    fn message(id: &str, conversation: &str, text: &str) -> E2eMessage {
+    fn message_at(id: &str, conversation: &str, text: &str, sent_at: i64) -> E2eMessage {
         E2eMessage {
             id: id.to_string(),
             conversation_id: conversation.to_string(),
             sender_device: "device-a".to_string(),
-            sent_at: 1,
+            sent_at,
             text: text.to_string(),
         }
+    }
+
+    fn message(id: &str, conversation: &str, text: &str) -> E2eMessage {
+        message_at(id, conversation, text, 1)
     }
 
     #[test]
     fn history_is_encrypted_at_rest_and_reloads() {
         let dir = scratch_dir("roundtrip");
         let path = dir.join("history.bin");
-        let provider = FixedKey([7; KEY_LEN]);
+        let provider = fresh_key();
         let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
         store
             .append(message("1", "conv-1", "needle-in-clear"))
@@ -376,8 +487,7 @@ mod tests {
     #[test]
     fn a_new_store_starts_empty() {
         let dir = scratch_dir("empty");
-        let store =
-            E2eHistoryStore::open(dir.join("history.bin"), &FixedKey([1; KEY_LEN])).expect("open");
+        let store = E2eHistoryStore::open(dir.join("history.bin"), &fresh_key()).expect("open");
         assert!(store.conversation_ids().is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -399,12 +509,13 @@ mod tests {
     fn a_wrong_key_or_damaged_file_is_an_error_and_keeps_the_file() {
         let dir = scratch_dir("wrong-key");
         let path = dir.join("history.bin");
-        let mut store = E2eHistoryStore::open(path.clone(), &FixedKey([2; KEY_LEN])).expect("open");
+        let provider = fresh_key();
+        let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
         store.append(message("1", "c", "secret")).expect("append");
         store.close();
         let before = fs::read(&path).expect("read");
 
-        let wrong = E2eHistoryStore::open(path.clone(), &FixedKey([3; KEY_LEN]));
+        let wrong = E2eHistoryStore::open(path.clone(), &fresh_key());
         assert!(matches!(wrong, Err(E2eStoreError::Corrupted)));
         assert_eq!(fs::read(&path).expect("read"), before);
 
@@ -412,7 +523,23 @@ mod tests {
         let last = damaged.len() - 1;
         damaged[last] ^= 0xff;
         fs::write(&path, damaged).expect("write");
-        let result = E2eHistoryStore::open(path, &FixedKey([2; KEY_LEN]));
+        let result = E2eHistoryStore::open(path, &provider);
+        assert!(matches!(result, Err(E2eStoreError::Corrupted)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_cut_short_is_an_error() {
+        let dir = scratch_dir("cut-short");
+        let path = dir.join("history.bin");
+        let provider = fresh_key();
+        let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
+        store.append(message("1", "c", "one")).expect("append");
+        store.close();
+        let mut data = fs::read(&path).expect("read");
+        data.truncate(data.len() - 3);
+        fs::write(&path, data).expect("write");
+        let result = E2eHistoryStore::open(path, &provider);
         assert!(matches!(result, Err(E2eStoreError::Corrupted)));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -421,7 +548,7 @@ mod tests {
     fn a_failed_write_does_not_keep_the_row() {
         let dir = scratch_dir("write-fails");
         let path = dir.join("history.bin");
-        let mut store = E2eHistoryStore::open(path.clone(), &FixedKey([4; KEY_LEN])).expect("open");
+        let mut store = E2eHistoryStore::open(path.clone(), &fresh_key()).expect("open");
         fs::create_dir(&path).expect("directory in the way");
         assert!(store.append(message("1", "c", "text")).is_err());
         assert!(store.messages("c").is_empty());
@@ -431,19 +558,82 @@ mod tests {
     #[test]
     fn search_runs_in_memory_over_one_or_all_conversations() {
         let dir = scratch_dir("search");
-        let mut store =
-            E2eHistoryStore::open(dir.join("history.bin"), &FixedKey([5; KEY_LEN])).expect("open");
+        let mut store = E2eHistoryStore::open(dir.join("history.bin"), &fresh_key()).expect("open");
         store.append(message("1", "a", "Hello World")).expect("a");
         store.append(message("2", "b", "world peace")).expect("b");
         assert_eq!(store.search(None, "WORLD").len(), 2);
         assert_eq!(store.search(Some("a"), "world").len(), 1);
         assert!(store.search(None, "").is_empty());
         assert!(store.search(None, "absent").is_empty());
-        let names: Vec<String> = fs::read_dir(&dir)
+        let mut names: Vec<String> = fs::read_dir(&dir)
             .expect("list")
             .map(|entry| entry.expect("entry").file_name().to_string_lossy().into())
             .collect();
-        assert_eq!(names, ["history.bin"]);
+        names.sort();
+        assert_eq!(names, ["history.bin", "history.bin.lock"]);
+        let lock = fs::read(dir.join("history.bin.lock")).expect("read lock");
+        assert!(lock.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rows_come_back_in_order_of_sent_at() {
+        let dir = scratch_dir("order");
+        let path = dir.join("history.bin");
+        let provider = fresh_key();
+        let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
+        store
+            .append(message_at("late", "c", "second", 2))
+            .expect("late");
+        store
+            .append(message_at("early", "c", "first", 1))
+            .expect("early");
+        let ids: Vec<&str> = store.messages("c").iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["early", "late"]);
+        store.close();
+
+        let store = E2eHistoryStore::open(path, &provider).expect("reopen");
+        let ids: Vec<&str> = store.messages("c").iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["early", "late"]);
+        let found: Vec<&str> = store
+            .search(None, "s")
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(found, ["early", "late"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_handle_on_the_same_history_is_refused() {
+        let dir = scratch_dir("in-use");
+        let path = dir.join("history.bin");
+        let provider = fresh_key();
+        let store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
+        let second = E2eHistoryStore::open(path.clone(), &provider);
+        assert!(matches!(second, Err(E2eStoreError::InUse)));
+        store.close();
+        E2eHistoryStore::open(path, &provider).expect("open after close");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn many_appends_survive_a_reopen_and_each_adds_one_record() {
+        let dir = scratch_dir("appends");
+        let path = dir.join("history.bin");
+        let provider = fresh_key();
+        let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
+        store.append(message("1", "a", "one")).expect("one");
+        let first_size = fs::metadata(&path).expect("size").len();
+        store.append(message("2", "a", "two")).expect("two");
+        store.append(message("3", "b", "three")).expect("three");
+        let size = fs::metadata(&path).expect("size").len();
+        assert!(size > first_size);
+        store.close();
+
+        let store = E2eHistoryStore::open(path, &provider).expect("reopen");
+        assert_eq!(store.messages("a").len(), 2);
+        assert_eq!(store.messages("b").len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -451,14 +641,16 @@ mod tests {
     fn delete_conversation_removes_only_that_conversation() {
         let dir = scratch_dir("delete-one");
         let path = dir.join("history.bin");
-        let provider = FixedKey([6; KEY_LEN]);
+        let provider = fresh_key();
         let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
         store.append(message("1", "a", "one")).expect("a");
         store.append(message("2", "b", "two")).expect("b");
         store.delete_conversation("a").expect("delete");
+        store.append(message("3", "b", "three")).expect("b again");
         store.close();
         let store = E2eHistoryStore::open(path, &provider).expect("reopen");
         assert_eq!(store.conversation_ids(), ["b"]);
+        assert_eq!(store.messages("b").len(), 2);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -466,7 +658,7 @@ mod tests {
     fn delete_all_removes_the_file() {
         let dir = scratch_dir("delete-all");
         let path = dir.join("history.bin");
-        let mut store = E2eHistoryStore::open(path.clone(), &FixedKey([8; KEY_LEN])).expect("open");
+        let mut store = E2eHistoryStore::open(path.clone(), &fresh_key()).expect("open");
         store.append(message("1", "a", "one")).expect("a");
         store.delete_all().expect("delete");
         assert!(!path.exists());
