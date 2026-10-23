@@ -31,8 +31,13 @@
 
 use std::collections::HashMap;
 
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::e2e_wire::{as_object, reject_unknown_fields, required_str, WireError};
+use crate::slash::{is_channel, is_statusmsg_target};
 
 /// Response body of `GET /api/config`, the first, unauthenticated call a
 /// client makes.
@@ -621,6 +626,135 @@ pub struct ActiveThemePair {
     pub dark: Option<ThemeWire>,
 }
 
+/// Verb of the E2E send door: `POST /networks/:network_id/e2e/messages`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum E2eSendVerb {
+    KeyReq,
+    PkMsg,
+    Msg,
+    Nack,
+}
+
+impl E2eSendVerb {
+    fn parse(text: &str) -> Result<Self, WireError> {
+        match text {
+            "keyreq" => Ok(Self::KeyReq),
+            "pkmsg" => Ok(Self::PkMsg),
+            "msg" => Ok(Self::Msg),
+            "nack" => Ok(Self::Nack),
+            _ => Err(WireError::BadVerb),
+        }
+    }
+}
+
+/// Lane hint of the send door. Absent means `Text`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum E2eSendPriority {
+    Control,
+    Text,
+}
+
+/// Request body of the E2E send door (`expires_at` from protocol 46).
+///
+/// `expires_at` is a positive Unix time in seconds. It is valid only on a
+/// `control` `msg` or `pkmsg` that answers an order. `new` and `from_value`
+/// enforce that rule. The target is a direct peer: never a channel or a
+/// status-prefixed channel such as `@#ops`. Build the JSON with `to_json`,
+/// never by hand in UI code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct E2eSendRequest {
+    target: String,
+    verb: E2eSendVerb,
+    payload: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    priority: Option<E2eSendPriority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<u64>,
+}
+
+impl E2eSendRequest {
+    const FIELDS: [&'static str; 5] = ["target", "verb", "payload", "priority", "expires_at"];
+
+    /// Checks every field and builds the request.
+    pub fn new(
+        target: &str,
+        verb: E2eSendVerb,
+        payload: &str,
+        priority: Option<E2eSendPriority>,
+        expires_at: Option<u64>,
+    ) -> Result<Self, WireError> {
+        if target.is_empty()
+            || is_channel(target)
+            || is_statusmsg_target(target)
+            || target.contains(['\r', '\n', '\0', ' '])
+        {
+            return Err(WireError::BadTarget);
+        }
+        let decodes = STANDARD.decode(payload).is_ok() || STANDARD_NO_PAD.decode(payload).is_ok();
+        if payload.is_empty() || !decodes {
+            return Err(WireError::BadPayload);
+        }
+        if let Some(deadline) = expires_at {
+            let allowed = priority == Some(E2eSendPriority::Control)
+                && matches!(verb, E2eSendVerb::Msg | E2eSendVerb::PkMsg);
+            if !allowed || deadline == 0 || deadline > i64::MAX as u64 {
+                return Err(WireError::BadExpiry);
+            }
+        }
+        Ok(Self {
+            target: target.to_string(),
+            verb,
+            payload: payload.to_string(),
+            priority,
+            expires_at,
+        })
+    }
+
+    /// Reads a request from JSON, strictly: a missing, unknown or wrongly
+    /// typed field is an error. An integer is never read from a string, a
+    /// boolean or a number with a fraction.
+    pub fn from_value(value: &Value) -> Result<Self, WireError> {
+        let map = as_object(value)?;
+        reject_unknown_fields(map, &Self::FIELDS)?;
+        let verb = E2eSendVerb::parse(required_str(map, "verb")?)?;
+        let priority = match map.get("priority") {
+            None => None,
+            Some(Value::String(text)) => Some(match text.as_str() {
+                "control" => E2eSendPriority::Control,
+                "text" => E2eSendPriority::Text,
+                _ => return Err(WireError::BadPriority),
+            }),
+            Some(_) => return Err(WireError::BadFieldType),
+        };
+        let expires_at = match map.get("expires_at") {
+            None => None,
+            Some(Value::Number(number)) => Some(number.as_u64().ok_or(WireError::BadExpiry)?),
+            Some(_) => return Err(WireError::BadFieldType),
+        };
+        Self::new(
+            required_str(map, "target")?,
+            verb,
+            required_str(map, "payload")?,
+            priority,
+            expires_at,
+        )
+    }
+
+    /// The compact JSON text for the request body.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("a request of plain fields serializes")
+    }
+
+    /// Whether the order deadline is at or before `now_unix_secs`. Grappa
+    /// answers such a request with `too_late`, so a caller may skip the send.
+    pub fn deadline_passed(&self, now_unix_secs: u64) -> bool {
+        self.expires_at
+            .is_some_and(|deadline| deadline <= now_unix_secs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,5 +1040,38 @@ mod tests {
         };
         let json = serde_json::to_string(&prefs).expect("serialize");
         assert_eq!(json, r#"{"colored_nicklist":false}"#);
+    }
+
+    #[test]
+    fn e2e_send_request_fixtures() {
+        let set: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/e2e/send_request.json"))
+                .expect("fixture is valid JSON");
+        for case in set["valid"].as_array().expect("valid list") {
+            let request = E2eSendRequest::from_value(&case["request"]).expect("valid request");
+            assert_eq!(Some(request.to_json().as_str()), case["wire"].as_str());
+        }
+        for case in set["invalid"].as_array().expect("invalid list") {
+            let error = E2eSendRequest::from_value(&case["request"]).expect_err("invalid request");
+            assert_eq!(format!("{error:?}"), case["error"], "{case}");
+        }
+    }
+
+    #[test]
+    fn e2e_send_request_deadline_check() {
+        let build = |deadline| {
+            E2eSendRequest::new(
+                "bot",
+                E2eSendVerb::Msg,
+                "eyJ2IjoyfQ==",
+                Some(E2eSendPriority::Control),
+                deadline,
+            )
+            .expect("valid request")
+        };
+        let request = build(Some(1_790_000_000));
+        assert!(!request.deadline_passed(1_789_999_999));
+        assert!(request.deadline_passed(1_790_000_000));
+        assert!(!build(None).deadline_passed(u64::MAX));
     }
 }
