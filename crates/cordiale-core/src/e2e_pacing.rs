@@ -79,6 +79,7 @@ fn nick_key(nick: &str, casemapping: CaseMapping) -> String {
 #[derive(Debug, Clone)]
 pub struct IntervalLimiter {
     interval: Duration,
+    casemapping: Option<CaseMapping>,
     last: HashMap<String, Duration>,
 }
 
@@ -86,13 +87,25 @@ impl IntervalLimiter {
     pub fn new(interval: Duration) -> Self {
         Self {
             interval,
+            casemapping: None,
             last: HashMap::new(),
         }
     }
 
+    /// Clear the state when the casemapping differs from the one of the
+    /// stored keys. Old keys cannot be folded again with the new mapping.
+    fn sync_casemapping(&mut self, casemapping: CaseMapping) {
+        if self.casemapping != Some(casemapping) {
+            self.last.clear();
+            self.casemapping = Some(casemapping);
+        }
+    }
+
     /// Record the event and return `true` when the interval has passed.
-    /// A refused event does not start a new interval.
+    /// A refused event does not start a new interval. A changed casemapping
+    /// clears all intervals first.
     pub fn try_acquire(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
+        self.sync_casemapping(casemapping);
         let key = nick_key(nick, casemapping);
         if let Some(last) = self.last.get(&key) {
             if now.saturating_sub(*last) < self.interval {
@@ -104,6 +117,7 @@ impl IntervalLimiter {
     }
 
     pub fn forget(&mut self, nick: &str, casemapping: CaseMapping) {
+        self.sync_casemapping(casemapping);
         self.last.remove(&nick_key(nick, casemapping));
     }
 }
@@ -156,6 +170,7 @@ impl Default for OneTimeKeyPacer {
 #[derive(Debug, Clone)]
 pub struct ReassemblyGate {
     timeout: Duration,
+    casemapping: Option<CaseMapping>,
     last_fragment: HashMap<String, HashMap<String, Duration>>,
 }
 
@@ -163,7 +178,17 @@ impl ReassemblyGate {
     pub fn new(timeout: Duration) -> Self {
         Self {
             timeout,
+            casemapping: None,
             last_fragment: HashMap::new(),
+        }
+    }
+
+    /// Clear the state when the casemapping differs from the one of the
+    /// stored keys. Old keys cannot be folded again with the new mapping.
+    fn sync_casemapping(&mut self, casemapping: CaseMapping) {
+        if self.casemapping != Some(casemapping) {
+            self.last_fragment.clear();
+            self.casemapping = Some(casemapping);
         }
     }
 
@@ -175,6 +200,7 @@ impl ReassemblyGate {
         casemapping: CaseMapping,
         now: Duration,
     ) {
+        self.sync_casemapping(casemapping);
         let timeout = self.timeout;
         let messages = self
             .last_fragment
@@ -187,6 +213,7 @@ impl ReassemblyGate {
     /// The reassembly of message `msgid` ended (complete, failed or
     /// cancelled). Other messages of the nickname stay active.
     pub fn finish(&mut self, nick: &str, msgid: &str, casemapping: CaseMapping) {
+        self.sync_casemapping(casemapping);
         let key = nick_key(nick, casemapping);
         if let Some(messages) = self.last_fragment.get_mut(&key) {
             messages.remove(msgid);
@@ -197,8 +224,10 @@ impl ReassemblyGate {
     }
 
     /// A reassembly is active until `timeout` has passed since its last
-    /// fragment. At exactly `timeout` it is no longer active.
-    pub fn is_active(&self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
+    /// fragment. At exactly `timeout` it is no longer active. A different
+    /// casemapping clears the state of the old one.
+    pub fn is_active(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
+        self.sync_casemapping(casemapping);
         self.last_fragment
             .get(&nick_key(nick, casemapping))
             .is_some_and(|messages| {
@@ -208,7 +237,7 @@ impl ReassemblyGate {
             })
     }
 
-    pub fn may_send_keyreq(&self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
+    pub fn may_send_keyreq(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
         !self.is_active(nick, casemapping, now)
     }
 }
@@ -308,6 +337,12 @@ impl SendTracker {
 
     pub fn status(&self, id: &str) -> Option<SendStatus> {
         self.sends.get(id).copied()
+    }
+
+    /// Remove a send and return its last status. The caller does this after
+    /// it saves the status. An unknown id returns `None`.
+    pub fn remove(&mut self, id: &str) -> Option<SendStatus> {
+        self.sends.remove(id)
     }
 
     /// Apply an HTTP answer to a pending send. Return `true` when the status
@@ -573,6 +608,45 @@ mod tests {
             tracker.status("m1"),
             Some(SendStatus::Failed(SendFailure::TooLate))
         );
+    }
+
+    #[test]
+    fn limiter_clears_state_when_casemapping_changes() {
+        let mut limiter = keys_answer_limiter();
+        assert!(limiter.try_acquire("[bob]", ASCII, secs(0)));
+        assert!(limiter.try_acquire("{bob}", RFC, secs(1)));
+        assert!(!limiter.try_acquire("[bob]", RFC, secs(2)));
+    }
+
+    #[test]
+    fn gate_clears_state_when_casemapping_changes() {
+        let mut gate = ReassemblyGate::new(secs(10));
+        gate.note_fragment("[bob]", "A", ASCII, secs(0));
+        assert!(gate.is_active("[bob]", ASCII, secs(1)));
+        assert!(!gate.is_active("[bob]", RFC, secs(1)));
+        gate.note_fragment("{bob}", "B", RFC, secs(2));
+        assert!(gate.is_active("[bob]", RFC, secs(3)));
+        gate.finish("{bob}", "B", RFC);
+        assert!(gate.may_send_keyreq("[bob]", RFC, secs(3)));
+    }
+
+    #[test]
+    fn gate_read_clears_state_when_casemapping_changes() {
+        let mut gate = ReassemblyGate::new(secs(10));
+        gate.note_fragment("[bob]", "A", ASCII, secs(0));
+        assert!(!gate.is_active("[bob]", RFC, secs(1)));
+        assert!(!gate.is_active("[bob]", ASCII, secs(2)));
+        assert!(gate.may_send_keyreq("[bob]", ASCII, secs(2)));
+    }
+
+    #[test]
+    fn remove_drops_a_send_entry() {
+        let mut tracker = SendTracker::new();
+        tracker.start("m1");
+        assert!(tracker.apply_response("m1", SendResponse::Accepted));
+        assert_eq!(tracker.remove("m1"), Some(SendStatus::Accepted));
+        assert_eq!(tracker.status("m1"), None);
+        assert_eq!(tracker.remove("m1"), None);
     }
 
     #[test]
