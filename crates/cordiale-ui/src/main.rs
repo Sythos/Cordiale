@@ -32,6 +32,7 @@ mod ceremony_ctap;
 mod channels;
 mod dates;
 mod debug_info;
+mod e2e_view;
 mod frames;
 mod history;
 mod home;
