@@ -1558,6 +1558,7 @@ fn query_windows_snapshot_migrates_cache_on_case_only_nick_change() {
             server_time: Some(1),
             presence_noise: false,
             rename_to: None,
+            encrypted: false,
         }],
     );
     state
@@ -1685,6 +1686,7 @@ fn state_with_selected_query(
             server_time: Some(1),
             presence_noise: false,
             rename_to: None,
+            encrypted: false,
         }],
     );
     state
@@ -8886,6 +8888,7 @@ fn read_cursor_write_back_is_forward_only() {
         server_time: Some(id),
         presence_noise: false,
         rename_to: None,
+        encrypted: false,
     };
     assert_eq!(read_cursor_to_write(&mut state), None);
     state.windows.current_channel = Some(key.clone());
@@ -8937,6 +8940,7 @@ fn catch_up_anchors_cover_joined_channels_and_keep_the_first_one() {
         server_time: Some(id),
         presence_noise: false,
         rename_to: None,
+        encrypted: false,
     };
     let mut state = WorkerState::new();
     let joined = ("libera".to_string(), "#rust".to_string());
@@ -8993,6 +8997,7 @@ fn history_tail_replaces_old_rows_keeps_live_ones_and_marks_the_hole() {
         server_time: Some(id),
         presence_noise: false,
         rename_to: None,
+        encrypted: false,
     };
     let mut messages = vec![line(1), line(2), line(900)];
     // The tail arrives newest first, like the default page.
@@ -9015,6 +9020,7 @@ fn history_tail_without_rows_leaves_the_window_alone() {
         server_time: Some(4),
         presence_noise: false,
         rename_to: None,
+        encrypted: false,
     }];
     replace_with_history_tail(&mut messages, Vec::new());
     assert_eq!(messages.len(), 1);
@@ -9578,6 +9584,7 @@ fn history_row(id: Option<i64>, server_time: Option<i64>) -> RenderedMessage {
         server_time,
         presence_noise: false,
         rename_to: None,
+        encrypted: false,
     }
 }
 
@@ -10254,6 +10261,107 @@ fn rename_action_ignores_the_own_nick() {
         handle_open_rename_target(&mut state, &ui, "me".to_string()).await;
     });
     assert!(state.transcript.pending_query_focus.is_none());
+}
+
+fn e2e_row(id: i64, nick: Option<&str>, italic: bool, encrypted: bool) -> RenderedMessage {
+    RenderedMessage {
+        timestamp: "12:00".to_string(),
+        nick: nick.map(str::to_string),
+        text: format!("row {id}"),
+        italic,
+        message_id: Some(id),
+        server_time: Some(id),
+        presence_noise: false,
+        rename_to: None,
+        encrypted,
+    }
+}
+
+#[test]
+fn message_lock_shows_only_for_encrypted_chat_rows() {
+    assert!(message_lock_visible(&e2e_row(1, Some("anna"), false, true)));
+    // Clear text, legacy and unknown rows carry `encrypted: false`.
+    assert!(!message_lock_visible(&e2e_row(
+        2,
+        Some("anna"),
+        false,
+        false
+    )));
+    // System and service rows never show the lock.
+    assert!(!message_lock_visible(&e2e_row(3, None, true, true)));
+    assert!(!message_lock_visible(&e2e_row(
+        4,
+        Some("NickServ"),
+        true,
+        true
+    )));
+    assert!(!message_lock_visible(&e2e_row(5, None, false, true)));
+}
+
+#[test]
+fn mixed_rows_keep_their_own_lock_marker() {
+    let rows = vec![
+        e2e_row(1, Some("anna"), false, true),
+        e2e_row(2, Some("anna"), false, false),
+        e2e_row(3, None, true, false),
+        e2e_row(4, Some("bob"), false, true),
+    ];
+    let lines = chat_lines_model(&rows, true);
+    let marks: Vec<bool> = lines.iter().map(|line| line.encrypted).collect();
+    assert_eq!(marks, vec![true, false, false, true]);
+}
+
+#[test]
+fn history_reload_keeps_the_marker_of_a_known_row() {
+    let mut rows = vec![e2e_row(1, Some("anna"), false, true)];
+    // The reload brings the same id back from the server without the mark.
+    merge_rendered_messages(
+        &mut rows,
+        vec![
+            e2e_row(1, Some("anna"), false, false),
+            e2e_row(2, Some("anna"), false, false),
+        ],
+    );
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].encrypted);
+    assert!(!rows[1].encrypted);
+}
+
+#[test]
+fn wire_rows_start_without_the_lock() {
+    let payload = serde_json::json!({
+        "id": 7,
+        "sender": "anna",
+        "body": "hi",
+        "kind": "privmsg",
+    });
+    assert!(!render_message(&payload, None).encrypted);
+    assert!(!render_history_entry(&payload).encrypted);
+}
+
+#[test]
+fn send_lock_follows_the_confirmed_state_of_the_query() {
+    let mut state = WorkerState::new();
+    let anna = ("net".to_string(), "anna".to_string());
+    let bob = ("net".to_string(), "bob".to_string());
+
+    // Unknown state: no lock.
+    state.windows.current_query_ready = true;
+    assert!(!e2e_send_lock_visible(&state, &anna));
+
+    // Confirmed for anna only: bob stays without lock.
+    state.windows.e2e_send_confirmed.insert(anna.clone());
+    assert!(e2e_send_lock_visible(&state, &anna));
+    assert!(!e2e_send_lock_visible(&state, &bob));
+
+    // A query that is not ready cannot send, so it shows no lock.
+    state.windows.current_query_ready = false;
+    assert!(!e2e_send_lock_visible(&state, &anna));
+
+    // Losing the session removes the lock again.
+    state.windows.current_query_ready = true;
+    state.windows.e2e_send_confirmed.remove(&anna);
+    assert!(!e2e_send_lock_visible(&state, &anna));
 }
 
 #[test]

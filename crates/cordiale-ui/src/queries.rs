@@ -162,6 +162,13 @@ pub(crate) fn handle_close_query(state: &mut WorkerState, network: &str, nick: &
     }
 }
 
+/// Whether the send button of the query `key` shows the E2E lock. It needs
+/// a ready query window and a confirmed E2E send path for that very window;
+/// the state of another query or a global preference never counts.
+pub(crate) fn e2e_send_lock_visible(state: &WorkerState, key: &(String, String)) -> bool {
+    state.windows.current_query_ready && state.windows.e2e_send_confirmed.contains(key)
+}
+
 pub(crate) fn show_query_window(
     state: &WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -183,6 +190,7 @@ pub(crate) fn show_query_window(
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let query_ready = state.windows.current_query_ready;
+    let query_e2e = e2e_send_lock_visible(state, key);
     let history_start = state.transcript.history_start_reached.contains(key);
     let (label, peer_nick) = query_label(state, query);
     let window_status = window_status_for(state);
@@ -197,6 +205,7 @@ pub(crate) fn show_query_window(
         ui.set_has_selected_channel(true);
         ui.set_current_query(true);
         ui.set_current_query_ready(query_ready);
+        ui.set_current_query_e2e(query_e2e);
         ui.set_current_query_peer_nick(peer_nick.into());
         ui.set_compose_text(draft.into());
         ui.set_reply_target_left(false);
