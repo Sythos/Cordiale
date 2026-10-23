@@ -468,6 +468,58 @@ mod tests {
         );
     }
 
+    fn raw_key(hex: &str) -> [u8; 32] {
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        <[u8; 32]>::try_from(bytes).unwrap()
+    }
+
+    /// (raw key in hex, standard unpadded key text, expected did)
+    const DID_VECTORS: [(&str, &str, &str); 2] = [
+        // RFC 8032 test key.
+        (
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+            "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+            "If4x36FUomE",
+        ),
+        // Vector 70: the did holds both base64url characters.
+        (
+            "ee5d35c971a86ab62d114de7c07174d7f088a3cfebf14d25274d539d42d3f486",
+            "7l01yXGoarYtEU3nwHF01/CIo8/r8U0lJ01TnULT9IY",
+            "_Uw_z3-OAsk",
+        ),
+    ];
+
+    #[test]
+    fn did_matches_the_approved_vectors() {
+        for (hex, text, did) in DID_VECTORS {
+            let raw = raw_key(hex);
+            assert_eq!(STANDARD_NO_PAD.encode(raw), text);
+            assert_eq!(did_from_raw_key(&raw), did);
+            assert_eq!(did_from_key_text(text).unwrap(), did);
+            assert!(is_did_shape(did));
+        }
+    }
+
+    #[test]
+    fn did_hashes_the_raw_key_not_its_text() {
+        let (_, text, did) = DID_VECTORS[0];
+        let from_text = Sha256::digest(text.as_bytes());
+        assert_ne!(URL_SAFE_NO_PAD.encode(&from_text[..8]), did);
+    }
+
+    #[test]
+    fn did_vector_70_uses_hyphen_and_underscore() {
+        let (hex, _, did) = DID_VECTORS[1];
+        assert!(did.contains('-') && did.contains('_'));
+        assert!(is_did_shape(did));
+        assert_eq!(did_from_raw_key(&raw_key(hex)), did);
+        // The standard-base64 form of the same bytes is not a did.
+        assert!(!is_did_shape("/Uw/z3+OAsk"));
+    }
+
     #[test]
     fn did_shape_rejects_standard_base64_and_wrong_length() {
         assert!(!is_did_shape("abc+defghij"));
