@@ -465,6 +465,7 @@ pub(crate) fn replace_with_history_tail(
         server_time: first.server_time,
         presence_noise: false,
         rename_to: None,
+        encrypted: false,
     };
     messages.retain(|message| message.message_id.is_some_and(|id| id > newest));
     merge_rendered_messages(messages, tail.into_iter().chain(std::iter::once(note)));
