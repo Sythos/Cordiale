@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::e2e_wire::{as_object, reject_unknown_fields, required_str, WireError};
+use crate::slash::{is_channel, is_statusmsg_target};
 
 /// Response body of `GET /api/config`, the first, unauthenticated call a
 /// client makes.
@@ -659,7 +660,9 @@ pub enum E2eSendPriority {
 ///
 /// `expires_at` is a positive Unix time in seconds. It is valid only on a
 /// `control` `msg` or `pkmsg` that answers an order. `new` and `from_value`
-/// enforce that rule. Build the JSON with `to_json`, never by hand in UI code.
+/// enforce that rule. The target is a direct peer: never a channel or a
+/// status-prefixed channel such as `@#ops`. Build the JSON with `to_json`,
+/// never by hand in UI code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct E2eSendRequest {
     target: String,
@@ -683,7 +686,8 @@ impl E2eSendRequest {
         expires_at: Option<u64>,
     ) -> Result<Self, WireError> {
         if target.is_empty()
-            || target.starts_with(['#', '&', '+', '!'])
+            || is_channel(target)
+            || is_statusmsg_target(target)
             || target.contains(['\r', '\n', '\0', ' '])
         {
             return Err(WireError::BadTarget);
