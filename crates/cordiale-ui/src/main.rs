@@ -1438,6 +1438,10 @@ struct WindowState {
     current_query: bool,
     current_query_ready: bool,
     current_channel: Option<(String, String)>,
+    /// Query windows whose E2E send path the client confirmed as active.
+    /// A missing entry means legacy, clear text, lost or unknown, so the
+    /// send button shows no lock.
+    e2e_send_confirmed: std::collections::HashSet<(String, String)>,
 }
 
 struct WorkerState {
@@ -1567,6 +1571,7 @@ impl WorkerState {
                 current_query: false,
                 current_query_ready: false,
                 current_channel: None,
+                e2e_send_confirmed: std::collections::HashSet::new(),
             },
             networks: NetworkState {
                 network_ids: HashMap::new(),
@@ -7570,6 +7575,10 @@ struct RenderedMessage {
     /// The new nick of a peer rename line, read from `meta.new_nick`. It is
     /// `Some` only for a valid nick; the row then shows it as an action.
     rename_to: Option<String>,
+    /// The message was sent or received through E2E. Only the code that
+    /// validated and decrypted it, or sent it encrypted, sets this; parsed
+    /// wire rows start as `false`, so an unknown state shows no lock.
+    encrypted: bool,
 }
 
 /// Whether `nick` can be the target of a rename action: one token with no
@@ -7707,6 +7716,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             server_time: server_time(payload),
             presence_noise,
             rename_to,
+            encrypted: false,
         };
     }
 
@@ -7726,6 +7736,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             server_time: server_time(payload),
             presence_noise,
             rename_to: None,
+            encrypted: false,
         },
         (None, Some(body)) => RenderedMessage {
             timestamp,
@@ -7736,6 +7747,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             server_time: server_time(payload),
             presence_noise,
             rename_to: None,
+            encrypted: false,
         },
         _ => RenderedMessage {
             timestamp,
@@ -7748,6 +7760,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             server_time: server_time(payload),
             presence_noise,
             rename_to: None,
+            encrypted: false,
         },
     }
 }
@@ -8852,7 +8865,14 @@ fn chat_line_from_message(
             .into(),
         mention,
         rename_target: rename_target.into(),
+        encrypted: message_lock_visible(message),
     }
+}
+
+/// Whether a row shows the E2E lock: only an ordinary chat message that was
+/// encrypted. System and service rows (italic or without a nick) never do.
+fn message_lock_visible(message: &RenderedMessage) -> bool {
+    message.encrypted && !message.italic && message.nick.is_some()
 }
 
 /// The text a row shows as ordinary text, and the new nick of its rename
