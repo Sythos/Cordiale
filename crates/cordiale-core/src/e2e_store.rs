@@ -32,7 +32,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
@@ -42,11 +42,12 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use crate::credentials::{CredentialStore, KeyringCredentialStore};
-use crate::persistence::{create_private_dir_all, data_dir, write_atomic};
+use crate::persistence::{create_private_dir_all, data_dir, key_lock_dir, write_atomic};
 
 const HISTORY_FILE_NAME: &str = "e2e_history.bin";
 const KEY_SERVICE: &str = "cordiale-e2e";
 const KEY_USERNAME: &str = "history-key";
+const KEY_LOCK_FILE_NAME: &str = "e2e_key.lock";
 const KEY_LEN: usize = 32;
 /// File header; also bound to every record as associated data, with the
 /// index of the record.
@@ -90,27 +91,45 @@ impl E2eKeyProvider for KeyringKeyProvider {
         if !KeyringCredentialStore::is_available() {
             return Err(E2eStoreError::SecureStorageUnavailable);
         }
-        let keyring = KeyringCredentialStore;
-        let stored = keyring
-            .get_secret(KEY_SERVICE, KEY_USERNAME)
-            .map_err(|err| E2eStoreError::Key(format!("{err:?}")))?;
-        if let Some(text) = stored {
-            return decode_key(&text);
-        }
-        let key = Key::<XChaCha20Poly1305>::generate();
-        let mut bytes =
-            <[u8; KEY_LEN]>::try_from(key.as_slice()).map_err(|_| E2eStoreError::Corrupted)?;
-        let mut text = STANDARD_NO_PAD.encode(bytes);
-        let result = keyring
-            .set_secret(KEY_SERVICE, KEY_USERNAME, &text)
-            .map_err(|err| E2eStoreError::Key(format!("{err:?}")));
-        text.zeroize();
-        match result {
-            Ok(()) => Ok(bytes),
-            Err(err) => {
-                bytes.zeroize();
-                Err(err)
-            }
+        let dir = key_lock_dir().ok_or(E2eStoreError::NoDataDir)?;
+        create_private_dir_all(&dir)?;
+        load_or_create_locked(&dir.join(KEY_LOCK_FILE_NAME), &KeyringCredentialStore)
+    }
+}
+
+/// Reads the key, or creates and stores it, while an exclusive lock on
+/// `lock_path` is held. The keyring entry is one for the whole user, so the
+/// lock belongs to the key and not to a history file.
+fn load_or_create_locked(
+    lock_path: &Path,
+    store: &dyn CredentialStore,
+) -> Result<[u8; KEY_LEN], E2eStoreError> {
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path)?;
+    lock.lock()?;
+    let stored = store
+        .get_secret(KEY_SERVICE, KEY_USERNAME)
+        .map_err(|err| E2eStoreError::Key(format!("{err:?}")))?;
+    if let Some(text) = stored {
+        return decode_key(&text);
+    }
+    let key = Key::<XChaCha20Poly1305>::generate();
+    let mut bytes =
+        <[u8; KEY_LEN]>::try_from(key.as_slice()).map_err(|_| E2eStoreError::Corrupted)?;
+    let mut text = STANDARD_NO_PAD.encode(bytes);
+    let result = store
+        .set_secret(KEY_SERVICE, KEY_USERNAME, &text)
+        .map_err(|err| E2eStoreError::Key(format!("{err:?}")));
+    text.zeroize();
+    // The lock is released when `lock` drops at the end of the function.
+    match result {
+        Ok(()) => Ok(bytes),
+        Err(err) => {
+            bytes.zeroize();
+            Err(err)
         }
     }
 }
@@ -177,8 +196,8 @@ impl E2eHistoryStore {
             Err(fs::TryLockError::WouldBlock) => return Err(E2eStoreError::InUse),
             Err(fs::TryLockError::Error(err)) => return Err(err.into()),
         }
-        // The lock covers the key read, create and write: two processes
-        // cannot make two different keys.
+        // This lock only stops a second handle on the same file. The key
+        // provider has its own lock for the key creation.
         let key = provider.load_or_create_key()?;
         let mut store = E2eHistoryStore {
             path,
@@ -389,19 +408,10 @@ impl E2eHistoryStore {
     }
 }
 
-/// Lowercase plus the Unicode full case folds that lowercase leaves out,
-/// so that `Straße` and `STRASSE` compare equal.
+/// Unicode default full case folding, so that `Straße` and `STRASSE`
+/// compare equal.
 fn fold_case(text: &str) -> String {
-    let mut folded = String::with_capacity(text.len());
-    for ch in text.to_lowercase().chars() {
-        match ch {
-            'ß' => folded.push_str("ss"),
-            'ς' => folded.push('σ'),
-            'ſ' => folded.push('s'),
-            _ => folded.push(ch),
-        }
-    }
-    folded
+    caseless::default_case_fold_str(text)
 }
 
 fn record_aad(index: u64) -> Vec<u8> {
@@ -604,6 +614,57 @@ mod tests {
         store.append(message("1", "a", "Die Straße")).expect("a");
         assert_eq!(store.search(None, "STRASSE").len(), 1);
         assert_eq!(store.search(None, "straße").len(), 1);
+        store.append(message("2", "a", "a ﬀ b")).expect("b");
+        assert_eq!(store.search(None, "A FF B").len(), 1);
+        store.append(message("3", "a", "micro µ")).expect("c");
+        assert_eq!(store.search(None, "MICRO Μ").len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A store that is slow between the read and the write.
+    struct SlowStore(std::sync::Mutex<Option<String>>);
+
+    impl CredentialStore for SlowStore {
+        fn set_secret(
+            &self,
+            _service: &str,
+            _username: &str,
+            secret: &str,
+        ) -> Result<(), crate::credentials::CredentialError> {
+            *self.0.lock().expect("store") = Some(secret.to_string());
+            Ok(())
+        }
+
+        fn get_secret(
+            &self,
+            _service: &str,
+            _username: &str,
+        ) -> Result<Option<String>, crate::credentials::CredentialError> {
+            let value = self.0.lock().expect("store").clone();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(value)
+        }
+
+        fn delete_secret(
+            &self,
+            _service: &str,
+            _username: &str,
+        ) -> Result<(), crate::credentials::CredentialError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn concurrent_key_creation_gives_one_key() {
+        let dir = scratch_dir("keylock");
+        let lock_path = dir.join("key.lock");
+        let store = SlowStore(std::sync::Mutex::new(None));
+        let (first, second) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| load_or_create_locked(&lock_path, &store));
+            let b = scope.spawn(|| load_or_create_locked(&lock_path, &store));
+            (a.join().expect("a"), b.join().expect("b"))
+        });
+        assert_eq!(first.expect("first"), second.expect("second"));
         let _ = fs::remove_dir_all(&dir);
     }
 
