@@ -29,6 +29,8 @@ futures-util = { version = "0.3", features = ["sink"] }
 # it links FFmpeg, which a build has to provide (system libraries, or the
 # `static` feature of this crate to build them).
 ffmpeg-next = { version = "9", optional = true }
+chacha20poly1305 = "0.11"
+zeroize = "1"
 
 [features]
 video-shrink = ["dep:ffmpeg-next"]
