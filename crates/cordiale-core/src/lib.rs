@@ -58,6 +58,7 @@ pub mod client;
 pub mod credentials;
 pub mod diagnostics;
 pub mod domain;
+pub mod e2e_device;
 pub mod e2e_wire;
 pub mod formatting;
 pub mod isupport;
