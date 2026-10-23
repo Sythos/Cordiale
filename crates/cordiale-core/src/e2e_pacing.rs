@@ -403,6 +403,14 @@ impl SendTracker {
             _ => false,
         }
     }
+
+    /// Parse an `e2e_send_dropped` payload and apply it. Return `true` when
+    /// the status of a known send changed. A malformed payload is an error
+    /// and changes nothing.
+    pub fn apply_dropped_event(&mut self, payload: &Value) -> Result<bool, WireError> {
+        let event = SendDropped::from_value(payload)?;
+        Ok(self.apply_dropped(&event.id, event.reason))
+    }
 }
 
 #[cfg(test)]
@@ -440,6 +448,44 @@ mod tests {
                 "{}",
                 case["case"]
             );
+        }
+    }
+
+    #[test]
+    fn dropped_event_reaches_the_tracker_through_the_router() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/e2e/send_dropped.json"))
+                .expect("fixture is JSON");
+        let valid = &cases["valid"][0]["event"];
+        assert_eq!(
+            crate::wire_event::ClientEventKind::from_payload(valid),
+            Some(crate::wire_event::ClientEventKind::E2eSendDropped)
+        );
+        let mut tracker = SendTracker::new();
+        tracker.start("s1");
+        assert_eq!(tracker.apply_dropped_event(valid), Ok(true));
+        assert_eq!(
+            tracker.status("s1"),
+            Some(SendStatus::Dropped(DropReason::Late))
+        );
+        // A duplicate event changes nothing.
+        assert_eq!(tracker.apply_dropped_event(valid), Ok(false));
+    }
+
+    #[test]
+    fn invalid_dropped_event_leaves_the_tracker_unchanged() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/e2e/send_dropped.json"))
+                .expect("fixture is JSON");
+        let mut tracker = SendTracker::new();
+        tracker.start("s1");
+        for case in cases["invalid"].as_array().expect("invalid cases") {
+            assert!(
+                tracker.apply_dropped_event(&case["event"]).is_err(),
+                "{}",
+                case["case"]
+            );
+            assert_eq!(tracker.status("s1"), Some(SendStatus::Pending));
         }
     }
 

@@ -38,7 +38,7 @@ pub enum EventCarrier {
     Requester,
 }
 
-/// The complete set of 57 client event kinds documented by Grappa.
+/// The complete set of 58 client event kinds documented by Grappa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientEventKind {
     ArchiveChanged,
@@ -59,6 +59,7 @@ pub enum ClientEventKind {
     DirectoryComplete,
     DirectoryFailed,
     DirectoryProgress,
+    E2eSendDropped,
     InviteAck,
     IsupportChanged,
     Joined,
@@ -128,6 +129,7 @@ impl ClientEventKind {
             "directory_complete" => Self::DirectoryComplete,
             "directory_failed" => Self::DirectoryFailed,
             "directory_progress" => Self::DirectoryProgress,
+            "e2e_send_dropped" => Self::E2eSendDropped,
             "invite_ack" => Self::InviteAck,
             "isupport_changed" => Self::IsupportChanged,
             "joined" => Self::Joined,
@@ -191,6 +193,7 @@ impl ClientEventKind {
             Self::DirectoryComplete => "directory_complete",
             Self::DirectoryFailed => "directory_failed",
             Self::DirectoryProgress => "directory_progress",
+            Self::E2eSendDropped => "e2e_send_dropped",
             Self::InviteAck => "invite_ack",
             Self::IsupportChanged => "isupport_changed",
             Self::Joined => "joined",
@@ -260,7 +263,7 @@ mod tests {
     use std::collections::HashSet;
 
     /// Every kind, to check the wire-name table end to end.
-    const ALL_CLIENT_EVENT_KINDS: [ClientEventKind; 57] = [
+    const ALL_CLIENT_EVENT_KINDS: [ClientEventKind; 58] = [
         ClientEventKind::ArchiveChanged,
         ClientEventKind::ArchivePurged,
         ClientEventKind::AutoAwayDebounceChanged,
@@ -279,6 +282,7 @@ mod tests {
         ClientEventKind::DirectoryComplete,
         ClientEventKind::DirectoryFailed,
         ClientEventKind::DirectoryProgress,
+        ClientEventKind::E2eSendDropped,
         ClientEventKind::InviteAck,
         ClientEventKind::IsupportChanged,
         ClientEventKind::Joined,
@@ -321,13 +325,13 @@ mod tests {
     ];
 
     #[test]
-    fn inventory_has_57_unique_wire_names_and_round_trips() {
+    fn inventory_has_58_unique_wire_names_and_round_trips() {
         let names: HashSet<_> = ALL_CLIENT_EVENT_KINDS
             .iter()
             .map(|kind| kind.as_wire_name())
             .collect();
-        assert_eq!(ALL_CLIENT_EVENT_KINDS.len(), 57);
-        assert_eq!(names.len(), 57);
+        assert_eq!(ALL_CLIENT_EVENT_KINDS.len(), 58);
+        assert_eq!(names.len(), 58);
         for kind in ALL_CLIENT_EVENT_KINDS {
             assert_eq!(
                 ClientEventKind::from_wire_name(kind.as_wire_name()),
