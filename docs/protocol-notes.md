@@ -1271,6 +1271,20 @@ deduplica per `id`), `ack` dopo l'elaborazione locale anche di un elemento
 non decifrabile, `ack` idempotente (riprovabile), eventi sconosciuti non
 fatali (già così: un kind non censito si scarta in silenzio).
 
+**Fase 1 (issue 346): modulo del filo v2 senza dipendenze dal contratto.**
+`cordiale-core/src/e2e_wire.rs` contiene solo funzioni pure: frame
+`\x01E2E <VERB> <msgid> <i>/<n> <from> <to> <chunk>\x01` con le coppie di
+indirizzi per verbo, unione dei frammenti (qualunque cambio di campo scarta il
+messaggio), `did` (base64url senza padding dei primi 8 byte di SHA-256 della
+chiave Ed25519), chiavi e firme in base64 standard canonico (43 e 86
+caratteri), `ver`/`lv` da 1 a 2^31-1, testo firmato `irc-e2e:v2:id:`,
+legame `fb`, limite di 1–4 dispositivi e regola di versione della lista
+firmata. Non c'è nessun tipo REST o evento. Restano per le fasi successive:
+i due vettori `did` del commento 6348464388 (non letti qui), il testo firmato
+`irc-e2e:v2:dev:` (forma con N da confermare), il testo della lista firmata
+(separatore delle chiavi da confermare), verifica delle firme, motore Olm,
+protocolli 46–49, pairing X1, X2 e S1.
+
 ### Cronologia a tempo (v40): regole del server da rispettare
 
 - Unità: millisecondi epoch decimali, da `0` a int64 massimo; ISO-8601,
