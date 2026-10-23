@@ -633,6 +633,21 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
     storage().map(|storage| storage.layout.data.clone())
 }
 
+/// Where the lock of the E2E key lives, created if needed. A lock that guards
+/// a shared resource (the keyring entry) goes in the standard data folder, so
+/// every process takes the same lock. When that folder cannot be created, the
+/// folder in use (the old `~/.cordiale`) is the fallback.
+pub(crate) fn key_lock_dir() -> Option<PathBuf> {
+    let storage = storage()?;
+    let standard = Layout::standard(storage.platform, &storage.bases).data;
+    if create_private_dir_all(&standard).is_ok() {
+        return Some(standard);
+    }
+    let in_use = storage.layout.data.clone();
+    create_private_dir_all(&in_use).ok()?;
+    Some(in_use)
+}
+
 /// `name` in the old `~/.cordiale`, when that is not the folder in use.
 pub(crate) fn legacy_file(name: &str) -> Option<PathBuf> {
     storage()?.legacy_file(name)
