@@ -617,10 +617,11 @@ Audit diretto sui moduli sorgente Elixir del server (non regex/grep su
 poche righe): `session/wire.ex`'s `@type wire_event_kind` è l'insieme
 chiuso ufficiale (40 kind), più ogni altro `*/wire.ex` non-admin del repo:
 56 kind top-level in totale all'epoca, elencati con il loro carrier in
-`crates/cordiale-core/src/wire_event.rs` (`ClientEventKind`). Oggi sono 57:
+`crates/cordiale-core/src/wire_event.rs` (`ClientEventKind`). Oggi sono 58:
 la tabella §9 del contratto aggiunge `away_nick_suffix_changed` (v32), che
 ora sta nell'enum come gli altri (prima veniva scartato da
-`ClientEventKind::from_payload` prima di arrivare al suo gestore). Riassunto:
+`ClientEventKind::from_payload` prima di arrivare al suo gestore); il 58° è
+`e2e_send_dropped` (protocollo 46). Riassunto:
 
 - **`"parted"` non esiste**: due commenti nel sorgente server
   (`session/server.ex`, `session/window_state.ex`) confermano che
@@ -634,7 +635,7 @@ ora sta nell'enum come gli altri (prima veniva scartato da
   `notice`): `action` (CTCP `/me`), `topic` (riga scrollback di cambio
   topic), `kick` (riga scrollback di kick, diversa da `kicked`
   top-level), `server_event` (riga feed server, diversa da `notice`).
-- **Aggiornamento (2026-09-30)**: Cordiale gestisce tutti i 57 kind
+- **Aggiornamento (2026-09-30)**: Cordiale gestisce tutti i 58 kind
   (ISUPPORT/umode/identità, stato finestra, WHOIS/WHOWAS/LUSERS/banlist,
   DCC, directory canali, archivio, lifecycle network, presence
   MONITOR/WATCH, notify list, impostazioni server, riepilogo menzioni,
@@ -1212,7 +1213,7 @@ letto in una spec:
   di nuovo `protocol_version`).
 - Il parser deve confrontare `protocol_version` con `>=`, mai `==`, e
   ignorare i campi sconosciuti. Per i kind evento, Cordiale gestisce
-  tutti i 57 kind dell'inventario upstream attuale; un kind top-level
+  tutti i 58 kind dell'inventario upstream attuale; un kind top-level
   futuro non ancora censito viene scartato in silenzio
   (`ClientEventKind::from_payload`), come prescrive il contratto.
 - Una password vuota nel form Connect avvia il tentativo guest osservato
@@ -1256,7 +1257,9 @@ Stringhe, `null` e numeri con frazione (anche `1.0`) sono rifiutati.
 `NETWORK` grezzo (protocollo 47) in `IsupportState::network` (assente o `null`
 = `None`, nessuna normalizzazione; il nome del campo `network` è un'ipotesi da
 verificare); `SendDropped` in `e2e_pacing.rs` per l'evento `e2e_send_dropped`
-(campi `id` e `reason`: ipotesi da verificare, fixture `send_dropped.json`);
+(campi `id` e `reason`: ipotesi da verificare, fixture `send_dropped.json`), che il
+router dei kind (`ClientEventKind::E2eSendDropped`) inoltra a `SendTracker`
+(`apply_dropped_event`; nessun invio UI chiama ancora `SendTracker::start`);
 `E2eOperation` in `e2e_protocol.rs` (rotte e versioni minime 42–44; intervallo
 KEYS da 15 s separato dal fake-lag da 22 s, che non è un intervallo del
 client). **Da fare, dopo la lettura delle PR 2446, 2448, 2451 e 2452 di
