@@ -426,7 +426,11 @@ mod tests {
         let mut gate = ReassemblyGate::new(secs(10));
         gate.note_fragment("[bob]", "A", RFC, secs(0));
         assert!(!gate.may_send_keyreq("{bob}", RFC, secs(5)));
-        assert!(gate.may_send_keyreq("{bob}", ASCII, secs(5)));
+
+        let mut ascii_gate = ReassemblyGate::new(secs(10));
+        ascii_gate.note_fragment("[bob]", "A", ASCII, secs(0));
+        assert!(ascii_gate.may_send_keyreq("{bob}", ASCII, secs(5)));
+        assert!(!ascii_gate.may_send_keyreq("[bob]", ASCII, secs(5)));
     }
 
     #[test]
