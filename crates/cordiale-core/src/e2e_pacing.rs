@@ -30,6 +30,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
+
 use crate::isupport::CaseMapping;
 
 /// Minimum time between two KEYS answers to the same nickname.
@@ -375,6 +377,117 @@ impl SendTracker {
     }
 }
 
+/// Wire name of the drop event, as in the `kind` field of the payload.
+pub const SEND_DROPPED_KIND: &str = "e2e_send_dropped";
+
+/// Identity of one send: network, target and message id. Two sends match
+/// only when all three are equal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SendKey {
+    pub network: String,
+    pub target: String,
+    pub message_id: String,
+}
+
+impl SendKey {
+    pub fn new(network: &str, target: &str, message_id: &str) -> Self {
+        Self {
+            network: network.to_string(),
+            target: target.to_string(),
+            message_id: message_id.to_string(),
+        }
+    }
+}
+
+/// A parsed `e2e_send_dropped` event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendDropped {
+    pub key: SendKey,
+    pub reason: DropReason,
+}
+
+impl SendDropped {
+    /// Read the event payload. Return `None` when the kind is another one,
+    /// a field is missing or not a string, or the reason is not known. The
+    /// field names `network`, `target`, `message_id` and `reason` are an
+    /// assumption: check them against the protocol 47 contract.
+    pub fn from_payload(payload: &Value) -> Option<Self> {
+        if payload.get("kind")?.as_str()? != SEND_DROPPED_KIND {
+            return None;
+        }
+        Some(Self {
+            key: SendKey::new(
+                payload.get("network")?.as_str()?,
+                payload.get("target")?.as_str()?,
+                payload.get("message_id")?.as_str()?,
+            ),
+            reason: DropReason::from_wire(payload.get("reason")?.as_str()?)?,
+        })
+    }
+}
+
+/// Local status of every send, by [`SendKey`]. It routes a response or a
+/// drop event to the matching send only.
+#[derive(Debug, Clone, Default)]
+pub struct SendBook {
+    sends: HashMap<SendKey, SendStatus>,
+}
+
+impl SendBook {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a send as pending. A known send keeps its status.
+    pub fn start(&mut self, key: SendKey) {
+        self.sends.entry(key).or_insert(SendStatus::Pending);
+    }
+
+    pub fn status(&self, key: &SendKey) -> Option<SendStatus> {
+        self.sends.get(key).copied()
+    }
+
+    pub fn remove(&mut self, key: &SendKey) -> Option<SendStatus> {
+        self.sends.remove(key)
+    }
+
+    /// Apply an HTTP answer to the matching pending send. Return `true`
+    /// when the status changed.
+    pub fn apply_response(&mut self, key: &SendKey, response: SendResponse) -> bool {
+        let next = match response {
+            SendResponse::Accepted => SendStatus::Accepted,
+            SendResponse::Failed(failure) => SendStatus::Failed(failure),
+            SendResponse::Unexpected(_) => return false,
+        };
+        match self.sends.get_mut(key) {
+            Some(status @ SendStatus::Pending) => {
+                *status = next;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Apply a drop event to the matching pending or accepted send. An
+    /// unknown or final send changes nothing.
+    pub fn apply_dropped(&mut self, event: &SendDropped) -> bool {
+        match self.sends.get_mut(&event.key) {
+            Some(status @ (SendStatus::Pending | SendStatus::Accepted)) => {
+                *status = SendStatus::Dropped(event.reason);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Route one event payload. Return the event when it is a drop event
+    /// that changed a send.
+    pub fn apply_payload(&mut self, payload: &Value) -> Option<SendDropped> {
+        let event = SendDropped::from_payload(payload)?;
+        self.apply_dropped(&event).then_some(event)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +720,141 @@ mod tests {
         assert_eq!(
             tracker.status("m1"),
             Some(SendStatus::Failed(SendFailure::TooLate))
+        );
+    }
+
+    fn key(id: &str) -> SendKey {
+        SendKey::new("libera", "bob", id)
+    }
+
+    fn dropped_payload(network: &str, target: &str, id: &str, reason: &str) -> Value {
+        serde_json::json!({
+            "kind": "e2e_send_dropped",
+            "network": network,
+            "target": target,
+            "message_id": id,
+            "reason": reason,
+        })
+    }
+
+    #[test]
+    fn dropped_event_parses_and_rejects_bad_payloads() {
+        let event = SendDropped::from_payload(&dropped_payload("libera", "bob", "m1", "late"))
+            .expect("event");
+        assert_eq!(event.key, key("m1"));
+        assert_eq!(event.reason, DropReason::Late);
+        assert_eq!(
+            SendDropped::from_payload(&dropped_payload("libera", "bob", "m1", "other")),
+            None
+        );
+        let mut other_kind = dropped_payload("libera", "bob", "m1", "late");
+        other_kind["kind"] = Value::from("message");
+        assert_eq!(SendDropped::from_payload(&other_kind), None);
+        let mut missing = dropped_payload("libera", "bob", "m1", "late");
+        missing.as_object_mut().expect("object").remove("target");
+        assert_eq!(SendDropped::from_payload(&missing), None);
+    }
+
+    #[test]
+    fn book_accepted_response_is_not_delivered() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        assert!(book.apply_response(&key("m1"), SendResponse::Accepted));
+        assert_eq!(book.status(&key("m1")), Some(SendStatus::Accepted));
+        // A repeated answer changes nothing.
+        assert!(!book.apply_response(&key("m1"), SendResponse::Accepted));
+    }
+
+    #[test]
+    fn book_too_late_expires_only_the_matching_send() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        book.start(key("m2"));
+        let too_late = classify_send_response(422, Some("too_late"));
+        assert!(book.apply_response(&key("m1"), too_late));
+        assert_eq!(
+            book.status(&key("m1")),
+            Some(SendStatus::Failed(SendFailure::TooLate))
+        );
+        assert_eq!(book.status(&key("m2")), Some(SendStatus::Pending));
+    }
+
+    #[test]
+    fn book_each_drop_reason_updates_only_its_send() {
+        for reason in ["late", "send_failed", "session_ended"] {
+            let mut book = SendBook::new();
+            book.start(key("m1"));
+            book.start(key("m2"));
+            let payload = dropped_payload("libera", "bob", "m2", reason);
+            let event = book.apply_payload(&payload).expect("applied");
+            assert_eq!(Some(event.reason), DropReason::from_wire(reason));
+            assert_eq!(book.status(&key("m1")), Some(SendStatus::Pending));
+            assert_eq!(
+                book.status(&key("m2")),
+                Some(SendStatus::Dropped(event.reason))
+            );
+        }
+    }
+
+    #[test]
+    fn book_matches_network_and_target_too() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        assert!(book
+            .apply_payload(&dropped_payload("other", "bob", "m1", "late"))
+            .is_none());
+        assert!(book
+            .apply_payload(&dropped_payload("libera", "carol", "m1", "late"))
+            .is_none());
+        assert_eq!(book.status(&key("m1")), Some(SendStatus::Pending));
+    }
+
+    #[test]
+    fn book_duplicate_unknown_and_late_events_change_nothing() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        let payload = dropped_payload("libera", "bob", "m1", "late");
+        assert!(book.apply_payload(&payload).is_some());
+        // Duplicate, then a different reason for the same final send.
+        assert!(book.apply_payload(&payload).is_none());
+        let other = dropped_payload("libera", "bob", "m1", "send_failed");
+        assert!(book.apply_payload(&other).is_none());
+        // Unknown send.
+        let unknown = dropped_payload("libera", "bob", "zz", "late");
+        assert!(book.apply_payload(&unknown).is_none());
+        assert_eq!(book.status(&key("zz")), None);
+        // A late event does not touch a later send: the old one is removed.
+        book.remove(&key("m1"));
+        book.start(key("m3"));
+        assert!(book.apply_payload(&payload).is_none());
+        assert_eq!(book.status(&key("m3")), Some(SendStatus::Pending));
+    }
+
+    #[test]
+    fn book_out_of_order_answer_after_drop_is_ignored() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        let payload = dropped_payload("libera", "bob", "m1", "session_ended");
+        assert!(book.apply_payload(&payload).is_some());
+        assert!(!book.apply_response(&key("m1"), SendResponse::Accepted));
+        assert_eq!(
+            book.status(&key("m1")),
+            Some(SendStatus::Dropped(DropReason::SessionEnded))
+        );
+    }
+
+    #[test]
+    fn book_drop_before_accepted_answer_then_unexpected_status() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        assert!(!book.apply_response(&key("m1"), SendResponse::Unexpected(500)));
+        assert_eq!(book.status(&key("m1")), Some(SendStatus::Pending));
+        assert!(book.apply_response(&key("m1"), SendResponse::Accepted));
+        let payload = dropped_payload("libera", "bob", "m1", "send_failed");
+        assert!(book.apply_payload(&payload).is_some());
+        assert_eq!(
+            book.status(&key("m1")),
+            Some(SendStatus::Dropped(DropReason::SendFailed))
         );
     }
 
