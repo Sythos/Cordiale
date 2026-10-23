@@ -49,6 +49,38 @@ pub const SIGNATURE_TEXT_LEN: usize = 86;
 /// Length of a `did`: 8 bytes in unpadded base64url.
 pub const DID_LEN: usize = 11;
 
+/// Lifetime of an X1 pairing rendezvous, in seconds.
+pub const PAIRING_LIFETIME_SECS: u64 = 300;
+
+/// Largest X1 pairing message, in bytes: 16 KiB.
+pub const PAIRING_MESSAGE_MAX_BYTES: usize = 16 * 1024;
+
+/// Largest total size of the messages in one X1 rendezvous: 64 KiB.
+pub const PAIRING_TOTAL_MAX_BYTES: usize = 64 * 1024;
+
+/// Largest number of messages in one X1 rendezvous.
+pub const PAIRING_MAX_MESSAGES: usize = 64;
+
+/// Storage limit of one device inbox for S1 copies: 4 MiB.
+pub const INBOX_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Storage limit of one device inbox for one sender: 1 MiB.
+pub const INBOX_SENDER_MAX_BYTES: usize = 1024 * 1024;
+
+/// Lifetime of an S1 inbox copy, in seconds: seven days.
+pub const INBOX_EXPIRY_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Check whether the relay accepts one more X1 pairing message.
+///
+/// `count` and `total_bytes` describe the messages already stored.
+pub fn pairing_message_fits(count: usize, total_bytes: usize, next_len: usize) -> bool {
+    next_len <= PAIRING_MESSAGE_MAX_BYTES
+        && count < PAIRING_MAX_MESSAGES
+        && total_bytes
+            .checked_add(next_len)
+            .is_some_and(|sum| sum <= PAIRING_TOTAL_MAX_BYTES)
+}
+
 /// Address used when a frame is not for one device.
 pub const WILDCARD: &str = "*";
 
@@ -432,6 +464,17 @@ pub fn parse_payload(text: &str) -> Result<Value, WireError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn pairing_message_fits_checks_every_limit() {
+        assert!(pairing_message_fits(0, 0, PAIRING_MESSAGE_MAX_BYTES));
+        assert!(!pairing_message_fits(0, 0, PAIRING_MESSAGE_MAX_BYTES + 1));
+        assert!(pairing_message_fits(PAIRING_MAX_MESSAGES - 1, 0, 1));
+        assert!(!pairing_message_fits(PAIRING_MAX_MESSAGES, 0, 1));
+        assert!(pairing_message_fits(1, PAIRING_TOTAL_MAX_BYTES - 10, 10));
+        assert!(!pairing_message_fits(1, PAIRING_TOTAL_MAX_BYTES - 10, 11));
+        assert!(!pairing_message_fits(1, usize::MAX, 1));
+    }
 
     fn key_text(byte: u8) -> String {
         STANDARD_NO_PAD.encode([byte; 32])
