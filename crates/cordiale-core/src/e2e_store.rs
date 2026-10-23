@@ -39,10 +39,11 @@ use base64::Engine as _;
 use chacha20poly1305::aead::{Aead, Generate, Key, KeyInit, Nonce, Payload};
 use chacha20poly1305::XChaCha20Poly1305;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::credentials::{CredentialStore, KeyringCredentialStore};
-use crate::persistence::{create_private_dir_all, data_dir, key_lock_dir, write_atomic};
+use crate::persistence::{create_private_dir_all, data_dir, write_atomic};
 
 const HISTORY_FILE_NAME: &str = "e2e_history.bin";
 const KEY_SERVICE: &str = "cordiale-e2e";
@@ -91,16 +92,36 @@ impl E2eKeyProvider for KeyringKeyProvider {
         if !KeyringCredentialStore::is_available() {
             return Err(E2eStoreError::SecureStorageUnavailable);
         }
-        let dir = key_lock_dir().ok_or(E2eStoreError::NoDataDir)?;
-        load_or_create_locked(&dir.join(KEY_LOCK_FILE_NAME), &KeyringCredentialStore)
+        let dir = data_dir().ok_or(E2eStoreError::NoDataDir)?;
+        create_private_dir_all(&dir)?;
+        let username = key_username(&dir.canonicalize()?);
+        load_or_create_locked(
+            &dir.join(KEY_LOCK_FILE_NAME),
+            &username,
+            &KeyringCredentialStore,
+        )
     }
 }
 
-/// Reads the key, or creates and stores it, while an exclusive lock on
-/// `lock_path` is held. The keyring entry is one for the whole user, so the
-/// lock belongs to the key and not to a history file.
+/// The keyring user name of the key for one data folder. The keyring is
+/// shared by every process of the user, so the folder is part of the name:
+/// two data folders never share a key or need a common lock. The name holds
+/// a hash, so the path (and the user name in it) never reaches the keyring.
+fn key_username(dir: &Path) -> String {
+    let hash = Sha256::digest(dir.as_os_str().as_encoded_bytes());
+    let mut name = format!("{KEY_USERNAME}-");
+    for byte in &hash[..16] {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    name
+}
+
+/// Reads the key `username`, or creates and stores it, while an exclusive
+/// lock on `lock_path` is held. The entry and the lock belong to one data
+/// folder (see `key_username`), not to a history file.
 fn load_or_create_locked(
     lock_path: &Path,
+    username: &str,
     store: &dyn CredentialStore,
 ) -> Result<[u8; KEY_LEN], E2eStoreError> {
     let lock = OpenOptions::new()
@@ -110,7 +131,7 @@ fn load_or_create_locked(
         .open(lock_path)?;
     lock.lock()?;
     let stored = store
-        .get_secret(KEY_SERVICE, KEY_USERNAME)
+        .get_secret(KEY_SERVICE, username)
         .map_err(|err| E2eStoreError::Key(format!("{err:?}")))?;
     if let Some(text) = stored {
         return decode_key(&text);
@@ -120,7 +141,7 @@ fn load_or_create_locked(
         <[u8; KEY_LEN]>::try_from(key.as_slice()).map_err(|_| E2eStoreError::Corrupted)?;
     let mut text = STANDARD_NO_PAD.encode(bytes);
     let result = store
-        .set_secret(KEY_SERVICE, KEY_USERNAME, &text)
+        .set_secret(KEY_SERVICE, username, &text)
         .map_err(|err| E2eStoreError::Key(format!("{err:?}")));
     text.zeroize();
     // The lock is released when `lock` drops at the end of the function.
@@ -715,12 +736,21 @@ mod tests {
         let lock_path = dir.join("key.lock");
         let store = SlowStore(std::sync::Mutex::new(None));
         let (first, second) = std::thread::scope(|scope| {
-            let a = scope.spawn(|| load_or_create_locked(&lock_path, &store));
-            let b = scope.spawn(|| load_or_create_locked(&lock_path, &store));
+            let a = scope.spawn(|| load_or_create_locked(&lock_path, "user", &store));
+            let b = scope.spawn(|| load_or_create_locked(&lock_path, "user", &store));
             (a.join().expect("a"), b.join().expect("b"))
         });
         assert_eq!(first.expect("first"), second.expect("second"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn key_username_depends_on_the_folder_only() {
+        let first = key_username(Path::new("data-a"));
+        assert_eq!(first, key_username(Path::new("data-a")));
+        assert_ne!(first, key_username(Path::new("data-b")));
+        assert!(first.starts_with(KEY_USERNAME));
+        assert!(!first.contains("data-a"));
     }
 
     #[test]
