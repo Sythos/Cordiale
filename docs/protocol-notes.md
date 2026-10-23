@@ -1240,11 +1240,17 @@ voce qui sotto lo richiede.
 | 39 | Default server dell'auto-away: `auto_away.default_debounce_seconds` in `server_settings_changed` (snapshot dopo il join e push) | Supportato. Il valore risolto (secondi, `0` = spento) si legge a ogni `server_settings_changed`, resta separato dall'override dell'utente (`auto_away_debounce_changed`) e compare sotto il campo del ritardo in Settings. Se il sottoalbero manca (server < 39) o il valore non è un intero non negativo, non si mostra nessun numero. |
 | 40 | Cursori a tempo `before_time`, `after_time`, `around_time` (millisecondi epoch) sulla cronologia | Livello REST pronto: `GrappaClient::fetch_messages_by_time` con `HistoryTimeCursor`. Un solo cursore per chiamata, quindi mai insieme a un cursore a id (il server risponde 400 a due qualsiasi dei sei). Rifiutato prima dell'invio sotto la 40 o con versione ignota, perché un server vecchio ignora il parametro e risponde con l'ultima pagina. Nessun chiamante nella UI: serve solo alla parità di protocollo e non blocca l'E2E. La cronologia in uso resta a id. |
 | 41 | `truncated` in `mentions_bundle` | Già supportato (`frames.rs`, riga `mentions-truncated`). |
-| 42 | Relay E2E: `POST /networks/:id/e2e/messages`, evento `e2e_message` | In attesa del contratto per dispositivo (vedi sotto). Non implementato. |
+| 42 | Relay E2E: `POST /networks/:id/e2e/messages`, evento `e2e_message` | In attesa del contratto per dispositivo (vedi sotto). Tipizzato solo il corpo della richiesta di invio (`E2eSendRequest`, issue 358); risposta, evento `e2e_message` e chiamata del client non sono implementati. |
 | 43 | Coda offline: `GET /networks/:id/e2e/inbox`, `POST …/inbox/ack`, `id` in `e2e_message` | In attesa del contratto per dispositivo. Non implementato. |
 | 44 | Bundle di chiavi: `POST`/`GET`/`DELETE /networks/:id/e2e/keys` | In attesa del contratto per dispositivo. Non implementato. |
 | 45 | Buste di inbox e 202 dell'invio dichiarate nello schema generato | Nessun nuovo byte sul filo e nessun endpoint nuovo: non richiede codice. |
-| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Fuori da questa issue. |
+| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Restano da tipizzare risposta, rifiuti ed evento `e2e_send_dropped`. Il pacing a runtime è dell'issue 359. |
+
+`E2eSendRequest` (fonte: CLIENT_PROTOCOL §4f, PR 2446 di Grappa) è rigorosa:
+campo mancante, sconosciuto o di tipo sbagliato è un errore tipizzato
+(`WireError`). `expires_at` è un intero positivo (secondi Unix, al massimo
+int64), ammesso solo con `priority: "control"` e verbo `msg` o `pkmsg`.
+Stringhe, `null` e numeri con frazione (anche `1.0`) sono rifiutati.
 
 ### Contratto E2E: cosa manca (v42–v44)
 
@@ -1263,7 +1269,8 @@ destinatario-dispositivo nel frame. Finché Grappa non pubblica:
   (`ack` per `id` è oggi per account);
 - come un dispositivo nuovo viene firmato da uno già fidato;
 
-Cordiale non scrive tipi di richiesta, risposta o evento per v42–v44: un
+Cordiale non scrive tipi di richiesta, risposta o evento per v42–v44, tranne
+`E2eSendRequest` (corpo dell'invio, v42 con `expires_at` dalla v46): un
 formato indovinato romperebbe l'interoperabilità e metterebbe in dubbio
 l'invio di chiavi pubbliche per il dispositivo sbagliato. Valgono già, e
 andranno rispettate quando si implementa: consegna **almeno una volta** (si
@@ -1279,11 +1286,13 @@ messaggio), `did` (base64url senza padding dei primi 8 byte di SHA-256 della
 chiave Ed25519), chiavi e firme in base64 standard canonico (43 e 86
 caratteri), `ver`/`lv` da 1 a 2^31-1, testo firmato `irc-e2e:v2:id:`,
 legame `fb`, limite di 1–4 dispositivi e regola di versione della lista
-firmata. Non c'è nessun tipo REST o evento. Restano per le fasi successive:
+firmata. Questa fase non ha nessun tipo REST o evento (l'issue 358 aggiunge
+poi `E2eSendRequest`). Restano per le fasi successive:
 i due vettori `did` del commento 6348464388 (non letti qui), il testo firmato
 `irc-e2e:v2:dev:` (forma con N da confermare), il testo della lista firmata
 (separatore delle chiavi da confermare), verifica delle firme, motore Olm,
-protocolli 46–49, pairing X1, X2 e S1.
+il resto dei protocolli 46–49 (del 46 c'è solo la richiesta di invio),
+pairing X1, X2 e S1.
 
 **Fase 2 (issue 356): testo firmato di certificato e lista, formato candidato.**
 `e2e_wire.rs` ha due costruttori che restituiscono byte UTF-8 esatti, senza

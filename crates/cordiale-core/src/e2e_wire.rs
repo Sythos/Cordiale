@@ -72,6 +72,13 @@ pub enum WireError {
     FragmentMismatch,
     DuplicateDevice,
     BadDeviceCount,
+    BadTarget,
+    BadPayload,
+    BadPriority,
+    BadExpiry,
+    MissingField,
+    BadFieldType,
+    UnknownField,
 }
 
 /// Frame verb of the wire v2.
@@ -463,6 +470,35 @@ pub fn parse_payload(text: &str) -> Result<Value, WireError> {
     serde_json::from_str(text).map_err(|_| WireError::BadJson)
 }
 
+/// Reads a JSON object, or fails with `BadFieldType`.
+pub fn as_object(value: &Value) -> Result<&serde_json::Map<String, Value>, WireError> {
+    value.as_object().ok_or(WireError::BadFieldType)
+}
+
+/// Reads a required string field: absent is `MissingField`, any other type
+/// (including null) is `BadFieldType`.
+pub fn required_str<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a str, WireError> {
+    map.get(key)
+        .ok_or(WireError::MissingField)?
+        .as_str()
+        .ok_or(WireError::BadFieldType)
+}
+
+/// Fails with `UnknownField` when `map` holds a key outside `allowed`. Use it
+/// on what Cordiale sends: server answers are additive and skip this check.
+pub fn reject_unknown_fields(
+    map: &serde_json::Map<String, Value>,
+    allowed: &[&str],
+) -> Result<(), WireError> {
+    if map.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(WireError::UnknownField);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +798,21 @@ mod tests {
         let did = did_from_key_text(&key_text(1)).unwrap();
         let text = format!("\u{1}E2E KEYREQ AAAA 1/1 {did} * {{\"ver\":\n1}}\u{1}");
         assert_eq!(parse_frame(&text), Err(WireError::BadFrame));
+    }
+
+    #[test]
+    fn object_helpers_tell_missing_from_wrong_type() {
+        let value = json!({"a": "x", "b": null});
+        let map = as_object(&value).unwrap();
+        assert_eq!(required_str(map, "a"), Ok("x"));
+        assert_eq!(required_str(map, "b"), Err(WireError::BadFieldType));
+        assert_eq!(required_str(map, "c"), Err(WireError::MissingField));
+        assert_eq!(as_object(&json!([1])), Err(WireError::BadFieldType));
+        assert_eq!(reject_unknown_fields(map, &["a", "b"]), Ok(()));
+        assert_eq!(
+            reject_unknown_fields(map, &["a"]),
+            Err(WireError::UnknownField)
+        );
     }
 
     #[test]
