@@ -741,7 +741,7 @@ mod tests {
     fn signed_list_text_rejects_bad_lists() {
         let a = KEY_A.to_string();
         assert_eq!(
-            signed_list_signed_text(0, &[a.clone()]),
+            signed_list_signed_text(0, std::slice::from_ref(&a)),
             Err(WireError::BadVersion)
         );
         assert_eq!(
