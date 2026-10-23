@@ -344,6 +344,13 @@ impl KeyReqPacer {
         }
     }
 
+    /// A changed casemapping clears both the interval and the reassembly
+    /// state. Every public call starts here, so the two halves never differ.
+    fn sync_casemapping(&mut self, casemapping: CaseMapping) {
+        self.limiter.sync_casemapping(casemapping);
+        self.gate.sync_casemapping(casemapping);
+    }
+
     /// A KEYS fragment arrived: the timer of its message restarts.
     pub fn note_fragment(
         &mut self,
@@ -352,11 +359,13 @@ impl KeyReqPacer {
         casemapping: CaseMapping,
         now: Duration,
     ) {
+        self.sync_casemapping(casemapping);
         self.gate.note_fragment(nick, msgid, casemapping, now);
     }
 
     /// The reassembly of a KEYS answer ended.
     pub fn finish(&mut self, nick: &str, msgid: &str, casemapping: CaseMapping) {
+        self.sync_casemapping(casemapping);
         self.gate.finish(nick, msgid, casemapping);
     }
 
@@ -367,6 +376,7 @@ impl KeyReqPacer {
         casemapping: CaseMapping,
         now: Duration,
     ) -> Result<(), KeyReqRefusal> {
+        self.sync_casemapping(casemapping);
         if !self.gate.may_send_keyreq(nick, casemapping, now) {
             return Err(KeyReqRefusal::Reassembling);
         }
@@ -773,6 +783,23 @@ mod tests {
         assert!(!gate.is_active("[bob]", RFC, secs(1)));
         assert!(!gate.is_active("[bob]", ASCII, secs(2)));
         assert!(gate.may_send_keyreq("[bob]", ASCII, secs(2)));
+    }
+
+    #[test]
+    fn keyreq_pacer_clears_both_halves_when_fragment_changes_casemapping() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(0)), Ok(()));
+        pacer.note_fragment("[bob]", "A", RFC, secs(1));
+        pacer.finish("[bob]", "A", RFC);
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(2)), Ok(()));
+    }
+
+    #[test]
+    fn keyreq_pacer_clears_fragment_state_when_casemapping_returns() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(0)), Ok(()));
+        pacer.note_fragment("[bob]", "A", RFC, secs(1));
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(2)), Ok(()));
     }
 
     #[test]
