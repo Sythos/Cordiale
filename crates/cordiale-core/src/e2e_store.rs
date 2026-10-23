@@ -201,7 +201,6 @@ impl E2eHistoryStore {
     /// open is an error: it is never replaced by an empty history. Another
     /// open handle on the same path gives `InUse`.
     pub fn open(path: PathBuf, provider: &dyn E2eKeyProvider) -> Result<Self, E2eStoreError> {
-        let key = provider.load_or_create_key()?;
         if let Some(parent) = path.parent() {
             create_private_dir_all(parent)?;
         }
@@ -217,6 +216,9 @@ impl E2eHistoryStore {
             Err(fs::TryLockError::WouldBlock) => return Err(E2eStoreError::InUse),
             Err(fs::TryLockError::Error(err)) => return Err(err.into()),
         }
+        // This lock only stops a second handle on the same file. The key
+        // provider has its own lock for the key creation.
+        let key = provider.load_or_create_key()?;
         let mut store = E2eHistoryStore {
             path,
             _lock: lock,
@@ -265,14 +267,14 @@ impl E2eHistoryStore {
     /// Case-insensitive search in memory, oldest first. `None` searches
     /// every E2E conversation; normal IRC history is never part of it.
     pub fn search(&self, conversation_id: Option<&str>, needle: &str) -> Vec<&E2eMessage> {
-        let needle = needle.to_lowercase();
+        let needle = fold_case(needle);
         if needle.is_empty() {
             return Vec::new();
         }
         self.messages
             .iter()
             .filter(|message| conversation_id.is_none_or(|id| message.conversation_id == id))
-            .filter(|message| message.text.to_lowercase().contains(&needle))
+            .filter(|message| fold_case(&message.text).contains(&needle))
             .collect()
     }
 
@@ -424,6 +426,12 @@ impl E2eHistoryStore {
         write_atomic(&self.path, &out)?;
         Ok(())
     }
+}
+
+/// Unicode default full case folding, so that `Straße` and `STRASSE`
+/// compare equal.
+fn fold_case(text: &str) -> String {
+    caseless::default_case_fold_str(text)
 }
 
 fn record_aad(index: u64) -> Vec<u8> {
@@ -616,6 +624,20 @@ mod tests {
             .expect("lock metadata")
             .len();
         assert_eq!(lock_len, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_folds_case_beyond_lowercase() {
+        let dir = scratch_dir("fold");
+        let mut store = E2eHistoryStore::open(dir.join("history.bin"), &fresh_key()).expect("open");
+        store.append(message("1", "a", "Die Straße")).expect("a");
+        assert_eq!(store.search(None, "STRASSE").len(), 1);
+        assert_eq!(store.search(None, "straße").len(), 1);
+        store.append(message("2", "a", "a ﬀ b")).expect("b");
+        assert_eq!(store.search(None, "A FF B").len(), 1);
+        store.append(message("3", "a", "micro µ")).expect("c");
+        assert_eq!(store.search(None, "MICRO Μ").len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
