@@ -36,7 +36,7 @@ use vodozemac::{Ed25519PublicKey, Ed25519Signature};
 
 use crate::e2e_wire::{
     check_list_devices, decide_list, decode_key, decode_signature, device_id_signed_text,
-    did_from_key_text, ListDecision, WireError,
+    did_from_key_text, ListDecision, WireError, MAX_VERSION,
 };
 
 /// Why a certificate or a device list is rejected. The text never holds key
@@ -134,8 +134,12 @@ pub struct ListState {
 
 impl ListState {
     /// Applies the version rule. A lower version, or the same version with
-    /// other keys, is `StaleList`. Returns what changed.
+    /// other keys, is `StaleList`. A version out of 1 to 2^31 - 1 is
+    /// `BadVersion`. Returns what changed.
     pub fn apply(&mut self, version: u32, keys: &[String]) -> Result<ListDecision, E2eError> {
+        if !(1..=MAX_VERSION).contains(&version) {
+            return Err(WireError::BadVersion.into());
+        }
         check_list_devices(keys)?;
         let decision = decide_list(
             self.stored.as_ref().map(|(v, k)| (*v, k.as_slice())),
@@ -181,7 +185,7 @@ mod tests {
     #[test]
     fn certificate_of_a_new_device_is_accepted() {
         let cert = new_certificate();
-        let peer = accept_peer_device(&cert, &[cert.master_ed25519.clone()]).unwrap();
+        let peer = accept_peer_device(&cert, std::slice::from_ref(&cert.master_ed25519)).unwrap();
         assert_eq!(peer.did(), cert.did);
         assert_eq!(peer.curve25519(), cert.curve25519);
         assert_eq!(peer.ed25519(), cert.master_ed25519);
@@ -255,5 +259,20 @@ mod tests {
             list.apply(4, &[]),
             Err(E2eError::Wire(WireError::BadDeviceCount))
         );
+    }
+
+    #[test]
+    fn list_version_out_of_range_is_rejected() {
+        let keys = vec![new_certificate().master_ed25519];
+        let bad = Err(E2eError::Wire(WireError::BadVersion));
+        let mut list = ListState::default();
+        assert_eq!(list.apply(0, &keys), bad);
+        assert_eq!(list.apply(MAX_VERSION + 1, &keys), bad);
+        assert_eq!(list.apply(u32::MAX, &keys), bad);
+        assert!(list.keys().is_empty());
+        assert_eq!(list.apply(1, &keys), Ok(ListDecision::Replace));
+        assert_eq!(list.apply(u32::MAX, &keys), bad);
+        assert_eq!(list.apply(2, &keys), Ok(ListDecision::Replace));
+        assert_eq!(list.apply(MAX_VERSION, &keys), Ok(ListDecision::Replace));
     }
 }
