@@ -31,6 +31,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 ffmpeg-next = { version = "9", optional = true }
 chacha20poly1305 = "0.11"
 zeroize = "1"
+caseless = "0.2"
 
 [features]
 video-shrink = ["dep:ffmpeg-next"]
