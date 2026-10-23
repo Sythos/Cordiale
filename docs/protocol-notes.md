@@ -1294,6 +1294,19 @@ di sette giorni. Non ci sono ancora rotte REST, tipi di evento, ECIES, codice
 di controllo né motore Olm: i percorsi esatti e i payload di X1 non sono nel
 repository e X2 e S1 dipendono dal contratto finale del protocollo 49.
 
+**Fase 2 (issue 356): testo firmato di certificato e lista, formato candidato.**
+`e2e_wire.rs` ha due costruttori che restituiscono byte UTF-8 esatti, senza
+JSON: `device_certificate_signed_text(N, E)` dà `irc-e2e:v2:dev:<N>:<E>` e
+`signed_list_signed_text(N, [E1, E2, ...])` dà
+`irc-e2e:v2:list:<N>:<E1>,<E2>,...`. N va da 1 a 2^31-1; ogni E è una chiave
+in base64 standard canonico di 43 caratteri; la lista ha 1–4 chiavi senza
+doppioni. Il costruttore della lista **non ordina**: chi chiama passa le chiavi
+nell'ordine del contratto finale. Fonte: la bozza nella discussione 2430 di
+Grappa e la PR 4 di irc-olm; **non approvata**. Da confermare prima di
+congelare: definizione di N, ordine delle chiavi, separatore. Se un byte
+cambia, si aggiornano costruttori e vettori. Nessuna firma, nessuna verifica,
+nessun collegamento a `credentials.rs` (issue 357 e successive).
+
 ### Cronologia a tempo (v40): regole del server da rispettare
 
 - Unità: millisecondi epoch decimali, da `0` a int64 massimo; ISO-8601,
