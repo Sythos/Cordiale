@@ -202,6 +202,44 @@ pub fn device_id_signed_text(curve25519_key: &str, master_ed25519_key: &str) -> 
     format!("irc-e2e:v2:id:{curve25519_key}:{master_ed25519_key}")
 }
 
+fn check_version(version: u32) -> Result<(), WireError> {
+    if (1..=MAX_VERSION).contains(&version) {
+        Ok(())
+    } else {
+        Err(WireError::BadVersion)
+    }
+}
+
+/// Text the master key signs to certify one device: `irc-e2e:v2:dev:<N>:<E>`.
+///
+/// `first_list_version` is N, the first accepted list version that holds the
+/// device. `device_ed25519_key` is E, the public device key. Candidate format:
+/// the final contract is not approved yet. Returns the exact UTF-8 bytes for
+/// signing, apart from any signature or `did` text.
+pub fn device_certificate_signed_text(
+    first_list_version: u32,
+    device_ed25519_key: &str,
+) -> Result<Vec<u8>, WireError> {
+    check_version(first_list_version)?;
+    decode_key(device_ed25519_key)?;
+    Ok(format!("irc-e2e:v2:dev:{first_list_version}:{device_ed25519_key}").into_bytes())
+}
+
+/// Text the master key signs for one device list:
+/// `irc-e2e:v2:list:<N>:<E1>,<E2>,...`.
+///
+/// The keys keep the order of the caller: this function does not sort them.
+/// The caller applies the key order of the final contract. Candidate format:
+/// the final contract is not approved yet.
+pub fn signed_list_signed_text(
+    list_version: u32,
+    device_keys: &[String],
+) -> Result<Vec<u8>, WireError> {
+    check_version(list_version)?;
+    check_list_devices(device_keys)?;
+    Ok(format!("irc-e2e:v2:list:{list_version}:{}", device_keys.join(",")).into_bytes())
+}
+
 /// The `fb` binding: the first 16 bytes of SHA-256 over the sender and
 /// recipient Ed25519 keys, as unpadded standard base64.
 pub fn recipient_binding(sender_ed25519_key: &str, recipient_ed25519_key: &str) -> String {
@@ -630,5 +668,102 @@ mod tests {
         assert!(format_frame(&bad).is_err());
         bad.index = 1;
         assert!(format_frame(&bad).is_err());
+    }
+
+    const KEY_A: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const KEY_B: &str = "//////////////////////////////////////////8";
+
+    #[test]
+    fn device_certificate_text_is_exact() {
+        assert_eq!(
+            device_certificate_signed_text(3, KEY_A).unwrap(),
+            b"irc-e2e:v2:dev:3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_vec()
+        );
+        assert_eq!(
+            device_certificate_signed_text(MAX_VERSION, KEY_B).unwrap(),
+            b"irc-e2e:v2:dev:2147483647://////////////////////////////////////////8".to_vec()
+        );
+    }
+
+    #[test]
+    fn device_certificate_text_changes_with_each_field() {
+        let base = device_certificate_signed_text(3, KEY_A).unwrap();
+        assert_ne!(base, device_certificate_signed_text(4, KEY_A).unwrap());
+        assert_ne!(base, device_certificate_signed_text(3, KEY_B).unwrap());
+    }
+
+    #[test]
+    fn device_certificate_text_rejects_bad_input() {
+        assert_eq!(
+            device_certificate_signed_text(0, KEY_A),
+            Err(WireError::BadVersion)
+        );
+        assert_eq!(
+            device_certificate_signed_text(MAX_VERSION + 1, KEY_A),
+            Err(WireError::BadVersion)
+        );
+        assert_eq!(
+            device_certificate_signed_text(1, &KEY_A[..42]),
+            Err(WireError::BadKey)
+        );
+        assert_eq!(
+            device_certificate_signed_text(1, "A:A"),
+            Err(WireError::BadKey)
+        );
+    }
+
+    #[test]
+    fn signed_list_text_is_exact() {
+        let one = vec![KEY_A.to_string()];
+        assert_eq!(
+            signed_list_signed_text(1, &one).unwrap(),
+            b"irc-e2e:v2:list:1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_vec()
+        );
+        let two = vec![KEY_A.to_string(), KEY_B.to_string()];
+        assert_eq!(
+            signed_list_signed_text(12, &two).unwrap(),
+            b"irc-e2e:v2:list:12:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,//////////////////////////////////////////8"
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn signed_list_text_follows_caller_order_and_version() {
+        let ab = vec![KEY_A.to_string(), KEY_B.to_string()];
+        let ba = vec![KEY_B.to_string(), KEY_A.to_string()];
+        let base = signed_list_signed_text(2, &ab).unwrap();
+        assert_ne!(base, signed_list_signed_text(2, &ba).unwrap());
+        assert_ne!(base, signed_list_signed_text(3, &ab).unwrap());
+        assert_ne!(base, signed_list_signed_text(2, &ab[..1]).unwrap());
+    }
+
+    #[test]
+    fn signed_list_text_rejects_bad_lists() {
+        let a = KEY_A.to_string();
+        assert_eq!(
+            signed_list_signed_text(0, &[a.clone()]),
+            Err(WireError::BadVersion)
+        );
+        assert_eq!(
+            signed_list_signed_text(1, &[]),
+            Err(WireError::BadDeviceCount)
+        );
+        assert_eq!(
+            signed_list_signed_text(1, &[a.clone(), a.clone()]),
+            Err(WireError::DuplicateDevice)
+        );
+        assert_eq!(
+            signed_list_signed_text(1, &[a.clone(), format!("{KEY_A},{KEY_B}")]),
+            Err(WireError::BadKey)
+        );
+        assert_eq!(
+            signed_list_signed_text(1, &[a, String::new()]),
+            Err(WireError::BadKey)
+        );
+        let five: Vec<String> = (0..5u8).map(key_text).collect();
+        assert_eq!(
+            signed_list_signed_text(1, &five),
+            Err(WireError::BadDeviceCount)
+        );
     }
 }
