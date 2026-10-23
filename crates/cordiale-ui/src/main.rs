@@ -7597,7 +7597,7 @@ fn valid_rename_target(nick: &str) -> bool {
 /// (top level or `meta`), as one `userhost`/`user_host`/`mask` string or as a
 /// `user` + `host` pair, and kept whole so an IPv6 host is never cut.
 fn event_user_mask(payload: &Value) -> Option<String> {
-    let text = |source: &Value, key: &str| {
+    fn text<'a>(source: &'a Value, key: &str) -> Option<&'a str> {
         source
             .get(key)
             .and_then(Value::as_str)
@@ -7608,7 +7608,7 @@ fn event_user_mask(payload: &Value) -> Option<String> {
                         .chars()
                         .any(|ch| ch.is_whitespace() || ch.is_control())
             })
-    };
+    }
     for source in [Some(payload), payload.get("meta")].into_iter().flatten() {
         for key in ["userhost", "user_host", "mask"] {
             if let Some(mask) = text(source, key).filter(|mask| mask.contains('@')) {
