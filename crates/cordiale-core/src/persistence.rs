@@ -633,6 +633,13 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
     storage().map(|storage| storage.layout.data.clone())
 }
 
+/// The standard data folder, even when the old `~/.cordiale` is in use. A
+/// lock that guards a shared resource (the E2E key) lives here, so every
+/// process takes the same lock.
+pub(crate) fn key_lock_dir() -> Option<PathBuf> {
+    storage().map(|storage| Layout::standard(storage.platform, &storage.bases).data)
+}
+
 /// `name` in the old `~/.cordiale`, when that is not the folder in use.
 pub(crate) fn legacy_file(name: &str) -> Option<PathBuf> {
     storage()?.legacy_file(name)
