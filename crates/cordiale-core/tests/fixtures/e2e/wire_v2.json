@@ -1,6 +1,6 @@
 {
   "fixture_revision": 1,
-  "status": "candidate: signed texts and list order wait for the final contract of protocol 49 and the final MD-3 pin",
+  "status": "list order is ascending by the plain key text; the signed texts wait for the final MD-3 pin",
   "did": [
     {
       "case": "RFC 8032 test key",
