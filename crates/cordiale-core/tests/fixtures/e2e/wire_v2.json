@@ -111,5 +111,38 @@
       {"case": "fragment index above total", "text": "\u0001E2E MSG AAAA 2/1 If4x36FUomE _Uw_z3-OAsk {}\u0001", "error": "BadFragment"},
       {"case": "non-ASCII chunk", "text": "\u0001E2E MSG AAAA 1/1 If4x36FUomE _Uw_z3-OAsk café\u0001", "error": "BadFrame"}
     ]
+  },
+  "refusals": {
+    "known": [
+      {"token": "bad_request", "status": 400},
+      {"token": "invalid_line", "status": 400},
+      {"token": "unknown_device", "status": 422},
+      {"token": "too_large", "status": 413},
+      {"token": "too_late", "status": 422},
+      {"token": "rate_limited", "status": 429},
+      {"token": "not_found", "status": 404},
+      {"token": "upstream_unreachable", "status": 502},
+      {"token": "session_timeout", "status": 504},
+      {"token": "db_unavailable", "status": 503},
+      {"token": "listed_device", "status": 409},
+      {"token": "too_many_devices", "status": 409},
+      {"token": "master_mismatch", "status": 409},
+      {"token": "stale_list", "status": 409},
+      {"token": "same_device", "status": 409},
+      {"token": "keyless_device", "status": 409},
+      {"token": "key_taken", "status": 409},
+      {"token": "removed_device", "status": 409},
+      {"token": "inbox_full", "status": 413},
+      {"token": "pairing_already_joined", "status": 409},
+      {"token": "pairing_own_rendezvous", "status": 409},
+      {"token": "pairing_not_joined", "status": 409},
+      {"token": "pairing_full", "status": 413},
+      {"token": "pairing_not_a_party", "status": 403}
+    ],
+    "unknown": [
+      {"case": "token not in the document", "token": "new_token", "status": 409},
+      {"case": "known token with another status", "token": "inbox_full", "status": 409},
+      {"case": "no token", "token": null, "status": 500}
+    ]
   }
 }

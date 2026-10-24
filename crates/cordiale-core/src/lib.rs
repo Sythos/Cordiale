@@ -65,6 +65,7 @@ pub mod e2e_manage;
 pub mod e2e_pacing;
 pub mod e2e_pairing;
 pub mod e2e_protocol;
+pub mod e2e_refusal;
 pub mod e2e_selfcopy;
 pub mod e2e_state;
 pub mod e2e_store;

@@ -25,6 +25,7 @@
 //! The fixture file is plain JSON, so another implementation can read the
 //! same vectors. The list order is ascending by the plain key text.
 
+use cordiale_core::e2e_refusal::E2eRefusal;
 use cordiale_core::e2e_wire::{
     device_certificate_signed_text, did_from_key_text, format_frame, is_did_shape,
     parse_device_certificate_signed_text, parse_frame, signed_list_signed_text, Frame,
@@ -136,5 +137,23 @@ fn fixture_bad_frames_are_rejected() {
             "{}",
             text(case, "case")
         );
+    }
+}
+
+#[test]
+fn fixture_refusals_map_token_and_status() {
+    let all = fixtures();
+    for case in all["refusals"]["known"].as_array().expect("known") {
+        let status = u16::try_from(number(case, "status")).expect("status");
+        let refusal = E2eRefusal::from_response(status, Some(text(case, "token")));
+        assert!(refusal.is_known(), "{}", text(case, "token"));
+        assert_eq!(refusal.status(), status);
+        assert_eq!(refusal.token(), Some(text(case, "token")));
+    }
+    for case in all["refusals"]["unknown"].as_array().expect("unknown") {
+        let status = u16::try_from(number(case, "status")).expect("status");
+        let refusal = E2eRefusal::from_response(status, case["token"].as_str());
+        assert!(!refusal.is_known(), "{}", text(case, "case"));
+        assert_eq!(refusal.status(), status);
     }
 }

@@ -43,6 +43,7 @@ use crate::admin::{
 use crate::backoff::rate_limit_wait;
 use crate::e2e_device_routes::{ClaimRequest, CopyRequest, DeviceRoute};
 use crate::e2e_pacing::{classify_send_response, SendResponse};
+use crate::e2e_refusal::E2eRouteError;
 use crate::presence::{PresencePins, PresencePref};
 use crate::profile::{
     AddIgnoreRequest, AliasesView, IgnoreEntry, IgnoreMutationResponse, IgnoresResponse,
@@ -842,28 +843,32 @@ impl GrappaClient {
 
     /// `POST /e2e/devices/:did/claim` — takes one one-time key of the device.
     /// The body is read with `ClaimResponse::from_value`. The route is a
-    /// candidate of protocol 50.
+    /// candidate of protocol 50. A refusal is an `E2eRouteError::Refused`.
     pub async fn claim_e2e_device_key(
         &self,
         token: &str,
         did: &str,
         request: &ClaimRequest,
-    ) -> Result<Value, GrappaClientError> {
-        self.post_e2e_device_route(token, DeviceRoute::Claim, did, request)
-            .await
+    ) -> Result<Value, E2eRouteError> {
+        Ok(self
+            .post_e2e_device_route(token, DeviceRoute::Claim, did, request)
+            .await?)
     }
 
     /// `POST /e2e/devices/:did/copies` — puts one encrypted copy in the inbox
     /// of the device. The body is read with `CopyResponse::from_value`. The
-    /// route is a candidate of protocol 50.
+    /// route is a candidate of protocol 50. A refusal is an
+    /// `E2eRouteError::Refused`. A 2xx answer is an acceptance, not a
+    /// delivery.
     pub async fn send_e2e_copy(
         &self,
         token: &str,
         did: &str,
         request: &CopyRequest,
-    ) -> Result<Value, GrappaClientError> {
-        self.post_e2e_device_route(token, DeviceRoute::Copies, did, request)
-            .await
+    ) -> Result<Value, E2eRouteError> {
+        Ok(self
+            .post_e2e_device_route(token, DeviceRoute::Copies, did, request)
+            .await?)
     }
 
     async fn post_e2e_device_route<T: serde::Serialize>(
@@ -3550,6 +3555,7 @@ impl GrappaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::e2e_refusal::E2eRefusal;
     use wiremock::matchers::{
         body_json, body_string_contains, header, header_regex, method, path, query_param,
     };
@@ -4555,6 +4561,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rate_limited_e2e_claim_keeps_the_wait_the_server_asks_for() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/e2e/devices/AAAAAAAAAAA/claim"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "3")
+                    .set_body_json(serde_json::json!({
+                        "error": "rate_limited",
+                        "retry_after_ms": 1500
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let error = GrappaClient::new(mock_server.uri())
+            .claim_e2e_device_key("abc123", "AAAAAAAAAAA", &ClaimRequest::default())
+            .await
+            .expect_err("should be refused");
+
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
+        assert!(matches!(
+            error,
+            E2eRouteError::Refused {
+                refusal: E2eRefusal::RateLimited,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn a_rate_limited_write_without_a_header_falls_back_to_the_body() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -4787,7 +4824,7 @@ mod tests {
                 serde_json::json!({"item_id": "m.d", "ciphertext": "AAEC"}),
             ))
             .respond_with(
-                ResponseTemplate::new(409)
+                ResponseTemplate::new(413)
                     .set_body_json(serde_json::json!({"error": "inbox_full"})),
             )
             .mount(&mock_server)
@@ -4803,11 +4840,20 @@ mod tests {
             .send_e2e_copy("abc123", "AAAAAAAAAAA", &copy)
             .await
             .expect_err("copies refusal");
-        assert_eq!(err.code(), Some("inbox_full"));
+        assert!(matches!(
+            err,
+            E2eRouteError::Refused {
+                refusal: E2eRefusal::InboxFull,
+                ..
+            }
+        ));
         let bad = client
             .claim_e2e_device_key("abc123", "../x", &ClaimRequest::default())
             .await;
-        assert!(matches!(bad, Err(GrappaClientError::InvalidUrl(_))));
+        assert!(matches!(
+            bad,
+            Err(E2eRouteError::Client(GrappaClientError::InvalidUrl(_)))
+        ));
     }
 
     #[tokio::test]
