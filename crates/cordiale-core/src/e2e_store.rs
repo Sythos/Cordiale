@@ -69,6 +69,9 @@ pub enum E2eStoreError {
     /// The history file does not open with the key (damaged or wrong key,
     /// or a record cut short by a crash).
     Corrupted,
+    /// The state file is intact, but the key from the provider is not the
+    /// key that sealed it. The file stays as it is.
+    WrongKey,
     Io(io::Error),
 }
 
