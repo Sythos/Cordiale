@@ -1,0 +1,106 @@
+{
+  "fixture_revision": 1,
+  "status": "candidate: signed texts and list order wait for the final contract of protocol 49 and the final MD-3 pin",
+  "did": [
+    {
+      "case": "RFC 8032 test key",
+      "key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "key": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+      "did": "If4x36FUomE"
+    },
+    {
+      "case": "vector 70, the did holds a hyphen and an underscore",
+      "key_hex": "ee5d35c971a86ab62d114de7c07174d7f088a3cfebf14d25274d539d42d3f486",
+      "key": "7l01yXGoarYtEU3nwHF01/CIo8/r8U0lJ01TnULT9IY",
+      "did": "_Uw_z3-OAsk"
+    }
+  ],
+  "certificate": {
+    "valid": [
+      {
+        "case": "first key at list version 7",
+        "version": 7,
+        "key": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+        "signed_text": "irc-e2e:v2:dev:7:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+      },
+      {
+        "case": "highest version",
+        "version": 2147483647,
+        "key": "7l01yXGoarYtEU3nwHF01/CIo8/r8U0lJ01TnULT9IY",
+        "signed_text": "irc-e2e:v2:dev:2147483647:7l01yXGoarYtEU3nwHF01/CIo8/r8U0lJ01TnULT9IY"
+      }
+    ],
+    "invalid": [
+      {"case": "leading zero", "signed_text": "irc-e2e:v2:dev:07:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo", "error": "BadVersion"},
+      {"case": "version zero", "signed_text": "irc-e2e:v2:dev:0:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo", "error": "BadVersion"},
+      {"case": "version above the limit", "signed_text": "irc-e2e:v2:dev:2147483648:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo", "error": "BadVersion"},
+      {"case": "short key", "signed_text": "irc-e2e:v2:dev:7:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHUR", "error": "BadKey"},
+      {"case": "protocol v1 prefix", "signed_text": "irc-e2e:v1:dev:7:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo", "error": "BadPayload"}
+    ]
+  },
+  "signed_list": {
+    "valid": [
+      {
+        "case": "one device",
+        "version": 1,
+        "keys": ["11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo"],
+        "signed_text": "irc-e2e:v2:list:1:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+      },
+      {
+        "case": "two devices, caller order is reversed",
+        "version": 5,
+        "keys": [
+          "7l01yXGoarYtEU3nwHF01/CIo8/r8U0lJ01TnULT9IY",
+          "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        ],
+        "signed_text": "irc-e2e:v2:list:5:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo,7l01yXGoarYtEU3nwHF01/CIo8/r8U0lJ01TnULT9IY"
+      }
+    ],
+    "invalid": [
+      {"case": "no device", "version": 1, "keys": [], "error": "BadDeviceCount"},
+      {"case": "repeated device", "version": 1, "keys": ["11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo", "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo"], "error": "DuplicateDevice"},
+      {"case": "version zero", "version": 0, "keys": ["11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo"], "error": "BadVersion"},
+      {"case": "bad key", "version": 1, "keys": ["short"], "error": "BadKey"}
+    ]
+  },
+  "frames": {
+    "valid": [
+      {
+        "case": "key request from a device to everyone",
+        "text": "\u0001E2E KEYREQ AAAA 1/1 If4x36FUomE * {}\u0001",
+        "verb": "KEYREQ", "msgid": "AAAA", "index": 1, "total": 1, "from": "If4x36FUomE", "to": "*", "chunk": "{}"
+      },
+      {
+        "case": "keys answer for one device",
+        "text": "\u0001E2E KEYS AAAA 1/2 * _Uw_z3-OAsk {\"ver\":2\u0001",
+        "verb": "KEYS", "msgid": "AAAA", "index": 1, "total": 2, "from": "*", "to": "_Uw_z3-OAsk", "chunk": "{\"ver\":2"
+      },
+      {
+        "case": "message from one device to another",
+        "text": "\u0001E2E MSG AAAA 2/2 If4x36FUomE _Uw_z3-OAsk }\u0001",
+        "verb": "MSG", "msgid": "AAAA", "index": 2, "total": 2, "from": "If4x36FUomE", "to": "_Uw_z3-OAsk", "chunk": "}"
+      },
+      {
+        "case": "prekey message",
+        "text": "\u0001E2E PKMSG AAAA 1/1 If4x36FUomE _Uw_z3-OAsk {}\u0001",
+        "verb": "PKMSG", "msgid": "AAAA", "index": 1, "total": 1, "from": "If4x36FUomE", "to": "_Uw_z3-OAsk", "chunk": "{}"
+      },
+      {
+        "case": "nack",
+        "text": "\u0001E2E NACK AAAA 1/1 If4x36FUomE _Uw_z3-OAsk {}\u0001",
+        "verb": "NACK", "msgid": "AAAA", "index": 1, "total": 1, "from": "If4x36FUomE", "to": "_Uw_z3-OAsk", "chunk": "{}"
+      }
+    ],
+    "invalid": [
+      {"case": "no from and to fields", "text": "\u0001E2E MSG AAAA 1/1 {}\u0001", "error": "BadFrame"},
+      {"case": "no frame marker", "text": "E2E KEYREQ AAAA 1/1 If4x36FUomE * {}", "error": "BadFrame"},
+      {"case": "unknown verb", "text": "\u0001E2E HELLO AAAA 1/1 If4x36FUomE * {}\u0001", "error": "BadVerb"},
+      {"case": "key request from everyone", "text": "\u0001E2E KEYREQ AAAA 1/1 * * {}\u0001", "error": "BadAddress"},
+      {"case": "keys answer from a device", "text": "\u0001E2E KEYS AAAA 1/1 If4x36FUomE _Uw_z3-OAsk {}\u0001", "error": "BadAddress"},
+      {"case": "address is not a did", "text": "\u0001E2E MSG AAAA 1/1 alice bob {}\u0001", "error": "BadAddress"},
+      {"case": "fragment index zero", "text": "\u0001E2E MSG AAAA 0/1 If4x36FUomE _Uw_z3-OAsk {}\u0001", "error": "BadFragment"},
+      {"case": "fragment index above total", "text": "\u0001E2E MSG AAAA 2/1 If4x36FUomE _Uw_z3-OAsk {}\u0001", "error": "BadFragment"},
+      {"case": "non-ASCII chunk", "text": "\u0001E2E MSG AAAA 1/1 If4x36FUomE _Uw_z3-OAsk café\u0001", "error": "BadFrame"}
+    ]
+  }
+}
