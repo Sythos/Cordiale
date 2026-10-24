@@ -585,6 +585,13 @@ pub(crate) async fn handle_frame(
         }
         return;
     }
+    if payload_kind == "e2e_send_dropped" {
+        // Only the local send status changes: this is never a chat line.
+        if let Err(error) = state.e2e_sends.apply_dropped_event(&frame.payload) {
+            persistence::log_line(&format!("e2e_send_dropped ignored: {error:?}"));
+        }
+        return;
+    }
     if payload_kind == "umode_changed" {
         handle_umode_changed(state, &frame.topic, &frame.payload);
         push_umode_view(state, ui, false);
