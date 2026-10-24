@@ -1463,7 +1463,7 @@ struct WorkerState {
     /// The active centered Services console, if one is open.
     service_console: Option<ServiceConsoleState>,
     /// Local status of E2E sends, fed by `e2e_send_dropped` pushes.
-    e2e_sends: cordiale_core::e2e_pacing::SendTracker,
+    e2e_sends: cordiale_core::e2e_pacing::SendBook,
 }
 
 /// One open Services console. `since_id` is captured before the help
@@ -1592,7 +1592,7 @@ impl WorkerState {
             },
             home: home::HomeState::default(),
             service_console: None,
-            e2e_sends: cordiale_core::e2e_pacing::SendTracker::new(),
+            e2e_sends: cordiale_core::e2e_pacing::SendBook::new(),
         }
     }
 

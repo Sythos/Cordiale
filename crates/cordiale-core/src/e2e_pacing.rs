@@ -457,33 +457,6 @@ impl DropReason {
     }
 }
 
-/// Typed `e2e_send_dropped` event (protocol 46).
-///
-/// Candidate shape: `id` (send id) and `reason`. Unknown fields are ignored,
-/// because events are additive. A missing or wrongly typed field, or an
-/// unknown reason, is an error.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SendDropped {
-    pub id: String,
-    pub reason: DropReason,
-}
-
-impl SendDropped {
-    pub fn from_value(value: &Value) -> Result<Self, WireError> {
-        let map = as_object(value)?;
-        let id = required_str(map, "id")?;
-        if id.is_empty() {
-            return Err(WireError::MissingField);
-        }
-        let reason =
-            DropReason::from_wire(required_str(map, "reason")?).ok_or(WireError::BadFieldType)?;
-        Ok(Self {
-            id: id.to_string(),
-            reason,
-        })
-    }
-}
-
 /// Local status of one send. No variant means "delivered": the relay gives no
 /// such proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -549,14 +522,6 @@ impl SendTracker {
             _ => false,
         }
     }
-
-    /// Parse an `e2e_send_dropped` payload and apply it. Return `true` when
-    /// the status of a known send changed. A malformed payload is an error
-    /// and changes nothing.
-    pub fn apply_dropped_event(&mut self, payload: &Value) -> Result<bool, WireError> {
-        let event = SendDropped::from_value(payload)?;
-        Ok(self.apply_dropped(&event.id, event.reason))
-    }
 }
 
 /// Wire name of the drop event, as in the `kind` field of the payload.
@@ -581,7 +546,10 @@ impl SendKey {
     }
 }
 
-/// A parsed `e2e_send_dropped` event.
+/// Typed `e2e_send_dropped` event (protocol 46).
+///
+/// Candidate shape: `network`, `target`, `message_id` and `reason`. Unknown
+/// fields are ignored, because events are additive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendDropped {
     pub key: SendKey,
@@ -589,22 +557,33 @@ pub struct SendDropped {
 }
 
 impl SendDropped {
-    /// Read the event payload. Return `None` when the kind is another one,
-    /// a field is missing or not a string, or the reason is not known. The
-    /// field names `network`, `target`, `message_id` and `reason` are an
-    /// assumption: check them against the protocol 47 contract.
+    /// Read the event fields. A missing or wrongly typed field, an empty
+    /// `message_id` or an unknown reason is an error. This does not check
+    /// `kind`. The field names are an assumption: check them against the
+    /// protocol 46 contract.
+    pub fn from_value(value: &Value) -> Result<Self, WireError> {
+        let map = as_object(value)?;
+        let network = required_str(map, "network")?;
+        let target = required_str(map, "target")?;
+        let message_id = required_str(map, "message_id")?;
+        if message_id.is_empty() {
+            return Err(WireError::MissingField);
+        }
+        let reason =
+            DropReason::from_wire(required_str(map, "reason")?).ok_or(WireError::BadFieldType)?;
+        Ok(Self {
+            key: SendKey::new(network, target, message_id),
+            reason,
+        })
+    }
+
+    /// Read the event payload. Return `None` when the kind is another one
+    /// or `from_value` refuses the fields.
     pub fn from_payload(payload: &Value) -> Option<Self> {
         if payload.get("kind")?.as_str()? != SEND_DROPPED_KIND {
             return None;
         }
-        Some(Self {
-            key: SendKey::new(
-                payload.get("network")?.as_str()?,
-                payload.get("target")?.as_str()?,
-                payload.get("message_id")?.as_str()?,
-            ),
-            reason: DropReason::from_wire(payload.get("reason")?.as_str()?)?,
-        })
+        Self::from_value(payload).ok()
     }
 }
 
@@ -668,6 +647,14 @@ impl SendBook {
         let event = SendDropped::from_payload(payload)?;
         self.apply_dropped(&event).then_some(event)
     }
+
+    /// Parse an `e2e_send_dropped` payload and apply it. Return `true` when
+    /// the status of a known send changed. A malformed payload is an error
+    /// and changes nothing.
+    pub fn apply_dropped_event(&mut self, payload: &Value) -> Result<bool, WireError> {
+        let event = SendDropped::from_value(payload)?;
+        Ok(self.apply_dropped(&event))
+    }
 }
 
 #[cfg(test)]
@@ -688,12 +675,12 @@ mod tests {
                 .expect("fixture is JSON");
         for case in cases["valid"].as_array().expect("valid cases") {
             let event = SendDropped::from_value(&case["event"]).expect("valid event");
-            assert_eq!(
-                event.id,
-                case["id"].as_str().expect("id"),
-                "{}",
-                case["case"]
+            let expected = SendKey::new(
+                case["network"].as_str().expect("network"),
+                case["target"].as_str().expect("target"),
+                case["message_id"].as_str().expect("message_id"),
             );
+            assert_eq!(event.key, expected, "{}", case["case"]);
             let reason = DropReason::from_wire(case["reason"].as_str().expect("reason"));
             assert_eq!(Some(event.reason), reason, "{}", case["case"]);
         }
@@ -709,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn dropped_event_reaches_the_tracker_through_the_router() {
+    fn dropped_event_reaches_the_book_through_the_router() {
         let cases: Value =
             serde_json::from_str(include_str!("../tests/fixtures/e2e/send_dropped.json"))
                 .expect("fixture is JSON");
@@ -718,31 +705,33 @@ mod tests {
             crate::wire_event::ClientEventKind::from_payload(valid),
             Some(crate::wire_event::ClientEventKind::E2eSendDropped)
         );
-        let mut tracker = SendTracker::new();
-        tracker.start("s1");
-        assert_eq!(tracker.apply_dropped_event(valid), Ok(true));
+        let key = SendKey::new("libera", "bob", "s1");
+        let mut book = SendBook::new();
+        book.start(key.clone());
+        assert_eq!(book.apply_dropped_event(valid), Ok(true));
         assert_eq!(
-            tracker.status("s1"),
+            book.status(&key),
             Some(SendStatus::Dropped(DropReason::Late))
         );
         // A duplicate event changes nothing.
-        assert_eq!(tracker.apply_dropped_event(valid), Ok(false));
+        assert_eq!(book.apply_dropped_event(valid), Ok(false));
     }
 
     #[test]
-    fn invalid_dropped_event_leaves_the_tracker_unchanged() {
+    fn invalid_dropped_event_leaves_the_book_unchanged() {
         let cases: Value =
             serde_json::from_str(include_str!("../tests/fixtures/e2e/send_dropped.json"))
                 .expect("fixture is JSON");
-        let mut tracker = SendTracker::new();
-        tracker.start("s1");
+        let key = SendKey::new("libera", "bob", "s1");
+        let mut book = SendBook::new();
+        book.start(key.clone());
         for case in cases["invalid"].as_array().expect("invalid cases") {
             assert!(
-                tracker.apply_dropped_event(&case["event"]).is_err(),
+                book.apply_dropped_event(&case["event"]).is_err(),
                 "{}",
                 case["case"]
             );
-            assert_eq!(tracker.status("s1"), Some(SendStatus::Pending));
+            assert_eq!(book.status(&key), Some(SendStatus::Pending));
         }
     }
 

@@ -1,16 +1,20 @@
 {
   "valid": [
-    {"case": "late", "event": {"kind": "e2e_send_dropped", "id": "s1", "reason": "late"}, "id": "s1", "reason": "late"},
-    {"case": "send failed", "event": {"id": "s2", "reason": "send_failed"}, "id": "s2", "reason": "send_failed"},
-    {"case": "session ended with an unknown extra field", "event": {"id": "s3", "reason": "session_ended", "future": {"a": 1}}, "id": "s3", "reason": "session_ended"}
+    {"case": "late", "event": {"kind": "e2e_send_dropped", "network": "libera", "target": "bob", "message_id": "s1", "reason": "late"}, "network": "libera", "target": "bob", "message_id": "s1", "reason": "late"},
+    {"case": "send failed", "event": {"network": "libera", "target": "#room", "message_id": "s2", "reason": "send_failed"}, "network": "libera", "target": "#room", "message_id": "s2", "reason": "send_failed"},
+    {"case": "session ended with an unknown extra field", "event": {"network": "oftc", "target": "bob", "message_id": "s3", "reason": "session_ended", "future": {"a": 1}}, "network": "oftc", "target": "bob", "message_id": "s3", "reason": "session_ended"}
   ],
   "invalid": [
     {"case": "not an object", "event": "late", "error": "BadFieldType"},
-    {"case": "missing id", "event": {"reason": "late"}, "error": "MissingField"},
-    {"case": "empty id", "event": {"id": "", "reason": "late"}, "error": "MissingField"},
-    {"case": "id of the wrong type", "event": {"id": 5, "reason": "late"}, "error": "BadFieldType"},
-    {"case": "missing reason", "event": {"id": "s1"}, "error": "MissingField"},
-    {"case": "null reason", "event": {"id": "s1", "reason": null}, "error": "BadFieldType"},
-    {"case": "unknown reason", "event": {"id": "s1", "reason": "expired"}, "error": "BadFieldType"}
+    {"case": "missing network", "event": {"target": "bob", "message_id": "s1", "reason": "late"}, "error": "MissingField"},
+    {"case": "network of the wrong type", "event": {"network": 5, "target": "bob", "message_id": "s1", "reason": "late"}, "error": "BadFieldType"},
+    {"case": "missing target", "event": {"network": "libera", "message_id": "s1", "reason": "late"}, "error": "MissingField"},
+    {"case": "target of the wrong type", "event": {"network": "libera", "target": null, "message_id": "s1", "reason": "late"}, "error": "BadFieldType"},
+    {"case": "missing message id", "event": {"network": "libera", "target": "bob", "reason": "late"}, "error": "MissingField"},
+    {"case": "empty message id", "event": {"network": "libera", "target": "bob", "message_id": "", "reason": "late"}, "error": "MissingField"},
+    {"case": "message id of the wrong type", "event": {"network": "libera", "target": "bob", "message_id": 5, "reason": "late"}, "error": "BadFieldType"},
+    {"case": "missing reason", "event": {"network": "libera", "target": "bob", "message_id": "s1"}, "error": "MissingField"},
+    {"case": "null reason", "event": {"network": "libera", "target": "bob", "message_id": "s1", "reason": null}, "error": "BadFieldType"},
+    {"case": "unknown reason", "event": {"network": "libera", "target": "bob", "message_id": "s1", "reason": "expired"}, "error": "BadFieldType"}
   ]
 }
