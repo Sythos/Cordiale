@@ -29,6 +29,14 @@
 //! stays off: the store never uses the obfuscated fallback of
 //! `credentials.rs` and never asks for a passphrase.
 //!
+//! The file header holds the schema version (`CORDIALE-E2E-STATE-2`) and a
+//! short check value of the key. A wrong key gives `WrongKey`. A damaged or
+//! changed seal gives `Corrupted`. A changed check value reads as a wrong key.
+//!
+//! A file of the first schema (`CORDIALE-E2E-STATE-1`) is converted in memory
+//! on open. The new file goes to a staging file and is read back. Only then it
+//! replaces the old file. A failed step keeps the old file.
+//!
 //! Every change is written to a new file first and then renamed over the
 //! old one. A failed write keeps the old state in the file and in memory. A
 //! file that does not open is an error: it is never replaced by an empty
@@ -42,6 +50,7 @@ use std::path::{Path, PathBuf};
 use chacha20poly1305::aead::{Aead, Generate, Key, KeyInit, Nonce, Payload};
 use chacha20poly1305::XChaCha20Poly1305;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use vodozemac::olm::{Account, AccountPickle, Session, SessionPickle};
 use zeroize::Zeroize;
 
@@ -49,9 +58,17 @@ use crate::e2e_store::{E2eKeyProvider, E2eStoreError};
 use crate::persistence::{create_private_dir_all, write_atomic};
 
 const KEY_LEN: usize = 32;
-/// File header; also bound to the sealed state as associated data.
-const MAGIC: &[u8] = b"CORDIALE-E2E-STATE-1";
+/// File header of the first schema; read only, for the migration.
+const MAGIC_V1: &[u8] = b"CORDIALE-E2E-STATE-1";
+/// File header of the current schema; also bound to the sealed state.
+const MAGIC: &[u8] = b"CORDIALE-E2E-STATE-2";
 const NONCE_LEN: usize = 24;
+/// Length of the key check value after the header.
+const CHECK_LEN: usize = 16;
+/// Domain text of the key check value.
+const CHECK_DOMAIN: &[u8] = b"cordiale-e2e-state-key-check";
+/// Suffix of the staging file of a migration.
+const STAGING_SUFFIX: &str = ".migrating";
 
 /// What the file holds. The secret fields are overwritten on drop.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,8 +106,17 @@ pub struct E2eStateStore {
 impl E2eStateStore {
     /// Opens (or starts empty) the state at `path`. A file that does not
     /// open is an error: it is never replaced by an empty state. Another
-    /// open handle on the same path gives `InUse`.
+    /// open handle on the same path gives `InUse`. A file of the first
+    /// schema is converted; see the module text.
     pub fn open(path: PathBuf, provider: &dyn E2eKeyProvider) -> Result<Self, E2eStoreError> {
+        Self::open_with_writer(path, provider, write_atomic)
+    }
+
+    fn open_with_writer(
+        path: PathBuf,
+        provider: &dyn E2eKeyProvider,
+        writer: Writer,
+    ) -> Result<Self, E2eStoreError> {
         if let Some(parent) = path.parent() {
             create_private_dir_all(parent)?;
         }
@@ -114,10 +140,14 @@ impl E2eStateStore {
             _lock: lock,
             key,
             data: StateData::default(),
-            writer: write_atomic,
+            writer,
         };
         if store.path.exists() {
-            store.data = store.read_file()?;
+            let (data, legacy) = store.unseal(&fs::read(&store.path)?)?;
+            store.data = data;
+            if legacy {
+                store.migrate()?;
+            }
         }
         Ok(store)
     }
@@ -162,59 +192,117 @@ impl E2eStateStore {
     fn commit(&mut self, change: impl FnOnce(&mut StateData)) -> Result<(), E2eStoreError> {
         let mut next = self.data.clone();
         change(&mut next);
-        self.write_file(&next)?;
+        let sealed = self.seal(&next)?;
+        (self.writer)(&self.path, &sealed)?;
         self.data = next;
         Ok(())
+    }
+
+    /// Writes the current state in the current schema to a staging file,
+    /// reads it back, and only then renames it over the old file. A failed
+    /// step removes the staging file and keeps the old file.
+    fn migrate(&self) -> Result<(), E2eStoreError> {
+        let mut staging = self.path.clone().into_os_string();
+        staging.push(STAGING_SUFFIX);
+        let staging = PathBuf::from(staging);
+        let result = self
+            .write_checked(&staging)
+            .and_then(|()| fs::rename(&staging, &self.path).map_err(E2eStoreError::from));
+        if result.is_err() {
+            let _ = fs::remove_file(&staging);
+        }
+        result
+    }
+
+    fn write_checked(&self, staging: &Path) -> Result<(), E2eStoreError> {
+        (self.writer)(staging, &self.seal(&self.data)?)?;
+        match self.unseal(&fs::read(staging)?)? {
+            (back, false) if back == self.data => Ok(()),
+            _ => Err(E2eStoreError::Corrupted),
+        }
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
         XChaCha20Poly1305::new(&Key::<XChaCha20Poly1305>::from(self.key))
     }
 
-    /// Writes `[magic][nonce][ciphertext]`.
-    fn write_file(&self, data: &StateData) -> Result<(), E2eStoreError> {
+    /// A short value that tells the key of a file without opening it. It is
+    /// a one-way hash of the key with a domain text.
+    fn key_check(&self) -> [u8; CHECK_LEN] {
+        let mut hasher = Sha256::new();
+        hasher.update(CHECK_DOMAIN);
+        hasher.update(self.key);
+        let mut check = [0u8; CHECK_LEN];
+        check.copy_from_slice(&hasher.finalize()[..CHECK_LEN]);
+        check
+    }
+
+    /// Builds `[magic][key check][nonce][ciphertext]`. The header is bound
+    /// to the ciphertext as associated data.
+    fn seal(&self, data: &StateData) -> Result<Vec<u8>, E2eStoreError> {
         let mut plain = serde_json::to_vec(data).map_err(io::Error::other)?;
+        let mut header = MAGIC.to_vec();
+        header.extend_from_slice(&self.key_check());
         let nonce = Nonce::<XChaCha20Poly1305>::generate();
         let sealed = self.cipher().encrypt(
             &nonce,
             Payload {
                 msg: &plain,
-                aad: MAGIC,
+                aad: &header,
             },
         );
         plain.zeroize();
         let sealed = sealed.map_err(|_| E2eStoreError::Corrupted)?;
-        let mut out = Vec::with_capacity(MAGIC.len() + NONCE_LEN + sealed.len());
-        out.extend_from_slice(MAGIC);
+        let mut out = header;
         out.extend_from_slice(nonce.as_slice());
         out.extend_from_slice(&sealed);
-        (self.writer)(&self.path, &out)?;
-        Ok(())
+        Ok(out)
     }
 
-    fn read_file(&self) -> Result<StateData, E2eStoreError> {
+    /// Opens the bytes of a file. The flag is true when the file was of the
+    /// first schema and was converted in memory.
+    fn unseal(&self, raw: &[u8]) -> Result<(StateData, bool), E2eStoreError> {
+        if raw.starts_with(MAGIC_V1) {
+            let plain = self.open_sealed(&raw[MAGIC_V1.len()..], MAGIC_V1)?;
+            // The first schema holds the same two fields as the current one.
+            return Ok((parse(plain)?, true));
+        }
+        let header_len = MAGIC.len() + CHECK_LEN;
+        if !raw.starts_with(MAGIC) || raw.len() < header_len + NONCE_LEN {
+            return Err(E2eStoreError::Corrupted);
+        }
+        if raw[MAGIC.len()..header_len] != self.key_check() {
+            return Err(E2eStoreError::WrongKey);
+        }
+        let plain = self.open_sealed(&raw[header_len..], &raw[..header_len])?;
+        Ok((parse(plain)?, false))
+    }
+
+    /// Decrypts `[nonce][ciphertext]` with `aad` as associated data.
+    fn open_sealed(&self, body: &[u8], aad: &[u8]) -> Result<Vec<u8>, E2eStoreError> {
         let corrupted = || E2eStoreError::Corrupted;
-        let raw = fs::read(&self.path)?;
-        if !raw.starts_with(MAGIC) || raw.len() < MAGIC.len() + NONCE_LEN {
+        if body.len() < NONCE_LEN {
             return Err(corrupted());
         }
-        let body = &raw[MAGIC.len()..];
         let nonce =
             Nonce::<XChaCha20Poly1305>::try_from(&body[..NONCE_LEN]).map_err(|_| corrupted())?;
-        let mut plain = self
-            .cipher()
+        self.cipher()
             .decrypt(
                 &nonce,
                 Payload {
                     msg: &body[NONCE_LEN..],
-                    aad: MAGIC,
+                    aad,
                 },
             )
-            .map_err(|_| corrupted())?;
-        let parsed = serde_json::from_slice(&plain).map_err(|_| corrupted());
-        plain.zeroize();
-        parsed
+            .map_err(|_| corrupted())
     }
+}
+
+/// Parses the decrypted JSON and overwrites the text.
+fn parse(mut plain: Vec<u8>) -> Result<StateData, E2eStoreError> {
+    let parsed = serde_json::from_slice(&plain).map_err(|_| E2eStoreError::Corrupted);
+    plain.zeroize();
+    parsed
 }
 
 impl Drop for E2eStateStore {
@@ -344,7 +432,7 @@ mod tests {
         drop(store);
         let before = fs::read(&path).expect("read");
         let result = E2eStateStore::open(path.clone(), &fresh_key());
-        assert!(matches!(result, Err(E2eStoreError::Corrupted)));
+        assert!(matches!(result, Err(E2eStoreError::WrongKey)));
         assert_eq!(fs::read(&path).expect("read"), before);
         let _ = fs::remove_dir_all(&dir);
     }
@@ -423,6 +511,113 @@ mod tests {
         assert!(matches!(second, Err(E2eStoreError::InUse)));
         drop(first);
         assert!(E2eStateStore::open(path, &provider).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A file as the first schema wrote it.
+    fn legacy_file(key: &[u8; KEY_LEN], account: &Account, session: (&str, &Session)) -> Vec<u8> {
+        let sessions = BTreeMap::from([(session.0, session.1.pickle().encrypt(key))]);
+        let plain = serde_json::to_vec(&serde_json::json!({
+            "account": account.pickle().encrypt(key),
+            "sessions": sessions,
+        }))
+        .expect("json");
+        let nonce = Nonce::<XChaCha20Poly1305>::generate();
+        let sealed = XChaCha20Poly1305::new(&Key::<XChaCha20Poly1305>::from(*key))
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: &plain,
+                    aad: MAGIC_V1,
+                },
+            )
+            .expect("seal");
+        let mut out = MAGIC_V1.to_vec();
+        out.extend_from_slice(nonce.as_slice());
+        out.extend_from_slice(&sealed);
+        out
+    }
+
+    fn staging_of(path: &Path) -> PathBuf {
+        let mut staging = path.to_path_buf().into_os_string();
+        staging.push(STAGING_SUFFIX);
+        PathBuf::from(staging)
+    }
+
+    #[test]
+    fn a_first_schema_file_keeps_its_account_and_sessions() {
+        let dir = scratch_dir("migrate");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let account = Account::new();
+        let session = outbound_session(&account);
+        let old = legacy_file(&provider.0, &account, ("peer-1", &session));
+        fs::write(&path, old).expect("write");
+        let store = E2eStateStore::open(path.clone(), &provider).expect("open");
+        let loaded = store.account().expect("account").expect("present");
+        assert_eq!(loaded.identity_keys(), account.identity_keys());
+        let loaded = store.session("peer-1").expect("session").expect("present");
+        assert_eq!(loaded.session_id(), session.session_id());
+        drop(store);
+        assert!(fs::read(&path).expect("read").starts_with(MAGIC));
+        assert!(!staging_of(&path).exists());
+        let store = E2eStateStore::open(path, &provider).expect("reopen");
+        let loaded = store.account().expect("account").expect("present");
+        assert_eq!(loaded.identity_keys(), account.identity_keys());
+        assert!(store.session("peer-1").expect("session").is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_migration_keeps_the_first_schema_file() {
+        let dir = scratch_dir("migrate-fail");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let account = Account::new();
+        let session = outbound_session(&account);
+        let old = legacy_file(&provider.0, &account, ("peer-1", &session));
+        fs::write(&path, &old).expect("write");
+        for writer in [failing_writer as Writer, cutting_writer as Writer] {
+            let result = E2eStateStore::open_with_writer(path.clone(), &provider, writer);
+            assert!(matches!(result, Err(E2eStoreError::Io(_))));
+            assert_eq!(fs::read(&path).expect("read"), old);
+            assert!(!staging_of(&path).exists());
+        }
+        // The old file still opens and converts.
+        assert!(E2eStateStore::open(path, &provider).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_first_schema_file_with_a_wrong_key_is_an_error_and_keeps_the_file() {
+        let dir = scratch_dir("migrate-key");
+        let path = dir.join("state.bin");
+        let account = Account::new();
+        let session = outbound_session(&account);
+        let old = legacy_file(&fresh_key().0, &account, ("peer-1", &session));
+        fs::write(&path, &old).expect("write");
+        let result = E2eStateStore::open(path.clone(), &fresh_key());
+        assert!(matches!(result, Err(E2eStoreError::Corrupted)));
+        assert_eq!(fs::read(&path).expect("read"), old);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_changed_byte_is_an_error_at_every_offset() {
+        let dir = scratch_dir("every-byte");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+        store.set_account(&Account::new()).expect("account");
+        drop(store);
+        let whole = fs::read(&path).expect("read");
+        for offset in 0..whole.len() {
+            let mut changed = whole.clone();
+            changed[offset] ^= 1;
+            fs::write(&path, &changed).expect("damage");
+            assert!(E2eStateStore::open(path.clone(), &provider).is_err());
+            assert_eq!(fs::read(&path).expect("read"), changed);
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }
