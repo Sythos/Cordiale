@@ -617,10 +617,11 @@ Audit diretto sui moduli sorgente Elixir del server (non regex/grep su
 poche righe): `session/wire.ex`'s `@type wire_event_kind` è l'insieme
 chiuso ufficiale (40 kind), più ogni altro `*/wire.ex` non-admin del repo:
 56 kind top-level in totale all'epoca, elencati con il loro carrier in
-`crates/cordiale-core/src/wire_event.rs` (`ClientEventKind`). Oggi sono 57:
+`crates/cordiale-core/src/wire_event.rs` (`ClientEventKind`). Oggi sono 58:
 la tabella §9 del contratto aggiunge `away_nick_suffix_changed` (v32), che
 ora sta nell'enum come gli altri (prima veniva scartato da
-`ClientEventKind::from_payload` prima di arrivare al suo gestore). Riassunto:
+`ClientEventKind::from_payload` prima di arrivare al suo gestore); il 58° è
+`e2e_send_dropped` (protocollo 46). Riassunto:
 
 - **`"parted"` non esiste**: due commenti nel sorgente server
   (`session/server.ex`, `session/window_state.ex`) confermano che
@@ -634,7 +635,7 @@ ora sta nell'enum come gli altri (prima veniva scartato da
   `notice`): `action` (CTCP `/me`), `topic` (riga scrollback di cambio
   topic), `kick` (riga scrollback di kick, diversa da `kicked`
   top-level), `server_event` (riga feed server, diversa da `notice`).
-- **Aggiornamento (2026-09-30)**: Cordiale gestisce tutti i 57 kind
+- **Aggiornamento (2026-09-30)**: Cordiale gestisce tutti i 58 kind
   (ISUPPORT/umode/identità, stato finestra, WHOIS/WHOWAS/LUSERS/banlist,
   DCC, directory canali, archivio, lifecycle network, presence
   MONITOR/WATCH, notify list, impostazioni server, riepilogo menzioni,
@@ -1212,7 +1213,7 @@ letto in una spec:
   di nuovo `protocol_version`).
 - Il parser deve confrontare `protocol_version` con `>=`, mai `==`, e
   ignorare i campi sconosciuti. Per i kind evento, Cordiale gestisce
-  tutti i 57 kind dell'inventario upstream attuale; un kind top-level
+  tutti i 58 kind dell'inventario upstream attuale; un kind top-level
   futuro non ancora censito viene scartato in silenzio
   (`ClientEventKind::from_payload`), come prescrive il contratto.
 - Una password vuota nel form Connect avvia il tentativo guest osservato
@@ -1251,6 +1252,23 @@ campo mancante, sconosciuto o di tipo sbagliato è un errore tipizzato
 (`WireError`). `expires_at` è un intero positivo (secondi Unix, al massimo
 int64), ammesso solo con `priority: "control"` e verbo `msg` o `pkmsg`.
 Stringhe, `null` e numeri con frazione (anche `1.0`) sono rifiutati.
+
+**Issue 383, prima parte (fonti di Grappa non lette).** Fatto: il token
+`NETWORK` grezzo (protocollo 47) in `IsupportState::network` (assente o `null`
+= `None`, nessuna normalizzazione; il nome del campo `network` è un'ipotesi da
+verificare); `SendDropped` in `e2e_pacing.rs` per l'evento `e2e_send_dropped`
+(campi `network`, `target`, `message_id` e `reason`: ipotesi da verificare,
+fixture `send_dropped.json`), che il router dei kind
+(`ClientEventKind::E2eSendDropped`) inoltra a `SendBook`
+(`apply_dropped_event`; nessun invio UI chiama ancora `SendBook::start`);
+`E2eOperation` in `e2e_protocol.rs` (rotte e versioni minime 42–44; intervallo
+KEYS da 15 s separato dal fake-lag da 22 s, che non è un intervallo del
+client). **Da fare, dopo la lettura delle PR 2446, 2448, 2451 e 2452 di
+Grappa:** risposta e rifiuto dell'invio (46) con forma esatta, richieste,
+risposte, eventi e motivi di chiusura del pairing (48), righe dispositivo,
+liste firmate, bundle pubblici, messaggi di inbox e frame v2 del candidato 49
+dietro un solo modulo, con il marcatore nelle fixture. Cordiale non dichiara
+un contratto 49 definitivo.
 
 ### Contratto E2E: cosa manca (v42–v44)
 
@@ -1333,6 +1351,19 @@ dimensione sbagliata); i due vettori restano invariati. Il file
 dispositivo: il collegamento ai dati del dispositivo resta aperto finché non
 esiste l'archivio dell'account Olm. Quando la PR 4 di irc-olm e il
 coordinamento MD-1/MD-3 sono uniti, si aggiornano costruttore, parser e vettori.
+
+**Issue 386, parte 1: modelli del relay X1 (protocollo 48) e link di pairing.**
+Contratto letto in `CLIENT_PROTOCOL.md` §4g di Grappa (PR 2451). Il nuovo
+modulo `cordiale-core/src/e2e_pairing.rs` contiene solo dati e funzioni pure:
+le risposte delle cinque rotte `/e2e/pairings`, i due eventi del topic utente
+(`e2e_pairing_message` senza payload, `e2e_pairing_closed` con `reason`), la
+mappa degli errori del relay (`relay_error`) e `PairingLink`
+(`https://<host>/pair#pair=<id>.<chiave>`, oppure il codice `<id>.<chiave>`).
+`take_pairing_link` legge il testo e azzera subito il buffer, anche in caso di
+errore. `Debug` non stampa link, chiavi né payload. Restano per le parti
+successive: chiamate REST in `client.rs`, sessione ECIES con codice di
+controllo, catch-up e pulizia, firma di certificato e lista dopo la conferma,
+collegamento a `session.rs`, stato nello store cifrato.
 
 ### Cronologia a tempo (v40): regole del server da rispettare
 
