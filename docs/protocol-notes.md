@@ -1257,9 +1257,10 @@ Stringhe, `null` e numeri con frazione (anche `1.0`) sono rifiutati.
 `NETWORK` grezzo (protocollo 47) in `IsupportState::network` (assente o `null`
 = `None`, nessuna normalizzazione; il nome del campo `network` è un'ipotesi da
 verificare); `SendDropped` in `e2e_pacing.rs` per l'evento `e2e_send_dropped`
-(campi `id` e `reason`: ipotesi da verificare, fixture `send_dropped.json`), che il
-router dei kind (`ClientEventKind::E2eSendDropped`) inoltra a `SendTracker`
-(`apply_dropped_event`; nessun invio UI chiama ancora `SendTracker::start`);
+(campi `network`, `target`, `message_id` e `reason`: ipotesi da verificare,
+fixture `send_dropped.json`), che il router dei kind
+(`ClientEventKind::E2eSendDropped`) inoltra a `SendBook`
+(`apply_dropped_event`; nessun invio UI chiama ancora `SendBook::start`);
 `E2eOperation` in `e2e_protocol.rs` (rotte e versioni minime 42–44; intervallo
 KEYS da 15 s separato dal fake-lag da 22 s, che non è un intervallo del
 client). **Da fare, dopo la lettura delle PR 2446, 2448, 2451 e 2452 di
