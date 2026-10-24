@@ -1336,8 +1336,9 @@ nessun collegamento a `credentials.rs` (issue 357 e successive).
 
 **Fase 2b (issue 379): formato candidato completato, ancora non approvato.**
 In `e2e_wire.rs`: `signed_list_signed_text` ora **ordina** le chiavi (chiavi
-intere, in ordine crescente sui 32 byte grezzi, non sul testo base64; la scelta
-è del candidato e non è confermata) e le unisce con la virgola;
+intere, in ordine crescente sul testo semplice base64, come richiede il
+documento corrente del protocollo; l'ordine sui 32 byte grezzi della bozza
+iniziale è stato abbandonato nell'issue 416) e le unisce con la virgola;
 `sort_list_keys` è l'unico punto dell'ordine. `parse_device_certificate_signed_text`
 è l'inverso stretto di `device_certificate_signed_text`: versione decimale
 senza segno né zeri iniziali, chiave canonica. In `e2e_device.rs`:

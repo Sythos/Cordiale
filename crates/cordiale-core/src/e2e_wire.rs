@@ -317,25 +317,22 @@ pub fn parse_device_certificate_signed_text(bytes: &[u8]) -> Result<(u32, String
     Ok((version, key.to_string()))
 }
 
-/// The device keys of a list in the candidate order: ascending by the raw
-/// 32 bytes of each key. The final contract does not confirm this order yet.
+/// The device keys of a list in the contract order: ascending by the plain
+/// string of each key (standard unpadded Base64 text, byte by byte).
 /// Rejects an invalid list before it sorts.
 pub fn sort_list_keys(device_keys: &[String]) -> Result<Vec<String>, WireError> {
     check_list_devices(device_keys)?;
-    let mut keyed = Vec::with_capacity(device_keys.len());
-    for key in device_keys {
-        keyed.push((decode_key(key)?, key.clone()));
-    }
-    keyed.sort();
-    Ok(keyed.into_iter().map(|(_, key)| key).collect())
+    let mut sorted = device_keys.to_vec();
+    sorted.sort();
+    Ok(sorted)
 }
 
 /// Text the master key signs for one device list:
 /// `irc-e2e:v2:list:<N>:<E1>,<E2>,...`.
 ///
 /// The keys are the full keys, sorted by [`sort_list_keys`] whatever the
-/// order of the caller, and joined by a comma. Candidate format: the order
-/// and the separator are not approved by the final contract yet.
+/// order of the caller, and joined by a comma. The order is ascending plain
+/// text, as in the current protocol document.
 pub fn signed_list_signed_text(
     list_version: u32,
     device_keys: &[String],
@@ -965,7 +962,7 @@ mod tests {
         let two = vec![KEY_A.to_string(), KEY_B.to_string()];
         assert_eq!(
             signed_list_signed_text(12, &two).unwrap(),
-            b"irc-e2e:v2:list:12:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,//////////////////////////////////////////8"
+            b"irc-e2e:v2:list:12://////////////////////////////////////////8,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
                 .to_vec()
         );
     }
@@ -981,15 +978,17 @@ mod tests {
     }
 
     #[test]
-    fn list_keys_sort_by_raw_bytes_not_by_text() {
+    fn list_keys_sort_by_plain_text_not_by_raw_bytes() {
         // Raw 0xFB bytes encode as "+": it sorts before "A" as text, but
-        // after the all-zero key as raw bytes.
+        // after the all-zero key as raw bytes. In the same way "/" sorts
+        // before "A" as text, but the all-0xFF key sorts after it as bytes.
+        // The contract uses the text.
         let high = STANDARD_NO_PAD.encode([0xFBu8; 32]);
-        assert!(high.as_str() < KEY_A);
-        let keys = vec![high.clone(), KEY_B.to_string(), KEY_A.to_string()];
+        assert!(high.as_str() < KEY_B && KEY_B < KEY_A);
+        let keys = vec![KEY_B.to_string(), KEY_A.to_string(), high.clone()];
         assert_eq!(
             sort_list_keys(&keys).unwrap(),
-            vec![KEY_A.to_string(), high, KEY_B.to_string()]
+            vec![high, KEY_B.to_string(), KEY_A.to_string()]
         );
     }
 

@@ -23,8 +23,7 @@
 //! Checks the shared E2E v2 fixtures against `e2e_wire`.
 //!
 //! The fixture file is plain JSON, so another implementation can read the
-//! same vectors. The signed texts and the list order stay candidates until
-//! the final protocol 49 contract and the final MD-3 pin land.
+//! same vectors. The list order is ascending by the plain key text.
 
 use cordiale_core::e2e_wire::{
     device_certificate_signed_text, did_from_key_text, format_frame, is_did_shape,
