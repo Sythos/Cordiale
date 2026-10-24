@@ -1085,6 +1085,7 @@ version = "1.0.2"
 dependencies = [
  "arboard",
  "base64 0.23.1",
+ "chacha20poly1305",
  "chrono",
  "cordiale-core",
  "ctap-hid-fido2",
