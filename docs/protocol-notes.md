@@ -1352,6 +1352,19 @@ dispositivo: il collegamento ai dati del dispositivo resta aperto finché non
 esiste l'archivio dell'account Olm. Quando la PR 4 di irc-olm e il
 coordinamento MD-1/MD-3 sono uniti, si aggiornano costruttore, parser e vettori.
 
+**Issue 386, parte 1: modelli del relay X1 (protocollo 48) e link di pairing.**
+Contratto letto in `CLIENT_PROTOCOL.md` §4g di Grappa (PR 2451). Il nuovo
+modulo `cordiale-core/src/e2e_pairing.rs` contiene solo dati e funzioni pure:
+le risposte delle cinque rotte `/e2e/pairings`, i due eventi del topic utente
+(`e2e_pairing_message` senza payload, `e2e_pairing_closed` con `reason`), la
+mappa degli errori del relay (`relay_error`) e `PairingLink`
+(`https://<host>/pair#pair=<id>.<chiave>`, oppure il codice `<id>.<chiave>`).
+`take_pairing_link` legge il testo e azzera subito il buffer, anche in caso di
+errore. `Debug` non stampa link, chiavi né payload. Restano per le parti
+successive: chiamate REST in `client.rs`, sessione ECIES con codice di
+controllo, catch-up e pulizia, firma di certificato e lista dopo la conferma,
+collegamento a `session.rs`, stato nello store cifrato.
+
 ### Cronologia a tempo (v40): regole del server da rispettare
 
 - Unità: millisecondi epoch decimali, da `0` a int64 massimo; ISO-8601,
