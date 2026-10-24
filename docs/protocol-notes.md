@@ -1380,6 +1380,22 @@ rifiuti come `GrappaClientError::Rejected`. Quando si legge il testo di Grappa
 si cambia solo questo modulo. Non c'è ancora un'operazione in
 `E2eOperation` né una versione minima: restano alle fette successive.
 
+**Issue 428 (fetta 10 di 20 dell'ombrello 416), parte 1: `E2eOperation`.**
+Fonte: §4f di `CLIENT_PROTOCOL.md`. La mappa in `e2e_protocol.rs` ora ha tutte
+le rotte per dispositivo (`devices`, `list`, `inbox`, `inbox/ack`, `keys` per
+dispositivo, `claim`, `copies`), con il segnaposto `:did` riempito da
+`path()` dopo il controllo della forma del `did`. Versione minima 49 per tutte
+e 50 per `claim` e `copies`; le rotte a bundle unico di 42–44 non esistono più
+nella forma che Cordiale usa. Una versione ignota non le consente mai.
+**Differenze ancora aperte** (altre fette): il campo `msgid` (non
+`message_id`) di `e2e_send_dropped`; il corpo dell'invio senza `from`, `to` e
+con `payload` base64 invece di testo JSON; i corpi di `claim` (`{from_did}` →
+`{keys}`) e `copies` (`{from_did, verb, payload}` → `{id, msgid}`); le chiamate
+di `claim` e `copies` senza `/networks/:id`; i limiti di payload (32 KiB), righe
+(64), pagina e `ack` (100), chiavi monouso (50) e costo di una voce (+256 byte);
+il modello di `e2e_message`; i commenti «candidato» e la revisione delle
+fixture.
+
 ### Cronologia a tempo (v40): regole del server da rispettare
 
 - Unità: millisecondi epoch decimali, da `0` a int64 massimo; ISO-8601,
