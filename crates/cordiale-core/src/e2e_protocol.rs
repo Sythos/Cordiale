@@ -20,34 +20,53 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Map of the E2E operations to the protocol version that introduced them.
+//! Map of the E2E operations to the protocol version that has them.
 //!
-//! The routes are the single-bundle routes of protocols 42 to 44. The
-//! per-device routes of protocol 49 are not in this map: the upstream change
-//! is still a candidate and Cordiale does not claim a final protocol 49
-//! contract.
+//! The routes are the ones of section 4f of the client protocol document.
+//! Cordiale speaks the per-device shape of protocol 49. A server between 42
+//! and 48 speaks the single-bundle shape, which no release ever carried, so
+//! every operation here needs 49 at least, and the claim and copy doors need
+//! 50. A server with an unknown version never allows an operation.
+//!
+//! The pairing relay of protocol 48 (`/e2e/pairings`) is not below
+//! `/networks/:id` and is not in this map.
 
 use std::time::Duration;
 
 use crate::e2e_pacing::KEYS_ANSWER_INTERVAL;
+use crate::e2e_wire::{is_did_shape, WireError};
 
 /// One E2E operation of the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum E2eOperation {
     /// `POST /networks/:id/e2e/messages`.
     SendMessage,
-    /// `GET /networks/:id/e2e/inbox`.
-    InboxFetch,
-    /// `POST /networks/:id/e2e/inbox/ack`.
-    InboxAck,
-    /// `POST /networks/:id/e2e/keys`.
-    KeysPublish,
-    /// `GET /networks/:id/e2e/keys`.
-    KeysFetch,
-    /// `DELETE /networks/:id/e2e/keys`.
-    KeysDelete,
     /// A KEYS frame that answers a KEYREQ. It is sent with `SendMessage`.
     KeysAnswer,
+    /// `POST /networks/:id/e2e/devices`: register an id block.
+    DeviceRegister,
+    /// `GET /networks/:id/e2e/devices`.
+    DeviceList,
+    /// `DELETE /networks/:id/e2e/devices/:did`: drop an unlisted device.
+    DeviceDrop,
+    /// `PUT /networks/:id/e2e/list`: put the signed list.
+    ListPut,
+    /// `GET /networks/:id/e2e/list`.
+    ListFetch,
+    /// `DELETE /networks/:id/e2e/keys`: drop the whole identity.
+    IdentityDelete,
+    /// `GET /networks/:id/e2e/devices/:did/inbox`.
+    InboxFetch,
+    /// `POST /networks/:id/e2e/devices/:did/inbox/ack`.
+    InboxAck,
+    /// `POST /networks/:id/e2e/devices/:did/keys`.
+    KeysPublish,
+    /// `GET /networks/:id/e2e/devices/:did/keys`.
+    KeysFetch,
+    /// `POST /networks/:id/e2e/devices/:did/claim`.
+    Claim,
+    /// `POST /networks/:id/e2e/devices/:did/copies`.
+    Copy,
 }
 
 /// HTTP method of an operation.
@@ -55,39 +74,78 @@ pub enum E2eOperation {
 pub enum E2eMethod {
     Get,
     Post,
+    Put,
     Delete,
 }
 
+/// The place of the device id in a route.
+const DID: &str = ":did";
+
 impl E2eOperation {
-    pub const ALL: [E2eOperation; 7] = [
+    pub const ALL: [E2eOperation; 14] = [
         Self::SendMessage,
+        Self::KeysAnswer,
+        Self::DeviceRegister,
+        Self::DeviceList,
+        Self::DeviceDrop,
+        Self::ListPut,
+        Self::ListFetch,
+        Self::IdentityDelete,
         Self::InboxFetch,
         Self::InboxAck,
         Self::KeysPublish,
         Self::KeysFetch,
-        Self::KeysDelete,
-        Self::KeysAnswer,
+        Self::Claim,
+        Self::Copy,
     ];
 
-    /// First protocol version that has the operation.
+    /// First protocol version that has the operation in the shape that
+    /// Cordiale uses.
     pub fn min_protocol(self) -> u32 {
         match self {
-            Self::SendMessage | Self::KeysAnswer => 42,
-            Self::InboxFetch | Self::InboxAck => 43,
-            Self::KeysPublish | Self::KeysFetch | Self::KeysDelete => 44,
+            Self::Claim | Self::Copy => 50,
+            _ => 49,
         }
     }
 
-    /// Method and path below `/networks/:id`. A KEYS answer goes through the
-    /// send door.
+    /// Method and path below `/networks/:id`. A device id is the `:did`
+    /// segment: use [`E2eOperation::path`] to fill it. A KEYS answer goes
+    /// through the send door.
     pub fn route(self) -> (E2eMethod, &'static str) {
         match self {
             Self::SendMessage | Self::KeysAnswer => (E2eMethod::Post, "/e2e/messages"),
-            Self::InboxFetch => (E2eMethod::Get, "/e2e/inbox"),
-            Self::InboxAck => (E2eMethod::Post, "/e2e/inbox/ack"),
-            Self::KeysPublish => (E2eMethod::Post, "/e2e/keys"),
-            Self::KeysFetch => (E2eMethod::Get, "/e2e/keys"),
-            Self::KeysDelete => (E2eMethod::Delete, "/e2e/keys"),
+            Self::DeviceRegister => (E2eMethod::Post, "/e2e/devices"),
+            Self::DeviceList => (E2eMethod::Get, "/e2e/devices"),
+            Self::DeviceDrop => (E2eMethod::Delete, "/e2e/devices/:did"),
+            Self::ListPut => (E2eMethod::Put, "/e2e/list"),
+            Self::ListFetch => (E2eMethod::Get, "/e2e/list"),
+            Self::IdentityDelete => (E2eMethod::Delete, "/e2e/keys"),
+            Self::InboxFetch => (E2eMethod::Get, "/e2e/devices/:did/inbox"),
+            Self::InboxAck => (E2eMethod::Post, "/e2e/devices/:did/inbox/ack"),
+            Self::KeysPublish => (E2eMethod::Post, "/e2e/devices/:did/keys"),
+            Self::KeysFetch => (E2eMethod::Get, "/e2e/devices/:did/keys"),
+            Self::Claim => (E2eMethod::Post, "/e2e/devices/:did/claim"),
+            Self::Copy => (E2eMethod::Post, "/e2e/devices/:did/copies"),
+        }
+    }
+
+    /// Whether the route names a device.
+    pub fn needs_did(self) -> bool {
+        self.route().1.contains(DID)
+    }
+
+    /// The path below `/networks/:id`. `did` fills the `:did` segment. A
+    /// `did` that is not url-safe base64 of the right length is refused, so
+    /// it can never change the shape of the path. A route without a device
+    /// ignores `did`.
+    pub fn path(self, did: Option<&str>) -> Result<String, WireError> {
+        let template = self.route().1;
+        if !self.needs_did() {
+            return Ok(template.to_string());
+        }
+        match did {
+            Some(did) if is_did_shape(did) => Ok(template.replace(DID, did)),
+            _ => Err(WireError::BadDid),
         }
     }
 
@@ -111,31 +169,132 @@ impl E2eOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::e2e_device_routes::DeviceRoute;
     use crate::e2e_pacing::FAKE_LAG_BANK;
 
+    const DID_TEXT: &str = "If4x36FUomE";
+
     #[test]
-    fn every_operation_has_a_version_and_a_route() {
-        for operation in E2eOperation::ALL {
-            let (_, path) = operation.route();
-            assert!(path.starts_with("/e2e/"), "{operation:?}");
-            assert!(
-                (42..=44).contains(&operation.min_protocol()),
+    fn every_route_matches_section_4f() {
+        let cases = [
+            (
+                E2eOperation::SendMessage,
+                E2eMethod::Post,
+                "/e2e/messages",
+                49,
+            ),
+            (
+                E2eOperation::DeviceRegister,
+                E2eMethod::Post,
+                "/e2e/devices",
+                49,
+            ),
+            (E2eOperation::DeviceList, E2eMethod::Get, "/e2e/devices", 49),
+            (
+                E2eOperation::DeviceDrop,
+                E2eMethod::Delete,
+                "/e2e/devices/If4x36FUomE",
+                49,
+            ),
+            (E2eOperation::ListPut, E2eMethod::Put, "/e2e/list", 49),
+            (E2eOperation::ListFetch, E2eMethod::Get, "/e2e/list", 49),
+            (
+                E2eOperation::IdentityDelete,
+                E2eMethod::Delete,
+                "/e2e/keys",
+                49,
+            ),
+            (
+                E2eOperation::InboxFetch,
+                E2eMethod::Get,
+                "/e2e/devices/If4x36FUomE/inbox",
+                49,
+            ),
+            (
+                E2eOperation::InboxAck,
+                E2eMethod::Post,
+                "/e2e/devices/If4x36FUomE/inbox/ack",
+                49,
+            ),
+            (
+                E2eOperation::KeysPublish,
+                E2eMethod::Post,
+                "/e2e/devices/If4x36FUomE/keys",
+                49,
+            ),
+            (
+                E2eOperation::KeysFetch,
+                E2eMethod::Get,
+                "/e2e/devices/If4x36FUomE/keys",
+                49,
+            ),
+            (
+                E2eOperation::Claim,
+                E2eMethod::Post,
+                "/e2e/devices/If4x36FUomE/claim",
+                50,
+            ),
+            (
+                E2eOperation::Copy,
+                E2eMethod::Post,
+                "/e2e/devices/If4x36FUomE/copies",
+                50,
+            ),
+        ];
+        for (operation, method, path, version) in cases {
+            assert_eq!(operation.route().0, method, "{operation:?}");
+            assert_eq!(
+                operation.path(Some(DID_TEXT)).unwrap(),
+                path,
                 "{operation:?}"
             );
+            assert_eq!(operation.min_protocol(), version, "{operation:?}");
         }
         assert_eq!(
-            E2eOperation::KeysDelete.route(),
-            (E2eMethod::Delete, "/e2e/keys")
+            E2eOperation::KeysAnswer.route(),
+            E2eOperation::SendMessage.route()
         );
     }
 
     #[test]
+    fn a_route_with_a_device_needs_a_valid_did() {
+        for operation in E2eOperation::ALL {
+            assert!(operation.route().1.starts_with("/e2e/"), "{operation:?}");
+            if operation.needs_did() {
+                for did in [None, Some(""), Some("../etc/passwd"), Some("AAAAAAAAAAAA")] {
+                    assert_eq!(operation.path(did), Err(WireError::BadDid), "{operation:?}");
+                }
+            } else {
+                assert!(operation.path(None).is_ok(), "{operation:?}");
+            }
+        }
+    }
+
+    #[test]
     fn availability_follows_the_protocol_version() {
-        assert!(!E2eOperation::InboxFetch.available(None));
-        assert!(!E2eOperation::InboxFetch.available(Some(42)));
-        assert!(E2eOperation::InboxFetch.available(Some(43)));
-        assert!(E2eOperation::SendMessage.available(Some(46)));
-        assert!(!E2eOperation::KeysPublish.available(Some(43)));
+        for operation in E2eOperation::ALL {
+            let min = operation.min_protocol();
+            assert!(!operation.available(None), "{operation:?}");
+            assert!(!operation.available(Some(0)), "{operation:?}");
+            assert!(!operation.available(Some(min - 1)), "{operation:?}");
+            assert!(operation.available(Some(min)), "{operation:?}");
+            assert!(operation.available(Some(min + 1)), "{operation:?}");
+        }
+        assert!(!E2eOperation::Claim.available(Some(49)));
+        assert!(E2eOperation::Claim.available(Some(50)));
+        assert!(!E2eOperation::SendMessage.available(Some(47)));
+    }
+
+    #[test]
+    fn device_routes_agree_with_the_device_route_paths() {
+        assert_eq!(
+            E2eOperation::Claim.path(Some(DID_TEXT)),
+            DeviceRoute::Claim.path(DID_TEXT)
+        );
+        assert_eq!(
+            E2eOperation::Copy.path(Some(DID_TEXT)),
+            DeviceRoute::Copies.path(DID_TEXT)
+        );
     }
 
     #[test]
