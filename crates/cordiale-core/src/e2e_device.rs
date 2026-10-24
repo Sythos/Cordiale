@@ -60,6 +60,9 @@ pub enum E2eError {
     MasterChanged,
     /// The list holds a device key that an earlier list removed.
     RevokedDevice,
+    /// The list signature is valid only over the old raw byte order of the
+    /// keys. The list is not accepted.
+    LegacyListOrder,
 }
 
 impl From<WireError> for E2eError {
@@ -136,7 +139,11 @@ pub fn accept_peer_device(
 
 /// Decodes the key and signature text, then checks the signature. Callers
 /// build `signed` only from input that already passed the canonical checks.
-fn verify_signature(signer_ed25519: &str, signature: &str, signed: &[u8]) -> Result<(), E2eError> {
+pub(crate) fn verify_signature(
+    signer_ed25519: &str,
+    signature: &str,
+    signed: &[u8],
+) -> Result<(), E2eError> {
     let signer_raw = decode_key(signer_ed25519)?;
     let signature_raw = decode_signature(signature)?;
     let signer =

@@ -342,6 +342,28 @@ pub fn signed_list_signed_text(
     Ok(format!("irc-e2e:v2:list:{list_version}:{}", sorted.join(",")).into_bytes())
 }
 
+/// Text that an older build signed for a device list: the same text as
+/// [`signed_list_signed_text`], but the keys are ordered by their raw 32
+/// bytes, not by their plain text.
+///
+/// For the list migration of `e2e_list_migration` only. Only that module may
+/// call it, and only to find out that a list uses the old order. No code may
+/// use it to accept a list or to sign one.
+pub(crate) fn legacy_raw_order_list_signed_text(
+    list_version: u32,
+    device_keys: &[String],
+) -> Result<Vec<u8>, WireError> {
+    check_version(list_version)?;
+    check_list_devices(device_keys)?;
+    let mut raw = Vec::with_capacity(device_keys.len());
+    for key in device_keys {
+        raw.push((decode_key(key)?, key.as_str()));
+    }
+    raw.sort();
+    let keys: Vec<&str> = raw.iter().map(|(_, key)| *key).collect();
+    Ok(format!("irc-e2e:v2:list:{list_version}:{}", keys.join(",")).into_bytes())
+}
+
 /// The `fb` binding: the first 16 bytes of SHA-256 over the sender and
 /// recipient Ed25519 keys, as unpadded standard base64.
 pub fn recipient_binding(sender_ed25519_key: &str, recipient_ed25519_key: &str) -> String {
@@ -989,6 +1011,46 @@ mod tests {
         assert_eq!(
             sort_list_keys(&keys).unwrap(),
             vec![high, KEY_B.to_string(), KEY_A.to_string()]
+        );
+    }
+
+    #[test]
+    fn legacy_text_orders_by_raw_bytes_and_differs_from_the_current_text() {
+        let high = STANDARD_NO_PAD.encode([0xFBu8; 32]);
+        let keys = vec![KEY_A.to_string(), high.clone(), KEY_B.to_string()];
+        // Raw order: all zero, 0xFB, all 0xFF. Text order: "+", "/", "A".
+        assert_eq!(
+            legacy_raw_order_list_signed_text(4, &keys).unwrap(),
+            format!("irc-e2e:v2:list:4:{KEY_A},{high},{KEY_B}").into_bytes()
+        );
+        assert_ne!(
+            legacy_raw_order_list_signed_text(4, &keys).unwrap(),
+            signed_list_signed_text(4, &keys).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_text_equals_the_current_text_for_one_key() {
+        let keys = vec![KEY_A.to_string()];
+        assert_eq!(
+            legacy_raw_order_list_signed_text(2, &keys).unwrap(),
+            signed_list_signed_text(2, &keys).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_text_rejects_bad_lists() {
+        assert_eq!(
+            legacy_raw_order_list_signed_text(0, &[KEY_A.to_string()]),
+            Err(WireError::BadVersion)
+        );
+        assert_eq!(
+            legacy_raw_order_list_signed_text(1, &[]),
+            Err(WireError::BadDeviceCount)
+        );
+        assert_eq!(
+            legacy_raw_order_list_signed_text(1, &[KEY_A.to_string(), KEY_A.to_string()]),
+            Err(WireError::DuplicateDevice)
         );
     }
 

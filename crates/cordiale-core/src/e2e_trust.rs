@@ -40,6 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::e2e_device::{verify_signed_list, E2eError, ListState};
+use crate::e2e_list_migration::has_legacy_order;
 use crate::e2e_wire::{decode_key, ListDecision};
 
 /// What a master key means for a peer that may be known already.
@@ -63,6 +64,10 @@ struct PeerRecord {
     curves: BTreeMap<String, String>,
     revoked: BTreeSet<String>,
     revoked_curves: BTreeSet<String>,
+    /// True after a list from this master verified only in the old raw byte
+    /// order. The list was refused. A valid list clears the mark.
+    #[serde(default)]
+    needs_new_list: bool,
 }
 
 impl PeerRecord {
@@ -74,6 +79,7 @@ impl PeerRecord {
             curves: BTreeMap::new(),
             revoked: BTreeSet::new(),
             revoked_curves: BTreeSet::new(),
+            needs_new_list: false,
         }
     }
 
@@ -186,8 +192,19 @@ impl PeerTrust {
         keys: &[String],
         signature: &str,
     ) -> Result<ListDecision, E2eError> {
-        verify_signed_list(version, keys, master, signature)?;
         let key = peer_key(network, nick);
+        if let Err(err) = verify_signed_list(version, keys, master, signature) {
+            // A list that verifies only in the old raw byte order is refused.
+            // The stored state stays. The peer is marked, and no device is
+            // revoked.
+            if has_legacy_order(version, keys, master, signature) {
+                if let Some(record) = self.peers.get_mut(&key).filter(|r| r.master == master) {
+                    record.needs_new_list = true;
+                }
+                return Err(E2eError::LegacyListOrder);
+            }
+            return Err(err);
+        }
         let mut record = match self.peers.get(&key) {
             Some(record) if record.master != master => return Err(E2eError::MasterChanged),
             Some(record) => record.clone(),
@@ -201,6 +218,7 @@ impl PeerTrust {
         }
         let previous = record.list.keys().to_vec();
         let decision = record.list.apply(version, keys)?;
+        record.needs_new_list = false;
         if decision == ListDecision::Replace {
             for device in previous.iter().filter(|device| !keys.contains(device)) {
                 record.revoked.insert(device.clone());
@@ -237,6 +255,14 @@ impl PeerTrust {
             }
             None => false,
         })
+    }
+
+    /// True when the last list of the peer verified only in the old raw byte
+    /// order. The user needs a new list from the peer.
+    pub fn needs_new_list(&self, network: &str, nick: &str) -> bool {
+        self.peers
+            .get(&peer_key(network, nick))
+            .is_some_and(|record| record.needs_new_list)
     }
 
     /// The Ed25519 keys of the devices in the local list of a peer.
@@ -276,6 +302,24 @@ mod tests {
 
     fn new_keys(count: usize) -> Vec<String> {
         (0..count).map(|_| key_of(&Account::new())).collect()
+    }
+
+    /// Four device keys whose raw byte order differs from the text order.
+    fn keys_in_two_orders() -> Vec<String> {
+        use crate::e2e_wire::{legacy_raw_order_list_signed_text, signed_list_signed_text};
+        loop {
+            let keys = new_keys(4);
+            if signed_list_signed_text(1, &keys).unwrap()
+                != legacy_raw_order_list_signed_text(1, &keys).unwrap()
+            {
+                return keys;
+            }
+        }
+    }
+
+    fn old_order_signature(master: &Account, version: u32, keys: &[String]) -> String {
+        let text = crate::e2e_wire::legacy_raw_order_list_signed_text(version, keys).unwrap();
+        master.sign(&text).to_base64()
     }
 
     fn accept(
@@ -332,6 +376,51 @@ mod tests {
         );
         assert_eq!(trust.master(NET, NICK), None);
         assert!(trust.listed_devices(NET, NICK).is_empty());
+    }
+
+    #[test]
+    fn peer_list_in_the_old_order_is_refused_and_marks_the_peer() {
+        let master = Account::new();
+        let master_key = key_of(&master);
+        let keys = keys_in_two_orders();
+        let first = keys[..2].to_vec();
+        let mut trust = PeerTrust::default();
+        accept(&mut trust, &master, 1, &first).unwrap();
+        let before = trust.clone();
+        let old = old_order_signature(&master, 2, &keys);
+        assert_eq!(
+            trust.accept_list(NET, NICK, &master_key, 2, &keys, &old),
+            Err(E2eError::LegacyListOrder)
+        );
+        // The last good list stays and no device is revoked.
+        assert_eq!(trust.listed_devices(NET, NICK), first.as_slice());
+        assert!(first.iter().all(|k| !trust.is_revoked(NET, NICK, k, None)));
+        assert!(trust.needs_new_list(NET, NICK));
+        let mut unmarked = trust.clone();
+        let record = unmarked.peers.get_mut(&peer_key(NET, NICK)).unwrap();
+        record.needs_new_list = false;
+        assert_eq!(unmarked, before);
+        // The mark survives a restart and a valid list clears it.
+        let mut restored = PeerTrust::from_json(&trust.to_json().unwrap()).unwrap();
+        assert!(restored.needs_new_list(NET, NICK));
+        assert_eq!(
+            accept(&mut restored, &master, 2, &keys),
+            Ok(ListDecision::Replace)
+        );
+        assert!(!restored.needs_new_list(NET, NICK));
+    }
+
+    #[test]
+    fn unknown_peer_with_an_old_order_list_gets_no_record() {
+        let master = Account::new();
+        let keys = keys_in_two_orders();
+        let old = old_order_signature(&master, 1, &keys);
+        let mut trust = PeerTrust::default();
+        assert_eq!(
+            trust.accept_list(NET, NICK, &key_of(&master), 1, &keys, &old),
+            Err(E2eError::LegacyListOrder)
+        );
+        assert_eq!(trust, PeerTrust::default());
     }
 
     #[test]
