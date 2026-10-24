@@ -74,6 +74,9 @@ pub struct IsupportState {
     pub channellen: Option<u64>,
     pub topiclen: Option<u64>,
     pub frame_budget_base: u64,
+    /// Raw NETWORK token of the server (protocol 47), kept exactly as sent.
+    /// `None` when the field is absent or `null`.
+    pub network: Option<String>,
 }
 
 /// Member prefixes assumed before a network's ISUPPORT snapshot arrives,
@@ -178,6 +181,13 @@ pub fn parse_isupport_changed(payload: &Value) -> Option<IsupportChanged> {
         _ => return None,
     };
     let frame_budget_base = positive_integer(payload.get("frame_budget_base")?)?;
+    // The NETWORK token is opaque: no trimming, no case change, no emptiness
+    // check. A present value of another type makes the snapshot invalid.
+    let network = match payload.get("network") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(token)) => Some(token.clone()),
+        Some(_) => return None,
+    };
 
     Some(IsupportChanged {
         network_id,
@@ -196,6 +206,7 @@ pub fn parse_isupport_changed(payload: &Value) -> Option<IsupportChanged> {
             channellen: nullable_positive_integer(payload.get("channellen")?)?,
             topiclen: nullable_positive_integer(payload.get("topiclen")?)?,
             frame_budget_base,
+            network,
         },
     })
 }
@@ -356,6 +367,34 @@ mod tests {
         assert_eq!(parsed.state.prefix_order, ["o", "v"]);
         assert_eq!(parsed.state.channellen, None);
         assert_eq!(parsed.state.maxlist.get("b"), Some(&100));
+    }
+
+    #[test]
+    fn network_token_is_kept_raw_and_null_is_none() {
+        let parsed = parse_isupport_changed(&valid_payload()).expect("valid snapshot");
+        assert_eq!(parsed.state.network, None);
+
+        for token in ["Libera.Chat", " spaced ", "", "ÉLITE"] {
+            let mut payload = valid_payload();
+            payload["network"] = Value::String(token.to_string());
+            let parsed = parse_isupport_changed(&payload).expect("valid snapshot");
+            assert_eq!(parsed.state.network.as_deref(), Some(token));
+        }
+
+        let mut payload = valid_payload();
+        payload["network"] = Value::Null;
+        let parsed = parse_isupport_changed(&payload).expect("null network");
+        assert_eq!(parsed.state.network, None);
+
+        for invalid in [
+            serde_json::json!(7),
+            serde_json::json!(["a"]),
+            serde_json::json!({}),
+        ] {
+            let mut payload = valid_payload();
+            payload["network"] = invalid;
+            assert_eq!(parse_isupport_changed(&payload), None);
+        }
     }
 
     #[test]
