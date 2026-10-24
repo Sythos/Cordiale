@@ -214,7 +214,8 @@ impl PeerTrust {
     }
 
     /// Records the Curve25519 key of a device of a known peer, so a later
-    /// revocation covers it. Returns false for an unknown peer.
+    /// revocation covers it. When the device is already revoked, its curve key
+    /// is revoked too. Returns false for an unknown peer.
     pub fn record_curve(
         &mut self,
         network: &str,
@@ -229,6 +230,9 @@ impl PeerTrust {
                 record
                     .curves
                     .insert(ed25519.to_string(), curve25519.to_string());
+                if record.revoked.contains(ed25519) {
+                    record.revoked_curves.insert(curve25519.to_string());
+                }
                 true
             }
             None => false,
@@ -367,6 +371,28 @@ mod tests {
         .unwrap();
         assert_eq!(trust.record_curve(NET, NICK, &device_key, &curve), Ok(true));
         accept(&mut trust, &master, 2, &new_keys(1)).unwrap();
+        assert!(trust.is_revoked(NET, NICK, "unrelated", Some(&curve)));
+        let restored = PeerTrust::from_json(&trust.to_json().unwrap()).unwrap();
+        assert!(restored.is_revoked(NET, NICK, "unrelated", Some(&curve)));
+    }
+
+    #[test]
+    fn curve_learned_after_removal_is_revoked() {
+        let master = Account::new();
+        let device = Account::new();
+        let device_key = key_of(&device);
+        let curve = device.identity_keys().curve25519.to_base64();
+        let mut trust = PeerTrust::default();
+        accept(
+            &mut trust,
+            &master,
+            1,
+            &[device_key.clone(), key_of(&Account::new())],
+        )
+        .unwrap();
+        accept(&mut trust, &master, 2, &new_keys(1)).unwrap();
+        assert!(!trust.is_revoked(NET, NICK, "unrelated", Some(&curve)));
+        assert_eq!(trust.record_curve(NET, NICK, &device_key, &curve), Ok(true));
         assert!(trust.is_revoked(NET, NICK, "unrelated", Some(&curve)));
         let restored = PeerTrust::from_json(&trust.to_json().unwrap()).unwrap();
         assert!(restored.is_revoked(NET, NICK, "unrelated", Some(&curve)));
