@@ -55,6 +55,11 @@ pub enum E2eError {
     DeviceMismatch,
     /// The list has a lower version, or the same version with other keys.
     StaleList,
+    /// A peer shows a master key other than the one stored. The stored key
+    /// stays until the user acts.
+    MasterChanged,
+    /// The list holds a device key that an earlier list removed.
+    RevokedDevice,
 }
 
 impl From<WireError> for E2eError {
@@ -241,7 +246,7 @@ pub fn verify_signed_list(
 }
 
 /// The newest device list that passed its checks, for one remote user.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListState {
     stored: Option<(u32, Vec<String>)>,
 }

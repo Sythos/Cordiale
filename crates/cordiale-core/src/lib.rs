@@ -64,6 +64,7 @@ pub mod e2e_manage;
 pub mod e2e_pacing;
 pub mod e2e_selfcopy;
 pub mod e2e_store;
+pub mod e2e_trust;
 pub mod e2e_wire;
 pub mod formatting;
 pub mod isupport;
