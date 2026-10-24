@@ -4561,6 +4561,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rate_limited_e2e_claim_keeps_the_wait_the_server_asks_for() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/e2e/devices/AAAAAAAAAAA/claim"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "3")
+                    .set_body_json(serde_json::json!({
+                        "error": "rate_limited",
+                        "retry_after_ms": 1500
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let error = GrappaClient::new(mock_server.uri())
+            .claim_e2e_device_key("abc123", "AAAAAAAAAAA", &ClaimRequest::default())
+            .await
+            .expect_err("should be refused");
+
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
+        assert!(matches!(
+            error,
+            E2eRouteError::Refused {
+                refusal: E2eRefusal::RateLimited,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn a_rate_limited_write_without_a_header_falls_back_to_the_body() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -4809,7 +4840,13 @@ mod tests {
             .send_e2e_copy("abc123", "AAAAAAAAAAA", &copy)
             .await
             .expect_err("copies refusal");
-        assert!(matches!(err, E2eRouteError::Refused(E2eRefusal::InboxFull)));
+        assert!(matches!(
+            err,
+            E2eRouteError::Refused {
+                refusal: E2eRefusal::InboxFull,
+                ..
+            }
+        ));
         let bad = client
             .claim_e2e_device_key("abc123", "../x", &ClaimRequest::default())
             .await;

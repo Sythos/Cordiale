@@ -30,6 +30,8 @@
 //! A 202 answer is an acceptance. It is not a refusal and it is not a
 //! delivery, so this module never sees it.
 
+use std::time::Duration;
+
 use crate::client::GrappaClientError;
 
 /// A refusal of an E2E route: the status and the token, read together.
@@ -155,17 +157,36 @@ impl E2eRefusal {
 /// (transport, URL, size).
 #[derive(Debug)]
 pub enum E2eRouteError {
-    Refused(E2eRefusal),
+    Refused {
+        refusal: E2eRefusal,
+        /// The wait the server asked for, when it gave one.
+        retry_after: Option<Duration>,
+    },
     Client(GrappaClientError),
 }
 
 impl From<GrappaClientError> for E2eRouteError {
     fn from(err: GrappaClientError) -> Self {
         match err {
-            GrappaClientError::Rejected { status, code, .. } => {
-                Self::Refused(E2eRefusal::from_response(status.as_u16(), code.as_deref()))
-            }
+            GrappaClientError::Rejected {
+                status,
+                code,
+                retry_after,
+            } => Self::Refused {
+                refusal: E2eRefusal::from_response(status.as_u16(), code.as_deref()),
+                retry_after,
+            },
             other => Self::Client(other),
+        }
+    }
+}
+
+impl E2eRouteError {
+    /// The wait the server asked for with the refusal, when it gave one.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Refused { retry_after, .. } => *retry_after,
+            Self::Client(err) => err.retry_after(),
         }
     }
 }
@@ -234,12 +255,33 @@ mod tests {
         };
         assert!(matches!(
             E2eRouteError::from(rejected),
-            E2eRouteError::Refused(E2eRefusal::KeyTaken)
+            E2eRouteError::Refused {
+                refusal: E2eRefusal::KeyTaken,
+                retry_after: None
+            }
         ));
         let other = GrappaClientError::InvalidUrl("x".to_string());
         assert!(matches!(
             E2eRouteError::from(other),
             E2eRouteError::Client(_)
+        ));
+    }
+
+    #[test]
+    fn a_refusal_keeps_the_wait_the_server_asked_for() {
+        let rejected = GrappaClientError::Rejected {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            code: Some("rate_limited".to_string()),
+            retry_after: Some(Duration::from_millis(1500)),
+        };
+        let err = E2eRouteError::from(rejected);
+        assert_eq!(err.retry_after(), Some(Duration::from_millis(1500)));
+        assert!(matches!(
+            err,
+            E2eRouteError::Refused {
+                refusal: E2eRefusal::RateLimited,
+                ..
+            }
         ));
     }
 }
