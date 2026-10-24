@@ -60,6 +60,7 @@ pub mod diagnostics;
 pub mod domain;
 pub mod e2e_account;
 pub mod e2e_device;
+pub mod e2e_device_routes;
 pub mod e2e_manage;
 pub mod e2e_pacing;
 pub mod e2e_pairing;

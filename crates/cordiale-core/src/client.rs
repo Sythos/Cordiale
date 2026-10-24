@@ -41,6 +41,7 @@ use crate::admin::{
     AdminVisitorsResponse,
 };
 use crate::backoff::rate_limit_wait;
+use crate::e2e_device_routes::{ClaimRequest, CopyRequest, DeviceRoute};
 use crate::e2e_pacing::{classify_send_response, SendResponse};
 use crate::presence::{PresencePins, PresencePref};
 use crate::profile::{
@@ -837,6 +838,59 @@ impl GrappaClient {
             }
             Err(err) => Err(err),
         }
+    }
+
+    /// `POST /e2e/devices/:did/claim` — takes one one-time key of the device.
+    /// The body is read with `ClaimResponse::from_value`. The route is a
+    /// candidate of protocol 50.
+    pub async fn claim_e2e_device_key(
+        &self,
+        token: &str,
+        did: &str,
+        request: &ClaimRequest,
+    ) -> Result<Value, GrappaClientError> {
+        self.post_e2e_device_route(token, DeviceRoute::Claim, did, request)
+            .await
+    }
+
+    /// `POST /e2e/devices/:did/copies` — puts one encrypted copy in the inbox
+    /// of the device. The body is read with `CopyResponse::from_value`. The
+    /// route is a candidate of protocol 50.
+    pub async fn send_e2e_copy(
+        &self,
+        token: &str,
+        did: &str,
+        request: &CopyRequest,
+    ) -> Result<Value, GrappaClientError> {
+        self.post_e2e_device_route(token, DeviceRoute::Copies, did, request)
+            .await
+    }
+
+    async fn post_e2e_device_route<T: serde::Serialize>(
+        &self,
+        token: &str,
+        route: DeviceRoute,
+        did: &str,
+        request: &T,
+    ) -> Result<Value, GrappaClientError> {
+        let path = route
+            .path(did)
+            .map_err(|_| GrappaClientError::InvalidUrl(format!("bad device id: {did}")))?;
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(path.split('/').filter(|part| !part.is_empty()));
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await?;
+        let response = reject_with_code(response).await?;
+        Ok(response.json::<Value>().await?)
     }
 
     /// `GET /networks/:network_slug/channels/:channel_name/messages` —
@@ -4713,6 +4767,47 @@ mod tests {
             .send_e2e_message("abc123", "libera", &e2e_request())
             .await
             .expect("send_e2e_message")
+    }
+
+    #[tokio::test]
+    async fn e2e_device_routes_post_to_the_device_path() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/e2e/devices/AAAAAAAAAAA/claim"))
+            .and(header("authorization", "Bearer abc123"))
+            .and(body_json(serde_json::json!({})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"did": "AAAAAAAAAAA"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/e2e/devices/AAAAAAAAAAA/copies"))
+            .and(body_json(
+                serde_json::json!({"item_id": "m.d", "ciphertext": "AAEC"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_body_json(serde_json::json!({"error": "inbox_full"})),
+            )
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+        let claim = client
+            .claim_e2e_device_key("abc123", "AAAAAAAAAAA", &ClaimRequest::default())
+            .await
+            .expect("claim");
+        assert_eq!(claim["did"], "AAAAAAAAAAA");
+        let copy = CopyRequest::new("m.d", "AAEC").expect("copy request");
+        let err = client
+            .send_e2e_copy("abc123", "AAAAAAAAAAA", &copy)
+            .await
+            .expect_err("copies refusal");
+        assert_eq!(err.code(), Some("inbox_full"));
+        let bad = client
+            .claim_e2e_device_key("abc123", "../x", &ClaimRequest::default())
+            .await;
+        assert!(matches!(bad, Err(GrappaClientError::InvalidUrl(_))));
     }
 
     #[tokio::test]

@@ -1366,6 +1366,20 @@ successive: chiamate REST in `client.rs`, sessione ECIES con codice di
 controllo, catch-up e pulizia, firma di certificato e lista dopo la conferma,
 collegamento a `session.rs`, stato nello store cifrato.
 
+**Issue 418 (fetta 1 di 8 dell'ombrello 416): rotte per dispositivo `claim` e
+`copies`, formato candidato.** Il testo di Grappa per il protocollo 50 non è
+nel repository e non era raggiungibile, quindi i nomi dei campi sono
+un'**ipotesi da verificare**. Il nuovo modulo `e2e_device_routes.rs` contiene
+`DeviceRoute` (percorsi `/e2e/devices/:did/claim` e `/e2e/devices/:did/copies`,
+con `did` controllato prima di entrare nel percorso), `ClaimRequest` (corpo
+`{}`), `ClaimResponse` (`did`, `one_time_key`), `CopyRequest` (`item_id`,
+`ciphertext`, al massimo 1 MiB) e `CopyResponse` (`item_id`). Le risposte
+ignorano i campi in più; un nome diverso dà `MissingField`. In `client.rs`:
+`claim_e2e_device_key` e `send_e2e_copy` restituiscono il JSON grezzo e i
+rifiuti come `GrappaClientError::Rejected`. Quando si legge il testo di Grappa
+si cambia solo questo modulo. Non c'è ancora un'operazione in
+`E2eOperation` né una versione minima: restano alle fette successive.
+
 ### Cronologia a tempo (v40): regole del server da rispettare
 
 - Unità: millisecondi epoch decimali, da `0` a int64 massimo; ISO-8601,
