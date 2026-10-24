@@ -229,6 +229,9 @@ struct ChatLine {
     // The new nick of a peer rename line (`body` then holds only the text
     // before it); empty when the row has no such action.
     rename-target: string,
+    // This message was sent or received through E2E. Set per message, never
+    // inferred from the query; false when the state is unknown.
+    encrypted: bool,
 }
 
 // One row in the admin Sessions list.
@@ -1339,6 +1342,9 @@ export component AppWindow inherits Window {
     // A DM can be selected before its Phoenix topic joins and history load
     // finish. Keep composition disabled until Rust marks it ready.
     in property <bool> current-query-ready: false;
+    // The open query has a confirmed active E2E send path; false when the
+    // state is unknown, lost or not E2E.
+    in property <bool> current-query-e2e: false;
     // Only show the roster after Grappa confirms this window is joined.
     // Autojoin entries in `/boot` can be known but not currently connected.
     in property <bool> current-window-is-joined: false;
@@ -4158,6 +4164,12 @@ export component AppWindow inherits Window {
                             font-italic: line.italic;
                         }
 
+                        if line.encrypted : Text {
+                            text: "🔒 ";
+                            color: line.timestamp-color;
+                            font-size: 10px;
+                        }
+
                         if line.nick != "" : MemberContextMenu {
                             target-nick: line.nick;
                             is-chat-message: true;
@@ -4370,12 +4382,26 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Button {
-                    text: "➤";
-                    accessible-label: @tr("Send");
+                Rectangle {
                     width: 36px;
-                    enabled: current-query ? current-query-ready : has-selected-channel;
-                    clicked => { send-chat-message(compose-text); }
+
+                    Button {
+                        text: "➤";
+                        accessible-label: @tr("Send");
+                        width: parent.width;
+                        height: parent.height;
+                        enabled: current-query ? current-query-ready : has-selected-channel;
+                        clicked => { send-chat-message(compose-text); }
+                    }
+
+                    // Small lock at the lower-left of the icon. It has no
+                    // touch area, so the click goes to the button below.
+                    if current-query && current-query-ready && current-query-e2e : Text {
+                        text: "🔒";
+                        font-size: 9px;
+                        x: 5px;
+                        y: parent.height - self.height - 3px;
+                    }
                 }
             }
         }

@@ -1438,6 +1438,10 @@ struct WindowState {
     current_query: bool,
     current_query_ready: bool,
     current_channel: Option<(String, String)>,
+    /// Query windows whose E2E send path the client confirmed as active.
+    /// A missing entry means legacy, clear text, lost or unknown, so the
+    /// send button shows no lock.
+    e2e_send_confirmed: std::collections::HashSet<(String, String)>,
 }
 
 struct WorkerState {
@@ -1569,6 +1573,7 @@ impl WorkerState {
                 current_query: false,
                 current_query_ready: false,
                 current_channel: None,
+                e2e_send_confirmed: std::collections::HashSet::new(),
             },
             networks: NetworkState {
                 network_ids: HashMap::new(),
@@ -7573,6 +7578,10 @@ struct RenderedMessage {
     /// The new nick of a peer rename line, read from `meta.new_nick`. It is
     /// `Some` only for a valid nick; the row then shows it as an action.
     rename_to: Option<String>,
+    /// The message was sent or received through E2E. Only the code that
+    /// validated and decrypted it, or sent it encrypted, sets this; parsed
+    /// wire rows start as `false`, so an unknown state shows no lock.
+    encrypted: bool,
 }
 
 /// Whether `nick` can be the target of a rename action: one token with no
@@ -7584,6 +7593,62 @@ fn valid_rename_target(nick: &str) -> bool {
         && !nick
             .chars()
             .any(|ch| ch.is_whitespace() || ch.is_control() || ",@*?".contains(ch))
+}
+
+/// The `user@host` mask the server attached to a join/part/quit event, or
+/// `None` when the event carries none. It is read only from the event itself
+/// (top level or `meta`), as one `userhost`/`user_host`/`mask` string or as a
+/// `user` + `host` pair, and kept whole so an IPv6 host is never cut.
+fn event_user_mask(payload: &Value) -> Option<String> {
+    fn text<'a>(source: &'a Value, key: &str) -> Option<&'a str> {
+        source
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && !value
+                        .chars()
+                        .any(|ch| ch.is_whitespace() || ch.is_control())
+            })
+    }
+    for source in [Some(payload), payload.get("meta")].into_iter().flatten() {
+        for key in ["userhost", "user_host", "mask"] {
+            if let Some(mask) = text(source, key).filter(|mask| mask.contains('@')) {
+                return Some(mask.to_string());
+            }
+        }
+        if let (Some(user), Some(host)) = (text(source, "user"), text(source, "host")) {
+            if !user.contains('@') {
+                return Some(format!("{user}@{host}"));
+            }
+        }
+    }
+    None
+}
+
+/// ` (mask)` for a join/part/quit line, empty without a mask.
+fn mask_suffix(payload: &Value) -> String {
+    event_user_mask(payload)
+        .map(|mask| format!(" ({mask})"))
+        .unwrap_or_default()
+}
+
+/// ` #channel` for a join/part line, empty without a channel.
+fn channel_suffix(payload: &Value) -> String {
+    payload
+        .get("channel")
+        .and_then(Value::as_str)
+        .filter(|channel| !channel.is_empty())
+        .map(|channel| format!(" {channel}"))
+        .unwrap_or_default()
+}
+
+/// ` (reason)` for a part/quit line, empty without a reason.
+fn reason_suffix(reason: Option<&str>) -> String {
+    reason
+        .map(|reason| format!(" ({reason})"))
+        .unwrap_or_default()
 }
 
 /// Shared `from`/`nick`/`sender` + `body`/`message` extraction for both
@@ -7620,15 +7685,25 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
 
     let mut rename_to = None;
     let event_text = match kind {
-        Some("join") => Some(format!("→ {} joined", nick.unwrap_or("someone"))),
-        Some("part") => Some(match reason {
-            Some(reason) => format!("← {} left ({reason})", nick.unwrap_or("someone")),
-            None => format!("← {} left", nick.unwrap_or("someone")),
-        }),
-        Some("quit") => Some(match reason {
-            Some(reason) => format!("⇐ {} quit ({reason})", nick.unwrap_or("someone")),
-            None => format!("⇐ {} quit", nick.unwrap_or("someone")),
-        }),
+        Some("join") => Some(format!(
+            "→ {} has joined{}{}",
+            nick.unwrap_or("someone"),
+            channel_suffix(payload),
+            mask_suffix(payload)
+        )),
+        Some("part") => Some(format!(
+            "← {} has left{}{}{}",
+            nick.unwrap_or("someone"),
+            channel_suffix(payload),
+            reason_suffix(reason),
+            mask_suffix(payload)
+        )),
+        Some("quit") => Some(format!(
+            "⇐ {} has quit{}{}",
+            nick.unwrap_or("someone"),
+            reason_suffix(reason),
+            mask_suffix(payload)
+        )),
         // Real, observed shape (`docs/protocol-notes.md` doesn't mention
         // this kind at all): old nick in `sender` (already captured
         // above), new one in `meta.new_nick`.
@@ -7710,6 +7785,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             server_time: server_time(payload),
             presence_noise,
             rename_to,
+            encrypted: false,
         };
     }
 
@@ -7729,6 +7805,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             server_time: server_time(payload),
             presence_noise,
             rename_to: None,
+            encrypted: false,
         },
         (None, Some(body)) => RenderedMessage {
             timestamp,
@@ -7739,6 +7816,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             server_time: server_time(payload),
             presence_noise,
             rename_to: None,
+            encrypted: false,
         },
         _ => RenderedMessage {
             timestamp,
@@ -7751,6 +7829,7 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             server_time: server_time(payload),
             presence_noise,
             rename_to: None,
+            encrypted: false,
         },
     }
 }
@@ -8855,7 +8934,14 @@ fn chat_line_from_message(
             .into(),
         mention,
         rename_target: rename_target.into(),
+        encrypted: message_lock_visible(message),
     }
+}
+
+/// Whether a row shows the E2E lock: only an ordinary chat message that was
+/// encrypted. System and service rows (italic or without a nick) never do.
+fn message_lock_visible(message: &RenderedMessage) -> bool {
+    message.encrypted && !message.italic && message.nick.is_some()
 }
 
 /// The text a row shows as ordinary text, and the new nick of its rename

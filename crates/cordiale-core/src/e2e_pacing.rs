@@ -27,7 +27,7 @@
 //! four states stay separate: KEYS answer pacing, the fake-lag bank (a
 //! constant that no pacer here uses), KEYS reassembly and send status.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -41,8 +41,33 @@ pub const KEYS_ANSWER_INTERVAL: Duration = Duration::from_secs(15);
 /// Fake-lag bank of the relay. It is not a pacing interval of the client.
 pub const FAKE_LAG_BANK: Duration = Duration::from_secs(22);
 
+/// Minimum time between two KEYREQ to the same nickname (protocol 46).
+pub const KEYREQ_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Pacing values of the MD-3 candidate (irc-olm PR #4). They are not final.
+/// Update path: change only this module when the candidate is merged or
+/// changes, and check the tests that name a value.
+pub mod md3_candidate {
+    use std::time::Duration;
+
+    /// Minimum time between two re-key requests to the same nickname.
+    pub const REKEY_INTERVAL: Duration = Duration::from_secs(60);
+
+    /// An outgoing message that waits longer than this is dropped.
+    pub const OUTGOING_QUEUE_TTL: Duration = Duration::from_secs(90);
+
+    /// Minimum time between two one-time key requests to the same nickname.
+    pub const ONE_TIME_KEY_INTERVAL: Duration = Duration::from_secs(60);
+
+    /// Most one-time key requests to all nicknames in `ONE_TIME_KEY_WINDOW`.
+    pub const ONE_TIME_KEY_GLOBAL_LIMIT: usize = 30;
+
+    /// Window of the global one-time key limit.
+    pub const ONE_TIME_KEY_WINDOW: Duration = Duration::from_secs(3600);
+}
+
 /// Minimum time between two one-time key requests to the same nickname.
-pub const ONE_TIME_KEY_INTERVAL: Duration = Duration::from_secs(60);
+pub const ONE_TIME_KEY_INTERVAL: Duration = md3_candidate::ONE_TIME_KEY_INTERVAL;
 
 /// A send must arrive at least this long before its deadline.
 pub const SEND_SAFETY_MARGIN: Duration = Duration::from_secs(2);
@@ -139,21 +164,69 @@ pub enum KeyChoice {
     Fallback,
 }
 
-/// Decides between a one-time key and the fallback, per nickname.
+/// Global limit: at most `limit` events in any window of `window`.
+#[derive(Debug, Clone)]
+pub struct WindowLimiter {
+    limit: usize,
+    window: Duration,
+    events: VecDeque<Duration>,
+}
+
+impl WindowLimiter {
+    pub fn new(limit: usize, window: Duration) -> Self {
+        Self {
+            limit,
+            window,
+            events: VecDeque::new(),
+        }
+    }
+
+    /// Whether `try_acquire` would succeed. It records nothing.
+    pub fn is_ready(&mut self, now: Duration) -> bool {
+        while self
+            .events
+            .front()
+            .is_some_and(|first| now.saturating_sub(*first) >= self.window)
+        {
+            self.events.pop_front();
+        }
+        self.events.len() < self.limit
+    }
+
+    pub fn try_acquire(&mut self, now: Duration) -> bool {
+        if !self.is_ready(now) {
+            return false;
+        }
+        self.events.push_back(now);
+        true
+    }
+}
+
+/// Decides between a one-time key and the fallback. The limit of one request
+/// for each nickname and the global hourly limit both apply. A refused
+/// request does not use any limit.
 #[derive(Debug, Clone)]
 pub struct OneTimeKeyPacer {
     limiter: IntervalLimiter,
+    global: WindowLimiter,
 }
 
 impl OneTimeKeyPacer {
     pub fn new() -> Self {
         Self {
             limiter: IntervalLimiter::new(ONE_TIME_KEY_INTERVAL),
+            global: WindowLimiter::new(
+                md3_candidate::ONE_TIME_KEY_GLOBAL_LIMIT,
+                md3_candidate::ONE_TIME_KEY_WINDOW,
+            ),
         }
     }
 
     pub fn choose(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> KeyChoice {
-        if self.limiter.try_acquire(nick, casemapping, now) {
+        if self.global.is_ready(now)
+            && self.limiter.try_acquire(nick, casemapping, now)
+            && self.global.try_acquire(now)
+        {
             KeyChoice::OneTime
         } else {
             KeyChoice::Fallback
@@ -242,6 +315,79 @@ impl ReassemblyGate {
 
     pub fn may_send_keyreq(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> bool {
         !self.is_active(nick, casemapping, now)
+    }
+}
+
+/// Why a KEYREQ may not go out now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyReqRefusal {
+    /// A fragmented KEYS answer of the nickname is being reassembled.
+    Reassembling,
+    /// The last KEYREQ to the nickname is less than 30 seconds old.
+    Interval,
+}
+
+/// KEYREQ pacing: one request for each nickname in 30 seconds, and none while
+/// a KEYS answer of that nickname is in reassembly.
+///
+/// The reassembly timeout is a parameter. It must equal the timeout that the
+/// server uses for a fragmented KEYS answer (Grappa, protocol 46). This
+/// repository has no copy of that rule, so the caller owns the value.
+#[derive(Debug, Clone)]
+pub struct KeyReqPacer {
+    limiter: IntervalLimiter,
+    gate: ReassemblyGate,
+}
+
+impl KeyReqPacer {
+    pub fn new(reassembly_timeout: Duration) -> Self {
+        Self {
+            limiter: IntervalLimiter::new(KEYREQ_INTERVAL),
+            gate: ReassemblyGate::new(reassembly_timeout),
+        }
+    }
+
+    /// A changed casemapping clears both the interval and the reassembly
+    /// state. Every public call starts here, so the two halves never differ.
+    fn sync_casemapping(&mut self, casemapping: CaseMapping) {
+        self.limiter.sync_casemapping(casemapping);
+        self.gate.sync_casemapping(casemapping);
+    }
+
+    /// A KEYS fragment arrived: the timer of its message restarts.
+    pub fn note_fragment(
+        &mut self,
+        nick: &str,
+        msgid: &str,
+        casemapping: CaseMapping,
+        now: Duration,
+    ) {
+        self.sync_casemapping(casemapping);
+        self.gate.note_fragment(nick, msgid, casemapping, now);
+    }
+
+    /// The reassembly of a KEYS answer ended.
+    pub fn finish(&mut self, nick: &str, msgid: &str, casemapping: CaseMapping) {
+        self.sync_casemapping(casemapping);
+        self.gate.finish(nick, msgid, casemapping);
+    }
+
+    /// Ask to send a KEYREQ. A refusal uses no interval.
+    pub fn try_send(
+        &mut self,
+        nick: &str,
+        casemapping: CaseMapping,
+        now: Duration,
+    ) -> Result<(), KeyReqRefusal> {
+        self.sync_casemapping(casemapping);
+        if !self.gate.may_send_keyreq(nick, casemapping, now) {
+            return Err(KeyReqRefusal::Reassembling);
+        }
+        if self.limiter.try_acquire(nick, casemapping, now) {
+            Ok(())
+        } else {
+            Err(KeyReqRefusal::Interval)
+        }
     }
 }
 
@@ -410,6 +556,117 @@ impl SendTracker {
     pub fn apply_dropped_event(&mut self, payload: &Value) -> Result<bool, WireError> {
         let event = SendDropped::from_value(payload)?;
         Ok(self.apply_dropped(&event.id, event.reason))
+    }
+}
+
+/// Wire name of the drop event, as in the `kind` field of the payload.
+pub const SEND_DROPPED_KIND: &str = "e2e_send_dropped";
+
+/// Identity of one send: network, target and message id. Two sends match
+/// only when all three are equal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SendKey {
+    pub network: String,
+    pub target: String,
+    pub message_id: String,
+}
+
+impl SendKey {
+    pub fn new(network: &str, target: &str, message_id: &str) -> Self {
+        Self {
+            network: network.to_string(),
+            target: target.to_string(),
+            message_id: message_id.to_string(),
+        }
+    }
+}
+
+/// A parsed `e2e_send_dropped` event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendDropped {
+    pub key: SendKey,
+    pub reason: DropReason,
+}
+
+impl SendDropped {
+    /// Read the event payload. Return `None` when the kind is another one,
+    /// a field is missing or not a string, or the reason is not known. The
+    /// field names `network`, `target`, `message_id` and `reason` are an
+    /// assumption: check them against the protocol 47 contract.
+    pub fn from_payload(payload: &Value) -> Option<Self> {
+        if payload.get("kind")?.as_str()? != SEND_DROPPED_KIND {
+            return None;
+        }
+        Some(Self {
+            key: SendKey::new(
+                payload.get("network")?.as_str()?,
+                payload.get("target")?.as_str()?,
+                payload.get("message_id")?.as_str()?,
+            ),
+            reason: DropReason::from_wire(payload.get("reason")?.as_str()?)?,
+        })
+    }
+}
+
+/// Local status of every send, by [`SendKey`]. It routes a response or a
+/// drop event to the matching send only.
+#[derive(Debug, Clone, Default)]
+pub struct SendBook {
+    sends: HashMap<SendKey, SendStatus>,
+}
+
+impl SendBook {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a send as pending. A known send keeps its status.
+    pub fn start(&mut self, key: SendKey) {
+        self.sends.entry(key).or_insert(SendStatus::Pending);
+    }
+
+    pub fn status(&self, key: &SendKey) -> Option<SendStatus> {
+        self.sends.get(key).copied()
+    }
+
+    pub fn remove(&mut self, key: &SendKey) -> Option<SendStatus> {
+        self.sends.remove(key)
+    }
+
+    /// Apply an HTTP answer to the matching pending send. Return `true`
+    /// when the status changed.
+    pub fn apply_response(&mut self, key: &SendKey, response: SendResponse) -> bool {
+        let next = match response {
+            SendResponse::Accepted => SendStatus::Accepted,
+            SendResponse::Failed(failure) => SendStatus::Failed(failure),
+            SendResponse::Unexpected(_) => return false,
+        };
+        match self.sends.get_mut(key) {
+            Some(status @ SendStatus::Pending) => {
+                *status = next;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Apply a drop event to the matching pending or accepted send. An
+    /// unknown or final send changes nothing.
+    pub fn apply_dropped(&mut self, event: &SendDropped) -> bool {
+        match self.sends.get_mut(&event.key) {
+            Some(status @ (SendStatus::Pending | SendStatus::Accepted)) => {
+                *status = SendStatus::Dropped(event.reason);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Route one event payload. Return the event when it is a drop event
+    /// that changed a send.
+    pub fn apply_payload(&mut self, payload: &Value) -> Option<SendDropped> {
+        let event = SendDropped::from_payload(payload)?;
+        self.apply_dropped(&event).then_some(event)
     }
 }
 
@@ -713,6 +970,141 @@ mod tests {
         );
     }
 
+    fn key(id: &str) -> SendKey {
+        SendKey::new("libera", "bob", id)
+    }
+
+    fn dropped_payload(network: &str, target: &str, id: &str, reason: &str) -> Value {
+        serde_json::json!({
+            "kind": "e2e_send_dropped",
+            "network": network,
+            "target": target,
+            "message_id": id,
+            "reason": reason,
+        })
+    }
+
+    #[test]
+    fn dropped_event_parses_and_rejects_bad_payloads() {
+        let event = SendDropped::from_payload(&dropped_payload("libera", "bob", "m1", "late"))
+            .expect("event");
+        assert_eq!(event.key, key("m1"));
+        assert_eq!(event.reason, DropReason::Late);
+        assert_eq!(
+            SendDropped::from_payload(&dropped_payload("libera", "bob", "m1", "other")),
+            None
+        );
+        let mut other_kind = dropped_payload("libera", "bob", "m1", "late");
+        other_kind["kind"] = Value::from("message");
+        assert_eq!(SendDropped::from_payload(&other_kind), None);
+        let mut missing = dropped_payload("libera", "bob", "m1", "late");
+        missing.as_object_mut().expect("object").remove("target");
+        assert_eq!(SendDropped::from_payload(&missing), None);
+    }
+
+    #[test]
+    fn book_accepted_response_is_not_delivered() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        assert!(book.apply_response(&key("m1"), SendResponse::Accepted));
+        assert_eq!(book.status(&key("m1")), Some(SendStatus::Accepted));
+        // A repeated answer changes nothing.
+        assert!(!book.apply_response(&key("m1"), SendResponse::Accepted));
+    }
+
+    #[test]
+    fn book_too_late_expires_only_the_matching_send() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        book.start(key("m2"));
+        let too_late = classify_send_response(422, Some("too_late"));
+        assert!(book.apply_response(&key("m1"), too_late));
+        assert_eq!(
+            book.status(&key("m1")),
+            Some(SendStatus::Failed(SendFailure::TooLate))
+        );
+        assert_eq!(book.status(&key("m2")), Some(SendStatus::Pending));
+    }
+
+    #[test]
+    fn book_each_drop_reason_updates_only_its_send() {
+        for reason in ["late", "send_failed", "session_ended"] {
+            let mut book = SendBook::new();
+            book.start(key("m1"));
+            book.start(key("m2"));
+            let payload = dropped_payload("libera", "bob", "m2", reason);
+            let event = book.apply_payload(&payload).expect("applied");
+            assert_eq!(Some(event.reason), DropReason::from_wire(reason));
+            assert_eq!(book.status(&key("m1")), Some(SendStatus::Pending));
+            assert_eq!(
+                book.status(&key("m2")),
+                Some(SendStatus::Dropped(event.reason))
+            );
+        }
+    }
+
+    #[test]
+    fn book_matches_network_and_target_too() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        assert!(book
+            .apply_payload(&dropped_payload("other", "bob", "m1", "late"))
+            .is_none());
+        assert!(book
+            .apply_payload(&dropped_payload("libera", "carol", "m1", "late"))
+            .is_none());
+        assert_eq!(book.status(&key("m1")), Some(SendStatus::Pending));
+    }
+
+    #[test]
+    fn book_duplicate_unknown_and_late_events_change_nothing() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        let payload = dropped_payload("libera", "bob", "m1", "late");
+        assert!(book.apply_payload(&payload).is_some());
+        // Duplicate, then a different reason for the same final send.
+        assert!(book.apply_payload(&payload).is_none());
+        let other = dropped_payload("libera", "bob", "m1", "send_failed");
+        assert!(book.apply_payload(&other).is_none());
+        // Unknown send.
+        let unknown = dropped_payload("libera", "bob", "zz", "late");
+        assert!(book.apply_payload(&unknown).is_none());
+        assert_eq!(book.status(&key("zz")), None);
+        // A late event does not touch a later send: the old one is removed.
+        book.remove(&key("m1"));
+        book.start(key("m3"));
+        assert!(book.apply_payload(&payload).is_none());
+        assert_eq!(book.status(&key("m3")), Some(SendStatus::Pending));
+    }
+
+    #[test]
+    fn book_out_of_order_answer_after_drop_is_ignored() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        let payload = dropped_payload("libera", "bob", "m1", "session_ended");
+        assert!(book.apply_payload(&payload).is_some());
+        assert!(!book.apply_response(&key("m1"), SendResponse::Accepted));
+        assert_eq!(
+            book.status(&key("m1")),
+            Some(SendStatus::Dropped(DropReason::SessionEnded))
+        );
+    }
+
+    #[test]
+    fn book_drop_before_accepted_answer_then_unexpected_status() {
+        let mut book = SendBook::new();
+        book.start(key("m1"));
+        assert!(!book.apply_response(&key("m1"), SendResponse::Unexpected(500)));
+        assert_eq!(book.status(&key("m1")), Some(SendStatus::Pending));
+        assert!(book.apply_response(&key("m1"), SendResponse::Accepted));
+        let payload = dropped_payload("libera", "bob", "m1", "send_failed");
+        assert!(book.apply_payload(&payload).is_some());
+        assert_eq!(
+            book.status(&key("m1")),
+            Some(SendStatus::Dropped(DropReason::SendFailed))
+        );
+    }
+
     #[test]
     fn limiter_clears_state_when_casemapping_changes() {
         let mut limiter = keys_answer_limiter();
@@ -743,6 +1135,23 @@ mod tests {
     }
 
     #[test]
+    fn keyreq_pacer_clears_both_halves_when_fragment_changes_casemapping() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(0)), Ok(()));
+        pacer.note_fragment("[bob]", "A", RFC, secs(1));
+        pacer.finish("[bob]", "A", RFC);
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(2)), Ok(()));
+    }
+
+    #[test]
+    fn keyreq_pacer_clears_fragment_state_when_casemapping_returns() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(0)), Ok(()));
+        pacer.note_fragment("[bob]", "A", RFC, secs(1));
+        assert_eq!(pacer.try_send("[bob]", ASCII, secs(2)), Ok(()));
+    }
+
+    #[test]
     fn remove_drops_a_send_entry() {
         let mut tracker = SendTracker::new();
         tracker.start("m1");
@@ -757,5 +1166,75 @@ mod tests {
         let clock = MonotonicClock::new();
         let a = clock.now();
         assert!(clock.now() >= a);
+    }
+
+    #[test]
+    fn keyreq_once_per_nick_every_30_seconds() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        assert_eq!(pacer.try_send("bob", ASCII, secs(0)), Ok(()));
+        assert_eq!(
+            pacer.try_send("BOB", ASCII, secs(29)),
+            Err(KeyReqRefusal::Interval)
+        );
+        assert_eq!(pacer.try_send("carol", ASCII, secs(29)), Ok(()));
+        assert_eq!(pacer.try_send("bob", ASCII, secs(30)), Ok(()));
+    }
+
+    #[test]
+    fn keyreq_waits_for_reassembly_and_keeps_its_interval() {
+        let mut pacer = KeyReqPacer::new(secs(10));
+        pacer.note_fragment("bob", "A", ASCII, secs(0));
+        assert_eq!(
+            pacer.try_send("bob", ASCII, secs(5)),
+            Err(KeyReqRefusal::Reassembling)
+        );
+        // A new fragment restarts the timer.
+        pacer.note_fragment("bob", "A", ASCII, secs(8));
+        assert_eq!(
+            pacer.try_send("bob", ASCII, secs(17)),
+            Err(KeyReqRefusal::Reassembling)
+        );
+        // A refusal used no interval: the first send goes at once.
+        assert_eq!(pacer.try_send("bob", ASCII, secs(18)), Ok(()));
+        assert_eq!(
+            pacer.try_send("bob", ASCII, secs(40)),
+            Err(KeyReqRefusal::Interval)
+        );
+        pacer.note_fragment("bob", "B", ASCII, secs(48));
+        pacer.finish("bob", "B", ASCII);
+        assert_eq!(pacer.try_send("bob", ASCII, secs(48)), Ok(()));
+    }
+
+    #[test]
+    fn keys_interval_and_fake_lag_bank_are_separate_values() {
+        let mut limiter = keys_answer_limiter();
+        assert!(limiter.try_acquire("bob", ASCII, secs(0)));
+        assert!(!limiter.try_acquire("bob", ASCII, secs(14)));
+        // 15 seconds is enough, although the bank is 22 seconds.
+        assert!(limiter.try_acquire("bob", ASCII, secs(15)));
+        assert!(KEYS_ANSWER_INTERVAL < FAKE_LAG_BANK);
+    }
+
+    #[test]
+    fn one_time_key_global_limit_per_hour() {
+        let mut pacer = OneTimeKeyPacer::new();
+        for i in 0..30u64 {
+            let nick = format!("nick{i}");
+            assert_eq!(pacer.choose(&nick, ASCII, secs(i)), KeyChoice::OneTime);
+        }
+        assert_eq!(pacer.choose("extra", ASCII, secs(30)), KeyChoice::Fallback);
+        // A refused request used no per-nick interval.
+        assert_eq!(pacer.choose("extra", ASCII, secs(3600)), KeyChoice::OneTime);
+        // The first grant has left the window at 3600 seconds.
+        assert_eq!(pacer.choose("later", ASCII, secs(3601)), KeyChoice::OneTime);
+    }
+
+    #[test]
+    fn candidate_values_are_the_md3_numbers() {
+        assert_eq!(md3_candidate::REKEY_INTERVAL, secs(60));
+        assert_eq!(md3_candidate::OUTGOING_QUEUE_TTL, secs(90));
+        assert_eq!(md3_candidate::ONE_TIME_KEY_INTERVAL, secs(60));
+        assert_eq!(md3_candidate::ONE_TIME_KEY_GLOBAL_LIMIT, 30);
+        assert_eq!(md3_candidate::ONE_TIME_KEY_WINDOW, secs(3600));
     }
 }

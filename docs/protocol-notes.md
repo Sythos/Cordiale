@@ -1242,10 +1242,10 @@ voce qui sotto lo richiede.
 | 40 | Cursori a tempo `before_time`, `after_time`, `around_time` (millisecondi epoch) sulla cronologia | Livello REST pronto: `GrappaClient::fetch_messages_by_time` con `HistoryTimeCursor`. Un solo cursore per chiamata, quindi mai insieme a un cursore a id (il server risponde 400 a due qualsiasi dei sei). Rifiutato prima dell'invio sotto la 40 o con versione ignota, perché un server vecchio ignora il parametro e risponde con l'ultima pagina. Nessun chiamante nella UI: serve solo alla parità di protocollo e non blocca l'E2E. La cronologia in uso resta a id. |
 | 41 | `truncated` in `mentions_bundle` | Già supportato (`frames.rs`, riga `mentions-truncated`). |
 | 42 | Relay E2E: `POST /networks/:id/e2e/messages`, evento `e2e_message` | In attesa del contratto per dispositivo (vedi sotto). Tipizzato solo il corpo della richiesta di invio (`E2eSendRequest`, issue 358); risposta, evento `e2e_message` e chiamata del client non sono implementati. |
-| 43 | Coda offline: `GET /networks/:id/e2e/inbox`, `POST …/inbox/ack`, `id` in `e2e_message` | In attesa del contratto per dispositivo. Non implementato. |
+| 43 | Coda offline: `GET /networks/:id/e2e/inbox`, `POST …/inbox/ack`, `id` in `e2e_message` | In attesa del contratto per dispositivo. Le regole pure di S1 (issue 388) stanno in `e2e_selfcopy.rs`: una copia per ogni altro dispositivo, limiti dell'inbox, scadenza, deduplica, `ack` per ogni elemento gestito (nessun `ack` se la scrittura nella cronologia cifrata fallisce), stato «consegnato» solo con `ack` del dispositivo, nessuna storia ai dispositivi nuovi. Mancano le chiamate REST, il motore Olm (`CopyCipher`) e la cronologia cifrata: dipendono da #387 e dal contratto 49. |
 | 44 | Bundle di chiavi: `POST`/`GET`/`DELETE /networks/:id/e2e/keys` | In attesa del contratto per dispositivo. Non implementato. |
 | 45 | Buste di inbox e 202 dell'invio dichiarate nello schema generato | Nessun nuovo byte sul filo e nessun endpoint nuovo: non richiede codice. |
-| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Restano da tipizzare risposta, rifiuti ed evento `e2e_send_dropped`. Il pacing a runtime è dell'issue 359. |
+| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Issue 384: `GrappaClient::send_e2e_message` (`POST /networks/:id/e2e/messages`) classifica 202, 422 `too_late` e 400 con `classify_send_response`; `SendBook` e `route_e2e_send_dropped` (`session.rs`) applicano una volta sola l'evento `e2e_send_dropped`, per chiave rete, destinatario e id messaggio. **Non verificato sul sorgente di Grappa:** i nomi dei campi dell'evento (`network`, `target`, `message_id`, `reason`) sono un'ipotesi da controllare sul contratto del protocollo 47; il corpo del 202 non si legge. Il pacing a runtime è dell'issue 359. |
 
 `E2eSendRequest` (fonte: CLIENT_PROTOCOL §4f, PR 2446 di Grappa) è rigorosa:
 campo mancante, sconosciuto o di tipo sbagliato è un errore tipizzato
@@ -1332,6 +1332,24 @@ Grappa e la PR 4 di irc-olm; **non approvata**. Da confermare prima di
 congelare: definizione di N, ordine delle chiavi, separatore. Se un byte
 cambia, si aggiornano costruttori e vettori. Nessuna firma, nessuna verifica,
 nessun collegamento a `credentials.rs` (issue 357 e successive).
+
+**Fase 2b (issue 379): formato candidato completato, ancora non approvato.**
+In `e2e_wire.rs`: `signed_list_signed_text` ora **ordina** le chiavi (chiavi
+intere, in ordine crescente sui 32 byte grezzi, non sul testo base64; la scelta
+è del candidato e non è confermata) e le unisce con la virgola;
+`sort_list_keys` è l'unico punto dell'ordine. `parse_device_certificate_signed_text`
+è l'inverso stretto di `device_certificate_signed_text`: versione decimale
+senza segno né zeri iniziali, chiave canonica. In `e2e_device.rs`:
+`VersionedDeviceCertificate`, `build_device_certificate`,
+`verify_device_certificate(_bytes)`, `build_signed_list_signature` e
+`verify_signed_list`; ogni input non canonico è scartato prima della verifica
+della firma. Test nuovi sul `did` (alfabeto, padding, lunghezza, chiave di
+dimensione sbagliata); i due vettori restano invariati. Il file
+`docs/e2e-contract.md` non esiste: queste note sono il contratto locale.
+`credentials.rs` contiene solo archivi di credenziali e nessun metadato di
+dispositivo: il collegamento ai dati del dispositivo resta aperto finché non
+esiste l'archivio dell'account Olm. Quando la PR 4 di irc-olm e il
+coordinamento MD-1/MD-3 sono uniti, si aggiornano costruttore, parser e vettori.
 
 ### Cronologia a tempo (v40): regole del server da rispettare
 
