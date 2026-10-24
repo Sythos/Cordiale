@@ -22,7 +22,9 @@
 
 //! Encrypted local state of the E2E device: the Olm account and sessions.
 //!
-//! One file holds the Olm account and the Olm sessions. The file is sealed
+//! One file holds the Olm account, the Olm sessions, the master key, the own
+//! signed device list, the peer trust state and one slot for pending pairing
+//! state. The file is sealed
 //! with XChaCha20-Poly1305. The Olm pickles are also encrypted with the same
 //! key. The key comes from an `E2eKeyProvider`. When the provider has no
 //! secure place for the key (no OS keyring), the store does not open and E2E
@@ -43,6 +45,7 @@
 //! state, so a damaged file never gives a new identity without notice.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -54,7 +57,9 @@ use sha2::{Digest, Sha256};
 use vodozemac::olm::{Account, AccountPickle, Session, SessionPickle};
 use zeroize::Zeroize;
 
+use crate::e2e_manage::SignedList;
 use crate::e2e_store::{E2eKeyProvider, E2eStoreError};
+use crate::e2e_trust::PeerTrust;
 use crate::persistence::{create_private_dir_all, write_atomic};
 
 const KEY_LEN: usize = 32;
@@ -77,6 +82,18 @@ struct StateData {
     account: Option<String>,
     /// Encrypted pickles of the Olm sessions, by session id.
     sessions: BTreeMap<String, String>,
+    /// Encrypted pickle of the master key account.
+    #[serde(default)]
+    master: Option<String>,
+    /// The own signed device list (public values and the master signature).
+    #[serde(default)]
+    signed_list: Option<SignedList>,
+    /// Trust state of the peers, with the revoked devices (public values).
+    #[serde(default)]
+    trust: PeerTrust,
+    /// Opaque state of a pairing that is not finished.
+    #[serde(default)]
+    pending_pairing: Option<String>,
 }
 
 impl Drop for StateData {
@@ -85,6 +102,12 @@ impl Drop for StateData {
             text.zeroize();
         }
         for text in self.sessions.values_mut() {
+            text.zeroize();
+        }
+        if let Some(text) = self.master.as_mut() {
+            text.zeroize();
+        }
+        if let Some(text) = self.pending_pairing.as_mut() {
             text.zeroize();
         }
     }
@@ -187,6 +210,65 @@ impl E2eStateStore {
         })
     }
 
+    /// The master key, or `None` when the device has none yet.
+    pub fn master_key(&self) -> Result<Option<Account>, E2eStoreError> {
+        let Some(text) = self.data.master.as_deref() else {
+            return Ok(None);
+        };
+        let pickle =
+            AccountPickle::from_encrypted(text, &self.key).map_err(|_| E2eStoreError::Corrupted)?;
+        Ok(Some(Account::from_pickle(pickle)))
+    }
+
+    /// Saves the master key as an encrypted pickle.
+    pub fn set_master_key(&mut self, master: &Account) -> Result<(), E2eStoreError> {
+        let text = master.pickle().encrypt(&self.key);
+        self.commit(|data| data.master = Some(text))
+    }
+
+    /// The own signed device list, or `None`.
+    pub fn signed_list(&self) -> Option<SignedList> {
+        self.data.signed_list.clone()
+    }
+
+    /// Saves the own signed device list.
+    pub fn set_signed_list(&mut self, list: &SignedList) -> Result<(), E2eStoreError> {
+        let list = list.clone();
+        self.commit(|data| data.signed_list = Some(list))
+    }
+
+    /// The trust state of the peers, with the revoked devices. It is empty
+    /// when none was saved.
+    pub fn trust(&self) -> PeerTrust {
+        self.data.trust.clone()
+    }
+
+    /// Saves the trust state of the peers.
+    pub fn set_trust(&mut self, trust: &PeerTrust) -> Result<(), E2eStoreError> {
+        let trust = trust.clone();
+        self.commit(|data| data.trust = trust)
+    }
+
+    /// The pending pairing state, or `None` when no pairing is open.
+    pub fn pending_pairing(&self) -> Option<&str> {
+        self.data.pending_pairing.as_deref()
+    }
+
+    /// Saves the pending pairing state in the one slot. It replaces the
+    /// state that the slot held.
+    pub fn set_pending_pairing(&mut self, state: &str) -> Result<(), E2eStoreError> {
+        let state = state.to_string();
+        self.commit(|data| data.pending_pairing = Some(state))
+    }
+
+    /// Empties the pending pairing slot.
+    pub fn clear_pending_pairing(&mut self) -> Result<(), E2eStoreError> {
+        if self.data.pending_pairing.is_none() {
+            return Ok(());
+        }
+        self.commit(|data| data.pending_pairing = None)
+    }
+
     /// Applies `change` to a copy, writes the copy, and only then keeps it.
     /// A failed write leaves the old state in the file and in memory.
     fn commit(&mut self, change: impl FnOnce(&mut StateData)) -> Result<(), E2eStoreError> {
@@ -264,7 +346,8 @@ impl E2eStateStore {
     fn unseal(&self, raw: &[u8]) -> Result<(StateData, bool), E2eStoreError> {
         if raw.starts_with(MAGIC_V1) {
             let plain = self.open_sealed(&raw[MAGIC_V1.len()..], MAGIC_V1)?;
-            // The first schema holds the same two fields as the current one.
+            // The first schema holds the account and the sessions only. The
+            // other fields start empty.
             return Ok((parse(plain)?, true));
         }
         let header_len = MAGIC.len() + CHECK_LEN;
@@ -303,6 +386,20 @@ fn parse(mut plain: Vec<u8>) -> Result<StateData, E2eStoreError> {
     let parsed = serde_json::from_slice(&plain).map_err(|_| E2eStoreError::Corrupted);
     plain.zeroize();
     parsed
+}
+
+/// Shows what the store holds, never a key or a pickle.
+impl fmt::Debug for E2eStateStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("E2eStateStore")
+            .field("path", &self.path)
+            .field("has_account", &self.data.account.is_some())
+            .field("sessions", &self.data.sessions.len())
+            .field("has_master", &self.data.master.is_some())
+            .field("has_signed_list", &self.data.signed_list.is_some())
+            .field("has_pending_pairing", &self.data.pending_pairing.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for E2eStateStore {
@@ -618,6 +715,148 @@ mod tests {
             assert!(E2eStateStore::open(path.clone(), &provider).is_err());
             assert_eq!(fs::read(&path).expect("read"), changed);
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn sample_list(master: &Account, version: u32, keys: &[String]) -> SignedList {
+        let signature = crate::e2e_device::build_signed_list_signature(version, keys, |text| {
+            master.sign(text).to_base64()
+        })
+        .expect("signature");
+        SignedList {
+            version,
+            keys: keys.to_vec(),
+            signature,
+        }
+    }
+
+    fn ed25519_of(account: &Account) -> String {
+        account.identity_keys().ed25519.to_base64()
+    }
+
+    /// A trust state with one peer and one revoked device.
+    fn trust_with_revoked(master: &Account, kept: &str, dropped: &str) -> PeerTrust {
+        let master_key = ed25519_of(master);
+        let mut trust = PeerTrust::default();
+        trust
+            .observe_master("net", "alice", &master_key)
+            .expect("observe");
+        for (version, keys) in [
+            (1, vec![kept.to_string(), dropped.to_string()]),
+            (2, vec![kept.to_string()]),
+        ] {
+            let list = sample_list(master, version, &keys);
+            trust
+                .accept_list("net", "alice", &master_key, version, &keys, &list.signature)
+                .expect("list");
+        }
+        assert!(trust.is_revoked("net", "alice", dropped, None));
+        trust
+    }
+
+    #[test]
+    fn master_list_trust_and_pairing_survive_a_restart() {
+        let dir = scratch_dir("full-state");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let master = Account::new();
+        let kept = ed25519_of(&Account::new());
+        let dropped = ed25519_of(&Account::new());
+        let list = sample_list(&master, 3, std::slice::from_ref(&kept));
+        let trust = trust_with_revoked(&master, &kept, &dropped);
+        {
+            let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+            assert!(store.master_key().expect("master").is_none());
+            assert!(store.signed_list().is_none());
+            assert!(store.pending_pairing().is_none());
+            store.set_master_key(&master).expect("master");
+            store.set_signed_list(&list).expect("list");
+            store.set_trust(&trust).expect("trust");
+            store.set_pending_pairing("pairing-state").expect("pairing");
+        }
+        let mut store = E2eStateStore::open(path.clone(), &provider).expect("reopen");
+        let loaded = store.master_key().expect("master").expect("present");
+        assert_eq!(loaded.identity_keys(), master.identity_keys());
+        assert_eq!(store.signed_list(), Some(list));
+        assert_eq!(store.trust(), trust);
+        assert!(store.trust().is_revoked("net", "alice", &dropped, None));
+        assert_eq!(store.pending_pairing(), Some("pairing-state"));
+        store.clear_pending_pairing().expect("clear");
+        drop(store);
+        let store = E2eStateStore::open(path, &provider).expect("reopen");
+        assert!(store.pending_pairing().is_none());
+        assert_eq!(store.trust(), trust);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_old_master_list_trust_and_pairing() {
+        let dir = scratch_dir("failed-full");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let master = Account::new();
+        let kept = ed25519_of(&Account::new());
+        let dropped = ed25519_of(&Account::new());
+        let list = sample_list(&master, 3, std::slice::from_ref(&kept));
+        let trust = trust_with_revoked(&master, &kept, &dropped);
+        let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+        store.set_master_key(&master).expect("master");
+        store.set_signed_list(&list).expect("list");
+        store.set_trust(&trust).expect("trust");
+        store.set_pending_pairing("first").expect("pairing");
+        let before = fs::read(&path).expect("read");
+        store.writer = failing_writer;
+        let newer = sample_list(&master, 4, std::slice::from_ref(&kept));
+        assert!(store.set_master_key(&Account::new()).is_err());
+        assert!(store.set_signed_list(&newer).is_err());
+        assert!(store.set_trust(&PeerTrust::default()).is_err());
+        assert!(store.set_pending_pairing("second").is_err());
+        assert!(store.clear_pending_pairing().is_err());
+        let kept_master = store.master_key().expect("master").expect("present");
+        assert_eq!(kept_master.identity_keys(), master.identity_keys());
+        assert_eq!(store.signed_list(), Some(list));
+        assert_eq!(store.trust(), trust);
+        assert_eq!(store.pending_pairing(), Some("first"));
+        assert_eq!(fs::read(&path).expect("read"), before);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_first_schema_file_starts_with_empty_new_fields() {
+        let dir = scratch_dir("migrate-empty");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let account = Account::new();
+        let session = outbound_session(&account);
+        fs::write(&path, legacy_file(&provider.0, &account, ("p", &session))).expect("write");
+        let store = E2eStateStore::open(path, &provider).expect("open");
+        assert!(store.master_key().expect("master").is_none());
+        assert!(store.signed_list().is_none());
+        assert_eq!(store.trust(), PeerTrust::default());
+        assert!(store.pending_pairing().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn debug_output_shows_no_key_and_no_pickle() {
+        let dir = scratch_dir("debug");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let account = Account::new();
+        let master = Account::new();
+        let mut store = E2eStateStore::open(path, &provider).expect("open");
+        store.set_account(&account).expect("account");
+        store.set_master_key(&master).expect("master");
+        store
+            .set_pending_pairing("secret-pairing")
+            .expect("pairing");
+        let text = format!("{store:?}");
+        assert!(text.contains("E2eStateStore"));
+        assert!(!text.contains(&format!("{:?}", provider.0)));
+        assert!(!text.contains(&account.pickle().encrypt(&provider.0)));
+        assert!(!text.contains(&master.pickle().encrypt(&provider.0)));
+        assert!(!text.contains("secret-pairing"));
+        assert!(!text.contains(&ed25519_of(&account)));
         let _ = fs::remove_dir_all(&dir);
     }
 }
