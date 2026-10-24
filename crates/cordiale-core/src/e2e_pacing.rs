@@ -223,6 +223,7 @@ impl OneTimeKeyPacer {
     }
 
     pub fn choose(&mut self, nick: &str, casemapping: CaseMapping, now: Duration) -> KeyChoice {
+        self.limiter.sync_casemapping(casemapping);
         if self.global.is_ready(now)
             && self.limiter.try_acquire(nick, casemapping, now)
             && self.global.try_acquire(now)
@@ -1100,6 +1101,18 @@ mod tests {
         assert!(limiter.try_acquire("[bob]", ASCII, secs(0)));
         assert!(limiter.try_acquire("{bob}", RFC, secs(1)));
         assert!(!limiter.try_acquire("[bob]", RFC, secs(2)));
+    }
+
+    #[test]
+    fn one_time_key_syncs_casemapping_while_globally_blocked() {
+        let mut pacer = OneTimeKeyPacer::new();
+        for i in 0..29 {
+            let nick = format!("nick{i}");
+            assert_eq!(pacer.choose(&nick, ASCII, secs(0)), KeyChoice::OneTime);
+        }
+        assert_eq!(pacer.choose("bob", ASCII, secs(3590)), KeyChoice::OneTime);
+        assert_eq!(pacer.choose("carol", RFC, secs(3591)), KeyChoice::Fallback);
+        assert_eq!(pacer.choose("bob", ASCII, secs(3600)), KeyChoice::OneTime);
     }
 
     #[test]
