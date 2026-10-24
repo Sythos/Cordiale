@@ -54,6 +54,15 @@
           "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo"
         ],
         "signed_text": "irc-e2e:v2:list:5:11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo,7l01yXGoarYtEU3nwHF01/CIo8/r8U0lJ01TnULT9IY"
+      },
+      {
+        "case": "two devices, plain text order differs from raw byte order",
+        "version": 12,
+        "keys": [
+          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "//////////////////////////////////////////8"
+        ],
+        "signed_text": "irc-e2e:v2:list:12://////////////////////////////////////////8,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
       }
     ],
     "invalid": [

@@ -331,8 +331,8 @@ pub fn sort_list_keys(device_keys: &[String]) -> Result<Vec<String>, WireError> 
 /// `irc-e2e:v2:list:<N>:<E1>,<E2>,...`.
 ///
 /// The keys are the full keys, sorted by [`sort_list_keys`] whatever the
-/// order of the caller, and joined by a comma. Candidate format: the order
-/// and the separator are not approved by the final contract yet.
+/// order of the caller, and joined by a comma. The order is ascending plain
+/// text, as in the current protocol document.
 pub fn signed_list_signed_text(
     list_version: u32,
     device_keys: &[String],
@@ -962,7 +962,7 @@ mod tests {
         let two = vec![KEY_A.to_string(), KEY_B.to_string()];
         assert_eq!(
             signed_list_signed_text(12, &two).unwrap(),
-            b"irc-e2e:v2:list:12:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,//////////////////////////////////////////8"
+            b"irc-e2e:v2:list:12://////////////////////////////////////////8,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
                 .to_vec()
         );
     }
@@ -980,13 +980,15 @@ mod tests {
     #[test]
     fn list_keys_sort_by_plain_text_not_by_raw_bytes() {
         // Raw 0xFB bytes encode as "+": it sorts before "A" as text, but
-        // after the all-zero key as raw bytes. The contract uses the text.
+        // after the all-zero key as raw bytes. In the same way "/" sorts
+        // before "A" as text, but the all-0xFF key sorts after it as bytes.
+        // The contract uses the text.
         let high = STANDARD_NO_PAD.encode([0xFBu8; 32]);
-        assert!(high.as_str() < KEY_A);
+        assert!(high.as_str() < KEY_B && KEY_B < KEY_A);
         let keys = vec![KEY_B.to_string(), KEY_A.to_string(), high.clone()];
         assert_eq!(
             sort_list_keys(&keys).unwrap(),
-            vec![high, KEY_A.to_string(), KEY_B.to_string()]
+            vec![high, KEY_B.to_string(), KEY_A.to_string()]
         );
     }
 
