@@ -137,14 +137,22 @@ pub fn search_history<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chacha20poly1305::aead::{Generate, Key};
+    use chacha20poly1305::XChaCha20Poly1305;
     use cordiale_core::e2e_store::E2eKeyProvider;
 
-    struct FixedKey;
+    struct FixedKey([u8; 32]);
 
     impl E2eKeyProvider for FixedKey {
         fn load_or_create_key(&self) -> Result<[u8; 32], E2eStoreError> {
-            Ok([7; 32])
+            Ok(self.0)
         }
+    }
+
+    /// A random key for one test; no key is written in the source.
+    fn fresh_key() -> FixedKey {
+        let key = Key::<XChaCha20Poly1305>::generate();
+        FixedKey(<[u8; 32]>::try_from(key.as_slice()).expect("key length"))
     }
 
     fn row(id: &str, conversation: &str, at: i64, text: &str) -> E2eMessage {
@@ -158,7 +166,7 @@ mod tests {
     }
 
     fn open(dir: &tempfile::TempDir) -> E2eHistoryStore {
-        E2eHistoryStore::open(dir.path().join("history.bin"), &FixedKey).expect("open")
+        E2eHistoryStore::open(dir.path().join("history.bin"), &fresh_key()).expect("open")
     }
 
     #[test]
