@@ -1405,3 +1405,19 @@ fixture.
   perdere righe, la prima query è a tempo e le successive a id.
 - Controllare `protocol_version >= 40` prima di inviarli (obbligatorio, a
   differenza di `cap`): `supports_time_cursors` in `protocol.rs`.
+
+**Issue 430 (fetta 12 di 20 dell'ombrello 416), parte 1: liste dei peer con
+l'ordine grezzo.** Una build precedente ordinava le chiavi della lista sui 32
+byte grezzi; l'ordine corrente è il testo semplice crescente. Dove può esistere
+una firma nel vecchio ordine: lo store cifrato locale non contiene nessuna lista
+firmata; `PeerTrust` e `PeerDirectory` conservano versione e chiavi, mai la
+firma; resta la lista propria già pubblicata sul server. Il nuovo modulo
+`e2e_list_migration.rs` ha `has_legacy_order`, che usa
+`legacy_raw_order_list_signed_text` (in `e2e_wire.rs`, solo per questo
+controllo). Una lista di un peer che verifica solo nel vecchio ordine non è mai
+accettata: `PeerTrust::accept_list` dà `LegacyListOrder`, lo stato resta, il
+peer riceve il segno `needs_new_list` e nessun dispositivo è revocato. Il testo
+del certificato non cambia. **Ancora da fare (parte 2):** nuova firma della
+lista propria con la chiave master (stessa versione e stesse chiavi, perché la
+regola corrente dà `NoOp`), lista in attesa di pubblicazione e marca di
+migrazione fatta nello store cifrato, che sopravvive al riavvio.
