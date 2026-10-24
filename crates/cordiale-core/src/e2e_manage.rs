@@ -30,6 +30,8 @@
 //! the storage in the encrypted store, the adapter for the route names and
 //! error tokens of protocol 49 and the device screens.
 
+use serde::{Deserialize, Serialize};
+
 use crate::e2e_device::{
     accept_peer_device, verify_signed_list, DeviceCertificate, E2eError, ListState, PeerDevice,
 };
@@ -60,7 +62,7 @@ impl From<WireError> for ManageError {
 }
 
 /// A device list with the master signature over its signed text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedList {
     pub version: u32,
     pub keys: Vec<String>,
