@@ -74,7 +74,7 @@ fn fixture_certificates_match() {
     let all = fixtures();
     for case in all["certificate"]["valid"].as_array().expect("valid") {
         let bytes = device_certificate_signed_text(number(case, "version"), text(case, "key"))
-            .expect(text(case, "case"));
+            .unwrap_or_else(|err| panic!("{}: {err:?}", text(case, "case")));
         assert_eq!(bytes, text(case, "signed_text").as_bytes());
         assert_eq!(
             parse_device_certificate_signed_text(&bytes).unwrap(),
@@ -97,7 +97,7 @@ fn fixture_signed_lists_match() {
     let all = fixtures();
     for case in all["signed_list"]["valid"].as_array().expect("valid") {
         let bytes = signed_list_signed_text(number(case, "version"), &keys(case))
-            .expect(text(case, "case"));
+            .unwrap_or_else(|err| panic!("{}: {err:?}", text(case, "case")));
         assert_eq!(bytes, text(case, "signed_text").as_bytes());
     }
     for case in all["signed_list"]["invalid"].as_array().expect("invalid") {
@@ -114,7 +114,8 @@ fn fixture_signed_lists_match() {
 #[test]
 fn fixture_frames_parse_and_format_back() {
     for case in fixtures()["frames"]["valid"].as_array().expect("valid") {
-        let frame = parse_frame(text(case, "text")).expect(text(case, "case"));
+        let frame = parse_frame(text(case, "text"))
+            .unwrap_or_else(|err| panic!("{}: {err:?}", text(case, "case")));
         assert_eq!(frame.verb.as_str(), text(case, "verb"));
         assert_eq!(frame.msgid, text(case, "msgid"));
         assert_eq!(frame.index, number(case, "index"));
