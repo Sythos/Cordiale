@@ -75,6 +75,23 @@ pub const INBOX_EXPIRY_SECS: u64 = 7 * 24 * 60 * 60;
 /// Source: section 4f, the inbox routes ("at most 100", "1 to 100").
 pub const INBOX_PAGE_MAX: usize = 100;
 
+/// Largest payload of a send request or of a copy, in bytes. Source:
+/// section 4f, "413 `too_large` for a payload over 32 KiB".
+pub const SEND_PAYLOAD_MAX_BYTES: usize = 32 * 1024;
+
+/// Largest number of lines in the payload of a send request. Source:
+/// section 4f, the send door ("at most 64 lines").
+pub const SEND_PAYLOAD_MAX_LINES: usize = 64;
+
+/// Largest number of one-time keys in one KEYS bundle. Source: section 4f,
+/// the keys routes ("at most 50 one-time keys").
+pub const ONE_TIME_KEYS_MAX: usize = 50;
+
+/// Cost of one inbox entry, in bytes, added to the size of its payload when
+/// the inbox size is counted. Source: section 4f, the offline queue ("each
+/// entry costs 256 bytes more").
+pub const INBOX_ENTRY_COST_BYTES: usize = 256;
+
 /// Check whether the relay accepts one more X1 pairing message.
 ///
 /// `count` and `total_bytes` describe the messages already stored.
@@ -112,6 +129,8 @@ pub enum WireError {
     BadId,
     BadTarget,
     BadPayload,
+    PayloadTooLarge,
+    TooManyLines,
     BadPriority,
     BadExpiry,
     MissingField,
@@ -603,6 +622,14 @@ pub fn reject_unknown_fields(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn send_limits_have_the_documented_values() {
+        assert_eq!(SEND_PAYLOAD_MAX_BYTES, 32 * 1024);
+        assert_eq!(SEND_PAYLOAD_MAX_LINES, 64);
+        assert_eq!(ONE_TIME_KEYS_MAX, 50);
+        assert_eq!(INBOX_ENTRY_COST_BYTES, 256);
+    }
 
     #[test]
     fn pairing_message_fits_checks_every_limit() {

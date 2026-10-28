@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::e2e_device_routes::required_msgid;
 use crate::e2e_wire::{as_object, required_str, WireError};
 use crate::isupport::CaseMapping;
 
@@ -430,6 +431,22 @@ pub enum SendResponse {
     Unexpected(u16),
 }
 
+/// What the send door answered: the classified status and, for a 202, the
+/// `msgid` that Grappa gave to the message. A 202 is an acceptance. It never
+/// sets a delivered state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendAnswer {
+    pub response: SendResponse,
+    /// Set only when the answer is a 202 with a valid `msgid` in the body.
+    pub msgid: Option<String>,
+}
+
+/// Reads the `msgid` of the body of a 202 answer of the send door. Extra
+/// fields are ignored.
+pub fn parse_send_accepted(body: &Value) -> Result<String, WireError> {
+    required_msgid(as_object(body)?)
+}
+
 pub fn classify_send_response(status: u16, error: Option<&str>) -> SendResponse {
     match (status, error) {
         (202, _) => SendResponse::Accepted,
@@ -534,23 +551,24 @@ pub const SEND_DROPPED_KIND: &str = "e2e_send_dropped";
 pub struct SendKey {
     pub network: String,
     pub target: String,
-    pub message_id: String,
+    pub msgid: String,
 }
 
 impl SendKey {
-    pub fn new(network: &str, target: &str, message_id: &str) -> Self {
+    pub fn new(network: &str, target: &str, msgid: &str) -> Self {
         Self {
             network: network.to_string(),
             target: target.to_string(),
-            message_id: message_id.to_string(),
+            msgid: msgid.to_string(),
         }
     }
 }
 
 /// Typed `e2e_send_dropped` event (protocol 46).
 ///
-/// Candidate shape: `network`, `target`, `message_id` and `reason`. Unknown
-/// fields are ignored, because events are additive.
+/// Fields: `network`, `target`, `msgid` and `reason`. The old name
+/// `message_id` is not read. Unknown fields are ignored, because events are
+/// additive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendDropped {
     pub key: SendKey,
@@ -559,21 +577,19 @@ pub struct SendDropped {
 
 impl SendDropped {
     /// Read the event fields. A missing or wrongly typed field, an empty
-    /// `message_id` or an unknown reason is an error. This does not check
-    /// `kind`. The field names are an assumption: check them against the
-    /// protocol 46 contract.
+    /// `msgid` or an unknown reason is an error. This does not check `kind`.
     pub fn from_value(value: &Value) -> Result<Self, WireError> {
         let map = as_object(value)?;
         let network = required_str(map, "network")?;
         let target = required_str(map, "target")?;
-        let message_id = required_str(map, "message_id")?;
-        if message_id.is_empty() {
+        let msgid = required_str(map, "msgid")?;
+        if msgid.is_empty() {
             return Err(WireError::MissingField);
         }
         let reason =
             DropReason::from_wire(required_str(map, "reason")?).ok_or(WireError::BadFieldType)?;
         Ok(Self {
-            key: SendKey::new(network, target, message_id),
+            key: SendKey::new(network, target, msgid),
             reason,
         })
     }
@@ -679,7 +695,7 @@ mod tests {
             let expected = SendKey::new(
                 case["network"].as_str().expect("network"),
                 case["target"].as_str().expect("target"),
-                case["message_id"].as_str().expect("message_id"),
+                case["msgid"].as_str().expect("msgid"),
             );
             assert_eq!(event.key, expected, "{}", case["case"]);
             let reason = DropReason::from_wire(case["reason"].as_str().expect("reason"));
@@ -694,6 +710,26 @@ mod tests {
                 case["case"]
             );
         }
+    }
+
+    #[test]
+    fn a_202_answer_gives_the_msgid_and_never_a_delivered_state() {
+        let body = serde_json::json!({"id": 3, "msgid": "q83vEjRWeJA", "extra": 1});
+        assert_eq!(parse_send_accepted(&body), Ok("q83vEjRWeJA".to_string()));
+        assert_eq!(
+            parse_send_accepted(&serde_json::json!({"id": 3})),
+            Err(WireError::MissingField)
+        );
+        assert_eq!(
+            parse_send_accepted(&serde_json::json!({"msgid": "a b"})),
+            Err(WireError::BadMsgid)
+        );
+        let key = SendKey::new("libera", "bob", "q83vEjRWeJA");
+        let mut book = SendBook::new();
+        book.start(key.clone());
+        assert!(book.apply_response(&key, classify_send_response(202, None)));
+        // The only state after a 202 is `Accepted`; no state means delivered.
+        assert_eq!(book.status(&key), Some(SendStatus::Accepted));
     }
 
     #[test]
@@ -969,7 +1005,7 @@ mod tests {
             "kind": "e2e_send_dropped",
             "network": network,
             "target": target,
-            "message_id": id,
+            "msgid": id,
             "reason": reason,
         })
     }

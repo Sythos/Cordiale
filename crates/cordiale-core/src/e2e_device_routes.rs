@@ -49,16 +49,17 @@ use serde_json::Value;
 
 use crate::e2e_protocol::own_flag_allowed;
 use crate::e2e_wire::{
-    as_object, is_did_shape, parse_payload, required_str, WireError, INBOX_PAGE_MAX, WILDCARD,
+    as_object, is_did_shape, parse_payload, required_str, WireError, INBOX_PAGE_MAX,
+    SEND_PAYLOAD_MAX_BYTES, WILDCARD,
 };
 
-/// Largest payload of a copy, in bytes. Source: section 4f, "413 `too_large`
-/// for a payload over 32 KiB".
-pub const COPY_PAYLOAD_MAX_BYTES: usize = 32 * 1024;
+/// Largest payload of a copy, in bytes. The limit is the one of the send
+/// door: `SEND_PAYLOAD_MAX_BYTES`.
+pub const COPY_PAYLOAD_MAX_BYTES: usize = SEND_PAYLOAD_MAX_BYTES;
 
 /// Checks the text of a payload or of a KEYS answer: compact JSON object
 /// text in printable ASCII with no space.
-fn check_compact_json(text: &str) -> Result<(), WireError> {
+pub(crate) fn check_compact_json(text: &str) -> Result<(), WireError> {
     if text.is_empty() || text.contains(' ') {
         return Err(WireError::BadPayload);
     }
@@ -81,7 +82,7 @@ fn required_id(map: &serde_json::Map<String, Value>, key: &str) -> Result<u64, W
     read_id(map.get(key).ok_or(WireError::MissingField)?)
 }
 
-fn required_msgid(map: &serde_json::Map<String, Value>) -> Result<String, WireError> {
+pub(crate) fn required_msgid(map: &serde_json::Map<String, Value>) -> Result<String, WireError> {
     let msgid = required_str(map, "msgid")?;
     if msgid.is_empty() || msgid.contains(|c: char| c.is_whitespace() || c.is_control()) {
         return Err(WireError::BadMsgid);
@@ -250,7 +251,9 @@ impl InboxVerb {
     }
 }
 
-/// One row of the inbox of a device: an `e2e_message` of section 4f.
+/// One row of the inbox of a device: an `e2e_message` of section 4f. The
+/// `e2e_message` event on the user topic has the same fields, so it is read
+/// with the same type: see [`E2eMessageEvent`].
 ///
 /// `from` is a routing hint only. Pin a peer on its key, never on its nick.
 /// `from_did` is a device id, or `*` on a `keys` row. `own` is true on a copy
@@ -267,6 +270,11 @@ pub struct InboxRow {
     pub payload: String,
     pub own: bool,
 }
+
+/// The `e2e_message` event of section 4f. Its kind is
+/// `ClientEventKind::E2eMessage`. No engine reads this event in this
+/// module; a later slice connects it.
+pub type E2eMessageEvent = InboxRow;
 
 impl InboxRow {
     /// Reads one row. A missing field, a wrong type and a bad `did` are

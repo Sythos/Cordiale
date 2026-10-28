@@ -35,7 +35,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::e2e_wire::{INBOX_EXPIRY_SECS, INBOX_MAX_BYTES, INBOX_SENDER_MAX_BYTES};
+use crate::e2e_wire::{
+    INBOX_ENTRY_COST_BYTES, INBOX_EXPIRY_SECS, INBOX_MAX_BYTES, INBOX_SENDER_MAX_BYTES,
+};
 
 /// The Olm operations that S1 needs. The engine of the pairing phase
 /// implements it.
@@ -80,7 +82,7 @@ pub fn build_copies(
             continue;
         }
         match cipher.encrypt(did, plaintext) {
-            Some(ciphertext) if ciphertext.len() <= INBOX_SENDER_MAX_BYTES => {
+            Some(ciphertext) if inbox_accepts(0, 0, ciphertext.len()) => {
                 plan.copies.push(OutgoingCopy {
                     target_did: did.to_owned(),
                     item_id: format!("{msgid}.{did}"),
@@ -96,13 +98,18 @@ pub fn build_copies(
 /// True when an inbox can take one more copy.
 ///
 /// `total_bytes` is the size of the whole inbox. `sender_bytes` is the size
-/// of the items of the same sender. A self-copy counts as a sender.
+/// of the items of the same sender. A self-copy counts as a sender. Count
+/// each stored entry as its payload size plus `INBOX_ENTRY_COST_BYTES`. The
+/// new copy counts the same way: `next_len` plus `INBOX_ENTRY_COST_BYTES`.
 pub fn inbox_accepts(total_bytes: usize, sender_bytes: usize, next_len: usize) -> bool {
+    let Some(cost) = next_len.checked_add(INBOX_ENTRY_COST_BYTES) else {
+        return false;
+    };
     total_bytes
-        .checked_add(next_len)
+        .checked_add(cost)
         .is_some_and(|sum| sum <= INBOX_MAX_BYTES)
         && sender_bytes
-            .checked_add(next_len)
+            .checked_add(cost)
             .is_some_and(|sum| sum <= INBOX_SENDER_MAX_BYTES)
 }
 
@@ -348,11 +355,38 @@ mod tests {
 
     #[test]
     fn inbox_limits_apply() {
-        assert!(inbox_accepts(0, 0, INBOX_SENDER_MAX_BYTES));
-        assert!(!inbox_accepts(0, 1, INBOX_SENDER_MAX_BYTES));
-        assert!(!inbox_accepts(INBOX_MAX_BYTES - 10, 0, 11));
-        assert!(inbox_accepts(INBOX_MAX_BYTES - 10, 0, 10));
+        let room = INBOX_SENDER_MAX_BYTES - INBOX_ENTRY_COST_BYTES;
+        assert!(inbox_accepts(0, 0, room));
+        assert!(!inbox_accepts(0, 0, room + 1));
+        assert!(!inbox_accepts(0, 1, room));
+        assert!(!inbox_accepts(
+            INBOX_MAX_BYTES - INBOX_ENTRY_COST_BYTES - 9,
+            0,
+            10
+        ));
+        assert!(inbox_accepts(
+            INBOX_MAX_BYTES - INBOX_ENTRY_COST_BYTES - 10,
+            0,
+            10
+        ));
         assert!(!inbox_accepts(usize::MAX, 0, 1));
+        assert!(!inbox_accepts(0, 0, usize::MAX));
+    }
+
+    #[test]
+    fn each_inbox_entry_costs_256_bytes_more() {
+        assert_eq!(INBOX_ENTRY_COST_BYTES, 256);
+        // An empty copy still takes the entry cost.
+        assert!(!inbox_accepts(
+            INBOX_MAX_BYTES - INBOX_ENTRY_COST_BYTES + 1,
+            0,
+            0
+        ));
+        assert!(inbox_accepts(
+            INBOX_MAX_BYTES - INBOX_ENTRY_COST_BYTES,
+            0,
+            0
+        ));
     }
 
     #[test]
