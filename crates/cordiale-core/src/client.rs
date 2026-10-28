@@ -5482,7 +5482,7 @@ mod tests {
         let mock_server = MockServer::start().await;
         for (did, token) in [
             ("AAAAAAAAAAA", "keyless_device"),
-            ("BBBBBBBBBBB", "key_taken"),
+            ("BBBBBBBBBBA", "key_taken"),
         ] {
             Mock::given(method("POST"))
                 .and(path(format!("/networks/libera/e2e/devices/{did}/claim")))
@@ -5500,7 +5500,7 @@ mod tests {
             .expect_err("keyless");
         assert_eq!(keyless.claim_retry(), Some(ClaimRetry::WaitForKeys));
         let taken = client
-            .claim_e2e_device_key("abc123", "libera", "BBBBBBBBBBB", Some(50), &from)
+            .claim_e2e_device_key("abc123", "libera", "BBBBBBBBBBA", Some(50), &from)
             .await
             .expect_err("taken");
         assert_eq!(taken.claim_retry(), Some(ClaimRetry::Again));
