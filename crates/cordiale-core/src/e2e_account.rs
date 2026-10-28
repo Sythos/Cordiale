@@ -87,6 +87,30 @@ impl LocalAccount {
         }
     }
 
+    /// Wraps an account that the sealed store gave back.
+    pub fn from_account(id: AccountId, account: Account) -> Self {
+        Self { id, account }
+    }
+
+    /// The Olm account, for the sealed store only.
+    pub(crate) fn account(&self) -> &Account {
+        &self.account
+    }
+
+    /// Signs with the Ed25519 key of the device. The signature is unpadded
+    /// standard base64.
+    pub fn sign(&self, message: &[u8]) -> String {
+        self.account.sign(message).to_base64()
+    }
+
+    /// Makes `count` new one-time keys, without a look at the keys that
+    /// the account holds already. The caller counts what the server holds.
+    pub fn generate_one_time_keys(&mut self, count: usize) {
+        if count > 0 {
+            self.account.generate_one_time_keys(count);
+        }
+    }
+
     pub fn id(&self) -> &AccountId {
         &self.id
     }
