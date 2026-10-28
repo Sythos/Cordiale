@@ -149,9 +149,30 @@ impl E2eRefusal {
         !matches!(self, Self::Unknown { .. })
     }
 
+    /// How a refused claim goes on. `None` for any other refusal.
+    pub fn claim_retry(&self) -> Option<ClaimRetry> {
+        match self {
+            Self::KeyTaken => Some(ClaimRetry::Again),
+            Self::KeylessDevice => Some(ClaimRetry::WaitForKeys),
+            _ => None,
+        }
+    }
+
     fn entry(&self) -> Option<&'static (E2eRefusal, &'static str, u16)> {
         KNOWN.iter().find(|(refusal, _, _)| refusal == self)
     }
+}
+
+/// What to do after a refused claim. Source: section 4f, "409
+/// `keyless_device` … (unreachable until it uploads more), 409 `key_taken` …
+/// (ask again)".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimRetry {
+    /// The key went between the pick and the hand-out. Ask again.
+    Again,
+    /// The sibling holds no key at all. It is unreachable until it uploads
+    /// more keys, so asking again at once cannot work.
+    WaitForKeys,
 }
 
 /// Failure of an E2E REST call: a typed refusal, a route that the server
@@ -194,6 +215,14 @@ impl From<WireError> for E2eRouteError {
 }
 
 impl E2eRouteError {
+    /// How a refused claim goes on, when the error is a refusal of that kind.
+    pub fn claim_retry(&self) -> Option<ClaimRetry> {
+        match self {
+            Self::Refused { refusal, .. } => refusal.claim_retry(),
+            _ => None,
+        }
+    }
+
     /// The wait the server asked for with the refusal, when it gave one.
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
@@ -242,6 +271,22 @@ mod tests {
         for (refusal, status) in cases {
             assert_eq!(refusal.status(), status, "{refusal:?}");
         }
+    }
+
+    #[test]
+    fn a_refused_claim_tells_how_to_go_on() {
+        assert_eq!(E2eRefusal::KeyTaken.claim_retry(), Some(ClaimRetry::Again));
+        assert_eq!(
+            E2eRefusal::KeylessDevice.claim_retry(),
+            Some(ClaimRetry::WaitForKeys)
+        );
+        assert_eq!(E2eRefusal::InboxFull.claim_retry(), None);
+        let taken = E2eRouteError::Refused {
+            refusal: E2eRefusal::KeyTaken,
+            retry_after: None,
+        };
+        assert_eq!(taken.claim_retry(), Some(ClaimRetry::Again));
+        assert_eq!(E2eRouteError::Unavailable.claim_retry(), None);
     }
 
     #[test]

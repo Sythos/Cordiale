@@ -57,6 +57,7 @@ use sha2::{Digest, Sha256};
 use vodozemac::olm::{Account, AccountPickle, Session, SessionPickle};
 use zeroize::Zeroize;
 
+use crate::e2e_device::VersionedDeviceCertificate;
 use crate::e2e_manage::SignedList;
 use crate::e2e_store::{E2eKeyProvider, E2eStoreError};
 use crate::e2e_trust::PeerTrust;
@@ -88,6 +89,14 @@ struct StateData {
     /// The own signed device list (public values and the master signature).
     #[serde(default)]
     signed_list: Option<SignedList>,
+    /// True while the own signed list waits for its upload. Cleared only
+    /// after the server answered 2xx to the put.
+    #[serde(default)]
+    list_pending: bool,
+    /// The certificate of this device: the master signature for the first
+    /// list version that holds the device (public values).
+    #[serde(default)]
+    device_certificate: Option<VersionedDeviceCertificate>,
     /// Trust state of the peers, with the revoked devices (public values).
     #[serde(default)]
     trust: PeerTrust,
@@ -235,6 +244,44 @@ impl E2eStateStore {
     pub fn set_signed_list(&mut self, list: &SignedList) -> Result<(), E2eStoreError> {
         let list = list.clone();
         self.commit(|data| data.signed_list = Some(list))
+    }
+
+    /// True while the own signed list waits for publication: after a first
+    /// list, or after the migration of a list that has the old key order.
+    pub fn list_pending(&self) -> bool {
+        self.data.list_pending
+    }
+
+    /// Saves the own signed list and marks it as waiting for publication, in
+    /// one write. `set_signed_list` leaves the mark as it is.
+    pub fn set_signed_list_pending(&mut self, list: &SignedList) -> Result<(), E2eStoreError> {
+        let list = list.clone();
+        self.commit(|data| {
+            data.signed_list = Some(list);
+            data.list_pending = true;
+        })
+    }
+
+    /// Clears the mark after the server accepted the list.
+    pub fn clear_list_pending(&mut self) -> Result<(), E2eStoreError> {
+        if !self.data.list_pending {
+            return Ok(());
+        }
+        self.commit(|data| data.list_pending = false)
+    }
+
+    /// The certificate of this device, or `None`.
+    pub fn device_certificate(&self) -> Option<VersionedDeviceCertificate> {
+        self.data.device_certificate.clone()
+    }
+
+    /// Saves the certificate of this device.
+    pub fn set_device_certificate(
+        &mut self,
+        certificate: &VersionedDeviceCertificate,
+    ) -> Result<(), E2eStoreError> {
+        let certificate = certificate.clone();
+        self.commit(|data| data.device_certificate = Some(certificate))
     }
 
     /// The trust state of the peers, with the revoked devices. It is empty
@@ -397,6 +444,7 @@ impl fmt::Debug for E2eStateStore {
             .field("sessions", &self.data.sessions.len())
             .field("has_master", &self.data.master.is_some())
             .field("has_signed_list", &self.data.signed_list.is_some())
+            .field("list_pending", &self.data.list_pending)
             .field("has_pending_pairing", &self.data.pending_pairing.is_some())
             .finish_non_exhaustive()
     }
@@ -818,6 +866,42 @@ mod tests {
         assert_eq!(store.trust(), trust);
         assert_eq!(store.pending_pairing(), Some("first"));
         assert_eq!(fs::read(&path).expect("read"), before);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_pending_list_mark_and_the_certificate_survive_a_restart() {
+        let dir = scratch_dir("pending-list");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let master = Account::new();
+        let device = ed25519_of(&Account::new());
+        let list = sample_list(&master, 1, std::slice::from_ref(&device));
+        let certificate =
+            crate::e2e_device::build_device_certificate(1, &device, &ed25519_of(&master), |text| {
+                master.sign(text).to_base64()
+            })
+            .expect("certificate");
+        {
+            let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+            assert!(!store.list_pending());
+            assert!(store.device_certificate().is_none());
+            store.set_signed_list_pending(&list).expect("list");
+            store.set_device_certificate(&certificate).expect("cert");
+        }
+        let mut store = E2eStateStore::open(path.clone(), &provider).expect("reopen");
+        assert!(store.list_pending());
+        assert_eq!(store.signed_list(), Some(list.clone()));
+        assert_eq!(store.device_certificate(), Some(certificate));
+        store.writer = failing_writer;
+        assert!(store.clear_list_pending().is_err());
+        assert!(store.list_pending());
+        store.writer = write_atomic;
+        store.clear_list_pending().expect("clear");
+        drop(store);
+        let store = E2eStateStore::open(path, &provider).expect("reopen");
+        assert!(!store.list_pending());
+        assert_eq!(store.signed_list(), Some(list));
         let _ = fs::remove_dir_all(&dir);
     }
 

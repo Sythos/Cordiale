@@ -131,6 +131,7 @@ pub enum WireError {
     BadPayload,
     PayloadTooLarge,
     TooManyLines,
+    TooManyKeys,
     BadPriority,
     BadExpiry,
     MissingField,
@@ -287,6 +288,13 @@ fn integral_decimal(text: &str) -> Option<u64> {
 /// Text the master key signs to certify a device id block.
 pub fn device_id_signed_text(curve25519_key: &str, master_ed25519_key: &str) -> String {
     format!("irc-e2e:v2:id:{curve25519_key}:{master_ed25519_key}")
+}
+
+/// Text a device signs for each key of its bundle:
+/// `irc-e2e:v1:otk:<key>`. It covers the one-time keys and the fallback key.
+pub fn bundle_key_signed_text(curve25519_key: &str) -> Result<Vec<u8>, WireError> {
+    decode_key(curve25519_key)?;
+    Ok(format!("irc-e2e:v1:otk:{curve25519_key}").into_bytes())
 }
 
 fn check_version(version: u32) -> Result<(), WireError> {
@@ -1098,6 +1106,15 @@ mod tests {
             sort_list_keys(&[KEY_A.to_string(), "short".to_string()]),
             Err(WireError::BadKey)
         );
+    }
+
+    #[test]
+    fn bundle_key_text_holds_the_key_and_refuses_a_bad_key() {
+        assert_eq!(
+            bundle_key_signed_text(KEY_A).unwrap(),
+            format!("irc-e2e:v1:otk:{KEY_A}").into_bytes()
+        );
+        assert_eq!(bundle_key_signed_text("short"), Err(WireError::BadKey));
     }
 
     #[test]

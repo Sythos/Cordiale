@@ -1243,7 +1243,7 @@ voce qui sotto lo richiede.
 | 41 | `truncated` in `mentions_bundle` | Già supportato (`frames.rs`, riga `mentions-truncated`). |
 | 42 | Relay E2E: `POST /networks/:id/e2e/messages`, evento `e2e_message` | In attesa del contratto per dispositivo (vedi sotto). Tipizzato solo il corpo della richiesta di invio (`E2eSendRequest`, issue 358); risposta, evento `e2e_message` e chiamata del client non sono implementati. |
 | 43 | Coda offline: `GET /networks/:id/e2e/inbox`, `POST …/inbox/ack`, `id` in `e2e_message` | In attesa del contratto per dispositivo. Le regole pure di S1 (issue 388) stanno in `e2e_selfcopy.rs`: una copia per ogni altro dispositivo, limiti dell'inbox, scadenza, deduplica, `ack` per ogni elemento gestito (nessun `ack` se la scrittura nella cronologia cifrata fallisce), stato «consegnato» solo con `ack` del dispositivo, nessuna storia ai dispositivi nuovi. Mancano le chiamate REST, il motore Olm (`CopyCipher`) e la cronologia cifrata: dipendono da #387 e dal contratto 49. |
-| 44 | Bundle di chiavi: `POST`/`GET`/`DELETE /networks/:id/e2e/keys` | In attesa del contratto per dispositivo. Non implementato. |
+| 44 | Bundle di chiavi: `POST`/`GET`/`DELETE /networks/:id/e2e/keys` | Dal 49 le chiavi sono per dispositivo (`/e2e/devices/:did/keys`) e `DELETE /e2e/keys` butta l'intera identità: chiamate e pubblicazione del bundle in `e2e_provision.rs` (issue 451, vedi sotto). |
 | 45 | Buste di inbox e 202 dell'invio dichiarate nello schema generato | Nessun nuovo byte sul filo e nessun endpoint nuovo: non richiede codice. |
 | 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Issue 384: `GrappaClient::send_e2e_message` (`POST /networks/:id/e2e/messages`) classifica 202, 422 `too_late` e 400 con `classify_send_response`; `SendBook` e `route_e2e_send_dropped` (`session.rs`) applicano una volta sola l'evento `e2e_send_dropped`, per chiave rete, destinatario e id messaggio. I campi dell'evento sono `network`, `target`, `msgid` e `reason` (issue 450); il `msgid` del corpo del 202 si legge in `SendAnswer`. Il pacing a runtime è dell'issue 359. |
 
@@ -1427,6 +1427,51 @@ quel segno è rifiutato e `from`/`to` non sono id di dispositivo. Il file
 del limite di righe e degli altri token non sono stati riletti sul testo di
 §4f/§4g in questa fetta. Fixture `send_request.json` e `send_dropped.json` alla
 revisione 2, `wire_v2.json` alla 3.
+
+**Issue 451 (fetta 29 di 37 dell'ombrello 416): chiamate di dispositivo, lista e
+chiavi, bundle pubblico del dispositivo.** Fonte: §4f di `CLIENT_PROTOCOL.md`
+di Grappa, riletta il 2026-10-28 su `main` di `vjt/grappa-irc`. Nuovo modulo
+`e2e_identity_routes.rs` con i tipi: `DeviceIdRequest` e `DeviceRecord`
+(`{ed25519, curve25519, sig}` e `{did, …}`; il `did` della risposta deve
+derivare da `ed25519`), `ListRequest` e `HeldList` (`{master, ver, devices,
+sig}`; chiavi in ordine crescente sul testo, firma verificata prima dell'invio),
+`KeysUploadRequest` e `KeysHeld` (`{one_time_keys: [{key, sig}], fallback:
+{key, sig}}` e `{one_time_keys: N, fallback: bool}`; un campo vuoto è omesso,
+nessun campo o più di 50 chiavi sono rifiutati prima della chiamata). La firma
+di ogni chiave è del dispositivo su `irc-e2e:v1:otk:<chiave>`
+(`bundle_key_signed_text`), anche per la chiave di riserva. La firma del blocco
+id è del dispositivo su `irc-e2e:v2:id:<curve25519>:<master>`, con la chiave
+master vera. `GrappaClient` ha otto chiamate (`register_e2e_device`,
+`list_e2e_devices`, `drop_e2e_device`, `put_e2e_list`, `fetch_e2e_list`,
+`delete_e2e_identity`, `publish_e2e_keys`, `fetch_e2e_keys`): ognuna controlla
+`E2eOperation::available` prima di ogni richiesta e restituisce `E2eRouteError`;
+un `did` con padding, in base64 standard o con l'etichetta `🔒` è rifiutato
+(`BadDid`) prima del percorso.
+
+`e2e_provision::provision_device` crea l'identità al primo uso: account Olm del
+dispositivo, chiave master (solo sul primo dispositivo, cioè se il server non ha
+ancora una lista), lista firmata versione 1 e certificato `irc-e2e:v2:dev:N:E`
+con N = 1. Se lo store ha la master ma non una lista propria, si riusa la lista
+valida del server (verificata con la master): la versione 1 nasce solo se né lo
+store né il server hanno una lista, così il `PUT` non riceve `stale_list`. Se la
+lista del server non contiene il dispositivo, si firma la versione successiva con
+il dispositivo aggiunto. Tutto è salvato nello store sigillato prima della prima
+chiamata. Poi
+registra il blocco id (solo se il server non lo ha uguale), mette la lista (se
+segnata come in attesa o se il server non ne ha), porta le chiavi monouso a 50
+sul server e carica la chiave di riserva se manca. Le chiavi sono segnate come
+pubblicate solo dopo un 2xx; un upload fallito le lascia non pubblicate e il
+tentativo seguente invia le stesse chiavi. Un riavvio senza chiavi mancanti fa
+solo letture. Lo store sigillato ha ora il segno `list_pending` (lista propria in
+attesa di pubblicazione, anche dopo la migrazione dell'ordine vecchio: una lista
+del server con ordine vecchio riceve la versione successiva sulle stesse
+chiavi) e il certificato del dispositivo. `WrongKey` e `Corrupted` fermano la
+corsa prima di ogni richiesta e non creano mai una nuova identità. Una lista
+sul server sotto una master che il dispositivo non ha dà `NeedsPairing`: il
+pairing non è in questa fetta. `ClaimRetry` dice come proseguire dopo un claim
+rifiutato: `key_taken` si richiede subito, `keyless_device` aspetta che il
+fratello carichi chiavi. Il certificato non ha una rotta REST: Grappa compone il
+KEYS dalle chiavi caricate. Provato solo con un server simulato.
 
 ### Cronologia a tempo (v40): regole del server da rispettare
 
