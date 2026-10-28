@@ -32,9 +32,10 @@
 //!    A store that gives `WrongKey` or `Corrupted` stops the run here: a new
 //!    identity is never made in its place.
 //! 2. Read the list of the server. On a first start with no list, make the
-//!    master key and the first signed list (version 1) and save both. A list
-//!    under a master that this device does not hold stops the run with
-//!    `NeedsPairing`.
+//!    master key and the first signed list (version 1) and save both. A store
+//!    with the master but no own list reuses the valid list of the server:
+//!    version 1 is made only when neither side has a list. A list under a
+//!    master that this device does not hold stops the run with `NeedsPairing`.
 //! 3. Mark an own list that waits for publication. A list of the server that
 //!    has the old key order (`e2e_list_migration`) gets a new version over the
 //!    same keys, signed in the current order.
@@ -56,7 +57,9 @@ use vodozemac::olm::Account;
 
 use crate::client::GrappaClient;
 use crate::e2e_account::{AccountError, AccountId, LocalAccount};
-use crate::e2e_device::{build_device_certificate, build_signed_list_signature, E2eError};
+use crate::e2e_device::{
+    build_device_certificate, build_signed_list_signature, verify_signed_list, E2eError,
+};
 use crate::e2e_identity_routes::{DeviceIdRequest, KeysUploadRequest, ListRequest, SignedKey};
 use crate::e2e_list_migration::has_legacy_order;
 use crate::e2e_manage::SignedList;
@@ -220,9 +223,25 @@ pub async fn provision_device(
             list = Some(next);
         }
     }
-    let list = match list {
-        Some(list) => list,
-        None => {
+    let list = match (list, &held) {
+        (Some(list), _) => list,
+        // The store has the master but no own list: reuse the valid list of
+        // the server, so that the next version is above it.
+        (None, Some(held)) => {
+            let held = &held.list;
+            verify_signed_list(held.version, &held.keys, &master_key, &held.signature)?;
+            if held.keys.contains(&ed25519) {
+                store.set_signed_list(held)?;
+                held.clone()
+            } else {
+                let mut keys = held.keys.clone();
+                keys.push(ed25519.clone());
+                let next = sign_list(&master, held.version + 1, &keys)?;
+                store.set_signed_list_pending(&next)?;
+                next
+            }
+        }
+        (None, None) => {
             let first = sign_list(&master, 1, std::slice::from_ref(&ed25519))?;
             store.set_signed_list_pending(&first)?;
             first
@@ -335,7 +354,7 @@ fn signed_key(local: &LocalAccount, key: &str) -> Result<SignedKey, WireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::e2e_device::{verify_signature, verify_signed_list};
+    use crate::e2e_device::verify_signature;
     use crate::e2e_wire::{legacy_raw_order_list_signed_text, signed_list_signed_text};
     use serde_json::{json, Value};
     use std::fs;
@@ -412,6 +431,11 @@ mod tests {
                 let body = body_of(request);
                 let mut state = s.lock().unwrap();
                 state.list_puts += 1;
+                let held = state.list.as_ref().and_then(|list| list["ver"].as_u64());
+                if held.is_some_and(|held| body["ver"].as_u64() <= Some(held)) {
+                    return ResponseTemplate::new(409)
+                        .set_body_json(json!({"error": "stale_list"}));
+                }
                 state.list = Some(body.clone());
                 ResponseTemplate::new(200).set_body_json(body)
             })
@@ -544,7 +568,7 @@ mod tests {
         assert_eq!(list["devices"], json!([device_key]));
         verify_signed_list(
             1,
-            &[device_key.clone()],
+            std::slice::from_ref(&device_key),
             &master_key,
             list["sig"].as_str().unwrap(),
         )
@@ -800,6 +824,35 @@ mod tests {
         verify_signed_list(3, &sorted, &master_key, &own.signature).expect("current order");
         assert!(!store.list_pending());
         assert_eq!(state.lock().unwrap().list.as_ref().unwrap()["ver"], 3);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_store_without_an_own_list_reuses_the_list_of_the_server() {
+        let dir = scratch_dir("reuse");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let account = Account::new();
+        let master = Account::new();
+        let device_key = ed25519_of(&account);
+        let held = sign_list(&master, 3, std::slice::from_ref(&device_key)).unwrap();
+        state.lock().unwrap().list = Some(json!({
+            "master": ed25519_of(&master), "ver": 3,
+            "devices": [device_key], "sig": held.signature
+        }));
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        store.set_account(&account).expect("account");
+        store.set_master_key(&master).expect("master");
+
+        let outcome = run(&server, &mut store, PROTOCOL).await.expect("run");
+
+        assert!(!outcome.list_published);
+        assert_eq!(store.signed_list().expect("list").version, 3);
+        assert!(!store.list_pending());
+        let fake = state.lock().unwrap();
+        assert_eq!(fake.list_puts, 0);
+        assert_eq!(fake.key_posts.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
