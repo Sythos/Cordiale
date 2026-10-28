@@ -1,5 +1,5 @@
 {
-  "fixture_revision": 2,
+  "fixture_revision": 3,
   "status": "list order is ascending by the plain key text; the signed texts wait for the final MD-3 pin",
   "did": [
     {

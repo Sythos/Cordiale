@@ -745,7 +745,7 @@ mod tests {
                 "kind": "e2e_send_dropped",
                 "network": "libera",
                 "target": "bob",
-                "message_id": "m1",
+                "msgid": "m1",
                 "reason": "send_failed"
             }),
         );
