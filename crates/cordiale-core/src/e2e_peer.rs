@@ -47,7 +47,7 @@ use crate::e2e_device::{
     verify_device_certificate, verify_signature, E2eError, PeerDevice, VersionedDeviceCertificate,
 };
 use crate::e2e_trust::{MasterStatus, PeerTrust};
-use crate::e2e_wire::{bundle_key_signed_text, did_from_key_text, recipient_binding};
+use crate::e2e_wire::{bundle_key_signed_text, did_from_key_text, recipient_binding, ListDecision};
 
 /// The number of ids that the replay state keeps for each device.
 pub const REPLAY_WINDOW: usize = 256;
@@ -79,7 +79,9 @@ pub struct PeerBundle<'a> {
 /// Checks a remote device. `own_ed25519` is the device key of this client.
 /// `server_keys` is the list that the server reports, when it reports one.
 ///
-/// The trust state changes only when every check passes.
+/// A newer signed list from the known master is kept even when the device is
+/// refused, so its revocations stay. Nothing else changes unless every check
+/// passes.
 pub fn verify_peer_device(
     trust: &mut PeerTrust,
     network: &str,
@@ -89,10 +91,11 @@ pub fn verify_peer_device(
     bundle: &PeerBundle<'_>,
 ) -> Result<PeerDevice, E2eError> {
     let mut next = trust.clone();
-    if next.observe_master(network, nick, bundle.master)? == MasterStatus::Changed {
+    let status = next.observe_master(network, nick, bundle.master)?;
+    if status == MasterStatus::Changed {
         return Err(E2eError::MasterChanged);
     }
-    next.accept_list(
+    let decision = next.accept_list(
         network,
         nick,
         bundle.master,
@@ -100,6 +103,36 @@ pub fn verify_peer_device(
         bundle.list_keys,
         bundle.list_signature,
     )?;
+    match check_device(&next, network, nick, own_ed25519, server_keys, bundle) {
+        Ok(()) => {
+            let device = bundle.certificate.device_ed25519.as_str();
+            next.record_curve(network, nick, device, bundle.curve25519)?;
+            *trust = next;
+            Ok(PeerDevice::new(
+                bundle.did.to_string(),
+                bundle.curve25519.to_string(),
+                device.to_string(),
+            ))
+        }
+        Err(err) => {
+            if status == MasterStatus::Same && decision == ListDecision::Replace {
+                *trust = next;
+            }
+            Err(err)
+        }
+    }
+}
+
+/// The checks of one device against a trust state that already holds the
+/// list of the bundle. It changes no state.
+fn check_device(
+    next: &PeerTrust,
+    network: &str,
+    nick: &str,
+    own_ed25519: &str,
+    server_keys: Option<&[String]>,
+    bundle: &PeerBundle<'_>,
+) -> Result<(), E2eError> {
     let cert = bundle.certificate;
     if cert.master_ed25519 != bundle.master {
         return Err(E2eError::UnknownSigner);
@@ -125,13 +158,7 @@ pub fn verify_peer_device(
     if bundle.fb != recipient_binding(device, own_ed25519) {
         return Err(E2eError::RecipientMismatch);
     }
-    next.record_curve(network, nick, device, bundle.curve25519)?;
-    *trust = next;
-    Ok(PeerDevice::new(
-        bundle.did.to_string(),
-        bundle.curve25519.to_string(),
-        device.to_string(),
-    ))
+    Ok(())
 }
 
 /// The first-message and new-session ids that Cordiale already accepted, for
@@ -434,6 +461,7 @@ mod tests {
         let signature = sign_list(&peer.master, 2, &keys);
         let certificate = certify(&peer.master, 2, &keep);
         let (new_keys, new_signature) = (keys.clone(), signature.clone());
+        let listed = keys.clone();
         let kept = Peer {
             master: Account::from_pickle(peer.master.pickle()),
             device: keep,
@@ -450,8 +478,49 @@ mod tests {
             f.signature = new_signature;
         });
         assert_eq!(result.unwrap_err(), E2eError::RevokedDevice);
+        // The old list holds a revoked key: the revocation check comes first.
         let result = check(&mut trust, NICK, &peer, &own, |_| {});
-        assert_eq!(result.unwrap_err(), E2eError::StaleList);
+        assert_eq!(result.unwrap_err(), E2eError::RevokedDevice);
+        assert_eq!(trust.listed_devices(NET, NICK), listed.as_slice());
+        assert!(trust.is_revoked(NET, NICK, &ed(&peer.device), None));
+    }
+
+    #[test]
+    fn refused_device_keeps_the_newer_list_and_its_revocations() {
+        let own = own_key();
+        let master = Account::new();
+        let (a, b) = (Account::new(), Account::new());
+        let both = vec![ed(&a), ed(&b)];
+        let only_b = vec![ed(&b)];
+        let peer_a = Peer {
+            master: Account::from_pickle(master.pickle()),
+            certificate: certify(&master, 1, &a),
+            keys: both.clone(),
+            signature: sign_list(&master, 1, &both),
+            device: a,
+        };
+        let peer_b = Peer {
+            master: Account::from_pickle(master.pickle()),
+            certificate: certify(&master, 1, &b),
+            keys: both.clone(),
+            signature: sign_list(&master, 1, &both),
+            device: b,
+        };
+        let mut trust = PeerTrust::default();
+        check(&mut trust, NICK, &peer_b, &own, |_| {}).unwrap();
+        // Device A presents list 2 without A. A is refused, list 2 stays.
+        let signature = sign_list(&master, 2, &only_b);
+        let result = check(&mut trust, NICK, &peer_a, &own, |f| {
+            f.version = 2;
+            f.keys = only_b.clone();
+            f.signature = signature;
+        });
+        assert_eq!(result.unwrap_err(), E2eError::RevokedDevice);
+        assert!(trust.is_revoked(NET, NICK, &ed(&peer_a.device), None));
+        assert_eq!(trust.listed_devices(NET, NICK), only_b.as_slice());
+        // A cannot go back to list 1.
+        let result = check(&mut trust, NICK, &peer_a, &own, |_| {});
+        assert_eq!(result.unwrap_err(), E2eError::RevokedDevice);
     }
 
     #[test]
