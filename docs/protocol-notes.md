@@ -617,11 +617,11 @@ Audit diretto sui moduli sorgente Elixir del server (non regex/grep su
 poche righe): `session/wire.ex`'s `@type wire_event_kind` è l'insieme
 chiuso ufficiale (40 kind), più ogni altro `*/wire.ex` non-admin del repo:
 56 kind top-level in totale all'epoca, elencati con il loro carrier in
-`crates/cordiale-core/src/wire_event.rs` (`ClientEventKind`). Oggi sono 58:
+`crates/cordiale-core/src/wire_event.rs` (`ClientEventKind`). Oggi sono 59:
 la tabella §9 del contratto aggiunge `away_nick_suffix_changed` (v32), che
 ora sta nell'enum come gli altri (prima veniva scartato da
 `ClientEventKind::from_payload` prima di arrivare al suo gestore); il 58° è
-`e2e_send_dropped` (protocollo 46). Riassunto:
+`e2e_send_dropped` (protocollo 46) e il 59° è `e2e_message` (issue 450). Riassunto:
 
 - **`"parted"` non esiste**: due commenti nel sorgente server
   (`session/server.ex`, `session/window_state.ex`) confermano che
@@ -1245,7 +1245,7 @@ voce qui sotto lo richiede.
 | 43 | Coda offline: `GET /networks/:id/e2e/inbox`, `POST …/inbox/ack`, `id` in `e2e_message` | In attesa del contratto per dispositivo. Le regole pure di S1 (issue 388) stanno in `e2e_selfcopy.rs`: una copia per ogni altro dispositivo, limiti dell'inbox, scadenza, deduplica, `ack` per ogni elemento gestito (nessun `ack` se la scrittura nella cronologia cifrata fallisce), stato «consegnato» solo con `ack` del dispositivo, nessuna storia ai dispositivi nuovi. Mancano le chiamate REST, il motore Olm (`CopyCipher`) e la cronologia cifrata: dipendono da #387 e dal contratto 49. |
 | 44 | Bundle di chiavi: `POST`/`GET`/`DELETE /networks/:id/e2e/keys` | In attesa del contratto per dispositivo. Non implementato. |
 | 45 | Buste di inbox e 202 dell'invio dichiarate nello schema generato | Nessun nuovo byte sul filo e nessun endpoint nuovo: non richiede codice. |
-| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Issue 384: `GrappaClient::send_e2e_message` (`POST /networks/:id/e2e/messages`) classifica 202, 422 `too_late` e 400 con `classify_send_response`; `SendBook` e `route_e2e_send_dropped` (`session.rs`) applicano una volta sola l'evento `e2e_send_dropped`, per chiave rete, destinatario e id messaggio. **Non verificato sul sorgente di Grappa:** i nomi dei campi dell'evento (`network`, `target`, `message_id`, `reason`) sono un'ipotesi da controllare sul contratto del protocollo 47; il corpo del 202 non si legge. Il pacing a runtime è dell'issue 359. |
+| 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Issue 384: `GrappaClient::send_e2e_message` (`POST /networks/:id/e2e/messages`) classifica 202, 422 `too_late` e 400 con `classify_send_response`; `SendBook` e `route_e2e_send_dropped` (`session.rs`) applicano una volta sola l'evento `e2e_send_dropped`, per chiave rete, destinatario e id messaggio. I campi dell'evento sono `network`, `target`, `msgid` e `reason` (issue 450); il `msgid` del corpo del 202 si legge in `SendAnswer`. Il pacing a runtime è dell'issue 359. |
 
 `E2eSendRequest` (fonte: CLIENT_PROTOCOL §4f, PR 2446 di Grappa) è rigorosa:
 campo mancante, sconosciuto o di tipo sbagliato è un errore tipizzato
@@ -1387,10 +1387,7 @@ dispositivo, `claim`, `copies`), con il segnaposto `:did` riempito da
 `path()` dopo il controllo della forma del `did`. Versione minima 49 per tutte
 e 50 per `claim` e `copies`; le rotte a bundle unico di 42–44 non esistono più
 nella forma che Cordiale usa. Una versione ignota non le consente mai.
-**Differenze ancora aperte** (altre fette): il campo `msgid` (non
-`message_id`) di `e2e_send_dropped`; il corpo dell'invio senza `from`, `to` e
-con `payload` base64 invece di testo JSON; i limiti di payload (32 KiB) dell'invio, righe
-(64), chiavi monouso (50) e costo di una voce (+256 byte). Chiuse con la
+**Differenze chiuse con la fetta 28** (issue 450, vedi sotto). Chiuse con la
 fetta 27 dell'ombrello 416: corpi e rotte di `claim` e `copies`, limite di 100
 per pagina e `ack`, modello di `e2e_message`.
 
@@ -1410,6 +1407,26 @@ controllano `E2eOperation::available` prima di ogni richiesta e restituiscono
 `E2eRouteError` (`Unavailable`, `Wire`, `Refused`). Non verificato contro un
 server reale: la presenza di `kind` e `network` nelle righe di `GET …/inbox` è
 dedotta dall'esempio di `e2e_message`.
+
+**Issue 450 (fetta 28 di 37 dell'ombrello 416): invio, `e2e_message` e limiti.**
+`E2eSendRequest` ha `from` e `to` (id di dispositivo o `*`, coppia valida per il
+verbo come nel frame) e `payload` come testo JSON compatto, non base64. La
+priorità `reactive` è ammessa; `expires_at` resta solo per `control` con `msg`
+o `pkmsg`. Costanti in `e2e_wire.rs`: payload 32 KiB, 64 righe, 50 chiavi
+monouso, costo di 256 byte per voce di inbox. Una richiesta oltre il limite è
+rifiutata prima della chiamata (`PayloadTooLarge`, `TooManyLines`). Il conteggio
+delle righe è quello delle righe del testo del payload: **da verificare** sul
+testo di §4f. `inbox_accepts` somma 256 byte a ogni voce. `send_e2e_message`
+restituisce `SendAnswer`: la risposta classificata e il `msgid` del 202; un 202
+è solo un'accettazione e nessuno stato vuol dire «consegnato». `e2e_send_dropped`
+legge `msgid`; `message_id` dà `MissingField`. `E2eMessageEvent` (alias di
+`InboxRow`) e `ClientEventKind::E2eMessage` coprono l'evento; nessun motore lo
+legge ancora. L'etichetta `🔒` del nome di una query è solo UI: `target` con
+quel segno è rifiutato e `from`/`to` non sono id di dispositivo. Il file
+`CLIENT_PROTOCOL.md` non è nel repository: i nomi del corpo del 202 (`msgid`),
+del limite di righe e degli altri token non sono stati riletti sul testo di
+§4f/§4g in questa fetta. Fixture `send_request.json` e `send_dropped.json` alla
+revisione 2, `wire_v2.json` alla 3.
 
 ### Cronologia a tempo (v40): regole del server da rispettare
 
