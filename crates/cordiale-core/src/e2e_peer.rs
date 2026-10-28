@@ -524,6 +524,44 @@ mod tests {
     }
 
     #[test]
+    fn trust_revocation_and_replay_state_are_the_same_after_a_restart() {
+        let (peer, own) = (peer(), own_key());
+        let mut trust = PeerTrust::default();
+        check(&mut trust, NICK, &peer, &own, |_| {}).unwrap();
+        let keep = Account::new();
+        let keys = vec![ed(&keep)];
+        let kept = Peer {
+            master: Account::from_pickle(peer.master.pickle()),
+            certificate: certify(&peer.master, 2, &keep),
+            signature: sign_list(&peer.master, 2, &keys),
+            keys,
+            device: keep,
+        };
+        check(&mut trust, NICK, &kept, &own, |f| f.version = 2).unwrap();
+        let mut replay = ReplayState::default();
+        replay.accept_first_message(NET, NICK, "d1", "m1").unwrap();
+        replay.accept_new_session(NET, NICK, "d1", "s1").unwrap();
+        // The sealed store keeps the state as JSON.
+        let mut trust_again = PeerTrust::from_json(&trust.to_json().unwrap()).unwrap();
+        let mut replay_again: ReplayState =
+            serde_json::from_str(&serde_json::to_string(&replay).unwrap()).unwrap();
+        assert_eq!(trust_again, trust);
+        assert_eq!(replay_again, replay);
+        assert!(trust_again.is_revoked(NET, NICK, &ed(&peer.device), None));
+        let result = check(&mut trust_again, NICK, &peer, &own, |_| {});
+        assert_eq!(result.unwrap_err(), E2eError::RevokedDevice);
+        check(&mut trust_again, NICK, &kept, &own, |f| f.version = 2).unwrap();
+        assert_eq!(
+            replay_again.accept_first_message(NET, NICK, "d1", "m1"),
+            Err(E2eError::Replay)
+        );
+        assert_eq!(
+            replay_again.accept_new_session(NET, NICK, "d1", "s1"),
+            Err(E2eError::Replay)
+        );
+    }
+
+    #[test]
     fn replayed_first_message_and_session_are_refused() {
         let mut replay = ReplayState::default();
         replay.accept_first_message(NET, NICK, "d1", "m1").unwrap();

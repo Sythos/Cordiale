@@ -915,6 +915,46 @@ mod tests {
     }
 
     #[test]
+    fn a_message_for_one_device_leaves_the_other_session_unchanged() {
+        let dir = scratch_dir("device-isolation");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let account = Account::new();
+        let mut first = outbound_session(&account);
+        let second = outbound_session(&account);
+        let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+        store
+            .set_peer_session("net", "alice", "d1", &first)
+            .unwrap();
+        store
+            .set_peer_session("net", "alice", "d2", &second)
+            .unwrap();
+        let key_two = peer_device_key("net", "alice", "d2");
+        let before = store.data.sessions.get(&key_two).cloned();
+        // A message for device 1 changes the session of device 1 only.
+        let _ = first.encrypt(b"hello");
+        store
+            .set_peer_session("net", "alice", "d1", &first)
+            .unwrap();
+        assert_eq!(store.data.sessions.get(&key_two).cloned(), before);
+        // The plain and the locked query entries of one peer use one key.
+        let mut again = store.peer_session("net", "alice", "d1").unwrap().unwrap();
+        let _ = again.encrypt(b"again");
+        store
+            .set_peer_session("net", "alice", "d1", &again)
+            .unwrap();
+        assert_eq!(store.data.sessions.len(), 2);
+        drop(store);
+        let store = E2eStateStore::open(path, &provider).expect("reopen");
+        assert_eq!(store.data.sessions.get(&key_two).cloned(), before);
+        let one = store.peer_session("net", "alice", "d1").unwrap().unwrap();
+        let two = store.peer_session("net", "alice", "d2").unwrap().unwrap();
+        assert_eq!(one.session_id(), first.session_id());
+        assert_eq!(two.session_id(), second.session_id());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sessions_of_nicks_that_name_object_members_stay_apart() {
         let dir = scratch_dir("member-nicks");
         let provider = fresh_key();
