@@ -44,6 +44,9 @@ use crate::backoff::rate_limit_wait;
 use crate::e2e_device_routes::{
     ClaimRequest, ClaimResponse, CopyAccepted, CopyRequest, InboxAckRequest, InboxRow,
 };
+use crate::e2e_identity_routes::{
+    DeviceIdRequest, DeviceRecord, HeldList, KeysHeld, KeysUploadRequest, ListRequest,
+};
 use crate::e2e_pacing::{classify_send_response, parse_send_accepted, SendAnswer, SendResponse};
 use crate::e2e_protocol::E2eOperation;
 use crate::e2e_refusal::E2eRouteError;
@@ -942,6 +945,154 @@ impl GrappaClient {
         Ok(())
     }
 
+    /// `POST /networks/:network_id/e2e/devices` — registers the id block of
+    /// this device. Registering the same `ed25519` again replaces the id block
+    /// and stays one device. Protocol 49 at least.
+    pub async fn register_e2e_device(
+        &self,
+        token: &str,
+        network_id: &str,
+        server_protocol: Option<u32>,
+        request: &DeviceIdRequest,
+    ) -> Result<DeviceRecord, E2eRouteError> {
+        let url = self.e2e_url(
+            E2eOperation::DeviceRegister,
+            network_id,
+            None,
+            server_protocol,
+        )?;
+        let value = self
+            .send_e2e_device_request(self.http.post(url).bearer_auth(token).json(request))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(DeviceRecord::from_value(&value)?)
+    }
+
+    /// `GET /networks/:network_id/e2e/devices` — the devices of the account,
+    /// oldest first, listed or not. Protocol 49 at least.
+    pub async fn list_e2e_devices(
+        &self,
+        token: &str,
+        network_id: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<Vec<DeviceRecord>, E2eRouteError> {
+        let url = self.e2e_url(E2eOperation::DeviceList, network_id, None, server_protocol)?;
+        let value = self
+            .send_e2e_device_request(self.http.get(url).bearer_auth(token))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(DeviceRecord::list_from_value(&value)?)
+    }
+
+    /// `DELETE /networks/:network_id/e2e/devices/:did` — drops a device that
+    /// the list does not name. A listed device is a 409 `listed_device`.
+    /// Protocol 49 at least. `did` is the unpadded Base64URL device id.
+    pub async fn drop_e2e_device(
+        &self,
+        token: &str,
+        network_id: &str,
+        did: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<(), E2eRouteError> {
+        let url =
+            self.e2e_device_url(E2eOperation::DeviceDrop, network_id, did, server_protocol)?;
+        self.send_e2e_device_request(self.http.delete(url).bearer_auth(token))
+            .await?;
+        Ok(())
+    }
+
+    /// `PUT /networks/:network_id/e2e/list` — puts the signed list. The
+    /// answer is the list as the server holds it. The very list held, put
+    /// again, is a 200. Protocol 49 at least.
+    pub async fn put_e2e_list(
+        &self,
+        token: &str,
+        network_id: &str,
+        server_protocol: Option<u32>,
+        request: &ListRequest,
+    ) -> Result<HeldList, E2eRouteError> {
+        let url = self.e2e_url(E2eOperation::ListPut, network_id, None, server_protocol)?;
+        let value = self
+            .send_e2e_device_request(self.http.put(url).bearer_auth(token).json(request))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(HeldList::from_value(&value)?)
+    }
+
+    /// `GET /networks/:network_id/e2e/list` — the signed list. Before a list
+    /// is put the answer is a 404 `not_found`. Protocol 49 at least.
+    pub async fn fetch_e2e_list(
+        &self,
+        token: &str,
+        network_id: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<HeldList, E2eRouteError> {
+        let url = self.e2e_url(E2eOperation::ListFetch, network_id, None, server_protocol)?;
+        let value = self
+            .send_e2e_device_request(self.http.get(url).bearer_auth(token))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(HeldList::from_value(&value)?)
+    }
+
+    /// `DELETE /networks/:network_id/e2e/keys` — drops the whole identity:
+    /// every device with its keys and queue, and the list. Protocol 49 at
+    /// least.
+    pub async fn delete_e2e_identity(
+        &self,
+        token: &str,
+        network_id: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<(), E2eRouteError> {
+        let url = self.e2e_url(
+            E2eOperation::IdentityDelete,
+            network_id,
+            None,
+            server_protocol,
+        )?;
+        self.send_e2e_device_request(self.http.delete(url).bearer_auth(token))
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /networks/:network_id/e2e/devices/:did/keys` — adds one-time
+    /// keys and replaces the fallback key of the device. The answer counts
+    /// what the device has left to hand out. Protocol 49 at least.
+    pub async fn publish_e2e_keys(
+        &self,
+        token: &str,
+        network_id: &str,
+        did: &str,
+        server_protocol: Option<u32>,
+        request: &KeysUploadRequest,
+    ) -> Result<KeysHeld, E2eRouteError> {
+        let url =
+            self.e2e_device_url(E2eOperation::KeysPublish, network_id, did, server_protocol)?;
+        let value = self
+            .send_e2e_device_request(self.http.post(url).bearer_auth(token).json(request))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(KeysHeld::from_value(&value)?)
+    }
+
+    /// `GET /networks/:network_id/e2e/devices/:did/keys` — what the device
+    /// has left to hand out. The keys themselves never come back. Protocol 49
+    /// at least.
+    pub async fn fetch_e2e_keys(
+        &self,
+        token: &str,
+        network_id: &str,
+        did: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<KeysHeld, E2eRouteError> {
+        let url = self.e2e_device_url(E2eOperation::KeysFetch, network_id, did, server_protocol)?;
+        let value = self
+            .send_e2e_device_request(self.http.get(url).bearer_auth(token))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(KeysHeld::from_value(&value)?)
+    }
+
     /// The URL of a per-device route below `/networks/:network_id`. The call
     /// is refused before any request when the server protocol does not have
     /// the route or when `did` is not a device id.
@@ -952,10 +1103,22 @@ impl GrappaClient {
         did: &str,
         server_protocol: Option<u32>,
     ) -> Result<reqwest::Url, E2eRouteError> {
+        self.e2e_url(operation, network_id, Some(did), server_protocol)
+    }
+
+    /// The URL of an E2E route below `/networks/:network_id`. `did` fills the
+    /// device segment of a route that has one; a route without one ignores it.
+    fn e2e_url(
+        &self,
+        operation: E2eOperation,
+        network_id: &str,
+        did: Option<&str>,
+        server_protocol: Option<u32>,
+    ) -> Result<reqwest::Url, E2eRouteError> {
         if !operation.available(server_protocol) {
             return Err(E2eRouteError::Unavailable);
         }
-        let path = operation.path(Some(did))?;
+        let path = operation.path(did)?;
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
@@ -3636,6 +3799,7 @@ impl GrappaClient {
 mod tests {
     use super::*;
     use crate::e2e_device_routes::CopyVerb;
+    use crate::e2e_identity_routes::SignedKey;
     use crate::e2e_refusal::E2eRefusal;
     use wiremock::matchers::{
         body_json, body_string, body_string_contains, header, header_regex, method, path,
@@ -4962,6 +5126,384 @@ mod tests {
             .ack_e2e_inbox("abc123", "libera", did, Some(49), &ack)
             .await
             .expect("ack");
+    }
+
+    /// A device and a master with well-formed values for the identity routes.
+    struct IdentityFixture {
+        device: vodozemac::olm::Account,
+        master: vodozemac::olm::Account,
+        did: String,
+    }
+
+    impl IdentityFixture {
+        fn new() -> Self {
+            let device = vodozemac::olm::Account::new();
+            let did =
+                crate::e2e_wire::did_from_key_text(&device.identity_keys().ed25519.to_base64())
+                    .expect("did");
+            Self {
+                device,
+                master: vodozemac::olm::Account::new(),
+                did,
+            }
+        }
+
+        fn ed25519(&self) -> String {
+            self.device.identity_keys().ed25519.to_base64()
+        }
+
+        fn curve25519(&self) -> String {
+            self.device.identity_keys().curve25519.to_base64()
+        }
+
+        fn id_request(&self) -> DeviceIdRequest {
+            let master = self.master.identity_keys().ed25519.to_base64();
+            let text = crate::e2e_wire::device_id_signed_text(&self.curve25519(), &master);
+            let sig = self.device.sign(text.as_bytes()).to_base64();
+            DeviceIdRequest::new(&self.ed25519(), &self.curve25519(), &sig).expect("id block")
+        }
+
+        fn record(&self) -> serde_json::Value {
+            let mut record: serde_json::Value =
+                serde_json::from_str(&self.id_request().to_json()).expect("json");
+            record["did"] = serde_json::json!(self.did);
+            record
+        }
+
+        fn list_request(&self, version: u32) -> ListRequest {
+            let keys = vec![self.ed25519()];
+            let signature = crate::e2e_device::build_signed_list_signature(version, &keys, |t| {
+                self.master.sign(t).to_base64()
+            })
+            .expect("list signature");
+            let list = crate::e2e_manage::SignedList {
+                version,
+                keys,
+                signature,
+            };
+            ListRequest::new(&self.master.identity_keys().ed25519.to_base64(), &list)
+                .expect("list request")
+        }
+
+        fn keys_request(&self) -> KeysUploadRequest {
+            let key = SignedKey::new(&self.curve25519(), &self.device.sign(b"text").to_base64())
+                .expect("signed key");
+            KeysUploadRequest::new(vec![key.clone()], Some(key)).expect("keys")
+        }
+    }
+
+    #[tokio::test]
+    async fn e2e_identity_routes_use_the_documented_methods_paths_and_bodies() {
+        let fixture = IdentityFixture::new();
+        let did = fixture.did.clone();
+        let id_request = fixture.id_request();
+        let list_request = fixture.list_request(1);
+        let list_answer: serde_json::Value =
+            serde_json::from_str(&list_request.to_json()).expect("json");
+        let keys_request = fixture.keys_request();
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/e2e/devices"))
+            .and(header("authorization", "Bearer abc123"))
+            .and(body_string(id_request.to_json()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(fixture.record()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/e2e/devices"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"devices": [fixture.record()]})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/networks/libera/e2e/list"))
+            .and(body_string(list_request.to_json()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(list_answer.clone()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/e2e/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(list_answer))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/networks/libera/e2e/devices/{did}")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/e2e/keys"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/libera/e2e/devices/{did}/keys")))
+            .and(body_string(keys_request.to_json()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"one_time_keys": 1, "fallback": true})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/networks/libera/e2e/devices/{did}/keys")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"one_time_keys": 50, "fallback": false})),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let registered = client
+            .register_e2e_device("abc123", "libera", Some(49), &id_request)
+            .await
+            .expect("register");
+        assert_eq!(registered.did, did);
+        assert!(registered.matches(&id_request));
+        let devices = client
+            .list_e2e_devices("abc123", "libera", Some(49))
+            .await
+            .expect("devices");
+        assert_eq!(devices.len(), 1);
+        let held = client
+            .put_e2e_list("abc123", "libera", Some(49), &list_request)
+            .await
+            .expect("put list");
+        assert_eq!(held.list.version, 1);
+        let fetched = client
+            .fetch_e2e_list("abc123", "libera", Some(49))
+            .await
+            .expect("list");
+        assert_eq!(fetched, held);
+        client
+            .drop_e2e_device("abc123", "libera", &did, Some(49))
+            .await
+            .expect("drop");
+        client
+            .delete_e2e_identity("abc123", "libera", Some(49))
+            .await
+            .expect("delete");
+        let published = client
+            .publish_e2e_keys("abc123", "libera", &did, Some(49), &keys_request)
+            .await
+            .expect("publish");
+        assert_eq!((published.one_time_keys, published.fallback), (1, true));
+        let left = client
+            .fetch_e2e_keys("abc123", "libera", &did, Some(49))
+            .await
+            .expect("keys");
+        assert_eq!((left.one_time_keys, left.fallback), (50, false));
+    }
+
+    #[tokio::test]
+    async fn e2e_identity_routes_refuse_before_the_request() {
+        let fixture = IdentityFixture::new();
+        let mock_server = MockServer::start().await;
+        let client = GrappaClient::new(mock_server.uri());
+        let id_request = fixture.id_request();
+        let list_request = fixture.list_request(1);
+        let keys_request = fixture.keys_request();
+        let did = fixture.did.as_str();
+
+        assert!(matches!(
+            client
+                .register_e2e_device("abc123", "libera", Some(48), &id_request)
+                .await,
+            Err(E2eRouteError::Unavailable)
+        ));
+        assert!(matches!(
+            client.list_e2e_devices("abc123", "libera", None).await,
+            Err(E2eRouteError::Unavailable)
+        ));
+        assert!(matches!(
+            client
+                .put_e2e_list("abc123", "libera", Some(48), &list_request)
+                .await,
+            Err(E2eRouteError::Unavailable)
+        ));
+        assert!(matches!(
+            client.fetch_e2e_list("abc123", "libera", Some(1)).await,
+            Err(E2eRouteError::Unavailable)
+        ));
+        assert!(matches!(
+            client
+                .delete_e2e_identity("abc123", "libera", Some(0))
+                .await,
+            Err(E2eRouteError::Unavailable)
+        ));
+        assert!(matches!(
+            client
+                .drop_e2e_device("abc123", "libera", did, Some(48))
+                .await,
+            Err(E2eRouteError::Unavailable)
+        ));
+        assert!(matches!(
+            client
+                .publish_e2e_keys("abc123", "libera", did, None, &keys_request)
+                .await,
+            Err(E2eRouteError::Unavailable)
+        ));
+        assert!(matches!(
+            client
+                .fetch_e2e_keys("abc123", "libera", did, Some(48))
+                .await,
+            Err(E2eRouteError::Unavailable)
+        ));
+
+        // A padded or standard-Base64 id, or the UI label of a query, is no
+        // device id and never reaches a path.
+        for bad in [
+            "If4x36FUomE=",
+            "AAAAAAAAAAA=",
+            "AAAAAA+/AAA",
+            "🔒alice",
+            "../keys",
+        ] {
+            assert!(matches!(
+                client
+                    .drop_e2e_device("abc123", "libera", bad, Some(49))
+                    .await,
+                Err(E2eRouteError::Wire(WireError::BadDid))
+            ));
+            assert!(matches!(
+                client
+                    .publish_e2e_keys("abc123", "libera", bad, Some(49), &keys_request)
+                    .await,
+                Err(E2eRouteError::Wire(WireError::BadDid))
+            ));
+            assert!(matches!(
+                client
+                    .fetch_e2e_keys("abc123", "libera", bad, Some(49))
+                    .await,
+                Err(E2eRouteError::Wire(WireError::BadDid))
+            ));
+        }
+        assert!(mock_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_canonical_11_character_did_is_accepted_in_a_device_route() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/networks/libera/e2e/devices/_Uw_z3-OAsk"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        GrappaClient::new(mock_server.uri())
+            .drop_e2e_device("abc123", "libera", "_Uw_z3-OAsk", Some(49))
+            .await
+            .expect("drop");
+    }
+
+    #[tokio::test]
+    async fn e2e_identity_refusals_are_typed() {
+        let fixture = IdentityFixture::new();
+        let device_route = format!("/networks/libera/e2e/devices/{}", fixture.did);
+        let keys_route = format!("{device_route}/keys");
+        let mock_server = MockServer::start().await;
+        for (verb, route, status, token) in [
+            ("GET", "/networks/libera/e2e/list", 404, "not_found"),
+            ("PUT", "/networks/libera/e2e/list", 409, "stale_list"),
+            (
+                "POST",
+                "/networks/libera/e2e/devices",
+                409,
+                "too_many_devices",
+            ),
+            ("DELETE", device_route.as_str(), 409, "listed_device"),
+            ("POST", keys_route.as_str(), 413, "too_large"),
+        ] {
+            Mock::given(method(verb))
+                .and(path(route))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_body_json(serde_json::json!({"error": token})),
+                )
+                .mount(&mock_server)
+                .await;
+        }
+        let client = GrappaClient::new(mock_server.uri());
+        let refusal = |error: E2eRouteError| match error {
+            E2eRouteError::Refused { refusal, .. } => refusal,
+            other => panic!("not a refusal: {other:?}"),
+        };
+        let fetch = client
+            .fetch_e2e_list("abc123", "libera", Some(49))
+            .await
+            .expect_err("404");
+        assert_eq!(refusal(fetch), E2eRefusal::NotFound);
+        let put = client
+            .put_e2e_list("abc123", "libera", Some(49), &fixture.list_request(1))
+            .await
+            .expect_err("409");
+        assert_eq!(refusal(put), E2eRefusal::StaleList);
+        let register = client
+            .register_e2e_device("abc123", "libera", Some(49), &fixture.id_request())
+            .await
+            .expect_err("409");
+        assert_eq!(refusal(register), E2eRefusal::TooManyDevices);
+        let dropped = client
+            .drop_e2e_device("abc123", "libera", &fixture.did, Some(49))
+            .await
+            .expect_err("409");
+        assert_eq!(refusal(dropped), E2eRefusal::ListedDevice);
+        let publish = client
+            .publish_e2e_keys(
+                "abc123",
+                "libera",
+                &fixture.did,
+                Some(49),
+                &fixture.keys_request(),
+            )
+            .await
+            .expect_err("413");
+        assert_eq!(refusal(publish), E2eRefusal::TooLarge);
+    }
+
+    #[tokio::test]
+    async fn a_claim_refused_with_keyless_device_or_key_taken_is_typed() {
+        use crate::e2e_refusal::ClaimRetry;
+        let mock_server = MockServer::start().await;
+        for (did, token) in [
+            ("AAAAAAAAAAA", "keyless_device"),
+            ("BBBBBBBBBBB", "key_taken"),
+        ] {
+            Mock::given(method("POST"))
+                .and(path(format!("/networks/libera/e2e/devices/{did}/claim")))
+                .respond_with(
+                    ResponseTemplate::new(409).set_body_json(serde_json::json!({"error": token})),
+                )
+                .mount(&mock_server)
+                .await;
+        }
+        let client = GrappaClient::new(mock_server.uri());
+        let from = ClaimRequest::new("If4x36FUomE").expect("claim request");
+        let keyless = client
+            .claim_e2e_device_key("abc123", "libera", "AAAAAAAAAAA", Some(50), &from)
+            .await
+            .expect_err("keyless");
+        assert_eq!(keyless.claim_retry(), Some(ClaimRetry::WaitForKeys));
+        let taken = client
+            .claim_e2e_device_key("abc123", "libera", "BBBBBBBBBBB", Some(50), &from)
+            .await
+            .expect_err("taken");
+        assert_eq!(taken.claim_retry(), Some(ClaimRetry::Again));
     }
 
     #[tokio::test]
