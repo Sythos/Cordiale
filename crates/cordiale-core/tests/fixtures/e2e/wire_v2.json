@@ -1,5 +1,5 @@
 {
-  "fixture_revision": 1,
+  "fixture_revision": 2,
   "status": "list order is ascending by the plain key text; the signed texts wait for the final MD-3 pin",
   "did": [
     {
@@ -110,6 +110,66 @@
       {"case": "fragment index zero", "text": "\u0001E2E MSG AAAA 0/1 If4x36FUomE _Uw_z3-OAsk {}\u0001", "error": "BadFragment"},
       {"case": "fragment index above total", "text": "\u0001E2E MSG AAAA 2/1 If4x36FUomE _Uw_z3-OAsk {}\u0001", "error": "BadFragment"},
       {"case": "non-ASCII chunk", "text": "\u0001E2E MSG AAAA 1/1 If4x36FUomE _Uw_z3-OAsk café\u0001", "error": "BadFrame"}
+    ]
+  },
+  "inbox_rows": {
+    "valid": [
+      {
+        "case": "own set on protocol 50",
+        "server_protocol": 50,
+        "row": {"kind": "e2e_message", "network": "azzurra", "id": 4711, "from": "vjt-claude", "from_did": "If4x36FUomE", "to_did": "_Uw_z3-OAsk", "verb": "msg", "msgid": "q83vEjRWeJA", "payload": "{\"v\":2}", "own": true},
+        "own": true
+      },
+      {
+        "case": "own absent on protocol 50",
+        "server_protocol": 50,
+        "row": {"kind": "e2e_message", "network": "azzurra", "id": 4712, "from": "vjt-claude", "from_did": "If4x36FUomE", "to_did": "_Uw_z3-OAsk", "verb": "pkmsg", "msgid": "q83vEjRWeJB", "payload": "{\"v\":2}"},
+        "own": false
+      },
+      {
+        "case": "own absent on protocol 49",
+        "server_protocol": 49,
+        "row": {"kind": "e2e_message", "network": "azzurra", "id": 4713, "from": "vjt-claude", "from_did": "If4x36FUomE", "to_did": "_Uw_z3-OAsk", "verb": "msg", "msgid": "q83vEjRWeJC", "payload": "{}"},
+        "own": false
+      },
+      {
+        "case": "extra fields are ignored",
+        "server_protocol": 50,
+        "row": {"kind": "e2e_message", "network": "azzurra", "id": 4714, "from": "vjt-claude", "from_did": "*", "to_did": "_Uw_z3-OAsk", "verb": "keys", "msgid": "q83vEjRWeJD", "payload": "{}", "own": false, "extra": [1, 2], "other": {"a": null}},
+        "own": false
+      }
+    ],
+    "invalid": [
+      {
+        "case": "own from protocol 49",
+        "server_protocol": 49,
+        "row": {"kind": "e2e_message", "network": "azzurra", "id": 4715, "from": "vjt-claude", "from_did": "If4x36FUomE", "to_did": "_Uw_z3-OAsk", "verb": "msg", "msgid": "q83vEjRWeJE", "payload": "{}", "own": true},
+        "error": "UnknownField"
+      },
+      {
+        "case": "bad from_did",
+        "server_protocol": 50,
+        "row": {"kind": "e2e_message", "network": "azzurra", "id": 4716, "from": "vjt-claude", "from_did": "alice", "to_did": "_Uw_z3-OAsk", "verb": "msg", "msgid": "q83vEjRWeJF", "payload": "{}", "own": false},
+        "error": "BadDid"
+      },
+      {
+        "case": "bad to_did",
+        "server_protocol": 50,
+        "row": {"kind": "e2e_message", "network": "azzurra", "id": 4717, "from": "vjt-claude", "from_did": "If4x36FUomE", "to_did": "*", "verb": "msg", "msgid": "q83vEjRWeJG", "payload": "{}", "own": false},
+        "error": "BadDid"
+      },
+      {
+        "case": "own is not a boolean",
+        "server_protocol": 50,
+        "row": {"kind": "e2e_message", "network": "azzurra", "id": 4718, "from": "vjt-claude", "from_did": "If4x36FUomE", "to_did": "_Uw_z3-OAsk", "verb": "msg", "msgid": "q83vEjRWeJH", "payload": "{}", "own": "true"},
+        "error": "BadFieldType"
+      },
+      {
+        "case": "id is missing",
+        "server_protocol": 50,
+        "row": {"kind": "e2e_message", "network": "azzurra", "from": "vjt-claude", "from_did": "If4x36FUomE", "to_did": "_Uw_z3-OAsk", "verb": "msg", "msgid": "q83vEjRWeJI", "payload": "{}"},
+        "error": "MissingField"
+      }
     ]
   },
   "refusals": {

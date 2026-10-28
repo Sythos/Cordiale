@@ -1389,12 +1389,27 @@ e 50 per `claim` e `copies`; le rotte a bundle unico di 42–44 non esistono pi�
 nella forma che Cordiale usa. Una versione ignota non le consente mai.
 **Differenze ancora aperte** (altre fette): il campo `msgid` (non
 `message_id`) di `e2e_send_dropped`; il corpo dell'invio senza `from`, `to` e
-con `payload` base64 invece di testo JSON; i corpi di `claim` (`{from_did}` →
-`{keys}`) e `copies` (`{from_did, verb, payload}` → `{id, msgid}`); le chiamate
-di `claim` e `copies` senza `/networks/:id`; i limiti di payload (32 KiB), righe
-(64), pagina e `ack` (100), chiavi monouso (50) e costo di una voce (+256 byte);
-il modello di `e2e_message`; i commenti «candidato» e la revisione delle
-fixture.
+con `payload` base64 invece di testo JSON; i limiti di payload (32 KiB) dell'invio, righe
+(64), chiavi monouso (50) e costo di una voce (+256 byte). Chiuse con la
+fetta 27 dell'ombrello 416: corpi e rotte di `claim` e `copies`, limite di 100
+per pagina e `ack`, modello di `e2e_message`.
+
+**Issue 449 (fetta 27 di 37 dell'ombrello 416): rotte per dispositivo e riga
+di inbox del protocollo 50.** Fonte: §4f di `CLIENT_PROTOCOL.md` di Grappa.
+`claim`, `copies`, `inbox` e `inbox/ack` stanno sotto
+`/networks/:id/e2e/devices/:did/`; il percorso si costruisce solo con
+`E2eOperation::path` (`DeviceRoute` è stato rimosso). Corpo di `claim`
+`{from_did}`, risposta `{keys}` (testo KEYS v2 compatto, tenuto com'è); corpo di
+`copies` `{from_did, verb, payload}`, risposta 202 `{id, msgid}`: un 2xx è
+un'accettazione, mai una consegna. `InboxRow` ha tutti i campi di
+`e2e_message`, compreso `own`, letto solo da un server con protocollo 50 o più
+(`own_flag_allowed`); da un server più vecchio una riga con `own` è rifiutata
+(`UnknownField`). `INBOX_PAGE_MAX` (100) vale per la pagina e per l'`ack`; un
+`ack` con 0 o più di 100 id è rifiutato prima della richiesta. Le chiamate
+controllano `E2eOperation::available` prima di ogni richiesta e restituiscono
+`E2eRouteError` (`Unavailable`, `Wire`, `Refused`). Non verificato contro un
+server reale: la presenza di `kind` e `network` nelle righe di `GET …/inbox` è
+dedotta dall'esempio di `e2e_message`.
 
 ### Cronologia a tempo (v40): regole del server da rispettare
 

@@ -23,6 +23,7 @@
 //! Map of the E2E operations to the protocol version that has them.
 //!
 //! The routes are the ones of section 4f of the client protocol document.
+//! The claim and copy routes are below `/networks/:id` like the others.
 //! Cordiale speaks the per-device shape of protocol 49. A server between 42
 //! and 48 speaks the single-bundle shape, which no release ever carried, so
 //! every operation here needs 49 at least, and the claim and copy doors need
@@ -76,6 +77,16 @@ pub enum E2eMethod {
     Post,
     Put,
     Delete,
+}
+
+/// First protocol version whose inbox rows carry the `own` flag. Source:
+/// section 4f, "`own` (v50)".
+pub const OWN_FLAG_MIN_PROTOCOL: u32 = 50;
+
+/// Whether a server with this protocol version may send the `own` flag. An
+/// unknown version never may.
+pub fn own_flag_allowed(server_protocol: Option<u32>) -> bool {
+    server_protocol.is_some_and(|version| version >= OWN_FLAG_MIN_PROTOCOL)
 }
 
 /// The place of the device id in a route.
@@ -169,7 +180,6 @@ impl E2eOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::e2e_device_routes::DeviceRoute;
     use crate::e2e_pacing::FAKE_LAG_BANK;
 
     const DID_TEXT: &str = "If4x36FUomE";
@@ -286,15 +296,12 @@ mod tests {
     }
 
     #[test]
-    fn device_routes_agree_with_the_device_route_paths() {
-        assert_eq!(
-            E2eOperation::Claim.path(Some(DID_TEXT)),
-            DeviceRoute::Claim.path(DID_TEXT)
-        );
-        assert_eq!(
-            E2eOperation::Copy.path(Some(DID_TEXT)),
-            DeviceRoute::Copies.path(DID_TEXT)
-        );
+    fn the_own_flag_needs_protocol_50() {
+        assert!(!own_flag_allowed(None));
+        assert!(!own_flag_allowed(Some(49)));
+        assert!(own_flag_allowed(Some(50)));
+        assert!(own_flag_allowed(Some(51)));
+        assert_eq!(OWN_FLAG_MIN_PROTOCOL, E2eOperation::Claim.min_protocol());
     }
 
     #[test]

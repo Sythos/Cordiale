@@ -33,6 +33,7 @@
 use std::time::Duration;
 
 use crate::client::GrappaClientError;
+use crate::e2e_wire::WireError;
 
 /// A refusal of an E2E route: the status and the token, read together.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,8 +154,9 @@ impl E2eRefusal {
     }
 }
 
-/// Failure of an E2E REST call: a typed refusal, or any other client error
-/// (transport, URL, size).
+/// Failure of an E2E REST call: a typed refusal, a route that the server
+/// protocol does not have, an answer of the wrong shape, or any other client
+/// error (transport, URL, size).
 #[derive(Debug)]
 pub enum E2eRouteError {
     Refused {
@@ -163,6 +165,10 @@ pub enum E2eRouteError {
         retry_after: Option<Duration>,
     },
     Client(GrappaClientError),
+    /// The server protocol version does not have the route.
+    Unavailable,
+    /// The answer of the server does not have the documented shape.
+    Wire(WireError),
 }
 
 impl From<GrappaClientError> for E2eRouteError {
@@ -181,12 +187,19 @@ impl From<GrappaClientError> for E2eRouteError {
     }
 }
 
+impl From<WireError> for E2eRouteError {
+    fn from(err: WireError) -> Self {
+        Self::Wire(err)
+    }
+}
+
 impl E2eRouteError {
     /// The wait the server asked for with the refusal, when it gave one.
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::Refused { retry_after, .. } => *retry_after,
             Self::Client(err) => err.retry_after(),
+            Self::Unavailable | Self::Wire(_) => None,
         }
     }
 }
