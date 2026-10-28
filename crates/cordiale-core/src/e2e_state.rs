@@ -59,6 +59,7 @@ use zeroize::Zeroize;
 
 use crate::e2e_device::VersionedDeviceCertificate;
 use crate::e2e_manage::SignedList;
+use crate::e2e_peer::{peer_device_key, ReplayState};
 use crate::e2e_store::{E2eKeyProvider, E2eStoreError};
 use crate::e2e_trust::PeerTrust;
 use crate::persistence::{create_private_dir_all, write_atomic};
@@ -103,6 +104,9 @@ struct StateData {
     /// Opaque state of a pairing that is not finished.
     #[serde(default)]
     pending_pairing: Option<String>,
+    /// First-message and new-session ids already accepted (public values).
+    #[serde(default)]
+    replay: ReplayState,
 }
 
 impl Drop for StateData {
@@ -217,6 +221,40 @@ impl E2eStateStore {
         self.commit(|data| {
             data.sessions.insert(id, text);
         })
+    }
+
+    /// The Olm session with one remote device, or `None`. The key is the
+    /// network, the nick and the `did`: one session for each device.
+    pub fn peer_session(
+        &self,
+        network: &str,
+        nick: &str,
+        did: &str,
+    ) -> Result<Option<Session>, E2eStoreError> {
+        self.session(&peer_device_key(network, nick, did))
+    }
+
+    /// Saves the session with one remote device. It replaces the session
+    /// that the same device had and never touches another device.
+    pub fn set_peer_session(
+        &mut self,
+        network: &str,
+        nick: &str,
+        did: &str,
+        session: &Session,
+    ) -> Result<(), E2eStoreError> {
+        self.set_session(&peer_device_key(network, nick, did), session)
+    }
+
+    /// The replay state. It is empty when none was saved.
+    pub fn replay(&self) -> ReplayState {
+        self.data.replay.clone()
+    }
+
+    /// Saves the replay state.
+    pub fn set_replay(&mut self, replay: &ReplayState) -> Result<(), E2eStoreError> {
+        let replay = replay.clone();
+        self.commit(|data| data.replay = replay)
     }
 
     /// The master key, or `None` when the device has none yet.
@@ -834,6 +872,68 @@ mod tests {
         let store = E2eStateStore::open(path, &provider).expect("reopen");
         assert!(store.pending_pairing().is_none());
         assert_eq!(store.trust(), trust);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_sessions_and_replay_state_survive_a_restart() {
+        let dir = scratch_dir("peer-sessions");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let account = Account::new();
+        let (first, second) = (outbound_session(&account), outbound_session(&account));
+        let mut replay = ReplayState::default();
+        replay
+            .accept_first_message("net", "alice", "d1", "m1")
+            .unwrap();
+        replay
+            .accept_new_session("net", "alice", "d1", "s1")
+            .unwrap();
+        {
+            let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+            store
+                .set_peer_session("net", "alice", "d1", &first)
+                .unwrap();
+            store
+                .set_peer_session("net", "alice", "d2", &second)
+                .unwrap();
+            // The second query entry of the same peer reuses the session.
+            store
+                .set_peer_session("net", "alice", "d1", &first)
+                .unwrap();
+            store.set_replay(&replay).expect("replay");
+            assert_eq!(store.data.sessions.len(), 2);
+        }
+        let store = E2eStateStore::open(path, &provider).expect("reopen");
+        let one = store.peer_session("net", "alice", "d1").unwrap().unwrap();
+        let two = store.peer_session("net", "alice", "d2").unwrap().unwrap();
+        assert_eq!(one.session_id(), first.session_id());
+        assert_eq!(two.session_id(), second.session_id());
+        assert!(store.peer_session("net", "bob", "d1").unwrap().is_none());
+        assert_eq!(store.replay(), replay);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sessions_of_nicks_that_name_object_members_stay_apart() {
+        let dir = scratch_dir("member-nicks");
+        let provider = fresh_key();
+        let account = Account::new();
+        let mut store = E2eStateStore::open(dir.join("state.bin"), &provider).expect("open");
+        let mut expected = Vec::new();
+        for nick in ["constructor", "__proto__", "toString"] {
+            let session = outbound_session(&account);
+            store.set_peer_session("net", nick, "d1", &session).unwrap();
+            expected.push((nick, session.session_id()));
+        }
+        for (nick, id) in expected {
+            let loaded = store.peer_session("net", nick, "d1").unwrap().unwrap();
+            assert_eq!(loaded.session_id(), id);
+        }
+        assert!(store
+            .peer_session("net", "valueOf", "d1")
+            .unwrap()
+            .is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 
