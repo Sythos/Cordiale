@@ -251,6 +251,33 @@ impl E2eStateStore {
         self.data.replay.clone()
     }
 
+    /// Saves the result of one received message in one write: the session
+    /// with one remote device, and the account and the replay state when they
+    /// changed. A failed write keeps all three as they were.
+    pub fn set_inbound(
+        &mut self,
+        network: &str,
+        nick: &str,
+        did: &str,
+        session: &Session,
+        account: Option<&Account>,
+        replay: Option<&ReplayState>,
+    ) -> Result<(), E2eStoreError> {
+        let key = peer_device_key(network, nick, did);
+        let session_text = session.pickle().encrypt(&self.key);
+        let account_text = account.map(|account| account.pickle().encrypt(&self.key));
+        let replay = replay.cloned();
+        self.commit(|data| {
+            data.sessions.insert(key, session_text);
+            if let Some(text) = account_text {
+                data.account = Some(text);
+            }
+            if let Some(replay) = replay {
+                data.replay = replay;
+            }
+        })
+    }
+
     /// Saves the replay state.
     pub fn set_replay(&mut self, replay: &ReplayState) -> Result<(), E2eStoreError> {
         let replay = replay.clone();
@@ -665,6 +692,74 @@ mod tests {
         let store = E2eStateStore::open(path, &provider).expect("reopen");
         let loaded = store.account().expect("account").expect("present");
         assert_eq!(loaded.identity_keys(), account.identity_keys());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_inbound_save_keeps_account_session_and_replay() {
+        let dir = scratch_dir("failed-inbound");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let account = Account::new();
+        let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+        store.set_account(&account).expect("account");
+        let before = fs::read(&path).expect("read");
+        let session = outbound_session(&account);
+        let mut replay = ReplayState::default();
+        replay
+            .accept_first_message("net", "bob", "AAAAAAAAAAA", "m1")
+            .expect("replay");
+        store.writer = failing_writer;
+        let other = Account::new();
+        let result = store.set_inbound(
+            "net",
+            "bob",
+            "AAAAAAAAAAA",
+            &session,
+            Some(&other),
+            Some(&replay),
+        );
+        assert!(matches!(result, Err(E2eStoreError::Io(_))));
+        let kept = store.account().expect("account").expect("present");
+        assert_eq!(kept.identity_keys(), account.identity_keys());
+        assert!(store
+            .peer_session("net", "bob", "AAAAAAAAAAA")
+            .expect("session")
+            .is_none());
+        assert_eq!(store.replay(), ReplayState::default());
+        assert_eq!(fs::read(&path).expect("read"), before);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_inbound_save_writes_account_session_and_replay_together() {
+        let dir = scratch_dir("inbound");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let account = Account::new();
+        let mut store = E2eStateStore::open(path, &provider).expect("open");
+        let session = outbound_session(&account);
+        let mut replay = ReplayState::default();
+        replay
+            .accept_first_message("net", "bob", "AAAAAAAAAAA", "m1")
+            .expect("replay");
+        store
+            .set_inbound(
+                "net",
+                "bob",
+                "AAAAAAAAAAA",
+                &session,
+                Some(&account),
+                Some(&replay),
+            )
+            .expect("inbound");
+        let loaded = store
+            .peer_session("net", "bob", "AAAAAAAAAAA")
+            .expect("session")
+            .expect("present");
+        assert_eq!(loaded.session_id(), session.session_id());
+        assert_eq!(store.replay(), replay);
+        assert!(store.account().expect("account").is_some());
         let _ = fs::remove_dir_all(&dir);
     }
 
