@@ -162,6 +162,7 @@ mod tests {
             sender_device: "device".into(),
             sent_at: at,
             text: text.into(),
+            encrypted: true,
         }
     }
 
