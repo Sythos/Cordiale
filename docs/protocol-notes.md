@@ -1509,7 +1509,7 @@ chiave (`DeviceMismatch`), revoca (`RevokedDevice`), presenza nella lista
 verificata e nell'eventuale lista del server (`NotListed`: il server può solo
 togliere un dispositivo), firma del dispositivo sulla chiave curve
 (`irc-e2e:v1:otk:<curve>`, candidato) e legame `fb` (`RecipientMismatch`). Lo
-stato di fiducia cambia solo se tutti i controlli passano. `ReplayState` rifiuta
+stato di fiducia cambia solo se tutti i controlli passano; una lista firmata più nuova del master noto resta anche se il dispositivo è rifiutato. `ReplayState` rifiuta
 (`Replay`) un `msgid` di primo messaggio o un id di sessione già visti per lo
 stesso dispositivo; tiene gli ultimi 256 id per dispositivo (regola candidata,
 il contratto finale non è ancora scritto). Sessioni, fiducia e replay usano la
