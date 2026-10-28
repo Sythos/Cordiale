@@ -44,7 +44,7 @@ use crate::backoff::rate_limit_wait;
 use crate::e2e_device_routes::{
     ClaimRequest, ClaimResponse, CopyAccepted, CopyRequest, InboxAckRequest, InboxRow,
 };
-use crate::e2e_pacing::{classify_send_response, SendResponse};
+use crate::e2e_pacing::{classify_send_response, parse_send_accepted, SendAnswer, SendResponse};
 use crate::e2e_protocol::E2eOperation;
 use crate::e2e_refusal::E2eRouteError;
 use crate::e2e_wire::WireError;
@@ -816,13 +816,14 @@ impl GrappaClient {
     /// request. A 202 means only that Grappa accepted the request: it is not
     /// a delivery. A 422 `too_late` and a 400 `bad_request` come back as
     /// `SendResponse::Failed`; any other refusal is `SendResponse::Unexpected`.
-    /// Only a transport or URL failure is an `Err`. The 202 body is not read.
+    /// Only a transport or URL failure is an `Err`. The `msgid` of the 202
+    /// body is in `SendAnswer::msgid`; it is `None` when the body has none.
     pub async fn send_e2e_message(
         &self,
         token: &str,
         network_id: &str,
         request: &E2eSendRequest,
-    ) -> Result<SendResponse, GrappaClientError> {
+    ) -> Result<SendAnswer, GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
@@ -837,10 +838,25 @@ impl GrappaClient {
             .send()
             .await?;
         match reject_with_code(response).await {
-            Ok(response) => Ok(classify_send_response(response.status().as_u16(), None)),
-            Err(GrappaClientError::Rejected { status, code, .. }) => {
-                Ok(classify_send_response(status.as_u16(), code.as_deref()))
+            Ok(response) => {
+                let class = classify_send_response(response.status().as_u16(), None);
+                let msgid = match class {
+                    SendResponse::Accepted => response
+                        .json::<Value>()
+                        .await
+                        .ok()
+                        .and_then(|body| parse_send_accepted(&body).ok()),
+                    _ => None,
+                };
+                Ok(SendAnswer {
+                    response: class,
+                    msgid,
+                })
             }
+            Err(GrappaClientError::Rejected { status, code, .. }) => Ok(SendAnswer {
+                response: classify_send_response(status.as_u16(), code.as_deref()),
+                msgid: None,
+            }),
             Err(err) => Err(err),
         }
     }
@@ -4845,14 +4861,16 @@ mod tests {
         E2eSendRequest::new(
             "bob",
             crate::rest::E2eSendVerb::Msg,
-            "eyJ2IjoyfQ==",
+            "AAAAAAAAAAA",
+            "If4x36FUomE",
+            r#"{"v":2}"#,
             Some(crate::rest::E2eSendPriority::Control),
             Some(1_790_000_000),
         )
         .expect("request")
     }
 
-    async fn e2e_answer(template: ResponseTemplate) -> SendResponse {
+    async fn e2e_answer(template: ResponseTemplate) -> SendAnswer {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/networks/libera/e2e/messages"))
@@ -4860,7 +4878,9 @@ mod tests {
             .and(body_json(serde_json::json!({
                 "target": "bob",
                 "verb": "msg",
-                "payload": "eyJ2IjoyfQ==",
+                "from": "AAAAAAAAAAA",
+                "to": "If4x36FUomE",
+                "payload": "{\"v\":2}",
                 "priority": "control",
                 "expires_at": 1_790_000_000
             })))
@@ -5020,24 +5040,44 @@ mod tests {
 
     #[tokio::test]
     async fn send_e2e_message_202_is_accepted_not_delivered() {
-        let answer = e2e_answer(ResponseTemplate::new(202)).await;
-        assert_eq!(answer, SendResponse::Accepted);
+        let template = ResponseTemplate::new(202)
+            .set_body_json(serde_json::json!({"id": 3, "msgid": "q83vEjRWeJA"}));
+        let answer = e2e_answer(template).await;
+        assert_eq!(answer.response, SendResponse::Accepted);
+        assert_eq!(answer.msgid.as_deref(), Some("q83vEjRWeJA"));
+    }
+
+    #[tokio::test]
+    async fn send_e2e_message_202_without_a_msgid_is_still_only_accepted() {
+        for template in [
+            ResponseTemplate::new(202),
+            ResponseTemplate::new(202).set_body_json(serde_json::json!({"msgid": ""})),
+        ] {
+            let answer = e2e_answer(template).await;
+            assert_eq!(answer.response, SendResponse::Accepted);
+            assert_eq!(answer.msgid, None);
+        }
     }
 
     #[tokio::test]
     async fn send_e2e_message_422_too_late_is_a_failure() {
         let template =
             ResponseTemplate::new(422).set_body_json(serde_json::json!({"error": "too_late"}));
+        let answer = e2e_answer(template).await;
         assert_eq!(
-            e2e_answer(template).await,
+            answer.response,
             SendResponse::Failed(crate::e2e_pacing::SendFailure::TooLate)
         );
+        assert_eq!(answer.msgid, None);
     }
 
     #[tokio::test]
     async fn send_e2e_message_other_refusal_is_unexpected() {
         let template = ResponseTemplate::new(500);
-        assert_eq!(e2e_answer(template).await, SendResponse::Unexpected(500));
+        assert_eq!(
+            e2e_answer(template).await.response,
+            SendResponse::Unexpected(500)
+        );
     }
 
     #[tokio::test]

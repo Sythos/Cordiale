@@ -31,12 +31,14 @@
 
 use std::collections::HashMap;
 
-use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::e2e_wire::{as_object, reject_unknown_fields, required_str, WireError};
+use crate::e2e_device_routes::check_compact_json;
+use crate::e2e_wire::{
+    as_object, check_addresses, reject_unknown_fields, required_str, Verb, WireError,
+    SEND_PAYLOAD_MAX_BYTES, SEND_PAYLOAD_MAX_LINES,
+};
 use crate::slash::{is_channel, is_statusmsg_target};
 
 /// Response body of `GET /api/config`, the first, unauthenticated call a
@@ -646,7 +648,21 @@ impl E2eSendVerb {
             _ => Err(WireError::BadVerb),
         }
     }
+
+    /// The frame verb that sets which `from` and `to` pairs are valid.
+    fn frame_verb(self) -> Verb {
+        match self {
+            Self::KeyReq => Verb::KeyReq,
+            Self::PkMsg => Verb::PkMsg,
+            Self::Msg => Verb::Msg,
+            Self::Nack => Verb::Nack,
+        }
+    }
 }
+
+/// The lock sign in the UI label `🔒<user>` of an encrypted query window. It
+/// is a label only and never part of a protocol value.
+pub const QUERY_LOCK_LABEL: &str = "\u{1F512}";
 
 /// Lane hint of the send door. Absent means `Text`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -654,19 +670,26 @@ impl E2eSendVerb {
 pub enum E2eSendPriority {
     Control,
     Text,
+    Reactive,
 }
 
 /// Request body of the E2E send door (`expires_at` from protocol 46).
 ///
+/// `from` and `to` are device ids or `*`, as in the frame; the pair must
+/// fit the verb. `payload` is compact JSON object text of at most
+/// `SEND_PAYLOAD_MAX_BYTES` bytes and `SEND_PAYLOAD_MAX_LINES` lines.
 /// `expires_at` is a positive Unix time in seconds. It is valid only on a
 /// `control` `msg` or `pkmsg` that answers an order. `new` and `from_value`
-/// enforce that rule. The target is a direct peer: never a channel or a
-/// status-prefixed channel such as `@#ops`. Build the JSON with `to_json`,
-/// never by hand in UI code.
+/// enforce these rules. The target is a direct peer: never a channel or a
+/// status-prefixed channel such as `@#ops`. It is a protocol value, never
+/// the UI label of a query window. Build the JSON with `to_json`, never by
+/// hand in UI code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct E2eSendRequest {
     target: String,
     verb: E2eSendVerb,
+    from: String,
+    to: String,
     payload: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     priority: Option<E2eSendPriority>,
@@ -675,27 +698,43 @@ pub struct E2eSendRequest {
 }
 
 impl E2eSendRequest {
-    const FIELDS: [&'static str; 5] = ["target", "verb", "payload", "priority", "expires_at"];
+    const FIELDS: [&'static str; 7] = [
+        "target",
+        "verb",
+        "from",
+        "to",
+        "payload",
+        "priority",
+        "expires_at",
+    ];
 
-    /// Checks every field and builds the request.
+    /// Checks every field and builds the request. A payload over a limit is
+    /// refused here, so no such request reaches the network.
     pub fn new(
         target: &str,
         verb: E2eSendVerb,
+        from: &str,
+        to: &str,
         payload: &str,
         priority: Option<E2eSendPriority>,
         expires_at: Option<u64>,
     ) -> Result<Self, WireError> {
         if target.is_empty()
+            || target.contains(QUERY_LOCK_LABEL)
             || is_channel(target)
             || is_statusmsg_target(target)
             || target.contains(['\r', '\n', '\0', ' '])
         {
             return Err(WireError::BadTarget);
         }
-        let decodes = STANDARD.decode(payload).is_ok() || STANDARD_NO_PAD.decode(payload).is_ok();
-        if payload.is_empty() || !decodes {
-            return Err(WireError::BadPayload);
+        check_addresses(verb.frame_verb(), from, to)?;
+        if payload.len() > SEND_PAYLOAD_MAX_BYTES {
+            return Err(WireError::PayloadTooLarge);
         }
+        if payload.lines().count() > SEND_PAYLOAD_MAX_LINES {
+            return Err(WireError::TooManyLines);
+        }
+        check_compact_json(payload)?;
         if let Some(deadline) = expires_at {
             let allowed = priority == Some(E2eSendPriority::Control)
                 && matches!(verb, E2eSendVerb::Msg | E2eSendVerb::PkMsg);
@@ -706,6 +745,8 @@ impl E2eSendRequest {
         Ok(Self {
             target: target.to_string(),
             verb,
+            from: from.to_string(),
+            to: to.to_string(),
             payload: payload.to_string(),
             priority,
             expires_at,
@@ -724,6 +765,7 @@ impl E2eSendRequest {
             Some(Value::String(text)) => Some(match text.as_str() {
                 "control" => E2eSendPriority::Control,
                 "text" => E2eSendPriority::Text,
+                "reactive" => E2eSendPriority::Reactive,
                 _ => return Err(WireError::BadPriority),
             }),
             Some(_) => return Err(WireError::BadFieldType),
@@ -736,6 +778,8 @@ impl E2eSendRequest {
         Self::new(
             required_str(map, "target")?,
             verb,
+            required_str(map, "from")?,
+            required_str(map, "to")?,
             required_str(map, "payload")?,
             priority,
             expires_at,
@@ -1063,7 +1107,9 @@ mod tests {
             E2eSendRequest::new(
                 "bot",
                 E2eSendVerb::Msg,
-                "eyJ2IjoyfQ==",
+                "AAAAAAAAAAA",
+                "If4x36FUomE",
+                r#"{"v":2}"#,
                 Some(E2eSendPriority::Control),
                 deadline,
             )
@@ -1073,5 +1119,62 @@ mod tests {
         assert!(!request.deadline_passed(1_789_999_999));
         assert!(request.deadline_passed(1_790_000_000));
         assert!(!build(None).deadline_passed(u64::MAX));
+    }
+
+    fn request_with_payload(payload: &str) -> Result<E2eSendRequest, WireError> {
+        E2eSendRequest::new(
+            "bot",
+            E2eSendVerb::Msg,
+            "AAAAAAAAAAA",
+            "If4x36FUomE",
+            payload,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn e2e_send_request_payload_size_limit() {
+        // `{"k":"` and `"}` take 8 bytes, so the filler sets the exact size.
+        let sized = |len: usize| format!(r#"{{"k":"{}"}}"#, "a".repeat(len - 8));
+        assert!(request_with_payload(&sized(SEND_PAYLOAD_MAX_BYTES)).is_ok());
+        assert_eq!(
+            request_with_payload(&sized(SEND_PAYLOAD_MAX_BYTES + 1)),
+            Err(WireError::PayloadTooLarge)
+        );
+    }
+
+    #[test]
+    fn e2e_send_request_line_limit() {
+        let lines = |count: usize| vec!["{}"; count].join("\n");
+        assert_eq!(
+            request_with_payload(&lines(SEND_PAYLOAD_MAX_LINES + 1)),
+            Err(WireError::TooManyLines)
+        );
+        // Within the limit, a line break is still not compact JSON.
+        assert_eq!(
+            request_with_payload(&lines(SEND_PAYLOAD_MAX_LINES)),
+            Err(WireError::BadJson)
+        );
+    }
+
+    #[test]
+    fn e2e_send_request_refuses_the_ui_lock_label_everywhere() {
+        let label = format!("{QUERY_LOCK_LABEL}bob");
+        let build = |target: &str, from: &str, to: &str| {
+            E2eSendRequest::new(target, E2eSendVerb::Msg, from, to, "{}", None, None)
+        };
+        assert_eq!(
+            build(&label, "AAAAAAAAAAA", "If4x36FUomE"),
+            Err(WireError::BadTarget)
+        );
+        assert_eq!(
+            build("bob", &label, "If4x36FUomE"),
+            Err(WireError::BadAddress)
+        );
+        assert_eq!(
+            build("bob", "AAAAAAAAAAA", &label),
+            Err(WireError::BadAddress)
+        );
     }
 }

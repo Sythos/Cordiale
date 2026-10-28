@@ -25,12 +25,13 @@
 //! The fixture file is plain JSON, so another implementation can read the
 //! same vectors. The list order is ascending by the plain key text.
 
-use cordiale_core::e2e_device_routes::InboxRow;
+use cordiale_core::e2e_device_routes::{E2eMessageEvent, InboxRow};
 use cordiale_core::e2e_refusal::E2eRefusal;
 use cordiale_core::e2e_wire::{
     device_certificate_signed_text, did_from_key_text, format_frame, is_did_shape,
     parse_device_certificate_signed_text, parse_frame, signed_list_signed_text, Frame,
 };
+use cordiale_core::wire_event::ClientEventKind;
 use serde_json::Value;
 
 fn fixtures() -> Value {
@@ -151,6 +152,15 @@ fn fixture_inbox_rows_read_the_own_flag() {
     for case in all["inbox_rows"]["valid"].as_array().expect("valid") {
         let row = InboxRow::from_value(&case["row"], server_protocol(case))
             .unwrap_or_else(|err| panic!("{}: {err:?}", text(case, "case")));
+        // The event on the user topic has the same fields as an inbox row.
+        let event = E2eMessageEvent::from_value(&case["row"], server_protocol(case));
+        assert_eq!(event.as_ref(), Ok(&row), "{}", text(case, "case"));
+        assert_eq!(
+            ClientEventKind::from_payload(&case["row"]),
+            Some(ClientEventKind::E2eMessage),
+            "{}",
+            text(case, "case")
+        );
         assert_eq!(
             row.own,
             case["own"].as_bool().expect("own"),

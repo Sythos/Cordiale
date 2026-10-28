@@ -1,57 +1,78 @@
 {
+  "fixture_revision": 2,
   "valid": [
     {
       "case": "keyreq with no priority",
-      "request": {"target": "vjt-claude", "verb": "keyreq", "payload": "eyJ2IjoyfQ=="},
-      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"keyreq\",\"payload\":\"eyJ2IjoyfQ==\"}"
+      "request": {"target": "vjt-claude", "verb": "keyreq", "from": "AAAAAAAAAAA", "to": "*", "payload": "{\"v\":2}"},
+      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"keyreq\",\"from\":\"AAAAAAAAAAA\",\"to\":\"*\",\"payload\":\"{\\\"v\\\":2}\"}"
     },
     {
       "case": "text msg with explicit priority",
-      "request": {"target": "vjt-claude", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "text"},
-      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"msg\",\"payload\":\"eyJ2IjoyfQ==\",\"priority\":\"text\"}"
+      "request": {"target": "vjt-claude", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "text"},
+      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"msg\",\"from\":\"AAAAAAAAAAA\",\"to\":\"If4x36FUomE\",\"payload\":\"{\\\"v\\\":2}\",\"priority\":\"text\"}"
+    },
+    {
+      "case": "reactive msg",
+      "request": {"target": "vjt-claude", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "reactive"},
+      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"msg\",\"from\":\"AAAAAAAAAAA\",\"to\":\"If4x36FUomE\",\"payload\":\"{\\\"v\\\":2}\",\"priority\":\"reactive\"}"
     },
     {
       "case": "control msg with an order deadline",
-      "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000},
-      "wire": "{\"target\":\"bot\",\"verb\":\"msg\",\"payload\":\"eyJ2IjoyfQ==\",\"priority\":\"control\",\"expires_at\":1790000000}"
+      "request": {"target": "bot", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": 1790000000},
+      "wire": "{\"target\":\"bot\",\"verb\":\"msg\",\"from\":\"AAAAAAAAAAA\",\"to\":\"If4x36FUomE\",\"payload\":\"{\\\"v\\\":2}\",\"priority\":\"control\",\"expires_at\":1790000000}"
     },
     {
-      "case": "control pkmsg with an order deadline and unpadded payload",
-      "request": {"target": "bot", "verb": "pkmsg", "payload": "eyJ2IjoyfQ", "priority": "control", "expires_at": 1},
-      "wire": "{\"target\":\"bot\",\"verb\":\"pkmsg\",\"payload\":\"eyJ2IjoyfQ\",\"priority\":\"control\",\"expires_at\":1}"
+      "case": "control pkmsg with an order deadline",
+      "request": {"target": "bot", "verb": "pkmsg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": 1},
+      "wire": "{\"target\":\"bot\",\"verb\":\"pkmsg\",\"from\":\"AAAAAAAAAAA\",\"to\":\"If4x36FUomE\",\"payload\":\"{\\\"v\\\":2}\",\"priority\":\"control\",\"expires_at\":1}"
     },
     {
       "case": "nack",
-      "request": {"target": "vjt-claude", "verb": "nack", "payload": "eyJ2IjoyfQ=="},
-      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"nack\",\"payload\":\"eyJ2IjoyfQ==\"}"
+      "request": {"target": "vjt-claude", "verb": "nack", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"},
+      "wire": "{\"target\":\"vjt-claude\",\"verb\":\"nack\",\"from\":\"AAAAAAAAAAA\",\"to\":\"If4x36FUomE\",\"payload\":\"{\\\"v\\\":2}\"}"
     }
   ],
   "invalid": [
     {"case": "not an object", "request": [1], "error": "BadFieldType"},
-    {"case": "unknown verb", "request": {"target": "bot", "verb": "keys", "payload": "eyJ2IjoyfQ=="}, "error": "BadVerb"},
-    {"case": "missing target", "request": {"verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "MissingField"},
-    {"case": "unknown field", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "extra": 1}, "error": "UnknownField"},
-    {"case": "target of the wrong type", "request": {"target": 5, "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadFieldType"},
-    {"case": "channel target", "request": {"target": "#chan", "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadTarget"},
-    {"case": "status-prefixed channel target @", "request": {"target": "@#ops", "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadTarget"},
-    {"case": "status-prefixed channel target %", "request": {"target": "%#ops", "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadTarget"},
-    {"case": "status-prefixed channel target ~", "request": {"target": "~#ops", "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadTarget"},
-    {"case": "two status prefixes", "request": {"target": "@+#ops", "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadTarget"},
-    {"case": "empty target", "request": {"target": "", "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadTarget"},
-    {"case": "target with a space", "request": {"target": "a b", "verb": "msg", "payload": "eyJ2IjoyfQ=="}, "error": "BadTarget"},
-    {"case": "payload is not base64", "request": {"target": "bot", "verb": "msg", "payload": "***"}, "error": "BadPayload"},
-    {"case": "unknown priority", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "urgent"}, "error": "BadPriority"},
-    {"case": "null priority", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": null}, "error": "BadFieldType"},
-    {"case": "deadline on keyreq", "request": {"target": "bot", "verb": "keyreq", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000}, "error": "BadExpiry"},
-    {"case": "deadline on nack", "request": {"target": "bot", "verb": "nack", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000}, "error": "BadExpiry"},
-    {"case": "deadline on text msg", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "text", "expires_at": 1790000000}, "error": "BadExpiry"},
-    {"case": "deadline with no priority", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "expires_at": 1790000000}, "error": "BadExpiry"},
-    {"case": "deadline is zero", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 0}, "error": "BadExpiry"},
-    {"case": "deadline is negative", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": -5}, "error": "BadExpiry"},
-    {"case": "deadline has a fraction", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000.5}, "error": "BadExpiry"},
-    {"case": "deadline is a float with no fraction", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 1790000000.0}, "error": "BadExpiry"},
-    {"case": "deadline above int64", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": 9223372036854775808}, "error": "BadExpiry"},
-    {"case": "deadline is a string", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": "1790000000"}, "error": "BadFieldType"},
-    {"case": "deadline is null", "request": {"target": "bot", "verb": "msg", "payload": "eyJ2IjoyfQ==", "priority": "control", "expires_at": null}, "error": "BadFieldType"}
+    {"case": "unknown verb", "request": {"target": "bot", "verb": "keys", "from": "AAAAAAAAAAA", "to": "*", "payload": "{\"v\":2}"}, "error": "BadVerb"},
+    {"case": "missing target", "request": {"verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "MissingField"},
+    {"case": "missing from", "request": {"target": "bot", "verb": "msg", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "MissingField"},
+    {"case": "missing to", "request": {"target": "bot", "verb": "msg", "from": "AAAAAAAAAAA", "payload": "{\"v\":2}"}, "error": "MissingField"},
+    {"case": "unknown field", "request": {"target": "bot", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "extra": 1}, "error": "UnknownField"},
+    {"case": "target of the wrong type", "request": {"target": 5, "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadFieldType"},
+    {"case": "channel target", "request": {"target": "#chan", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadTarget"},
+    {"case": "status-prefixed channel target @", "request": {"target": "@#ops", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadTarget"},
+    {"case": "status-prefixed channel target %", "request": {"target": "%#ops", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadTarget"},
+    {"case": "status-prefixed channel target ~", "request": {"target": "~#ops", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadTarget"},
+    {"case": "two status prefixes", "request": {"target": "@+#ops", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadTarget"},
+    {"case": "empty target", "request": {"target": "", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadTarget"},
+    {"case": "target with a space", "request": {"target": "a b", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadTarget"},
+    {"case": "target with the UI lock label", "request": {"target": "🔒bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadTarget"},
+    {"case": "from with the UI lock label", "request": {"target": "bob", "verb": "msg", "from": "🔒bob", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadAddress"},
+    {"case": "to with the UI lock label", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "🔒bob", "payload": "{\"v\":2}"}, "error": "BadAddress"},
+    {"case": "from is a nick", "request": {"target": "bob", "verb": "msg", "from": "alice", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadAddress"},
+    {"case": "keyreq to a device", "request": {"target": "bob", "verb": "keyreq", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadAddress"},
+    {"case": "msg from any device", "request": {"target": "bob", "verb": "msg", "from": "*", "to": "If4x36FUomE", "payload": "{\"v\":2}"}, "error": "BadAddress"},
+    {"case": "nack to any device", "request": {"target": "bob", "verb": "nack", "from": "AAAAAAAAAAA", "to": "*", "payload": "{\"v\":2}"}, "error": "BadAddress"},
+    {"case": "payload is base64 text", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "eyJ2IjoyfQ=="}, "error": "BadJson"},
+    {"case": "payload is empty", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": ""}, "error": "BadPayload"},
+    {"case": "payload is not an object", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "[1]"}, "error": "BadPayload"},
+    {"case": "payload is not compact", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\": 2}"}, "error": "BadPayload"},
+    {"case": "payload has a line break", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":\n2}"}, "error": "BadJson"},
+    {"case": "unknown priority", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "urgent"}, "error": "BadPriority"},
+    {"case": "priority with another casing", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "Reactive"}, "error": "BadPriority"},
+    {"case": "null priority", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": null}, "error": "BadFieldType"},
+    {"case": "deadline on keyreq", "request": {"target": "bob", "verb": "keyreq", "from": "AAAAAAAAAAA", "to": "*", "payload": "{\"v\":2}", "priority": "control", "expires_at": 1790000000}, "error": "BadExpiry"},
+    {"case": "deadline on nack", "request": {"target": "bob", "verb": "nack", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": 1790000000}, "error": "BadExpiry"},
+    {"case": "deadline on text msg", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "text", "expires_at": 1790000000}, "error": "BadExpiry"},
+    {"case": "deadline on reactive msg", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "reactive", "expires_at": 1790000000}, "error": "BadExpiry"},
+    {"case": "deadline with no priority", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "expires_at": 1790000000}, "error": "BadExpiry"},
+    {"case": "deadline is zero", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": 0}, "error": "BadExpiry"},
+    {"case": "deadline is negative", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": -5}, "error": "BadExpiry"},
+    {"case": "deadline has a fraction", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": 1790000000.5}, "error": "BadExpiry"},
+    {"case": "deadline is a float with no fraction", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": 1790000000.0}, "error": "BadExpiry"},
+    {"case": "deadline above int64", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": 9223372036854775808}, "error": "BadExpiry"},
+    {"case": "deadline is a string", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": "1790000000"}, "error": "BadFieldType"},
+    {"case": "deadline is null", "request": {"target": "bob", "verb": "msg", "from": "AAAAAAAAAAA", "to": "If4x36FUomE", "payload": "{\"v\":2}", "priority": "control", "expires_at": null}, "error": "BadFieldType"}
   ]
 }
