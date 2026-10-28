@@ -25,6 +25,7 @@
 //! The fixture file is plain JSON, so another implementation can read the
 //! same vectors. The list order is ascending by the plain key text.
 
+use cordiale_core::e2e_device_routes::InboxRow;
 use cordiale_core::e2e_refusal::E2eRefusal;
 use cordiale_core::e2e_wire::{
     device_certificate_signed_text, did_from_key_text, format_frame, is_did_shape,
@@ -133,6 +134,33 @@ fn fixture_bad_frames_are_rejected() {
     for case in fixtures()["frames"]["invalid"].as_array().expect("invalid") {
         assert_eq!(
             error_name(parse_frame(text(case, "text"))),
+            text(case, "error"),
+            "{}",
+            text(case, "case")
+        );
+    }
+}
+
+fn server_protocol(case: &Value) -> Option<u32> {
+    Some(number(case, "server_protocol"))
+}
+
+#[test]
+fn fixture_inbox_rows_read_the_own_flag() {
+    let all = fixtures();
+    for case in all["inbox_rows"]["valid"].as_array().expect("valid") {
+        let row = InboxRow::from_value(&case["row"], server_protocol(case))
+            .unwrap_or_else(|err| panic!("{}: {err:?}", text(case, "case")));
+        assert_eq!(
+            row.own,
+            case["own"].as_bool().expect("own"),
+            "{}",
+            text(case, "case")
+        );
+    }
+    for case in all["inbox_rows"]["invalid"].as_array().expect("invalid") {
+        assert_eq!(
+            error_name(InboxRow::from_value(&case["row"], server_protocol(case))),
             text(case, "error"),
             "{}",
             text(case, "case")

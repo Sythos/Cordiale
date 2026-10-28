@@ -41,9 +41,13 @@ use crate::admin::{
     AdminVisitorsResponse,
 };
 use crate::backoff::rate_limit_wait;
-use crate::e2e_device_routes::{ClaimRequest, CopyRequest, DeviceRoute};
+use crate::e2e_device_routes::{
+    ClaimRequest, ClaimResponse, CopyAccepted, CopyRequest, InboxAckRequest, InboxRow,
+};
 use crate::e2e_pacing::{classify_send_response, SendResponse};
+use crate::e2e_protocol::E2eOperation;
 use crate::e2e_refusal::E2eRouteError;
+use crate::e2e_wire::WireError;
 use crate::presence::{PresencePins, PresencePref};
 use crate::profile::{
     AddIgnoreRequest, AliasesView, IgnoreEntry, IgnoreMutationResponse, IgnoresResponse,
@@ -841,61 +845,121 @@ impl GrappaClient {
         }
     }
 
-    /// `POST /e2e/devices/:did/claim` — takes one one-time key of the device.
-    /// The body is read with `ClaimResponse::from_value`. The route is a
-    /// candidate of protocol 50. A refusal is an `E2eRouteError::Refused`.
+    /// `POST /networks/:network_id/e2e/devices/:did/claim` — takes one key of
+    /// the sibling device `did` for the device in the request. The answer is
+    /// read with `ClaimResponse::from_value`. Protocol 50 at least. A
+    /// refusal is an `E2eRouteError::Refused`.
     pub async fn claim_e2e_device_key(
         &self,
         token: &str,
+        network_id: &str,
         did: &str,
+        server_protocol: Option<u32>,
         request: &ClaimRequest,
-    ) -> Result<Value, E2eRouteError> {
-        Ok(self
-            .post_e2e_device_route(token, DeviceRoute::Claim, did, request)
-            .await?)
+    ) -> Result<ClaimResponse, E2eRouteError> {
+        let url = self.e2e_device_url(E2eOperation::Claim, network_id, did, server_protocol)?;
+        let value = self
+            .send_e2e_device_request(self.http.post(url).bearer_auth(token).json(request))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(ClaimResponse::from_value(&value)?)
     }
 
-    /// `POST /e2e/devices/:did/copies` — puts one encrypted copy in the inbox
-    /// of the device. The body is read with `CopyResponse::from_value`. The
-    /// route is a candidate of protocol 50. A refusal is an
-    /// `E2eRouteError::Refused`. A 2xx answer is an acceptance, not a
-    /// delivery.
+    /// `POST /networks/:network_id/e2e/devices/:did/copies` — puts one
+    /// encrypted copy in the inbox of the sibling device `did`. The answer is
+    /// read with `CopyAccepted::from_value`. Protocol 50 at least. A 2xx
+    /// answer is an acceptance, not a delivery.
     pub async fn send_e2e_copy(
         &self,
         token: &str,
+        network_id: &str,
         did: &str,
+        server_protocol: Option<u32>,
         request: &CopyRequest,
-    ) -> Result<Value, E2eRouteError> {
-        Ok(self
-            .post_e2e_device_route(token, DeviceRoute::Copies, did, request)
-            .await?)
+    ) -> Result<CopyAccepted, E2eRouteError> {
+        let url = self.e2e_device_url(E2eOperation::Copy, network_id, did, server_protocol)?;
+        let value = self
+            .send_e2e_device_request(self.http.post(url).bearer_auth(token).json(request))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(CopyAccepted::from_value(&value)?)
     }
 
-    async fn post_e2e_device_route<T: serde::Serialize>(
+    /// `GET /networks/:network_id/e2e/devices/:did/inbox?after=<id>` — one
+    /// page of the inbox of the device, oldest first, at most 100 rows. Page
+    /// on with the last `id`. Protocol 49 at least; `own` needs protocol 50.
+    pub async fn fetch_e2e_inbox(
         &self,
         token: &str,
-        route: DeviceRoute,
+        network_id: &str,
         did: &str,
-        request: &T,
-    ) -> Result<Value, GrappaClientError> {
-        let path = route
-            .path(did)
-            .map_err(|_| GrappaClientError::InvalidUrl(format!("bad device id: {did}")))?;
+        after: Option<u64>,
+        server_protocol: Option<u32>,
+    ) -> Result<Vec<InboxRow>, E2eRouteError> {
+        let mut url =
+            self.e2e_device_url(E2eOperation::InboxFetch, network_id, did, server_protocol)?;
+        if let Some(after) = after {
+            url.query_pairs_mut()
+                .append_pair("after", &after.to_string());
+        }
+        let value = self
+            .send_e2e_device_request(self.http.get(url).bearer_auth(token))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(InboxRow::page_from_value(&value, server_protocol)?)
+    }
+
+    /// `POST /networks/:network_id/e2e/devices/:did/inbox/ack` — deletes
+    /// the acknowledged entries of the device. The request holds 1 to 100
+    /// ids. Protocol 49 at least. The server answers 204.
+    pub async fn ack_e2e_inbox(
+        &self,
+        token: &str,
+        network_id: &str,
+        did: &str,
+        server_protocol: Option<u32>,
+        request: &InboxAckRequest,
+    ) -> Result<(), E2eRouteError> {
+        let url = self.e2e_device_url(E2eOperation::InboxAck, network_id, did, server_protocol)?;
+        self.send_e2e_device_request(self.http.post(url).bearer_auth(token).json(request))
+            .await?;
+        Ok(())
+    }
+
+    /// The URL of a per-device route below `/networks/:network_id`. The call
+    /// is refused before any request when the server protocol does not have
+    /// the route or when `did` is not a device id.
+    fn e2e_device_url(
+        &self,
+        operation: E2eOperation,
+        network_id: &str,
+        did: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<reqwest::Url, E2eRouteError> {
+        if !operation.available(server_protocol) {
+            return Err(E2eRouteError::Unavailable);
+        }
+        let path = operation.path(Some(did))?;
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
             .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(["networks", network_id])
             .extend(path.split('/').filter(|part| !part.is_empty()));
+        Ok(url)
+    }
 
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(token)
-            .json(request)
-            .send()
-            .await?;
-        let response = reject_with_code(response).await?;
-        Ok(response.json::<Value>().await?)
+    /// Sends one request of a per-device route. The answer is the JSON body,
+    /// or `None` for an answer with no body (204).
+    async fn send_e2e_device_request(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<Option<Value>, GrappaClientError> {
+        let response = reject_with_code(builder.send().await?).await?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        Ok(Some(response.json::<Value>().await?))
     }
 
     /// `GET /networks/:network_slug/channels/:channel_name/messages` —
@@ -3555,9 +3619,11 @@ impl GrappaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::e2e_device_routes::CopyVerb;
     use crate::e2e_refusal::E2eRefusal;
     use wiremock::matchers::{
-        body_json, body_string_contains, header, header_regex, method, path, query_param,
+        body_json, body_string, body_string_contains, header, header_regex, method, path,
+        query_param,
     };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -4564,7 +4630,7 @@ mod tests {
     async fn a_rate_limited_e2e_claim_keeps_the_wait_the_server_asks_for() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/e2e/devices/AAAAAAAAAAA/claim"))
+            .and(path("/networks/libera/e2e/devices/AAAAAAAAAAA/claim"))
             .respond_with(
                 ResponseTemplate::new(429)
                     .insert_header("retry-after", "3")
@@ -4576,8 +4642,9 @@ mod tests {
             .mount(&mock_server)
             .await;
 
+        let from = ClaimRequest::new("If4x36FUomE").expect("claim request");
         let error = GrappaClient::new(mock_server.uri())
-            .claim_e2e_device_key("abc123", "AAAAAAAAAAA", &ClaimRequest::default())
+            .claim_e2e_device_key("abc123", "libera", "AAAAAAAAAAA", Some(50), &from)
             .await
             .expect_err("should be refused");
 
@@ -4807,37 +4874,139 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_device_routes_post_to_the_device_path() {
+    async fn e2e_device_routes_use_the_network_device_paths() {
+        const BASE: &str = "/networks/libera/e2e/devices/AAAAAAAAAAA";
+        let row = serde_json::json!({
+            "kind": "e2e_message", "network": "libera", "id": 7,
+            "from": "alice", "from_did": "If4x36FUomE", "to_did": "AAAAAAAAAAA",
+            "verb": "msg", "msgid": "m1", "payload": "{}", "own": true
+        });
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/e2e/devices/AAAAAAAAAAA/claim"))
+            .and(path(format!("{BASE}/claim")))
             .and(header("authorization", "Bearer abc123"))
-            .and(body_json(serde_json::json!({})))
+            .and(body_string(r#"{"from_did":"If4x36FUomE"}"#))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({"did": "AAAAAAAAAAA"})),
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"keys": r#"{"ver":2}"#})),
             )
             .mount(&mock_server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/e2e/devices/AAAAAAAAAAA/copies"))
-            .and(body_json(
-                serde_json::json!({"item_id": "m.d", "ciphertext": "AAEC"}),
+            .and(path(format!("{BASE}/copies")))
+            .and(body_string(
+                r#"{"from_did":"If4x36FUomE","verb":"msg","payload":"{\"a\":1}"}"#,
             ))
+            .respond_with(
+                ResponseTemplate::new(202)
+                    .set_body_json(serde_json::json!({"id": 9, "msgid": "m2"})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{BASE}/inbox")))
+            .and(query_param("after", "6"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages": [row]})),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{BASE}/inbox/ack")))
+            .and(body_string(r#"{"ids":[7,8]}"#))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+        let did = "AAAAAAAAAAA";
+        let from = ClaimRequest::new("If4x36FUomE").expect("claim request");
+        let claim = client
+            .claim_e2e_device_key("abc123", "libera", did, Some(50), &from)
+            .await
+            .expect("claim");
+        assert_eq!(claim.keys(), r#"{"ver":2}"#);
+        let copy = CopyRequest::new("If4x36FUomE", CopyVerb::Msg, r#"{"a":1}"#).expect("copy");
+        let accepted = client
+            .send_e2e_copy("abc123", "libera", did, Some(50), &copy)
+            .await
+            .expect("copies");
+        assert_eq!((accepted.id(), accepted.msgid()), (9, "m2"));
+        let rows = client
+            .fetch_e2e_inbox("abc123", "libera", did, Some(6), Some(50))
+            .await
+            .expect("inbox");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].own);
+        let ack = InboxAckRequest::new(&[7, 8]).expect("ack request");
+        client
+            .ack_e2e_inbox("abc123", "libera", did, Some(49), &ack)
+            .await
+            .expect("ack");
+    }
+
+    #[tokio::test]
+    async fn e2e_device_routes_refuse_before_the_request() {
+        let mock_server = MockServer::start().await;
+        let client = GrappaClient::new(mock_server.uri());
+        let from = ClaimRequest::new("If4x36FUomE").expect("claim request");
+        let claim = client
+            .claim_e2e_device_key("abc123", "libera", "AAAAAAAAAAA", Some(49), &from)
+            .await;
+        assert!(matches!(claim, Err(E2eRouteError::Unavailable)));
+        let inbox = client
+            .fetch_e2e_inbox("abc123", "libera", "AAAAAAAAAAA", None, None)
+            .await;
+        assert!(matches!(inbox, Err(E2eRouteError::Unavailable)));
+        let bad = client
+            .claim_e2e_device_key("abc123", "libera", "../x", Some(50), &from)
+            .await;
+        assert!(matches!(bad, Err(E2eRouteError::Wire(WireError::BadDid))));
+        let over: Vec<u64> = (1..=101).collect();
+        assert!(InboxAckRequest::new(&over).is_err());
+        assert!(mock_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_inbox_row_with_own_from_protocol_49_is_refused() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/networks/libera/e2e/devices/AAAAAAAAAAA/inbox"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "messages": [{
+                    "kind": "e2e_message", "network": "libera", "id": 7,
+                    "from": "alice", "from_did": "If4x36FUomE", "to_did": "AAAAAAAAAAA",
+                    "verb": "msg", "msgid": "m1", "payload": "{}", "own": true
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+        let result = GrappaClient::new(mock_server.uri())
+            .fetch_e2e_inbox("abc123", "libera", "AAAAAAAAAAA", None, Some(49))
+            .await;
+        assert!(matches!(
+            result,
+            Err(E2eRouteError::Wire(WireError::UnknownField))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_e2e_copy_refusal_is_typed() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/networks/libera/e2e/devices/AAAAAAAAAAA/copies"))
             .respond_with(
                 ResponseTemplate::new(413)
                     .set_body_json(serde_json::json!({"error": "inbox_full"})),
             )
             .mount(&mock_server)
             .await;
-        let client = GrappaClient::new(mock_server.uri());
-        let claim = client
-            .claim_e2e_device_key("abc123", "AAAAAAAAAAA", &ClaimRequest::default())
-            .await
-            .expect("claim");
-        assert_eq!(claim["did"], "AAAAAAAAAAA");
-        let copy = CopyRequest::new("m.d", "AAEC").expect("copy request");
-        let err = client
-            .send_e2e_copy("abc123", "AAAAAAAAAAA", &copy)
+        let copy = CopyRequest::new("If4x36FUomE", CopyVerb::PkMsg, "{}").expect("copy");
+        let err = GrappaClient::new(mock_server.uri())
+            .send_e2e_copy("abc123", "libera", "AAAAAAAAAAA", Some(50), &copy)
             .await
             .expect_err("copies refusal");
         assert!(matches!(
@@ -4846,13 +5015,6 @@ mod tests {
                 refusal: E2eRefusal::InboxFull,
                 ..
             }
-        ));
-        let bad = client
-            .claim_e2e_device_key("abc123", "../x", &ClaimRequest::default())
-            .await;
-        assert!(matches!(
-            bad,
-            Err(E2eRouteError::Client(GrappaClientError::InvalidUrl(_)))
         ));
     }
 

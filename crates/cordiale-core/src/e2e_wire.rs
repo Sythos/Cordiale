@@ -71,6 +71,10 @@ pub const INBOX_SENDER_MAX_BYTES: usize = 1024 * 1024;
 /// Lifetime of an S1 inbox copy, in seconds: seven days.
 pub const INBOX_EXPIRY_SECS: u64 = 7 * 24 * 60 * 60;
 
+/// Largest number of rows in one inbox page and of ids in one inbox ack.
+/// Source: section 4f, the inbox routes ("at most 100", "1 to 100").
+pub const INBOX_PAGE_MAX: usize = 100;
+
 /// Check whether the relay accepts one more X1 pairing message.
 ///
 /// `count` and `total_bytes` describe the messages already stored.
@@ -104,6 +108,8 @@ pub enum WireError {
     FragmentMismatch,
     DuplicateDevice,
     BadDeviceCount,
+    BadIdCount,
+    BadId,
     BadTarget,
     BadPayload,
     BadPriority,
