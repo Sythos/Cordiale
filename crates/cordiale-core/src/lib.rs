@@ -66,6 +66,7 @@ pub mod e2e_list_migration;
 pub mod e2e_manage;
 pub mod e2e_pacing;
 pub mod e2e_pairing;
+pub mod e2e_peer;
 pub mod e2e_protocol;
 pub mod e2e_provision;
 pub mod e2e_refusal;

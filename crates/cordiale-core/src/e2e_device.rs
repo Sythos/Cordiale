@@ -63,6 +63,14 @@ pub enum E2eError {
     /// The list signature is valid only over the old raw byte order of the
     /// keys. The list is not accepted.
     LegacyListOrder,
+    /// The first message or the new session was accepted before.
+    Replay,
+    /// The certificate holds an N above the version of the list.
+    BadCertificateVersion,
+    /// The device is not in the verified list, or the server list lacks it.
+    NotListed,
+    /// The `fb` binding is not the one for this sender and recipient.
+    RecipientMismatch,
 }
 
 impl From<WireError> for E2eError {
@@ -91,6 +99,14 @@ pub struct PeerDevice {
 }
 
 impl PeerDevice {
+    pub(crate) fn new(did: String, curve25519: String, ed25519: String) -> Self {
+        PeerDevice {
+            did,
+            curve25519,
+            ed25519,
+        }
+    }
+
     pub fn did(&self) -> &str {
         &self.did
     }

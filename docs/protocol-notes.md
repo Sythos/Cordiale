@@ -1498,3 +1498,25 @@ del certificato non cambia. **Ancora da fare (parte 2):** nuova firma della
 lista propria con la chiave master (stessa versione e stesse chiavi, perché la
 regola corrente dà `NoOp`), lista in attesa di pubblicazione e marca di
 migrazione fatta nello store cifrato, che sopravvive al riavvio.
+
+**Issue 452 (fetta 30 di 37 dell'ombrello 416): fiducia del dispositivo remoto,
+una sessione Olm per dispositivo.** Il nuovo modulo `e2e_peer.rs` ha
+`verify_peer_device`, l'unica porta verso un dispositivo remoto. Controlla in
+ordine: master noto (`MasterChanged` se diverso), lista firmata con firma e
+versione (`PeerTrust::accept_list`), certificato firmato dal master con N non
+oltre la versione della lista (`BadCertificateVersion`), `did` derivato dalla
+chiave (`DeviceMismatch`), revoca (`RevokedDevice`), presenza nella lista
+verificata e nell'eventuale lista del server (`NotListed`: il server può solo
+togliere un dispositivo), firma del dispositivo sulla chiave curve
+(`irc-e2e:v1:otk:<curve>`, candidato) e legame `fb` (`RecipientMismatch`). Lo
+stato di fiducia cambia solo se tutti i controlli passano; una lista firmata più nuova del master noto resta anche se il dispositivo è rifiutato. `ReplayState` rifiuta
+(`Replay`) un `msgid` di primo messaggio o un id di sessione già visti per lo
+stesso dispositivo; tiene gli ultimi 256 id per dispositivo (regola candidata,
+il contratto finale non è ancora scritto). Sessioni, fiducia e replay usano la
+chiave rete, nick, `did`: mai l'etichetta della finestra query, quindi la voce
+normale e quella cifrata dello stesso peer condividono record e sessione.
+`E2eStateStore` salva sessioni per dispositivo (`set_peer_session`) e replay
+(`set_replay`) nel file cifrato. **Grappa 2453:** il fix JavaScript non è
+portato. Le mappe Rust usano `BTreeMap<String, _>` e i nick `constructor`,
+`__proto__` e `toString` sono chiavi normali; test di regressione in
+`e2e_peer.rs` e `e2e_state.rs`. Non provato in locale (rustc troppo vecchio).
