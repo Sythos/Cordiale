@@ -1451,7 +1451,12 @@ un `did` con padding, in base64 standard o con l'etichetta `🔒` è rifiutato
 `e2e_provision::provision_device` crea l'identità al primo uso: account Olm del
 dispositivo, chiave master (solo sul primo dispositivo, cioè se il server non ha
 ancora una lista), lista firmata versione 1 e certificato `irc-e2e:v2:dev:N:E`
-con N = 1. Tutto è salvato nello store sigillato prima della prima chiamata. Poi
+con N = 1. Se lo store ha la master ma non una lista propria, si riusa la lista
+valida del server (verificata con la master): la versione 1 nasce solo se né lo
+store né il server hanno una lista, così il `PUT` non riceve `stale_list`. Se la
+lista del server non contiene il dispositivo, si firma la versione successiva con
+il dispositivo aggiunto. Tutto è salvato nello store sigillato prima della prima
+chiamata. Poi
 registra il blocco id (solo se il server non lo ha uguale), mette la lista (se
 segnata come in attesa o se il server non ne ha), porta le chiavi monouso a 50
 sul server e carica la chiave di riserva se manca. Le chiavi sono segnate come
