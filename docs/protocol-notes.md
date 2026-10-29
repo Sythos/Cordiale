@@ -1541,8 +1541,24 @@ non revocato e pronto (sessione o chiave monouso), a parità il `did` più basso
 `E2eStateStore::olm_identity()` dà l'identità Olm; il motore legge solo la
 chiave pubblica con `device_key()`. `locked_label` e `route_for_window` tengono `🔒` solo come etichetta
 della finestra: il peer si identifica con il `did`, mai con l'etichetta.
-**Da verificare:** i campi JSON di KEYS (`KeysPayload`) e di `pkmsg`/`msg`
-(`MessagePayload`) sono un formato candidato, non letto sul testo di §4f. Il
+**Controllo di §4f (passo 3):** §4f dà solo la busta: `payload` è testo JSON
+compatto, passato com'è, nella forma `{"v":2,"id":{…},"bodies":{…}}`. I campi
+interni non sono in §4f ma nel formato wire v2 di irc-olm (`devices.py`,
+`engine.py`) e nel commento di Grappa 2430. Confronto con `KeysPayload` e
+`MessagePayload`, che **non coincidono**: (1) KEYS reale: `{"v","master":{"ed25519",
+"list":{"ver","devices"},"sig"},"devices":[{"id":{"curve25519","ed25519","sig"},
+"otk":{"key","fallback","sig"}}]}`, fino a 4 dispositivi; il candidato è piatto, con
+un solo dispositivo e `cert_*`. (2) `pkmsg` reale: `{"v","id":{…},"master":
+{"ed25519","ver","cert"},"bodies":{<did>:<ct>}}`; `msg`: `{"v","ck","bodies"}`; il
+candidato ha un solo `ct` e nessun blocco `id`/`master`. (3) Il testo cifrato è un
+JSON interno con `t`, `lv` e, nel `pkmsg`, `fb`; il candidato cifra il testo nudo e
+mette `fb` fuori. (4) Il `t` del testo di chat umano non è in irc-olm (è un bot):
+va letto in cicchetto. Confermati: firma `irc-e2e:v2:id:`, `list:`, `dev:` e
+`irc-e2e:v1:otk:`, `did`, calcolo di `fb` (`recipient_binding`), base64 standard
+senza riempimento, `to_parts` di vodozemac uguale a `to_base64` per `ct`, e le
+regole di §4f su inbox, ack, dedupe per `id`, `from`/`to`, 202 e KEYS da `*`.
+Il pin MD-3 (PR 4 di irc-olm) non è congelato: il riallineamento di
+`KeysPayload`/`MessagePayload` e del motore resta da fare dopo il pin. Il
 verbo KEYS non è tra i verbi della porta di invio (`E2eSendVerb`): Grappa compone
 KEYS dalle chiavi caricate, quindi il client non lo invia. I NACK sono confermati
 senza essere salvati.
