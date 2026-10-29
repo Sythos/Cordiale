@@ -1533,8 +1533,13 @@ una seconda riga. Un 202 dà solo `Accepted` nel `SendBook`, con il `msgid` dell
 risposta. Non esiste un percorso che invii testo in chiaro. Le righe della
 cronologia cifrata hanno il campo `encrypted` (le righe vecchie si leggono come
 cifrate). Le righe della cronologia non tengono il `did` proprio: l'id di una
-riga ricevuta usa il `to_did` della riga e le righe proprie hanno
-`sender_device` = `OWN_DEVICE` (`"own"`). `locked_label` e `route_for_window` tengono `🔒` solo come etichetta
+riga ricevuta è `<rete>:in:<id dell'elemento>` e non contiene alcun `did`; le
+righe proprie hanno `sender_device` = `OWN_DEVICE` (`"own"`). La revoca si
+legge dallo stato di fiducia salvato (`PeerTrust::is_did_revoked`), anche dopo un
+riavvio, prima di usare una sessione ripristinata; l'invio sceglie un dispositivo
+non revocato e pronto (sessione o chiave monouso), a parità il `did` più basso.
+`E2eStateStore::olm_identity()` dà l'identità Olm; il motore legge solo la
+chiave pubblica con `device_key()`. `locked_label` e `route_for_window` tengono `🔒` solo come etichetta
 della finestra: il peer si identifica con il `did`, mai con l'etichetta.
 **Da verificare:** i campi JSON di KEYS (`KeysPayload`) e di `pkmsg`/`msg`
 (`MessagePayload`) sono un formato candidato, non letto sul testo di §4f. Il
