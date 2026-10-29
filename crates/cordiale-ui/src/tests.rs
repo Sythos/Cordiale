@@ -10441,6 +10441,48 @@ fn a_locked_row_keeps_the_encrypted_mark_and_the_real_nick() {
 }
 
 #[test]
+fn a_dropped_send_is_marked_in_the_locked_row_only() {
+    use cordiale_core::e2e_pacing::DropReason;
+    use cordiale_core::e2e_store::E2eMessage;
+    let message = E2eMessage {
+        id: "libera:out:m1".to_string(),
+        conversation_id: "libera\u{0}bob".to_string(),
+        sender_device: cordiale_core::e2e_engine::OWN_DEVICE.to_string(),
+        sent_at: 1_700_000_000,
+        text: "hello".to_string(),
+        encrypted: true,
+    };
+    let sent = locked_row_with_drop(&message, "me", "bob", None);
+    assert_eq!(sent.text, "hello");
+    assert!(!sent.italic);
+    for reason in [
+        DropReason::Late,
+        DropReason::SendFailed,
+        DropReason::SessionEnded,
+    ] {
+        let dropped = locked_row_with_drop(&message, "me", "bob", Some(reason));
+        assert_eq!(dropped.text, "\u{26A0} hello");
+        assert!(dropped.italic);
+        assert!(dropped.encrypted);
+    }
+    // The plain row builder has no drop input: a plain row never has the mark.
+    assert_eq!(locked_row(&message, "me", "bob").text, "hello");
+}
+
+#[test]
+fn a_peer_without_e2e_capability_gets_the_not_ready_text() {
+    use cordiale_core::e2e_engine::EngineError;
+    assert_eq!(
+        e2e_send_error_kind(&EngineError::PeerNotCapable),
+        "e2e-not-ready"
+    );
+    assert_eq!(
+        e2e_send_error_kind(&EngineError::QueueFull),
+        "e2e-send-failed"
+    );
+}
+
+#[test]
 fn a_locked_window_without_an_engine_sends_nothing() {
     let mut state = peer_link_state(&[("libera", "bob")]);
     state.windows.current_query = true;
