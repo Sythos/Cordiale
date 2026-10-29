@@ -1532,7 +1532,9 @@ cronologia, così il tentativo seguente decifra ancora. Un id già visto non scr
 una seconda riga. Un 202 dà solo `Accepted` nel `SendBook`, con il `msgid` della
 risposta. Non esiste un percorso che invii testo in chiaro. Le righe della
 cronologia cifrata hanno il campo `encrypted` (le righe vecchie si leggono come
-cifrate). `locked_label` e `route_for_window` tengono `🔒` solo come etichetta
+cifrate). Le righe della cronologia non tengono il `did` proprio: l'id di una
+riga ricevuta usa il `to_did` della riga e le righe proprie hanno
+`sender_device` = `OWN_DEVICE` (`"own"`). `locked_label` e `route_for_window` tengono `🔒` solo come etichetta
 della finestra: il peer si identifica con il `did`, mai con l'etichetta.
 **Da verificare:** i campi JSON di KEYS (`KeysPayload`) e di `pkmsg`/`msg`
 (`MessagePayload`) sono un formato candidato, non letto sul testo di §4f. Il
