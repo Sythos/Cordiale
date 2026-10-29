@@ -95,6 +95,37 @@ pub struct CertifiedBundle<'a> {
     pub id_signature: &'a str,
 }
 
+/// Applies the signed list of a KEYS answer without a device. A newer list
+/// from the known master is kept, so its revocations stay. A first list of an
+/// unknown master is not kept: only a verified device pins a master.
+pub fn apply_peer_list(
+    trust: &mut PeerTrust,
+    network: &str,
+    nick: &str,
+    master: &str,
+    list_version: u32,
+    list_keys: &[String],
+    list_signature: &str,
+) -> Result<ListDecision, E2eError> {
+    let mut next = trust.clone();
+    let status = next.observe_master(network, nick, master)?;
+    if status == MasterStatus::Changed {
+        return Err(E2eError::MasterChanged);
+    }
+    let decision = next.accept_list(
+        network,
+        nick,
+        master,
+        list_version,
+        list_keys,
+        list_signature,
+    )?;
+    if status == MasterStatus::Same && decision == ListDecision::Replace {
+        *trust = next;
+    }
+    Ok(decision)
+}
+
 /// Checks a device of a KEYS answer. `server_keys` is the list that the
 /// server reports, when it reports one.
 ///

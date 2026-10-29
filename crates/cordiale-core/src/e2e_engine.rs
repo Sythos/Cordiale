@@ -78,7 +78,8 @@ use crate::e2e_pacing::{
     SendStatus,
 };
 use crate::e2e_peer::{
-    verify_certified_device, verify_peer_device, CertifiedBundle, PeerBundle, ReplayState,
+    apply_peer_list, verify_certified_device, verify_peer_device, CertifiedBundle, PeerBundle,
+    ReplayState,
 };
 use crate::e2e_refusal::E2eRouteError;
 use crate::e2e_state::E2eStateStore;
@@ -719,14 +720,28 @@ impl E2eEngine {
     /// device of the answer must pass [`verify_peer_device`] and carry a good
     /// signature on its key. A device that is refused is skipped, the others
     /// stay. Returns the `did` of the devices that were accepted, or the first
-    /// error when none was. The trust state is saved also when every device is
-    /// refused, because a newer list stays.
+    /// error when none was. The signed list is applied first, also when the
+    /// answer has no device. The trust state is saved also when every device
+    /// is refused, because a newer list stays.
     pub fn accept_keys(&mut self, nick: &str, keys: &str) -> Result<Vec<String>, EngineError> {
         let payload = KeysPayload::parse(keys)?;
         let master = &payload.master;
         let mut trust = self.state.trust();
         let mut accepted = Vec::new();
         let mut first_error = None;
+        // The list revokes the devices that it drops, with or without a
+        // device entry in the answer.
+        if let Err(err) = apply_peer_list(
+            &mut trust,
+            &self.network,
+            nick,
+            &master.ed25519,
+            master.list.ver,
+            &master.list.devices,
+            &master.sig,
+        ) {
+            first_error = Some(err);
+        }
         let mut seen = HashSet::new();
         for entry in &payload.devices {
             // The first entry of a device key counts.
@@ -1911,6 +1926,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_newer_list_without_devices_still_drops_the_revoked_device() {
+        let alice_id = Ident::new("alice-no-devices");
+        let bob_id = Ident::new("bob-no-devices");
+        let mut alice = alice_id.engine();
+        alice
+            .accept_keys("bob", &bob_id.keys())
+            .expect("alice reads bob");
+        assert!(alice.is_ready("bob"));
+        // List 2 drops the device of Bob. The answer has no device entry.
+        let mut empty = bob_id.newer_keys_struct(&fresh_device());
+        empty.devices.clear();
+        let empty = serde_json::to_string(&empty).expect("json");
+        let refused = alice.accept_keys("bob", &empty);
+        assert!(matches!(
+            refused,
+            Err(EngineError::Wire(WireError::BadDeviceCount))
+        ));
+        assert!(alice.peers.is_empty());
+        assert!(!alice.is_ready("bob"));
+        // The revocation is in the saved trust state.
+        let bob_ed = ed(&bob_id.device);
+        assert!(alice.state.trust().is_revoked(NET, "bob", &bob_ed, None));
+        // As a KEYS row, the answer is acknowledged and gives no device.
+        let alice_did = alice.own_did().to_string();
+        let value = row(4, "bob", WILDCARD, &alice_did, "keys", "k2", &empty);
+        let keys_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        let outcome = alice.handle_row(&keys_row, 1);
+        assert_eq!(outcome, RowOutcome::Undecryptable);
+        assert!(outcome.acknowledge());
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let sent = alice
+            .send_text(&GrappaClient::new(server.uri()), TOKEN, "bob", "late", 1)
+            .await;
+        assert!(matches!(sent, Err(EngineError::NotReady)));
+        assert!(server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn a_persisted_revocation_stops_a_restored_session_after_a_restart() {
         let alice_id = Ident::new("alice-restart");
         let bob_id = Ident::new("bob-restart");
@@ -2468,7 +2526,7 @@ mod tests {
     }
 
     /// The inner message of a copy of `text` to `peer`, bound to Bob.
-    fn copy_plain(s: &Siblings, peer: &str, text: &str, fb: Option<&str>) -> String {
+    fn copy_plain(peer: &str, text: &str, fb: Option<&str>) -> String {
         InnerOut {
             t: "copy",
             peer: Some(peer),
@@ -2485,7 +2543,7 @@ mod tests {
     }
 
     fn copy_row(s: &Siblings, id: u64, msgid: &str, peer: &str, text: &str, used: &str) -> Value {
-        let plain = copy_plain(s, peer, text, Some(&second_fb(s)));
+        let plain = copy_plain(peer, text, Some(&second_fb(s)));
         second_row(s, id, msgid, used, &plain, true)
     }
 
@@ -2518,8 +2576,8 @@ mod tests {
         let locked = locked_label("carol");
         let fb = second_fb(&s);
         let wrong_fb = recipient_binding(&ed(&s.second), &ed(&Account::new()));
-        let no_fb = copy_plain(&s, "carol", "no binding", None);
-        let bad_fb = copy_plain(&s, "carol", "wrong binding", Some(&wrong_fb));
+        let no_fb = copy_plain("carol", "no binding", None);
+        let bad_fb = copy_plain("carol", "wrong binding", Some(&wrong_fb));
         // A text is not a copy, and a copy is not a text from a person.
         let text = InnerOut {
             t: "text",
@@ -2541,7 +2599,7 @@ mod tests {
                 10,
                 "msgid9",
                 "",
-                &copy_plain(&s, "carol", "copy in a peer row", Some(&fb)),
+                &copy_plain("carol", "copy in a peer row", Some(&fb)),
                 false,
             ),
         ];
