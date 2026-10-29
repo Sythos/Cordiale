@@ -1557,8 +1557,8 @@ va letto in cicchetto. Confermati: firma `irc-e2e:v2:id:`, `list:`, `dev:` e
 `irc-e2e:v1:otk:`, `did`, calcolo di `fb` (`recipient_binding`), base64 standard
 senza riempimento, `to_parts` di vodozemac uguale a `to_base64` per `ct`, e le
 regole di §4f su inbox, ack, dedupe per `id`, `from`/`to`, 202 e KEYS da `*`.
-Il pin MD-3 (PR 4 di irc-olm) non è congelato: il riallineamento di
-`KeysPayload`/`MessagePayload` e del motore resta da fare dopo il pin. Il
+Il riallineamento di `KeysPayload`/`MessagePayload` e del motore a MD-3 è
+fatto nel passo 4 (sotto). Il
 verbo KEYS non è tra i verbi della porta di invio (`E2eSendVerb`): Grappa compone
 KEYS dalle chiavi caricate, quindi il client non lo invia. I NACK sono confermati
 senza essere salvati.
@@ -1594,15 +1594,42 @@ invia nulla; i comandi `/…` e i file nella finestra bloccata sono rifiutati
 `SendBook` e mostra `e2e-send-failed`. Lo snapshot `query_windows_list` non chiude
 la finestra bloccata. Aprire la query `<user>` chiede le chiavi del peer se non è
 pronto (KEYREQ).
-**Controllo dei campi (parte non chiusa):** il testo di §4f di `CLIENT_PROTOCOL.md`
-non è nel repository e l'host di Grappa non è raggiungibile da qui. I campi di
-`KeysPayload` e `MessagePayload` e le chiamate vodozemac non sono quindi riletti sul
-testo del protocollo. Verificato solo ciò che si vede nel repository: i campi di
-`KeysPayload` sono quelli che `verify_peer_device` richiede (`PeerBundle`), e il
-`fb` è `recipient_binding` come in `e2e_wire.rs`. Test con una sessione WebSocket
-vera in `e2e_engine.rs` (`a_real_websocket_session_feeds_the_receive_path`).
+Test con una sessione WebSocket vera in `e2e_engine.rs`
+(`a_real_websocket_session_feeds_the_receive_path`).
 **Non provato in locale:** rustc 1.85 non compila il crate (serve `File::try_lock`);
 build, test e clippy girano in CI.
 **Da fare (nuove fette):** collegare il provisioning alla UI; controllare la capacità
 E2E del peer prima di un KEYREQ; contatori di non letti per le voci bloccate; il lato
 che crea le copie `own`.
+
+**Issue 453, passo 4: formato wire v2 di irc-olm (MD-3).** Il pin MD-3 (PR 4 di
+irc-olm, merge `1606c85`) è unito. Letti `devices.py`, `engine.py` e `keys.py` a quel
+commit e il motore di cicchetto (`cicchetto/src/lib/e2e/{wire,client,engine}.ts`).
+`KeysPayload`, `MessagePayload` e il messaggio interno sono ora quelli reali:
+- KEYS: `{"v":2,"master":{"ed25519","list":{"ver","devices"},"sig"},"devices":[{"id":
+  {"curve25519","ed25519","sig"},"otk":{"key","fallback","sig"}}]}`, fino a 4 voci. La
+  firma `id` è del dispositivo su `irc-e2e:v2:id:<curve>:<master>`; la firma `otk` è su
+  `irc-e2e:v1:otk:<chiave>`. Una voce rifiutata si salta, le altre restano. Il `did` si
+  calcola dalla chiave, mai dal filo.
+- `pkmsg`: `{"v":2,"id":{…},"master":{"ed25519","ver","cert"},"bodies":{<did>:<ct>}}`;
+  `msg`: `{"v":2,"ck":<curve>,"bodies":{<did>:<ct>}}`. `bodies` ha da 1 a 4 voci; il motore
+  legge la voce del proprio `did`. Un `pkmsg` non porta la lista: il dispositivo passa con
+  `verify_certified_device` (id, certificato `irc-e2e:v2:dev:N:E` del master, revoche). Passa
+  se la lista salvata lo contiene, o se la lista salvata ha versione inferiore a N. Un
+  dispositivo certificato e non in lista si ricorda con il suo N (`PeerTrust::record_certified`):
+  una lista che raggiunge N senza di esso lo revoca.
+- Messaggio interno (testo cifrato da Olm): JSON compatto `{"t","lv",…}`. Il `t` del testo di
+  chat umano è `"text"` con `"body"` (letto in `client.ts` di cicchetto: `{t:"text", body}`);
+  la copia S1 è `{"t":"copy","peer","body"}`. `lv` è la versione della lista del mittente;
+  nel corpo di un `pkmsg` c'è anche `fb`, e il ricevente lo confronta con
+  `recipient_binding(mittente, proprio)` dopo la decifratura (altrimenti la sessione si
+  scarta). Gli altri tipi (`list`, `listreq`, `chal`, `ack`) tengono la sessione e non
+  salvano nulla (`RowOutcome::Ignored`).
+- Invio: il `pkmsg` richiede chiave master, lista firmata e certificato del dispositivo
+  nello stato (`own_wire`); senza, l'invio dà `NotReady` e non parte nulla. `fb` è nel
+  messaggio interno solo se la sessione non ha ancora ricevuto un messaggio.
+
+**Limiti noti del passo 4:** l'invio va a un solo dispositivo del peer (il `bodies` ha una
+voce), non a tutti; il motore non risponde a `listreq`, non applica `t:list` e non manda
+`listreq` quando vede un `lv` più alto; il motore non invia NACK; la `fallback` della chiave
+non è distinta dalla chiave monouso. Non provato contro un server o un bot reale.

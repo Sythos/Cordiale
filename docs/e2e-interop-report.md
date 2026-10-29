@@ -7,8 +7,10 @@ cancello completo non può chiudersi finché i contratti a monte non sono finali
 
 - Fixture: `crates/cordiale-core/tests/fixtures/e2e/wire_v2.json`, revisione 1
   (più `send_request.json`, già in uso da `rest.rs`).
-- Pin MD-3 di irc-olm: **non congelato**. La PR 4 di irc-olm è ancora un
-  candidato. Nessun test usa il vecchio pin v1 come prova v2.
+- Pin MD-3 di irc-olm: PR 4 unita (merge `1606c85`). Il motore (`e2e_engine.rs`)
+  segue il suo formato di KEYS, `pkmsg`, `msg` e messaggio interno; vedi
+  `docs/protocol-notes.md`, issue 453 passo 4. Nessun test usa il vecchio pin v1
+  come prova v2.
 - Protocolli: 46, 47 e 48 hanno modifiche unite a monte. Il protocollo 49 è il
   candidato della PR 2452 di Grappa (bozza): non è definitivo.
 
