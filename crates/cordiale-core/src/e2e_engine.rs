@@ -80,6 +80,7 @@ use crate::e2e_pacing::{
     MonotonicClock, OutgoingQueue, QueuedSend, SendBook, SendDecision, SendDropped, SendFailure,
     SendKey, SendResponse, SendStatus,
 };
+use crate::e2e_pairing_flow::JoinerDevice;
 use crate::e2e_peer::{
     apply_peer_list, verify_certified_device, verify_peer_device, CertifiedBundle, PeerBundle,
     ReplayState,
@@ -674,6 +675,35 @@ impl E2eEngine {
             &KeyringKeyProvider,
         )?;
         Self::new(network, state, history)
+    }
+
+    /// Like [`Self::open_for_network`], but for a device that joins by X1
+    /// pairing: the state file and the Olm identity of the device are made
+    /// when they are missing. The pairing needs the identity first, because
+    /// the creator signs its key.
+    pub fn open_for_pairing(
+        server: &str,
+        account: &str,
+        network: &str,
+    ) -> Result<Self, EngineError> {
+        let part = storage_part(server, account, network).ok_or(EngineError::NotReady)?;
+        let dir = data_dir().ok_or(EngineError::Store(E2eStoreError::NoDataDir))?;
+        let mut state = E2eStateStore::open(
+            dir.join(format!("e2e_state_{part}.bin")),
+            &KeyringKeyProvider,
+        )?;
+        JoinerDevice::from_store(&mut state).map_err(|_| EngineError::NotReady)?;
+        let history = E2eHistoryStore::open(
+            dir.join(format!("e2e_history_{part}.bin")),
+            &KeyringKeyProvider,
+        )?;
+        Self::new(network, state, history)
+    }
+
+    /// The sealed state of the device, for the pairing flow. The engine owns
+    /// the one open handle on the file, so the flow writes through it.
+    pub fn state_mut(&mut self) -> &mut E2eStateStore {
+        &mut self.state
     }
 
     /// The nicks that have a conversation in the sealed history of this

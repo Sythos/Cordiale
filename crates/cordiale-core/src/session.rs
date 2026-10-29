@@ -45,6 +45,7 @@ use tokio::time::{interval, sleep, MissedTickBehavior};
 use crate::backoff::{random_unit, Backoff};
 use crate::e2e_device_routes::InboxRow;
 use crate::e2e_pacing::{SendBook, SendDropped};
+use crate::e2e_pairing::PairingPush;
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
 use crate::websocket::{PhoenixSocket, PhoenixSocketError};
 
@@ -261,6 +262,15 @@ pub fn route_e2e_message(frame: &PhoenixMessage, server_protocol: Option<u32>) -
         return None;
     }
     InboxRow::from_value(&frame.payload, server_protocol).ok()
+}
+
+/// Read one session frame as a pairing event (`e2e_pairing_message` or
+/// `e2e_pairing_closed`). Call it for every `SessionEvent::Frame`. The event
+/// has no payload: the client fetches the messages after its last sequence.
+/// Any other frame, and a frame of the wrong shape, return `None`. A pairing
+/// frame is never a chat line.
+pub fn route_e2e_pairing(frame: &PhoenixMessage) -> Option<PairingPush> {
+    PairingPush::from_value(&frame.payload)
 }
 
 /// Starts a session: connects, joins `grappa:user:{user}`, and spawns the
@@ -741,6 +751,46 @@ mod tests {
             event: "phx_reply".to_string(),
             payload,
         }
+    }
+
+    #[test]
+    fn pairing_frames_are_routed_and_other_frames_are_not() {
+        use crate::e2e_pairing::{ClosedReason, PairingRole};
+        let id = "AbCdEfGhIjKlMnOpQrStUv";
+        let message = reply(
+            "1",
+            serde_json::json!({
+                "kind": "e2e_pairing_message",
+                "rendezvous_id": id,
+                "seq": 3,
+                "from": "joiner"
+            }),
+        );
+        assert_eq!(
+            route_e2e_pairing(&message),
+            Some(PairingPush::Message {
+                rendezvous_id: id.to_string(),
+                seq: 3,
+                from: PairingRole::Joiner
+            })
+        );
+        let closed = reply(
+            "2",
+            serde_json::json!({
+                "kind": "e2e_pairing_closed",
+                "rendezvous_id": id,
+                "reason": "expired"
+            }),
+        );
+        assert_eq!(
+            route_e2e_pairing(&closed),
+            Some(PairingPush::Closed {
+                rendezvous_id: id.to_string(),
+                reason: ClosedReason::Expired
+            })
+        );
+        let other = reply("3", serde_json::json!({"kind": "message"}));
+        assert!(route_e2e_pairing(&other).is_none());
     }
 
     #[test]

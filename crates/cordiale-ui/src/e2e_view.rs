@@ -29,6 +29,8 @@
 // The views and the worker commands that call this module are a later step.
 #![allow(dead_code)]
 
+use cordiale_core::e2e_pairing::{ClosedReason, PairingCallError};
+use cordiale_core::e2e_pairing_flow::{DriveError, EndReason, FlowError, PairingStatus};
 use cordiale_core::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError};
 
 /// What the user sees for one E2E message.
@@ -134,6 +136,42 @@ pub fn search_history<'a>(
     store.search(conversation_id, needle)
 }
 
+/// The `status-kind` key and the hint text of a pairing state. Pairing is
+/// E2E control state shown in the status bar: no pairing text is ever a chat
+/// line of a query. The hint is the two-digit code or empty.
+pub fn pairing_status_key(status: &PairingStatus) -> (&'static str, String) {
+    match status {
+        PairingStatus::Waiting => ("e2e-pair-waiting", String::new()),
+        PairingStatus::Code(code) => ("e2e-pair-code", code.clone()),
+        PairingStatus::AwaitingPeer => ("e2e-pair-await", String::new()),
+        PairingStatus::Done => ("e2e-pair-done", String::new()),
+        PairingStatus::Ended(reason) => (pairing_end_key(*reason), String::new()),
+    }
+}
+
+fn pairing_end_key(reason: EndReason) -> &'static str {
+    match reason {
+        EndReason::Cancelled | EndReason::Closed(ClosedReason::Closed | ClosedReason::Replaced) => {
+            "e2e-pair-cancelled"
+        }
+        EndReason::Timeout | EndReason::Closed(ClosedReason::Expired) => "e2e-pair-timeout",
+        EndReason::WrongCode => "e2e-pair-wrong-code",
+        EndReason::BadChannel | EndReason::BadMessage | EndReason::Failed => "e2e-pair-failed",
+    }
+}
+
+/// The `status-kind` key of a failed pairing step.
+pub fn pairing_error_key(error: &DriveError) -> &'static str {
+    match error {
+        DriveError::Call(call) if matches!(**call, PairingCallError::Unavailable) => {
+            "e2e-pair-unavailable"
+        }
+        DriveError::Flow(FlowError::WrongCode) => "e2e-pair-wrong-code",
+        DriveError::Flow(FlowError::NotActive | FlowError::NoChannel) => "e2e-pair-none",
+        _ => "e2e-pair-failed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +206,48 @@ mod tests {
 
     fn open(dir: &tempfile::TempDir) -> E2eHistoryStore {
         E2eHistoryStore::open(dir.path().join("history.bin"), &fresh_key()).expect("open")
+    }
+
+    #[test]
+    fn pairing_states_map_to_distinct_status_keys() {
+        let code = pairing_status_key(&PairingStatus::Code("42".to_string()));
+        assert_eq!(code, ("e2e-pair-code", "42".to_string()));
+        let cases = [
+            (PairingStatus::Waiting, "e2e-pair-waiting"),
+            (PairingStatus::AwaitingPeer, "e2e-pair-await"),
+            (PairingStatus::Done, "e2e-pair-done"),
+            (
+                PairingStatus::Ended(EndReason::Cancelled),
+                "e2e-pair-cancelled",
+            ),
+            (PairingStatus::Ended(EndReason::Timeout), "e2e-pair-timeout"),
+            (
+                PairingStatus::Ended(EndReason::Closed(ClosedReason::Expired)),
+                "e2e-pair-timeout",
+            ),
+            (
+                PairingStatus::Ended(EndReason::WrongCode),
+                "e2e-pair-wrong-code",
+            ),
+            (PairingStatus::Ended(EndReason::Failed), "e2e-pair-failed"),
+        ];
+        for (status, key) in cases {
+            let (found, hint) = pairing_status_key(&status);
+            assert_eq!(found, key, "{status:?}");
+            assert!(hint.is_empty());
+        }
+    }
+
+    #[test]
+    fn pairing_errors_map_to_status_keys() {
+        let old = DriveError::Call(Box::new(PairingCallError::Unavailable));
+        assert_eq!(pairing_error_key(&old), "e2e-pair-unavailable");
+        let wrong = DriveError::Flow(FlowError::WrongCode);
+        assert_eq!(pairing_error_key(&wrong), "e2e-pair-wrong-code");
+        let none = DriveError::Flow(FlowError::NotActive);
+        assert_eq!(pairing_error_key(&none), "e2e-pair-none");
+        let other = DriveError::Flow(FlowError::TooLarge);
+        assert_eq!(pairing_error_key(&other), "e2e-pair-failed");
     }
 
     #[test]

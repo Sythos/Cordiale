@@ -136,6 +136,33 @@ pub enum SlashCommand {
     Usage(&'static str),
     /// A command Cordiale doesn't know, as typed (`/frobnicate`).
     Unknown(String),
+    /// `/e2e pair|join|code|cancel`: the X1 pairing of a new device.
+    E2ePair(E2ePairAction),
+}
+
+/// The step of `/e2e` for the pairing flow. `Debug` hides the link and the
+/// code, so no log line holds them.
+#[derive(Clone, PartialEq, Eq)]
+pub enum E2ePairAction {
+    /// `/e2e pair`: open a rendezvous and show the pairing link.
+    Start,
+    /// `/e2e join <link>`: join with the link or the code of the creator.
+    Join(String),
+    /// `/e2e code <nn>`: type the two-digit code to confirm.
+    Code(String),
+    /// `/e2e cancel`.
+    Cancel,
+}
+
+impl std::fmt::Debug for E2ePairAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Start => "E2ePairAction::Start",
+            Self::Join(_) => "E2ePairAction::Join(..)",
+            Self::Code(_) => "E2ePairAction::Code(..)",
+            Self::Cancel => "E2ePairAction::Cancel",
+        })
+    }
 }
 
 /// Whether `name` is a channel rather than a nick.
@@ -475,6 +502,13 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             Reconnect { network, reason }
         }
         "quit" => Quit(non_empty(args)),
+        "e2e" => match words(args).as_slice() {
+            [step] if step == "pair" => E2ePair(E2ePairAction::Start),
+            [step] if step == "cancel" => E2ePair(E2ePairAction::Cancel),
+            [step, link] if step == "join" => E2ePair(E2ePairAction::Join(link.clone())),
+            [step, code] if step == "code" => E2ePair(E2ePairAction::Code(code.clone())),
+            _ => Usage("/e2e pair | join <link> | code <nn> | cancel"),
+        },
         "hilight" | "highlight" | "dehilight" => match non_empty(args) {
             Some(pattern) => Highlight {
                 add: verb != "dehilight",
@@ -1116,6 +1150,25 @@ mod tests {
         assert_eq!(parse("/beep"), Some(Beep(None)));
         assert_eq!(parse("/beep Chime"), Some(Beep(Some("chime".to_string()))));
         assert!(matches!(parse("/beep a b"), Some(Usage(_))));
+    }
+
+    #[test]
+    fn e2e_pairing_steps() {
+        assert_eq!(parse("/e2e pair"), Some(E2ePair(E2ePairAction::Start)));
+        assert_eq!(parse("/e2e cancel"), Some(E2ePair(E2ePairAction::Cancel)));
+        assert_eq!(
+            parse("/e2e join abc.def"),
+            Some(E2ePair(E2ePairAction::Join("abc.def".to_string())))
+        );
+        assert_eq!(
+            parse("/e2e code 42"),
+            Some(E2ePair(E2ePairAction::Code("42".to_string())))
+        );
+        for bad in ["/e2e", "/e2e join", "/e2e pair now", "/e2e other"] {
+            assert!(matches!(parse(bad), Some(Usage(_))), "{bad}");
+        }
+        let shown = format!("{:?}", E2ePairAction::Join("secret-link".to_string()));
+        assert!(!shown.contains("secret"));
     }
 
     #[test]

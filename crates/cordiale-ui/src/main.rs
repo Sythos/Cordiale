@@ -1913,6 +1913,7 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::E2eTick) => {
                         tick_e2e_engines(&mut state, &ui).await;
+                        tick_pairing(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::RadioTrack { generation, track }) => {
                         if let Some(tuned) = radio_state

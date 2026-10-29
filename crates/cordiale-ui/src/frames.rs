@@ -591,6 +591,12 @@ pub(crate) async fn handle_frame(
         handle_e2e_message(state, ui, &frame).await;
         return;
     }
+    if payload_kind == "e2e_pairing_message" || payload_kind == "e2e_pairing_closed" {
+        // Pairing control state: the status bar shows it. It is never a chat
+        // line, and nothing of it reaches the plain `<user>` query.
+        handle_e2e_pairing(state, ui, &frame).await;
+        return;
+    }
     if payload_kind == "e2e_send_dropped" {
         // Only the local send status changes: this is never a chat line.
         if let Err(error) = state.e2e_sends.apply_dropped_event(&frame.payload) {

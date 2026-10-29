@@ -2704,6 +2704,28 @@ export component AppWindow inherits Window {
             return @tr("The message was not encrypted or not sent. Nothing was sent as clear text.");
         } else if status-kind == "e2e-text-only" {
             return @tr("An encrypted chat takes plain text only. Nothing was sent.");
+        } else if status-kind == "e2e-pair-link" {
+            return @tr("Pairing link: {}. On the new device, type /e2e join and this link.", status-command-hint);
+        } else if status-kind == "e2e-pair-waiting" {
+            return @tr("Waiting for the new device to join.");
+        } else if status-kind == "e2e-pair-code" {
+            return @tr("Pairing code: {}. If both devices show it, type /e2e code and the code here.", status-command-hint);
+        } else if status-kind == "e2e-pair-await" {
+            return @tr("Confirmed. Waiting for the other device.");
+        } else if status-kind == "e2e-pair-done" {
+            return @tr("The new device is paired.");
+        } else if status-kind == "e2e-pair-cancelled" {
+            return @tr("Pairing cancelled.");
+        } else if status-kind == "e2e-pair-timeout" {
+            return @tr("Pairing timed out. Start again.");
+        } else if status-kind == "e2e-pair-failed" {
+            return @tr("Pairing failed. Start again.");
+        } else if status-kind == "e2e-pair-wrong-code" {
+            return @tr("The code is not the same. Pairing stopped. Start again.");
+        } else if status-kind == "e2e-pair-unavailable" {
+            return @tr("This server does not support device pairing.");
+        } else if status-kind == "e2e-pair-none" {
+            return @tr("No pairing is open. Type /e2e pair on the first device.");
         } else if status-kind == "rate-limited" {
             return @tr("Too many requests. Try again in about {} s.", status-retry-secs);
         } else if status-kind == "part-failed" {

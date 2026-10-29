@@ -30,11 +30,13 @@
 //! 50. A server with an unknown version never allows an operation.
 //!
 //! The pairing relay of protocol 48 (`/e2e/pairings`) is not below
-//! `/networks/:id` and is not in this map.
+//! `/networks/:id`. [`PairingOperation`] holds its routes and its version
+//! check.
 
 use std::time::Duration;
 
 use crate::e2e_pacing::KEYS_ANSWER_INTERVAL;
+use crate::e2e_pairing::is_rendezvous_id;
 use crate::e2e_wire::{is_did_shape, WireError};
 
 /// One E2E operation of the client.
@@ -177,6 +179,64 @@ impl E2eOperation {
     }
 }
 
+/// First protocol version that has the X1 pairing relay.
+pub const PAIRING_MIN_PROTOCOL: u32 = 48;
+
+/// One call of the X1 pairing relay. The routes are not below `/networks/:id`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingOperation {
+    /// `POST /e2e/pairings`: open a rendezvous.
+    Create,
+    /// `POST /e2e/pairings/:id/join`.
+    Join,
+    /// `POST /e2e/pairings/:id/messages`.
+    Post,
+    /// `GET /e2e/pairings/:id/messages?after=<seq>`.
+    Fetch,
+    /// `DELETE /e2e/pairings/:id`: close the rendezvous.
+    Close,
+}
+
+impl PairingOperation {
+    pub const ALL: [PairingOperation; 5] = [
+        Self::Create,
+        Self::Join,
+        Self::Post,
+        Self::Fetch,
+        Self::Close,
+    ];
+
+    /// Method and path template. `:id` is the rendezvous id.
+    pub fn route(self) -> (E2eMethod, &'static str) {
+        match self {
+            Self::Create => (E2eMethod::Post, "/e2e/pairings"),
+            Self::Join => (E2eMethod::Post, "/e2e/pairings/:id/join"),
+            Self::Post => (E2eMethod::Post, "/e2e/pairings/:id/messages"),
+            Self::Fetch => (E2eMethod::Get, "/e2e/pairings/:id/messages"),
+            Self::Close => (E2eMethod::Delete, "/e2e/pairings/:id"),
+        }
+    }
+
+    /// The path with the rendezvous id filled in. An id that has not the
+    /// shape of a rendezvous id is refused, so it never changes the path.
+    pub fn path(self, rendezvous_id: Option<&str>) -> Result<String, WireError> {
+        let template = self.route().1;
+        if !template.contains(":id") {
+            return Ok(template.to_string());
+        }
+        match rendezvous_id {
+            Some(id) if is_rendezvous_id(id) => Ok(template.replace(":id", id)),
+            _ => Err(WireError::BadId),
+        }
+    }
+
+    /// Whether a server with this protocol version has the relay. An unknown
+    /// version never allows it.
+    pub fn available(self, server_protocol: Option<u32>) -> bool {
+        server_protocol.is_some_and(|version| version >= PAIRING_MIN_PROTOCOL)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +353,31 @@ mod tests {
         assert!(!E2eOperation::Claim.available(Some(49)));
         assert!(E2eOperation::Claim.available(Some(50)));
         assert!(!E2eOperation::SendMessage.available(Some(47)));
+    }
+
+    #[test]
+    fn pairing_routes_need_protocol_48_and_a_valid_id() {
+        let id = "AbCdEfGhIjKlMnOpQrStUv";
+        let paths = [
+            "/e2e/pairings",
+            "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv/join",
+            "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv/messages",
+            "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv/messages",
+            "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv",
+        ];
+        for (operation, path) in PairingOperation::ALL.into_iter().zip(paths) {
+            assert_eq!(operation.path(Some(id)).unwrap(), path, "{operation:?}");
+            assert!(!operation.available(None));
+            assert!(!operation.available(Some(47)));
+            assert!(operation.available(Some(48)));
+            if operation != PairingOperation::Create {
+                for bad in [None, Some("../x"), Some("short")] {
+                    assert_eq!(operation.path(bad), Err(WireError::BadId), "{operation:?}");
+                }
+            }
+        }
+        assert_eq!(PairingOperation::Fetch.route().0, E2eMethod::Get);
+        assert_eq!(PairingOperation::Close.route().0, E2eMethod::Delete);
     }
 
     #[test]

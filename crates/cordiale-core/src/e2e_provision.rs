@@ -199,26 +199,37 @@ pub async fn provision_device(
         Err(err) => return Err(err.into()),
     };
 
-    let master = match store.master_key()? {
-        Some(master) => master,
-        None if held.is_some() => return Err(ProvisionError::NeedsPairing),
-        None => {
-            let master = Account::new();
-            store.set_master_key(&master)?;
-            master
+    // A device that joined by X1 pairing holds no master secret: it has the
+    // certificate that the master signed for its key. Only a master holder
+    // signs a list or a certificate.
+    let (master, master_key): (Option<Account>, String) = match store.master_key()? {
+        Some(master) => {
+            let key = master.identity_keys().ed25519.to_base64();
+            (Some(master), key)
         }
+        None => match &held {
+            Some(held) if is_paired_under(store, &held.master, &ed25519) => {
+                (None, held.master.clone())
+            }
+            Some(_) => return Err(ProvisionError::NeedsPairing),
+            None => {
+                let master = Account::new();
+                store.set_master_key(&master)?;
+                let key = master.identity_keys().ed25519.to_base64();
+                (Some(master), key)
+            }
+        },
     };
-    let master_key = master.identity_keys().ed25519.to_base64();
     if held.as_ref().is_some_and(|held| held.master != master_key) {
         return Err(ProvisionError::MasterMismatch);
     }
 
     let mut list = store.signed_list();
-    if let Some(held) = &held {
+    if let (Some(held), Some(master)) = (&held, master.as_ref()) {
         let held = &held.list;
         let behind = list.as_ref().is_none_or(|own| own.version <= held.version);
         if behind && has_legacy_order(held.version, &held.keys, &master_key, &held.signature) {
-            let next = sign_list(&master, held.version + 1, &held.keys)?;
+            let next = sign_list(master, held.version + 1, &held.keys)?;
             store.set_signed_list_pending(&next)?;
             list = Some(next);
         }
@@ -236,19 +247,22 @@ pub async fn provision_device(
             } else {
                 let mut keys = held.keys.clone();
                 keys.push(ed25519.clone());
-                let next = sign_list(&master, held.version + 1, &keys)?;
+                let master = master.as_ref().ok_or(ProvisionError::NeedsPairing)?;
+                let next = sign_list(master, held.version + 1, &keys)?;
                 store.set_signed_list_pending(&next)?;
                 next
             }
         }
         (None, None) => {
-            let first = sign_list(&master, 1, std::slice::from_ref(&ed25519))?;
+            let master = master.as_ref().ok_or(ProvisionError::NeedsPairing)?;
+            let first = sign_list(master, 1, std::slice::from_ref(&ed25519))?;
             store.set_signed_list_pending(&first)?;
             first
         }
     };
 
     if store.device_certificate().is_none() {
+        let master = master.as_ref().ok_or(ProvisionError::NeedsPairing)?;
         let certificate = build_device_certificate(list.version, &ed25519, &master_key, |text| {
             master.sign(text).to_base64()
         })?;
@@ -328,6 +342,15 @@ pub async fn provision_device(
     outcome.one_time_keys_published = one_time.len();
     outcome.fallback_published = fallback.is_some();
     Ok(outcome)
+}
+
+/// True when the store holds the certificate that `master` signed for this
+/// device key. Only a device that joined by X1 pairing has one without the
+/// master secret.
+fn is_paired_under(store: &E2eStateStore, master: &str, device_ed25519: &str) -> bool {
+    store
+        .device_certificate()
+        .is_some_and(|cert| cert.master_ed25519 == master && cert.device_ed25519 == device_ed25519)
 }
 
 /// Signs a device list with the master key. The keys are sorted by the
