@@ -555,6 +555,8 @@ pub struct E2eEngine {
     peers: HashMap<String, PeerEntry>,
     book: SendBook,
     keyreq: KeyReqPacer,
+    /// Casemapping of the network, read again for every pacing decision.
+    casemapping: CaseMapping,
     clock: MonotonicClock,
     /// Devices that a newer signed list revoked. Their rows are not read.
     revoked_dids: HashSet<String>,
@@ -587,6 +589,7 @@ impl E2eEngine {
             peers: HashMap::new(),
             book: SendBook::new(),
             keyreq: KeyReqPacer::new(KEYS_REASSEMBLY_TIMEOUT),
+            casemapping: CaseMapping::Rfc1459,
             clock: MonotonicClock::new(),
             revoked_dids: HashSet::new(),
             keys_wanted: Vec::new(),
@@ -704,6 +707,17 @@ impl E2eEngine {
     /// The status of a send. A 202 gives `Accepted`, never a delivered state.
     pub fn send_status(&self, key: &SendKey) -> Option<SendStatus> {
         self.book.status(key)
+    }
+
+    /// Sets the casemapping of the network. Call it when the ISUPPORT
+    /// snapshot changes. The pacers use the value on their next decision.
+    pub fn set_casemapping(&mut self, casemapping: CaseMapping) {
+        self.casemapping = casemapping;
+    }
+
+    /// The session ended: every open send becomes a `session_ended` drop.
+    pub fn end_session(&mut self) -> Vec<SendDropped> {
+        self.book.end_session()
     }
 
     /// Applies an `e2e_send_dropped` event to the send book.
@@ -1152,7 +1166,7 @@ impl E2eEngine {
         nick: &str,
     ) -> Result<(), EngineError> {
         self.keyreq
-            .try_send(nick, CaseMapping::Rfc1459, self.clock.now())
+            .try_send(nick, self.casemapping, self.clock.now())
             .map_err(EngineError::Paced)?;
         let payload = format!(r#"{{"v":{PAYLOAD_VERSION}}}"#);
         let request = E2eSendRequest::new(
@@ -2396,6 +2410,35 @@ mod tests {
             .expect("keyreq");
         let again = p.alice.request_keys(&client, TOKEN, "bob").await;
         assert!(matches!(again, Err(EngineError::Paced(_))));
+    }
+
+    #[tokio::test]
+    async fn keyreq_pacing_follows_the_current_casemapping() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/{NET}/e2e/messages")))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({"msgid": "k1"})))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = GrappaClient::new(server.uri());
+        p.alice.set_casemapping(CaseMapping::Ascii);
+        p.alice
+            .request_keys(&client, TOKEN, "[bob]")
+            .await
+            .expect("first");
+        // Under ASCII, "{bob}" is another nick: no interval applies.
+        p.alice
+            .request_keys(&client, TOKEN, "{bob}")
+            .await
+            .expect("second");
+    }
+
+    #[test]
+    fn end_session_leaves_no_open_send() {
+        let mut p = pair();
+        assert!(p.alice.end_session().is_empty());
     }
 
     #[test]
