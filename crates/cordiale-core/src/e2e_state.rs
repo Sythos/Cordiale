@@ -107,6 +107,26 @@ struct StateData {
     /// First-message and new-session ids already accepted (public values).
     #[serde(default)]
     replay: ReplayState,
+    /// A revoke of an own device that is not finished (public values).
+    #[serde(default)]
+    pending_revoke: Option<PendingRevoke>,
+    /// Device keys of the own account that this device revoked. A list that
+    /// holds one of them is never accepted again.
+    #[serde(default)]
+    own_revoked: Vec<String>,
+    /// True while an identity reset waits for the server. The local private
+    /// state stays until the server dropped the identity.
+    #[serde(default)]
+    reset_pending: bool,
+}
+
+/// An own device that a revoke removes from the list (public values).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingRevoke {
+    /// The device key that leaves the list.
+    pub ed25519: String,
+    /// The id of the device on the server.
+    pub did: String,
 }
 
 impl Drop for StateData {
@@ -406,6 +426,88 @@ impl E2eStateStore {
             return Ok(());
         }
         self.commit(|data| data.pending_pairing = None)
+    }
+
+    /// The revoke that waits for the server, or `None`.
+    pub fn pending_revoke(&self) -> Option<PendingRevoke> {
+        self.data.pending_revoke.clone()
+    }
+
+    /// The device keys of the own account that this device revoked.
+    pub fn own_revoked(&self) -> &[String] {
+        &self.data.own_revoked
+    }
+
+    /// Saves the list without the revoked device, marks it as waiting for
+    /// publication and saves the pending revoke, in one write.
+    pub fn begin_revoke(
+        &mut self,
+        pending: &PendingRevoke,
+        list: &SignedList,
+    ) -> Result<(), E2eStoreError> {
+        let pending = pending.clone();
+        let list = list.clone();
+        self.commit(|data| {
+            if !data.own_revoked.contains(&pending.ed25519) {
+                data.own_revoked.push(pending.ed25519.clone());
+            }
+            data.signed_list = Some(list);
+            data.list_pending = true;
+            data.pending_revoke = Some(pending);
+        })
+    }
+
+    /// Ends the pending revoke after the server dropped the device.
+    pub fn clear_pending_revoke(&mut self) -> Result<(), E2eStoreError> {
+        if self.data.pending_revoke.is_none() {
+            return Ok(());
+        }
+        self.commit(|data| data.pending_revoke = None)
+    }
+
+    /// True while an identity reset waits for the server.
+    pub fn reset_pending(&self) -> bool {
+        self.data.reset_pending
+    }
+
+    /// Marks the reset as started. Nothing else changes until the server
+    /// dropped the identity.
+    pub fn begin_reset(&mut self) -> Result<(), E2eStoreError> {
+        if self.data.reset_pending {
+            return Ok(());
+        }
+        self.commit(|data| data.reset_pending = true)
+    }
+
+    /// Removes the private state of the identity: the Olm account, the
+    /// sessions, the master key, the own list and certificate and the
+    /// pending states. The peer trust and the replay state stay, so a revoked
+    /// peer device stays revoked.
+    pub fn finish_reset(&mut self) -> Result<(), E2eStoreError> {
+        self.commit(|data| {
+            if let Some(text) = data.account.as_mut() {
+                text.zeroize();
+            }
+            if let Some(text) = data.master.as_mut() {
+                text.zeroize();
+            }
+            for text in data.sessions.values_mut() {
+                text.zeroize();
+            }
+            if let Some(text) = data.pending_pairing.as_mut() {
+                text.zeroize();
+            }
+            data.account = None;
+            data.master = None;
+            data.sessions.clear();
+            data.pending_pairing = None;
+            data.signed_list = None;
+            data.list_pending = false;
+            data.device_certificate = None;
+            data.pending_revoke = None;
+            data.own_revoked.clear();
+            data.reset_pending = false;
+        })
     }
 
     /// Applies `change` to a copy, writes the copy, and only then keeps it.

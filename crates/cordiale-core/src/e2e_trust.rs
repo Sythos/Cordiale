@@ -250,6 +250,29 @@ impl PeerTrust {
         Ok(decision)
     }
 
+    /// Revokes one device of an account at once, with its curve key when
+    /// known. Use it for the own account, where the user revokes a device
+    /// without a list from a peer. A missing record is made with `master`.
+    pub fn revoke_device(
+        &mut self,
+        network: &str,
+        nick: &str,
+        master: &str,
+        ed25519: &str,
+    ) -> Result<(), E2eError> {
+        decode_key(master)?;
+        decode_key(ed25519)?;
+        let record = self
+            .peers
+            .entry(peer_key(network, nick))
+            .or_insert_with(|| PeerRecord::new(master));
+        if let Some(curve) = record.curves.get(ed25519) {
+            record.revoked_curves.insert(curve.clone());
+        }
+        record.revoked.insert(ed25519.to_string());
+        Ok(())
+    }
+
     /// Records the Curve25519 key of a device of a known peer, so a later
     /// revocation covers it. When the device is already revoked, its curve key
     /// is revoked too. Returns false for an unknown peer.
