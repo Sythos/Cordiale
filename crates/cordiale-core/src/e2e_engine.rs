@@ -1008,6 +1008,10 @@ impl E2eEngine {
             }
             return RowOutcome::Undecryptable;
         };
+        // A message that the engine read is proof of E2E capability.
+        if !row.own {
+            self.set_peer_capability(&nick, true);
+        }
         // Text from a person goes to the conversation of the sender. A copy of
         // an own device names its peer. Both must come in the right kind of
         // row: a copy is an `own` row. A message that does not fit is
@@ -3976,6 +3980,29 @@ mod tests {
             .request_keys(&client, TOKEN, "carol")
             .await
             .expect("keyreq");
+    }
+
+    #[tokio::test]
+    async fn a_message_that_the_engine_reads_sets_the_peer_capability() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, "hello bob").await;
+        let payload = body["payload"].as_str().expect("payload");
+        p.bob.set_peer_capability("Alice", false);
+        assert!(!p.bob.peer_capable("alice"));
+        let value = row(
+            5,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "pkmsg",
+            "msgid1",
+            payload,
+        );
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(p.bob.handle_row(&item, 200), RowOutcome::Stored);
+        assert!(p.bob.peer_capable("ALICE"));
     }
 
     #[test]
