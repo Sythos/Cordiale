@@ -63,6 +63,7 @@ use crate::e2e_peer::{verify_peer_device, PeerBundle, ReplayState};
 use crate::e2e_refusal::E2eRouteError;
 use crate::e2e_state::E2eStateStore;
 use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError};
+use crate::e2e_trust::PeerTrust;
 use crate::e2e_wire::{
     did_from_key_text, parse_payload, recipient_binding, WireError, INBOX_PAGE_MAX, WILDCARD,
 };
@@ -265,7 +266,7 @@ struct PeerEntry {
 /// The decrypted text and the state to save after the history write.
 struct Decrypted {
     text: String,
-    account: Option<Account>,
+    identity: Option<Account>,
     session: Session,
     replay: Option<ReplayState>,
 }
@@ -291,15 +292,15 @@ pub struct E2eEngine {
 }
 
 impl E2eEngine {
-    /// Opens the engine for the Olm account of `state`. A state without an
-    /// account is `NotReady`: the provisioning creates it first.
+    /// Opens the engine for the Olm identity of `state`. A state without an
+    /// identity is `NotReady`: the provisioning creates it first. The engine
+    /// keeps the public device key only.
     pub fn new(
         network: &str,
         state: E2eStateStore,
         history: E2eHistoryStore,
     ) -> Result<Self, EngineError> {
-        let account = state.account()?.ok_or(EngineError::NotReady)?;
-        let own_ed25519 = account.identity_keys().ed25519.to_base64();
+        let own_ed25519 = state.device_key()?.ok_or(EngineError::NotReady)?;
         let own_did = did_from_key_text(&own_ed25519)?;
         Ok(Self {
             network: network.to_string(),
@@ -329,16 +330,33 @@ impl E2eEngine {
     /// True when the peer has a verified device and a way to start or keep an
     /// Olm session. The caller opens the locked query only then.
     pub fn is_ready(&self, nick: &str) -> bool {
-        self.peers.values().any(|entry| {
-            entry.nick == nick
-                && (entry.one_time_key.is_some()
-                    || self
-                        .state
-                        .peer_session(&self.network, nick, entry.device.did())
-                        .ok()
-                        .flatten()
-                        .is_some())
-        })
+        let trust = self.state.trust();
+        self.peers
+            .values()
+            .any(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+    }
+
+    /// True when the persisted trust revokes the device of `entry`.
+    fn entry_revoked(&self, entry: &PeerEntry, trust: &PeerTrust) -> bool {
+        trust.is_revoked(
+            &self.network,
+            &entry.nick,
+            entry.device.ed25519(),
+            Some(entry.device.curve25519()),
+        )
+    }
+
+    /// True when the device is not revoked and has a session or a one-time
+    /// key to open one.
+    fn entry_ready(&self, entry: &PeerEntry, trust: &PeerTrust) -> bool {
+        !self.entry_revoked(entry, trust)
+            && (entry.one_time_key.is_some()
+                || self
+                    .state
+                    .peer_session(&self.network, &entry.nick, entry.device.did())
+                    .ok()
+                    .flatten()
+                    .is_some())
     }
 
     /// The status of a send. A 202 gives `Accepted`, never a delivered state.
@@ -393,14 +411,7 @@ impl E2eEngine {
         let revoked: Vec<String> = self
             .peers
             .iter()
-            .filter(|(_, entry)| {
-                trust.is_revoked(
-                    &self.network,
-                    &entry.nick,
-                    entry.device.ed25519(),
-                    Some(entry.device.curve25519()),
-                )
-            })
+            .filter(|(_, entry)| self.entry_revoked(entry, &trust))
             .map(|(did, _)| did.clone())
             .collect();
         for did in revoked {
@@ -444,14 +455,22 @@ impl E2eEngine {
     }
 
     fn receive_message(&mut self, row: &InboxRow, now: i64) -> RowOutcome {
-        if self.revoked_dids.contains(&row.from_did) {
-            return RowOutcome::Undecryptable;
-        }
         let entry = self.peers.get(&row.from_did).cloned();
         let nick = entry
             .as_ref()
             .map_or(row.from.as_str(), |entry| entry.nick.as_str())
             .to_string();
+        // The persisted trust decides, also after a restart: a restored
+        // session of a revoked device is not used.
+        let trust = self.state.trust();
+        if self.revoked_dids.contains(&row.from_did)
+            || trust.is_did_revoked(&self.network, &nick, &row.from_did)
+            || entry
+                .as_ref()
+                .is_some_and(|entry| self.entry_revoked(entry, &trust))
+        {
+            return RowOutcome::Undecryptable;
+        }
         let Some(mut decrypted) = self.decrypt_row(row, entry.as_ref(), &nick) else {
             if entry.is_none() && !self.keys_wanted.contains(&nick) {
                 self.keys_wanted.push(nick);
@@ -459,7 +478,7 @@ impl E2eEngine {
             return RowOutcome::Undecryptable;
         };
         let conversation = conversation_id(&self.network, &nick);
-        let row_id = format!("{}:{}:{}", self.network, row.to_did, row.id);
+        let row_id = format!("{}:in:{}", self.network, row.id);
         let stored = self
             .history
             .messages(&conversation)
@@ -498,7 +517,7 @@ impl E2eEngine {
             nick,
             did,
             &decrypted.session,
-            decrypted.account.as_ref(),
+            decrypted.identity.as_ref(),
             decrypted.replay.as_ref(),
         )
     }
@@ -538,14 +557,14 @@ impl E2eEngine {
                         let text = String::from_utf8(plain).ok()?;
                         return Some(Decrypted {
                             text,
-                            account: None,
+                            identity: None,
                             session,
                             replay: Some(replay),
                         });
                     }
                 }
-                let mut account = self.state.account().ok()??;
-                let created = account
+                let mut identity = self.state.olm_identity().ok()??;
+                let created = identity
                     .create_inbound_session(SessionConfig::version_1(), curve, &message)
                     .ok()?;
                 replay
@@ -559,7 +578,7 @@ impl E2eEngine {
                 let text = String::from_utf8(created.plaintext).ok()?;
                 Some(Decrypted {
                     text,
-                    account: Some(account),
+                    identity: Some(identity),
                     session: created.session,
                     replay: Some(replay),
                 })
@@ -574,7 +593,7 @@ impl E2eEngine {
                 let text = String::from_utf8(plain).ok()?;
                 Some(Decrypted {
                     text,
-                    account: None,
+                    identity: None,
                     session,
                     replay: None,
                 })
@@ -703,6 +722,25 @@ impl E2eEngine {
         }
     }
 
+    /// The device of `nick` to send to: not revoked and ready, with a session
+    /// first. The order of the devices does not decide; the `did` breaks a tie.
+    fn pick_device(&self, nick: &str) -> Option<PeerEntry> {
+        let trust = self.state.trust();
+        self.peers
+            .values()
+            .filter(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+            .min_by_key(|entry| {
+                let has_session = self
+                    .state
+                    .peer_session(&self.network, nick, entry.device.did())
+                    .ok()
+                    .flatten()
+                    .is_some();
+                (!has_session, entry.device.did().to_string())
+            })
+            .cloned()
+    }
+
     /// Encrypts `text` for `nick` and sends it. `nick` is the real nick of the
     /// peer; the label of the locked query is refused. Any failure before the
     /// 202 answer returns an error and sends nothing in clear.
@@ -717,23 +755,18 @@ impl E2eEngine {
         if nick.contains(QUERY_LOCK_LABEL) {
             return Err(EngineError::Wire(WireError::BadTarget));
         }
-        let entry = self
-            .peers
-            .values()
-            .find(|entry| entry.nick == nick)
-            .cloned()
-            .ok_or(EngineError::NotReady)?;
+        let entry = self.pick_device(nick).ok_or(EngineError::NotReady)?;
         let did = entry.device.did().to_string();
         let mut session = match self.state.peer_session(&self.network, nick, &did)? {
             Some(session) => session,
             None => {
                 let one_time = entry.one_time_key.as_deref().ok_or(EngineError::NotReady)?;
-                let account = self.state.account()?.ok_or(EngineError::NotReady)?;
+                let identity = self.state.olm_identity()?.ok_or(EngineError::NotReady)?;
                 let curve = Curve25519PublicKey::from_base64(entry.device.curve25519())
                     .map_err(|_| EngineError::EncryptionFailed)?;
                 let one_time = Curve25519PublicKey::from_base64(one_time)
                     .map_err(|_| EngineError::EncryptionFailed)?;
-                account
+                identity
                     .create_outbound_session(SessionConfig::version_1(), curve, one_time)
                     .map_err(|_| EngineError::EncryptionFailed)?
             }
@@ -838,12 +871,57 @@ mod tests {
         dir
     }
 
-    fn ed(account: &Account) -> String {
-        account.identity_keys().ed25519.to_base64()
+    fn ed(device: &Account) -> String {
+        device.identity_keys().ed25519.to_base64()
     }
 
-    fn curve(account: &Account) -> String {
-        account.identity_keys().curve25519.to_base64()
+    fn curve(device: &Account) -> String {
+        device.identity_keys().curve25519.to_base64()
+    }
+
+    /// The KEYS text of `device`, listed by `master` in a list of `listed`
+    /// at `version`, for the user with the Ed25519 key `recipient`.
+    fn keys_payload(
+        master: &Account,
+        device: &Account,
+        listed: &[String],
+        version: u32,
+        recipient: &str,
+        with_one_time_key: bool,
+    ) -> String {
+        let device_ed = ed(device);
+        let certificate = build_device_certificate(version, &device_ed, &ed(master), |text| {
+            master.sign(text).to_base64()
+        })
+        .expect("certificate");
+        let list_signature =
+            build_signed_list_signature(version, listed, |text| master.sign(text).to_base64())
+                .expect("list");
+        let curve_text = bundle_key_signed_text(&curve(device)).expect("text");
+        let one_time_key = with_one_time_key.then(|| {
+            device
+                .one_time_keys()
+                .values()
+                .next()
+                .expect("one-time key")
+                .to_base64()
+        });
+        serde_json::to_string(&KeysPayload {
+            v: 2,
+            master: ed(master),
+            list_version: version,
+            list_keys: listed.to_vec(),
+            list_signature,
+            cert_version: version,
+            cert_signature: certificate.signature,
+            ed25519: device_ed.clone(),
+            did: did_from_key_text(&device_ed).expect("did"),
+            curve25519: curve(device),
+            curve_signature: device.sign(&curve_text).to_base64(),
+            fb: recipient_binding(&device_ed, recipient),
+            one_time_key,
+        })
+        .expect("json")
     }
 
     /// One user with a master key and one device, as a test double.
@@ -876,41 +954,27 @@ mod tests {
         /// The KEYS text of this user for the user with the Ed25519 key
         /// `recipient`.
         fn keys_for(&self, recipient: &str, with_one_time_key: bool) -> String {
-            let device_ed = ed(&self.device);
-            let certificate = build_device_certificate(1, &device_ed, &ed(&self.master), |text| {
-                self.master.sign(text).to_base64()
-            })
-            .expect("certificate");
-            let list_keys = vec![device_ed.clone()];
-            let list_signature = build_signed_list_signature(1, &list_keys, |text| {
-                self.master.sign(text).to_base64()
-            })
-            .expect("list");
-            let curve_text = bundle_key_signed_text(&curve(&self.device)).expect("text");
-            let one_time_key = with_one_time_key.then(|| {
-                self.device
-                    .one_time_keys()
-                    .values()
-                    .next()
-                    .expect("one-time key")
-                    .to_base64()
-            });
-            serde_json::to_string(&KeysPayload {
-                v: 2,
-                master: ed(&self.master),
-                list_version: 1,
-                list_keys,
-                list_signature,
-                cert_version: 1,
-                cert_signature: certificate.signature,
-                ed25519: device_ed.clone(),
-                did: did_from_key_text(&device_ed).expect("did"),
-                curve25519: curve(&self.device),
-                curve_signature: self.device.sign(&curve_text).to_base64(),
-                fb: recipient_binding(&device_ed, recipient),
-                one_time_key,
-            })
-            .expect("json")
+            keys_payload(
+                &self.master,
+                &self.device,
+                &[ed(&self.device)],
+                1,
+                recipient,
+                with_one_time_key,
+            )
+        }
+
+        /// The KEYS text of a list 2 that holds `new_device` only. The
+        /// device of this user is revoked.
+        fn newer_keys_for(&self, new_device: &Account, recipient: &str) -> String {
+            keys_payload(
+                &self.master,
+                new_device,
+                &[ed(new_device)],
+                2,
+                recipient,
+                false,
+            )
         }
     }
 
@@ -974,8 +1038,10 @@ mod tests {
             .expect("alice reads bob");
         bob.accept_keys("alice", &alice_id.keys_for(&ed(&bob_id.device), false))
             .expect("bob reads alice");
-        let alice_did = alice.own_did().to_string();
-        let bob_did = bob.own_did().to_string();
+        let alice_did = did_from_key_text(&ed(&alice_id.device)).expect("did");
+        let bob_did = did_from_key_text(&ed(&bob_id.device)).expect("did");
+        assert_eq!(alice.own_did(), alice_did);
+        assert_eq!(bob.own_did(), bob_did);
         Pair {
             alice,
             bob,
@@ -1145,8 +1211,8 @@ mod tests {
         let bob_dir = scratch_dir("bob-broken");
         let mut state =
             E2eStateStore::open(bob_dir.join("state.bin"), &FixedKey([7; 32])).expect("state");
-        let bob_account = p.bob.state.account().expect("account").expect("some");
-        state.set_account(&bob_account).expect("account");
+        let bob_identity = p.bob.state.olm_identity().expect("identity").expect("some");
+        state.set_account(&bob_identity).expect("identity");
         let history = E2eHistoryStore::open(bob_dir.join("history.bin"), &FixedKey([9; 32]))
             .expect("history");
         let mut broken = E2eEngine::new(NET, state, history).expect("engine");
@@ -1220,32 +1286,7 @@ mod tests {
         assert!(alice.is_ready("bob"));
         // Bob signs list 2 with a new device only. The old device is revoked.
         let new_device = Account::new();
-        let new_ed = ed(&new_device);
-        let certificate = build_device_certificate(2, &new_ed, &ed(&bob_id.master), |text| {
-            bob_id.master.sign(text).to_base64()
-        })
-        .expect("certificate");
-        let list_keys = vec![new_ed.clone()];
-        let list_signature =
-            build_signed_list_signature(2, &list_keys, |text| bob_id.master.sign(text).to_base64())
-                .expect("list");
-        let curve_text = bundle_key_signed_text(&curve(&new_device)).expect("text");
-        let newer = serde_json::to_string(&KeysPayload {
-            v: 2,
-            master: ed(&bob_id.master),
-            list_version: 2,
-            list_keys,
-            list_signature,
-            cert_version: 2,
-            cert_signature: certificate.signature,
-            ed25519: new_ed.clone(),
-            did: did_from_key_text(&new_ed).expect("did"),
-            curve25519: curve(&new_device),
-            curve_signature: new_device.sign(&curve_text).to_base64(),
-            fb: recipient_binding(&new_ed, &ed(&alice_id.device)),
-            one_time_key: None,
-        })
-        .expect("json");
+        let newer = bob_id.newer_keys_for(&new_device, &ed(&alice_id.device));
         // The new device has no one-time key and no session: not ready.
         alice.accept_keys("bob", &newer).expect("newer list");
         let server = MockServer::start().await;
@@ -1261,6 +1302,169 @@ mod tests {
             .await
             .expect("requests")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_newer_list_still_drops_the_revoked_device() {
+        let alice_id = Ident::new("alice-refused");
+        let bob_id = Ident::new("bob-refused");
+        let mut alice = alice_id.engine();
+        alice
+            .accept_keys("bob", &bob_id.keys_for(&ed(&alice_id.device), true))
+            .expect("alice reads bob");
+        assert!(alice.is_ready("bob"));
+        // List 2 revokes the old device, but its new device binds to a wrong
+        // recipient: the device is refused, the list stays.
+        let new_device = Account::new();
+        let wrong = bob_id.newer_keys_for(&new_device, &ed(&bob_id.master));
+        let refused = alice.accept_keys("bob", &wrong);
+        assert!(matches!(
+            refused,
+            Err(EngineError::Device(E2eError::RecipientMismatch))
+        ));
+        assert!(alice.peers.is_empty());
+        assert!(!alice.is_ready("bob"));
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let sent = alice
+            .send_text(&GrappaClient::new(server.uri()), TOKEN, "bob", "late", 1)
+            .await;
+        assert!(matches!(sent, Err(EngineError::NotReady)));
+        assert!(server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_persisted_revocation_stops_a_restored_session_after_a_restart() {
+        let alice_id = Ident::new("alice-restart");
+        let bob_id = Ident::new("bob-restart");
+        let mut alice = alice_id.engine();
+        let mut bob = bob_id.engine();
+        alice
+            .accept_keys("bob", &bob_id.keys_for(&ed(&alice_id.device), true))
+            .expect("alice reads bob");
+        bob.accept_keys("alice", &alice_id.keys_for(&ed(&bob_id.device), false))
+            .expect("bob reads alice");
+        let alice_did = did_from_key_text(&ed(&alice_id.device)).expect("did");
+        let bob_did = did_from_key_text(&ed(&bob_id.device)).expect("did");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+
+        // Alice opens the session, Bob answers, so the next message is a
+        // normal one that Bob opens with the session in his state.
+        let (_, first) = alice_sends(&mut alice, &server, "one").await;
+        let value = row(
+            5,
+            "alice",
+            &alice_did,
+            &bob_did,
+            "pkmsg",
+            "msgid1",
+            first["payload"].as_str().expect("payload"),
+        );
+        let first_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(bob.handle_row(&first_row, 200), RowOutcome::Stored);
+        let before = server.received_requests().await.expect("requests").len();
+        bob.send_text(&client, TOKEN, "alice", "reply", 210)
+            .await
+            .expect("reply");
+        let requests = server.received_requests().await.expect("requests");
+        let reply: Value = serde_json::from_slice(&requests[before].body).expect("body");
+        let value = row(
+            6,
+            "bob",
+            &bob_did,
+            &alice_did,
+            &reply["verb"].as_str().expect("verb").to_string(),
+            "msgid1",
+            reply["payload"].as_str().expect("payload"),
+        );
+        let reply_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(alice.handle_row(&reply_row, 220), RowOutcome::Stored);
+        let (_, second) = alice_sends(&mut alice, &server, "two").await;
+        assert_eq!(second["verb"], "msg");
+
+        // Bob learns a list that revokes the device of Alice, then restarts.
+        let new_device = Account::new();
+        let newer = alice_id.newer_keys_for(&new_device, &ed(&bob_id.device));
+        bob.accept_keys("alice", &newer).expect("newer list");
+        drop(bob);
+        let mut bob = bob_id.engine();
+        assert!(bob.peers.is_empty());
+        let value = row(
+            7,
+            "alice",
+            &alice_did,
+            &bob_did,
+            "msg",
+            "msgid1",
+            second["payload"].as_str().expect("payload"),
+        );
+        let late = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(bob.handle_row(&late, 230), RowOutcome::Undecryptable);
+        let rows = bob.history().messages(&conversation_id(NET, "alice"));
+        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+        assert_eq!(texts, ["one"]);
+    }
+
+    #[tokio::test]
+    async fn a_send_goes_to_the_ready_device_of_a_peer_with_two_devices() {
+        let alice_id = Ident::new("alice-two");
+        let bob_id = Ident::new("bob-two");
+        let other = Account::new();
+        let listed = vec![ed(&bob_id.device), ed(&other)];
+        let recipient = ed(&alice_id.device);
+        let mut alice = alice_id.engine();
+        alice
+            .accept_keys(
+                "bob",
+                &keys_payload(&bob_id.master, &other, &listed, 1, &recipient, false),
+            )
+            .expect("device without key");
+        alice
+            .accept_keys(
+                "bob",
+                &keys_payload(&bob_id.master, &bob_id.device, &listed, 1, &recipient, true),
+            )
+            .expect("device with key");
+        assert_eq!(alice.peers.len(), 2);
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, body) = alice_sends(&mut alice, &server, "hello").await;
+        let ready = did_from_key_text(&ed(&bob_id.device)).expect("did");
+        assert_eq!(body["to"], ready.as_str());
+    }
+
+    #[test]
+    fn a_failed_trust_write_leaves_the_keys_row_unacknowledged() {
+        let alice_id = Ident::new("alice-trust");
+        let bob_id = Ident::new("bob-trust");
+        let mut alice = alice_id.engine();
+        // A folder in place of the state file makes the write fail.
+        let state_path = alice_id.dir.join("state.bin");
+        std::fs::remove_file(&state_path).ok();
+        std::fs::create_dir_all(&state_path).expect("folder in place of file");
+        let alice_did = did_from_key_text(&ed(&alice_id.device)).expect("did");
+        let value = row(
+            3,
+            "bob",
+            WILDCARD,
+            &alice_did,
+            "keys",
+            "k1",
+            &bob_id.keys_for(&ed(&alice_id.device), true),
+        );
+        let keys_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        let outcome = alice.handle_row(&keys_row, 1);
+        assert_eq!(outcome, RowOutcome::StoreFailed);
+        assert!(!outcome.acknowledge());
+        assert!(alice.peers.is_empty());
+        // The row is not marked as seen: the next drain reads it again.
+        assert_eq!(alice.handle_row(&keys_row, 2), RowOutcome::StoreFailed);
     }
 
     #[tokio::test]

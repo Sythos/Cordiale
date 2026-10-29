@@ -188,14 +188,24 @@ impl E2eStateStore {
         Ok(store)
     }
 
-    /// The Olm account, or `None` when the device has none yet.
-    pub fn account(&self) -> Result<Option<Account>, E2eStoreError> {
+    /// The Olm identity of this device, or `None` when the device has none
+    /// yet. It holds private keys: read the public key with
+    /// [`Self::device_key`] when that is all you need.
+    pub fn olm_identity(&self) -> Result<Option<Account>, E2eStoreError> {
         let Some(text) = self.data.account.as_deref() else {
             return Ok(None);
         };
         let pickle =
             AccountPickle::from_encrypted(text, &self.key).map_err(|_| E2eStoreError::Corrupted)?;
         Ok(Some(Account::from_pickle(pickle)))
+    }
+
+    /// The public Ed25519 device key as base64 text, or `None` when the device
+    /// has no identity yet. The private keys never leave the store.
+    pub fn device_key(&self) -> Result<Option<String>, E2eStoreError> {
+        Ok(self
+            .olm_identity()?
+            .map(|identity| identity.identity_keys().ed25519.to_base64()))
     }
 
     /// Saves the Olm account.
@@ -592,12 +602,12 @@ mod tests {
         let session = outbound_session(&account);
         {
             let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
-            assert!(store.account().expect("account").is_none());
+            assert!(store.olm_identity().expect("account").is_none());
             store.set_account(&account).expect("account");
             store.set_session("peer-1", &session).expect("session");
         }
         let store = E2eStateStore::open(path, &provider).expect("reopen");
-        let loaded = store.account().expect("account").expect("present");
+        let loaded = store.olm_identity().expect("account").expect("present");
         assert_eq!(loaded.identity_keys(), account.identity_keys());
         let loaded = store.session("peer-1").expect("session").expect("present");
         assert_eq!(loaded.session_id(), session.session_id());
@@ -674,6 +684,20 @@ mod tests {
     }
 
     #[test]
+    fn the_device_key_is_the_public_key_of_the_saved_identity() {
+        let dir = scratch_dir("device-key");
+        let provider = fresh_key();
+        let identity = Account::new();
+        let mut store = E2eStateStore::open(dir.join("state.bin"), &provider).expect("open");
+        assert!(store.device_key().expect("none").is_none());
+        store.set_account(&identity).expect("identity");
+        assert_eq!(
+            store.device_key().expect("key"),
+            Some(identity.identity_keys().ed25519.to_base64())
+        );
+    }
+
+    #[test]
     fn a_failed_save_keeps_the_old_account_in_file_and_memory() {
         let dir = scratch_dir("failed-save");
         let path = dir.join("state.bin");
@@ -685,12 +709,12 @@ mod tests {
         store.writer = failing_writer;
         let result = store.set_account(&Account::new());
         assert!(matches!(result, Err(E2eStoreError::Io(_))));
-        let kept = store.account().expect("account").expect("present");
+        let kept = store.olm_identity().expect("account").expect("present");
         assert_eq!(kept.identity_keys(), account.identity_keys());
         assert_eq!(fs::read(&path).expect("read"), before);
         drop(store);
         let store = E2eStateStore::open(path, &provider).expect("reopen");
-        let loaded = store.account().expect("account").expect("present");
+        let loaded = store.olm_identity().expect("account").expect("present");
         assert_eq!(loaded.identity_keys(), account.identity_keys());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -720,7 +744,7 @@ mod tests {
             Some(&replay),
         );
         assert!(matches!(result, Err(E2eStoreError::Io(_))));
-        let kept = store.account().expect("account").expect("present");
+        let kept = store.olm_identity().expect("account").expect("present");
         assert_eq!(kept.identity_keys(), account.identity_keys());
         assert!(store
             .peer_session("net", "bob", "AAAAAAAAAAA")
@@ -759,7 +783,7 @@ mod tests {
             .expect("present");
         assert_eq!(loaded.session_id(), session.session_id());
         assert_eq!(store.replay(), replay);
-        assert!(store.account().expect("account").is_some());
+        assert!(store.olm_identity().expect("account").is_some());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -771,7 +795,7 @@ mod tests {
         let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
         store.writer = cutting_writer;
         assert!(store.set_account(&Account::new()).is_err());
-        assert!(store.account().expect("account").is_none());
+        assert!(store.olm_identity().expect("account").is_none());
         drop(store);
         // The cut file is an error, not an empty state.
         let result = E2eStateStore::open(path, &provider);
@@ -832,7 +856,7 @@ mod tests {
         let old = legacy_file(&provider.0, &account, ("peer-1", &session));
         fs::write(&path, old).expect("write");
         let store = E2eStateStore::open(path.clone(), &provider).expect("open");
-        let loaded = store.account().expect("account").expect("present");
+        let loaded = store.olm_identity().expect("account").expect("present");
         assert_eq!(loaded.identity_keys(), account.identity_keys());
         let loaded = store.session("peer-1").expect("session").expect("present");
         assert_eq!(loaded.session_id(), session.session_id());
@@ -840,7 +864,7 @@ mod tests {
         assert!(fs::read(&path).expect("read").starts_with(MAGIC));
         assert!(!staging_of(&path).exists());
         let store = E2eStateStore::open(path, &provider).expect("reopen");
-        let loaded = store.account().expect("account").expect("present");
+        let loaded = store.olm_identity().expect("account").expect("present");
         assert_eq!(loaded.identity_keys(), account.identity_keys());
         assert!(store.session("peer-1").expect("session").is_some());
         let _ = fs::remove_dir_all(&dir);
