@@ -175,6 +175,15 @@ pub struct E2eMessage {
     pub sender_device: String,
     pub sent_at: i64,
     pub text: String,
+    /// True for a row that came through the E2E path. The mark stays with
+    /// the row. A row written before the mark existed reads as encrypted:
+    /// this store never held a plain row.
+    #[serde(default = "encrypted_default")]
+    pub encrypted: bool,
+}
+
+fn encrypted_default() -> bool {
+    true
 }
 
 /// The sealed history. The decrypted rows stay in memory until `close` or
@@ -507,6 +516,7 @@ mod tests {
             sender_device: "device-a".to_string(),
             sent_at,
             text: text.to_string(),
+            encrypted: true,
         }
     }
 

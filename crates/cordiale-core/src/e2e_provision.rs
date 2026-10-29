@@ -174,7 +174,7 @@ pub async fn provision_device(
         return Err(E2eRouteError::Unavailable.into());
     }
 
-    let (account, identity_created) = match store.account()? {
+    let (account, identity_created) = match store.olm_identity()? {
         Some(account) => (account, false),
         None => {
             let account = Account::new();
@@ -535,7 +535,7 @@ mod tests {
 
         let outcome = run(&server, &mut store, PROTOCOL).await.expect("run");
 
-        let account = store.account().expect("account").expect("saved");
+        let account = store.olm_identity().expect("account").expect("saved");
         let master = store.master_key().expect("master").expect("saved");
         let device_key = ed25519_of(&account);
         let master_key = ed25519_of(&master);
@@ -632,7 +632,7 @@ mod tests {
             }
         }
         // The debug text of the store shows no key.
-        let account = store.account().unwrap().unwrap();
+        let account = store.olm_identity().unwrap().unwrap();
         let text = format!("{store:?}");
         assert!(!text.contains(&ed25519_of(&account)));
         let _ = fs::remove_dir_all(&dir);
@@ -648,7 +648,7 @@ mod tests {
             let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
             run(&server, &mut store, PROTOCOL).await.expect("first run");
             (
-                ed25519_of(&store.account().unwrap().unwrap()),
+                ed25519_of(&store.olm_identity().unwrap().unwrap()),
                 ed25519_of(&store.master_key().unwrap().unwrap()),
             )
         };
@@ -668,7 +668,10 @@ mod tests {
             (fake.device_posts, fake.list_puts, fake.key_posts.len()),
             (1, 1, 1)
         );
-        assert_eq!(ed25519_of(&store.account().unwrap().unwrap()), account_key);
+        assert_eq!(
+            ed25519_of(&store.olm_identity().unwrap().unwrap()),
+            account_key
+        );
         assert_eq!(
             ed25519_of(&store.master_key().unwrap().unwrap()),
             master_key
@@ -718,7 +721,7 @@ mod tests {
                 ..
             }))
         ));
-        let kept = store.account().unwrap().unwrap();
+        let kept = store.olm_identity().unwrap().unwrap();
         let kept_keys: Vec<String> = kept
             .one_time_keys()
             .values()
@@ -748,7 +751,7 @@ mod tests {
         let mut sent_sorted = sent;
         sent_sorted.sort();
         assert_eq!(sent_sorted, expected);
-        let after = store.account().unwrap().unwrap();
+        let after = store.olm_identity().unwrap().unwrap();
         assert_eq!(ed25519_of(&after), device_key);
         assert!(after.one_time_keys().is_empty());
         assert!(after.fallback_key().is_empty());
@@ -765,7 +768,7 @@ mod tests {
         run(&server, &mut store, PROTOCOL).await.expect("first run");
 
         let master = store.master_key().unwrap().unwrap();
-        let device_key = ed25519_of(&store.account().unwrap().unwrap());
+        let device_key = ed25519_of(&store.olm_identity().unwrap().unwrap());
         let newer = sign_list(&master, 2, std::slice::from_ref(&device_key)).unwrap();
         store.set_signed_list_pending(&newer).expect("pending");
         assert!(store.list_pending());
@@ -795,7 +798,7 @@ mod tests {
         // the raw byte order of the keys.
         let master = store.master_key().unwrap().unwrap();
         let master_key = ed25519_of(&master);
-        let device_key = ed25519_of(&store.account().unwrap().unwrap());
+        let device_key = ed25519_of(&store.olm_identity().unwrap().unwrap());
         let keys = loop {
             let keys = vec![device_key.clone(), ed25519_of(&Account::new())];
             if legacy_raw_order_list_signed_text(2, &keys).unwrap()
@@ -923,7 +926,7 @@ mod tests {
             ));
         }
 
-        assert!(store.account().unwrap().is_none());
+        assert!(store.olm_identity().unwrap().is_none());
         assert!(store.master_key().unwrap().is_none());
         assert!(server.received_requests().await.unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);

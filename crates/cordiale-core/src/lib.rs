@@ -61,6 +61,7 @@ pub mod domain;
 pub mod e2e_account;
 pub mod e2e_device;
 pub mod e2e_device_routes;
+pub mod e2e_engine;
 pub mod e2e_identity_routes;
 pub mod e2e_list_migration;
 pub mod e2e_manage;

@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::e2e_device::{verify_signed_list, E2eError, ListState};
 use crate::e2e_list_migration::has_legacy_order;
-use crate::e2e_wire::{decode_key, ListDecision};
+use crate::e2e_wire::{decode_key, did_from_key_text, ListDecision};
 
 /// What a master key means for a peer that may be known already.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +285,19 @@ impl PeerTrust {
             .get(&peer_key(network, nick))
             .is_some_and(|record| record.is_revoked(ed25519, curve25519))
     }
+
+    /// True when a revoked device key of the peer has this `did`. Use it when
+    /// only the `did` of a sender is known, for example after a restart.
+    pub fn is_did_revoked(&self, network: &str, nick: &str, did: &str) -> bool {
+        self.peers
+            .get(&peer_key(network, nick))
+            .is_some_and(|record| {
+                record
+                    .revoked
+                    .iter()
+                    .any(|key| did_from_key_text(key).is_ok_and(|revoked| revoked == did))
+            })
+    }
 }
 
 #[cfg(test)]
@@ -438,6 +451,21 @@ mod tests {
             Err(E2eError::RevokedDevice)
         );
         assert_eq!(restored.listed_devices(NET, NICK), &keys[..1]);
+    }
+
+    #[test]
+    fn a_revoked_device_is_found_by_its_did_after_a_restart() {
+        let master = Account::new();
+        let keys = new_keys(2);
+        let mut trust = PeerTrust::default();
+        accept(&mut trust, &master, 1, &keys).unwrap();
+        accept(&mut trust, &master, 2, &keys[..1]).unwrap();
+        let restored = PeerTrust::from_json(&trust.to_json().unwrap()).unwrap();
+        let revoked = did_from_key_text(&keys[1]).unwrap();
+        let kept = did_from_key_text(&keys[0]).unwrap();
+        assert!(restored.is_did_revoked(NET, NICK, &revoked));
+        assert!(!restored.is_did_revoked(NET, NICK, &kept));
+        assert!(!restored.is_did_revoked(NET, "other", &revoked));
     }
 
     #[test]

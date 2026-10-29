@@ -1520,3 +1520,30 @@ normale e quella cifrata dello stesso peer condividono record e sessione.
 portato. Le mappe Rust usano `BTreeMap<String, _>` e i nick `constructor`,
 `__proto__` e `toString` sono chiavi normali; test di regressione in
 `e2e_peer.rs` e `e2e_state.rs`. Non provato in locale (rustc troppo vecchio).
+
+**Issue 453 (fetta 31 di 37 dell'ombrello 416): motore E2E collegato a client e
+sessione.** Nuovo modulo `e2e_engine.rs` con `E2eEngine`: ricezione
+(`handle_row`, `handle_event`, `drain`), invio (`send_text`, `request_keys`) e
+lettura di KEYS (`accept_keys`, `claim_keys`). `session::route_e2e_message` legge
+un frame `e2e_message` come `InboxRow`. Un elemento si conferma (`ack`) dopo
+l'elaborazione locale, anche se non si decifra; non si conferma se la scrittura
+nella cronologia o nello stato fallisce, e lo stato Olm si salva solo dopo la
+cronologia, così il tentativo seguente decifra ancora. Un id già visto non scrive
+una seconda riga. Un 202 dà solo `Accepted` nel `SendBook`, con il `msgid` della
+risposta. Non esiste un percorso che invii testo in chiaro. Le righe della
+cronologia cifrata hanno il campo `encrypted` (le righe vecchie si leggono come
+cifrate). Le righe della cronologia non tengono il `did` proprio: l'id di una
+riga ricevuta è `<rete>:in:<id dell'elemento>` e non contiene alcun `did`; le
+righe proprie hanno `sender_device` = `OWN_DEVICE` (`"own"`). La revoca si
+legge dallo stato di fiducia salvato (`PeerTrust::is_did_revoked`), anche dopo un
+riavvio, prima di usare una sessione ripristinata; l'invio sceglie un dispositivo
+non revocato e pronto (sessione o chiave monouso), a parità il `did` più basso.
+`E2eStateStore::olm_identity()` dà l'identità Olm; il motore legge solo la
+chiave pubblica con `device_key()`. `locked_label` e `route_for_window` tengono `🔒` solo come etichetta
+della finestra: il peer si identifica con il `did`, mai con l'etichetta.
+**Da verificare:** i campi JSON di KEYS (`KeysPayload`) e di `pkmsg`/`msg`
+(`MessagePayload`) sono un formato candidato, non letto sul testo di §4f. Il
+verbo KEYS non è tra i verbi della porta di invio (`E2eSendVerb`): Grappa compone
+KEYS dalle chiavi caricate, quindi il client non lo invia. Le copie `own` (S1) e
+i NACK sono confermati senza essere salvati. Non collegato: i comandi del worker
+e le finestre della UI (`🔒<user>`), che usano `route_for_window` e `is_ready`.

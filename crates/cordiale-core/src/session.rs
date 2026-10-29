@@ -43,6 +43,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
 use crate::backoff::{random_unit, Backoff};
+use crate::e2e_device_routes::InboxRow;
 use crate::e2e_pacing::{SendBook, SendDropped};
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
 use crate::websocket::{PhoenixSocket, PhoenixSocketError};
@@ -249,6 +250,17 @@ impl SessionHandle {
 /// and a repeated event return `None` and change nothing.
 pub fn route_e2e_send_dropped(book: &mut SendBook, frame: &PhoenixMessage) -> Option<SendDropped> {
     book.apply_payload(&frame.payload)
+}
+
+/// Read one session frame as an `e2e_message` row. Call it for every
+/// `SessionEvent::Frame`, then give the row to the E2E engine. Any other
+/// frame, and a row that does not read, return `None`. `server_protocol` is
+/// the version of the server, which sets whether `own` is allowed.
+pub fn route_e2e_message(frame: &PhoenixMessage, server_protocol: Option<u32>) -> Option<InboxRow> {
+    if frame.payload.get("kind")?.as_str()? != "e2e_message" {
+        return None;
+    }
+    InboxRow::from_value(&frame.payload, server_protocol).ok()
 }
 
 /// Starts a session: connects, joins `grappa:user:{user}`, and spawns the
