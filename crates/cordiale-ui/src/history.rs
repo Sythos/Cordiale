@@ -83,6 +83,11 @@ pub(crate) async fn handle_load_older_history(
             ui.set_history_loading(false);
         });
     };
+    // A locked window holds all its rows already: Grappa has none to add.
+    if open_locked_window(state).is_some() {
+        finish(false, true);
+        return;
+    }
     let (Some(client), Some(token), Some(key)) = (
         state.conn.client.clone(),
         state.conn.token.clone(),

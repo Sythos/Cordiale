@@ -241,6 +241,18 @@ msgid "Couldn't send that message."
 msgstr "Nachricht konnte nicht gesendet werden."
 
 msgctxt "AppWindow"
+msgid "This chat is not ready for encryption. Nothing was sent."
+msgstr "Dieser Chat ist nicht bereit für die Verschlüsselung. Es wurde nichts gesendet."
+
+msgctxt "AppWindow"
+msgid "The message was not encrypted or not sent. Nothing was sent as clear text."
+msgstr "Die Nachricht wurde nicht verschlüsselt oder nicht gesendet. Es wurde nichts im Klartext gesendet."
+
+msgctxt "AppWindow"
+msgid "An encrypted chat takes plain text only. Nothing was sent."
+msgstr "Ein verschlüsselter Chat nimmt nur einfachen Text an. Es wurde nichts gesendet."
+
+msgctxt "AppWindow"
 msgid "Disconnected. Reconnecting…"
 msgstr "Verbindung getrennt. Verbinde erneut…"
 

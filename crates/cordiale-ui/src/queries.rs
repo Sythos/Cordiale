@@ -12,6 +12,11 @@ pub(crate) async fn handle_select_query(
 ) {
     // Later navigation ends a delayed rename focus.
     state.transcript.pending_query_focus = None;
+    // A locked entry is local: it has no Grappa window and no topic.
+    if is_locked_name(&nick) {
+        handle_select_locked_query(state, ui, network, &nick);
+        return;
+    }
     let Some(query) = find_query_window(&state.transcript.query_windows, &network, &nick).cloned()
     else {
         return;
@@ -56,6 +61,9 @@ pub(crate) async fn handle_select_query(
         }
         show_query_window(state, ui, &query, &key);
     }
+    // The plain query stays as it is. A peer with a verified device also gets
+    // a locked entry; a peer without one is asked for its keys.
+    offer_locked_query(state, ui, &network, &nick).await;
 }
 
 /// The new nick of a rename row was clicked in the open window. A query the
@@ -532,7 +540,7 @@ pub(crate) fn followed_query_windows(
 /// Query rows for the sidebar: a window folded into another one is not
 /// listed, its unread counts are added to the anchor's row instead.
 pub(crate) fn sidebar_query_windows(state: &WorkerState) -> Vec<QueryWindow> {
-    state
+    let mut windows: Vec<QueryWindow> = state
         .transcript
         .query_windows
         .iter()
@@ -540,7 +548,11 @@ pub(crate) fn sidebar_query_windows(state: &WorkerState) -> Vec<QueryWindow> {
             query_view_key(state, query) == (query.network.clone(), query.target_nick.clone())
         })
         .cloned()
-        .collect()
+        .collect();
+    // The locked entries follow the Grappa windows; the plain query of the
+    // same peer keeps its own row.
+    windows.extend(state.e2e.locked_windows());
+    windows
 }
 
 pub(crate) fn merge_followed_query_counts(

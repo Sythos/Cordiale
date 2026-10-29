@@ -585,10 +585,25 @@ pub(crate) async fn handle_frame(
         }
         return;
     }
+    if payload_kind == "e2e_message" {
+        // An inbox item for this device: the engine opens it. It is never a
+        // chat line of the plain windows.
+        handle_e2e_message(state, ui, &frame).await;
+        return;
+    }
     if payload_kind == "e2e_send_dropped" {
         // Only the local send status changes: this is never a chat line.
         if let Err(error) = state.e2e_sends.apply_dropped_event(&frame.payload) {
             persistence::log_line(&format!("e2e_send_dropped ignored: {error:?}"));
+        }
+        let dropped = frame
+            .payload
+            .get("network")
+            .and_then(Value::as_str)
+            .and_then(|network| state.e2e.engine_mut(network))
+            .and_then(|engine| engine.apply_send_dropped(&frame.payload));
+        if dropped.is_some() {
+            let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("e2e-send-failed".into()));
         }
         return;
     }
@@ -6069,7 +6084,8 @@ pub(crate) fn apply_query_windows_snapshot(
     }
 
     let mut selected_closed = false;
-    if state.windows.current_query {
+    // A locked window is not in the server snapshot: it stays open.
+    if state.windows.current_query && open_locked_window(state).is_none() {
         if let Some((network, nick)) = state.windows.current_channel.clone() {
             let selected = find_query_window(&snapshot, &network, &nick)
                 .cloned()
@@ -6136,17 +6152,18 @@ pub(crate) fn reconcile_query_topic_tracking(state: &mut WorkerState, previous: 
             .stale_query_topics
             .remove(&query_window_key(&query.network, &query.target_nick));
     }
-    state.windows.current_query_ready = state.windows.current_query
-        && state
-            .windows
-            .current_channel
-            .as_ref()
-            .is_some_and(|(network, nick)| {
-                state
-                    .transcript
-                    .query_ready
-                    .contains(&query_window_key(network, nick))
-            });
+    state.windows.current_query_ready = open_locked_window(state).is_some()
+        || (state.windows.current_query
+            && state
+                .windows
+                .current_channel
+                .as_ref()
+                .is_some_and(|(network, nick)| {
+                    state
+                        .transcript
+                        .query_ready
+                        .contains(&query_window_key(network, nick))
+                }));
 }
 
 fn handle_query_windows_list(
@@ -6202,7 +6219,7 @@ fn handle_query_windows_list(
     }
 }
 
-fn clear_closed_query_view(ui: &slint::Weak<AppWindow>) {
+pub(crate) fn clear_closed_query_view(ui: &slint::Weak<AppWindow>) {
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));

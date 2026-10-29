@@ -2698,6 +2698,12 @@ export component AppWindow inherits Window {
             return @tr("Caps must be whole numbers, or empty for unlimited.");
         } else if status-kind == "send-failed" {
             return @tr("Couldn't send that message.");
+        } else if status-kind == "e2e-not-ready" {
+            return @tr("This chat is not ready for encryption. Nothing was sent.");
+        } else if status-kind == "e2e-send-failed" {
+            return @tr("The message was not encrypted or not sent. Nothing was sent as clear text.");
+        } else if status-kind == "e2e-text-only" {
+            return @tr("An encrypted chat takes plain text only. Nothing was sent.");
         } else if status-kind == "rate-limited" {
             return @tr("Too many requests. Try again in about {} s.", status-retry-secs);
         } else if status-kind == "part-failed" {
