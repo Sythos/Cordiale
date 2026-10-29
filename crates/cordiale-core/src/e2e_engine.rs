@@ -1920,6 +1920,8 @@ mod tests {
     #[tokio::test]
     async fn a_real_websocket_session_feeds_the_receive_path() {
         use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
         use tokio_tungstenite::tungstenite::Message;
 
         let alice_id = Ident::new("alice-ws");
@@ -1961,7 +1963,17 @@ mod tests {
         let server_topic = "grappa:user:bob".to_string();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
-            let mut socket = tokio_tungstenite::accept_async(stream)
+            // The client offers subprotocols, so the server must select one
+            // of them: "phoenix", as Grappa does.
+            let select_phoenix =
+                |_request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_static("phoenix"),
+                    );
+                    Ok(response)
+                };
+            let mut socket = tokio_tungstenite::accept_hdr_async(stream, select_phoenix)
                 .await
                 .expect("handshake");
             while let Some(Ok(Message::Text(text))) = socket.next().await {
