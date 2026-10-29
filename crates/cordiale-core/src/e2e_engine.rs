@@ -2160,6 +2160,179 @@ mod tests {
             .is_empty());
     }
 
+    /// True when the request has the lock label in its URL or in its body.
+    fn carries_the_label(request: &wiremock::Request) -> bool {
+        request.url.as_str().contains(QUERY_LOCK_LABEL)
+            || request.url.as_str().contains("%F0%9F%94%92")
+            || String::from_utf8_lossy(&request.body).contains(QUERY_LOCK_LABEL)
+    }
+
+    async fn mount_plain_send(server: &MockServer, peer: &str) {
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/{NET}/channels/{peer}/messages")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": 9})))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_202_answer_sets_the_accepted_state_only() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (sent, _) = alice_sends(&mut p.alice, &server, "hello").await;
+        let key = sent.key.expect("send key");
+        assert_eq!(p.alice.send_status(&key), Some(SendStatus::Accepted));
+        // Nothing but an event of the server moves the state on: a second
+        // send does not change the first one.
+        let (second, _) = alice_sends(&mut p.alice, &server, "again").await;
+        assert_eq!(p.alice.send_status(&key), Some(SendStatus::Accepted));
+        assert_eq!(
+            p.alice.send_status(&second.key.expect("send key")),
+            Some(SendStatus::Accepted)
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_and_locked_sends_stay_in_their_own_entries() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        mount_plain_send(&server, "bob").await;
+        let client = GrappaClient::new(server.uri());
+
+        // Both entries of Bob are open. The selected name picks the route.
+        let plain_route = route_for_window("bob");
+        let locked_route = route_for_window(&locked_label("bob"));
+        assert!(matches!(plain_route, SendRoute::Plain { .. }));
+        assert!(matches!(locked_route, SendRoute::Encrypted { .. }));
+        assert_eq!(plain_route.nick(), "bob");
+        assert_eq!(locked_route.nick(), "bob");
+
+        client
+            .send_message(
+                TOKEN,
+                NET,
+                plain_route.nick(),
+                &crate::rest::SendMessageRequest::plain("clear words"),
+            )
+            .await
+            .expect("plain send");
+        p.alice
+            .send_text(&client, TOKEN, locked_route.nick(), "sealed words", 100)
+            .await
+            .expect("locked send");
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 2);
+        let plain_body = String::from_utf8_lossy(&requests[0].body).to_string();
+        let locked_body = String::from_utf8_lossy(&requests[1].body).to_string();
+        assert_eq!(
+            requests[0].url.path(),
+            format!("/networks/{NET}/channels/bob/messages")
+        );
+        assert!(plain_body.contains("clear words"));
+        assert_eq!(
+            requests[1].url.path(),
+            format!("/networks/{NET}/e2e/messages")
+        );
+        assert!(!locked_body.contains("sealed words"));
+        assert!(!locked_body.contains("clear words"));
+        // The label is in no URL and in no body.
+        assert!(requests.iter().all(|request| !carries_the_label(request)));
+
+        // Only the locked text is in the sealed history, with the mark.
+        let rows = p.alice.history().messages(&conversation_id(NET, "bob"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "sealed words");
+        assert!(rows[0].encrypted);
+        assert!(p
+            .alice
+            .history()
+            .messages(&conversation_id(NET, &locked_label("bob")))
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_lock_label_is_in_no_request_of_the_e2e_paths() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/networks/{NET}/e2e/devices/{}/inbox",
+                p.alice_did
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"messages": []})))
+            .mount(&server)
+            .await;
+        let client = GrappaClient::new(server.uri());
+        p.alice
+            .request_keys(&client, TOKEN, "bob")
+            .await
+            .expect("keyreq");
+        p.alice
+            .send_text(&client, TOKEN, "bob", "hello", 100)
+            .await
+            .expect("send");
+        p.alice
+            .drain(&client, TOKEN, PROTOCOL, 101)
+            .await
+            .expect("drain");
+        // A name with the label is refused before any request.
+        let label = locked_label("bob");
+        assert!(p.alice.request_keys(&client, TOKEN, &label).await.is_err());
+        assert!(p
+            .alice
+            .send_text(&client, TOKEN, &label, "hello", 102)
+            .await
+            .is_err());
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| !carries_the_label(request)));
+    }
+
+    #[tokio::test]
+    async fn a_peer_without_a_verified_device_keeps_the_plain_query() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        mount_plain_send(&server, "carol").await;
+        let client = GrappaClient::new(server.uri());
+
+        // Carol has no verified device: she has no locked entry to offer.
+        assert!(!p.alice.is_ready("carol"));
+        assert!(!p.alice.ready_peers().contains(&"carol".to_string()));
+        // The plain query of Carol sends as before.
+        client
+            .send_message(
+                TOKEN,
+                NET,
+                route_for_window("carol").nick(),
+                &crate::rest::SendMessageRequest::plain("clear words"),
+            )
+            .await
+            .expect("plain send");
+        // The locked path refuses, and the text does not move to the plain
+        // path or to the E2E door.
+        let locked = p
+            .alice
+            .send_text(&client, TOKEN, "carol", "clear words", 100)
+            .await;
+        assert!(matches!(locked, Err(EngineError::NotReady)));
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url.path(),
+            format!("/networks/{NET}/channels/carol/messages")
+        );
+        assert!(p
+            .alice
+            .history()
+            .messages(&conversation_id(NET, "carol"))
+            .is_empty());
+    }
+
     #[tokio::test]
     async fn the_inbox_is_read_page_by_page() {
         let mut p = pair();
