@@ -37,6 +37,11 @@
 //! device ids and registers the `msgid` of the 202 answer in the
 //! [`SendBook`]. A 202 is an acceptance, never a delivery.
 //!
+//! Own copies (S1): a row with `own` set is a copy of a message that another
+//! device of the same account sent. It is opened like any other row. Its
+//! plaintext is a [`CopyBody`] that names the peer, and the text goes to the
+//! conversation of that peer as an own row.
+//!
 //! The label of the locked query ([`locked_label`]) is for display only. A
 //! peer is pinned on its `did`; the nick is a routing hint.
 //!
@@ -49,6 +54,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use vodozemac::olm::{Account, Message, OlmMessage, PreKeyMessage, Session, SessionConfig};
 use vodozemac::Curve25519PublicKey;
 
@@ -62,12 +68,13 @@ use crate::e2e_pacing::{
 use crate::e2e_peer::{verify_peer_device, PeerBundle, ReplayState};
 use crate::e2e_refusal::E2eRouteError;
 use crate::e2e_state::E2eStateStore;
-use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError};
+use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError, KeyringKeyProvider};
 use crate::e2e_trust::PeerTrust;
 use crate::e2e_wire::{
     did_from_key_text, parse_payload, recipient_binding, WireError, INBOX_PAGE_MAX, WILDCARD,
 };
 use crate::isupport::CaseMapping;
+use crate::persistence::data_dir;
 use crate::rest::{E2eSendPriority, E2eSendRequest, E2eSendVerb, QUERY_LOCK_LABEL};
 
 /// Version number in the payloads that the engine writes.
@@ -78,7 +85,7 @@ const PAYLOAD_VERSION: u32 = 2;
 const KEYS_REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `sender_device` of own rows; this history is local to one device.
-const OWN_DEVICE: &str = "own";
+pub const OWN_DEVICE: &str = "own";
 
 /// The display label of the locked query of `nick`. Use it for a window
 /// name only: never as a nick, an API value or a wire field.
@@ -120,6 +127,26 @@ pub fn route_for_window(window_name: &str) -> SendRoute {
 /// label of the locked query is not part of it.
 pub fn conversation_id(network: &str, nick: &str) -> String {
     format!("{network}\u{0}{nick}")
+}
+
+/// The part of the engine file names for one network of one account on one
+/// server: a hash, so two servers or two accounts with the same network slug
+/// never share an identity or a history. A guest (`visitor:`) or an empty
+/// value has no engine files.
+fn storage_part(server: &str, account: &str, network: &str) -> Option<String> {
+    if server.is_empty()
+        || account.is_empty()
+        || account.starts_with("visitor:")
+        || network.is_empty()
+    {
+        return None;
+    }
+    let hash = Sha256::digest(format!("{server}\u{0}{account}\u{0}{network}").as_bytes());
+    let mut part = String::new();
+    for byte in &hash[..16] {
+        part.push_str(&format!("{byte:02x}"));
+    }
+    Some(part)
 }
 
 /// Why an engine call failed.
@@ -219,6 +246,35 @@ impl MessagePayload {
     }
 }
 
+/// The plaintext of a copy from another device of the same account: the peer
+/// of the conversation and the text. Candidate format, like the payloads
+/// above. The sender of copies is a later slice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyBody {
+    pub peer: String,
+    pub text: String,
+}
+
+impl CopyBody {
+    /// Reads the plaintext of a copy. A peer that is not a plain nick is
+    /// refused: the label of the locked query is never a peer.
+    pub fn parse(plain: &str) -> Option<Self> {
+        let body: Self = serde_json::from_str(plain).ok()?;
+        valid_peer(&body.peer).then_some(body)
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+fn valid_peer(peer: &str) -> bool {
+    !peer.is_empty()
+        && peer.chars().count() <= 64
+        && !peer.contains(QUERY_LOCK_LABEL)
+        && !peer.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+}
+
 /// What [`E2eEngine::handle_row`] did with one row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowOutcome {
@@ -231,8 +287,7 @@ pub enum RowOutcome {
     /// The row cannot be read: bad payload, no verified device, no session or
     /// a failed decryption. The caller acknowledges it.
     Undecryptable,
-    /// A row that this slice does not store: a NACK or a copy of an own
-    /// device.
+    /// A row that is not stored: a NACK.
     Ignored,
     /// The write to the history or the state failed. Do not acknowledge the
     /// row: it stays in the inbox for the next drain.
@@ -288,6 +343,9 @@ pub struct E2eEngine {
     revoked_dids: HashSet<String>,
     /// Nicks that sent a message the engine could not read for lack of keys.
     keys_wanted: Vec<String>,
+    /// Peers whose conversation got a new row since the last call of
+    /// [`E2eEngine::take_changed_peers`].
+    changed_peers: Vec<String>,
     local_sends: u64,
 }
 
@@ -315,8 +373,60 @@ impl E2eEngine {
             clock: MonotonicClock::new(),
             revoked_dids: HashSet::new(),
             keys_wanted: Vec::new(),
+            changed_peers: Vec::new(),
             local_sends: 0,
         })
+    }
+
+    /// Opens the engine of `network` from the sealed files in the data
+    /// folder. `server` is the base URL of Grappa and `account` the signed-in
+    /// account: both are part of the file names. A network without a state
+    /// file, or without an Olm identity in it, is `NotReady`: the provisioning
+    /// makes the identity first, and this call never makes a key or a file of
+    /// its own.
+    pub fn open_for_network(
+        server: &str,
+        account: &str,
+        network: &str,
+    ) -> Result<Self, EngineError> {
+        let part = storage_part(server, account, network).ok_or(EngineError::NotReady)?;
+        let dir = data_dir().ok_or(EngineError::Store(E2eStoreError::NoDataDir))?;
+        let state_path = dir.join(format!("e2e_state_{part}.bin"));
+        if !state_path.exists() {
+            return Err(EngineError::NotReady);
+        }
+        let state = E2eStateStore::open(state_path, &KeyringKeyProvider)?;
+        let history = E2eHistoryStore::open(
+            dir.join(format!("e2e_history_{part}.bin")),
+            &KeyringKeyProvider,
+        )?;
+        Self::new(network, state, history)
+    }
+
+    /// The nicks that have a conversation in the sealed history of this
+    /// network.
+    pub fn history_peers(&self) -> Vec<String> {
+        let prefix = conversation_id(&self.network, "");
+        let mut peers: Vec<String> = self
+            .history
+            .conversation_ids()
+            .iter()
+            .filter_map(|id| id.strip_prefix(&prefix).map(str::to_string))
+            .collect();
+        peers.sort();
+        peers
+    }
+
+    /// The nicks whose conversation changed since the last call. The list is
+    /// cleared.
+    pub fn take_changed_peers(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.changed_peers)
+    }
+
+    fn note_changed(&mut self, nick: &str) {
+        if !self.changed_peers.iter().any(|known| known == nick) {
+            self.changed_peers.push(nick.to_string());
+        }
     }
 
     pub fn own_did(&self) -> &str {
@@ -334,6 +444,21 @@ impl E2eEngine {
         self.peers
             .values()
             .any(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+    }
+
+    /// The nicks that have a verified device ready to send to, in order. A
+    /// device of the own account counts under the own nick.
+    pub fn ready_peers(&self) -> Vec<String> {
+        let trust = self.state.trust();
+        let mut nicks: Vec<String> = self
+            .peers
+            .values()
+            .filter(|entry| self.entry_ready(entry, &trust))
+            .map(|entry| entry.nick.clone())
+            .collect();
+        nicks.sort();
+        nicks.dedup();
+        nicks
     }
 
     /// True when the persisted trust revokes the device of `entry`.
@@ -445,7 +570,6 @@ impl E2eEngine {
                 Err(_) => RowOutcome::Undecryptable,
             },
             InboxVerb::Nack => RowOutcome::Ignored,
-            InboxVerb::PkMsg | InboxVerb::Msg if row.own => RowOutcome::Ignored,
             InboxVerb::PkMsg | InboxVerb::Msg => self.receive_message(row, now),
         };
         if outcome.acknowledge() {
@@ -477,8 +601,27 @@ impl E2eEngine {
             }
             return RowOutcome::Undecryptable;
         };
-        let conversation = conversation_id(&self.network, &nick);
-        let row_id = format!("{}:in:{}", self.network, row.id);
+        // A copy of an own device names its peer in the plaintext. A copy
+        // that does not read is acknowledged and not stored.
+        let (peer, row_id, sender_device, text) = if row.own {
+            let Some(body) = CopyBody::parse(&decrypted.text) else {
+                return RowOutcome::Undecryptable;
+            };
+            (
+                body.peer,
+                format!("{}:own:{}", self.network, row.id),
+                OWN_DEVICE.to_string(),
+                body.text,
+            )
+        } else {
+            (
+                nick.clone(),
+                format!("{}:in:{}", self.network, row.id),
+                row.from_did.clone(),
+                std::mem::take(&mut decrypted.text),
+            )
+        };
+        let conversation = conversation_id(&self.network, &peer);
         let stored = self
             .history
             .messages(&conversation)
@@ -488,9 +631,9 @@ impl E2eEngine {
             let message = E2eMessage {
                 id: row_id,
                 conversation_id: conversation,
-                sender_device: row.from_did.clone(),
+                sender_device,
                 sent_at: now,
-                text: std::mem::take(&mut decrypted.text),
+                text,
                 encrypted: true,
             };
             if self.history.append(message).is_err() {
@@ -503,6 +646,7 @@ impl E2eEngine {
         if saved.is_err() {
             return RowOutcome::StoreFailed;
         }
+        self.note_changed(&peer);
         RowOutcome::Stored
     }
 
@@ -826,6 +970,7 @@ impl E2eEngine {
             encrypted: true,
         };
         self.history.append(message)?;
+        self.note_changed(nick);
         Ok(SentText {
             msgid: answer.msgid,
             key,
@@ -840,7 +985,7 @@ mod tests {
     use crate::e2e_store::E2eKeyProvider;
     use crate::e2e_wire::bundle_key_signed_text;
     use crate::phoenix::PhoenixMessage;
-    use crate::session::route_e2e_message;
+    use crate::session::{route_e2e_message, spawn_session, SessionEvent};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1600,9 +1745,331 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_files_are_apart_for_each_server_and_account() {
+        let base = storage_part("https://a.example", "anna", NET).expect("part");
+        assert_eq!(base.len(), 32);
+        assert!(base.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(
+            storage_part("https://a.example", "anna", NET).as_deref(),
+            Some(base.as_str())
+        );
+        assert_ne!(
+            storage_part("https://b.example", "anna", NET).as_deref(),
+            Some(base.as_str())
+        );
+        assert_ne!(
+            storage_part("https://a.example", "bruno", NET).as_deref(),
+            Some(base.as_str())
+        );
+        assert_ne!(
+            storage_part("https://a.example", "anna", "other").as_deref(),
+            Some(base.as_str())
+        );
+        // A guest and an unknown account have no engine files.
+        assert_eq!(storage_part("https://a.example", "visitor:7", NET), None);
+        assert_eq!(storage_part("https://a.example", "", NET), None);
+        assert_eq!(storage_part("", "anna", NET), None);
+    }
+
+    #[test]
     fn a_peer_without_a_verified_device_is_not_ready() {
         let id = Ident::new("solo");
         let engine = id.engine();
         assert!(!engine.is_ready("bob"));
+    }
+
+    /// Bob, a second device of Bob that shares his master key, and the KEYS
+    /// of the second device that Bob has read.
+    struct Siblings {
+        bob: E2eEngine,
+        bob_id: Ident,
+        second: Account,
+        second_did: String,
+    }
+
+    fn siblings() -> Siblings {
+        let mut bob_id = Ident::new("bob-own");
+        // Four keys: one for a first peer and one for each copy.
+        bob_id.device.generate_one_time_keys(3);
+        let mut bob = bob_id.engine();
+        let second = Account::new();
+        let keys = keys_payload(
+            &bob_id.master,
+            &second,
+            &[ed(&bob_id.device), ed(&second)],
+            1,
+            &ed(&bob_id.device),
+            false,
+        );
+        bob.accept_keys("bob", &keys)
+            .expect("bob reads the second device");
+        let second_did = did_from_key_text(&ed(&second)).expect("did");
+        Siblings {
+            bob,
+            bob_id,
+            second,
+            second_did,
+        }
+    }
+
+    /// An `own` inbox row: the second device sends the plaintext `plain` to
+    /// Bob as a pre-key message. It uses a one-time key of Bob other than
+    /// `used`; the row `id` picks the key.
+    fn copy_row_raw(s: &Siblings, id: u64, msgid: &str, used: &str, plain: &str) -> Value {
+        // Each row id takes another key, because a key opens one session.
+        let mut free: Vec<Curve25519PublicKey> = s
+            .bob_id
+            .device
+            .one_time_keys()
+            .values()
+            .filter(|key| key.to_base64() != used)
+            .cloned()
+            .collect();
+        free.sort_by_key(|key| key.to_base64());
+        let one_time_key = free.swap_remove((id % 3) as usize);
+        let bob_curve = Curve25519PublicKey::from_base64(&curve(&s.bob_id.device)).expect("curve");
+        let mut session = s
+            .second
+            .create_outbound_session(SessionConfig::version_1(), bob_curve, one_time_key)
+            .expect("outbound session");
+        let OlmMessage::PreKey(message) = session.encrypt(plain.as_bytes()).expect("encrypt")
+        else {
+            panic!("the first message is a pre-key message");
+        };
+        let payload = MessagePayload {
+            v: PAYLOAD_VERSION,
+            fb: recipient_binding(&ed(&s.second), &ed(&s.bob_id.device)),
+            ct: message.to_base64(),
+        }
+        .to_json();
+        let mut value = row(
+            id,
+            "bob",
+            &s.second_did,
+            s.bob.own_did(),
+            "pkmsg",
+            msgid,
+            &payload,
+        );
+        value["own"] = json!(true);
+        value
+    }
+
+    fn copy_row(s: &Siblings, id: u64, msgid: &str, peer: &str, text: &str, used: &str) -> Value {
+        let plain = CopyBody {
+            peer: peer.to_string(),
+            text: text.to_string(),
+        }
+        .to_json();
+        copy_row_raw(s, id, msgid, used, &plain)
+    }
+
+    #[test]
+    fn a_copy_of_an_own_device_is_stored_in_the_conversation_of_its_peer() {
+        let mut s = siblings();
+        let value = copy_row(&s, 3, "msgid2", "carol", "sent from the other device", "");
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert!(item.own);
+        assert_eq!(s.bob.handle_row(&item, 50), RowOutcome::Stored);
+        assert_eq!(s.bob.handle_row(&item, 51), RowOutcome::Duplicate);
+
+        let rows = s.bob.history().messages(&conversation_id(NET, "carol"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "sent from the other device");
+        assert_eq!(rows[0].sender_device, OWN_DEVICE);
+        assert!(rows[0].encrypted);
+        assert!(s
+            .bob
+            .history()
+            .messages(&conversation_id(NET, "bob"))
+            .is_empty());
+        assert_eq!(s.bob.take_changed_peers(), vec!["carol".to_string()]);
+        assert!(s.bob.take_changed_peers().is_empty());
+    }
+
+    #[test]
+    fn a_copy_without_a_valid_peer_is_acknowledged_and_not_stored() {
+        let mut s = siblings();
+        let locked = locked_label("carol");
+        let cases = [
+            copy_row_raw(&s, 4, "msgid3", "", "not json"),
+            copy_row(&s, 5, "msgid4", &locked, "labelled peer", ""),
+            copy_row(&s, 6, "msgid5", "", "empty peer", ""),
+        ];
+        for value in cases {
+            let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+            let outcome = s.bob.handle_row(&item, 60);
+            assert_eq!(outcome, RowOutcome::Undecryptable);
+            assert!(outcome.acknowledge());
+        }
+        assert!(s.bob.history().conversation_ids().is_empty());
+    }
+
+    #[test]
+    fn the_history_peers_follow_the_stored_conversations() {
+        let mut s = siblings();
+        for (id, peer) in [(3, "carol"), (4, "dave")] {
+            let msgid = format!("msgid{id}");
+            let value = copy_row(&s, id, &msgid, peer, "hi", "");
+            let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+            assert_eq!(s.bob.handle_row(&item, 70), RowOutcome::Stored);
+        }
+        assert_eq!(s.bob.history_peers(), vec!["carol", "dave"]);
+    }
+
+    #[tokio::test]
+    async fn a_real_websocket_session_feeds_the_receive_path() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let alice_id = Ident::new("alice-ws");
+        let mut alice = alice_id.engine();
+        let mut s = siblings();
+        let bob_keys = s.bob_id.keys_for(&ed(&alice_id.device), true);
+        let used = KeysPayload::parse(&bob_keys)
+            .expect("keys")
+            .one_time_key
+            .expect("one-time key");
+        alice
+            .accept_keys("bob", &bob_keys)
+            .expect("alice reads bob");
+        s.bob
+            .accept_keys("alice", &alice_id.keys_for(&ed(&s.bob_id.device), false))
+            .expect("bob reads alice");
+        let alice_did = alice.own_did().to_string();
+        let bob_did = s.bob.own_did().to_string();
+
+        let send_server = MockServer::start().await;
+        mount_send(&send_server, "msgid1").await;
+        let (_, body) = alice_sends(&mut alice, &send_server, "over the socket").await;
+        let payload = body["payload"].as_str().expect("payload").to_string();
+        let message = row(
+            7, "alice", &alice_did, &bob_did, "pkmsg", "msgid1", &payload,
+        );
+        let copy = copy_row(&s, 8, "msgid2", "carol", "from the second device", &used);
+
+        // The server joins the user topic, then pushes the message twice and
+        // the copy once.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let ws_url = format!(
+            "ws://{}/socket/websocket",
+            listener.local_addr().expect("address")
+        );
+        let pushes = vec![message.clone(), message, copy];
+        let server_topic = "grappa:user:bob".to_string();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            // The client offers subprotocols, so the server must select one
+            // of them: "phoenix", as Grappa does. The tungstenite `Callback`
+            // trait sets the error type, so the closure cannot box it.
+            #[allow(clippy::result_large_err)]
+            let select_phoenix =
+                |_request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+                    response.headers_mut().insert(
+                        "sec-websocket-protocol",
+                        HeaderValue::from_static("phoenix"),
+                    );
+                    Ok(response)
+                };
+            let mut socket = tokio_tungstenite::accept_hdr_async(stream, select_phoenix)
+                .await
+                .expect("handshake");
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let frame = PhoenixMessage::from_json(text.as_str()).expect("frame");
+                if frame.event != "phx_join" || frame.topic != server_topic {
+                    continue;
+                }
+                let reply = PhoenixMessage {
+                    join_ref: frame.join_ref.clone(),
+                    message_ref: frame.message_ref.clone(),
+                    topic: server_topic.clone(),
+                    event: "phx_reply".to_string(),
+                    payload: json!({"status": "ok", "response": {"protocol_version": 50}}),
+                };
+                socket
+                    .send(Message::from(reply.to_json().expect("json")))
+                    .await
+                    .expect("reply");
+                for payload in pushes {
+                    let push = PhoenixMessage {
+                        join_ref: None,
+                        message_ref: None,
+                        topic: server_topic.clone(),
+                        event: "event".to_string(),
+                        payload,
+                    };
+                    socket
+                        .send(Message::from(push.to_json().expect("json")))
+                        .await
+                        .expect("push");
+                }
+                break;
+            }
+            // Keep the socket open until the client ends the session.
+            while socket.next().await.is_some() {}
+        });
+
+        let ack_server = MockServer::start().await;
+        for id in [7, 8] {
+            Mock::given(method("POST"))
+                .and(path(format!(
+                    "/networks/{NET}/e2e/devices/{bob_did}/inbox/ack"
+                )))
+                .and(body_json(json!({"ids": [id]})))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&ack_server)
+                .await;
+        }
+        let client = GrappaClient::new(ack_server.uri());
+
+        let (handle, mut events) = spawn_session(ws_url, TOKEN.to_string(), "bob".to_string());
+        let mut protocol = None;
+        let mut outcomes = Vec::new();
+        while outcomes.len() < 3 {
+            let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+                .await
+                .expect("a session event in time")
+                .expect("the session is open");
+            match event {
+                SessionEvent::Connected { protocol_version } => protocol = protocol_version,
+                SessionEvent::Frame(frame) => {
+                    if let Some(item) = route_e2e_message(&frame, protocol) {
+                        let outcome = s
+                            .bob
+                            .handle_event(&client, TOKEN, protocol, &item, 300)
+                            .await
+                            .expect("handled");
+                        outcomes.push(outcome);
+                    }
+                }
+                other => panic!("unexpected session event: {other:?}"),
+            }
+        }
+        handle.shutdown();
+        server.abort();
+
+        assert_eq!(protocol, Some(50));
+        assert_eq!(
+            outcomes,
+            vec![
+                RowOutcome::Stored,
+                RowOutcome::Duplicate,
+                RowOutcome::Stored
+            ]
+        );
+        let received = s.bob.history().messages(&conversation_id(NET, "alice"));
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].text, "over the socket");
+        assert!(received[0].encrypted);
+        let copies = s.bob.history().messages(&conversation_id(NET, "carol"));
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].text, "from the second device");
+        assert_eq!(copies[0].sender_device, OWN_DEVICE);
+        assert!(copies[0].encrypted);
     }
 }

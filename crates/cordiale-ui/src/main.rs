@@ -32,6 +32,7 @@ mod ceremony_ctap;
 mod channels;
 mod dates;
 mod debug_info;
+mod e2e_runtime;
 mod e2e_view;
 mod frames;
 mod history;
@@ -98,6 +99,7 @@ use cordiale_core::wire_event::ClientEventKind;
 
 use admin_handlers::*;
 use channels::*;
+use e2e_runtime::*;
 use frames::*;
 use history::*;
 use mentions::*;
@@ -1465,6 +1467,8 @@ struct WorkerState {
     service_console: Option<ServiceConsoleState>,
     /// Local status of E2E sends, fed by `e2e_send_dropped` pushes.
     e2e_sends: cordiale_core::e2e_pacing::SendBook,
+    /// The E2E engines of the session and the locked query entries.
+    e2e: E2eRuntime,
 }
 
 /// One open Services console. `since_id` is captured before the help
@@ -1594,6 +1598,7 @@ impl WorkerState {
             home: home::HomeState::default(),
             service_console: None,
             e2e_sends: cordiale_core::e2e_pacing::SendBook::new(),
+            e2e: E2eRuntime::default(),
         }
     }
 
@@ -1808,7 +1813,9 @@ async fn run_worker(
                         handle_select_query(&mut state, &ui, network, nick).await;
                     }
                     Some(WorkerCommand::CloseQuery { network, nick }) => {
-                        handle_close_query(&mut state, &network, &nick);
+                        if !close_locked_query(&mut state, &ui, &network, &nick) {
+                            handle_close_query(&mut state, &network, &nick);
+                        }
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
                         handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;
@@ -2421,6 +2428,8 @@ async fn run_worker(
                         if let Some(handle) = state.conn.session.take() {
                             drop(handle.close());
                         }
+                        // Close the sealed E2E files of this account.
+                        state.e2e = E2eRuntime::default();
                         let guest_logout_failed = if state.conn.guest_session {
                             if let (Some(client), Some(token), Some(identifier)) = (
                                 state.conn.client.as_ref(),
@@ -2563,6 +2572,9 @@ async fn run_worker(
                             ui.set_status_retry_secs(0);
                         });
                         request_watch_patterns(&mut state);
+                        // Open the E2E engines and read what the inbox held
+                        // while the socket was down.
+                        start_e2e_engines(&mut state, &ui).await;
                         // Grappa doesn't replay what a channel said while
                         // the socket was down: backfill it over REST.
                         if !state.transcript.catch_up_anchors.is_empty() {
@@ -2919,6 +2931,7 @@ async fn finish_connect(
             let entries = channel_entries_from_boot(&outcome);
             state.windows.channel_entries = entries.clone();
             state.transcript.query_windows.clear();
+            state.e2e = E2eRuntime::default();
             state.conn.server_protocol_version = Some(outcome.compatibility.protocol_version);
             state.transcript.pending_own_nick_dms.clear();
             state.transcript.pending_query_focus = None;
@@ -4090,6 +4103,11 @@ fn alias_target(state: &WorkerState) -> Option<String> {
 }
 
 async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
+    // A locked window sends through the E2E engine only, never as plain text.
+    if let Some((network, nick)) = open_locked_window(state) {
+        handle_send_locked(state, ui, network, nick, body).await;
+        return;
+    }
     if state.windows.current_query && !state.windows.current_query_ready {
         return;
     }
@@ -4259,6 +4277,11 @@ async fn handle_attach_file(
             ui.set_status_kind(kind.into());
         });
     };
+    // A locked window takes text only: a link would go out as plain text.
+    if open_locked_window(state).is_some() {
+        set_status("e2e-text-only", filename);
+        return;
+    }
     // The window open when the upload starts is where the link goes, even
     // if another one is opened while the file is on its way.
     let Some((network, channel)) = state.windows.current_channel.clone() else {

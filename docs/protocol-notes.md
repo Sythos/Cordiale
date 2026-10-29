@@ -1544,6 +1544,49 @@ della finestra: il peer si identifica con il `did`, mai con l'etichetta.
 **Da verificare:** i campi JSON di KEYS (`KeysPayload`) e di `pkmsg`/`msg`
 (`MessagePayload`) sono un formato candidato, non letto sul testo di §4f. Il
 verbo KEYS non è tra i verbi della porta di invio (`E2eSendVerb`): Grappa compone
-KEYS dalle chiavi caricate, quindi il client non lo invia. Le copie `own` (S1) e
-i NACK sono confermati senza essere salvati. Non collegato: i comandi del worker
-e le finestre della UI (`🔒<user>`), che usano `route_for_window` e `is_ready`.
+KEYS dalle chiavi caricate, quindi il client non lo invia. I NACK sono confermati
+senza essere salvati.
+
+**Issue 453, passo 2: worker, finestre `🔒<user>` e copie `own` (S1).**
+Copie `own`: una riga `pkmsg`/`msg` con `own` si decifra come le altre; il testo in
+chiaro è un `CopyBody` JSON `{"peer","text"}` (formato **candidato**, non letto da
+§4f: la riga di inbox non dice con chi è la conversazione). La riga va nella
+conversazione di `peer`, con `sender_device` = `own` e id `<rete>:own:<id>`; un
+`peer` vuoto, con spazi o controlli, o con l'etichetta `🔒` rende la copia
+illeggibile (confermata, non salvata). Il lato che *crea* le copie non c'è ancora.
+Motore per rete: `E2eEngine::open_for_network(server, account, rete)` apre
+`e2e_state_<h>.bin` e `e2e_history_<h>.bin` nella cartella dati con la chiave del
+portachiavi; `<h>` è l'esadecimale dei primi 16 byte di SHA-256 di
+`server\0account\0rete` (URL base di Grappa e account collegato), così due server o
+due account con lo stesso slug di rete non condividono identità né cronologia. Senza
+file di stato o senza identità Olm dà `NotReady` e non crea né chiavi né file. Un
+ospite (`visitor:…`) o un account vuoto non ha motore. Nessun
+percorso della UI crea l'identità: il provisioning (`provision_device`) non è
+ancora collegato alla UI, quindi finché non lo è la UI non apre nessun motore.
+UI (`e2e_runtime.rs`): al `Connected` il worker apre i motori e legge l'inbox
+(`drain`), anche dopo una riconnessione; ogni frame `e2e_message` va a
+`handle_event`. Il motore dice chi ha ricevuto righe (`take_changed_peers`), di
+chi mancano le chiavi (`take_keys_wanted`, KEYREQ con il limite di 30 s) e chi è
+pronto (`ready_peers`). Il peer pronto o con righe ha una voce `🔒<user>` nella
+barra laterale; la voce `<user>` resta quella di Grappa e non cambia. La voce
+bloccata è locale: le sue righe vengono dalla cronologia cifrata (chiave
+`(rete, "🔒<user>")` nel transcript, righe con `encrypted` vero), i suoi invii vanno
+solo a `E2eEngine::send_text` con il nick vero. Un errore (peer non pronto,
+cifratura fallita, 202 rifiutato) mostra `e2e-not-ready` o `e2e-send-failed` e non
+invia nulla; i comandi `/…` e i file nella finestra bloccata sono rifiutati
+(`e2e-text-only`). Un `e2e_send_dropped` per una rete con motore aggiorna il suo
+`SendBook` e mostra `e2e-send-failed`. Lo snapshot `query_windows_list` non chiude
+la finestra bloccata. Aprire la query `<user>` chiede le chiavi del peer se non è
+pronto (KEYREQ).
+**Controllo dei campi (parte non chiusa):** il testo di §4f di `CLIENT_PROTOCOL.md`
+non è nel repository e l'host di Grappa non è raggiungibile da qui. I campi di
+`KeysPayload` e `MessagePayload` e le chiamate vodozemac non sono quindi riletti sul
+testo del protocollo. Verificato solo ciò che si vede nel repository: i campi di
+`KeysPayload` sono quelli che `verify_peer_device` richiede (`PeerBundle`), e il
+`fb` è `recipient_binding` come in `e2e_wire.rs`. Test con una sessione WebSocket
+vera in `e2e_engine.rs` (`a_real_websocket_session_feeds_the_receive_path`).
+**Non provato in locale:** rustc 1.85 non compila il crate (serve `File::try_lock`);
+build, test e clippy girano in CI.
+**Da fare (nuove fette):** collegare il provisioning alla UI; controllare la capacità
+E2E del peer prima di un KEYREQ; contatori di non letti per le voci bloccate; il lato
+che crea le copie `own`.

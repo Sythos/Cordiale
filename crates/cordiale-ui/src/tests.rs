@@ -10374,3 +10374,82 @@ fn rename_action_ignores_an_invalid_nick() {
     });
     assert_eq!(state.transcript.pending_query_focus, None);
 }
+
+#[test]
+fn locked_entries_are_listed_apart_from_the_plain_query_of_the_peer() {
+    let mut state = peer_link_state(&[("libera", "bob")]);
+    assert!(state.e2e.add_locked("libera", "bob"));
+    assert!(!state.e2e.add_locked("libera", "bob"));
+    let windows = sidebar_query_windows(&state);
+    assert_eq!(windows.len(), 2);
+    assert_eq!(windows[0].target_nick, "bob");
+    assert_eq!(windows[1].target_nick, "\u{1F512}bob");
+    assert!(is_locked_name(&windows[1].target_nick));
+    assert!(!is_locked_name(&windows[0].target_nick));
+    // The server snapshot has the plain query only.
+    assert_eq!(state.transcript.query_windows.len(), 1);
+    assert_eq!(state.transcript.query_windows[0].target_nick, "bob");
+}
+
+#[test]
+fn the_open_window_is_locked_only_when_it_carries_the_label() {
+    let mut state = peer_link_state(&[("libera", "bob")]);
+    state.windows.current_query = true;
+    state.windows.current_channel = Some(("libera".to_string(), "bob".to_string()));
+    assert_eq!(open_locked_window(&state), None);
+    state.windows.current_channel = Some(("libera".to_string(), "\u{1F512}bob".to_string()));
+    // The nick the engine gets has no label.
+    assert_eq!(
+        open_locked_window(&state),
+        Some(("libera".to_string(), "bob".to_string()))
+    );
+    // A channel window is never a locked one.
+    state.windows.current_query = false;
+    assert_eq!(open_locked_window(&state), None);
+}
+
+#[test]
+fn a_failed_e2e_send_gets_an_error_key() {
+    use cordiale_core::e2e_engine::EngineError;
+    assert_eq!(e2e_send_error_kind(&EngineError::NotReady), "e2e-not-ready");
+    assert_eq!(
+        e2e_send_error_kind(&EngineError::EncryptionFailed),
+        "e2e-send-failed"
+    );
+}
+
+#[test]
+fn a_locked_row_keeps_the_encrypted_mark_and_the_real_nick() {
+    use cordiale_core::e2e_store::E2eMessage;
+    let mut message = E2eMessage {
+        id: "libera:in:1".to_string(),
+        conversation_id: "libera\u{0}bob".to_string(),
+        sender_device: "AAAAAAAAAAA".to_string(),
+        sent_at: 1_700_000_000,
+        text: "hello".to_string(),
+        encrypted: true,
+    };
+    let incoming = locked_row(&message, "me", "bob");
+    assert!(incoming.encrypted);
+    assert_eq!(incoming.nick.as_deref(), Some("bob"));
+    assert_eq!(incoming.text, "hello");
+    assert!(message_lock_visible(&incoming));
+    message.sender_device = cordiale_core::e2e_engine::OWN_DEVICE.to_string();
+    let outgoing = locked_row(&message, "me", "bob");
+    assert!(outgoing.encrypted);
+    assert_eq!(outgoing.nick.as_deref(), Some("me"));
+}
+
+#[test]
+fn a_locked_window_without_an_engine_sends_nothing() {
+    let mut state = peer_link_state(&[("libera", "bob")]);
+    state.windows.current_query = true;
+    state.windows.current_channel = Some(("libera".to_string(), "\u{1F512}bob".to_string()));
+    let ui = slint::Weak::<AppWindow>::default();
+    upload_test_runtime().block_on(async {
+        handle_send_message(&mut state, &ui, "secret".to_string()).await;
+    });
+    // No client and no engine: the text went nowhere, and no plain row
+    // appeared for it.
+    assert!(state.transcript.messages.is_empty());
+}
