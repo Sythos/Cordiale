@@ -228,6 +228,7 @@ pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<
         }
     }
     close_stale_pairings(state).await;
+    pump_pairing(state, ui).await;
     refresh_network_groups(state, ui);
 }
 
@@ -323,7 +324,7 @@ pub(crate) async fn run_e2e_pair(
     let now = e2e_now();
     // A new start replaces the open pairing: the old one is cancelled first.
     if matches!(action, E2ePairAction::Start | E2ePairAction::Join(_)) {
-        end_active_pairing(state, &ctx).await;
+        end_active_pairing(state).await;
     }
     match action {
         E2ePairAction::Start => {
@@ -368,31 +369,87 @@ pub(crate) async fn run_e2e_pair(
             let Some(mut engine) = take_pairing_engine(state, &active.network, false) else {
                 return show_pairing_kind(ui, "e2e-pair-failed", String::new());
             };
-            let result =
-                pairing::confirm(&ctx, engine.state_mut(), &mut active.session, &typed).await;
-            state.e2e.engines.insert(active.network.clone(), engine);
+            // The pairing changes the list of its own network, not the one of
+            // the open window.
+            let pairing_network = active.network.clone();
+            let pairing_ctx = PairingContext {
+                client: &client,
+                token: &token,
+                protocol,
+                network_id: &pairing_network,
+            };
+            let result = pairing::confirm(
+                &pairing_ctx,
+                engine.state_mut(),
+                &mut active.session,
+                &typed,
+            )
+            .await;
+            state.e2e.engines.insert(pairing_network.clone(), engine);
             finish_pairing_step(state, ui, active, result.err());
         }
         E2ePairAction::Cancel => {
             if state.e2e.pairing.is_none() {
                 return show_pairing_kind(ui, "e2e-pair-none", String::new());
             }
-            end_active_pairing(state, &ctx).await;
+            end_active_pairing(state).await;
             show_pairing(ui, &PairingStatus::Ended(pairing::EndReason::Cancelled));
         }
     }
 }
 
-/// Cancels the open pairing, closes its rendezvous and empties its slot.
-async fn end_active_pairing(state: &mut WorkerState, ctx: &PairingContext<'_>) {
+/// Cancels the open pairing, closes its rendezvous and empties its slot. The
+/// calls use the network of the pairing.
+async fn end_active_pairing(state: &mut WorkerState) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
     let Some(mut active) = state.e2e.pairing.take() else {
         return;
     };
     let Some(mut engine) = take_pairing_engine(state, &active.network, false) else {
         return;
     };
-    pairing::cancel(ctx, engine.state_mut(), &mut active.session).await;
-    state.e2e.engines.insert(active.network, engine);
+    let protocol = state.conn.server_protocol_version;
+    let network = active.network.clone();
+    let ctx = PairingContext {
+        client: &client,
+        token: &token,
+        protocol,
+        network_id: &network,
+    };
+    pairing::cancel(&ctx, engine.state_mut(), &mut active.session).await;
+    state.e2e.engines.insert(network, engine);
+}
+
+/// Fetches the messages of the open pairing after its last sequence. Call it
+/// after a connect or a reconnect: an event missed while the socket was down
+/// is read here. With no open pairing it does nothing.
+async fn pump_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
+    let Some(mut active) = state.e2e.pairing.take() else {
+        return;
+    };
+    if !active.session.is_active() {
+        return;
+    }
+    let Some(mut engine) = take_pairing_engine(state, &active.network, false) else {
+        state.e2e.pairing = Some(active);
+        return;
+    };
+    let protocol = state.conn.server_protocol_version;
+    let network = active.network.clone();
+    let ctx = PairingContext {
+        client: &client,
+        token: &token,
+        protocol,
+        network_id: &network,
+    };
+    let result = pairing::pump(&ctx, engine.state_mut(), &mut active.session).await;
+    state.e2e.engines.insert(network, engine);
+    finish_pairing_step(state, ui, active, result.err());
 }
 
 /// Keeps the pairing while it is open and shows its state or its error.

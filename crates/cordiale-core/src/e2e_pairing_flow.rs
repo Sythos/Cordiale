@@ -1414,16 +1414,17 @@ mod tests {
         let text = format!(
             "{creator:?} {joiner:?} {new_device:?} {grant:?} {outgoing:?} {stale:?} {ctx:?}"
         );
-        for secret in [
-            "SECRET-PAYLOAD",
-            "TOKEN-VALUE",
-            ID,
-            new_device.ed25519.as_str(),
-            new_device.curve25519.as_str(),
-            grant.master.as_str(),
-            grant.list.signature.as_str(),
+        // The message names the value, never prints it.
+        for (label, value) in [
+            ("payload", "SECRET-PAYLOAD"),
+            ("token", "TOKEN-VALUE"),
+            ("rendezvous", ID),
+            ("device ed25519", new_device.ed25519.as_str()),
+            ("device curve25519", new_device.curve25519.as_str()),
+            ("master", grant.master.as_str()),
+            ("list signature", grant.list.signature.as_str()),
         ] {
-            assert!(!text.contains(secret), "{secret}");
+            assert!(!text.contains(value), "{label}");
         }
     }
 
