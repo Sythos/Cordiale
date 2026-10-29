@@ -74,7 +74,8 @@ use crate::client::{GrappaClient, GrappaClientError};
 use crate::e2e_device::{verify_signature, E2eError, PeerDevice};
 use crate::e2e_device_routes::{ClaimRequest, InboxAckRequest, InboxRow, InboxVerb};
 use crate::e2e_pacing::{
-    KeyReqPacer, KeyReqRefusal, MonotonicClock, SendBook, SendDropped, SendKey, SendResponse,
+    md3_pacing, DropReason, IntervalLimiter, KeyReqPacer, KeyReqRefusal, MonotonicClock,
+    OutgoingQueue, QueuedSend, SendBook, SendDropped, SendFailure, SendKey, SendResponse,
     SendStatus,
 };
 use crate::e2e_peer::{
@@ -96,9 +97,9 @@ use crate::rest::{E2eSendPriority, E2eSendRequest, E2eSendVerb, QUERY_LOCK_LABEL
 /// Version number in the payloads that the engine writes.
 const PAYLOAD_VERSION: u32 = 2;
 
-/// How long a fragmented KEYS answer may stay in reassembly. The server owns
-/// the real value; this is the value of the pacer until it is confirmed.
-const KEYS_REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a fragmented KEYS answer may stay in reassembly. The value comes
+/// from the final source and is recorded in [`md3_pacing`].
+const KEYS_REASSEMBLY_TIMEOUT: Duration = md3_pacing::REASSEMBLY_TIMEOUT;
 
 /// `sender_device` of own rows; this history is local to one device.
 pub const OWN_DEVICE: &str = "own";
@@ -182,6 +183,10 @@ pub enum EngineError {
     Rejected(SendResponse),
     /// A KEYREQ is not allowed now.
     Paced(KeyReqRefusal),
+    /// The peer is known to have no E2E capability. No KEYREQ went out.
+    PeerNotCapable,
+    /// The nickname already has the most messages that may wait for keys.
+    QueueFull,
 }
 
 impl From<WireError> for EngineError {
@@ -516,6 +521,28 @@ pub struct SentText {
     pub key: Option<SendKey>,
 }
 
+/// A text that waits for keys, or for a re-send after a NACK.
+#[derive(Debug, Clone)]
+struct PendingText {
+    text: String,
+    /// 1 for a first send, 2 for a re-send after a NACK.
+    sends: u8,
+    /// The history row of the text. A re-send adds no second row.
+    row_id: String,
+}
+
+/// A text that went out. It stays available for one re-send after a NACK.
+#[derive(Debug, Clone)]
+struct SentRecord {
+    nick: String,
+    /// The device the message was for. Only this device may NACK it.
+    did: String,
+    text: String,
+    sends: u8,
+    row_id: String,
+    at: Duration,
+}
+
 #[derive(Debug, Clone)]
 struct PeerEntry {
     nick: String,
@@ -562,6 +589,20 @@ pub struct E2eEngine {
     revoked_dids: HashSet<String>,
     /// Nicks that sent a message the engine could not read for lack of keys.
     keys_wanted: Vec<String>,
+    /// Texts that wait for the keys of their peer, oldest first.
+    queue: OutgoingQueue,
+    pending: HashMap<SendKey, PendingText>,
+    /// Texts that went out, by `msgid`, for a re-send after a NACK.
+    sent: HashMap<String, SentRecord>,
+    /// At most one re-key for each nick in the re-key interval.
+    rekey: IntervalLimiter,
+    /// The history row of each send. A drop shows on this row.
+    row_ids: HashMap<SendKey, String>,
+    /// Rows whose send was dropped, with the reason. Only the locked query
+    /// reads them; the plain query never sees a drop.
+    dropped_rows: HashMap<String, DropReason>,
+    /// Peers with a known E2E capability. An absent peer is not known.
+    capability: Vec<(String, bool)>,
     /// Peers whose conversation got a new row since the last call of
     /// [`E2eEngine::take_changed_peers`].
     changed_peers: Vec<String>,
@@ -593,6 +634,13 @@ impl E2eEngine {
             clock: MonotonicClock::new(),
             revoked_dids: HashSet::new(),
             keys_wanted: Vec::new(),
+            queue: OutgoingQueue::new(),
+            pending: HashMap::new(),
+            sent: HashMap::new(),
+            rekey: IntervalLimiter::new(md3_pacing::REKEY_INTERVAL),
+            row_ids: HashMap::new(),
+            dropped_rows: HashMap::new(),
+            capability: Vec::new(),
             changed_peers: Vec::new(),
             local_sends: 0,
         })
@@ -715,14 +763,102 @@ impl E2eEngine {
         self.casemapping = casemapping;
     }
 
-    /// The session ended: every open send becomes a `session_ended` drop.
+    /// The session ended: every open send and every queued text becomes a
+    /// `session_ended` drop. The queue and the re-send memory are cleared.
     pub fn end_session(&mut self) -> Vec<SendDropped> {
-        self.book.end_session()
+        // A queued text is also a pending send of the book, so the book
+        // gives one drop for it.
+        self.queue.end_session();
+        self.pending.clear();
+        self.sent.clear();
+        let ended = self.book.end_session();
+        self.note_drops(&ended);
+        ended
     }
 
     /// Applies an `e2e_send_dropped` event to the send book.
     pub fn apply_send_dropped(&mut self, payload: &Value) -> Option<SendDropped> {
-        self.book.apply_payload(payload)
+        let dropped = self.book.apply_payload(payload)?;
+        self.note_drops(std::slice::from_ref(&dropped));
+        Some(dropped)
+    }
+
+    /// The reason a send was dropped, for the history row `row_id`. Only the
+    /// locked query uses it: a plain row never has one.
+    pub fn dropped_reason(&self, row_id: &str) -> Option<DropReason> {
+        self.dropped_rows.get(row_id).copied()
+    }
+
+    /// Records the known E2E capability of a peer. The caller sets it from
+    /// the signal that tells it. Proof of E2E (keys or a message that the
+    /// engine read) sets it to true by itself.
+    pub fn set_peer_capability(&mut self, nick: &str, capable: bool) {
+        let cm = self.casemapping;
+        let wanted = cm.fold(nick);
+        match self
+            .capability
+            .iter_mut()
+            .find(|(known, _)| cm.fold(known) == wanted)
+        {
+            Some(entry) => entry.1 = capable,
+            None => self.capability.push((nick.to_string(), capable)),
+        }
+    }
+
+    /// False only when the peer is known to have no E2E capability. A peer
+    /// that is not known may be a first contact, so it can get a KEYREQ.
+    fn peer_capable(&self, nick: &str) -> bool {
+        let cm = self.casemapping;
+        let wanted = cm.fold(nick);
+        self.capability
+            .iter()
+            .find(|(known, _)| cm.fold(known) == wanted)
+            .is_none_or(|(_, capable)| *capable)
+    }
+
+    /// Records the drops on the history rows of their sends and marks the
+    /// conversations as changed.
+    fn note_drops(&mut self, drops: &[SendDropped]) {
+        for drop in drops {
+            if let Some(row_id) = self.row_ids.get(&drop.key).cloned() {
+                self.dropped_rows.entry(row_id).or_insert(drop.reason);
+            }
+            self.note_changed(&drop.key.target);
+        }
+    }
+
+    /// A local failure of a send: `send_failed` for a pending or accepted
+    /// send. A final send stays as it is.
+    fn fail_send(&mut self, key: &SendKey, reason: DropReason) -> Option<SendDropped> {
+        if !self.book.drop_local(key, reason) {
+            return None;
+        }
+        let dropped = SendDropped {
+            key: key.clone(),
+            reason,
+        };
+        self.note_drops(std::slice::from_ref(&dropped));
+        Some(dropped)
+    }
+
+    /// True when a text waits for keys or for a re-send.
+    pub fn has_queued_text(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
+    /// Removes the texts that waited too long for keys. Each is a `late` drop.
+    pub fn expire_queue(&mut self) -> Vec<SendDropped> {
+        let late = self.queue.expire(self.clock.now());
+        self.settle_late(late)
+    }
+
+    fn settle_late(&mut self, late: Vec<SendDropped>) -> Vec<SendDropped> {
+        for drop in &late {
+            self.pending.remove(&drop.key);
+            self.book.drop_local(&drop.key, drop.reason);
+        }
+        self.note_drops(&late);
+        late
     }
 
     /// The nicks for which a KEYREQ is useful. The list is cleared.
@@ -812,7 +948,11 @@ impl E2eEngine {
             dids.push(did);
         }
         match (dids.is_empty(), first_error) {
-            (false, _) => Ok(dids),
+            (false, _) => {
+                // Keys are proof of E2E capability.
+                self.set_peer_capability(nick, true);
+                Ok(dids)
+            }
             (true, Some(err)) => Err(err.into()),
             (true, None) => Err(WireError::BadDeviceCount.into()),
         }
@@ -830,7 +970,10 @@ impl E2eEngine {
                 Err(EngineError::Store(_)) => RowOutcome::StoreFailed,
                 Err(_) => RowOutcome::Undecryptable,
             },
-            InboxVerb::Nack => RowOutcome::Ignored,
+            InboxVerb::Nack => {
+                self.on_nack(row);
+                RowOutcome::Ignored
+            }
             InboxVerb::PkMsg | InboxVerb::Msg => self.receive_message(row, now),
         };
         if outcome.acknowledge() {
@@ -1165,6 +1308,9 @@ impl E2eEngine {
         token: &str,
         nick: &str,
     ) -> Result<(), EngineError> {
+        if !self.peer_capable(nick) {
+            return Err(EngineError::PeerNotCapable);
+        }
         self.keyreq
             .try_send(nick, self.casemapping, self.clock.now())
             .map_err(EngineError::Paced)?;
@@ -1254,6 +1400,173 @@ impl E2eEngine {
             return Err(EngineError::Wire(WireError::BadTarget));
         }
         let entry = self.pick_device(nick).ok_or(EngineError::NotReady)?;
+        self.deliver(client, token, nick, text, entry, 1, None, now)
+            .await
+    }
+
+    /// Like [`E2eEngine::send_text`], but a peer without keys is not an
+    /// error: the text waits in the queue and the engine asks for the keys
+    /// (see [`E2eEngine::take_keys_wanted`]). The row shows at once. A text
+    /// that waits more than the queue lifetime is a `late` drop. Nothing goes
+    /// in clear text. A peer known to have no E2E capability is refused.
+    pub async fn send_or_queue(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        nick: &str,
+        text: &str,
+        now: i64,
+    ) -> Result<SentText, EngineError> {
+        match self.send_text(client, token, nick, text, now).await {
+            Err(EngineError::NotReady) => self.queue_text(nick, text, now),
+            other => other,
+        }
+    }
+
+    /// Puts a text in the queue and writes its row in the history.
+    fn queue_text(&mut self, nick: &str, text: &str, now: i64) -> Result<SentText, EngineError> {
+        if !self.peer_capable(nick) {
+            return Err(EngineError::PeerNotCapable);
+        }
+        // A device that cannot write messages makes the wait useless.
+        let identity = self.state.olm_identity()?.ok_or(EngineError::NotReady)?;
+        self.own_wire(&identity)?;
+        self.local_sends += 1;
+        // The time makes the row id unique across runs of the program.
+        let key = SendKey::new(&self.network, nick, &format!("q{now}-{}", self.local_sends));
+        if !self
+            .queue
+            .push(key.clone(), self.casemapping, self.clock.now())
+        {
+            return Err(EngineError::QueueFull);
+        }
+        let row_id = format!("{}:out:{}", self.network, key.msgid);
+        let message = E2eMessage {
+            id: row_id.clone(),
+            conversation_id: conversation_id(&self.network, nick),
+            sender_device: OWN_DEVICE.to_string(),
+            sent_at: now,
+            text: text.to_string(),
+            encrypted: true,
+        };
+        if let Err(error) = self.history.append(message) {
+            self.queue.remove(&key);
+            return Err(error.into());
+        }
+        self.book.start(key.clone());
+        self.row_ids.insert(key.clone(), row_id.clone());
+        self.pending.insert(
+            key.clone(),
+            PendingText {
+                text: text.to_string(),
+                sends: 1,
+                row_id,
+            },
+        );
+        self.want_keys(nick);
+        self.note_changed(nick);
+        Ok(SentText {
+            msgid: None,
+            key: Some(key),
+        })
+    }
+
+    fn want_keys(&mut self, nick: &str) {
+        if !self.keys_wanted.iter().any(|known| known == nick) {
+            self.keys_wanted.push(nick.to_string());
+        }
+    }
+
+    /// Sends the queued texts whose peer has keys now, oldest first, and asks
+    /// again for the keys of the others. A text past its lifetime is a `late`
+    /// drop. A text that the send door refuses is a `send_failed` drop; a
+    /// busy relay (429) keeps it in the queue until its lifetime ends. Return
+    /// the drops.
+    pub async fn flush_queue(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        now: i64,
+    ) -> Vec<SendDropped> {
+        if self.queue.is_empty() {
+            return Vec::new();
+        }
+        let cm = self.casemapping;
+        let ready: HashSet<String> = self
+            .ready_peers()
+            .iter()
+            .map(|nick| cm.fold(nick))
+            .collect();
+        let (taken, late) = self
+            .queue
+            .take_matching(self.clock.now(), |item: &QueuedSend| {
+                ready.contains(&cm.fold(&item.key.target))
+            });
+        let mut drops = self.settle_late(late);
+        let mut retry = Vec::new();
+        for item in taken {
+            let Some(pending) = self.pending.remove(&item.key) else {
+                continue;
+            };
+            let nick = item.key.target.clone();
+            let Some(entry) = self.pick_device(&nick) else {
+                self.pending.insert(item.key.clone(), pending);
+                retry.push(item);
+                continue;
+            };
+            let result = self
+                .deliver(
+                    client,
+                    token,
+                    &nick,
+                    &pending.text,
+                    entry,
+                    pending.sends,
+                    Some(pending.row_id.clone()),
+                    now,
+                )
+                .await;
+            match result {
+                Ok(_) => {
+                    self.book.remove(&item.key);
+                }
+                Err(EngineError::Rejected(SendResponse::Unexpected(429))) => {
+                    self.pending.insert(item.key.clone(), pending);
+                    retry.push(item);
+                }
+                Err(EngineError::Rejected(SendResponse::Failed(SendFailure::TooLate))) => {
+                    drops.extend(self.fail_send(&item.key, DropReason::Late));
+                }
+                Err(_) => {
+                    drops.extend(self.fail_send(&item.key, DropReason::SendFailed));
+                }
+            }
+        }
+        for item in retry.into_iter().rev() {
+            self.queue.restore(item);
+        }
+        for nick in self.queue.targets() {
+            self.want_keys(&nick);
+        }
+        drops
+    }
+
+    /// Sends `text` to `entry`, a device of `nick`. `row_id` is the history
+    /// row of a text that waited in the queue or that goes out again after a
+    /// NACK; without it the call writes the row. `sends` counts the sends of
+    /// the text.
+    #[allow(clippy::too_many_arguments)]
+    async fn deliver(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        nick: &str,
+        text: &str,
+        entry: PeerEntry,
+        sends: u8,
+        row_id: Option<String>,
+        now: i64,
+    ) -> Result<SentText, EngineError> {
         let did = entry.device.did().to_string();
         let identity = self.state.olm_identity()?.ok_or(EngineError::NotReady)?;
         let own = self.own_wire(&identity)?;
@@ -1342,21 +1655,145 @@ impl E2eEngine {
             .msgid
             .clone()
             .unwrap_or_else(|| format!("local{}", self.local_sends));
-        let message = E2eMessage {
-            id: format!("{}:out:{suffix}", self.network),
-            conversation_id: conversation_id(&self.network, nick),
-            sender_device: OWN_DEVICE.to_string(),
-            sent_at: now,
-            text: text.to_string(),
-            encrypted: true,
+        let row_id = match row_id {
+            Some(row_id) => row_id,
+            None => {
+                let row_id = format!("{}:out:{suffix}", self.network);
+                let message = E2eMessage {
+                    id: row_id.clone(),
+                    conversation_id: conversation_id(&self.network, nick),
+                    sender_device: OWN_DEVICE.to_string(),
+                    sent_at: now,
+                    text: text.to_string(),
+                    encrypted: true,
+                };
+                self.history.append(message)?;
+                row_id
+            }
         };
-        self.history.append(message)?;
+        if let (Some(key), Some(msgid)) = (&key, &answer.msgid) {
+            self.row_ids.insert(key.clone(), row_id.clone());
+            self.remember_sent(msgid, nick, &did, text, sends, &row_id);
+        }
         self.note_changed(nick);
         Ok(SentText {
             msgid: answer.msgid,
             key,
         })
     }
+
+    /// Keeps the text of a send for a re-send after a NACK. The memory is
+    /// bounded in time and in count.
+    fn remember_sent(
+        &mut self,
+        msgid: &str,
+        nick: &str,
+        did: &str,
+        text: &str,
+        sends: u8,
+        row_id: &str,
+    ) {
+        let record = SentRecord {
+            nick: nick.to_string(),
+            did: did.to_string(),
+            text: text.to_string(),
+            sends,
+            row_id: row_id.to_string(),
+            at: self.clock.now(),
+        };
+        self.sent.insert(msgid.to_string(), record);
+        self.trim_sent();
+    }
+
+    fn trim_sent(&mut self) {
+        let now = self.clock.now();
+        self.sent
+            .retain(|_, record| now.saturating_sub(record.at) < md3_pacing::SENT_MEMORY);
+        while self.sent.len() > md3_pacing::SENT_MAX {
+            let oldest = self
+                .sent
+                .iter()
+                .min_by_key(|(_, record)| record.at)
+                .map(|(msgid, _)| msgid.clone());
+            match oldest {
+                Some(msgid) => self.sent.remove(&msgid),
+                None => break,
+            };
+        }
+    }
+
+    /// Reads a NACK: the device that got a message could not read it. The
+    /// text goes out again once, on a new session. The engine drops the
+    /// failed session, asks for fresh keys and queues the text.
+    ///
+    /// Rules of irc-olm (`_on_nack`): only the device that got the message
+    /// may NACK it. The nick must be the one the text went to. A message goes
+    /// out at most twice. A nick gets at most one re-key each minute. When a
+    /// rule stops the re-send, the send is a `send_failed` drop.
+    fn on_nack(&mut self, row: &InboxRow) {
+        self.trim_sent();
+        let Some(reference) = nack_reference(&row.payload) else {
+            return;
+        };
+        if self
+            .sent
+            .get(&reference)
+            .is_none_or(|record| record.did != row.from_did)
+        {
+            return;
+        }
+        let Some(record) = self.sent.remove(&reference) else {
+            return;
+        };
+        let cm = self.casemapping;
+        let key = SendKey::new(&self.network, &record.nick, &reference);
+        if cm.fold(&record.nick) != cm.fold(&row.from)
+            || record.sends >= md3_pacing::MAX_SENDS
+            || !self.rekey.try_acquire(&record.nick, cm, self.clock.now())
+        {
+            self.fail_send(&key, DropReason::SendFailed);
+            return;
+        }
+        if self
+            .state
+            .remove_peer_session(&self.network, &record.nick, &record.did)
+            .is_err()
+        {
+            self.fail_send(&key, DropReason::SendFailed);
+            return;
+        }
+        self.local_sends += 1;
+        let queue_key = SendKey::new(
+            &self.network,
+            &record.nick,
+            &format!("q{}", self.local_sends),
+        );
+        if !self.queue.push(queue_key.clone(), cm, self.clock.now()) {
+            self.fail_send(&key, DropReason::SendFailed);
+            return;
+        }
+        // The old send stays accepted. The row of both sends is the same, and
+        // the queue key carries the drop of the re-send.
+        self.book.start(queue_key.clone());
+        self.row_ids
+            .insert(queue_key.clone(), record.row_id.clone());
+        self.pending.insert(
+            queue_key,
+            PendingText {
+                text: record.text,
+                sends: record.sends + 1,
+                row_id: record.row_id,
+            },
+        );
+        self.want_keys(&record.nick);
+    }
+}
+
+/// The `ref` of a NACK payload: the `msgid` of the message that failed.
+fn nack_reference(payload: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(payload).ok()?;
+    let reference = value.get("ref")?.as_str()?;
+    (!reference.is_empty()).then(|| reference.to_string())
 }
 
 #[cfg(test)]
@@ -3039,5 +3476,389 @@ mod tests {
         assert_eq!(copies[0].text, "from the second device");
         assert_eq!(copies[0].sender_device, OWN_DEVICE);
         assert!(copies[0].encrypted);
+    }
+
+    // --- queue, NACK and drops (final KEYS and send rules) -------------------
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    /// Alice has no keys of Bob. Returns her engine and Bob as a test double.
+    fn alice_without_keys(name: &str) -> (E2eEngine, Ident) {
+        let alice = Ident::new(&format!("alice-{name}"));
+        let bob = Ident::new(&format!("bob-{name}"));
+        (alice.engine(), bob)
+    }
+
+    fn nack_row(id: u64, alice: &E2eEngine, bob: &Ident, reference: &str) -> InboxRow {
+        let bob_did = did_from_key_text(&ed(&bob.device)).expect("did");
+        let payload = json!({"v": 2, "ref": reference}).to_string();
+        let value = row(id, "bob", &bob_did, alice.own_did(), "nack", "n", &payload);
+        InboxRow::from_value(&value, PROTOCOL).expect("nack row")
+    }
+
+    fn dropped_event(msgid: &str, reason: &str) -> Value {
+        json!({
+            "kind": "e2e_send_dropped", "network": NET, "target": "bob",
+            "msgid": msgid, "reason": reason
+        })
+    }
+
+    async fn mount_status(server: &MockServer, status: u16, code: &str) {
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/{NET}/e2e/messages")))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({"error": code})))
+            .mount(server)
+            .await;
+    }
+
+    fn row_of(engine: &E2eEngine, key: &SendKey) -> String {
+        engine.row_ids.get(key).cloned().expect("row of the send")
+    }
+
+    #[tokio::test]
+    async fn a_text_for_a_peer_without_keys_waits_and_goes_with_the_keys() {
+        let (mut alice, bob) = alice_without_keys("wait");
+        let server = MockServer::start().await;
+        mount_send(&server, "m1").await;
+        let client = GrappaClient::new(server.uri());
+        let queued = alice
+            .send_or_queue(&client, TOKEN, "bob", "hi bob", 100)
+            .await
+            .expect("queued");
+        assert!(queued.msgid.is_none());
+        assert!(server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
+        assert_eq!(alice.take_keys_wanted(), vec!["bob".to_string()]);
+        // Without keys the queue sends nothing.
+        assert!(alice.flush_queue(&client, TOKEN, 101).await.is_empty());
+        assert!(server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
+
+        alice.accept_keys("bob", &bob.keys()).expect("keys");
+        assert!(alice.flush_queue(&client, TOKEN, 102).await.is_empty());
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(!String::from_utf8_lossy(&requests[0].body).contains("hi bob"));
+        // One row, written when the text was queued.
+        let rows = alice.history().messages(&conversation_id(NET, "bob"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "hi bob");
+        assert!(alice.queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_queued_text_that_waits_too_long_is_a_late_drop() {
+        let (mut alice, _bob) = alice_without_keys("late");
+        let client = GrappaClient::new("http://127.0.0.1:9");
+        let queued = alice
+            .send_or_queue(&client, TOKEN, "bob", "too slow", 100)
+            .await
+            .expect("queued");
+        let key = queued.key.expect("key");
+        let row_id = row_of(&alice, &key);
+        // The deadline is 90 s; the margin of 2 s makes 88 s too late.
+        alice.clock.advance(secs(87));
+        assert!(alice.expire_queue().is_empty());
+        alice.clock.advance(secs(1));
+        let late = alice.expire_queue();
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].reason, DropReason::Late);
+        assert_eq!(
+            alice.send_status(&key),
+            Some(SendStatus::Dropped(DropReason::Late))
+        );
+        assert_eq!(alice.dropped_reason(&row_id), Some(DropReason::Late));
+        assert!(alice.queue.is_empty());
+        // The late text is not sent when the keys come.
+        assert!(alice.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_queue_refuses_the_seventeenth_text_of_a_nick() {
+        let (mut alice, _bob) = alice_without_keys("full");
+        let client = GrappaClient::new("http://127.0.0.1:9");
+        for n in 0..md3_pacing::OUTGOING_QUEUE_MAX {
+            alice
+                .send_or_queue(&client, TOKEN, "bob", &format!("t{n}"), 100)
+                .await
+                .expect("queued");
+        }
+        let refused = alice
+            .send_or_queue(&client, TOKEN, "bob", "extra", 100)
+            .await;
+        assert!(matches!(refused, Err(EngineError::QueueFull)));
+        // Another nick has its own room.
+        alice
+            .send_or_queue(&client, TOKEN, "carol", "hello", 100)
+            .await
+            .expect("other nick");
+    }
+
+    #[tokio::test]
+    async fn a_failed_send_of_a_queued_text_is_a_send_failed_drop() {
+        let (mut alice, bob) = alice_without_keys("failed");
+        let server = MockServer::start().await;
+        mount_status(&server, 400, "bad_request").await;
+        let client = GrappaClient::new(server.uri());
+        let queued = alice
+            .send_or_queue(&client, TOKEN, "bob", "x", 100)
+            .await
+            .expect("queued");
+        let row_id = row_of(&alice, &queued.key.expect("key"));
+        alice.accept_keys("bob", &bob.keys()).expect("keys");
+        let drops = alice.flush_queue(&client, TOKEN, 101).await;
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].reason, DropReason::SendFailed);
+        assert_eq!(alice.dropped_reason(&row_id), Some(DropReason::SendFailed));
+        assert!(alice.queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_too_late_answer_to_a_queued_text_is_a_late_drop() {
+        let (mut alice, bob) = alice_without_keys("toolate");
+        let server = MockServer::start().await;
+        mount_status(&server, 422, "too_late").await;
+        let client = GrappaClient::new(server.uri());
+        let queued = alice
+            .send_or_queue(&client, TOKEN, "bob", "x", 100)
+            .await
+            .expect("queued");
+        let row_id = row_of(&alice, &queued.key.expect("key"));
+        alice.accept_keys("bob", &bob.keys()).expect("keys");
+        let drops = alice.flush_queue(&client, TOKEN, 101).await;
+        assert_eq!(drops[0].reason, DropReason::Late);
+        assert_eq!(alice.dropped_reason(&row_id), Some(DropReason::Late));
+    }
+
+    #[tokio::test]
+    async fn a_busy_relay_keeps_the_text_in_the_queue() {
+        let (mut alice, bob) = alice_without_keys("busy");
+        let server = MockServer::start().await;
+        mount_status(&server, 429, "rate_limited").await;
+        let client = GrappaClient::new(server.uri());
+        alice
+            .send_or_queue(&client, TOKEN, "bob", "x", 100)
+            .await
+            .expect("queued");
+        alice.accept_keys("bob", &bob.keys()).expect("keys");
+        assert!(alice.flush_queue(&client, TOKEN, 101).await.is_empty());
+        assert_eq!(alice.queue.len(), 1);
+        assert_eq!(alice.pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_send_can_become_a_dropped_send_and_never_a_delivered_one() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (sent, _) = alice_sends(&mut p.alice, &server, "hello").await;
+        let key = sent.key.expect("key");
+        let row_id = row_of(&p.alice, &key);
+        assert_eq!(p.alice.send_status(&key), Some(SendStatus::Accepted));
+        assert_eq!(p.alice.dropped_reason(&row_id), None);
+        let dropped = p
+            .alice
+            .apply_send_dropped(&dropped_event("msgid1", "send_failed"))
+            .expect("dropped");
+        assert_eq!(dropped.reason, DropReason::SendFailed);
+        assert_eq!(
+            p.alice.send_status(&key),
+            Some(SendStatus::Dropped(DropReason::SendFailed))
+        );
+        assert_eq!(
+            p.alice.dropped_reason(&row_id),
+            Some(DropReason::SendFailed)
+        );
+        // The same event again changes nothing.
+        assert!(p
+            .alice
+            .apply_send_dropped(&dropped_event("msgid1", "late"))
+            .is_none());
+        assert_eq!(
+            p.alice.dropped_reason(&row_id),
+            Some(DropReason::SendFailed)
+        );
+        // A row that is not an own send has no drop.
+        assert_eq!(p.alice.dropped_reason(&format!("{NET}:in:5")), None);
+    }
+
+    #[tokio::test]
+    async fn end_session_drops_accepted_and_queued_sends() {
+        let (mut alice, bob) = alice_without_keys("ended");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+        alice.accept_keys("bob", &bob.keys()).expect("keys");
+        let accepted = alice
+            .send_or_queue(&client, TOKEN, "bob", "sent", 100)
+            .await
+            .expect("sent");
+        let accepted_row = row_of(&alice, &accepted.key.expect("key"));
+        let queued = alice
+            .send_or_queue(&client, TOKEN, "carol", "waits", 101)
+            .await
+            .expect("queued");
+        let queued_row = row_of(&alice, &queued.key.expect("key"));
+        let ended = alice.end_session();
+        assert_eq!(ended.len(), 2);
+        assert!(ended.iter().all(|d| d.reason == DropReason::SessionEnded));
+        assert_eq!(
+            alice.dropped_reason(&accepted_row),
+            Some(DropReason::SessionEnded)
+        );
+        assert_eq!(
+            alice.dropped_reason(&queued_row),
+            Some(DropReason::SessionEnded)
+        );
+        assert!(alice.queue.is_empty());
+        assert!(alice.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_nack_sends_the_text_again_once_on_a_new_session() {
+        let (mut alice, bob) = alice_without_keys("nack");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/{NET}/e2e/messages")))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({"msgid": "msgid1"})))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_send(&server, "msgid2").await;
+        let client = GrappaClient::new(server.uri());
+        let bob_did = did_from_key_text(&ed(&bob.device)).expect("did");
+        alice.accept_keys("bob", &bob.keys()).expect("keys");
+        let sent = alice
+            .send_text(&client, TOKEN, "bob", "again please", 100)
+            .await
+            .expect("send");
+        let row_id = row_of(&alice, &sent.key.clone().expect("key"));
+
+        let nack = nack_row(9, &alice, &bob, "msgid1");
+        assert_eq!(alice.handle_row(&nack, 101), RowOutcome::Ignored);
+        // The failed session is gone and the keys are asked for again.
+        assert!(alice
+            .state
+            .peer_session(NET, "bob", &bob_did)
+            .expect("session")
+            .is_none());
+        assert_eq!(alice.take_keys_wanted(), vec!["bob".to_string()]);
+        assert_eq!(alice.queue.len(), 1);
+        assert!(!alice.is_ready("bob"));
+
+        alice.accept_keys("bob", &bob.keys()).expect("fresh keys");
+        assert!(alice.flush_queue(&client, TOKEN, 102).await.is_empty());
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 2);
+        let second: Value = serde_json::from_slice(&requests[1].body).expect("body");
+        assert_eq!(second["verb"], "pkmsg");
+        // The history keeps one row for the text.
+        assert_eq!(
+            alice.history().messages(&conversation_id(NET, "bob")).len(),
+            1
+        );
+
+        // The second NACK is the last: a message goes out twice at most.
+        let again = nack_row(10, &alice, &bob, "msgid2");
+        assert_eq!(alice.handle_row(&again, 103), RowOutcome::Ignored);
+        assert!(alice.queue.is_empty());
+        assert_eq!(alice.dropped_reason(&row_id), Some(DropReason::SendFailed));
+    }
+
+    #[tokio::test]
+    async fn a_nack_that_is_not_ours_changes_nothing() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (sent, _) = alice_sends(&mut p.alice, &server, "hello").await;
+        let key = sent.key.expect("key");
+        let other = Ident::new("bob-other");
+        // An unknown reference.
+        let unknown = nack_row(11, &p.alice, &other, "nope");
+        assert_eq!(p.alice.handle_row(&unknown, 1), RowOutcome::Ignored);
+        // A known reference from a device that did not get the message.
+        let wrong_device = nack_row(12, &p.alice, &other, "msgid1");
+        assert_eq!(p.alice.handle_row(&wrong_device, 1), RowOutcome::Ignored);
+        assert_eq!(p.alice.send_status(&key), Some(SendStatus::Accepted));
+        assert!(p.alice.queue.is_empty());
+        assert!(p.alice.take_keys_wanted().is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_re_key_for_each_nick_in_a_minute() {
+        let (mut alice, bob) = alice_without_keys("rekey");
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/{NET}/e2e/messages")))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({"msgid": "ma"})))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_send(&server, "mb").await;
+        let client = GrappaClient::new(server.uri());
+        alice.accept_keys("bob", &bob.keys()).expect("keys");
+        let first = alice
+            .send_text(&client, TOKEN, "bob", "a", 100)
+            .await
+            .expect("a");
+        let second = alice
+            .send_text(&client, TOKEN, "bob", "b", 100)
+            .await
+            .expect("b");
+        let second_row = row_of(&alice, &second.key.expect("key"));
+        let first_row = row_of(&alice, &first.key.expect("key"));
+        assert_eq!(
+            alice.handle_row(&nack_row(1, &alice, &bob, "ma"), 1),
+            RowOutcome::Ignored
+        );
+        assert_eq!(alice.queue.len(), 1);
+        // The second NACK comes in the same minute: no second re-key.
+        assert_eq!(
+            alice.handle_row(&nack_row(2, &alice, &bob, "mb"), 1),
+            RowOutcome::Ignored
+        );
+        assert_eq!(alice.queue.len(), 1);
+        assert_eq!(
+            alice.dropped_reason(&second_row),
+            Some(DropReason::SendFailed)
+        );
+        assert_eq!(alice.dropped_reason(&first_row), None);
+    }
+
+    #[tokio::test]
+    async fn no_keyreq_goes_to_a_peer_without_e2e_capability() {
+        let (mut alice, _bob) = alice_without_keys("capability");
+        let server = MockServer::start().await;
+        mount_send(&server, "k1").await;
+        let client = GrappaClient::new(server.uri());
+        alice.set_peer_capability("Carol", false);
+        let refused = alice.request_keys(&client, TOKEN, "carol").await;
+        assert!(matches!(refused, Err(EngineError::PeerNotCapable)));
+        let queued = alice.send_or_queue(&client, TOKEN, "carol", "hi", 1).await;
+        assert!(matches!(queued, Err(EngineError::PeerNotCapable)));
+        assert!(server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
+        // The refusal used no interval: a peer with the capability asks at once.
+        alice.set_peer_capability("carol", true);
+        alice
+            .request_keys(&client, TOKEN, "carol")
+            .await
+            .expect("keyreq");
+    }
+
+    #[test]
+    fn the_reassembly_timeout_is_the_final_value() {
+        assert_eq!(KEYS_REASSEMBLY_TIMEOUT, secs(60));
     }
 }
