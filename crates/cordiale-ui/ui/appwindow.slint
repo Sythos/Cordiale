@@ -2726,6 +2726,22 @@ export component AppWindow inherits Window {
             return @tr("This server does not support device pairing.");
         } else if status-kind == "e2e-pair-none" {
             return @tr("No pairing is open. Type /e2e pair on the first device.");
+        } else if status-kind == "e2e-revoke-done" {
+            return @tr("Device {} was revoked.", status-message);
+        } else if status-kind == "e2e-revoke-pending" {
+            return @tr("The revoke is not finished. Try again later.");
+        } else if status-kind == "e2e-revoke-unavailable" {
+            return @tr("This server does not support device revoke.");
+        } else if status-kind == "e2e-revoke-failed" {
+            return @tr("The device was not revoked.");
+        } else if status-kind == "e2e-reset-done" {
+            return @tr("The E2E identity was reset. The locked query cannot send now.");
+        } else if status-kind == "e2e-reset-pending" {
+            return @tr("The reset is not finished. Try again later.");
+        } else if status-kind == "e2e-reset-unavailable" {
+            return @tr("This server does not support the reset of the E2E identity.");
+        } else if status-kind == "e2e-reset-failed" {
+            return @tr("The E2E identity was not reset.");
         } else if status-kind == "rate-limited" {
             return @tr("Too many requests. Try again in about {} s.", status-retry-secs);
         } else if status-kind == "part-failed" {
