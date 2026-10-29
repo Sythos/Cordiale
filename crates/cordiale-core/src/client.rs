@@ -48,9 +48,13 @@ use crate::e2e_identity_routes::{
     DeviceIdRequest, DeviceRecord, HeldList, KeysHeld, KeysUploadRequest, ListRequest,
 };
 use crate::e2e_pacing::{classify_send_response, parse_send_accepted, SendAnswer, SendResponse};
-use crate::e2e_protocol::E2eOperation;
+use crate::e2e_pairing::{
+    MessageEnvelope, MessagesEnvelope, PairingCallError, PostPayload, RelayMessage, Rendezvous,
+    RendezvousEnvelope,
+};
+use crate::e2e_protocol::{E2eOperation, PairingOperation};
 use crate::e2e_refusal::E2eRouteError;
-use crate::e2e_wire::WireError;
+use crate::e2e_wire::{pairing_message_fits, WireError};
 use crate::presence::{PresencePins, PresencePref};
 use crate::profile::{
     AddIgnoreRequest, AliasesView, IgnoreEntry, IgnoreMutationResponse, IgnoresResponse,
@@ -181,6 +185,15 @@ async fn reject_with_code(
         code,
         retry_after,
     })
+}
+
+/// Reads the body of a pairing answer. A missing body or a wrong shape is a
+/// `WireError::BadJson`; the body is not kept in the error.
+fn parse_pairing_answer<T: serde::de::DeserializeOwned>(
+    body: Option<Value>,
+) -> Result<T, PairingCallError> {
+    let body = body.ok_or(WireError::BadJson)?;
+    serde_json::from_value(body).map_err(|_| PairingCallError::Bad(WireError::BadJson))
 }
 
 impl From<reqwest::Error> for GrappaClientError {
@@ -1091,6 +1104,165 @@ impl GrappaClient {
             .await?
             .ok_or(WireError::MissingField)?;
         Ok(KeysHeld::from_value(&value)?)
+    }
+
+    /// `POST /e2e/pairings` — opens a rendezvous for X1 pairing. The caller
+    /// is the creator.
+    pub async fn create_pairing(
+        &self,
+        token: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<Rendezvous, PairingCallError> {
+        let url = self.pairing_url(PairingOperation::Create, None, server_protocol, None)?;
+        let body = self
+            .send_pairing_request(
+                self.http
+                    .post(url)
+                    .bearer_auth(token)
+                    .json(&serde_json::json!({})),
+            )
+            .await?;
+        parse_pairing_answer::<RendezvousEnvelope>(body).map(|envelope| envelope.rendezvous)
+    }
+
+    /// `POST /e2e/pairings/:id/join` — joins the rendezvous of a pairing
+    /// link. The caller is the joiner.
+    pub async fn join_pairing(
+        &self,
+        token: &str,
+        rendezvous_id: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<Rendezvous, PairingCallError> {
+        let url = self.pairing_url(
+            PairingOperation::Join,
+            Some(rendezvous_id),
+            server_protocol,
+            None,
+        )?;
+        let body = self
+            .send_pairing_request(
+                self.http
+                    .post(url)
+                    .bearer_auth(token)
+                    .json(&serde_json::json!({})),
+            )
+            .await?;
+        parse_pairing_answer::<RendezvousEnvelope>(body).map(|envelope| envelope.rendezvous)
+    }
+
+    /// `POST /e2e/pairings/:id/messages` — puts one sealed message in the
+    /// rendezvous. `count` and `total_bytes` describe the messages the relay
+    /// already holds. A payload over a limit is refused before any request.
+    pub async fn post_pairing_message(
+        &self,
+        token: &str,
+        rendezvous_id: &str,
+        payload: &str,
+        count: usize,
+        total_bytes: usize,
+        server_protocol: Option<u32>,
+    ) -> Result<RelayMessage, PairingCallError> {
+        if !pairing_message_fits(count, total_bytes, payload.len()) {
+            return Err(PairingCallError::TooLarge);
+        }
+        let url = self.pairing_url(
+            PairingOperation::Post,
+            Some(rendezvous_id),
+            server_protocol,
+            None,
+        )?;
+        let body = self
+            .send_pairing_request(
+                self.http
+                    .post(url)
+                    .bearer_auth(token)
+                    .json(&PostPayload { payload }),
+            )
+            .await?;
+        parse_pairing_answer::<MessageEnvelope>(body).map(|envelope| envelope.message)
+    }
+
+    /// `GET /e2e/pairings/:id/messages?after=<seq>` — the messages after
+    /// the last sequence the caller took in, oldest first.
+    pub async fn fetch_pairing_messages(
+        &self,
+        token: &str,
+        rendezvous_id: &str,
+        after: u64,
+        server_protocol: Option<u32>,
+    ) -> Result<Vec<RelayMessage>, PairingCallError> {
+        let url = self.pairing_url(
+            PairingOperation::Fetch,
+            Some(rendezvous_id),
+            server_protocol,
+            Some(after),
+        )?;
+        let body = self
+            .send_pairing_request(self.http.get(url).bearer_auth(token))
+            .await?;
+        parse_pairing_answer::<MessagesEnvelope>(body).map(|envelope| envelope.messages)
+    }
+
+    /// `DELETE /e2e/pairings/:id` — closes the rendezvous.
+    pub async fn close_pairing(
+        &self,
+        token: &str,
+        rendezvous_id: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<(), PairingCallError> {
+        let url = self.pairing_url(
+            PairingOperation::Close,
+            Some(rendezvous_id),
+            server_protocol,
+            None,
+        )?;
+        self.send_pairing_request(self.http.delete(url).bearer_auth(token))
+            .await?;
+        Ok(())
+    }
+
+    /// The URL of a pairing route. The relay is at the root of the API, not
+    /// below `/networks/:id`. The call is refused before any request when the
+    /// server protocol is below 48 or the id has not the shape of an id.
+    fn pairing_url(
+        &self,
+        operation: PairingOperation,
+        rendezvous_id: Option<&str>,
+        server_protocol: Option<u32>,
+        after: Option<u64>,
+    ) -> Result<reqwest::Url, PairingCallError> {
+        if !operation.available(server_protocol) {
+            return Err(PairingCallError::Unavailable);
+        }
+        let path = operation.path(rendezvous_id)?;
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?
+            .extend(path.split('/').filter(|part| !part.is_empty()));
+        if let Some(after) = after {
+            url.query_pairs_mut()
+                .append_pair("after", &after.to_string());
+        }
+        Ok(url)
+    }
+
+    /// Sends one pairing request. The answer is the JSON body, or `None`
+    /// for an answer with no body (204).
+    async fn send_pairing_request(
+        &self,
+        builder: reqwest::RequestBuilder,
+    ) -> Result<Option<Value>, PairingCallError> {
+        let response =
+            reject_with_code(builder.send().await.map_err(GrappaClientError::from)?).await?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+        let body = response
+            .json::<Value>()
+            .await
+            .map_err(GrappaClientError::from)?;
+        Ok(Some(body))
     }
 
     /// The URL of a per-device route below `/networks/:network_id`. The call

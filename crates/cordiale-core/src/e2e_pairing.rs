@@ -36,7 +36,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroize;
 
-use crate::e2e_wire::decode_key;
+use crate::client::GrappaClientError;
+use crate::e2e_wire::{decode_key, WireError};
 
 /// The side of a rendezvous: the device that opened it or the one that joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -189,6 +190,39 @@ pub fn relay_error(status: u16, code: Option<&str>) -> PairingError {
         (413 | 422, _) => PairingError::Rejected,
         (429, _) => PairingError::RateLimited,
         (other, _) => PairingError::Unexpected(other),
+    }
+}
+
+/// Failure of a call to the pairing relay. No value holds a key, a link or
+/// a payload.
+#[derive(Debug)]
+pub enum PairingCallError {
+    /// The server protocol is below 48. No request went out.
+    Unavailable,
+    /// The payload is over a limit of the relay. No request went out.
+    TooLarge,
+    /// A rendezvous id or an answer has not the documented shape.
+    Bad(WireError),
+    /// The relay refused the call.
+    Relay(PairingError),
+    /// Transport, URL or any other client error.
+    Client(GrappaClientError),
+}
+
+impl From<GrappaClientError> for PairingCallError {
+    fn from(err: GrappaClientError) -> Self {
+        match err {
+            GrappaClientError::Rejected { status, code, .. } => {
+                Self::Relay(relay_error(status.as_u16(), code.as_deref()))
+            }
+            other => Self::Client(other),
+        }
+    }
+}
+
+impl From<WireError> for PairingCallError {
+    fn from(err: WireError) -> Self {
+        Self::Bad(err)
     }
 }
 
