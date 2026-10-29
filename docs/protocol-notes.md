@@ -1679,3 +1679,32 @@ riassembla e consegna messaggi interi.
   cresce con il numero di dispositivi, quindi non c'è un gruppo da ridurre. Un messaggio è
   rifiutato solo quando quel corpo non sta nei limiti (`PayloadTooLarge`, `TooManyLines`).
   Il ripiego serve quando il motore invierà a tutti i dispositivi (`bodies` con più voci).
+
+**Issue 455 (fetta 33 di 37 dell'ombrello 416): flusso X1 tra due dispositivi.**
+Il testo di Grappa §4g non era raggiungibile: i punti sotto sono un **formato
+candidato**, da verificare. Cambia solo `e2e_pairing_flow.rs`.
+
+- **Rotte.** `PairingOperation` in `e2e_protocol.rs`: `POST /e2e/pairings`, `/join`,
+  `POST` e `GET` `/messages` (con `?after=<seq>`, **ipotesi**) e `DELETE /e2e/pairings/:id`
+  (**ipotesi**, la chiusura). Versione minima 48; fuori da `/networks/:id`. In `client.rs`:
+  `create_pairing`, `join_pairing`, `post_pairing_message` (controlla `pairing_message_fits`
+  prima della chiamata), `fetch_pairing_messages`, `close_pairing`. Errori: `PairingCallError`.
+- **Sessione.** `route_e2e_pairing` in `session.rs` legge `e2e_pairing_message` e
+  `e2e_pairing_closed`; in `frames.rs` vanno allo stato di controllo E2E e mai a una riga di
+  chat. Lo stato è nella barra di stato (`e2e-pair-*`).
+- **Canale.** `vodozemac::ecies` con info `irc-e2e:v2:pair`: il joiner apre il canale verso la
+  chiave del link; il codice a due cifre è `CheckCode::to_digit(NoLeadingZero)`. Messaggi in
+  chiaro del canale (JSON, campo `t`): `hello`, `confirm` (chiavi pubbliche del joiner),
+  `grant` (master, certificato, lista). Il segreto del canale sta solo in memoria.
+- **Firma.** Il creatore firma e pubblica la lista **solo** dopo la conferma dei due
+  dispositivi (`confirmed_device`); prima mette la lista (`PUT`), poi invia il grant. Il joiner
+  controlla il grant (`apply_grant`), salva lista e certificato e fa `provision_device`, che
+  registra il dispositivo e carica il bundle pubblico. `provision_device` ora accetta un
+  dispositivo accoppiato senza il segreto della master (ha il certificato della master).
+- **Slot e pulizia.** Lo slot di `E2eStateStore` tiene un record senza chiavi (ruolo, id,
+  inizio). Si svuota a successo, annullamento, scadenza (300 s), errore e riavvio
+  (`take_stale_pairing`: il record trovato all'avvio è sempre vecchio; il rendezvous si chiude).
+- **UI.** Comandi `/e2e pair | join <link> | code <nn> | cancel`. Il link si mostra come testo
+  nella barra di stato; l'immagine QR non è inclusa (il dato è `PairingLink::url`; `qrcode` è
+  già una dipendenza di `cordiale-ui`). Il provisioning dell'identità all'avvio non è ancora
+  collegato all'app: il creatore deve avere già uno stato con la master.
