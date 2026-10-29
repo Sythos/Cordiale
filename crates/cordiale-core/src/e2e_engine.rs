@@ -1964,7 +1964,9 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
             // The client offers subprotocols, so the server must select one
-            // of them: "phoenix", as Grappa does.
+            // of them: "phoenix", as Grappa does. The tungstenite `Callback`
+            // trait sets the error type, so the closure cannot box it.
+            #[allow(clippy::result_large_err)]
             let select_phoenix =
                 |_request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
                     response.headers_mut().insert(
