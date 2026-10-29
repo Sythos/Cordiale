@@ -1669,10 +1669,11 @@ riassembla e consegna messaggi interi.
   `🔒<user>` (segno ⚠ e corsivo). Un 202 può diventare scartato; nessuno stato dice
   «consegnato». I motivi stanno in memoria: non sono salvati nella cronologia cifrata.
 - **Capacità E2E del peer.** `set_peer_capability(nick, false)` blocca il KEYREQ e
-  l'accodamento (`PeerNotCapable`); chiavi lette dal peer la mettono a vero. **La fonte del
-  segnale di capacità non esiste né in `CLIENT_PROTOCOL.md` né in irc-olm né in cicchetto**:
-  senza segnale un peer sconosciuto può ricevere un KEYREQ (primo contatto). Da
-  collegare quando Grappa pubblica il segnale.
+  l'accodamento (`PeerNotCapable`); chiavi lette dal peer o un suo messaggio E2E letto dal
+  motore (non una copia di un dispositivo proprio) la mettono a vero. **La fonte di un
+  segnale negativo (peer senza E2E) non esiste né in `CLIENT_PROTOCOL.md` né in irc-olm né
+  in cicchetto**: senza segnale un peer sconosciuto può ricevere un KEYREQ (primo contatto).
+  Il ramo `false` resta da collegare quando Grappa pubblica il segnale.
 - **Grappa 2456 (invio per gruppi di dispositivi più piccoli): rinviata.** Il motore
   invia un solo corpo per messaggio, a un solo dispositivo del peer: il limite di righe non
   cresce con il numero di dispositivi, quindi non c'è un gruppo da ridurre. Un messaggio è
