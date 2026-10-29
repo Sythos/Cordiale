@@ -256,6 +256,23 @@ impl E2eStateStore {
         self.set_session(&peer_device_key(network, nick, did), session)
     }
 
+    /// Forgets the session with one remote device, so the next message to it
+    /// starts a new session. A device without a session is not an error.
+    pub fn remove_peer_session(
+        &mut self,
+        network: &str,
+        nick: &str,
+        did: &str,
+    ) -> Result<(), E2eStoreError> {
+        let key = peer_device_key(network, nick, did);
+        if !self.data.sessions.contains_key(&key) {
+            return Ok(());
+        }
+        self.commit(|data| {
+            data.sessions.remove(&key);
+        })
+    }
+
     /// The replay state. It is empty when none was saved.
     pub fn replay(&self) -> ReplayState {
         self.data.replay.clone()
@@ -1030,6 +1047,28 @@ mod tests {
         assert_eq!(two.session_id(), second.session_id());
         assert!(store.peer_session("net", "bob", "d1").unwrap().is_none());
         assert_eq!(store.replay(), replay);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removing_a_session_leaves_the_other_device_alone() {
+        let dir = scratch_dir("session-removal");
+        let provider = fresh_key();
+        let account = Account::new();
+        let first = outbound_session(&account);
+        let second = outbound_session(&account);
+        let mut store = E2eStateStore::open(dir.join("state.bin"), &provider).expect("open");
+        store
+            .set_peer_session("net", "alice", "d1", &first)
+            .unwrap();
+        store
+            .set_peer_session("net", "alice", "d2", &second)
+            .unwrap();
+        store.remove_peer_session("net", "alice", "d1").unwrap();
+        assert!(store.peer_session("net", "alice", "d1").unwrap().is_none());
+        assert!(store.peer_session("net", "alice", "d2").unwrap().is_some());
+        // A device without a session is not an error.
+        store.remove_peer_session("net", "alice", "d1").unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 

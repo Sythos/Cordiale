@@ -1633,3 +1633,48 @@ commit e il motore di cicchetto (`cicchetto/src/lib/e2e/{wire,client,engine}.ts`
 voce), non a tutti; il motore non risponde a `listreq`, non applica `t:list` e non manda
 `listreq` quando vede un `lv` più alto; il motore non invia NACK; la `fallback` della chiave
 non è distinta dalla chiave monouso. Non provato contro un server o un bot reale.
+
+**Issue 454, passi 1 e 2: pacing finale, coda, NACK e motivi di scarto.** Fonti lette il
+2026-10-29: `CLIENT_PROTOCOL.md` §4f su `main` di `vjt/grappa-irc`, e irc-olm al commit
+`1606c85` (PR 4): `engine.py`, `reassembly.py`, `pacing.py`. Ogni costante di
+`e2e_pacing::md3_pacing` cita la sua fonte nel commento. Valori confermati: re-key 60 s
+(`REKEY_INTERVAL`), vita della coda 90 s (`OUTQ_TTL`), al più 16 testi in coda per nick
+(`OUTQ_MAX`), chiave monouso una al minuto per nick e 30 all'ora per connessione (§4f e
+`OTK_*`), KEYS una ogni 15 s per nick (§4f), KEYREQ una ogni 30 s per nick
+(`KEYREQ_RETRY`), memoria dei testi inviati 1800 s e 1200 voci, al più 2 invii per
+messaggio (`MAX_SENDS`). Il timeout di riassemblaggio è **60 s dall'ultimo frammento**
+(`Reassembler(timeout=60.0)`; §4f: «receivers wait 60 s from a message's LAST line»): il
+valore di 30 s usato prima non aveva fonte ed è sostituito. Gli altri limiti di
+riassemblaggio (32 KiB per mittente, 8 messaggi, 512 KiB in tutto) sono di Grappa, che
+riassembla e consegna messaggi interi.
+
+- **Casemapping.** `E2eEngine::set_casemapping` riceve il valore di `isupport_changed`
+  (`handle_isupport_changed`) e quello già noto all'apertura del motore; i limitatori lo
+  leggono a ogni decisione, anche quando il limite globale blocca.
+- **Coda.** `E2eEngine::send_or_queue` mette in coda il testo di un peer senza chiavi
+  (riga subito visibile, KEYREQ via `take_keys_wanted`); `flush_queue` lo invia quando le
+  chiavi arrivano; `expire_queue` scarta come `late` ciò che supera 90 s meno il margine di
+  2 s. Un 429 lascia il testo in coda; 422 `too_late` dà `late`; ogni altro rifiuto o errore
+  di invio dà `send_failed`. Il worker esegue questi passi a ogni evento del motore e ogni
+  15 s (`E2eTick`).
+- **NACK.** Solo il dispositivo a cui è andato il messaggio può dare un NACK; il nick deve
+  essere quello del destinatario; un messaggio parte al più due volte; un re-key per nick
+  al minuto. Il motore butta la sessione fallita, chiede di nuovo le chiavi e rimette il
+  testo in coda sulla stessa riga della cronologia. Una regola che blocca il reinvio dà
+  `send_failed`.
+- **Fine sessione.** `end_session` (chiamata a `Disconnected` e `Reconnecting`) svuota la
+  coda e porta ogni invio aperto, in coda o accettato, a `session_ended`.
+- **Motivi di scarto.** `late`, `send_failed` e `session_ended` si attaccano alla riga
+  della cronologia cifrata (`E2eEngine::dropped_reason`) e compaiono solo nella finestra
+  `🔒<user>` (segno ⚠ e corsivo). Un 202 può diventare scartato; nessuno stato dice
+  «consegnato». I motivi stanno in memoria: non sono salvati nella cronologia cifrata.
+- **Capacità E2E del peer.** `set_peer_capability(nick, false)` blocca il KEYREQ e
+  l'accodamento (`PeerNotCapable`); chiavi lette dal peer la mettono a vero. **La fonte del
+  segnale di capacità non esiste né in `CLIENT_PROTOCOL.md` né in irc-olm né in cicchetto**:
+  senza segnale un peer sconosciuto può ricevere un KEYREQ (primo contatto). Da
+  collegare quando Grappa pubblica il segnale.
+- **Grappa 2456 (invio per gruppi di dispositivi più piccoli): rinviata.** Il motore
+  invia un solo corpo per messaggio, a un solo dispositivo del peer: il limite di righe non
+  cresce con il numero di dispositivi, quindi non c'è un gruppo da ridurre. Un messaggio è
+  rifiutato solo quando quel corpo non sta nei limiti (`PayloadTooLarge`, `TooManyLines`).
+  Il ripiego serve quando il motore invierà a tutti i dispositivi (`bodies` con più voci).

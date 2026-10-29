@@ -2906,10 +2906,16 @@ pub(crate) fn handle_isupport_changed(
         persistence::log_line("isupport_changed rejected: unknown network");
         return;
     };
+    // The E2E pacers read the casemapping at every decision, so the engine
+    // gets each change of the snapshot.
+    let casemapping = event.state.casemapping;
     state
         .networks
         .isupport_by_network
         .insert(network.clone(), event.state);
+    if let Some(engine) = state.e2e.engine_mut(network) {
+        engine.set_casemapping(casemapping);
+    }
 }
 
 fn parse_umode_changed(

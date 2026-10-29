@@ -36,61 +36,114 @@ use crate::e2e_device_routes::required_msgid;
 use crate::e2e_wire::{as_object, required_str, WireError};
 use crate::isupport::CaseMapping;
 
-/// Minimum time between two KEYS answers to the same nickname.
+/// Minimum time between two KEYS answers to the same nickname. Source: Grappa
+/// section 4f ("per nick (case-folded), one answer per 15 s") and irc-olm
+/// `KEYS_INTERVAL = KEYREQ_RETRY / 2`.
 pub const KEYS_ANSWER_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Fake-lag bank of the relay. It is not a pacing interval of the client.
 pub const FAKE_LAG_BANK: Duration = Duration::from_secs(22);
 
-/// Minimum time between two KEYREQ to the same nickname (protocol 46).
+/// Minimum time between two KEYREQ to the same nickname.
+///
+/// Source: irc-olm `KEYREQ_RETRY = 30.0` and cicchetto `KEYREQ_RETRY_MS`
+/// (30 000), both "at most one KEYREQ per nick in this long".
 pub const KEYREQ_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Pacing values of the MD-3 pin of irc-olm (PR #4, merge `1606c85`).
+/// Final pacing and queue values of the MD-3 contract.
 ///
-/// Source of each value: the project notes on that pin. The text of the final
-/// contract was not readable when this module was named, so a value stays
-/// open to a check against it. Update path: change only this module and the
-/// tests that name a value.
+/// Sources, read on 2026-10-29:
+///
+/// - irc-olm PR 4 (merge `1606c85`), file `src/irc_olm/engine.py`.
+/// - irc-olm `src/irc_olm/reassembly.py` at the same commit.
+/// - Grappa `docs/CLIENT_PROTOCOL.md` section 4f, on `main`.
+///
+/// Each constant names its source. A value that only one source gives says
+/// so. Update path: change only this module and the tests that name a value.
 pub mod md3_pacing {
     use std::time::Duration;
 
     /// Minimum time between two re-key requests to the same nickname.
+    /// Source: irc-olm `REKEY_INTERVAL = 60.0` ("at most one re-key per nick
+    /// per minute") and cicchetto `REKEY_INTERVAL_MS`.
     pub const REKEY_INTERVAL: Duration = Duration::from_secs(60);
 
-    /// An outgoing message that waits longer than this is dropped.
+    /// An outgoing message that waits longer than this for keys is dropped.
+    /// Source: irc-olm `OUTQ_TTL = 90.0` and cicchetto `OUTQ_TTL_MS`.
     pub const OUTGOING_QUEUE_TTL: Duration = Duration::from_secs(90);
 
+    /// Most messages that wait for the keys of one nickname. A message past
+    /// the limit is refused. Source: irc-olm `OUTQ_MAX = 16` and cicchetto
+    /// `OUTQ_MAX`.
+    pub const OUTGOING_QUEUE_MAX: usize = 16;
+
     /// Minimum time between two one-time key requests to the same nickname.
+    /// Source: Grappa section 4f ("one-time keys at most once a minute") and
+    /// irc-olm `OTK_PER_NICK_INTERVAL = 60.0`.
     pub const ONE_TIME_KEY_INTERVAL: Duration = Duration::from_secs(60);
 
     /// Most one-time key requests to all nicknames in `ONE_TIME_KEY_WINDOW`.
+    /// Source: Grappa section 4f ("at most 30 answers with one-time keys an
+    /// hour") and irc-olm `OTK_GLOBAL_PER_HOUR = 30`.
     pub const ONE_TIME_KEY_GLOBAL_LIMIT: usize = 30;
 
-    /// Window of the global one-time key limit.
+    /// Window of the global one-time key limit. Source: the same text as
+    /// `ONE_TIME_KEY_GLOBAL_LIMIT` ("an hour").
     pub const ONE_TIME_KEY_WINDOW: Duration = Duration::from_secs(3600);
+
+    /// How long the sent text stays available for a re-send after a NACK.
+    /// Source: irc-olm `SENT_MEMORY = 1800.0` and cicchetto `SENT_MEMORY_MS`.
+    pub const SENT_MEMORY: Duration = Duration::from_secs(1800);
+
+    /// Most sent texts kept for a re-send. Source: irc-olm `SENT_MAX = 1200`.
+    pub const SENT_MAX: usize = 1200;
+
+    /// A message goes out at most this many times to a device: once, and
+    /// once more on a new session after a NACK. Source: irc-olm
+    /// `MAX_SENDS = 2` and cicchetto `MAX_SENDS`.
+    pub const MAX_SENDS: u8 = 2;
+
+    /// A fragmented message is dropped when no fragment arrived for this
+    /// long. The time runs from the LAST fragment. Source: irc-olm
+    /// `Reassembler(timeout=60.0)` and Grappa section 4f ("receivers wait 60 s
+    /// from a message's LAST line"). The other reassembly caps (32 KiB for
+    /// each sender, 8 messages for each sender, 512 KiB in total) belong to
+    /// Grappa: it reassembles and gives the client whole messages.
+    pub const REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(60);
 }
 
 /// Minimum time between two one-time key requests to the same nickname.
 pub const ONE_TIME_KEY_INTERVAL: Duration = md3_pacing::ONE_TIME_KEY_INTERVAL;
 
-/// A send must arrive at least this long before its deadline.
+/// A send must arrive at least this long before its deadline. Source: Grappa
+/// section 4f ("starts the message only if its last line can leave 2 s before
+/// that instant").
 pub const SEND_SAFETY_MARGIN: Duration = Duration::from_secs(2);
 
 /// Monotonic clock for production code. Tests pass a [`Duration`] directly.
 #[derive(Debug, Clone, Copy)]
 pub struct MonotonicClock {
     start: Instant,
+    /// Time added by a test that moves the clock forward.
+    offset: Duration,
 }
 
 impl MonotonicClock {
     pub fn new() -> Self {
         Self {
             start: Instant::now(),
+            offset: Duration::ZERO,
         }
     }
 
     pub fn now(&self) -> Duration {
-        self.start.elapsed()
+        self.start.elapsed() + self.offset
+    }
+
+    /// Moves the clock forward. Tests use it to inject time.
+    #[cfg(test)]
+    pub fn advance(&mut self, by: Duration) {
+        self.offset += by;
     }
 }
 
@@ -335,9 +388,8 @@ pub enum KeyReqRefusal {
 /// KEYREQ pacing: one request for each nickname in 30 seconds, and none while
 /// a KEYS answer of that nickname is in reassembly.
 ///
-/// The reassembly timeout is a parameter. It must equal the timeout that the
-/// server uses for a fragmented KEYS answer (Grappa, protocol 46). This
-/// repository has no copy of that rule, so the caller owns the value.
+/// The reassembly timeout is a parameter. The engine passes
+/// [`md3_pacing::REASSEMBLY_TIMEOUT`], the value of the final source.
 #[derive(Debug, Clone)]
 pub struct KeyReqPacer {
     limiter: IntervalLimiter,
@@ -729,12 +781,28 @@ impl OutgoingQueue {
         self.items.is_empty()
     }
 
+    /// How many queued messages are for `target`. The casemapping of the
+    /// network decides when two targets are the same nickname.
+    pub fn len_for(&self, target: &str, casemapping: CaseMapping) -> usize {
+        let wanted = nick_key(target, casemapping);
+        self.items
+            .iter()
+            .filter(|item| nick_key(&item.key.target, casemapping) == wanted)
+            .count()
+    }
+
     /// Queue a message. The deadline is `now` plus the queue lifetime.
-    pub fn push(&mut self, key: SendKey, now: Duration) {
+    /// Return `false` and queue nothing when the target already has
+    /// `OUTGOING_QUEUE_MAX` messages waiting.
+    pub fn push(&mut self, key: SendKey, casemapping: CaseMapping, now: Duration) -> bool {
+        if self.len_for(&key.target, casemapping) >= md3_pacing::OUTGOING_QUEUE_MAX {
+            return false;
+        }
         self.items.push_back(QueuedSend {
             key,
             deadline: now + md3_pacing::OUTGOING_QUEUE_TTL,
         });
+        true
     }
 
     /// Remove the messages that cannot arrive before their deadline minus the
@@ -758,8 +826,51 @@ impl OutgoingQueue {
     /// Take the messages that may go now, oldest first. The late ones are
     /// removed first and returned as drops.
     pub fn take_ready(&mut self, now: Duration) -> (Vec<QueuedSend>, Vec<SendDropped>) {
+        self.take_matching(now, |_| true)
+    }
+
+    /// Like [`OutgoingQueue::take_ready`], but take only the live messages
+    /// for which `ready` is true. The others stay queued in their order.
+    pub fn take_matching(
+        &mut self,
+        now: Duration,
+        mut ready: impl FnMut(&QueuedSend) -> bool,
+    ) -> (Vec<QueuedSend>, Vec<SendDropped>) {
         let late = self.expire(now);
-        (self.items.drain(..).collect(), late)
+        let mut taken = Vec::new();
+        let mut kept = VecDeque::new();
+        for item in self.items.drain(..) {
+            if ready(&item) {
+                taken.push(item);
+            } else {
+                kept.push_back(item);
+            }
+        }
+        self.items = kept;
+        (taken, late)
+    }
+
+    /// The targets that have a message in the queue, each one once.
+    pub fn targets(&self) -> Vec<String> {
+        let mut targets: Vec<String> = Vec::new();
+        for item in &self.items {
+            if !targets.contains(&item.key.target) {
+                targets.push(item.key.target.clone());
+            }
+        }
+        targets
+    }
+
+    /// Remove one message from the queue. Return `true` when it was there.
+    pub fn remove(&mut self, key: &SendKey) -> bool {
+        let before = self.items.len();
+        self.items.retain(|item| &item.key != key);
+        self.items.len() != before
+    }
+
+    /// Put a taken message back with its first deadline, at the front.
+    pub fn restore(&mut self, item: QueuedSend) {
+        self.items.push_front(item);
     }
 
     /// The session ended: empty the queue. Each message is a `session_ended`
@@ -1375,13 +1486,49 @@ mod tests {
         assert_eq!(md3_pacing::ONE_TIME_KEY_INTERVAL, secs(60));
         assert_eq!(md3_pacing::ONE_TIME_KEY_GLOBAL_LIMIT, 30);
         assert_eq!(md3_pacing::ONE_TIME_KEY_WINDOW, secs(3600));
+        assert_eq!(md3_pacing::OUTGOING_QUEUE_MAX, 16);
+        assert_eq!(md3_pacing::SENT_MEMORY, secs(1800));
+        assert_eq!(md3_pacing::SENT_MAX, 1200);
+        assert_eq!(md3_pacing::MAX_SENDS, 2);
+        assert_eq!(md3_pacing::REASSEMBLY_TIMEOUT, secs(60));
+        assert_eq!(KEYREQ_INTERVAL, secs(30));
+    }
+
+    #[test]
+    fn queue_limit_is_per_nick_and_follows_the_casemapping() {
+        let mut queue = OutgoingQueue::new();
+        for n in 0..md3_pacing::OUTGOING_QUEUE_MAX {
+            let key = SendKey::new("libera", "[bob]", &format!("m{n}"));
+            assert!(queue.push(key, RFC, secs(0)));
+        }
+        let full = SendKey::new("libera", "{bob}", "x");
+        assert!(!queue.push(full.clone(), RFC, secs(0)));
+        // Under ASCII "{bob}" is another nick and has room.
+        assert!(queue.push(full, ASCII, secs(0)));
+        assert!(queue.push(SendKey::new("libera", "carol", "c"), RFC, secs(0)));
+    }
+
+    #[test]
+    fn take_matching_keeps_the_others_in_order() {
+        let mut queue = OutgoingQueue::new();
+        queue.push(key("a"), RFC, secs(0));
+        queue.push(SendKey::new("libera", "carol", "b"), RFC, secs(1));
+        queue.push(key("c"), RFC, secs(2));
+        let (taken, late) = queue.take_matching(secs(10), |item| item.key.target == "bob");
+        assert!(late.is_empty());
+        assert_eq!(taken.len(), 2);
+        assert_eq!(taken[0].key, key("a"));
+        assert_eq!(taken[1].key, key("c"));
+        assert_eq!(queue.len(), 1);
+        queue.restore(taken[1].clone());
+        assert_eq!(queue.len(), 2);
     }
 
     #[test]
     fn queue_expires_a_message_as_late() {
         let mut queue = OutgoingQueue::new();
-        queue.push(key("a"), secs(0));
-        queue.push(key("b"), secs(50));
+        queue.push(key("a"), RFC, secs(0));
+        queue.push(key("b"), RFC, secs(50));
         // Deadline of "a" is 90 s; the 2 s margin makes 88 s too late.
         assert!(queue.expire(secs(87)).is_empty());
         let late = queue.expire(secs(88));
@@ -1394,8 +1541,8 @@ mod tests {
     #[test]
     fn queue_take_ready_returns_live_and_late_apart() {
         let mut queue = OutgoingQueue::new();
-        queue.push(key("a"), secs(0));
-        queue.push(key("b"), secs(60));
+        queue.push(key("a"), RFC, secs(0));
+        queue.push(key("b"), RFC, secs(60));
         let (ready, late) = queue.take_ready(secs(100));
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].key, key("b"));
@@ -1406,7 +1553,7 @@ mod tests {
     #[test]
     fn end_session_drops_queue_and_book_without_a_delivered_state() {
         let mut queue = OutgoingQueue::new();
-        queue.push(key("q"), secs(0));
+        queue.push(key("q"), RFC, secs(0));
         let ended = queue.end_session();
         assert_eq!(ended[0].reason, DropReason::SessionEnded);
         assert!(queue.is_empty());

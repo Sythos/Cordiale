@@ -245,6 +245,8 @@ enum WorkerCommand {
         track: Option<cordiale_core::radio::Track>,
     },
     ArchiveClose,
+    /// Timer of the E2E engines: queued texts expire or go out.
+    E2eTick,
     /// Backfills the next channel queued after a reconnect, one at a time.
     CatchUpNext,
     /// Flips one user mode of the network shown in the user-mode view.
@@ -1642,6 +1644,16 @@ async fn run_worker(
     radio.set_volume(f32::from(volume) / 100.0);
     let mut radio_state = RadioState::default();
     let mut session_events: Option<mpsc::UnboundedReceiver<SessionEvent>> = None;
+    let tick_tx = worker_self.clone();
+    tokio::spawn(async move {
+        let mut timer = tokio::time::interval(E2E_TICK);
+        loop {
+            timer.tick().await;
+            if tick_tx.send(WorkerCommand::E2eTick).is_err() {
+                return;
+            }
+        }
+    });
 
     loop {
         let next_event = async {
@@ -1898,6 +1910,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::RadioEvent(generation, event)) => {
                         handle_radio_event(&mut radio_state, &ui, generation, event);
+                    }
+                    Some(WorkerCommand::E2eTick) => {
+                        tick_e2e_engines(&mut state, &ui).await;
                     }
                     Some(WorkerCommand::RadioTrack { generation, track }) => {
                         if let Some(tuned) = radio_state
@@ -2606,6 +2621,7 @@ async fn run_worker(
                             "session disconnected: {reason}, retrying in {retry_in:?}"
                         ));
                         note_catch_up_anchors(&mut state);
+                        end_e2e_sessions(&mut state, &ui);
                         reset_query_session_readiness(&mut state);
                         state.conn.own_listener_ready.clear();
                         state.networks.supported_user_modes_by_network.clear();
@@ -2626,6 +2642,7 @@ async fn run_worker(
                             "session reconnecting: {reason}, retrying in {retry_in:?}"
                         ));
                         note_catch_up_anchors(&mut state);
+                        end_e2e_sessions(&mut state, &ui);
                         reset_query_session_readiness(&mut state);
                         state.conn.own_listener_ready.clear();
                         state.networks.supported_user_modes_by_network.clear();

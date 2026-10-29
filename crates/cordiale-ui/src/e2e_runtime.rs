@@ -18,10 +18,14 @@ use std::collections::BTreeSet;
 use cordiale_core::e2e_engine::{
     conversation_id, locked_label, route_for_window, E2eEngine, EngineError, SendRoute, OWN_DEVICE,
 };
+use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_protocol::E2eOperation;
 use cordiale_core::e2e_store::E2eMessage;
 use cordiale_core::phoenix::PhoenixMessage;
 use cordiale_core::session::route_e2e_message;
+
+/// How often the timers of the engines run: queued texts expire or go out.
+pub(crate) const E2E_TICK: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The engines of the session and the locked entries of the sidebar.
 #[derive(Default)]
@@ -86,7 +90,9 @@ pub(crate) fn is_locked_name(name: &str) -> bool {
 /// own text; every other failure gets the general one.
 pub(crate) fn e2e_send_error_kind(error: &EngineError) -> &'static str {
     match error {
-        EngineError::NotReady | EngineError::Paced(_) => "e2e-not-ready",
+        EngineError::NotReady | EngineError::Paced(_) | EngineError::PeerNotCapable => {
+            "e2e-not-ready"
+        }
         _ => "e2e-send-failed",
     }
 }
@@ -96,8 +102,16 @@ fn set_e2e_status(ui: &slint::Weak<AppWindow>, kind: &'static str) {
 }
 
 /// One sealed history row as a row of the locked window. The row keeps the
-/// encrypted mark.
-pub(crate) fn locked_row(message: &E2eMessage, own_nick: &str, peer: &str) -> RenderedMessage {
+/// encrypted mark. A row whose send was dropped (`late`, `send_failed` or
+/// `session_ended`) is marked with a warning sign and shown in italics: the
+/// text did not reach the peer, and nothing shows it as delivered. Only the
+/// locked window has this mark; a plain row never gets it.
+pub(crate) fn locked_row_with_drop(
+    message: &E2eMessage,
+    own_nick: &str,
+    peer: &str,
+    dropped: Option<DropReason>,
+) -> RenderedMessage {
     let nick = if message.sender_device == OWN_DEVICE {
         own_nick
     } else {
@@ -113,8 +127,12 @@ pub(crate) fn locked_row(message: &E2eMessage, own_nick: &str, peer: &str) -> Re
     RenderedMessage {
         timestamp,
         nick: Some(nick.to_string()),
-        text: message.text.clone(),
-        italic: false,
+        text: if dropped.is_some() {
+            format!("\u{26A0} {}", message.text)
+        } else {
+            message.text.clone()
+        },
+        italic: dropped.is_some(),
         message_id: None,
         server_time: message.sent_at.checked_mul(1000),
         presence_noise: false,
@@ -152,7 +170,11 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
         return false;
     }
     match E2eEngine::open_for_network(client.base_url(), account, network) {
-        Ok(engine) => {
+        Ok(mut engine) => {
+            // The ISUPPORT snapshot can come before the engine.
+            if let Some(isupport) = state.networks.isupport_by_network.get(network) {
+                engine.set_casemapping(isupport.casemapping);
+            }
             for peer in engine.history_peers() {
                 state.e2e.add_locked(network, &peer);
             }
@@ -239,6 +261,15 @@ async fn settle_engine(
     network: &str,
     mut engine: E2eEngine,
 ) {
+    if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
+        // Texts that wait for keys go out when the keys came, or end as a
+        // `late` or `send_failed` drop. The engine marks the rows.
+        let drops = engine.expire_queue();
+        let drops = [drops, engine.flush_queue(&client, &token, e2e_now()).await].concat();
+        if !drops.is_empty() {
+            set_e2e_status(ui, "e2e-send-failed");
+        }
+    }
     let wanted = engine.take_keys_wanted();
     if let (false, Some(client), Some(token)) = (
         wanted.is_empty(),
@@ -247,7 +278,7 @@ async fn settle_engine(
     ) {
         for nick in wanted {
             if let Err(error) = engine.request_keys(&client, &token, &nick).await {
-                if !matches!(error, EngineError::Paced(_)) {
+                if !matches!(error, EngineError::Paced(_) | EngineError::PeerNotCapable) {
                     persistence::log_line(&format!("e2e key request failed: {error:?}"));
                 }
             }
@@ -327,7 +358,10 @@ fn load_locked_rows(state: &mut WorkerState, network: &str, nick: &str) {
                 .history()
                 .messages(&conversation_id(network, nick))
                 .into_iter()
-                .map(|message| locked_row(message, &own_nick, nick))
+                .map(|message| {
+                    let dropped = engine.dropped_reason(&message.id);
+                    locked_row_with_drop(message, &own_nick, nick, dropped)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -494,7 +528,7 @@ pub(crate) async fn handle_send_locked(
         return;
     };
     let result = engine
-        .send_text(&client, &token, &nick, &body, e2e_now())
+        .send_or_queue(&client, &token, &nick, &body, e2e_now())
         .await;
     if let Err(error) = &result {
         // The log gets the kind of the failure, never the text.
@@ -502,4 +536,48 @@ pub(crate) async fn handle_send_locked(
         set_e2e_status(ui, e2e_send_error_kind(error));
     }
     settle_engine(state, ui, &network, engine).await;
+}
+
+/// The session stopped (a disconnect or a reconnect): every open send of
+/// every engine becomes a `session_ended` drop, and every queue is emptied.
+/// The locked window shows the dropped rows.
+pub(crate) fn end_e2e_sessions(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let mut networks: Vec<String> = state.e2e.engines.keys().cloned().collect();
+    networks.sort();
+    let mut any = false;
+    for network in &networks {
+        let Some(engine) = state.e2e.engines.get_mut(network) else {
+            continue;
+        };
+        any |= !engine.end_session().is_empty();
+        let changed = engine.take_changed_peers();
+        for nick in changed {
+            refresh_locked_view(state, ui, network, &nick);
+        }
+    }
+    if any {
+        set_e2e_status(ui, "e2e-send-failed");
+    }
+}
+
+/// Runs the timers of the engines: a text that waits too long for keys is a
+/// `late` drop, a queued text goes out when its keys came, and the keys are
+/// asked for again.
+pub(crate) async fn tick_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let mut networks: Vec<String> = state.e2e.engines.keys().cloned().collect();
+    networks.sort();
+    for network in networks {
+        if !state
+            .e2e
+            .engines
+            .get(&network)
+            .is_some_and(E2eEngine::has_queued_text)
+        {
+            continue;
+        }
+        let Some(engine) = state.e2e.engines.remove(&network) else {
+            continue;
+        };
+        settle_engine(state, ui, &network, engine).await;
+    }
 }
