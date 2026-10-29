@@ -39,17 +39,29 @@
 //!
 //! Own copies (S1): a row with `own` set is a copy of a message that another
 //! device of the same account sent. It is opened like any other row. Its
-//! plaintext is a [`CopyBody`] that names the peer, and the text goes to the
+//! inner message is a `copy` that names the peer, and the text goes to the
 //! conversation of that peer as an own row.
 //!
 //! The label of the locked query ([`locked_label`]) is for display only. A
 //! peer is pinned on its `did`; the nick is a routing hint.
 //!
-//! The JSON of the KEYS, `pkmsg` and `msg` payloads in [`KeysPayload`] and
-//! [`MessagePayload`] is a candidate: the fields are not read from the text of
-//! the protocol. A change stays in those two types.
+//! The payloads follow the wire v2 of irc-olm (MD-3) and of cicchetto:
+//!
+//! - KEYS: `{"v":2,"master":{…},"devices":[{"id":{…},"otk":{…}}]}`. The master
+//!   block holds the signed list. Each entry holds the id block of one device
+//!   and one key to start a session. See [`KeysPayload`].
+//! - `pkmsg`: `{"v":2,"id":{…},"master":{"ed25519","ver","cert"},"bodies":{…}}`.
+//! - `msg`: `{"v":2,"ck":<curve key>,"bodies":{…}}`.
+//!
+//! `bodies` maps the `did` of a recipient device to the Olm message in base64.
+//! The Olm plaintext is a compact JSON object [`Inner`]: `t` is the kind
+//! (`text` for chat text, `copy` for an own copy), `lv` is the version of the
+//! list of the sender, and a body of a `pkmsg` also holds `fb`, the binding of
+//! the two device keys. The engine reads `text` and `copy`. It does not act on
+//! a list (`list`, `listreq`) inside an Olm message: it keeps the session and
+//! stores no row.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -59,19 +71,23 @@ use vodozemac::olm::{Account, Message, OlmMessage, PreKeyMessage, Session, Sessi
 use vodozemac::Curve25519PublicKey;
 
 use crate::client::{GrappaClient, GrappaClientError};
-use crate::e2e_device::{E2eError, PeerDevice, VersionedDeviceCertificate};
+use crate::e2e_device::{verify_signature, E2eError, PeerDevice};
 use crate::e2e_device_routes::{ClaimRequest, InboxAckRequest, InboxRow, InboxVerb};
 use crate::e2e_pacing::{
     KeyReqPacer, KeyReqRefusal, MonotonicClock, SendBook, SendDropped, SendKey, SendResponse,
     SendStatus,
 };
-use crate::e2e_peer::{verify_peer_device, PeerBundle, ReplayState};
+use crate::e2e_peer::{
+    apply_peer_list, verify_certified_device, verify_peer_device, CertifiedBundle, PeerBundle,
+    ReplayState,
+};
 use crate::e2e_refusal::E2eRouteError;
 use crate::e2e_state::E2eStateStore;
 use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError, KeyringKeyProvider};
 use crate::e2e_trust::PeerTrust;
 use crate::e2e_wire::{
-    did_from_key_text, parse_payload, recipient_binding, WireError, INBOX_PAGE_MAX, WILDCARD,
+    bundle_key_signed_text, device_id_signed_text, did_from_key_text, is_did_shape, parse_payload,
+    recipient_binding, WireError, INBOX_PAGE_MAX, MAX_LIST_DEVICES, MAX_VERSION, WILDCARD,
 };
 use crate::isupport::CaseMapping;
 use crate::persistence::data_dir;
@@ -198,74 +214,263 @@ impl From<GrappaClientError> for EngineError {
     }
 }
 
-/// The payload of a KEYS row or of a claim answer: everything that
-/// [`verify_peer_device`] needs, and one one-time key when the server gave
-/// one. Candidate format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Reads `ver`, `lv` and the like: an integral JSON number from 1 to 2^31 - 1.
+/// A number such as `1.0` counts by its value. Booleans, strings, null and
+/// fractions are not versions.
+fn version_from_value(value: &Value) -> Option<u32> {
+    let Value::Number(number) = value else {
+        return None;
+    };
+    let whole = match number.as_u64() {
+        Some(whole) => whole,
+        None => {
+            let float = number.as_f64()?;
+            if float.fract() != 0.0 || float < 0.0 {
+                return None;
+            }
+            float as u64
+        }
+    };
+    u32::try_from(whole)
+        .ok()
+        .filter(|version| (1..=MAX_VERSION).contains(version))
+}
+
+fn de_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    version_from_value(&value).ok_or_else(|| serde::de::Error::custom("bad version"))
+}
+
+fn check_payload_version(version: u32) -> Result<(), WireError> {
+    if version == PAYLOAD_VERSION {
+        Ok(())
+    } else {
+        Err(WireError::BadVersion)
+    }
+}
+
+/// The id block of a device: its keys and its signature over its curve key
+/// and its master key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdBlock {
+    pub curve25519: String,
+    pub ed25519: String,
+    pub sig: String,
+}
+
+/// The signed device list in the master block of a KEYS payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MasterList {
+    #[serde(deserialize_with = "de_version")]
+    pub ver: u32,
+    pub devices: Vec<String>,
+}
+
+/// The master block of a KEYS payload: the master key, its device list and
+/// the signature of the list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MasterBlock {
+    pub ed25519: String,
+    pub list: MasterList,
+    pub sig: String,
+}
+
+/// The master block of a `pkmsg`: the master key and its certificate for the
+/// sending device, with the list version N that the certificate names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MasterRef {
+    pub ed25519: String,
+    #[serde(deserialize_with = "de_version")]
+    pub ver: u32,
+    pub cert: String,
+}
+
+/// A key to start a session, signed by the device. It is a one-time key or
+/// the fallback key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OneTimeKey {
+    pub key: String,
+    #[serde(default)]
+    pub fallback: bool,
+    pub sig: String,
+}
+
+/// One device in a KEYS payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeysEntry {
+    pub id: IdBlock,
+    pub otk: OneTimeKey,
+}
+
+/// The payload of a KEYS row or of a claim answer (wire v2): the master block
+/// with the signed list, and one entry for each device, 4 at most. A KEYS from
+/// the server describes the user, so the entries are the devices of the peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeysPayload {
     pub v: u32,
-    pub master: String,
-    pub list_version: u32,
-    pub list_keys: Vec<String>,
-    pub list_signature: String,
-    pub cert_version: u32,
-    pub cert_signature: String,
-    pub ed25519: String,
-    pub did: String,
-    pub curve25519: String,
-    pub curve_signature: String,
-    pub fb: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub one_time_key: Option<String>,
+    pub master: MasterBlock,
+    pub devices: Vec<KeysEntry>,
 }
 
 impl KeysPayload {
     pub fn parse(text: &str) -> Result<Self, WireError> {
         let value = parse_payload(text)?;
-        serde_json::from_value(value).map_err(|_| WireError::BadPayload)
+        let payload: Self = serde_json::from_value(value).map_err(|_| WireError::BadPayload)?;
+        check_payload_version(payload.v)?;
+        if payload.devices.len() > MAX_LIST_DEVICES {
+            return Err(WireError::BadDeviceCount);
+        }
+        Ok(payload)
     }
 }
 
-/// The payload of a `pkmsg` or `msg` request: the `fb` binding and the Olm
-/// message as base64. Candidate format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessagePayload {
+/// The payload of a `pkmsg` (wire v2): the id block and the master block of
+/// the sender, and the Olm message for each recipient device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreKeyPayload {
     pub v: u32,
-    pub fb: String,
-    pub ct: String,
+    pub id: IdBlock,
+    pub master: MasterRef,
+    pub bodies: BTreeMap<String, String>,
+}
+
+/// The payload of a `msg` (wire v2): the curve key of the sender and the Olm
+/// message for each recipient device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MsgPayload {
+    pub v: u32,
+    pub ck: String,
+    pub bodies: BTreeMap<String, String>,
+}
+
+/// The payload of a `pkmsg` or `msg` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessagePayload {
+    PreKey(PreKeyPayload),
+    Normal(MsgPayload),
 }
 
 impl MessagePayload {
-    pub fn parse(text: &str) -> Result<Self, WireError> {
+    /// Reads the payload of a row with the verb `verb`: `PkMsg` or `Msg`.
+    pub fn parse(verb: InboxVerb, text: &str) -> Result<Self, WireError> {
         let value = parse_payload(text)?;
-        serde_json::from_value(value).map_err(|_| WireError::BadPayload)
+        let payload = match verb {
+            InboxVerb::PkMsg => {
+                Self::PreKey(serde_json::from_value(value).map_err(|_| WireError::BadPayload)?)
+            }
+            InboxVerb::Msg => {
+                Self::Normal(serde_json::from_value(value).map_err(|_| WireError::BadPayload)?)
+            }
+            _ => return Err(WireError::BadVerb),
+        };
+        let version = match &payload {
+            Self::PreKey(payload) => payload.v,
+            Self::Normal(payload) => payload.v,
+        };
+        check_payload_version(version)?;
+        let bodies = payload.bodies();
+        if bodies.is_empty() || bodies.len() > MAX_LIST_DEVICES {
+            return Err(WireError::BadDeviceCount);
+        }
+        if !bodies.keys().all(|did| is_did_shape(did)) {
+            return Err(WireError::BadDid);
+        }
+        Ok(payload)
     }
 
+    /// The Olm message in base64 for each recipient `did`.
+    pub fn bodies(&self) -> &BTreeMap<String, String> {
+        match self {
+            Self::PreKey(payload) => &payload.bodies,
+            Self::Normal(payload) => &payload.bodies,
+        }
+    }
+
+    fn to_json(&self) -> String {
+        match self {
+            Self::PreKey(payload) => serde_json::to_string(payload),
+            Self::Normal(payload) => serde_json::to_string(payload),
+        }
+        .unwrap_or_default()
+    }
+}
+
+/// What an inner message says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InnerKind {
+    /// Chat text from a person: `{"t":"text","body":…}`.
+    Text { body: String },
+    /// A copy of the text that another device of the account sent to `peer`:
+    /// `{"t":"copy","peer":…,"body":…}`.
+    Copy { peer: String, body: String },
+    /// Any other kind: a list, a list request, a challenge, an unknown one.
+    /// The engine keeps the session and stores nothing.
+    Other,
+}
+
+/// The decrypted Olm plaintext: a JSON object with the kind `t`, the version
+/// `lv` of the list of the sender and, in a `pkmsg`, the binding `fb`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inner {
+    pub kind: InnerKind,
+    pub lv: Option<u32>,
+    pub fb: Option<String>,
+}
+
+impl Inner {
+    /// Reads the plaintext. `None` when it is not a JSON object with a string
+    /// `t`.
+    pub fn parse(plain: &[u8]) -> Option<Self> {
+        let text = std::str::from_utf8(plain).ok()?;
+        let value: Value = serde_json::from_str(text).ok()?;
+        let map = value.as_object()?;
+        let field = |name: &str| map.get(name).and_then(Value::as_str);
+        let kind = match map.get("t")?.as_str()? {
+            "text" => field("body").map_or(InnerKind::Other, |body| InnerKind::Text {
+                body: body.to_string(),
+            }),
+            "copy" => match (field("peer"), field("body")) {
+                (Some(peer), Some(body)) => InnerKind::Copy {
+                    peer: peer.to_string(),
+                    body: body.to_string(),
+                },
+                _ => InnerKind::Other,
+            },
+            _ => InnerKind::Other,
+        };
+        Some(Self {
+            kind,
+            lv: map.get("lv").and_then(version_from_value),
+            fb: field("fb").map(str::to_string),
+        })
+    }
+}
+
+/// The inner message that the engine writes.
+#[derive(Serialize)]
+struct InnerOut<'a> {
+    t: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer: Option<&'a str>,
+    body: &'a str,
+    lv: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fb: Option<&'a str>,
+}
+
+impl InnerOut<'_> {
     fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
 }
 
-/// The plaintext of a copy from another device of the same account: the peer
-/// of the conversation and the text. Candidate format, like the payloads
-/// above. The sender of copies is a later slice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CopyBody {
-    pub peer: String,
-    pub text: String,
-}
-
-impl CopyBody {
-    /// Reads the plaintext of a copy. A peer that is not a plain nick is
-    /// refused: the label of the locked query is never a peer.
-    pub fn parse(plain: &str) -> Option<Self> {
-        let body: Self = serde_json::from_str(plain).ok()?;
-        valid_peer(&body.peer).then_some(body)
-    }
-
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
-    }
+/// The inner message of a `pkmsg` body when its `fb` binds the two device
+/// keys, else `None`.
+fn bound_to(inner: Inner, expected_fb: &str) -> Option<Inner> {
+    (inner.fb.as_deref() == Some(expected_fb)).then_some(inner)
 }
 
 fn valid_peer(peer: &str) -> bool {
@@ -287,7 +492,8 @@ pub enum RowOutcome {
     /// The row cannot be read: bad payload, no verified device, no session or
     /// a failed decryption. The caller acknowledges it.
     Undecryptable,
-    /// A row that is not stored: a NACK.
+    /// A row that is not stored: a NACK, or a message of another kind than
+    /// text (a list or a list request). The session of such a message is kept.
     Ignored,
     /// The write to the history or the state failed. Do not acknowledge the
     /// row: it stays in the inbox for the next drain.
@@ -318,12 +524,23 @@ struct PeerEntry {
     one_time_key: Option<String>,
 }
 
-/// The decrypted text and the state to save after the history write.
+/// What this device writes about itself in a message: its id block, its
+/// master block and the version of its list.
+struct OwnWire {
+    id: IdBlock,
+    master: MasterRef,
+    lv: u32,
+}
+
+/// The decrypted inner message and the state to save after the history write.
 struct Decrypted {
-    text: String,
+    inner: Inner,
     identity: Option<Account>,
     session: Session,
     replay: Option<ReplayState>,
+    /// The device of a first message and the trust state that holds it. The
+    /// state is saved with the rest and the device is cached after that.
+    learned: Option<(PeerEntry, PeerTrust)>,
 }
 
 pub struct E2eEngine {
@@ -499,39 +716,62 @@ impl E2eEngine {
         std::mem::take(&mut self.keys_wanted)
     }
 
-    /// Reads a KEYS text into the engine: a KEYS row or a claim answer. The
-    /// device must pass [`verify_peer_device`]. The trust state is saved also
-    /// when the device is refused, because a newer list stays.
-    pub fn accept_keys(&mut self, nick: &str, keys: &str) -> Result<String, EngineError> {
+    /// Reads a KEYS text into the engine: a KEYS row or a claim answer. Each
+    /// device of the answer must pass [`verify_peer_device`] and carry a good
+    /// signature on its key. A device that is refused is skipped, the others
+    /// stay. Returns the `did` of the devices that were accepted, or the first
+    /// error when none was. The signed list is applied first, also when the
+    /// answer has no device. The trust state is saved also when every device
+    /// is refused, because a newer list stays.
+    pub fn accept_keys(&mut self, nick: &str, keys: &str) -> Result<Vec<String>, EngineError> {
         let payload = KeysPayload::parse(keys)?;
-        let certificate = VersionedDeviceCertificate {
-            first_list_version: payload.cert_version,
-            device_ed25519: payload.ed25519.clone(),
-            master_ed25519: payload.master.clone(),
-            signature: payload.cert_signature.clone(),
-        };
-        let bundle = PeerBundle {
-            master: &payload.master,
-            list_version: payload.list_version,
-            list_keys: &payload.list_keys,
-            list_signature: &payload.list_signature,
-            certificate: &certificate,
-            did: &payload.did,
-            curve25519: &payload.curve25519,
-            curve_signature: &payload.curve_signature,
-            fb: &payload.fb,
-        };
+        let master = &payload.master;
         let mut trust = self.state.trust();
-        let result = verify_peer_device(
+        let mut accepted = Vec::new();
+        let mut first_error = None;
+        // The list revokes the devices that it drops, with or without a
+        // device entry in the answer.
+        if let Err(err) = apply_peer_list(
             &mut trust,
             &self.network,
             nick,
-            &self.own_ed25519,
-            None,
-            &bundle,
-        );
+            &master.ed25519,
+            master.list.ver,
+            &master.list.devices,
+            &master.sig,
+        ) {
+            first_error = Some(err);
+        }
+        let mut seen = HashSet::new();
+        for entry in &payload.devices {
+            // The first entry of a device key counts.
+            if !seen.insert(entry.id.ed25519.as_str()) {
+                continue;
+            }
+            let bundle = PeerBundle {
+                master: &master.ed25519,
+                list_version: master.list.ver,
+                list_keys: &master.list.devices,
+                list_signature: &master.sig,
+                device_ed25519: &entry.id.ed25519,
+                curve25519: &entry.id.curve25519,
+                id_signature: &entry.id.sig,
+            };
+            let checked = verify_peer_device(&mut trust, &self.network, nick, None, &bundle)
+                .and_then(|device| {
+                    let text = bundle_key_signed_text(&entry.otk.key)?;
+                    verify_signature(&entry.id.ed25519, &entry.otk.sig, &text)?;
+                    Ok(device)
+                });
+            match checked {
+                Ok(device) => accepted.push((device, entry.otk.key.clone())),
+                Err(err) => {
+                    first_error.get_or_insert(err);
+                }
+            }
+        }
         self.state.set_trust(&trust)?;
-        // A newer list stays even when the device is refused: drop every
+        // A newer list stays even when a device is refused: drop every
         // cached device that the trust state now revokes.
         let revoked: Vec<String> = self
             .peers
@@ -543,18 +783,25 @@ impl E2eEngine {
             self.peers.remove(&did);
             self.revoked_dids.insert(did);
         }
-        let device = result?;
-        let did = device.did().to_string();
-        self.revoked_dids.remove(&did);
-        self.peers.insert(
-            did.clone(),
-            PeerEntry {
-                nick: nick.to_string(),
-                device,
-                one_time_key: payload.one_time_key.clone(),
-            },
-        );
-        Ok(did)
+        let mut dids = Vec::new();
+        for (device, one_time_key) in accepted {
+            let did = device.did().to_string();
+            self.revoked_dids.remove(&did);
+            self.peers.insert(
+                did.clone(),
+                PeerEntry {
+                    nick: nick.to_string(),
+                    device,
+                    one_time_key: Some(one_time_key),
+                },
+            );
+            dids.push(did);
+        }
+        match (dids.is_empty(), first_error) {
+            (false, _) => Ok(dids),
+            (true, Some(err)) => Err(err.into()),
+            (true, None) => Err(WireError::BadDeviceCount.into()),
+        }
     }
 
     /// Reads one inbox row. It never sends and never acknowledges: the
@@ -595,31 +842,37 @@ impl E2eEngine {
         {
             return RowOutcome::Undecryptable;
         }
-        let Some(mut decrypted) = self.decrypt_row(row, entry.as_ref(), &nick) else {
+        let Some(decrypted) = self.decrypt_row(row, entry.as_ref(), &nick) else {
             if entry.is_none() && !self.keys_wanted.contains(&nick) {
                 self.keys_wanted.push(nick);
             }
             return RowOutcome::Undecryptable;
         };
-        // A copy of an own device names its peer in the plaintext. A copy
-        // that does not read is acknowledged and not stored.
-        let (peer, row_id, sender_device, text) = if row.own {
-            let Some(body) = CopyBody::parse(&decrypted.text) else {
-                return RowOutcome::Undecryptable;
-            };
-            (
-                body.peer,
-                format!("{}:own:{}", self.network, row.id),
-                OWN_DEVICE.to_string(),
-                body.text,
-            )
-        } else {
-            (
+        // Text from a person goes to the conversation of the sender. A copy of
+        // an own device names its peer. Both must come in the right kind of
+        // row: a copy is an `own` row. A message that does not fit is
+        // acknowledged and not stored. A kind that is no text only moves the
+        // session on.
+        let (peer, row_id, sender_device, text) = match (&decrypted.inner.kind, row.own) {
+            (InnerKind::Text { body }, false) => (
                 nick.clone(),
                 format!("{}:in:{}", self.network, row.id),
                 row.from_did.clone(),
-                std::mem::take(&mut decrypted.text),
-            )
+                body.clone(),
+            ),
+            (InnerKind::Copy { peer, body }, true) if valid_peer(peer) => (
+                peer.clone(),
+                format!("{}:own:{}", self.network, row.id),
+                OWN_DEVICE.to_string(),
+                body.clone(),
+            ),
+            (InnerKind::Other, _) => {
+                return match self.save_state(&nick, &row.from_did, &decrypted) {
+                    Ok(()) => RowOutcome::Ignored,
+                    Err(_) => RowOutcome::StoreFailed,
+                };
+            }
+            _ => return RowOutcome::Undecryptable,
         };
         let conversation = conversation_id(&self.network, &peer);
         let stored = self
@@ -650,12 +903,17 @@ impl E2eEngine {
         RowOutcome::Stored
     }
 
+    /// Saves the trust state of a new device, then the session, the account
+    /// and the replay state, and caches the device.
     fn save_state(
         &mut self,
         nick: &str,
         did: &str,
         decrypted: &Decrypted,
     ) -> Result<(), E2eStoreError> {
+        if let Some((_, trust)) = &decrypted.learned {
+            self.state.set_trust(trust)?;
+        }
         self.state.set_inbound(
             &self.network,
             nick,
@@ -663,7 +921,13 @@ impl E2eEngine {
             &decrypted.session,
             decrypted.identity.as_ref(),
             decrypted.replay.as_ref(),
-        )
+        )?;
+        if let Some((entry, _)) = &decrypted.learned {
+            self.revoked_dids.remove(entry.device.did());
+            self.peers
+                .insert(entry.device.did().to_string(), entry.clone());
+        }
+        Ok(())
     }
 
     /// Decrypts one `pkmsg` or `msg` row. It changes no stored state.
@@ -673,22 +937,51 @@ impl E2eEngine {
         entry: Option<&PeerEntry>,
         nick: &str,
     ) -> Option<Decrypted> {
-        let payload = MessagePayload::parse(&row.payload).ok()?;
-        if let Some(entry) = entry {
-            let expected = recipient_binding(entry.device.ed25519(), &self.own_ed25519);
-            if payload.fb != expected {
-                return None;
-            }
-        }
-        match row.verb {
-            InboxVerb::PkMsg => {
-                let entry = entry?;
+        let payload = MessagePayload::parse(row.verb, &row.payload).ok()?;
+        // The body for this device. A message for other devices only is not
+        // for this one.
+        let body = payload.bodies().get(&self.own_did)?;
+        match &payload {
+            MessagePayload::PreKey(pre) => {
+                if did_from_key_text(&pre.id.ed25519).ok()? != row.from_did {
+                    return None;
+                }
+                // The message carries no list: the certificate of the master
+                // and the id block say who the sender is.
+                let mut trust = self.state.trust();
+                let device = verify_certified_device(
+                    &mut trust,
+                    &self.network,
+                    nick,
+                    &CertifiedBundle {
+                        master: &pre.master.ed25519,
+                        certificate_version: pre.master.ver,
+                        certificate_signature: &pre.master.cert,
+                        device_ed25519: &pre.id.ed25519,
+                        curve25519: &pre.id.curve25519,
+                        id_signature: &pre.id.sig,
+                    },
+                )
+                .ok()?;
+                // A device keeps its curve key.
+                if entry.is_some_and(|entry| entry.device.curve25519() != device.curve25519()) {
+                    return None;
+                }
+                let expected_fb = recipient_binding(device.ed25519(), &self.own_ed25519);
                 let mut replay = self.state.replay();
                 replay
                     .accept_first_message(&self.network, nick, &row.from_did, &row.msgid)
                     .ok()?;
-                let curve = Curve25519PublicKey::from_base64(entry.device.curve25519()).ok()?;
-                let message = PreKeyMessage::from_base64(&payload.ct).ok()?;
+                let curve = Curve25519PublicKey::from_base64(device.curve25519()).ok()?;
+                let message = PreKeyMessage::from_base64(body).ok()?;
+                let learned = Some((
+                    PeerEntry {
+                        nick: nick.to_string(),
+                        one_time_key: entry.and_then(|entry| entry.one_time_key.clone()),
+                        device,
+                    },
+                    trust,
+                ));
                 // Olm keeps sending pre-key messages until the peer answers.
                 // A message of the session that exists is opened with it.
                 if let Some(mut session) = self
@@ -698,12 +991,12 @@ impl E2eEngine {
                 {
                     if session.session_id() == message.session_id() {
                         let plain = session.decrypt(&OlmMessage::PreKey(message)).ok()?;
-                        let text = String::from_utf8(plain).ok()?;
                         return Some(Decrypted {
-                            text,
+                            inner: bound_to(Inner::parse(&plain)?, &expected_fb)?,
                             identity: None,
                             session,
                             replay: Some(replay),
+                            learned,
                         });
                     }
                 }
@@ -719,27 +1012,40 @@ impl E2eEngine {
                         &created.session.session_id(),
                     )
                     .ok()?;
-                let text = String::from_utf8(created.plaintext).ok()?;
+                // A message that is not bound to the key of the sender and to
+                // this device is dropped with its new session.
+                let inner = bound_to(Inner::parse(&created.plaintext)?, &expected_fb)?;
                 Some(Decrypted {
-                    text,
+                    inner,
                     identity: Some(identity),
                     session: created.session,
                     replay: Some(replay),
+                    learned,
                 })
             }
-            _ => {
+            MessagePayload::Normal(normal) => {
+                if entry.is_some_and(|entry| entry.device.curve25519() != normal.ck) {
+                    return None;
+                }
                 let mut session = self
                     .state
                     .peer_session(&self.network, nick, &row.from_did)
                     .ok()??;
-                let message = Message::from_base64(&payload.ct).ok()?;
+                let message = Message::from_base64(body).ok()?;
                 let plain = session.decrypt(&OlmMessage::Normal(message)).ok()?;
-                let text = String::from_utf8(plain).ok()?;
+                // The message moved the session on, so the session is saved
+                // also when the plaintext is not an inner message.
+                let inner = Inner::parse(&plain).unwrap_or(Inner {
+                    kind: InnerKind::Other,
+                    lv: None,
+                    fb: None,
+                });
                 Some(Decrypted {
-                    text,
+                    inner,
                     identity: None,
                     session,
                     replay: None,
+                    learned: None,
                 })
             }
         }
@@ -821,6 +1127,7 @@ impl E2eEngine {
     }
 
     /// Takes one key of the device `did` of `nick` and reads the KEYS answer.
+    /// Returns the `did` of the devices that the answer gave.
     pub async fn claim_keys(
         &mut self,
         client: &GrappaClient,
@@ -828,7 +1135,7 @@ impl E2eEngine {
         server_protocol: Option<u32>,
         nick: &str,
         did: &str,
-    ) -> Result<String, EngineError> {
+    ) -> Result<Vec<String>, EngineError> {
         let request = ClaimRequest::new(&self.own_did)?;
         let answer = client
             .claim_e2e_device_key(token, &self.network, did, server_protocol, &request)
@@ -866,6 +1173,39 @@ impl E2eEngine {
         }
     }
 
+    /// The id block, the master block and the list version that this device
+    /// writes in its messages. They come from the provisioning: a device
+    /// without a master key, a certificate or a signed list is not ready.
+    fn own_wire(&self, identity: &Account) -> Result<OwnWire, EngineError> {
+        let master = self.state.master_key()?.ok_or(EngineError::NotReady)?;
+        let master_ed25519 = master.identity_keys().ed25519.to_base64();
+        let certificate = self
+            .state
+            .device_certificate()
+            .ok_or(EngineError::NotReady)?;
+        let list = self.state.signed_list().ok_or(EngineError::NotReady)?;
+        if certificate.device_ed25519 != self.own_ed25519
+            || certificate.master_ed25519 != master_ed25519
+        {
+            return Err(EngineError::NotReady);
+        }
+        let curve25519 = identity.identity_keys().curve25519.to_base64();
+        let text = device_id_signed_text(&curve25519, &master_ed25519);
+        Ok(OwnWire {
+            id: IdBlock {
+                sig: identity.sign(text).to_base64(),
+                curve25519,
+                ed25519: self.own_ed25519.clone(),
+            },
+            master: MasterRef {
+                ed25519: master_ed25519,
+                ver: certificate.first_list_version,
+                cert: certificate.signature,
+            },
+            lv: list.version,
+        })
+    }
+
     /// The device of `nick` to send to: not revoked and ready, with a session
     /// first. The order of the devices does not decide; the `did` breaks a tie.
     fn pick_device(&self, nick: &str) -> Option<PeerEntry> {
@@ -901,11 +1241,12 @@ impl E2eEngine {
         }
         let entry = self.pick_device(nick).ok_or(EngineError::NotReady)?;
         let did = entry.device.did().to_string();
+        let identity = self.state.olm_identity()?.ok_or(EngineError::NotReady)?;
+        let own = self.own_wire(&identity)?;
         let mut session = match self.state.peer_session(&self.network, nick, &did)? {
             Some(session) => session,
             None => {
                 let one_time = entry.one_time_key.as_deref().ok_or(EngineError::NotReady)?;
-                let identity = self.state.olm_identity()?.ok_or(EngineError::NotReady)?;
                 let curve = Curve25519PublicKey::from_base64(entry.device.curve25519())
                     .map_err(|_| EngineError::EncryptionFailed)?;
                 let one_time = Curve25519PublicKey::from_base64(one_time)
@@ -915,17 +1256,43 @@ impl E2eEngine {
                     .map_err(|_| EngineError::EncryptionFailed)?
             }
         };
-        let (verb, ct) = match session.encrypt(text.as_bytes()) {
-            Ok(OlmMessage::PreKey(message)) => (E2eSendVerb::PkMsg, message.to_base64()),
-            Ok(OlmMessage::Normal(message)) => (E2eSendVerb::Msg, message.to_base64()),
-            Err(_) => return Err(EngineError::EncryptionFailed),
-        };
-        let payload = MessagePayload {
-            v: PAYLOAD_VERSION,
-            fb: recipient_binding(&self.own_ed25519, entry.device.ed25519()),
-            ct,
+        // A session that has not received a message writes pre-key messages.
+        // The inner message of a pre-key message holds `fb`, the binding of
+        // the two device keys.
+        let fb = (!session.has_received_message())
+            .then(|| recipient_binding(&self.own_ed25519, entry.device.ed25519()));
+        let inner = InnerOut {
+            t: "text",
+            peer: None,
+            body: text,
+            lv: own.lv,
+            fb: fb.as_deref(),
         }
         .to_json();
+        let message = session
+            .encrypt(inner.as_bytes())
+            .map_err(|_| EngineError::EncryptionFailed)?;
+        let (verb, payload) = match message {
+            OlmMessage::PreKey(message) => (
+                E2eSendVerb::PkMsg,
+                MessagePayload::PreKey(PreKeyPayload {
+                    v: PAYLOAD_VERSION,
+                    id: own.id,
+                    master: own.master,
+                    bodies: BTreeMap::from([(did.clone(), message.to_base64())]),
+                })
+                .to_json(),
+            ),
+            OlmMessage::Normal(message) => (
+                E2eSendVerb::Msg,
+                MessagePayload::Normal(MsgPayload {
+                    v: PAYLOAD_VERSION,
+                    ck: own.id.curve25519,
+                    bodies: BTreeMap::from([(did.clone(), message.to_base64())]),
+                })
+                .to_json(),
+            ),
+        };
         let request = E2eSendRequest::new(
             nick,
             verb,
@@ -982,8 +1349,8 @@ impl E2eEngine {
 mod tests {
     use super::*;
     use crate::e2e_device::{build_device_certificate, build_signed_list_signature};
+    use crate::e2e_manage::SignedList;
     use crate::e2e_store::E2eKeyProvider;
-    use crate::e2e_wire::bundle_key_signed_text;
     use crate::phoenix::PhoenixMessage;
     use crate::session::{route_e2e_message, spawn_session, SessionEvent};
     use serde_json::json;
@@ -1024,49 +1391,93 @@ mod tests {
         device.identity_keys().curve25519.to_base64()
     }
 
-    /// The KEYS text of `device`, listed by `master` in a list of `listed`
-    /// at `version`, for the user with the Ed25519 key `recipient`.
-    fn keys_payload(
+    /// A device with one one-time key.
+    fn fresh_device() -> Account {
+        let mut device = Account::new();
+        device.generate_one_time_keys(1);
+        device
+    }
+
+    /// The id block of `device`, signed for `master`.
+    fn id_block(device: &Account, master: &Account) -> IdBlock {
+        let text = device_id_signed_text(&curve(device), &ed(master));
+        IdBlock {
+            curve25519: curve(device),
+            ed25519: ed(device),
+            sig: device.sign(text).to_base64(),
+        }
+    }
+
+    /// The KEYS payload with the entry of `device`, listed by `master` in a
+    /// list of `listed` at `version`.
+    fn keys_struct(
         master: &Account,
         device: &Account,
         listed: &[String],
         version: u32,
-        recipient: &str,
-        with_one_time_key: bool,
-    ) -> String {
-        let device_ed = ed(device);
-        let certificate = build_device_certificate(version, &device_ed, &ed(master), |text| {
-            master.sign(text).to_base64()
-        })
-        .expect("certificate");
+    ) -> KeysPayload {
         let list_signature =
             build_signed_list_signature(version, listed, |text| master.sign(text).to_base64())
                 .expect("list");
-        let curve_text = bundle_key_signed_text(&curve(device)).expect("text");
-        let one_time_key = with_one_time_key.then(|| {
-            device
-                .one_time_keys()
-                .values()
-                .next()
-                .expect("one-time key")
-                .to_base64()
-        });
-        serde_json::to_string(&KeysPayload {
+        let one_time_key = device
+            .one_time_keys()
+            .values()
+            .next()
+            .expect("one-time key")
+            .to_base64();
+        let otk_text = bundle_key_signed_text(&one_time_key).expect("text");
+        let mut devices = listed.to_vec();
+        devices.sort();
+        KeysPayload {
             v: 2,
-            master: ed(master),
-            list_version: version,
-            list_keys: listed.to_vec(),
-            list_signature,
-            cert_version: version,
-            cert_signature: certificate.signature,
-            ed25519: device_ed.clone(),
-            did: did_from_key_text(&device_ed).expect("did"),
-            curve25519: curve(device),
-            curve_signature: device.sign(&curve_text).to_base64(),
-            fb: recipient_binding(&device_ed, recipient),
-            one_time_key,
+            master: MasterBlock {
+                ed25519: ed(master),
+                list: MasterList {
+                    ver: version,
+                    devices,
+                },
+                sig: list_signature,
+            },
+            devices: vec![KeysEntry {
+                id: id_block(device, master),
+                otk: OneTimeKey {
+                    key: one_time_key,
+                    fallback: false,
+                    sig: device.sign(&otk_text).to_base64(),
+                },
+            }],
+        }
+    }
+
+    fn keys_payload(master: &Account, device: &Account, listed: &[String], version: u32) -> String {
+        serde_json::to_string(&keys_struct(master, device, listed, version)).expect("json")
+    }
+
+    /// The `pkmsg` payload that `sender`, a device of `master`, sends to the
+    /// device `to_did`. `cert_version` is the N of its certificate.
+    fn pre_key_json(
+        master: &Account,
+        sender: &Account,
+        cert_version: u32,
+        to_did: &str,
+        message: &PreKeyMessage,
+    ) -> String {
+        let certificate =
+            build_device_certificate(cert_version, &ed(sender), &ed(master), |text| {
+                master.sign(text).to_base64()
+            })
+            .expect("certificate");
+        MessagePayload::PreKey(PreKeyPayload {
+            v: PAYLOAD_VERSION,
+            id: id_block(sender, master),
+            master: MasterRef {
+                ed25519: ed(master),
+                ver: cert_version,
+                cert: certificate.signature,
+            },
+            bodies: BTreeMap::from([(to_did.to_string(), message.to_base64())]),
         })
-        .expect("json")
+        .to_json()
     }
 
     /// One user with a master key and one device, as a test double.
@@ -1078,48 +1489,62 @@ mod tests {
 
     impl Ident {
         fn new(name: &str) -> Self {
-            let mut device = Account::new();
-            device.generate_one_time_keys(1);
             Self {
                 master: Account::new(),
-                device,
+                device: fresh_device(),
                 dir: scratch_dir(name),
             }
         }
 
+        /// The engine of this user, as the provisioning leaves it: the Olm
+        /// account, the master key, the list 1 and the certificate N = 1.
         fn engine(&self) -> E2eEngine {
             let mut state =
                 E2eStateStore::open(self.dir.join("state.bin"), &FixedKey([7; 32])).expect("state");
             state.set_account(&self.device).expect("account");
+            state.set_master_key(&self.master).expect("master");
+            let keys = vec![ed(&self.device)];
+            let signature =
+                build_signed_list_signature(1, &keys, |text| self.master.sign(text).to_base64())
+                    .expect("list");
+            state
+                .set_signed_list(&SignedList {
+                    version: 1,
+                    keys,
+                    signature,
+                })
+                .expect("signed list");
+            let certificate =
+                build_device_certificate(1, &ed(&self.device), &ed(&self.master), |text| {
+                    self.master.sign(text).to_base64()
+                })
+                .expect("certificate");
+            state
+                .set_device_certificate(&certificate)
+                .expect("certificate");
             let history = E2eHistoryStore::open(self.dir.join("history.bin"), &FixedKey([9; 32]))
                 .expect("history");
             E2eEngine::new(NET, state, history).expect("engine")
         }
 
-        /// The KEYS text of this user for the user with the Ed25519 key
-        /// `recipient`.
-        fn keys_for(&self, recipient: &str, with_one_time_key: bool) -> String {
-            keys_payload(
-                &self.master,
-                &self.device,
-                &[ed(&self.device)],
-                1,
-                recipient,
-                with_one_time_key,
-            )
+        /// The KEYS payload of this user.
+        fn keys_struct(&self) -> KeysPayload {
+            keys_struct(&self.master, &self.device, &[ed(&self.device)], 1)
         }
 
-        /// The KEYS text of a list 2 that holds `new_device` only. The
+        /// The KEYS text of this user.
+        fn keys(&self) -> String {
+            serde_json::to_string(&self.keys_struct()).expect("json")
+        }
+
+        /// The KEYS payload of a list 2 that holds `new_device` only. The
         /// device of this user is revoked.
-        fn newer_keys_for(&self, new_device: &Account, recipient: &str) -> String {
-            keys_payload(
-                &self.master,
-                new_device,
-                &[ed(new_device)],
-                2,
-                recipient,
-                false,
-            )
+        fn newer_keys_struct(&self, new_device: &Account) -> KeysPayload {
+            keys_struct(&self.master, new_device, &[ed(new_device)], 2)
+        }
+
+        fn newer_keys(&self, new_device: &Account) -> String {
+            serde_json::to_string(&self.newer_keys_struct(new_device)).expect("json")
         }
     }
 
@@ -1177,12 +1602,12 @@ mod tests {
         let alice_id = Ident::new("alice");
         let bob_id = Ident::new("bob");
         let mut alice = alice_id.engine();
-        let mut bob = bob_id.engine();
+        let bob = bob_id.engine();
+        // Only Alice reads the KEYS of Bob. Bob learns the device of Alice
+        // from the certificate in her first message.
         alice
-            .accept_keys("bob", &bob_id.keys_for(&ed(&alice_id.device), true))
+            .accept_keys("bob", &bob_id.keys())
             .expect("alice reads bob");
-        bob.accept_keys("alice", &alice_id.keys_for(&ed(&bob_id.device), false))
-            .expect("bob reads alice");
         let alice_did = did_from_key_text(&ed(&alice_id.device)).expect("did");
         let bob_did = did_from_key_text(&ed(&bob_id.device)).expect("did");
         assert_eq!(alice.own_did(), alice_did);
@@ -1250,6 +1675,30 @@ mod tests {
         let sent_rows = p.alice.history().messages(&conversation_id(NET, "bob"));
         assert_eq!(sent_rows.len(), 1);
         assert!(sent_rows[0].encrypted);
+    }
+
+    #[tokio::test]
+    async fn the_pkmsg_and_msg_payloads_follow_the_wire_v2_shape() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, first) = alice_sends(&mut p.alice, &server, "hello bob").await;
+        let payload: Value =
+            serde_json::from_str(first["payload"].as_str().expect("payload")).expect("json");
+        let object = payload.as_object().expect("object");
+        let mut names: Vec<&str> = object.keys().map(String::as_str).collect();
+        names.sort();
+        assert_eq!(names, ["bodies", "id", "master", "v"]);
+        assert_eq!(payload["v"], 2);
+        let id = payload["id"].as_object().expect("id block");
+        assert_eq!(id.len(), 3);
+        assert_eq!(payload["id"]["ed25519"], p.alice.own_ed25519.as_str());
+        assert_eq!(payload["master"]["ver"], 1);
+        assert!(payload["master"]["cert"].is_string());
+        let bodies = payload["bodies"].as_object().expect("bodies");
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies.contains_key(&p.bob_did));
+        assert!(bodies[&p.bob_did].is_string());
     }
 
     #[tokio::test]
@@ -1361,7 +1810,6 @@ mod tests {
         let history = E2eHistoryStore::open(bob_dir.join("history.bin"), &FixedKey([9; 32]))
             .expect("history");
         let mut broken = E2eEngine::new(NET, state, history).expect("engine");
-        broken.peers = p.bob.peers.clone();
         std::fs::remove_file(bob_dir.join("history.bin")).ok();
         std::fs::create_dir_all(bob_dir.join("history.bin")).expect("folder in place of file");
 
@@ -1421,23 +1869,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_list_that_revokes_a_cached_device_ends_the_send() {
+    async fn a_list_that_revokes_a_cached_device_moves_the_send_to_the_new_one() {
         let alice_id = Ident::new("alice-revoke");
         let bob_id = Ident::new("bob-revoke");
         let mut alice = alice_id.engine();
         alice
-            .accept_keys("bob", &bob_id.keys_for(&ed(&alice_id.device), true))
+            .accept_keys("bob", &bob_id.keys())
             .expect("alice reads bob");
         assert!(alice.is_ready("bob"));
         // Bob signs list 2 with a new device only. The old device is revoked.
-        let new_device = Account::new();
-        let newer = bob_id.newer_keys_for(&new_device, &ed(&alice_id.device));
-        // The new device has no one-time key and no session: not ready.
-        alice.accept_keys("bob", &newer).expect("newer list");
+        let new_device = fresh_device();
+        alice
+            .accept_keys("bob", &bob_id.newer_keys(&new_device))
+            .expect("newer list");
         let server = MockServer::start().await;
         mount_send(&server, "msgid1").await;
         let old_did = did_from_key_text(&ed(&bob_id.device)).expect("did");
+        let new_did = did_from_key_text(&ed(&new_device)).expect("did");
         assert!(!alice.peers.contains_key(&old_did));
+        let (_, body) = alice_sends(&mut alice, &server, "late").await;
+        assert_eq!(body["to"], new_did.as_str());
+    }
+
+    #[tokio::test]
+    async fn a_refused_newer_list_still_drops_the_revoked_device() {
+        let alice_id = Ident::new("alice-refused");
+        let bob_id = Ident::new("bob-refused");
+        let mut alice = alice_id.engine();
+        alice
+            .accept_keys("bob", &bob_id.keys())
+            .expect("alice reads bob");
+        assert!(alice.is_ready("bob"));
+        // List 2 revokes the old device, but its new device has a wrong id
+        // signature: the device is refused, the list stays.
+        let new_device = fresh_device();
+        let mut wrong = bob_id.newer_keys_struct(&new_device);
+        wrong.devices[0].id.sig = bob_id.master.sign("other text").to_base64();
+        let refused = alice.accept_keys("bob", &serde_json::to_string(&wrong).expect("json"));
+        assert!(matches!(
+            refused,
+            Err(EngineError::Device(E2eError::BadSignature))
+        ));
+        assert!(alice.peers.is_empty());
+        assert!(!alice.is_ready("bob"));
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
         let sent = alice
             .send_text(&GrappaClient::new(server.uri()), TOKEN, "bob", "late", 1)
             .await;
@@ -1450,25 +1926,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_newer_list_still_drops_the_revoked_device() {
-        let alice_id = Ident::new("alice-refused");
-        let bob_id = Ident::new("bob-refused");
+    async fn a_newer_list_without_devices_still_drops_the_revoked_device() {
+        let alice_id = Ident::new("alice-no-devices");
+        let bob_id = Ident::new("bob-no-devices");
         let mut alice = alice_id.engine();
         alice
-            .accept_keys("bob", &bob_id.keys_for(&ed(&alice_id.device), true))
+            .accept_keys("bob", &bob_id.keys())
             .expect("alice reads bob");
         assert!(alice.is_ready("bob"));
-        // List 2 revokes the old device, but its new device binds to a wrong
-        // recipient: the device is refused, the list stays.
-        let new_device = Account::new();
-        let wrong = bob_id.newer_keys_for(&new_device, &ed(&bob_id.master));
-        let refused = alice.accept_keys("bob", &wrong);
+        // List 2 drops the device of Bob. The answer has no device entry.
+        let mut empty = bob_id.newer_keys_struct(&fresh_device());
+        empty.devices.clear();
+        let empty = serde_json::to_string(&empty).expect("json");
+        let refused = alice.accept_keys("bob", &empty);
         assert!(matches!(
             refused,
-            Err(EngineError::Device(E2eError::RecipientMismatch))
+            Err(EngineError::Wire(WireError::BadDeviceCount))
         ));
         assert!(alice.peers.is_empty());
         assert!(!alice.is_ready("bob"));
+        // The revocation is in the saved trust state.
+        let bob_ed = ed(&bob_id.device);
+        assert!(alice.state.trust().is_revoked(NET, "bob", &bob_ed, None));
+        // As a KEYS row, the answer is acknowledged and gives no device.
+        let alice_did = alice.own_did().to_string();
+        let value = row(4, "bob", WILDCARD, &alice_did, "keys", "k2", &empty);
+        let keys_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        let outcome = alice.handle_row(&keys_row, 1);
+        assert_eq!(outcome, RowOutcome::Undecryptable);
+        assert!(outcome.acknowledge());
         let server = MockServer::start().await;
         mount_send(&server, "msgid1").await;
         let sent = alice
@@ -1489,10 +1975,8 @@ mod tests {
         let mut alice = alice_id.engine();
         let mut bob = bob_id.engine();
         alice
-            .accept_keys("bob", &bob_id.keys_for(&ed(&alice_id.device), true))
+            .accept_keys("bob", &bob_id.keys())
             .expect("alice reads bob");
-        bob.accept_keys("alice", &alice_id.keys_for(&ed(&bob_id.device), false))
-            .expect("bob reads alice");
         let alice_did = did_from_key_text(&ed(&alice_id.device)).expect("did");
         let bob_did = did_from_key_text(&ed(&bob_id.device)).expect("did");
         let server = MockServer::start().await;
@@ -1532,11 +2016,27 @@ mod tests {
         assert_eq!(alice.handle_row(&reply_row, 220), RowOutcome::Stored);
         let (_, second) = alice_sends(&mut alice, &server, "two").await;
         assert_eq!(second["verb"], "msg");
+        // A `msg` holds the curve key of the sender and a body for each
+        // device, and nothing else.
+        let msg: Value =
+            serde_json::from_str(second["payload"].as_str().expect("payload")).expect("json");
+        let mut names: Vec<&str> = msg
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort();
+        assert_eq!(names, ["bodies", "ck", "v"]);
+        assert_eq!(msg["ck"], curve(&alice_id.device).as_str());
+        assert!(msg["bodies"][&bob_did].is_string());
 
         // Bob learns a list that revokes the device of Alice, then restarts.
-        let new_device = Account::new();
-        let newer = alice_id.newer_keys_for(&new_device, &ed(&bob_id.device));
-        bob.accept_keys("alice", &newer).expect("newer list");
+        // The certificate of the first message put the device in his trust
+        // state, so the list revokes it though he never read a KEYS of Alice.
+        let new_device = fresh_device();
+        bob.accept_keys("alice", &alice_id.newer_keys(&new_device))
+            .expect("newer list");
         drop(bob);
         let mut bob = bob_id.engine();
         assert!(bob.peers.is_empty());
@@ -1559,31 +2059,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_send_goes_to_the_ready_device_of_a_peer_with_two_devices() {
+    async fn a_send_goes_to_a_ready_device_of_a_peer_with_two_devices() {
         let alice_id = Ident::new("alice-two");
         let bob_id = Ident::new("bob-two");
-        let other = Account::new();
-        let listed = vec![ed(&bob_id.device), ed(&other)];
-        let recipient = ed(&alice_id.device);
+        let other = fresh_device();
+        let broken = fresh_device();
+        let listed = vec![ed(&bob_id.device), ed(&other), ed(&broken)];
         let mut alice = alice_id.engine();
-        alice
-            .accept_keys(
-                "bob",
-                &keys_payload(&bob_id.master, &other, &listed, 1, &recipient, false),
-            )
-            .expect("device without key");
-        alice
-            .accept_keys(
-                "bob",
-                &keys_payload(&bob_id.master, &bob_id.device, &listed, 1, &recipient, true),
-            )
-            .expect("device with key");
+        for device in [&other, &bob_id.device] {
+            alice
+                .accept_keys("bob", &keys_payload(&bob_id.master, device, &listed, 1))
+                .expect("device with a key");
+        }
+        // The key of the third device has a wrong signature: the answer is
+        // refused and the device is not used.
+        let mut bad = keys_struct(&bob_id.master, &broken, &listed, 1);
+        bad.devices[0].otk.sig = broken.sign("other text").to_base64();
+        let refused = alice.accept_keys("bob", &serde_json::to_string(&bad).expect("json"));
+        assert!(matches!(
+            refused,
+            Err(EngineError::Device(E2eError::BadSignature))
+        ));
         assert_eq!(alice.peers.len(), 2);
         let server = MockServer::start().await;
         mount_send(&server, "msgid1").await;
         let (_, body) = alice_sends(&mut alice, &server, "hello").await;
-        let ready = did_from_key_text(&ed(&bob_id.device)).expect("did");
-        assert_eq!(body["to"], ready.as_str());
+        // Neither device has a session: the lowest `did` wins.
+        let lowest = [&other, &bob_id.device]
+            .iter()
+            .map(|device| did_from_key_text(&ed(device)).expect("did"))
+            .min()
+            .expect("two devices");
+        assert_eq!(body["to"], lowest.as_str());
     }
 
     #[test]
@@ -1596,15 +2103,7 @@ mod tests {
         std::fs::remove_file(&state_path).ok();
         std::fs::create_dir_all(&state_path).expect("folder in place of file");
         let alice_did = did_from_key_text(&ed(&alice_id.device)).expect("did");
-        let value = row(
-            3,
-            "bob",
-            WILDCARD,
-            &alice_did,
-            "keys",
-            "k1",
-            &bob_id.keys_for(&ed(&alice_id.device), true),
-        );
+        let value = row(3, "bob", WILDCARD, &alice_did, "keys", "k1", &bob_id.keys());
         let keys_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
         let outcome = alice.handle_row(&keys_row, 1);
         assert_eq!(outcome, RowOutcome::StoreFailed);
@@ -1772,6 +2271,181 @@ mod tests {
     }
 
     #[test]
+    fn versions_are_integral_numbers_in_range() {
+        for good in [json!(1), json!(1.0), json!(2147483647)] {
+            assert!(version_from_value(&good).is_some(), "{good}");
+        }
+        let bad = [
+            json!(0),
+            json!(-1),
+            json!(1.5),
+            json!(2147483648u64),
+            json!(true),
+            json!("1"),
+            json!(null),
+        ];
+        for value in bad {
+            assert_eq!(version_from_value(&value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn a_keys_payload_is_read_by_the_wire_v2_rules() {
+        let bob = Ident::new("keys-shape");
+        let good: Value = serde_json::from_str(&bob.keys()).expect("json");
+        // A version that is a whole number in float form counts.
+        let mut value = good.clone();
+        value["master"]["list"]["ver"] = json!(1.0);
+        let payload = KeysPayload::parse(&value.to_string()).expect("keys");
+        assert_eq!(payload.master.list.ver, 1);
+        assert_eq!(payload.devices.len(), 1);
+        assert_eq!(payload.devices[0].id.ed25519, ed(&bob.device));
+        // Fields that a later version adds are ignored.
+        let mut value = good.clone();
+        value["extra"] = json!(true);
+        value["devices"][0]["otk"]["extra"] = json!(1);
+        assert!(KeysPayload::parse(&value.to_string()).is_ok());
+        // The fallback flag is optional.
+        let mut value = good.clone();
+        value["devices"][0]["otk"]
+            .as_object_mut()
+            .expect("otk")
+            .remove("fallback");
+        assert!(KeysPayload::parse(&value.to_string()).is_ok());
+        // Another wire version, a missing key block and a bad `ver` are
+        // refused.
+        let mut value = good.clone();
+        value["v"] = json!(1);
+        assert_eq!(
+            KeysPayload::parse(&value.to_string()),
+            Err(WireError::BadVersion)
+        );
+        let mut value = good.clone();
+        value["devices"][0]
+            .as_object_mut()
+            .expect("entry")
+            .remove("otk");
+        assert_eq!(
+            KeysPayload::parse(&value.to_string()),
+            Err(WireError::BadPayload)
+        );
+        let mut value = good.clone();
+        value["master"]["list"]["ver"] = json!(0);
+        assert_eq!(
+            KeysPayload::parse(&value.to_string()),
+            Err(WireError::BadPayload)
+        );
+        // At most 4 devices.
+        let mut value = good;
+        let entry = value["devices"][0].clone();
+        value["devices"] = json!([entry, entry, entry, entry, entry]);
+        assert_eq!(
+            KeysPayload::parse(&value.to_string()),
+            Err(WireError::BadDeviceCount)
+        );
+    }
+
+    #[test]
+    fn a_message_payload_is_read_by_the_wire_v2_rules() {
+        let did = did_from_key_text(&ed(&Account::new())).expect("did");
+        let msg = |value: Value| MessagePayload::parse(InboxVerb::Msg, &value.to_string());
+        let good = json!({"v": 2, "ck": "k", "bodies": {(did.clone()): "body"}});
+        match msg(good.clone()).expect("msg") {
+            MessagePayload::Normal(payload) => {
+                assert_eq!(payload.ck, "k");
+                assert_eq!(payload.bodies.get(&did).map(String::as_str), Some("body"));
+            }
+            other => panic!("not a msg: {other:?}"),
+        }
+        let mut value = good.clone();
+        value["v"] = json!(1);
+        assert_eq!(msg(value), Err(WireError::BadVersion));
+        let mut value = good.clone();
+        value["bodies"] = json!({});
+        assert_eq!(msg(value), Err(WireError::BadDeviceCount));
+        let mut value = good.clone();
+        value["bodies"] = json!({"not a did": "body"});
+        assert_eq!(msg(value), Err(WireError::BadDid));
+        let mut value = good.clone();
+        value["bodies"] = json!({(did.clone()): 5});
+        assert_eq!(msg(value), Err(WireError::BadPayload));
+        // The old shape with a single `ct` is not a message of wire v2.
+        assert_eq!(
+            msg(json!({"v": 2, "fb": "x", "ct": "y"})),
+            Err(WireError::BadPayload)
+        );
+        // A `pkmsg` needs the id block and the master block.
+        assert_eq!(
+            MessagePayload::parse(InboxVerb::PkMsg, &good.to_string()),
+            Err(WireError::BadPayload)
+        );
+        assert_eq!(
+            MessagePayload::parse(InboxVerb::Keys, &good.to_string()),
+            Err(WireError::BadVerb)
+        );
+    }
+
+    #[test]
+    fn the_inner_message_has_a_kind_a_list_version_and_a_binding() {
+        let text = InnerOut {
+            t: "text",
+            peer: None,
+            body: "héllo",
+            lv: 3,
+            fb: Some("FB"),
+        }
+        .to_json();
+        assert_eq!(text, r#"{"t":"text","body":"héllo","lv":3,"fb":"FB"}"#);
+        let inner = Inner::parse(text.as_bytes()).expect("inner");
+        assert_eq!(
+            inner.kind,
+            InnerKind::Text {
+                body: "héllo".to_string()
+            }
+        );
+        assert_eq!(inner.lv, Some(3));
+        assert_eq!(inner.fb.as_deref(), Some("FB"));
+
+        let copy = InnerOut {
+            t: "copy",
+            peer: Some("carol"),
+            body: "hi",
+            lv: 1,
+            fb: None,
+        }
+        .to_json();
+        assert_eq!(copy, r#"{"t":"copy","peer":"carol","body":"hi","lv":1}"#);
+        let inner = Inner::parse(copy.as_bytes()).expect("inner");
+        assert_eq!(
+            inner.kind,
+            InnerKind::Copy {
+                peer: "carol".to_string(),
+                body: "hi".to_string()
+            }
+        );
+        assert_eq!(inner.fb, None);
+
+        // Other kinds and incomplete texts are not chat text.
+        for plain in [
+            r#"{"t":"list","lv":2}"#,
+            r#"{"t":"listreq","lv":2}"#,
+            r#"{"t":"text"}"#,
+            r#"{"t":"copy","peer":"x"}"#,
+            r#"{"t":"chal","nonce":"n"}"#,
+        ] {
+            let inner = Inner::parse(plain.as_bytes()).expect("inner");
+            assert_eq!(inner.kind, InnerKind::Other, "{plain}");
+        }
+        // Not an object with a string `t`.
+        for plain in ["not json", "[]", r#"{"body":"x"}"#, r#"{"t":1}"#] {
+            assert_eq!(Inner::parse(plain.as_bytes()), None, "{plain}");
+        }
+        // A bad `lv` is no version.
+        let inner = Inner::parse(br#"{"t":"text","body":"x","lv":0}"#).expect("inner");
+        assert_eq!(inner.lv, None);
+    }
+
+    #[test]
     fn a_peer_without_a_verified_device_is_not_ready() {
         let id = Ident::new("solo");
         let engine = id.engine();
@@ -1792,14 +2466,12 @@ mod tests {
         // Four keys: one for a first peer and one for each copy.
         bob_id.device.generate_one_time_keys(3);
         let mut bob = bob_id.engine();
-        let second = Account::new();
+        let second = fresh_device();
         let keys = keys_payload(
             &bob_id.master,
             &second,
             &[ed(&bob_id.device), ed(&second)],
             1,
-            &ed(&bob_id.device),
-            false,
         );
         bob.accept_keys("bob", &keys)
             .expect("bob reads the second device");
@@ -1812,10 +2484,11 @@ mod tests {
         }
     }
 
-    /// An `own` inbox row: the second device sends the plaintext `plain` to
-    /// Bob as a pre-key message. It uses a one-time key of Bob other than
+    /// An inbox row from the second device: it sends the plaintext `plain` to
+    /// Bob as a pre-key message, with the certificate of the master. `own`
+    /// marks the row as a copy. It uses a one-time key of Bob other than
     /// `used`; the row `id` picks the key.
-    fn copy_row_raw(s: &Siblings, id: u64, msgid: &str, used: &str, plain: &str) -> Value {
+    fn second_row(s: &Siblings, id: u64, msgid: &str, used: &str, plain: &str, own: bool) -> Value {
         // Each row id takes another key, because a key opens one session.
         let mut free: Vec<Curve25519PublicKey> = s
             .bob_id
@@ -1836,12 +2509,7 @@ mod tests {
         else {
             panic!("the first message is a pre-key message");
         };
-        let payload = MessagePayload {
-            v: PAYLOAD_VERSION,
-            fb: recipient_binding(&ed(&s.second), &ed(&s.bob_id.device)),
-            ct: message.to_base64(),
-        }
-        .to_json();
+        let payload = pre_key_json(&s.bob_id.master, &s.second, 1, s.bob.own_did(), &message);
         let mut value = row(
             id,
             "bob",
@@ -1851,17 +2519,32 @@ mod tests {
             msgid,
             &payload,
         );
-        value["own"] = json!(true);
+        if own {
+            value["own"] = json!(true);
+        }
         value
     }
 
-    fn copy_row(s: &Siblings, id: u64, msgid: &str, peer: &str, text: &str, used: &str) -> Value {
-        let plain = CopyBody {
-            peer: peer.to_string(),
-            text: text.to_string(),
+    /// The inner message of a copy of `text` to `peer`, bound to Bob.
+    fn copy_plain(peer: &str, text: &str, fb: Option<&str>) -> String {
+        InnerOut {
+            t: "copy",
+            peer: Some(peer),
+            body: text,
+            lv: 1,
+            fb,
         }
-        .to_json();
-        copy_row_raw(s, id, msgid, used, &plain)
+        .to_json()
+    }
+
+    /// The `fb` that the second device writes for Bob.
+    fn second_fb(s: &Siblings) -> String {
+        recipient_binding(&ed(&s.second), &ed(&s.bob_id.device))
+    }
+
+    fn copy_row(s: &Siblings, id: u64, msgid: &str, peer: &str, text: &str, used: &str) -> Value {
+        let plain = copy_plain(peer, text, Some(&second_fb(s)));
+        second_row(s, id, msgid, used, &plain, true)
     }
 
     #[test]
@@ -1891,10 +2574,34 @@ mod tests {
     fn a_copy_without_a_valid_peer_is_acknowledged_and_not_stored() {
         let mut s = siblings();
         let locked = locked_label("carol");
+        let fb = second_fb(&s);
+        let wrong_fb = recipient_binding(&ed(&s.second), &ed(&Account::new()));
+        let no_fb = copy_plain("carol", "no binding", None);
+        let bad_fb = copy_plain("carol", "wrong binding", Some(&wrong_fb));
+        // A text is not a copy, and a copy is not a text from a person.
+        let text = InnerOut {
+            t: "text",
+            peer: None,
+            body: "text in a copy row",
+            lv: 1,
+            fb: Some(&fb),
+        }
+        .to_json();
         let cases = [
-            copy_row_raw(&s, 4, "msgid3", "", "not json"),
+            second_row(&s, 4, "msgid3", "", "not json", true),
             copy_row(&s, 5, "msgid4", &locked, "labelled peer", ""),
             copy_row(&s, 6, "msgid5", "", "empty peer", ""),
+            second_row(&s, 7, "msgid6", "", &no_fb, true),
+            second_row(&s, 8, "msgid7", "", &bad_fb, true),
+            second_row(&s, 9, "msgid8", "", &text, true),
+            second_row(
+                &s,
+                10,
+                "msgid9",
+                "",
+                &copy_plain("carol", "copy in a peer row", Some(&fb)),
+                false,
+            ),
         ];
         for value in cases {
             let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
@@ -1903,6 +2610,49 @@ mod tests {
             assert!(outcome.acknowledge());
         }
         assert!(s.bob.history().conversation_ids().is_empty());
+    }
+
+    #[test]
+    fn an_engine_message_keeps_the_session_and_stores_nothing() {
+        let mut s = siblings();
+        let fb = second_fb(&s);
+        let request = format!(r#"{{"t":"listreq","lv":1,"fb":"{fb}"}}"#);
+        let value = second_row(&s, 3, "msgid2", "", &request, false);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        let outcome = s.bob.handle_row(&item, 80);
+        assert_eq!(outcome, RowOutcome::Ignored);
+        assert!(outcome.acknowledge());
+        assert!(s.bob.history().conversation_ids().is_empty());
+        assert!(s.bob.take_changed_peers().is_empty());
+        // The session is saved: the second device has one with Bob now.
+        assert!(s
+            .bob
+            .state
+            .peer_session(NET, "bob", &s.second_did)
+            .expect("session")
+            .is_some());
+    }
+
+    #[test]
+    fn text_from_a_person_goes_to_the_conversation_of_the_sender() {
+        let mut s = siblings();
+        let fb = second_fb(&s);
+        let plain = InnerOut {
+            t: "text",
+            peer: None,
+            body: "hello from the other device",
+            lv: 1,
+            fb: Some(&fb),
+        }
+        .to_json();
+        let value = second_row(&s, 3, "msgid2", "", &plain, false);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(s.bob.handle_row(&item, 90), RowOutcome::Stored);
+        let rows = s.bob.history().messages(&conversation_id(NET, "bob"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "hello from the other device");
+        assert_eq!(rows[0].sender_device, s.second_did);
+        assert!(rows[0].encrypted);
     }
 
     #[test]
@@ -1927,16 +2677,18 @@ mod tests {
         let alice_id = Ident::new("alice-ws");
         let mut alice = alice_id.engine();
         let mut s = siblings();
-        let bob_keys = s.bob_id.keys_for(&ed(&alice_id.device), true);
+        let bob_keys = s.bob_id.keys();
         let used = KeysPayload::parse(&bob_keys)
             .expect("keys")
-            .one_time_key
-            .expect("one-time key");
+            .devices
+            .remove(0)
+            .otk
+            .key;
         alice
             .accept_keys("bob", &bob_keys)
             .expect("alice reads bob");
         s.bob
-            .accept_keys("alice", &alice_id.keys_for(&ed(&s.bob_id.device), false))
+            .accept_keys("alice", &alice_id.keys())
             .expect("bob reads alice");
         let alice_did = alice.own_did().to_string();
         let bob_did = s.bob.own_did().to_string();

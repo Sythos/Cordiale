@@ -285,7 +285,8 @@ fn integral_decimal(text: &str) -> Option<u64> {
     scaled.parse().ok()
 }
 
-/// Text the master key signs to certify a device id block.
+/// Text a device signs with its own key to vouch for its id block: its curve
+/// key and its master key.
 pub fn device_id_signed_text(curve25519_key: &str, master_ed25519_key: &str) -> String {
     format!("irc-e2e:v2:id:{curve25519_key}:{master_ed25519_key}")
 }

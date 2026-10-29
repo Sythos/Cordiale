@@ -296,6 +296,11 @@ impl ListState {
         Ok(decision)
     }
 
+    /// The version of the stored list, or 0 when none is stored.
+    pub fn version(&self) -> u32 {
+        self.stored.as_ref().map_or(0, |(version, _)| *version)
+    }
+
     pub fn keys(&self) -> &[String] {
         match &self.stored {
             Some((_, keys)) => keys.as_slice(),

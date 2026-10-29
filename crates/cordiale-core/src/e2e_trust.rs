@@ -68,6 +68,10 @@ struct PeerRecord {
     /// order. The list was refused. A valid list clears the mark.
     #[serde(default)]
     needs_new_list: bool,
+    /// Device Ed25519 key to the version N of its certificate, for devices
+    /// that a first message certified and no stored list holds yet.
+    #[serde(default)]
+    certified: BTreeMap<String, u32>,
 }
 
 impl PeerRecord {
@@ -80,6 +84,7 @@ impl PeerRecord {
             revoked: BTreeSet::new(),
             revoked_curves: BTreeSet::new(),
             needs_new_list: false,
+            certified: BTreeMap::new(),
         }
     }
 
@@ -220,12 +225,26 @@ impl PeerTrust {
         let decision = record.list.apply(version, keys)?;
         record.needs_new_list = false;
         if decision == ListDecision::Replace {
-            for device in previous.iter().filter(|device| !keys.contains(device)) {
-                record.revoked.insert(device.clone());
-                if let Some(curve) = record.curves.get(device) {
+            // A certificate is the word of the master that list N held the
+            // device. A list at N or newer that lacks it drops the device.
+            let passed = record
+                .certified
+                .iter()
+                .filter(|(device, n)| **n <= version && !keys.contains(*device))
+                .map(|(device, _)| device.clone());
+            let dropped: Vec<String> = previous
+                .iter()
+                .filter(|device| !keys.contains(device))
+                .cloned()
+                .chain(passed)
+                .collect();
+            for device in dropped {
+                if let Some(curve) = record.curves.get(&device) {
                     record.revoked_curves.insert(curve.clone());
                 }
+                record.revoked.insert(device);
             }
+            record.certified.retain(|_, n| *n > version);
         }
         self.peers.insert(key, record);
         Ok(decision)
@@ -255,6 +274,27 @@ impl PeerTrust {
             }
             None => false,
         })
+    }
+
+    /// Records that a certificate of the master named the device at the list
+    /// version `n`, when no stored list holds the device. A later list that
+    /// reaches `n` without the device revokes it. Returns false for an
+    /// unknown peer.
+    pub fn record_certified(&mut self, network: &str, nick: &str, ed25519: &str, n: u32) -> bool {
+        match self.peers.get_mut(&peer_key(network, nick)) {
+            Some(record) => {
+                record.certified.insert(ed25519.to_string(), n);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The version of the stored list of a peer, or 0 when none is stored.
+    pub fn list_version(&self, network: &str, nick: &str) -> u32 {
+        self.peers
+            .get(&peer_key(network, nick))
+            .map_or(0, |record| record.list.version())
     }
 
     /// True when the last list of the peer verified only in the old raw byte
