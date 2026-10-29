@@ -54,7 +54,8 @@ pub const KEYREQ_INTERVAL: Duration = Duration::from_secs(30);
 ///
 /// Sources, read on 2026-10-29:
 ///
-/// - irc-olm PR 4 (merge `1606c85`), file `src/irc_olm/engine.py`.
+/// - irc-olm is the public repository `vjt/irc-olm`. Its PR 4 (merge
+///   `1606c85`), file `src/irc_olm/engine.py`.
 /// - irc-olm `src/irc_olm/reassembly.py` at the same commit.
 /// - Grappa `docs/CLIENT_PROTOCOL.md` section 4f, on `main`.
 ///

@@ -45,6 +45,8 @@
 //! The label of the locked query ([`locked_label`]) is for display only. A
 //! peer is pinned on its `did`; the nick is a routing hint.
 //!
+//! irc-olm is the public repository `vjt/irc-olm`.
+//!
 //! The payloads follow the wire v2 of irc-olm (MD-3) and of cicchetto:
 //!
 //! - KEYS: `{"v":2,"master":{…},"devices":[{"id":{…},"otk":{…}}]}`. The master
