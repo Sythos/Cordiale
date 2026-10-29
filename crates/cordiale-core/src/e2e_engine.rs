@@ -76,6 +76,9 @@ const PAYLOAD_VERSION: u32 = 2;
 /// the real value; this is the value of the pacer until it is confirmed.
 const KEYS_REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `sender_device` of own rows; this history is local to one device.
+const OWN_DEVICE: &str = "own";
+
 /// The display label of the locked query of `nick`. Use it for a window
 /// name only: never as a nick, an API value or a wire field.
 pub fn locked_label(nick: &str) -> String {
@@ -449,14 +452,14 @@ impl E2eEngine {
             .as_ref()
             .map_or(row.from.as_str(), |entry| entry.nick.as_str())
             .to_string();
-        let Some(decrypted) = self.decrypt_row(row, entry.as_ref(), &nick) else {
+        let Some(mut decrypted) = self.decrypt_row(row, entry.as_ref(), &nick) else {
             if entry.is_none() && !self.keys_wanted.contains(&nick) {
                 self.keys_wanted.push(nick);
             }
             return RowOutcome::Undecryptable;
         };
         let conversation = conversation_id(&self.network, &nick);
-        let row_id = format!("{}:{}:{}", self.network, self.own_did, row.id);
+        let row_id = format!("{}:{}:{}", self.network, row.to_did, row.id);
         let stored = self
             .history
             .messages(&conversation)
@@ -468,7 +471,7 @@ impl E2eEngine {
                 conversation_id: conversation,
                 sender_device: row.from_did.clone(),
                 sent_at: now,
-                text: decrypted.text,
+                text: std::mem::take(&mut decrypted.text),
                 encrypted: true,
             };
             if self.history.append(message).is_err() {
@@ -782,9 +785,9 @@ impl E2eEngine {
             .clone()
             .unwrap_or_else(|| format!("local{}", self.local_sends));
         let message = E2eMessage {
-            id: format!("{}:{}:out:{suffix}", self.network, self.own_did),
+            id: format!("{}:out:{suffix}", self.network),
             conversation_id: conversation_id(&self.network, nick),
-            sender_device: self.own_did.clone(),
+            sender_device: OWN_DEVICE.to_string(),
             sent_at: now,
             text: text.to_string(),
             encrypted: true,
