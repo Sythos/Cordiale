@@ -1408,7 +1408,9 @@ mod tests {
         assert_eq!(bob.handle_row(&late, 230), RowOutcome::Undecryptable);
         let rows = bob.history().messages(&conversation_id(NET, "alice"));
         let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
-        assert_eq!(texts, ["one"]);
+        // The history holds the received "one" and the sent "reply" only.
+        assert_eq!(texts, ["one", "reply"]);
+        assert!(!texts.contains(&"two"));
     }
 
     #[tokio::test]
