@@ -45,10 +45,13 @@ pub const FAKE_LAG_BANK: Duration = Duration::from_secs(22);
 /// Minimum time between two KEYREQ to the same nickname (protocol 46).
 pub const KEYREQ_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Pacing values of the MD-3 candidate (irc-olm PR #4). They are not final.
-/// Update path: change only this module when the candidate is merged or
-/// changes, and check the tests that name a value.
-pub mod md3_candidate {
+/// Pacing values of the MD-3 pin of irc-olm (PR #4, merge `1606c85`).
+///
+/// Source of each value: the project notes on that pin. The text of the final
+/// contract was not readable when this module was named, so a value stays
+/// open to a check against it. Update path: change only this module and the
+/// tests that name a value.
+pub mod md3_pacing {
     use std::time::Duration;
 
     /// Minimum time between two re-key requests to the same nickname.
@@ -68,7 +71,7 @@ pub mod md3_candidate {
 }
 
 /// Minimum time between two one-time key requests to the same nickname.
-pub const ONE_TIME_KEY_INTERVAL: Duration = md3_candidate::ONE_TIME_KEY_INTERVAL;
+pub const ONE_TIME_KEY_INTERVAL: Duration = md3_pacing::ONE_TIME_KEY_INTERVAL;
 
 /// A send must arrive at least this long before its deadline.
 pub const SEND_SAFETY_MARGIN: Duration = Duration::from_secs(2);
@@ -217,8 +220,8 @@ impl OneTimeKeyPacer {
         Self {
             limiter: IntervalLimiter::new(ONE_TIME_KEY_INTERVAL),
             global: WindowLimiter::new(
-                md3_candidate::ONE_TIME_KEY_GLOBAL_LIMIT,
-                md3_candidate::ONE_TIME_KEY_WINDOW,
+                md3_pacing::ONE_TIME_KEY_GLOBAL_LIMIT,
+                md3_pacing::ONE_TIME_KEY_WINDOW,
             ),
         }
     }
@@ -658,6 +661,31 @@ impl SendBook {
         }
     }
 
+    /// Mark a send as dropped by a local cause (`late`, `send_failed` or
+    /// `session_ended`). Same rule as a drop event: a final send stays.
+    pub fn drop_local(&mut self, key: &SendKey, reason: DropReason) -> bool {
+        self.apply_dropped(&SendDropped {
+            key: key.clone(),
+            reason,
+        })
+    }
+
+    /// The session ended: every pending or accepted send becomes a
+    /// `session_ended` drop. Return the changed sends.
+    pub fn end_session(&mut self) -> Vec<SendDropped> {
+        let mut ended = Vec::new();
+        for (key, status) in self.sends.iter_mut() {
+            if matches!(status, SendStatus::Pending | SendStatus::Accepted) {
+                *status = SendStatus::Dropped(DropReason::SessionEnded);
+                ended.push(SendDropped {
+                    key: key.clone(),
+                    reason: DropReason::SessionEnded,
+                });
+            }
+        }
+        ended
+    }
+
     /// Route one event payload. Return the event when it is a drop event
     /// that changed a send.
     pub fn apply_payload(&mut self, payload: &Value) -> Option<SendDropped> {
@@ -671,6 +699,79 @@ impl SendBook {
     pub fn apply_dropped_event(&mut self, payload: &Value) -> Result<bool, WireError> {
         let event = SendDropped::from_value(payload)?;
         Ok(self.apply_dropped(&event))
+    }
+}
+
+/// An outgoing message that waits for keys. It expires at `deadline`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedSend {
+    pub key: SendKey,
+    pub deadline: Duration,
+}
+
+/// Outgoing messages that wait for a key, in order of arrival. Time is
+/// injected. A message that reaches its deadline is dropped as `late`.
+#[derive(Debug, Clone, Default)]
+pub struct OutgoingQueue {
+    items: VecDeque<QueuedSend>,
+}
+
+impl OutgoingQueue {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Queue a message. The deadline is `now` plus the queue lifetime.
+    pub fn push(&mut self, key: SendKey, now: Duration) {
+        self.items.push_back(QueuedSend {
+            key,
+            deadline: now + md3_pacing::OUTGOING_QUEUE_TTL,
+        });
+    }
+
+    /// Remove the messages that cannot arrive before their deadline minus the
+    /// safety margin. Each one is a `late` drop.
+    pub fn expire(&mut self, now: Duration) -> Vec<SendDropped> {
+        let mut late = Vec::new();
+        self.items.retain(|item| {
+            if check_send_deadline(now, item.deadline) == SendDecision::TooLate {
+                late.push(SendDropped {
+                    key: item.key.clone(),
+                    reason: DropReason::Late,
+                });
+                false
+            } else {
+                true
+            }
+        });
+        late
+    }
+
+    /// Take the messages that may go now, oldest first. The late ones are
+    /// removed first and returned as drops.
+    pub fn take_ready(&mut self, now: Duration) -> (Vec<QueuedSend>, Vec<SendDropped>) {
+        let late = self.expire(now);
+        (self.items.drain(..).collect(), late)
+    }
+
+    /// The session ended: empty the queue. Each message is a `session_ended`
+    /// drop.
+    pub fn end_session(&mut self) -> Vec<SendDropped> {
+        self.items
+            .drain(..)
+            .map(|item| SendDropped {
+                key: item.key,
+                reason: DropReason::SessionEnded,
+            })
+            .collect()
     }
 }
 
@@ -1268,11 +1369,76 @@ mod tests {
     }
 
     #[test]
-    fn candidate_values_are_the_md3_numbers() {
-        assert_eq!(md3_candidate::REKEY_INTERVAL, secs(60));
-        assert_eq!(md3_candidate::OUTGOING_QUEUE_TTL, secs(90));
-        assert_eq!(md3_candidate::ONE_TIME_KEY_INTERVAL, secs(60));
-        assert_eq!(md3_candidate::ONE_TIME_KEY_GLOBAL_LIMIT, 30);
-        assert_eq!(md3_candidate::ONE_TIME_KEY_WINDOW, secs(3600));
+    fn md3_pacing_values_are_the_recorded_numbers() {
+        assert_eq!(md3_pacing::REKEY_INTERVAL, secs(60));
+        assert_eq!(md3_pacing::OUTGOING_QUEUE_TTL, secs(90));
+        assert_eq!(md3_pacing::ONE_TIME_KEY_INTERVAL, secs(60));
+        assert_eq!(md3_pacing::ONE_TIME_KEY_GLOBAL_LIMIT, 30);
+        assert_eq!(md3_pacing::ONE_TIME_KEY_WINDOW, secs(3600));
+    }
+
+    #[test]
+    fn queue_expires_a_message_as_late() {
+        let mut queue = OutgoingQueue::new();
+        queue.push(key("a"), secs(0));
+        queue.push(key("b"), secs(50));
+        // Deadline of "a" is 90 s; the 2 s margin makes 88 s too late.
+        assert!(queue.expire(secs(87)).is_empty());
+        let late = queue.expire(secs(88));
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].key, key("a"));
+        assert_eq!(late[0].reason, DropReason::Late);
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn queue_take_ready_returns_live_and_late_apart() {
+        let mut queue = OutgoingQueue::new();
+        queue.push(key("a"), secs(0));
+        queue.push(key("b"), secs(60));
+        let (ready, late) = queue.take_ready(secs(100));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].key, key("b"));
+        assert_eq!(late[0].key, key("a"));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn end_session_drops_queue_and_book_without_a_delivered_state() {
+        let mut queue = OutgoingQueue::new();
+        queue.push(key("q"), secs(0));
+        let ended = queue.end_session();
+        assert_eq!(ended[0].reason, DropReason::SessionEnded);
+        assert!(queue.is_empty());
+
+        let mut book = SendBook::new();
+        book.start(key("p"));
+        book.start(key("s"));
+        book.apply_response(&key("s"), SendResponse::Accepted);
+        book.start(key("f"));
+        book.apply_response(&key("f"), SendResponse::Failed(SendFailure::BadRequest));
+        let ended = book.end_session();
+        assert_eq!(ended.len(), 2);
+        assert_eq!(
+            book.status(&key("s")),
+            Some(SendStatus::Dropped(DropReason::SessionEnded))
+        );
+        assert_eq!(
+            book.status(&key("f")),
+            Some(SendStatus::Failed(SendFailure::BadRequest))
+        );
+    }
+
+    #[test]
+    fn local_drop_changes_an_accepted_send_once() {
+        let mut book = SendBook::new();
+        book.start(key("a"));
+        book.apply_response(&key("a"), SendResponse::Accepted);
+        assert!(book.drop_local(&key("a"), DropReason::SendFailed));
+        assert!(!book.drop_local(&key("a"), DropReason::Late));
+        assert_eq!(
+            book.status(&key("a")),
+            Some(SendStatus::Dropped(DropReason::SendFailed))
+        );
     }
 }
