@@ -10429,13 +10429,13 @@ fn a_locked_row_keeps_the_encrypted_mark_and_the_real_nick() {
         text: "hello".to_string(),
         encrypted: true,
     };
-    let incoming = locked_row(&message, "me", "bob");
+    let incoming = locked_row_with_drop(&message, "me", "bob", None);
     assert!(incoming.encrypted);
     assert_eq!(incoming.nick.as_deref(), Some("bob"));
     assert_eq!(incoming.text, "hello");
     assert!(message_lock_visible(&incoming));
     message.sender_device = cordiale_core::e2e_engine::OWN_DEVICE.to_string();
-    let outgoing = locked_row(&message, "me", "bob");
+    let outgoing = locked_row_with_drop(&message, "me", "bob", None);
     assert!(outgoing.encrypted);
     assert_eq!(outgoing.nick.as_deref(), Some("me"));
 }
@@ -10465,8 +10465,11 @@ fn a_dropped_send_is_marked_in_the_locked_row_only() {
         assert!(dropped.italic);
         assert!(dropped.encrypted);
     }
-    // The plain row builder has no drop input: a plain row never has the mark.
-    assert_eq!(locked_row(&message, "me", "bob").text, "hello");
+    // Without a drop reason, the row has no mark.
+    assert_eq!(
+        locked_row_with_drop(&message, "me", "bob", None).text,
+        "hello"
+    );
 }
 
 #[test]

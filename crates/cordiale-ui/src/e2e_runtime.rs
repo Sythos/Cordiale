@@ -102,15 +102,10 @@ fn set_e2e_status(ui: &slint::Weak<AppWindow>, kind: &'static str) {
 }
 
 /// One sealed history row as a row of the locked window. The row keeps the
-/// encrypted mark.
-pub(crate) fn locked_row(message: &E2eMessage, own_nick: &str, peer: &str) -> RenderedMessage {
-    locked_row_with_drop(message, own_nick, peer, None)
-}
-
-/// Like [`locked_row`]. A row whose send was dropped (`late`, `send_failed`
-/// or `session_ended`) is marked with a warning sign and shown in italics:
-/// the text did not reach the peer, and nothing shows it as delivered. Only
-/// the locked window has this mark; a plain row never gets it.
+/// encrypted mark. A row whose send was dropped (`late`, `send_failed` or
+/// `session_ended`) is marked with a warning sign and shown in italics: the
+/// text did not reach the peer, and nothing shows it as delivered. Only the
+/// locked window has this mark; a plain row never gets it.
 pub(crate) fn locked_row_with_drop(
     message: &E2eMessage,
     own_nick: &str,

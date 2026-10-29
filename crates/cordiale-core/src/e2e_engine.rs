@@ -74,9 +74,9 @@ use crate::client::{GrappaClient, GrappaClientError};
 use crate::e2e_device::{verify_signature, E2eError, PeerDevice};
 use crate::e2e_device_routes::{ClaimRequest, InboxAckRequest, InboxRow, InboxVerb};
 use crate::e2e_pacing::{
-    md3_pacing, DropReason, IntervalLimiter, KeyReqPacer, KeyReqRefusal, MonotonicClock,
-    OutgoingQueue, QueuedSend, SendBook, SendDropped, SendFailure, SendKey, SendResponse,
-    SendStatus,
+    check_send_deadline, md3_pacing, DropReason, IntervalLimiter, KeyReqPacer, KeyReqRefusal,
+    MonotonicClock, OutgoingQueue, QueuedSend, SendBook, SendDecision, SendDropped, SendFailure,
+    SendKey, SendResponse, SendStatus,
 };
 use crate::e2e_peer::{
     apply_peer_list, verify_certified_device, verify_peer_device, CertifiedBundle, PeerBundle,
@@ -529,6 +529,9 @@ struct PendingText {
     sends: u8,
     /// The history row of the text. A re-send adds no second row.
     row_id: String,
+    /// The device that must get the text: the one that sent the NACK. A first
+    /// send has none and goes to the best ready device.
+    did: Option<String>,
 }
 
 /// A text that went out. It stays available for one re-send after a NACK.
@@ -1385,6 +1388,16 @@ impl E2eEngine {
             .cloned()
     }
 
+    /// The device `did` of `nick`, when it is not revoked and ready. No other
+    /// device takes its place.
+    fn pick_specific_device(&self, nick: &str, did: &str) -> Option<PeerEntry> {
+        let trust = self.state.trust();
+        self.peers
+            .get(did)
+            .filter(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+            .cloned()
+    }
+
     /// Encrypts `text` for `nick` and sends it. `nick` is the real nick of the
     /// peer; the label of the locked query is refused. Any failure before the
     /// 202 answer returns an error and sends nothing in clear.
@@ -1461,6 +1474,7 @@ impl E2eEngine {
                 text: text.to_string(),
                 sends: 1,
                 row_id,
+                did: None,
             },
         );
         self.want_keys(nick);
@@ -1509,7 +1523,16 @@ impl E2eEngine {
                 continue;
             };
             let nick = item.key.target.clone();
-            let Some(entry) = self.pick_device(&nick) else {
+            // The sends before this one took time: check the deadline again.
+            if check_send_deadline(self.clock.now(), item.deadline) == SendDecision::TooLate {
+                drops.extend(self.fail_send(&item.key, DropReason::Late));
+                continue;
+            }
+            let entry = match &pending.did {
+                Some(did) => self.pick_specific_device(&nick, did),
+                None => self.pick_device(&nick),
+            };
+            let Some(entry) = entry else {
                 self.pending.insert(item.key.clone(), pending);
                 retry.push(item);
                 continue;
@@ -1783,6 +1806,7 @@ impl E2eEngine {
                 text: record.text,
                 sends: record.sends + 1,
                 row_id: record.row_id,
+                did: Some(record.did),
             },
         );
         self.want_keys(&record.nick);
@@ -3771,6 +3795,103 @@ mod tests {
         assert_eq!(alice.handle_row(&again, 103), RowOutcome::Ignored);
         assert!(alice.queue.is_empty());
         assert_eq!(alice.dropped_reason(&row_id), Some(DropReason::SendFailed));
+    }
+
+    #[tokio::test]
+    async fn the_deadline_is_checked_again_before_each_queued_send() {
+        let (mut alice, bob) = alice_without_keys("deadline");
+        let server = MockServer::start().await;
+        // The answer takes longer than the time that is left to the texts.
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/{NET}/e2e/messages")))
+            .respond_with(
+                ResponseTemplate::new(202)
+                    .set_body_json(json!({"msgid": "m1"}))
+                    .set_delay(Duration::from_millis(800)),
+            )
+            .mount(&server)
+            .await;
+        let client = GrappaClient::new(server.uri());
+        alice
+            .send_or_queue(&client, TOKEN, "bob", "first", 100)
+            .await
+            .expect("first");
+        let second = alice
+            .send_or_queue(&client, TOKEN, "bob", "second", 100)
+            .await
+            .expect("second");
+        let second_row = row_of(&alice, &second.key.expect("key"));
+        alice.accept_keys("bob", &bob.keys()).expect("keys");
+        // Both texts are live now: 87.5 s plus the 2 s margin is before 90 s.
+        alice.clock.advance(Duration::from_millis(87_500));
+        let drops = alice.flush_queue(&client, TOKEN, 101).await;
+        // The first send took 0.8 s, so the second text is too late.
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].reason, DropReason::Late);
+        assert_eq!(alice.dropped_reason(&second_row), Some(DropReason::Late));
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(alice.queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_nack_re_send_goes_to_the_device_that_sent_the_nack() {
+        let alice_id = Ident::new("alice-two");
+        let mut alice = alice_id.engine();
+        let master = Account::new();
+        let (d1, d2) = (fresh_device(), fresh_device());
+        let listed = vec![ed(&d1), ed(&d2)];
+        let mut keys = keys_struct(&master, &d1, &listed, 1);
+        keys.devices
+            .extend(keys_struct(&master, &d2, &listed, 1).devices);
+        let keys_text = serde_json::to_string(&keys).expect("json");
+        alice.accept_keys("bob", &keys_text).expect("keys");
+        assert_eq!(alice.peers.len(), 2);
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/{NET}/e2e/messages")))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({"msgid": "msgid1"})))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        mount_send(&server, "msgid2").await;
+        let client = GrappaClient::new(server.uri());
+        let (_, body) = alice_sends(&mut alice, &server, "hi").await;
+        let first = body["to"].as_str().expect("to").to_string();
+
+        // The other device has a session, so a plain pick would prefer it.
+        let other = if did_from_key_text(&ed(&d1)).expect("did") == first {
+            &d2
+        } else {
+            &d1
+        };
+        let other_did = did_from_key_text(&ed(other)).expect("did");
+        let identity = alice.state.olm_identity().expect("state").expect("account");
+        let other_key = *other.one_time_keys().values().next().expect("key");
+        let session = identity
+            .create_outbound_session(
+                SessionConfig::version_1(),
+                Curve25519PublicKey::from_base64(&curve(other)).expect("curve"),
+                other_key,
+            )
+            .expect("session");
+        alice
+            .state
+            .set_peer_session(NET, "bob", &other_did, &session)
+            .expect("save");
+
+        let payload = json!({"v": 2, "ref": "msgid1"}).to_string();
+        let value = row(9, "bob", &first, alice.own_did(), "nack", "n", &payload);
+        let nack = InboxRow::from_value(&value, PROTOCOL).expect("nack row");
+        assert_eq!(alice.handle_row(&nack, 101), RowOutcome::Ignored);
+        alice.accept_keys("bob", &keys_text).expect("fresh keys");
+        assert!(alice.flush_queue(&client, TOKEN, 102).await.is_empty());
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 2);
+        let second: Value = serde_json::from_slice(&requests[1].body).expect("body");
+        assert_eq!(second["to"], first.as_str());
+        assert_eq!(second["verb"], "pkmsg");
     }
 
     #[tokio::test]
