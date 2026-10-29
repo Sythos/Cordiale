@@ -1379,7 +1379,7 @@ mod tests {
             "bob",
             &bob_did,
             &alice_did,
-            &reply["verb"].as_str().expect("verb").to_string(),
+            reply["verb"].as_str().expect("verb"),
             "msgid1",
             reply["payload"].as_str().expect("payload"),
         );
