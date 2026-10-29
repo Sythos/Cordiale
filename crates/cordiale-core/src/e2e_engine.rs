@@ -54,6 +54,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use vodozemac::olm::{Account, Message, OlmMessage, PreKeyMessage, Session, SessionConfig};
 use vodozemac::Curve25519PublicKey;
 
@@ -128,15 +129,24 @@ pub fn conversation_id(network: &str, nick: &str) -> String {
     format!("{network}\u{0}{nick}")
 }
 
-/// The part of a file name for `network`: only letters, digits, `-` and `_`.
-/// Any other slug has no engine files, so it has no engine.
-fn file_part(network: &str) -> Option<&str> {
-    (!network.is_empty()
-        && network.len() <= 64
-        && network
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'))
-    .then_some(network)
+/// The part of the engine file names for one network of one account on one
+/// server: a hash, so two servers or two accounts with the same network slug
+/// never share an identity or a history. A guest (`visitor:`) or an empty
+/// value has no engine files.
+fn storage_part(server: &str, account: &str, network: &str) -> Option<String> {
+    if server.is_empty()
+        || account.is_empty()
+        || account.starts_with("visitor:")
+        || network.is_empty()
+    {
+        return None;
+    }
+    let hash = Sha256::digest(format!("{server}\u{0}{account}\u{0}{network}").as_bytes());
+    let mut part = String::new();
+    for byte in &hash[..16] {
+        part.push_str(&format!("{byte:02x}"));
+    }
+    Some(part)
 }
 
 /// Why an engine call failed.
@@ -369,11 +379,17 @@ impl E2eEngine {
     }
 
     /// Opens the engine of `network` from the sealed files in the data
-    /// folder. A network without a state file, or without an Olm identity in
-    /// it, is `NotReady`: the provisioning makes the identity first, and this
-    /// call never makes a key or a file of its own.
-    pub fn open_for_network(network: &str) -> Result<Self, EngineError> {
-        let part = file_part(network).ok_or(EngineError::NotReady)?;
+    /// folder. `server` is the base URL of Grappa and `account` the signed-in
+    /// account: both are part of the file names. A network without a state
+    /// file, or without an Olm identity in it, is `NotReady`: the provisioning
+    /// makes the identity first, and this call never makes a key or a file of
+    /// its own.
+    pub fn open_for_network(
+        server: &str,
+        account: &str,
+        network: &str,
+    ) -> Result<Self, EngineError> {
+        let part = storage_part(server, account, network).ok_or(EngineError::NotReady)?;
         let dir = data_dir().ok_or(EngineError::Store(E2eStoreError::NoDataDir))?;
         let state_path = dir.join(format!("e2e_state_{part}.bin"));
         if !state_path.exists() {
@@ -1729,6 +1745,33 @@ mod tests {
     }
 
     #[test]
+    fn the_engine_files_are_apart_for_each_server_and_account() {
+        let base = storage_part("https://a.example", "anna", NET).expect("part");
+        assert_eq!(base.len(), 32);
+        assert!(base.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(
+            storage_part("https://a.example", "anna", NET).as_deref(),
+            Some(base.as_str())
+        );
+        assert_ne!(
+            storage_part("https://b.example", "anna", NET).as_deref(),
+            Some(base.as_str())
+        );
+        assert_ne!(
+            storage_part("https://a.example", "bruno", NET).as_deref(),
+            Some(base.as_str())
+        );
+        assert_ne!(
+            storage_part("https://a.example", "anna", "other").as_deref(),
+            Some(base.as_str())
+        );
+        // A guest and an unknown account have no engine files.
+        assert_eq!(storage_part("https://a.example", "visitor:7", NET), None);
+        assert_eq!(storage_part("https://a.example", "", NET), None);
+        assert_eq!(storage_part("", "anna", NET), None);
+    }
+
+    #[test]
     fn a_peer_without_a_verified_device_is_not_ready() {
         let id = Ident::new("solo");
         let engine = id.engine();
@@ -1785,10 +1828,12 @@ mod tests {
         free.sort_by_key(|key| key.to_base64());
         let one_time_key = free.swap_remove((id % 3) as usize);
         let bob_curve = Curve25519PublicKey::from_base64(&curve(&s.bob_id.device)).expect("curve");
-        let mut session =
-            s.second
-                .create_outbound_session(SessionConfig::version_1(), bob_curve, one_time_key);
-        let OlmMessage::PreKey(message) = session.encrypt(plain.as_bytes()) else {
+        let mut session = s
+            .second
+            .create_outbound_session(SessionConfig::version_1(), bob_curve, one_time_key)
+            .expect("outbound session");
+        let OlmMessage::PreKey(message) = session.encrypt(plain.as_bytes()).expect("encrypt")
+        else {
             panic!("the first message is a pre-key message");
         };
         let payload = MessagePayload {

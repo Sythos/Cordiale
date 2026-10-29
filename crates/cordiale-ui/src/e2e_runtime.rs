@@ -142,7 +142,16 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
     if !routes.iter().all(|route| route.available(protocol)) {
         return false;
     }
-    match E2eEngine::open_for_network(network) {
+    // The files belong to one account on one server; a guest has none.
+    let (Some(client), Some(account)) =
+        (state.conn.client.as_ref(), state.conn.identifier.as_ref())
+    else {
+        return false;
+    };
+    if state.conn.guest_session {
+        return false;
+    }
+    match E2eEngine::open_for_network(client.base_url(), account, network) {
         Ok(engine) => {
             for peer in engine.history_peers() {
                 state.e2e.add_locked(network, &peer);
@@ -270,7 +279,8 @@ async fn settle_engine(
 }
 
 /// Reloads the rows of the locked window of `nick` from the sealed history
-/// and redraws it, when that window is the open one.
+/// and redraws its rows, when that window is the open one. The compose field
+/// and the other window values stay as they are.
 fn refresh_locked_view(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -281,8 +291,24 @@ fn refresh_locked_view(
         .is_some_and(|(open_network, open_nick)| open_network == network && open_nick == nick);
     if is_open {
         load_locked_rows(state, network, nick);
-        show_locked_window(state, ui, network, nick);
+        show_locked_rows(state, ui, network, nick);
     }
+}
+
+/// Redraws only the rows of the locked window of `nick`.
+fn show_locked_rows(state: &WorkerState, ui: &slint::Weak<AppWindow>, network: &str, nick: &str) {
+    let lines = state
+        .transcript
+        .messages
+        .get(&(network.to_string(), locked_label(nick)))
+        .cloned()
+        .unwrap_or_default();
+    let dark_theme = state.prefs.theme == Theme::Dark;
+    refresh_mention_context(state);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        show_chat_lines(&ui, chat_lines_model(&lines, dark_theme));
+    });
 }
 
 fn load_locked_rows(state: &mut WorkerState, network: &str, nick: &str) {
