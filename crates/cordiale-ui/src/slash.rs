@@ -59,6 +59,15 @@ pub(crate) async fn run_slash_command(
         open_service_console(state, ui, &network, service.clone()).await;
         return;
     }
+    // The pairing steps hold a link or a code: the label of the command is
+    // only its first word, and nothing here logs the arguments.
+    let command = match command {
+        SlashCommand::E2ePair(action) => {
+            run_e2e_pair(state, ui, network, action).await;
+            return;
+        }
+        other => other,
+    };
     if channel == SERVER_WINDOW_NAME
         && matches!(&command, SlashCommand::Say(_) | SlashCommand::Action(_))
     {
@@ -516,6 +525,7 @@ pub(crate) async fn run_slash_command(
         SlashCommand::Unknown(name) => {
             return set_command_status(ui, "command-unknown", name);
         }
+        SlashCommand::E2ePair(_) => unreachable!("handled before request dispatch"),
     };
     if let Err(err) = result {
         persistence::log_line(&format!("{label} failed: {err:?}"));

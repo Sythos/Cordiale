@@ -253,6 +253,50 @@ msgid "An encrypted chat takes plain text only. Nothing was sent."
 msgstr "Una chat cifrata accetta solo testo semplice. Non è stato inviato nulla."
 
 msgctxt "AppWindow"
+msgid "Pairing link: {}. On the new device, type /e2e join and this link."
+msgstr "Link di abbinamento: {}. Sul nuovo dispositivo scrivi /e2e join e questo link."
+
+msgctxt "AppWindow"
+msgid "Waiting for the new device to join."
+msgstr "In attesa che il nuovo dispositivo si colleghi."
+
+msgctxt "AppWindow"
+msgid "Pairing code: {}. If both devices show it, type /e2e code and the code here."
+msgstr "Codice di abbinamento: {}. Se entrambi i dispositivi lo mostrano, scrivi qui /e2e code e il codice."
+
+msgctxt "AppWindow"
+msgid "Confirmed. Waiting for the other device."
+msgstr "Confermato. In attesa dell'altro dispositivo."
+
+msgctxt "AppWindow"
+msgid "The new device is paired."
+msgstr "Il nuovo dispositivo è abbinato."
+
+msgctxt "AppWindow"
+msgid "Pairing cancelled."
+msgstr "Abbinamento annullato."
+
+msgctxt "AppWindow"
+msgid "Pairing timed out. Start again."
+msgstr "Abbinamento scaduto. Ricomincia."
+
+msgctxt "AppWindow"
+msgid "Pairing failed. Start again."
+msgstr "Abbinamento non riuscito. Ricomincia."
+
+msgctxt "AppWindow"
+msgid "The code is not the same. Pairing stopped. Start again."
+msgstr "Il codice non coincide. Abbinamento interrotto. Ricomincia."
+
+msgctxt "AppWindow"
+msgid "This server does not support device pairing."
+msgstr "Questo server non supporta l'abbinamento dei dispositivi."
+
+msgctxt "AppWindow"
+msgid "No pairing is open. Type /e2e pair on the first device."
+msgstr "Nessun abbinamento aperto. Scrivi /e2e pair sul primo dispositivo."
+
+msgctxt "AppWindow"
 msgid "Disconnected. Reconnecting…"
 msgstr "Disconnesso. Riconnessione in corso…"
 
