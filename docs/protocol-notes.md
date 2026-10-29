@@ -1554,10 +1554,13 @@ chiaro è un `CopyBody` JSON `{"peer","text"}` (formato **candidato**, non letto
 conversazione di `peer`, con `sender_device` = `own` e id `<rete>:own:<id>`; un
 `peer` vuoto, con spazi o controlli, o con l'etichetta `🔒` rende la copia
 illeggibile (confermata, non salvata). Il lato che *crea* le copie non c'è ancora.
-Motore per rete: `E2eEngine::open_for_network` apre `e2e_state_<rete>.bin` e
-`e2e_history_<rete>.bin` nella cartella dati con la chiave del portachiavi; senza
+Motore per rete: `E2eEngine::open_for_network(server, account, rete)` apre
+`e2e_state_<h>.bin` e `e2e_history_<h>.bin` nella cartella dati con la chiave del
+portachiavi; `<h>` è l'esadecimale dei primi 16 byte di SHA-256 di
+`server\0account\0rete` (URL base di Grappa e account collegato), così due server o
+due account con lo stesso slug di rete non condividono identità né cronologia. Senza
 file di stato o senza identità Olm dà `NotReady` e non crea né chiavi né file. Un
-nome di rete con caratteri fuori da `[A-Za-z0-9_-]` non ha motore. Nessun
+ospite (`visitor:…`) o un account vuoto non ha motore. Nessun
 percorso della UI crea l'identità: il provisioning (`provision_device`) non è
 ancora collegato alla UI, quindi finché non lo è la UI non apre nessun motore.
 UI (`e2e_runtime.rs`): al `Connected` il worker apre i motori e legge l'inbox
