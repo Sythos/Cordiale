@@ -303,4 +303,4 @@ Il dettaglio sta in `protocol-notes.md` §8; `client_proto` resta 37.
 | 41 | Marcatore `truncated` delle menzioni | Già supportato |
 | 42–44 | Relay, coda offline e bundle di chiavi E2E | In attesa del contratto per dispositivo di Grappa; non implementato |
 | 45 | Buste E2E dichiarate nello schema | Nessun cambio sul filo, niente da fare |
-| 46 | Pacing e `expires_at` | Fuori ambito (issue 346) |
+| 46 | Pacing e `expires_at` | Valori finali, coda, NACK e motivi di scarto nel motore (issue 454, vedi `protocol-notes.md`) |
