@@ -540,11 +540,23 @@ pub fn stream_title(meta: &[u8]) -> Option<String> {
     (!title.is_empty()).then(|| title.to_string())
 }
 
-/// Stream URLs listed in a `.pls` or `.m3u` playlist, in order.
+/// The most bytes read from a playlist body.
+const MAX_PLAYLIST_BYTES: usize = 256 * 1024;
+/// The longest time the whole playlist body may take to arrive.
+const PLAYLIST_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// The most stream URLs taken from a playlist.
+const MAX_PLAYLIST_ENTRIES: usize = 64;
+/// The longest playlist line that is parsed, in bytes. Longer lines are skipped.
+const MAX_PLAYLIST_LINE: usize = 2048;
+
+/// Stream URLs listed in a `.pls` or `.m3u` playlist, in order. A line over
+/// [`MAX_PLAYLIST_LINE`] bytes is skipped. The list stops at
+/// [`MAX_PLAYLIST_ENTRIES`] URLs.
 pub fn playlist_urls(playlist: &str) -> Vec<String> {
     playlist
         .lines()
         .map(str::trim)
+        .filter(|line| line.len() <= MAX_PLAYLIST_LINE)
         .filter_map(|line| {
             let url = match line.split_once('=') {
                 Some((key, value)) if key.to_ascii_lowercase().starts_with("file") => value.trim(),
@@ -552,7 +564,43 @@ pub fn playlist_urls(playlist: &str) -> Vec<String> {
             };
             (url.starts_with("http://") || url.starts_with("https://")).then(|| url.to_string())
         })
+        .take(MAX_PLAYLIST_ENTRIES)
         .collect()
+}
+
+/// A body that arrives in chunks.
+trait ChunkSource {
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, RadioError>;
+}
+
+impl ChunkSource for reqwest::Response {
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, RadioError> {
+        Ok(self.chunk().await?.map(|bytes| bytes.to_vec()))
+    }
+}
+
+/// Collects a playlist body from `source` until it ends. It fails when the
+/// body passes `max_bytes` or when the whole read takes longer than `limit`.
+async fn read_playlist_body<S: ChunkSource>(
+    source: &mut S,
+    max_bytes: usize,
+    limit: std::time::Duration,
+) -> Result<String, RadioError> {
+    let read = async {
+        let mut body = Vec::new();
+        while let Some(chunk) = source.next_chunk().await? {
+            if body.len() + chunk.len() > max_bytes {
+                return Err(RadioError::Refused("the playlist is too large".to_string()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(String::from_utf8_lossy(&body).into_owned())
+    };
+    tokio::time::timeout(limit, read).await.unwrap_or_else(|_| {
+        Err(RadioError::Refused(
+            "the playlist took too long".to_string(),
+        ))
+    })
 }
 
 /// Why a stream couldn't be opened or read.
@@ -598,7 +646,12 @@ impl RadioStream {
     pub async fn open(url: &str, allow_local_start: bool) -> Result<Self, RadioError> {
         let mut response = Self::get(url, allow_local_start).await?;
         if is_playlist(url, response.headers().get(CONTENT_TYPE)) {
-            let text = response.text().await?;
+            let declared = response.content_length();
+            if declared.is_some_and(|length| length > MAX_PLAYLIST_BYTES as u64) {
+                return Err(RadioError::Refused("the playlist is too large".to_string()));
+            }
+            let text = read_playlist_body(&mut response, MAX_PLAYLIST_BYTES, PLAYLIST_BODY_TIMEOUT)
+                .await?;
             let stream = playlist_urls(&text)
                 .into_iter()
                 .next()
@@ -760,5 +813,75 @@ mod tests {
             "https://ice1.somafm.com/groovesalad-128-mp3",
             None
         ));
+    }
+
+    struct Chunks {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+        /// Wait this long before every chunk.
+        delay: std::time::Duration,
+    }
+
+    impl Chunks {
+        fn new(chunks: &[&[u8]], delay: std::time::Duration) -> Self {
+            Self {
+                chunks: chunks.iter().map(|chunk| chunk.to_vec()).collect(),
+                delay,
+            }
+        }
+    }
+
+    impl ChunkSource for Chunks {
+        async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, RadioError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(self.chunks.pop_front())
+        }
+    }
+
+    const NO_DELAY: std::time::Duration = std::time::Duration::ZERO;
+    const LONG: std::time::Duration = std::time::Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn a_normal_playlist_is_read_in_chunks() {
+        let mut source = Chunks::new(&[b"#EXTM3U\nhttp://exam", b"ple.org/a.ogg\n"], NO_DELAY);
+        let text = read_playlist_body(&mut source, 1024, LONG).await.unwrap();
+        assert_eq!(playlist_urls(&text), vec!["http://example.org/a.ogg"]);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_playlist_is_refused() {
+        let mut source = Chunks::new(&[&[b'a'; 600], &[b'a'; 600]], NO_DELAY);
+        let result = read_playlist_body(&mut source, 1000, LONG).await;
+        assert!(
+            matches!(&result, Err(RadioError::Refused(reason)) if reason == "the playlist is too large"),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slow_playlist_body_times_out() {
+        let mut source = Chunks::new(&[b"a", b"b"], std::time::Duration::from_millis(200));
+        let result =
+            read_playlist_body(&mut source, 1024, std::time::Duration::from_millis(50)).await;
+        assert!(
+            matches!(&result, Err(RadioError::Refused(reason)) if reason == "the playlist took too long"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_playlist_lists_a_limited_number_of_entries() {
+        let many: String = (0..MAX_PLAYLIST_ENTRIES + 20)
+            .map(|n| format!("http://example.org/{n}\n"))
+            .collect();
+        let urls = playlist_urls(&many);
+        assert_eq!(urls.len(), MAX_PLAYLIST_ENTRIES);
+        assert_eq!(urls[0], "http://example.org/0");
+    }
+
+    #[test]
+    fn a_long_playlist_line_is_skipped() {
+        let long = format!("http://example.org/{}", "a".repeat(MAX_PLAYLIST_LINE));
+        let playlist = format!("{long}\nFile1=http://example.org/ok\n");
+        assert_eq!(playlist_urls(&playlist), vec!["http://example.org/ok"]);
     }
 }
