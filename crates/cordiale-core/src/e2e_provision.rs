@@ -236,7 +236,12 @@ pub async fn provision_device(
         if let (Some(own), Some(master)) = (&list, master.as_ref()) {
             match migrate_own_list(master, own)? {
                 Some(next) => {
-                    store.set_migrated_list_pending(&next)?;
+                    // A list that is not above the server list is not
+                    // published: the server would answer `stale_list`.
+                    let pending = held
+                        .as_ref()
+                        .is_none_or(|held| held.list.version < next.version);
+                    store.set_migrated_list(&next, pending)?;
                     list = Some(next);
                 }
                 None => store.set_list_migrated()?,
@@ -900,10 +905,12 @@ mod tests {
         let old = master
             .sign(legacy_raw_order_list_signed_text(1, &keys).unwrap())
             .to_base64();
+        let mut unsorted = sorted.clone();
+        unsorted.reverse();
         store
             .set_signed_list(&SignedList {
                 version: 1,
-                keys: sorted.clone(),
+                keys: unsorted,
                 signature: old,
             })
             .expect("old list");
@@ -924,6 +931,51 @@ mod tests {
         assert!(store.list_migrated());
         run(&server, &mut store, PROTOCOL).await.expect("restart");
         assert_eq!(store.signed_list(), Some(own));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_migrated_list_below_the_server_version_is_not_published() {
+        let dir = scratch_dir("own-legacy-stale");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        run(&server, &mut store, PROTOCOL).await.expect("first run");
+
+        let master = store.master_key().unwrap().unwrap();
+        let master_key = ed25519_of(&master);
+        let device_key = ed25519_of(&store.olm_identity().unwrap().unwrap());
+        let keys = loop {
+            let keys = vec![device_key.clone(), ed25519_of(&Account::new())];
+            if legacy_raw_order_list_signed_text(1, &keys).unwrap()
+                != signed_list_signed_text(1, &keys).unwrap()
+            {
+                break keys;
+            }
+        };
+        let old = master
+            .sign(legacy_raw_order_list_signed_text(1, &keys).unwrap())
+            .to_base64();
+        store
+            .set_signed_list(&SignedList {
+                version: 1,
+                keys: keys.clone(),
+                signature: old,
+            })
+            .expect("old list");
+        let current = sign_list(&master, 2, &keys).unwrap();
+        state.lock().unwrap().list = Some(json!({
+            "master": master_key, "ver": 2, "devices": current.keys, "sig": current.signature
+        }));
+        let puts = state.lock().unwrap().list_puts;
+
+        for _ in 0..2 {
+            run(&server, &mut store, PROTOCOL).await.expect("run");
+            assert!(store.list_migrated());
+            assert!(!store.list_pending());
+            assert_eq!(state.lock().unwrap().list_puts, puts);
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

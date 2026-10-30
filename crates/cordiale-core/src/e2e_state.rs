@@ -395,13 +395,18 @@ impl E2eStateStore {
         self.commit(|data| data.list_migrated = true)
     }
 
-    /// Saves the re-signed own list, marks it as waiting for publication and
-    /// marks the migration as done, in one write.
-    pub fn set_migrated_list_pending(&mut self, list: &SignedList) -> Result<(), E2eStoreError> {
+    /// Saves the re-signed own list and marks the migration as done, in one
+    /// write. `pending` marks the list as waiting for publication. A mark that
+    /// is already set stays.
+    pub fn set_migrated_list(
+        &mut self,
+        list: &SignedList,
+        pending: bool,
+    ) -> Result<(), E2eStoreError> {
         let list = list.clone();
         self.commit(|data| {
             data.signed_list = Some(list);
-            data.list_pending = true;
+            data.list_pending |= pending;
             data.list_migrated = true;
         })
     }
@@ -1395,11 +1400,11 @@ mod tests {
         let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
         assert!(!store.list_migrated());
         store.writer = failing_writer;
-        assert!(store.set_migrated_list_pending(&list).is_err());
+        assert!(store.set_migrated_list(&list, true).is_err());
         assert!(!store.list_migrated() && !store.list_pending());
         assert_eq!(store.signed_list(), None);
         store.writer = write_atomic;
-        store.set_migrated_list_pending(&list).expect("save");
+        store.set_migrated_list(&list, true).expect("save");
         drop(store);
         let mut store = E2eStateStore::open(path, &provider).expect("reopen");
         assert!(store.list_migrated() && store.list_pending());

@@ -42,7 +42,7 @@ use crate::e2e_device::{
     build_signed_list_signature, verify_signature, verify_signed_list, E2eError,
 };
 use crate::e2e_manage::SignedList;
-use crate::e2e_wire::legacy_raw_order_list_signed_text;
+use crate::e2e_wire::{legacy_raw_order_list_signed_text, sort_list_keys};
 
 /// The key order over which a signature verifies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +93,7 @@ pub(crate) fn migrate_own_list(
             })?;
             Ok(Some(SignedList {
                 version: list.version,
-                keys: list.keys.clone(),
+                keys: sort_list_keys(&list.keys)?,
                 signature,
             }))
         }
@@ -184,7 +184,10 @@ mod tests {
         let keys = keys_in_two_orders();
         let old = legacy_list(&master, 4, &keys);
         let next = migrate_own_list(&master, &old).unwrap().expect("migrated");
-        assert_eq!((next.version, &next.keys), (4, &keys));
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!((next.version, &next.keys), (4, &sorted));
+        crate::e2e_identity_routes::ListRequest::new(&key_of(&master), &next).expect("request");
         verify_signed_list(4, &keys, &key_of(&master), &next.signature).expect("current order");
         assert_eq!(migrate_own_list(&master, &next), Ok(None));
     }
