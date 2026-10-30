@@ -5386,6 +5386,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_queued_text_goes_out_when_the_keys_come_with_another_letter_case() {
+        let (mut alice, bob) = alice_without_keys("queuecase");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+        let bob_did = did_from_key_text(&ed(&bob.device)).expect("did");
+        alice
+            .send_or_queue(&client, TOKEN, "bob", "wait", 100)
+            .await
+            .expect("queued");
+        assert_eq!(alice.queue.len(), 1);
+        alice.accept_keys("Bob", &bob.keys()).expect("keys");
+        assert!(alice.flush_queue(&client, TOKEN, 101).await.is_empty());
+        assert!(alice.queue.is_empty());
+        assert!(alice
+            .state
+            .peer_session(NET, "Bob", &bob_did)
+            .expect("session")
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn a_send_with_another_letter_case_keeps_the_session_under_the_stored_nick() {
         let (mut alice, bob) = alice_without_keys("case");
         let server = MockServer::start().await;
