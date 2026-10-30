@@ -499,23 +499,22 @@ pub(crate) fn push_window_ignores(state: &WorkerState, ui: &slint::Weak<AppWindo
     });
 }
 
-/// Loads the ignore list of the open window's network once, then shows it
-/// to the nick context menus. A failed load leaves the menus on Ignore.
+/// Loads the ignore list of the open window's network each time a window
+/// opens, then shows it to the nick context menus. A failed load keeps the
+/// list that was known before.
 pub(crate) async fn sync_window_ignores(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let Some((network, _)) = state.windows.current_channel.clone() else {
         return;
     };
     // Never leave the masks of the previous window's network on screen.
     push_window_ignores(state, ui);
-    if !state.prefs.window_ignores.contains_key(&network) {
-        if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
-            match client.fetch_ignores(token, &network).await {
-                Ok(entries) => {
-                    state.prefs.window_ignores.insert(network, entries);
-                    push_window_ignores(state, ui);
-                }
-                Err(err) => persistence::log_line(&format!("ignore list load failed: {err:?}")),
+    if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
+        match client.fetch_ignores(token, &network).await {
+            Ok(entries) => {
+                state.prefs.window_ignores.insert(network, entries);
+                push_window_ignores(state, ui);
             }
+            Err(err) => persistence::log_line(&format!("ignore list load failed: {err:?}")),
         }
     }
 }

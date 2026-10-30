@@ -1346,7 +1346,6 @@ pub(crate) fn handle_select_locked_query(
     load_locked_rows(state, &network, &nick);
     refresh_network_groups(state, ui);
     show_locked_window(state, ui, &network, &nick);
-    push_window_ignores(state, ui);
 }
 
 /// Closes a locked entry. False when `label` is not a locked entry, so the

@@ -15,6 +15,7 @@ pub(crate) async fn handle_select_query(
     // A locked entry is local: it has no Grappa window and no topic.
     if is_locked_name(&nick) {
         handle_select_locked_query(state, ui, network, &nick);
+        sync_window_ignores(state, ui).await;
         return;
     }
     let Some(query) = find_query_window(&state.transcript.query_windows, &network, &nick).cloned()

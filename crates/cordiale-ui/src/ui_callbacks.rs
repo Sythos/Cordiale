@@ -593,6 +593,7 @@ pub(crate) fn register_member_callbacks(
     });
 
     ui.on_nick_ignored(|nick, masks| {
+        use slint::Model as _;
         let masks: Vec<String> = masks.iter().map(|mask| mask.to_string()).collect();
         nick_is_ignored(&nick, &masks)
     });

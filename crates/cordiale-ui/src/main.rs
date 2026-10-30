@@ -1694,7 +1694,7 @@ async fn run_worker(
                                 ui.set_settings_network(network.into());
                             });
                             load_identity_settings(&mut state, &ui, &loaded_network).await;
-                            handle_settings_network_refresh(&state, &ui).await;
+                            handle_settings_network_refresh(&mut state, &ui).await;
                         }
                     }
                     Some(WorkerCommand::TotpVerify(code)) => {
@@ -1706,7 +1706,7 @@ async fn run_worker(
                                 ui.set_settings_network(network.into());
                             });
                             load_identity_settings(&mut state, &ui, &loaded_network).await;
-                            handle_settings_network_refresh(&state, &ui).await;
+                            handle_settings_network_refresh(&mut state, &ui).await;
                         }
                     }
                     Some(WorkerCommand::ShareConsume { server_url, input }) => {
@@ -1723,7 +1723,7 @@ async fn run_worker(
                             let _ = ui_for_network.upgrade_in_event_loop(move |ui| {
                                 ui.set_settings_network(network.into());
                             });
-                            handle_settings_network_refresh(&state, &ui).await;
+                            handle_settings_network_refresh(&mut state, &ui).await;
                         }
                     }
                     Some(WorkerCommand::RecoverySignIn {
@@ -1747,7 +1747,7 @@ async fn run_worker(
                                 ui.set_settings_network(network.into());
                             });
                             load_identity_settings(&mut state, &ui, &loaded_network).await;
-                            handle_settings_network_refresh(&state, &ui).await;
+                            handle_settings_network_refresh(&mut state, &ui).await;
                         }
                     }
                     Some(WorkerCommand::SecurityShareMint) => {
@@ -1792,7 +1792,7 @@ async fn run_worker(
                                 ui.set_settings_network(network.into());
                             });
                             load_identity_settings(&mut state, &ui, &loaded_network).await;
-                            handle_settings_network_refresh(&state, &ui).await;
+                            handle_settings_network_refresh(&mut state, &ui).await;
                         }
                     }
                     Some(WorkerCommand::SecurityPasskeyAdd { name, password }) => {
@@ -2365,7 +2365,7 @@ async fn run_worker(
                     Some(WorkerCommand::SettingsNetworkSelected(network)) => {
                         load_identity_settings(&mut state, &ui, &network).await;
                         state.prefs.settings_network = Some(network);
-                        handle_settings_network_refresh(&state, &ui).await;
+                        handle_settings_network_refresh(&mut state, &ui).await;
                         push_notify_nicks(&state, &ui);
                     }
                     Some(WorkerCommand::IdentitySave {
@@ -2418,15 +2418,15 @@ async fn run_worker(
                         run_perform_save(&mut state, text).await;
                     }
                     Some(WorkerCommand::AliasAdd { command, expansion }) => {
-                        handle_alias_upsert(&state, &ui, Some((command, expansion))).await;
+                        handle_alias_upsert(&mut state, &ui, Some((command, expansion))).await;
                         state.prefs.aliases = None;
                     }
                     Some(WorkerCommand::AliasRemove(command)) => {
-                        handle_alias_remove(&state, &ui, command).await;
+                        handle_alias_remove(&mut state, &ui, command).await;
                         state.prefs.aliases = None;
                     }
                     Some(WorkerCommand::VhostToggle(address)) => {
-                        handle_vhost_toggle(&state, &ui, address).await;
+                        handle_vhost_toggle(&mut state, &ui, address).await;
                     }
                     // The server answers each change with a full `notify_list`
                     // snapshot; the local edit only avoids a stale row until
@@ -6428,19 +6428,29 @@ const ADMIN_EVENTS_CAP: usize = 200;
 /// Refreshes every self-service settings section: Ignores/Perform for
 /// `state.settings_network` (empty if none picked yet), plus the
 /// account-scoped Aliases/Vhost — see `docs/protocol-notes.md` §4quater.
-async fn handle_settings_network_refresh(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
+async fn handle_settings_network_refresh(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
+    let token = &token;
+    let settings_network = state.prefs.settings_network.clone();
 
-    let ignores: Vec<IgnoreEntry> = match &state.prefs.settings_network {
-        Some(network) => client
-            .fetch_ignores(token, network)
-            .await
-            .unwrap_or_default(),
+    let ignores: Vec<IgnoreEntry> = match &settings_network {
+        Some(network) => match client.fetch_ignores(token, network).await {
+            Ok(entries) => {
+                // The nick menus read the same list.
+                state
+                    .prefs
+                    .window_ignores
+                    .insert(network.clone(), entries.clone());
+                push_window_ignores(state, ui);
+                entries
+            }
+            Err(_) => Vec::new(),
+        },
         None => Vec::new(),
     };
-    let perform_text = match &state.prefs.settings_network {
+    let perform_text = match &settings_network {
         Some(network) => client
             .fetch_perform(token, network)
             .await
@@ -6703,7 +6713,7 @@ async fn handle_identity_save(state: &WorkerState, nick: String, ident: String, 
 /// the whole map, so this fetches the current one, applies the change,
 /// and writes the whole thing back (no diff/patch endpoint exists).
 async fn handle_alias_upsert(
-    state: &WorkerState,
+    state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     new_entry: Option<(String, String)>,
 ) {
@@ -6720,7 +6730,11 @@ async fn handle_alias_upsert(
     handle_settings_network_refresh(state, ui).await;
 }
 
-async fn handle_alias_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>, command: String) {
+async fn handle_alias_remove(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    command: String,
+) {
     let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
@@ -6733,7 +6747,11 @@ async fn handle_alias_remove(state: &WorkerState, ui: &slint::Weak<AppWindow>, c
 /// Toggles one address in the vhost selection — `PUT /me/settings/vhost`
 /// also replaces the whole selection, so this reads the current one,
 /// flips the one address, and writes it back.
-async fn handle_vhost_toggle(state: &WorkerState, ui: &slint::Weak<AppWindow>, address: String) {
+async fn handle_vhost_toggle(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    address: String,
+) {
     let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
