@@ -572,6 +572,7 @@ pub(crate) async fn run_e2e_pair(
                         network: network.clone(),
                         session,
                     });
+                    push_open_locked_state(state, ui);
                     show_pairing_kind(ui, "e2e-pair-link", link.code());
                     show_pairing_qr(ui, &link.url(&pairing_host(client.base_url())), link.code());
                 }
@@ -592,6 +593,7 @@ pub(crate) async fn run_e2e_pair(
                         network: network.clone(),
                         session,
                     });
+                    push_open_locked_state(state, ui);
                 }
                 Err(error) => show_pairing_kind(ui, pairing_error_key(&error), String::new()),
             }
@@ -627,6 +629,7 @@ pub(crate) async fn run_e2e_pair(
                 return show_pairing_kind(ui, "e2e-pair-none", String::new());
             }
             end_active_pairing(state).await;
+            push_open_locked_state(state, ui);
             show_pairing(ui, &PairingStatus::Ended(pairing::EndReason::Cancelled));
         }
     }
@@ -889,6 +892,7 @@ fn finish_pairing_step(
     if active.session.is_active() {
         state.e2e.pairing = Some(active);
     }
+    push_open_locked_state(state, ui);
 }
 
 /// Reads one `e2e_pairing_message` or `e2e_pairing_closed` frame. An event
@@ -951,6 +955,7 @@ pub(crate) async fn tick_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWi
     } else {
         state.e2e.pairing = Some(active);
     }
+    push_open_locked_state(state, ui);
 }
 
 async fn drain_network(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, network: &str) {
