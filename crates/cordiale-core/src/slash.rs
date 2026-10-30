@@ -138,6 +138,8 @@ pub enum SlashCommand {
     Unknown(String),
     /// `/e2e pair|join|code|cancel`: the X1 pairing of a new device.
     E2ePair(E2ePairAction),
+    /// `/e2e devices|revoke|reset`: the management of the own devices.
+    E2eManage(E2eManageAction),
 }
 
 /// The step of `/e2e` for the pairing flow. `Debug` hides the link and the
@@ -163,6 +165,19 @@ impl std::fmt::Debug for E2ePairAction {
             Self::Cancel => "E2ePairAction::Cancel",
         })
     }
+}
+
+/// The step of `/e2e` for the own devices and the own identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum E2eManageAction {
+    /// `/e2e devices`: show the ids of the own devices.
+    Devices,
+    /// `/e2e revoke <did>`: revoke the own device with this id.
+    Revoke(String),
+    /// `/e2e reset`: ask the user to confirm the reset of the identity.
+    Reset,
+    /// `/e2e reset yes`: the answer to the question. It resets the identity.
+    ResetConfirm,
 }
 
 /// Whether `name` is a channel rather than a nick.
@@ -507,7 +522,15 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             [step] if step == "cancel" => E2ePair(E2ePairAction::Cancel),
             [step, link] if step == "join" => E2ePair(E2ePairAction::Join(link.clone())),
             [step, code] if step == "code" => E2ePair(E2ePairAction::Code(code.clone())),
-            _ => Usage("/e2e pair | join <link> | code <nn> | cancel"),
+            [step] if step == "devices" => E2eManage(E2eManageAction::Devices),
+            [step, did] if step == "revoke" => E2eManage(E2eManageAction::Revoke(did.clone())),
+            [step] if step == "reset" => E2eManage(E2eManageAction::Reset),
+            [step, answer] if step == "reset" && answer == "yes" => {
+                E2eManage(E2eManageAction::ResetConfirm)
+            }
+            _ => Usage(
+                "/e2e pair | join <link> | code <nn> | cancel | devices | revoke <id> | reset",
+            ),
         },
         "hilight" | "highlight" | "dehilight" => match non_empty(args) {
             Some(pattern) => Highlight {
@@ -1169,6 +1192,28 @@ mod tests {
         }
         let shown = format!("{:?}", E2ePairAction::Join("secret-link".to_string()));
         assert!(!shown.contains("secret"));
+    }
+
+    #[test]
+    fn e2e_management_steps() {
+        assert_eq!(
+            parse("/e2e devices"),
+            Some(E2eManage(E2eManageAction::Devices))
+        );
+        assert_eq!(
+            parse("/e2e revoke abcdefghijk"),
+            Some(E2eManage(E2eManageAction::Revoke(
+                "abcdefghijk".to_string()
+            )))
+        );
+        assert_eq!(parse("/e2e reset"), Some(E2eManage(E2eManageAction::Reset)));
+        assert_eq!(
+            parse("/e2e reset yes"),
+            Some(E2eManage(E2eManageAction::ResetConfirm))
+        );
+        for bad in ["/e2e revoke", "/e2e reset now", "/e2e devices all"] {
+            assert!(matches!(parse(bad), Some(Usage(_))), "{bad}");
+        }
     }
 
     #[test]

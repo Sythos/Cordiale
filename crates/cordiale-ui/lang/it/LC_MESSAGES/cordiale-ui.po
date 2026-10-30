@@ -301,6 +301,14 @@ msgid "Device {} was revoked."
 msgstr "Il dispositivo {} è stato revocato."
 
 msgctxt "AppWindow"
+msgid "Own devices: {}. This device: {}."
+msgstr "I tuoi dispositivi: {}. Questo dispositivo: {}."
+
+msgctxt "AppWindow"
+msgid "This resets the E2E identity of this device. To confirm, type /e2e reset yes."
+msgstr "Questo azzera l'identità E2E di questo dispositivo. Per confermare, scrivi /e2e reset yes."
+
+msgctxt "AppWindow"
 msgid "The revoke is not finished. Try again later."
 msgstr "La revoca non è finita. Riprova più tardi."
 
