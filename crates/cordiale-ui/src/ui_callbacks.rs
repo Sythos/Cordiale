@@ -819,7 +819,7 @@ pub(crate) fn register_link_callbacks(
     let weak_for_media_share = ui.as_weak();
     ui.on_media_share(move || {
         if let Some(ui) = weak_for_media_share.upgrade() {
-            let outcome = media_save::share_link(ui.get_media_url().as_str());
+            let outcome = media_save::share(ui.get_media_url().as_str());
             if let Some(key) = media_save::status_key(&outcome, false) {
                 ui.set_status_kind(key.into());
             }

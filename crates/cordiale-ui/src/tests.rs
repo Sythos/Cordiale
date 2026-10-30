@@ -10785,6 +10785,14 @@ fn media_save_status_keys_treat_a_cancel_as_normal() {
 }
 
 #[test]
+fn media_share_falls_back_to_the_link_without_file_share() {
+    assert_eq!(media_save::share_mode(true), media_save::ShareMode::File);
+    assert_eq!(media_save::share_mode(false), media_save::ShareMode::Link);
+    assert!(!media_save::file_share_available());
+    assert_eq!(media_save::share(""), media_save::Outcome::Failed);
+}
+
+#[test]
 fn media_share_without_a_link_fails() {
     assert_eq!(media_save::share_link(""), media_save::Outcome::Failed);
 }
