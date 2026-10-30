@@ -1623,8 +1623,9 @@ commit e il motore di cicchetto (`cicchetto/src/lib/e2e/{wire,client,engine}.ts`
   la copia S1 è `{"t":"copy","peer","body"}`. `lv` è la versione della lista del mittente;
   nel corpo di un `pkmsg` c'è anche `fb`, e il ricevente lo confronta con
   `recipient_binding(mittente, proprio)` dopo la decifratura (altrimenti la sessione si
-  scarta). Gli altri tipi (`list`, `listreq`, `chal`, `ack`) tengono la sessione e non
-  salvano nulla (`RowOutcome::Ignored`).
+  scarta). `list` e `listreq` sono gestiti dal motore (vedi la issue 477 più
+  sotto). Gli altri tipi (`chal`, `ack`) tengono la sessione e non salvano nulla
+  (`RowOutcome::Ignored`).
 - Invio: il `pkmsg` richiede chiave master, lista firmata e certificato del dispositivo
   nello stato (`own_wire`); senza, l'invio dà `NotReady` e non parte nulla. `fb` è nel
   messaggio interno solo se la sessione non ha ancora ricevuto un messaggio.
