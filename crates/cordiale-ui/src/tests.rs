@@ -10912,3 +10912,81 @@ fn media_share_falls_back_to_the_link_without_file_share() {
 fn media_share_without_a_link_fails() {
     assert_eq!(media_save::share_link(""), media_save::Outcome::Failed);
 }
+
+/// Runs `apply_alias_change` with a fake read and write; returns the result
+/// and the map that reached the write, if any.
+fn run_alias_change_fake(
+    saved: Option<HashMap<String, String>>,
+    write_ok: bool,
+    change: AliasChange,
+) -> (
+    Result<(), AliasUpdateError>,
+    Option<HashMap<String, String>>,
+) {
+    let written = std::cell::RefCell::new(None);
+    let result = upload_test_runtime().block_on(apply_alias_change(
+        || async { saved },
+        |aliases| {
+            *written.borrow_mut() = Some(aliases);
+            async move { write_ok }
+        },
+        change,
+    ));
+    (result, written.into_inner())
+}
+
+fn saved_aliases() -> HashMap<String, String> {
+    HashMap::from([("hi".to_string(), "PRIVMSG $1 :hello".to_string())])
+}
+
+#[test]
+fn alias_upsert_with_a_failed_read_sends_nothing() {
+    let change = AliasChange::Set("bye".into(), "QUIT".into());
+    let (result, written) = run_alias_change_fake(None, true, change);
+    assert_eq!(result, Err(AliasUpdateError::Read));
+    assert_eq!(written, None);
+}
+
+#[test]
+fn alias_remove_with_a_failed_read_sends_nothing() {
+    let (result, written) = run_alias_change_fake(None, true, AliasChange::Remove("hi".into()));
+    assert_eq!(result, Err(AliasUpdateError::Read));
+    assert_eq!(written, None);
+}
+
+#[test]
+fn alias_upsert_writes_the_saved_aliases_plus_the_new_one() {
+    let change = AliasChange::Set("bye".into(), "QUIT".into());
+    let (result, written) = run_alias_change_fake(Some(saved_aliases()), true, change);
+    assert_eq!(result, Ok(()));
+    let mut expected = saved_aliases();
+    expected.insert("bye".into(), "QUIT".into());
+    assert_eq!(written, Some(expected));
+}
+
+#[test]
+fn alias_remove_writes_the_saved_aliases_minus_one() {
+    let (result, written) = run_alias_change_fake(
+        Some(saved_aliases()),
+        true,
+        AliasChange::Remove("hi".into()),
+    );
+    assert_eq!(result, Ok(()));
+    assert_eq!(written, Some(HashMap::new()));
+}
+
+#[test]
+fn alias_write_failure_is_reported() {
+    let (result, _) = run_alias_change_fake(
+        Some(saved_aliases()),
+        false,
+        AliasChange::Remove("hi".into()),
+    );
+    assert_eq!(result, Err(AliasUpdateError::Write));
+}
+
+#[test]
+fn alias_errors_map_to_distinct_status_kinds() {
+    assert_eq!(AliasUpdateError::Read.status_kind(), "alias-read-failed");
+    assert_eq!(AliasUpdateError::Write.status_kind(), "alias-save-failed");
+}
