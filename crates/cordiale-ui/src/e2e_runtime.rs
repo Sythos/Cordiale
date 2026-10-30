@@ -172,10 +172,15 @@ pub(crate) fn locked_row_with_drop(
 /// Opens the engine of `network` once for the session. False when the
 /// network has none.
 fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
+    // A reset network has no engine work, even when its engine is still in
+    // the map for the sealed history.
+    if state.e2e.reset.contains(network) {
+        return false;
+    }
     if state.e2e.engines.contains_key(network) {
         return true;
     }
-    if state.e2e.unavailable.contains(network) || state.e2e.reset.contains(network) {
+    if state.e2e.unavailable.contains(network) {
         return false;
     }
     // The server version can still be unknown here: ask again later.
@@ -268,6 +273,12 @@ async fn close_stale_pairings(state: &mut WorkerState) {
 /// Takes the engine of `network` out of the map for a pairing step. A joining
 /// device may have no engine yet: `create` makes its state and identity.
 fn take_pairing_engine(state: &mut WorkerState, network: &str, create: bool) -> Option<E2eEngine> {
+    // A device that joins after a reset gets a new identity. The old engine
+    // caches the deleted device id and holds the files, so it is dropped
+    // first and the new one reads the new device key.
+    if create && state.e2e.reset.contains(network) {
+        drop(state.e2e.engines.remove(network));
+    }
     if !state.e2e.engines.contains_key(network) {
         let opened = if create {
             open_pairing_engine(state, network)
@@ -342,6 +353,10 @@ pub(crate) async fn run_e2e_pair(
     }
     match action {
         E2ePairAction::Start => {
+            // A reset device has no master key, so it cannot open a pairing.
+            if state.e2e.reset.contains(&network) {
+                return show_pairing_kind(ui, "e2e-not-ready", String::new());
+            }
             let Some(mut engine) = take_pairing_engine(state, &network, false) else {
                 return show_pairing_kind(ui, "e2e-not-ready", String::new());
             };
@@ -509,11 +524,11 @@ pub(crate) async fn run_e2e_manage(
                 ResetConfirmation::user_confirmed(),
             )
             .await;
-            state.e2e.engines.insert(network.clone(), engine);
             if let Err(error) = &result {
                 persistence::log_line(&format!("e2e reset not finished: {error:?}"));
+                state.e2e.engines.insert(network, engine);
             } else {
-                state.e2e.reset.insert(network);
+                settle_reset(state, ui, &network, engine);
             }
             show_manage_kind(ui, reset_status_key(&result), String::new(), String::new());
         }
@@ -572,9 +587,28 @@ async fn resume_pending_manage(
             );
         }
     }
-    state.e2e.engines.insert(network.to_string(), engine);
     if reset_done {
-        state.e2e.reset.insert(network.to_string());
+        settle_reset(state, ui, network, engine);
+    } else {
+        state.e2e.engines.insert(network.to_string(), engine);
+    }
+}
+
+/// Marks `network` as reset and puts its engine back. The engine stays in the
+/// map for the sealed history only. The end of the session drops the queued
+/// texts, so nothing goes out for the deleted device.
+fn settle_reset(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    mut engine: E2eEngine,
+) {
+    engine.end_session();
+    let changed = engine.take_changed_peers();
+    state.e2e.engines.insert(network.to_string(), engine);
+    state.e2e.reset.insert(network.to_string());
+    for nick in changed {
+        refresh_locked_view(state, ui, network, &nick);
     }
 }
 
@@ -642,6 +676,10 @@ fn finish_pairing_step(
     match error {
         Some(error) => show_pairing_kind(ui, pairing_error_key(&error), String::new()),
         None => show_pairing(ui, &active.session.status()),
+    }
+    // A finished join gave the device a new identity after a reset.
+    if matches!(active.session.status(), PairingStatus::Done) {
+        state.e2e.reset.remove(&active.network);
     }
     if active.session.is_active() {
         state.e2e.pairing = Some(active);
@@ -1079,6 +1117,9 @@ pub(crate) async fn tick_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<A
     let mut networks: Vec<String> = state.e2e.engines.keys().cloned().collect();
     networks.sort();
     for network in networks {
+        if state.e2e.reset.contains(&network) {
+            continue;
+        }
         if !state
             .e2e
             .engines
@@ -1091,5 +1132,20 @@ pub(crate) async fn tick_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<A
             continue;
         };
         settle_engine(state, ui, &network, engine).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reset_network_gets_no_engine_and_keeps_its_marker() {
+        let mut state = WorkerState::new();
+        state.e2e.reset.insert("net".to_string());
+        assert!(!ensure_engine(&mut state, "net"));
+        // With no client the new engine of a join does not open.
+        assert!(take_pairing_engine(&mut state, "net", true).is_none());
+        assert!(state.e2e.reset.contains("net"));
     }
 }
