@@ -373,6 +373,14 @@ impl PeerTrust {
         }
     }
 
+    /// True when a signed list of the peer revoked at least one device. The
+    /// current list never holds a revoked key, so read this set, not the list.
+    pub fn has_revoked_devices(&self, network: &str, nick: &str) -> bool {
+        self.peers
+            .get(&peer_key(network, nick))
+            .is_some_and(|record| !record.revoked.is_empty())
+    }
+
     /// True when the key was revoked, or its curve key was.
     pub fn is_revoked(
         &self,

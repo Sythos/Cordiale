@@ -662,6 +662,9 @@ pub struct E2eEngine {
     revoked_dids: HashSet<String>,
     /// Nicks that sent a message the engine could not read for lack of keys.
     keys_wanted: Vec<String>,
+    /// Nicks whose KEYS or first message came under a master key that is not
+    /// the stored one. The view shows the trust alarm for them.
+    trust_changed: Vec<String>,
     /// Texts that wait for the keys of their peer, oldest first.
     queue: OutgoingQueue,
     pending: HashMap<SendKey, PendingText>,
@@ -719,6 +722,7 @@ impl E2eEngine {
             clock: MonotonicClock::new(),
             revoked_dids: HashSet::new(),
             keys_wanted: Vec::new(),
+            trust_changed: Vec::new(),
             queue: OutgoingQueue::new(),
             pending: HashMap::new(),
             sent: HashMap::new(),
@@ -1015,6 +1019,19 @@ impl E2eEngine {
         std::mem::take(&mut self.keys_wanted)
     }
 
+    /// The nicks whose master key changed since the last call. The list is
+    /// cleared. The stored master stays: the engine reads nothing under the
+    /// new master.
+    pub fn take_trust_changed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.trust_changed)
+    }
+
+    fn note_trust_changed(&mut self, nick: &str) {
+        if !self.trust_changed.iter().any(|known| known == nick) {
+            self.trust_changed.push(nick.to_string());
+        }
+    }
+
     /// Reads a KEYS text into the engine: a KEYS row or a claim answer. Each
     /// device of the answer must pass [`verify_peer_device`] and carry a good
     /// signature on its key. A device that is refused is skipped, the others
@@ -1028,6 +1045,7 @@ impl E2eEngine {
         let mut trust = self.state.trust();
         let mut accepted = Vec::new();
         let mut first_error = None;
+        let mut master_changed = false;
         // The list revokes the devices that it drops, with or without a
         // device entry in the answer.
         if let Err(err) = apply_peer_list(
@@ -1039,6 +1057,7 @@ impl E2eEngine {
             &master.list.devices,
             &master.sig,
         ) {
+            master_changed |= err == E2eError::MasterChanged;
             first_error = Some(err);
         }
         let mut seen = HashSet::new();
@@ -1065,9 +1084,13 @@ impl E2eEngine {
             match checked {
                 Ok(device) => accepted.push((device, entry.otk.key.clone())),
                 Err(err) => {
+                    master_changed |= err == E2eError::MasterChanged;
                     first_error.get_or_insert(err);
                 }
             }
+        }
+        if master_changed {
+            self.note_trust_changed(nick);
         }
         self.state.set_trust(&trust)?;
         // A newer list stays even when a device is refused: drop every
@@ -1227,6 +1250,16 @@ impl E2eEngine {
             return RowOutcome::Undecryptable;
         }
         let Some(decrypted) = self.decrypt_row(row, entry.as_ref(), &nick) else {
+            // A first message under another master than the stored one is a
+            // trust alarm, not only an unread row.
+            if let Ok(MessagePayload::PreKey(pre)) = MessagePayload::parse(row.verb, &row.payload) {
+                if trust
+                    .master(&self.network, &nick)
+                    .is_some_and(|master| master != pre.master.ed25519)
+                {
+                    self.note_trust_changed(&nick);
+                }
+            }
             if entry.is_none() && !self.keys_wanted.contains(&nick) {
                 self.keys_wanted.push(nick);
             }
@@ -2967,6 +3000,9 @@ mod tests {
         ));
         assert!(alice.peers.is_empty());
         assert!(!alice.is_ready("bob"));
+        // The revocation is in the trust state, not in the current list.
+        assert!(alice.trust().has_revoked_devices(NET, "bob"));
+        assert!(!alice.trust().has_revoked_devices(NET, "carol"));
         let server = MockServer::start().await;
         mount_send(&server, "msgid1").await;
         let sent = alice
@@ -2978,6 +3014,61 @@ mod tests {
             .await
             .expect("requests")
             .is_empty());
+    }
+
+    #[test]
+    fn a_keys_row_under_another_master_is_a_trust_change() {
+        let alice_id = Ident::new("alice-master");
+        let bob_id = Ident::new("bob-master");
+        let other_id = Ident::new("bob-other-master");
+        let mut alice = alice_id.engine();
+        alice
+            .accept_keys("bob", &bob_id.keys())
+            .expect("alice reads bob");
+        assert!(alice.take_trust_changed().is_empty());
+        let alice_did = alice.own_did().to_string();
+        let value = row(
+            4,
+            "bob",
+            WILDCARD,
+            &alice_did,
+            "keys",
+            "k2",
+            &other_id.keys(),
+        );
+        let keys_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(alice.handle_row(&keys_row, 1), RowOutcome::Undecryptable);
+        assert_eq!(alice.take_trust_changed(), ["bob"]);
+        assert!(alice.take_trust_changed().is_empty());
+        // The stored master stays.
+        assert!(alice.is_ready("bob"));
+    }
+
+    #[tokio::test]
+    async fn a_first_message_under_another_master_is_a_trust_change() {
+        let mut p = pair();
+        // Bob knows another master for the nick of Alice.
+        let other_id = Ident::new("alice-other-master");
+        p.bob
+            .accept_keys("alice", &other_id.keys())
+            .expect("bob reads the other master");
+        assert!(p.bob.take_trust_changed().is_empty());
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, "hello").await;
+        let payload = body["payload"].as_str().expect("payload").to_string();
+        let value = row(
+            5,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "pkmsg",
+            "msgid1",
+            &payload,
+        );
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(p.bob.handle_row(&item, 200), RowOutcome::Undecryptable);
+        assert_eq!(p.bob.take_trust_changed(), ["alice"]);
     }
 
     #[tokio::test]
