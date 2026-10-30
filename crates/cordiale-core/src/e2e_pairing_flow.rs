@@ -22,25 +22,31 @@
 
 //! The X1 pairing flow between two devices of one user.
 //!
-//! The creator is a device that holds the master key. It opens a rendezvous
-//! and shows the pairing link. The joiner is the new device. It reads the
-//! link and joins. The two sides then do these steps:
+//! The creator is the holder: a device that holds the master key. It opens a
+//! rendezvous and shows the pairing link. The joiner is the new device. It
+//! reads the link and joins. The two sides then do these steps:
 //!
 //! 1. The joiner opens an ECIES channel to the key of the link and posts the
-//!    initial message. The creator opens its side of the channel.
-//! 2. Both devices show the two-digit check code of the channel. The user
-//!    types the code on each device. A wrong code ends the pairing.
-//! 3. The joiner posts its public device keys, sealed, after its confirmation.
-//! 4. The creator, after its own confirmation and the keys of the joiner,
-//!    signs the certificate, puts the new signed list and posts the grant.
-//!    Nothing is signed or published before both confirmations.
-//! 5. The joiner checks the grant, saves list and certificate, and runs the
-//!    provision of its bundle. The creator closes the rendezvous.
+//!    initial message `hello`. The relay refuses a `|` in a payload, so this
+//!    first payload travels as base64url of its UTF-8, unpadded.
+//! 2. The joiner shows the two-digit check code. The user types it on the
+//!    holder. A wrong code ends the pairing. The holder then sends `offer`
+//!    with its network and master key.
+//! 3. The user confirms on the joiner. The joiner posts `join` with its public
+//!    device keys and its own signature over the id text (S1).
+//! 4. The holder checks the signature, signs the new list and the certificate,
+//!    puts the list and posts `signed`. Nothing is signed or published before
+//!    both confirmations.
+//! 5. The joiner checks `signed`, saves list and certificate, provisions its
+//!    bundle and posts `done`. The holder closes the rendezvous.
 //!
-//! The channel is `vodozemac::ecies` with the info text [`PAIRING_INFO`]. The
-//! message shapes, the info text and the digit mode are a **candidate**: the
-//! final contract of the relay is not in this repository. A change of the
-//! contract touches this module only.
+//! The messages are compact JSON with `"v":1` and a `"t"` kind. The shapes,
+//! the info text `irc-e2e:v2:pair` and the digit mode `AllowLeadingZero` are
+//! the final text of section 4g of the Grappa client protocol, and match
+//! `pairingMessages.ts` of Cicchetto. This device pairs one network for each
+//! pairing. An `offer` that names more networks is read for that network only,
+//! and the others go in `skipped`. A change of the contract touches this
+//! module only.
 //!
 //! The channel secret lives in memory only. The sealed store holds a small
 //! record (role, rendezvous id, start time) in its pairing slot, so a restart
@@ -51,6 +57,8 @@
 
 use std::fmt;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use vodozemac::ecies::{
     DigitMode, Ecies, EstablishedEcies, InboundCreationResult, InitialMessage, Message,
@@ -63,7 +71,7 @@ use zeroize::Zeroize;
 use crate::client::GrappaClient;
 use crate::e2e_device::{
     build_device_certificate, build_signed_list_signature, verify_device_certificate,
-    verify_signed_list, VersionedDeviceCertificate,
+    verify_signature, verify_signed_list, VersionedDeviceCertificate,
 };
 use crate::e2e_identity_routes::ListRequest;
 use crate::e2e_manage::SignedList;
@@ -75,12 +83,19 @@ use crate::e2e_provision::{provision_device, ProvisionError};
 use crate::e2e_refusal::E2eRouteError;
 use crate::e2e_state::E2eStateStore;
 use crate::e2e_wire::{
-    check_list_devices, decode_key, pairing_message_fits, MAX_VERSION, PAIRING_LIFETIME_SECS,
-    PAIRING_MESSAGE_MAX_BYTES,
+    check_list_devices, decode_key, decode_signature, device_id_signed_text, pairing_message_fits,
+    MAX_VERSION, PAIRING_LIFETIME_SECS, PAIRING_MESSAGE_MAX_BYTES,
 };
 
-/// The info text of the ECIES channel. Candidate value.
+/// The info text of the ECIES channel. Final value: section 4g of the Grappa
+/// client protocol.
 pub const PAIRING_INFO: &str = "irc-e2e:v2:pair";
+
+/// The `v` of every plaintext message of the channel.
+const WIRE_VERSION: u8 = 1;
+
+/// The reasons that a network can be left out of a pairing.
+const REFUSAL_REASONS: [&str; 4] = ["full", "paired", "list-changed", "failed"];
 
 /// Version of the record in the pairing slot of the sealed store.
 const RECORD_VERSION: u8 = 1;
@@ -120,18 +135,22 @@ pub enum FlowError {
     NoChannel,
     /// The typed code is not the check code. The pairing ends.
     WrongCode,
-    /// The creator has not both confirmations.
+    /// The step needs a confirmation or a message that is not there yet.
     NotConfirmed,
     /// A payload is over a limit of the relay. Nothing was sent.
     TooLarge,
     BadChannel,
     BadMessage,
-    /// The grant does not verify, or it is for another device.
+    /// The signed answer does not verify, or it is for another device.
     BadGrant,
     /// The list has four devices already, or its version is at the top.
     ListFull,
     /// The creator has no master key or no own list.
     NoIdentity,
+    /// The offer of the holder does not name the network of this pairing.
+    NotOffered,
+    /// The holder refused the device, or its answer holds no certificate.
+    Refused,
     /// The sealed store failed.
     Store,
 }
@@ -170,8 +189,8 @@ impl JoinerDevice {
     }
 }
 
-/// What the creator hands to the joiner: the master key, the certificate for
-/// the new device and the new signed list.
+/// What the holder hands to the joiner in `signed`: the master key (from the
+/// offer), the certificate for the new device and the new signed list.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grant {
     pub master: String,
@@ -185,13 +204,127 @@ impl fmt::Debug for Grant {
     }
 }
 
-/// The plaintext messages of the channel.
+#[derive(Serialize, Deserialize)]
+struct WireNetwork {
+    network: String,
+    master: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireId {
+    curve25519: String,
+    ed25519: String,
+    sig: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireJoined {
+    network: String,
+    id: WireId,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireReason {
+    network: String,
+    reason: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireList {
+    ver: u32,
+    devices: Vec<String>,
+    sig: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireSigned {
+    network: String,
+    cert: String,
+    list: WireList,
+}
+
+/// The plaintext messages of the channel, as section 4g of the Grappa client
+/// protocol lists them. An unknown extra field is ignored; a missing or
+/// ill-typed field, an unknown `t` and a `v` other than 1 are refused.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum Wire {
-    Hello,
-    Confirm { ed25519: String, curve25519: String },
-    Grant(Grant),
+    Hello {
+        v: u8,
+    },
+    Offer {
+        v: u8,
+        networks: Vec<WireNetwork>,
+        full: Vec<String>,
+    },
+    Join {
+        v: u8,
+        devices: Vec<WireJoined>,
+        skipped: Vec<WireReason>,
+    },
+    Signed {
+        v: u8,
+        devices: Vec<WireSigned>,
+        refused: Vec<WireReason>,
+    },
+    Done {
+        v: u8,
+        paired: Vec<String>,
+    },
+}
+
+fn reasons_ok(list: &[WireReason]) -> bool {
+    list.iter()
+        .all(|item| !item.network.is_empty() && REFUSAL_REASONS.contains(&item.reason.as_str()))
+}
+
+impl Wire {
+    /// The message when its version, keys, signatures and reasons are valid.
+    fn checked(self) -> Option<Self> {
+        let (v, ok) = match &self {
+            Wire::Hello { v } => (*v, true),
+            Wire::Offer { v, networks, full } => (
+                *v,
+                networks
+                    .iter()
+                    .all(|item| !item.network.is_empty() && decode_key(&item.master).is_ok())
+                    && full.iter().all(|network| !network.is_empty()),
+            ),
+            Wire::Join {
+                v,
+                devices,
+                skipped,
+            } => (
+                *v,
+                devices.iter().all(|item| {
+                    !item.network.is_empty()
+                        && decode_key(&item.id.ed25519).is_ok()
+                        && decode_key(&item.id.curve25519).is_ok()
+                        && decode_signature(&item.id.sig).is_ok()
+                }) && reasons_ok(skipped),
+            ),
+            Wire::Signed {
+                v,
+                devices,
+                refused,
+            } => (
+                *v,
+                devices.iter().all(|item| {
+                    !item.network.is_empty()
+                        && decode_signature(&item.cert).is_ok()
+                        && decode_signature(&item.list.sig).is_ok()
+                        && item.list.devices.iter().all(|key| decode_key(key).is_ok())
+                }) && reasons_ok(refused),
+            ),
+            Wire::Done { v, paired } => (*v, paired.iter().all(|network| !network.is_empty())),
+        };
+        (v == WIRE_VERSION && ok).then_some(self)
+    }
+}
+
+/// Reads the bytes of an opened message, or `None` for anything off-shape.
+fn read_wire(bytes: &[u8]) -> Option<Wire> {
+    serde_json::from_slice::<Wire>(bytes).ok()?.checked()
 }
 
 /// A sealed message with the totals of the relay before it. The client call
@@ -222,10 +355,15 @@ impl Outgoing {
 pub enum FlowEvent {
     /// The channel is open and the check code is known.
     CodeReady,
-    /// The creator took the public keys of the joiner.
-    PeerConfirmed,
-    /// The joiner took the grant. The caller must verify and apply it.
-    Granted(Grant),
+    /// The joiner took the offer of the holder and knows the master key.
+    Offered,
+    /// The holder took the public keys of the joiner. The caller must check
+    /// the signature of the id block and then answer with `signed`.
+    Joined,
+    /// The joiner took the signed answer. The caller must verify and apply it.
+    Signed(Grant),
+    /// The holder took `done`: the joiner is paired.
+    Paired,
 }
 
 /// What the user sees of a pairing.
@@ -255,12 +393,23 @@ enum Stage {
 pub struct PairingSession {
     role: PairingRole,
     rendezvous_id: String,
+    /// The slug of the network that this pairing changes.
+    network: String,
     started_at: i64,
     stage: Stage,
     waiting: Option<Ecies>,
     channel: Option<EstablishedEcies>,
     own_device: Option<JoinerDevice>,
     peer_device: Option<JoinerDevice>,
+    /// The signature of the id block of the joiner, as the holder read it.
+    peer_id_sig: Option<String>,
+    /// The master key: the own one for the holder, the offered one for the
+    /// joiner.
+    master: Option<String>,
+    /// The joiner: networks of the offer that this device leaves out.
+    skipped: Vec<WireReason>,
+    offer_sent: bool,
+    join_sent: bool,
     code: Option<u8>,
     own_confirmed: bool,
     last_seq: u64,
@@ -279,20 +428,26 @@ impl fmt::Debug for PairingSession {
 }
 
 fn code_of(channel: &EstablishedEcies) -> u8 {
-    channel.check_code().to_digit(DigitMode::NoLeadingZero)
+    channel.check_code().to_digit(DigitMode::AllowLeadingZero)
 }
 
 impl PairingSession {
-    fn new(role: PairingRole, rendezvous_id: &str, now: i64) -> Self {
+    fn new(role: PairingRole, rendezvous_id: &str, network: &str, now: i64) -> Self {
         Self {
             role,
             rendezvous_id: rendezvous_id.to_string(),
+            network: network.to_string(),
             started_at: now,
             stage: Stage::Open,
             waiting: None,
             channel: None,
             own_device: None,
             peer_device: None,
+            peer_id_sig: None,
+            master: None,
+            skipped: Vec::new(),
+            offer_sent: false,
+            join_sent: false,
             code: None,
             own_confirmed: false,
             last_seq: 0,
@@ -302,23 +457,29 @@ impl PairingSession {
     }
 
     /// The creator side: makes the ephemeral key and the pairing link.
-    pub fn create(rendezvous: &Rendezvous, now: i64) -> Result<(Self, PairingLink), FlowError> {
+    pub fn create(
+        rendezvous: &Rendezvous,
+        network: &str,
+        now: i64,
+    ) -> Result<(Self, PairingLink), FlowError> {
         if rendezvous.role != PairingRole::Creator {
             return Err(FlowError::WrongRole);
         }
         let ecies = Ecies::with_info(PAIRING_INFO);
         let link = PairingLink::new(&rendezvous.id, &ecies.public_key().to_base64())
             .map_err(FlowError::Link)?;
-        let mut session = Self::new(PairingRole::Creator, &rendezvous.id, now);
+        let mut session = Self::new(PairingRole::Creator, &rendezvous.id, network, now);
         session.waiting = Some(ecies);
         Ok((session, link))
     }
 
     /// The joiner side: opens the channel to the key of the link. Gives the
-    /// session and the initial message to post.
+    /// session and the initial message to post. The initial message travels
+    /// as base64url, because the relay refuses the `|` of its encoding.
     pub fn join(
         link: &PairingLink,
         rendezvous: &Rendezvous,
+        network: &str,
         device: JoinerDevice,
         now: i64,
     ) -> Result<(Self, Outgoing), FlowError> {
@@ -330,15 +491,16 @@ impl PairingSession {
         }
         let their = Curve25519PublicKey::from_base64(link.ephemeral_key())
             .map_err(|_| FlowError::Link(PairingError::BadLink))?;
-        let hello = serde_json::to_vec(&Wire::Hello).map_err(|_| FlowError::BadMessage)?;
+        let hello = serde_json::to_vec(&Wire::Hello { v: WIRE_VERSION })
+            .map_err(|_| FlowError::BadMessage)?;
         let OutboundCreationResult { ecies, message } = Ecies::with_info(PAIRING_INFO)
             .establish_outbound_channel(their, &hello)
             .map_err(|_| FlowError::BadChannel)?;
-        let payload = message.encode();
+        let payload = URL_SAFE_NO_PAD.encode(message.encode().as_bytes());
         if !pairing_message_fits(0, 0, payload.len()) {
             return Err(FlowError::TooLarge);
         }
-        let mut session = Self::new(PairingRole::Joiner, &rendezvous.id, now);
+        let mut session = Self::new(PairingRole::Joiner, &rendezvous.id, network, now);
         session.code = Some(code_of(&ecies));
         session.channel = Some(ecies);
         session.own_device = Some(device);
@@ -417,6 +579,13 @@ impl PairingSession {
         self.end(EndReason::Closed(reason));
     }
 
+    /// The holder sets its own master key, which the offer carries.
+    pub fn set_master(&mut self, master: &str) -> Result<(), FlowError> {
+        decode_key(master).map_err(|_| FlowError::NoIdentity)?;
+        self.master = Some(master.to_string());
+        Ok(())
+    }
+
     /// Takes in the messages of the relay. A message at or below the last
     /// sequence is skipped, so a repeat or a catch-up is safe. The order of
     /// the list does not matter. A message of this side is skipped.
@@ -460,7 +629,11 @@ impl PairingSession {
         let Some(ecies) = self.waiting.take() else {
             return Err(self.fail(EndReason::BadChannel, FlowError::BadChannel));
         };
-        let Ok(initial) = InitialMessage::decode(payload) else {
+        let encoded = URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()
+            .and_then(|raw| String::from_utf8(raw).ok());
+        let Some(Ok(initial)) = encoded.as_deref().map(InitialMessage::decode) else {
             return Err(self.fail(EndReason::BadChannel, FlowError::BadChannel));
         };
         let InboundCreationResult { ecies, message } =
@@ -468,7 +641,7 @@ impl PairingSession {
                 Ok(result) => result,
                 Err(_) => return Err(self.fail(EndReason::BadChannel, FlowError::BadChannel)),
             };
-        if !matches!(serde_json::from_slice::<Wire>(&message), Ok(Wire::Hello)) {
+        if !matches!(read_wire(&message), Some(Wire::Hello { .. })) {
             return Err(self.fail(EndReason::BadChannel, FlowError::BadChannel));
         }
         self.code = Some(code_of(&ecies));
@@ -489,34 +662,100 @@ impl PairingSession {
         let Ok(mut plain) = opened else {
             return Err(self.fail(EndReason::BadChannel, FlowError::BadChannel));
         };
-        let wire = serde_json::from_slice::<Wire>(&plain);
+        let wire = read_wire(&plain);
         plain.zeroize();
         match (self.role, wire) {
-            (
-                PairingRole::Creator,
-                Ok(Wire::Confirm {
-                    ed25519,
-                    curve25519,
-                }),
-            ) => {
-                let keys_ok = decode_key(&ed25519).is_ok() && decode_key(&curve25519).is_ok();
-                if !keys_ok || self.peer_device.is_some() {
-                    return Err(self.fail(EndReason::BadMessage, FlowError::BadMessage));
+            (PairingRole::Joiner, Some(Wire::Offer { networks, .. })) => self.take_offer(networks),
+            (PairingRole::Creator, Some(Wire::Join { devices, .. })) => self.take_join(devices),
+            (PairingRole::Joiner, Some(Wire::Signed { devices, .. })) => self.take_signed(devices),
+            (PairingRole::Creator, Some(Wire::Done { paired, .. })) => {
+                if self.offer_sent && paired.iter().any(|network| *network == self.network) {
+                    Ok(Some(FlowEvent::Paired))
+                } else {
+                    Err(self.fail(EndReason::Failed, FlowError::BadMessage))
                 }
-                self.peer_device = Some(JoinerDevice {
-                    ed25519,
-                    curve25519,
-                });
-                Ok(Some(FlowEvent::PeerConfirmed))
             }
-            (PairingRole::Joiner, Ok(Wire::Grant(grant))) => Ok(Some(FlowEvent::Granted(grant))),
             _ => Err(self.fail(EndReason::BadMessage, FlowError::BadMessage)),
         }
     }
 
+    /// The joiner keeps the master key offered for its network. The other
+    /// offered networks go in `skipped`.
+    fn take_offer(&mut self, networks: Vec<WireNetwork>) -> Result<Option<FlowEvent>, FlowError> {
+        if self.master.is_some() {
+            return Err(self.fail(EndReason::BadMessage, FlowError::BadMessage));
+        }
+        let mut master = None;
+        let mut skipped = Vec::new();
+        for item in networks {
+            if item.network == self.network {
+                master = Some(item.master);
+            } else {
+                skipped.push(WireReason {
+                    network: item.network,
+                    reason: "failed".to_string(),
+                });
+            }
+        }
+        let Some(master) = master else {
+            return Err(self.fail(EndReason::Failed, FlowError::NotOffered));
+        };
+        self.master = Some(master);
+        self.skipped = skipped;
+        Ok(Some(FlowEvent::Offered))
+    }
+
+    /// The holder keeps the device keys and the signature of the joiner. The
+    /// signature is checked in `peer_id_signature_valid`.
+    fn take_join(&mut self, devices: Vec<WireJoined>) -> Result<Option<FlowEvent>, FlowError> {
+        let entry = devices
+            .into_iter()
+            .find(|item| item.network == self.network);
+        let Some(entry) = entry else {
+            return Err(self.fail(EndReason::Failed, FlowError::Refused));
+        };
+        if !self.offer_sent || self.peer_device.is_some() {
+            return Err(self.fail(EndReason::BadMessage, FlowError::BadMessage));
+        }
+        self.peer_device = Some(JoinerDevice {
+            ed25519: entry.id.ed25519,
+            curve25519: entry.id.curve25519,
+        });
+        self.peer_id_sig = Some(entry.id.sig);
+        Ok(Some(FlowEvent::Joined))
+    }
+
+    /// The joiner builds the grant from the answer of the holder.
+    fn take_signed(&mut self, devices: Vec<WireSigned>) -> Result<Option<FlowEvent>, FlowError> {
+        let entry = devices
+            .into_iter()
+            .find(|item| item.network == self.network);
+        let (Some(entry), Some(master), Some(own)) =
+            (entry, self.master.clone(), self.own_device.clone())
+        else {
+            return Err(self.fail(EndReason::Failed, FlowError::Refused));
+        };
+        let grant = Grant {
+            certificate: VersionedDeviceCertificate {
+                first_list_version: entry.list.ver,
+                device_ed25519: own.ed25519,
+                master_ed25519: master.clone(),
+                signature: entry.cert,
+            },
+            list: SignedList {
+                version: entry.list.ver,
+                keys: entry.list.devices,
+                signature: entry.list.sig,
+            },
+            master,
+        };
+        Ok(Some(FlowEvent::Signed(grant)))
+    }
+
     /// The user typed the code of this device. A code that is not the check
-    /// code ends the pairing. The joiner gets its sealed keys to post; the
-    /// creator gets nothing to post.
+    /// code ends the pairing. The holder gets its sealed `offer` to post. The
+    /// joiner gets nothing here: its `join` follows with `seal_join`, when the
+    /// offer is there.
     pub fn confirm(&mut self, typed: &str) -> Result<Option<Outgoing>, FlowError> {
         if !self.is_active() {
             return Err(FlowError::NotActive);
@@ -528,38 +767,133 @@ impl PairingSession {
         if self.own_confirmed {
             return Ok(None);
         }
-        self.own_confirmed = true;
-        match (self.role, self.own_device.clone()) {
-            (PairingRole::Joiner, Some(device)) => {
-                let wire = Wire::Confirm {
-                    ed25519: device.ed25519,
-                    curve25519: device.curve25519,
-                };
-                self.seal(&wire).map(Some)
-            }
-            _ => Ok(None),
+        if self.role == PairingRole::Joiner {
+            self.own_confirmed = true;
+            return Ok(None);
         }
+        let master = self.master.clone().ok_or(FlowError::NoIdentity)?;
+        let network = self.network.clone();
+        let outgoing = self.seal(&Wire::Offer {
+            v: WIRE_VERSION,
+            networks: vec![WireNetwork { network, master }],
+            full: Vec::new(),
+        })?;
+        self.own_confirmed = true;
+        self.offer_sent = true;
+        Ok(Some(outgoing))
     }
 
-    /// The keys of the joiner, once both devices confirmed. This is the only
-    /// way to the signing step of the creator.
+    /// True when the joiner confirmed, holds the offer and sent no `join`.
+    pub fn join_ready(&self) -> bool {
+        self.role == PairingRole::Joiner
+            && self.stage == Stage::Keyed
+            && self.own_confirmed
+            && self.master.is_some()
+            && !self.join_sent
+    }
+
+    /// Seals `join` for the joiner. `id_signature` is the signature of the
+    /// own device over the id text for the offered master key (S1).
+    pub fn seal_join(&mut self, id_signature: &str) -> Result<Outgoing, FlowError> {
+        if !self.join_ready() {
+            return Err(FlowError::NotConfirmed);
+        }
+        let device = self.own_device.clone().ok_or(FlowError::NoIdentity)?;
+        let wire = Wire::Join {
+            v: WIRE_VERSION,
+            devices: vec![WireJoined {
+                network: self.network.clone(),
+                id: WireId {
+                    curve25519: device.curve25519,
+                    ed25519: device.ed25519,
+                    sig: id_signature.to_string(),
+                },
+            }],
+            skipped: std::mem::take(&mut self.skipped),
+        };
+        let outgoing = self.seal(&wire)?;
+        self.join_sent = true;
+        Ok(outgoing)
+    }
+
+    /// The keys of the joiner, once the holder confirmed and sent its offer.
+    /// This is the only way to the signing step of the holder.
     pub fn confirmed_device(&self) -> Option<&JoinerDevice> {
-        if self.role == PairingRole::Creator && self.stage == Stage::Keyed && self.own_confirmed {
+        if self.role == PairingRole::Creator
+            && self.stage == Stage::Keyed
+            && self.own_confirmed
+            && self.offer_sent
+        {
             self.peer_device.as_ref()
         } else {
             None
         }
     }
 
-    /// Seals the grant for the joiner. Refused until both devices confirmed.
-    /// The session is done when the grant is sealed.
-    pub fn seal_grant(&mut self, grant: &Grant) -> Result<Outgoing, FlowError> {
+    /// True when the joiner signed its id block for the master of the holder.
+    pub fn peer_id_signature_valid(&self) -> bool {
+        match (&self.peer_device, &self.peer_id_sig, &self.master) {
+            (Some(device), Some(signature), Some(master)) => verify_signature(
+                &device.ed25519,
+                signature,
+                device_id_signed_text(&device.curve25519, master).as_bytes(),
+            )
+            .is_ok(),
+            _ => false,
+        }
+    }
+
+    /// Seals `signed` for the joiner. Refused until both sides confirmed. The
+    /// pairing stays open until the joiner answers `done`.
+    pub fn seal_signed(&mut self, grant: &Grant) -> Result<Outgoing, FlowError> {
         if self.confirmed_device().is_none() {
             return Err(FlowError::NotConfirmed);
         }
-        let outgoing = self.seal(&Wire::Grant(grant.clone()))?;
-        self.finish();
+        let wire = Wire::Signed {
+            v: WIRE_VERSION,
+            devices: vec![WireSigned {
+                network: self.network.clone(),
+                cert: grant.certificate.signature.clone(),
+                list: WireList {
+                    ver: grant.list.version,
+                    devices: grant.list.keys.clone(),
+                    sig: grant.list.signature.clone(),
+                },
+            }],
+            refused: Vec::new(),
+        };
+        self.seal(&wire)
+    }
+
+    /// Seals `signed` with a refusal for the network. The pairing ends as
+    /// failed on this side.
+    pub fn seal_refusal(&mut self, reason: &str) -> Result<Outgoing, FlowError> {
+        if self.confirmed_device().is_none() || !REFUSAL_REASONS.contains(&reason) {
+            return Err(FlowError::NotConfirmed);
+        }
+        let wire = Wire::Signed {
+            v: WIRE_VERSION,
+            devices: Vec::new(),
+            refused: vec![WireReason {
+                network: self.network.clone(),
+                reason: reason.to_string(),
+            }],
+        };
+        let outgoing = self.seal(&wire)?;
+        self.end(EndReason::Failed);
         Ok(outgoing)
+    }
+
+    /// Seals `done` for the holder, after the joiner kept the answer.
+    pub fn seal_done(&mut self) -> Result<Outgoing, FlowError> {
+        if self.role != PairingRole::Joiner || !self.join_sent {
+            return Err(FlowError::NotConfirmed);
+        }
+        let wire = Wire::Done {
+            v: WIRE_VERSION,
+            paired: vec![self.network.clone()],
+        };
+        self.seal(&wire)
     }
 
     /// Marks the pairing as done and drops the secrets of the channel.
@@ -856,7 +1190,7 @@ pub async fn start_creator(
     now: i64,
 ) -> Result<(PairingSession, PairingLink), DriveError> {
     let rendezvous = ctx.client.create_pairing(ctx.token, ctx.protocol).await?;
-    let (session, link) = PairingSession::create(&rendezvous, now)?;
+    let (session, link) = PairingSession::create(&rendezvous, ctx.network_id, now)?;
     if let Err(error) = save_pending(store, &session) {
         let _ = ctx
             .client
@@ -881,7 +1215,8 @@ pub async fn start_joiner(
         .client
         .join_pairing(ctx.token, link.rendezvous_id(), ctx.protocol)
         .await?;
-    let (mut session, hello) = PairingSession::join(&link, &rendezvous, device, now)?;
+    let (mut session, hello) =
+        PairingSession::join(&link, &rendezvous, ctx.network_id, device, now)?;
     if let Err(error) = save_pending(store, &session) {
         session.end(EndReason::Failed);
         cleanup(ctx, store, &session, true).await;
@@ -928,15 +1263,30 @@ async fn pump_inner(
     for event in session.accept(&messages)? {
         match event {
             FlowEvent::CodeReady => {}
-            FlowEvent::PeerConfirmed => {
-                if session.confirmed_device().is_some() {
-                    finish_creator(ctx, store, session).await?;
-                }
+            FlowEvent::Offered => send_join_if_ready(ctx, store, session).await?,
+            FlowEvent::Joined => finish_creator(ctx, store, session).await?,
+            FlowEvent::Signed(grant) => finish_joiner(ctx, store, session, &grant).await?,
+            FlowEvent::Paired => {
+                // The holder closes the rendezvous after `done`.
+                session.finish();
+                cleanup(ctx, store, session, true).await;
             }
-            FlowEvent::Granted(grant) => finish_joiner(ctx, store, session, &grant).await?,
         }
     }
     Ok(())
+}
+
+/// The holder takes its master key, which the offer carries. A joiner has
+/// nothing to prepare.
+fn prepare_holder(store: &E2eStateStore, session: &mut PairingSession) -> Result<(), FlowError> {
+    if session.role != PairingRole::Creator || session.master.is_some() {
+        return Ok(());
+    }
+    let master = store
+        .master_key()
+        .map_err(|_| FlowError::Store)?
+        .ok_or(FlowError::NoIdentity)?;
+    session.set_master(&master.identity_keys().ed25519.to_base64())
 }
 
 /// The user typed the code on this device. A wrong code ends the pairing.
@@ -946,6 +1296,7 @@ pub async fn confirm(
     session: &mut PairingSession,
     typed: &str,
 ) -> Result<(), DriveError> {
+    prepare_holder(store, session)?;
     let outgoing = match session.confirm(typed) {
         Ok(outgoing) => outgoing,
         Err(FlowError::WrongCode) => {
@@ -970,15 +1321,50 @@ async fn confirm_inner(
     if let Some(outgoing) = outgoing {
         post(ctx, session, &outgoing).await?;
     }
-    if session.confirmed_device().is_some() {
-        finish_creator(ctx, store, session).await?;
+    send_join_if_ready(ctx, store, session).await
+}
+
+/// The joiner posts `join` when it confirmed and holds the offer. The id
+/// block carries the signature of this device over the id text for the
+/// offered master key (S1).
+async fn send_join_if_ready(
+    ctx: &PairingContext<'_>,
+    store: &E2eStateStore,
+    session: &mut PairingSession,
+) -> Result<(), DriveError> {
+    if !session.join_ready() {
+        return Ok(());
     }
+    let account = store
+        .olm_identity()
+        .map_err(|_| FlowError::Store)?
+        .ok_or(FlowError::NoIdentity)?;
+    let master = session.master.clone().ok_or(FlowError::NotConfirmed)?;
+    let curve25519 = account.identity_keys().curve25519.to_base64();
+    let signature = account
+        .sign(device_id_signed_text(&curve25519, &master).as_bytes())
+        .to_base64();
+    let outgoing = session.seal_join(&signature)?;
+    post(ctx, session, &outgoing).await
+}
+
+/// The holder answers a refusal and ends. The joiner closes the rendezvous.
+async fn refuse(
+    ctx: &PairingContext<'_>,
+    store: &mut E2eStateStore,
+    session: &mut PairingSession,
+    reason: &str,
+) -> Result<(), DriveError> {
+    let outgoing = session.seal_refusal(reason)?;
+    post(ctx, session, &outgoing).await?;
+    cleanup(ctx, store, session, false).await;
     Ok(())
 }
 
-/// The creator signs and publishes. It is reached only through
-/// `confirmed_device`, so both devices confirmed. The list goes to the
-/// server before the grant goes to the joiner.
+/// The holder signs and publishes. It is reached only after the `join`
+/// message, so both sides confirmed. The list goes to the server before
+/// `signed` goes to the joiner. A bad id signature, a device that is listed
+/// already and a full list get a refusal.
 async fn finish_creator(
     ctx: &PairingContext<'_>,
     store: &mut E2eStateStore,
@@ -988,12 +1374,22 @@ async fn finish_creator(
         .confirmed_device()
         .cloned()
         .ok_or(FlowError::NotConfirmed)?;
+    if !session.peer_id_signature_valid() {
+        return refuse(ctx, store, session, "failed").await;
+    }
     let master = store
         .master_key()
         .map_err(|_| FlowError::Store)?
         .ok_or(FlowError::NoIdentity)?;
     let current = store.signed_list().ok_or(FlowError::NoIdentity)?;
-    let grant = build_grant(&master, &current, &device.ed25519)?;
+    if current.keys.iter().any(|key| *key == device.ed25519) {
+        return refuse(ctx, store, session, "paired").await;
+    }
+    let grant = match build_grant(&master, &current, &device.ed25519) {
+        Ok(grant) => grant,
+        Err(FlowError::ListFull) => return refuse(ctx, store, session, "full").await,
+        Err(error) => return Err(error.into()),
+    };
     let request = ListRequest::new(&grant.master, &grant.list)
         .map_err(|err| DriveError::from(E2eRouteError::Wire(err)))?;
     ctx.client
@@ -1002,16 +1398,13 @@ async fn finish_creator(
     store
         .set_signed_list(&grant.list)
         .map_err(|_| FlowError::Store)?;
-    let outgoing = session.seal_grant(&grant)?;
-    post(ctx, session, &outgoing).await?;
-    // The joiner closes the rendezvous after it took the grant, so the grant
-    // is still there to fetch.
-    cleanup(ctx, store, session, false).await;
-    Ok(())
+    let outgoing = session.seal_signed(&grant)?;
+    post(ctx, session, &outgoing).await
 }
 
-/// The joiner checks the grant, saves it and runs the provision, which
-/// registers the device and uploads its public bundle.
+/// The joiner checks the answer, saves it and runs the provision, which
+/// registers the device and uploads its public bundle. Then it posts `done`.
+/// The holder closes the rendezvous.
 async fn finish_joiner(
     ctx: &PairingContext<'_>,
     store: &mut E2eStateStore,
@@ -1021,8 +1414,10 @@ async fn finish_joiner(
     let own = JoinerDevice::from_store(store)?;
     apply_grant(store, &own.ed25519, grant)?;
     provision_device(ctx.client, ctx.token, ctx.network_id, ctx.protocol, store).await?;
+    let outgoing = session.seal_done()?;
+    post(ctx, session, &outgoing).await?;
     session.finish();
-    cleanup(ctx, store, session, true).await;
+    cleanup(ctx, store, session, false).await;
     Ok(())
 }
 
@@ -1087,20 +1482,13 @@ pub async fn close_stale(ctx: &PairingContext<'_>, stale: &StalePairing) {
 mod tests {
     use super::*;
     use crate::e2e_store::{E2eKeyProvider, E2eStoreError};
-    use crate::e2e_wire::{did_from_key_text, PAIRING_MAX_MESSAGES, PAIRING_TOTAL_MAX_BYTES};
-    use serde_json::{json, Value};
-    use std::collections::HashMap;
+    use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex};
-    use wiremock::matchers::{method, path, path_regex};
-    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     const ID: &str = "AbCdEfGhIjKlMnOpQrStUv";
-    const PROTOCOL: Option<u32> = Some(50);
-    const CREATOR_TOKEN: &str = "creator-token";
-    const JOINER_TOKEN: &str = "joiner-token";
+    const NET: &str = "azzurra";
 
     struct TestKey([u8; 32]);
 
@@ -1139,12 +1527,33 @@ mod tests {
         }
     }
 
-    fn device() -> JoinerDevice {
-        let account = Account::new();
+    fn key_of(account: &Account) -> String {
+        account.identity_keys().ed25519.to_base64()
+    }
+
+    fn device_of(account: &Account) -> JoinerDevice {
         let keys = account.identity_keys();
         JoinerDevice {
             ed25519: keys.ed25519.to_base64(),
             curve25519: keys.curve25519.to_base64(),
+        }
+    }
+
+    fn id_signature(account: &Account, master: &str) -> String {
+        let curve = account.identity_keys().curve25519.to_base64();
+        account
+            .sign(device_id_signed_text(&curve, master).as_bytes())
+            .to_base64()
+    }
+
+    fn signed_list_of(master: &Account, version: u32, keys: &[String]) -> SignedList {
+        let signature =
+            build_signed_list_signature(version, keys, |text| master.sign(text).to_base64())
+                .expect("list signature");
+        SignedList {
+            version,
+            keys: keys.to_vec(),
+            signature,
         }
     }
 
@@ -1156,15 +1565,26 @@ mod tests {
         }
     }
 
-    /// Two sessions with the channel open: the creator has read the hello.
-    fn open_pair() -> (PairingSession, PairingSession, JoinerDevice) {
+    struct Pair {
+        creator: PairingSession,
+        joiner: PairingSession,
+        master: Account,
+        account: Account,
+    }
+
+    /// Two sessions with the channel open: the holder has read the hello and
+    /// knows its master key.
+    fn open_pair() -> Pair {
+        let master = Account::new();
+        let account = Account::new();
         let (mut creator, link) =
-            PairingSession::create(&rendezvous(PairingRole::Creator), 100).expect("create");
-        let new_device = device();
+            PairingSession::create(&rendezvous(PairingRole::Creator), NET, 100).expect("create");
+        creator.set_master(&key_of(&master)).expect("master");
         let (joiner, hello) = PairingSession::join(
             &link,
             &rendezvous(PairingRole::Joiner),
-            new_device.clone(),
+            NET,
+            device_of(&account),
             100,
         )
         .expect("join");
@@ -1172,7 +1592,12 @@ mod tests {
             .accept(&[relay(1, PairingRole::Joiner, &hello)])
             .expect("hello");
         assert_eq!(events, vec![FlowEvent::CodeReady]);
-        (creator, joiner, new_device)
+        Pair {
+            creator,
+            joiner,
+            master,
+            account,
+        }
     }
 
     fn code_text(session: &PairingSession) -> String {
@@ -1182,920 +1607,516 @@ mod tests {
         }
     }
 
+    /// Runs the steps up to the `join` message that the holder has read.
+    fn joined_pair() -> Pair {
+        let mut pair = open_pair();
+        let code = code_text(&pair.creator);
+        let offer = pair.creator.confirm(&code).expect("code").expect("offer");
+        let events = pair
+            .joiner
+            .accept(&[relay(2, PairingRole::Creator, &offer)])
+            .expect("offer");
+        assert_eq!(events, vec![FlowEvent::Offered]);
+        assert!(pair.joiner.confirm(&code).expect("confirm").is_none());
+        assert!(pair.joiner.join_ready());
+        let signature = id_signature(&pair.account, &key_of(&pair.master));
+        let join = pair.joiner.seal_join(&signature).expect("join message");
+        let events = pair
+            .creator
+            .accept(&[relay(3, PairingRole::Joiner, &join)])
+            .expect("join");
+        assert_eq!(events, vec![FlowEvent::Joined]);
+        pair
+    }
+
+    // ---- wire messages ----
+
+    fn key() -> String {
+        key_of(&Account::new())
+    }
+
+    fn signature() -> String {
+        Account::new().sign(b"x").to_base64()
+    }
+
+    #[test]
+    fn the_five_messages_of_section_4g_read() {
+        let hello = json!({"v": 1, "t": "hello"});
+        let offer = json!({"v": 1, "t": "offer", "networks": [{"network": NET, "master": key()}], "full": []});
+        let join = json!({"v": 1, "t": "join", "devices": [{"network": NET, "id": {
+            "curve25519": key(), "ed25519": key(), "sig": signature()}}], "skipped": []});
+        let signed = json!({"v": 1, "t": "signed", "devices": [{"network": NET, "cert": signature(),
+            "list": {"ver": 2, "devices": [key()], "sig": signature()}}], "refused": []});
+        let done = json!({"v": 1, "t": "done", "paired": [NET]});
+        for value in [hello, offer, join, signed, done] {
+            let bytes = serde_json::to_vec(&value).expect("json");
+            assert!(read_wire(&bytes).is_some(), "{value}");
+        }
+    }
+
+    /// The fixture file with its two placeholders filled in.
+    fn pairing_fixture() -> serde_json::Value {
+        let text = include_str!("../tests/fixtures/e2e/pairing_v1.json")
+            .replace("$KEY", "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo")
+            .replace("$SIG", &"A".repeat(86));
+        serde_json::from_str(&text).expect("fixture file is JSON")
+    }
+
+    #[test]
+    fn the_fixture_messages_read_and_the_invalid_ones_do_not() {
+        let all = pairing_fixture();
+        for case in all["valid"].as_array().expect("valid") {
+            let bytes = serde_json::to_vec(&case["message"]).expect("json");
+            assert!(read_wire(&bytes).is_some(), "{}", case["case"]);
+        }
+        for case in all["invalid"].as_array().expect("invalid") {
+            let bytes = serde_json::to_vec(&case["message"]).expect("json");
+            assert!(read_wire(&bytes).is_none(), "{}", case["case"]);
+        }
+    }
+
+    #[test]
+    fn an_unknown_extra_field_is_ignored() {
+        let bytes = br#"{"v":1,"t":"done","paired":["azzurra"],"extra":true}"#;
+        assert!(read_wire(bytes).is_some());
+    }
+
+    #[test]
+    fn malformed_messages_are_refused() {
+        let cases = [
+            json!({"v": 2, "t": "hello"}),
+            json!({"t": "hello"}),
+            json!({"v": 1, "t": "unknown"}),
+            json!({"v": 1}),
+            json!({"v": 1, "t": "done"}),
+            json!({"v": 1, "t": "done", "paired": [""]}),
+            json!({"v": 1, "t": "done", "paired": "azzurra"}),
+            json!({"v": 1, "t": "offer", "networks": [{"network": NET, "master": "short"}], "full": []}),
+            json!({"v": 1, "t": "join", "devices": [], "skipped": [{"network": NET, "reason": "other"}]}),
+            json!({"v": 1, "t": "signed", "devices": [{"network": NET, "cert": "short",
+                "list": {"ver": 2, "devices": [], "sig": signature()}}], "refused": []}),
+        ];
+        for value in cases {
+            let bytes = serde_json::to_vec(&value).expect("json");
+            assert!(read_wire(&bytes).is_none(), "{value}");
+        }
+        assert!(read_wire(b"not json").is_none());
+    }
+
     // ---- pure session ----
 
     #[test]
     fn both_sides_show_the_same_two_digit_code() {
-        let (creator, joiner, _) = open_pair();
-        let code = code_text(&creator);
+        let pair = open_pair();
+        let code = code_text(&pair.creator);
         assert_eq!(code.len(), 2);
         assert!(code.bytes().all(|b| b.is_ascii_digit()));
-        assert_eq!(code, code_text(&joiner));
+        assert_eq!(code, code_text(&pair.joiner));
     }
 
     #[test]
-    fn success_needs_both_confirmations_before_the_signing_step() {
-        let (mut creator, mut joiner, new_device) = open_pair();
-        let code = code_text(&creator);
-        // The joiner confirms first and sends its keys.
-        let keys = joiner.confirm(&code).expect("joiner").expect("keys");
-        let events = creator
-            .accept(&[relay(2, PairingRole::Joiner, &keys)])
-            .expect("keys");
-        assert_eq!(events, vec![FlowEvent::PeerConfirmed]);
-        // The creator has not confirmed: the signing step stays closed.
-        assert!(creator.confirmed_device().is_none());
-        let master = Account::new();
-        let list = signed_list_of(&master, 1, &[device().ed25519]);
-        let grant = build_grant(&master, &list, &new_device.ed25519).expect("grant");
+    fn the_initial_message_is_base64url_without_a_bar() {
+        let account = Account::new();
+        let (_creator, link) =
+            PairingSession::create(&rendezvous(PairingRole::Creator), NET, 100).expect("create");
+        let (_joiner, hello) = PairingSession::join(
+            &link,
+            &rendezvous(PairingRole::Joiner),
+            NET,
+            device_of(&account),
+            100,
+        )
+        .expect("join");
+        let payload = hello.payload();
+        assert!(!payload.contains('|'));
+        assert!(payload
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
+        let raw = URL_SAFE_NO_PAD.decode(payload).expect("base64url");
+        let text = String::from_utf8(raw).expect("utf-8");
+        assert!(text.contains('|'));
+    }
+
+    #[test]
+    fn a_plain_encoding_of_the_initial_message_is_refused() {
+        let (mut creator, link) =
+            PairingSession::create(&rendezvous(PairingRole::Creator), NET, 100).expect("create");
+        let their = Curve25519PublicKey::from_base64(link.ephemeral_key()).expect("key");
+        let hello = serde_json::to_vec(&Wire::Hello { v: 1 }).expect("hello");
+        let OutboundCreationResult { message, .. } = Ecies::with_info(PAIRING_INFO)
+            .establish_outbound_channel(their, &hello)
+            .expect("outbound");
+        let plain = RelayMessage {
+            seq: 1,
+            from: PairingRole::Joiner,
+            payload: message.encode(),
+        };
+        assert_eq!(creator.accept(&[plain]).unwrap_err(), FlowError::BadChannel);
         assert_eq!(
-            creator.seal_grant(&grant).unwrap_err(),
-            FlowError::NotConfirmed
+            creator.status(),
+            PairingStatus::Ended(EndReason::BadChannel)
         );
-        assert!(creator.confirm(&code).expect("creator").is_none());
-        assert_eq!(creator.confirmed_device(), Some(&new_device));
-        let sealed = creator.seal_grant(&grant).expect("sealed");
-        assert_eq!(creator.status(), PairingStatus::Done);
-        let events = joiner
-            .accept(&[relay(3, PairingRole::Creator, &sealed)])
-            .expect("grant");
-        assert_eq!(events, vec![FlowEvent::Granted(grant)]);
     }
 
     #[test]
-    fn the_creator_without_the_keys_of_the_joiner_cannot_sign() {
-        let (mut creator, _joiner, _) = open_pair();
+    fn the_whole_pairing_runs_in_the_order_of_section_4g() {
+        let mut pair = joined_pair();
+        assert!(pair.creator.peer_id_signature_valid());
+        let device = pair.creator.confirmed_device().cloned().expect("device");
+        assert_eq!(device, device_of(&pair.account));
+        let own = Account::new();
+        let list = signed_list_of(&pair.master, 1, &[key_of(&own)]);
+        let grant = build_grant(&pair.master, &list, &device.ed25519).expect("grant");
+        let signed = pair.creator.seal_signed(&grant).expect("signed");
+        let events = pair
+            .joiner
+            .accept(&[relay(4, PairingRole::Creator, &signed)])
+            .expect("signed");
+        assert_eq!(events, vec![FlowEvent::Signed(grant)]);
+        let done = pair.joiner.seal_done().expect("done");
+        pair.joiner.finish();
+        assert_eq!(pair.joiner.status(), PairingStatus::Done);
+        let events = pair
+            .creator
+            .accept(&[relay(5, PairingRole::Joiner, &done)])
+            .expect("done");
+        assert_eq!(events, vec![FlowEvent::Paired]);
+    }
+
+    #[test]
+    fn the_holder_without_a_master_key_sends_no_offer() {
+        let account = Account::new();
+        let (mut creator, link) =
+            PairingSession::create(&rendezvous(PairingRole::Creator), NET, 100).expect("create");
+        let (_joiner, hello) = PairingSession::join(
+            &link,
+            &rendezvous(PairingRole::Joiner),
+            NET,
+            device_of(&account),
+            100,
+        )
+        .expect("join");
+        creator
+            .accept(&[relay(1, PairingRole::Joiner, &hello)])
+            .expect("hello");
         let code = code_text(&creator);
-        creator.confirm(&code).expect("creator");
+        assert_eq!(creator.confirm(&code).unwrap_err(), FlowError::NoIdentity);
         assert!(creator.confirmed_device().is_none());
     }
 
     #[test]
     fn a_bad_code_ends_the_pairing_and_drops_the_channel() {
-        let (mut creator, _joiner, _) = open_pair();
-        let code = code_text(&creator);
+        let mut pair = open_pair();
+        let code = code_text(&pair.creator);
         let wrong = format!("{:02}", (code.parse::<u8>().unwrap() + 1) % 100);
-        assert_eq!(creator.confirm(&wrong).unwrap_err(), FlowError::WrongCode);
-        assert_eq!(creator.status(), PairingStatus::Ended(EndReason::WrongCode));
-        assert!(creator.channel.is_none());
-        assert_eq!(creator.confirm(&code).unwrap_err(), FlowError::NotActive);
-        let (mut other, _, _) = open_pair();
-        assert_eq!(other.confirm("x1").unwrap_err(), FlowError::WrongCode);
-    }
-
-    #[test]
-    fn confirm_before_the_channel_has_no_code() {
-        let (mut creator, _link) =
-            PairingSession::create(&rendezvous(PairingRole::Creator), 0).expect("create");
-        assert_eq!(creator.status(), PairingStatus::Waiting);
-        assert_eq!(creator.confirm("10").unwrap_err(), FlowError::NoChannel);
-    }
-
-    #[test]
-    fn cancel_and_close_end_the_pairing() {
-        let (mut creator, mut joiner, _) = open_pair();
-        creator.cancel();
-        assert_eq!(creator.status(), PairingStatus::Ended(EndReason::Cancelled));
-        joiner.on_closed(ClosedReason::Closed);
         assert_eq!(
-            joiner.status(),
-            PairingStatus::Ended(EndReason::Closed(ClosedReason::Closed))
+            pair.creator.confirm(&wrong).unwrap_err(),
+            FlowError::WrongCode
         );
-        // A later event does not change the end reason.
-        joiner.on_closed(ClosedReason::Expired);
         assert_eq!(
-            joiner.status(),
-            PairingStatus::Ended(EndReason::Closed(ClosedReason::Closed))
+            pair.creator.status(),
+            PairingStatus::Ended(EndReason::WrongCode)
+        );
+        assert!(pair.creator.channel.is_none());
+        assert_eq!(
+            pair.creator.confirm(&code).unwrap_err(),
+            FlowError::NotActive
         );
     }
 
     #[test]
-    fn the_pairing_times_out_after_the_lifetime() {
-        let (mut creator, _link) =
-            PairingSession::create(&rendezvous(PairingRole::Creator), 1_000).expect("create");
-        let lifetime = i64::try_from(PAIRING_LIFETIME_SECS).unwrap();
-        assert!(!creator.expire(1_000 + lifetime - 1));
-        assert!(creator.is_active());
-        assert!(creator.expire(1_000 + lifetime));
-        assert_eq!(creator.status(), PairingStatus::Ended(EndReason::Timeout));
-        assert!(!creator.expire(1_000 + 2 * lifetime));
-    }
-
-    #[test]
-    fn a_repeat_and_a_catch_up_are_safe() {
-        let (mut creator, mut joiner, _) = open_pair();
-        let code = code_text(&creator);
-        let keys = joiner.confirm(&code).unwrap().unwrap();
-        let message = relay(2, PairingRole::Joiner, &keys);
-        // The same message twice, with an own message of the creator and
-        // the hello again: only the new message counts.
-        let own = RelayMessage {
-            seq: 3,
-            from: PairingRole::Creator,
-            payload: "ignored".to_string(),
-        };
-        let hello_again = RelayMessage {
-            seq: 1,
-            from: PairingRole::Joiner,
-            payload: "ignored".to_string(),
-        };
-        let events = creator
-            .accept(&[own, message.clone(), hello_again, message])
-            .expect("accept");
-        assert_eq!(events, vec![FlowEvent::PeerConfirmed]);
-        assert_eq!(creator.last_seq(), 3);
-    }
-
-    #[test]
-    fn a_message_that_does_not_open_ends_the_pairing() {
-        let (mut creator, _joiner, _) = open_pair();
-        let junk = RelayMessage {
-            seq: 2,
-            from: PairingRole::Joiner,
-            payload: "AAAA".to_string(),
-        };
-        assert_eq!(creator.accept(&[junk]).unwrap_err(), FlowError::BadChannel);
+    fn the_joiner_sends_no_join_before_the_offer() {
+        let mut pair = open_pair();
+        let code = code_text(&pair.joiner);
+        assert!(pair.joiner.confirm(&code).expect("confirm").is_none());
+        assert!(!pair.joiner.join_ready());
         assert_eq!(
-            creator.status(),
-            PairingStatus::Ended(EndReason::BadChannel)
+            pair.joiner.seal_join("sig").unwrap_err(),
+            FlowError::NotConfirmed
         );
-        // A hello that does not open (a wrong key) also ends it.
-        let (mut waiting, _link) =
-            PairingSession::create(&rendezvous(PairingRole::Creator), 0).unwrap();
-        let junk = RelayMessage {
-            seq: 1,
-            from: PairingRole::Joiner,
-            payload: "AAAA|AAAA".to_string(),
-        };
-        assert!(waiting.accept(&[junk]).is_err());
-        assert!(!waiting.is_active());
     }
 
     #[test]
-    fn a_hello_for_another_key_does_not_open() {
-        let (_creator, link) =
-            PairingSession::create(&rendezvous(PairingRole::Creator), 0).unwrap();
-        let (_other, other_link) =
-            PairingSession::create(&rendezvous(PairingRole::Creator), 0).unwrap();
-        let (_joiner, hello) =
-            PairingSession::join(&other_link, &rendezvous(PairingRole::Joiner), device(), 0)
-                .unwrap();
-        let (mut creator, _) =
-            PairingSession::create(&rendezvous(PairingRole::Creator), 0).unwrap();
-        let _ = link;
-        assert!(creator
-            .accept(&[relay(1, PairingRole::Joiner, &hello)])
-            .is_err());
-    }
-
-    #[test]
-    fn a_link_for_another_rendezvous_is_refused() {
-        let (_creator, link) =
-            PairingSession::create(&rendezvous(PairingRole::Creator), 0).unwrap();
-        let mut other = rendezvous(PairingRole::Joiner);
-        other.id = "ZyXwVuTsRqPoNmLkJiHgFe".to_string();
+    fn the_joiner_sends_no_join_before_its_own_confirmation() {
+        let mut pair = open_pair();
+        let code = code_text(&pair.creator);
+        let offer = pair.creator.confirm(&code).expect("code").expect("offer");
+        pair.joiner
+            .accept(&[relay(2, PairingRole::Creator, &offer)])
+            .expect("offer");
+        assert!(!pair.joiner.join_ready());
         assert_eq!(
-            PairingSession::join(&link, &other, device(), 0).unwrap_err(),
-            FlowError::Link(PairingError::BadId)
+            pair.joiner.seal_join("sig").unwrap_err(),
+            FlowError::NotConfirmed
+        );
+    }
+
+    #[test]
+    fn an_id_signature_for_another_master_is_not_valid() {
+        let mut pair = open_pair();
+        let code = code_text(&pair.creator);
+        let offer = pair.creator.confirm(&code).expect("code").expect("offer");
+        pair.joiner
+            .accept(&[relay(2, PairingRole::Creator, &offer)])
+            .expect("offer");
+        pair.joiner.confirm(&code).expect("confirm");
+        let signature = id_signature(&pair.account, &key());
+        let join = pair.joiner.seal_join(&signature).expect("join message");
+        pair.creator
+            .accept(&[relay(3, PairingRole::Joiner, &join)])
+            .expect("join");
+        assert!(!pair.creator.peer_id_signature_valid());
+    }
+
+    #[test]
+    fn a_refusal_ends_both_sides() {
+        let mut pair = joined_pair();
+        let refusal = pair.creator.seal_refusal("full").expect("refusal");
+        assert_eq!(
+            pair.creator.status(),
+            PairingStatus::Ended(EndReason::Failed)
         );
         assert_eq!(
-            PairingSession::join(&link, &rendezvous(PairingRole::Creator), device(), 0)
+            pair.joiner
+                .accept(&[relay(4, PairingRole::Creator, &refusal)])
                 .unwrap_err(),
+            FlowError::Refused
+        );
+        assert_eq!(
+            pair.joiner.status(),
+            PairingStatus::Ended(EndReason::Failed)
+        );
+    }
+
+    #[test]
+    fn a_refusal_needs_a_known_reason_and_the_join() {
+        let mut pair = open_pair();
+        assert_eq!(
+            pair.creator.seal_refusal("failed").unwrap_err(),
+            FlowError::NotConfirmed
+        );
+        let mut joined = joined_pair();
+        assert_eq!(
+            joined.creator.seal_refusal("other").unwrap_err(),
+            FlowError::NotConfirmed
+        );
+    }
+
+    #[test]
+    fn signed_cannot_be_sealed_before_the_join() {
+        let mut pair = open_pair();
+        let code = code_text(&pair.creator);
+        pair.creator.confirm(&code).expect("code");
+        let list = signed_list_of(&pair.master, 1, &[key()]);
+        let grant = build_grant(&pair.master, &list, &key()).expect("grant");
+        assert_eq!(
+            pair.creator.seal_signed(&grant).unwrap_err(),
+            FlowError::NotConfirmed
+        );
+    }
+
+    #[test]
+    fn an_offer_without_the_network_ends_the_joiner() {
+        let master = Account::new();
+        let account = Account::new();
+        let (mut other, link) =
+            PairingSession::create(&rendezvous(PairingRole::Creator), "other-net", 100)
+                .expect("create");
+        other.set_master(&key_of(&master)).expect("master");
+        let (mut joiner, hello) = PairingSession::join(
+            &link,
+            &rendezvous(PairingRole::Joiner),
+            NET,
+            device_of(&account),
+            100,
+        )
+        .expect("join");
+        other
+            .accept(&[relay(1, PairingRole::Joiner, &hello)])
+            .expect("hello");
+        let code = code_text(&other);
+        let offer = other.confirm(&code).expect("code").expect("offer");
+        assert_eq!(
+            joiner
+                .accept(&[relay(2, PairingRole::Creator, &offer)])
+                .unwrap_err(),
+            FlowError::NotOffered
+        );
+        assert_eq!(joiner.status(), PairingStatus::Ended(EndReason::Failed));
+    }
+
+    #[test]
+    fn a_done_message_before_the_offer_ends_the_holder() {
+        let mut pair = open_pair();
+        let code = code_text(&pair.creator);
+        pair.joiner.confirm(&code).expect("confirm");
+        // The joiner sends `done` before any offer: the holder refuses it.
+        pair.joiner.join_sent = true;
+        let done = pair.joiner.seal_done().expect("done");
+        assert_eq!(
+            pair.creator
+                .accept(&[relay(2, PairingRole::Joiner, &done)])
+                .unwrap_err(),
+            FlowError::BadMessage
+        );
+        assert_eq!(
+            pair.creator.status(),
+            PairingStatus::Ended(EndReason::Failed)
+        );
+    }
+
+    #[test]
+    fn a_repeated_or_stale_message_gives_no_second_event() {
+        let mut pair = open_pair();
+        let code = code_text(&pair.creator);
+        let offer = pair.creator.confirm(&code).expect("code").expect("offer");
+        let message = relay(2, PairingRole::Creator, &offer);
+        let first = pair.joiner.accept(&[message.clone()]).expect("offer");
+        assert_eq!(first, vec![FlowEvent::Offered]);
+        let again = pair.joiner.accept(&[message]).expect("repeat");
+        assert!(again.is_empty());
+        assert_eq!(pair.joiner.last_seq(), 2);
+    }
+
+    #[test]
+    fn a_message_of_the_own_side_is_skipped() {
+        let mut pair = open_pair();
+        let code = code_text(&pair.creator);
+        let offer = pair.creator.confirm(&code).expect("code").expect("offer");
+        let own = relay(2, PairingRole::Creator, &offer);
+        assert!(pair.creator.accept(&[own]).expect("own").is_empty());
+    }
+
+    #[test]
+    fn an_oversize_payload_ends_the_pairing() {
+        let mut pair = open_pair();
+        let big = RelayMessage {
+            seq: 2,
+            from: PairingRole::Creator,
+            payload: "A".repeat(PAIRING_MESSAGE_MAX_BYTES + 1),
+        };
+        assert_eq!(
+            pair.joiner.accept(&[big]).unwrap_err(),
+            FlowError::BadMessage
+        );
+    }
+
+    #[test]
+    fn a_session_expires_after_its_lifetime() {
+        let mut pair = open_pair();
+        assert!(!pair.creator.expire(100));
+        let lifetime = i64::try_from(PAIRING_LIFETIME_SECS).expect("lifetime");
+        assert!(pair.creator.expire(100 + lifetime));
+        assert_eq!(
+            pair.creator.status(),
+            PairingStatus::Ended(EndReason::Timeout)
+        );
+    }
+
+    #[test]
+    fn a_session_with_the_wrong_role_is_refused() {
+        assert_eq!(
+            PairingSession::create(&rendezvous(PairingRole::Joiner), NET, 1).unwrap_err(),
             FlowError::WrongRole
         );
     }
 
-    #[test]
-    fn a_payload_over_a_limit_is_refused_before_it_is_sealed() {
-        let (_creator, mut joiner, _) = open_pair();
-        let code = code_text(&joiner);
-        joiner.relay_count = PAIRING_MAX_MESSAGES;
-        assert_eq!(joiner.confirm(&code).unwrap_err(), FlowError::TooLarge);
-        let (_creator, mut joiner, _) = open_pair();
-        let code = code_text(&joiner);
-        joiner.relay_bytes = PAIRING_TOTAL_MAX_BYTES - 10;
-        assert_eq!(joiner.confirm(&code).unwrap_err(), FlowError::TooLarge);
-    }
+    // ---- list and certificate ----
 
     #[test]
-    fn a_message_over_the_size_limit_from_the_relay_ends_the_pairing() {
-        let (mut creator, _joiner, _) = open_pair();
-        let big = RelayMessage {
-            seq: 2,
-            from: PairingRole::Joiner,
-            payload: "A".repeat(PAIRING_MESSAGE_MAX_BYTES + 1),
-        };
-        assert_eq!(creator.accept(&[big]).unwrap_err(), FlowError::BadMessage);
-        assert!(!creator.is_active());
-    }
-
-    #[test]
-    fn debug_output_holds_no_link_key_or_payload() {
-        let (creator, joiner, new_device) = open_pair();
+    fn a_grant_adds_the_device_and_applies() {
         let master = Account::new();
-        let list = signed_list_of(&master, 1, &[device().ed25519]);
-        let grant = build_grant(&master, &list, &new_device.ed25519).unwrap();
-        let outgoing = Outgoing {
-            payload: "SECRET-PAYLOAD".to_string(),
-            count: 1,
-            total_bytes: 2,
-        };
-        let stale = StalePairing {
-            role: PairingRole::Creator,
-            rendezvous_id: ID.to_string(),
-        };
-        let client = GrappaClient::new("http://localhost");
-        let ctx = PairingContext {
-            client: &client,
-            token: "TOKEN-VALUE",
-            protocol: PROTOCOL,
-            network_id: "libera",
-        };
-        let text = format!(
-            "{creator:?} {joiner:?} {new_device:?} {grant:?} {outgoing:?} {stale:?} {ctx:?}"
-        );
-        // The message names the value, never prints it.
-        for (label, value) in [
-            ("payload", "SECRET-PAYLOAD"),
-            ("token", "TOKEN-VALUE"),
-            ("rendezvous", ID),
-            ("device ed25519", new_device.ed25519.as_str()),
-            ("device curve25519", new_device.curve25519.as_str()),
-            ("master", grant.master.as_str()),
-            ("list signature", grant.list.signature.as_str()),
-        ] {
-            assert!(!text.contains(value), "{label}");
-        }
-    }
-
-    // ---- grant ----
-
-    fn signed_list_of(master: &Account, version: u32, keys: &[String]) -> SignedList {
-        let signature =
-            build_signed_list_signature(version, keys, |text| master.sign(text).to_base64())
-                .unwrap();
-        let mut sorted = keys.to_vec();
-        sorted.sort();
-        SignedList {
-            version,
-            keys: sorted,
-            signature,
-        }
-    }
-
-    #[test]
-    fn the_grant_adds_the_device_and_signs_a_certificate_for_the_new_version() {
-        let master = Account::new();
-        let first = device().ed25519;
-        let current = signed_list_of(&master, 1, std::slice::from_ref(&first));
-        let new_device = device();
-        let grant = build_grant(&master, &current, &new_device.ed25519).unwrap();
+        let holder = Account::new();
+        let joiner = Account::new();
+        let list = signed_list_of(&master, 1, &[key_of(&holder)]);
+        let grant = build_grant(&master, &list, &key_of(&joiner)).expect("grant");
         assert_eq!(grant.list.version, 2);
-        assert!(grant.list.keys.contains(&first));
-        assert!(grant.list.keys.contains(&new_device.ed25519));
-        let master_key = master.identity_keys().ed25519.to_base64();
-        verify_signed_list(2, &grant.list.keys, &master_key, &grant.list.signature).unwrap();
-        assert_eq!(grant.certificate.first_list_version, 2);
-        verify_device_certificate(&grant.certificate, &[master_key]).unwrap();
-    }
-
-    #[test]
-    fn a_full_list_or_a_forged_list_gives_no_grant() {
-        let master = Account::new();
-        let keys: Vec<String> = (0..4).map(|_| device().ed25519).collect();
-        let full = signed_list_of(&master, 1, &keys);
-        assert_eq!(
-            build_grant(&master, &full, &device().ed25519).unwrap_err(),
-            FlowError::ListFull
-        );
-        let other = Account::new();
-        let forged = signed_list_of(&other, 1, &keys[..1]);
-        assert_eq!(
-            build_grant(&master, &forged, &device().ed25519).unwrap_err(),
-            FlowError::NoIdentity
-        );
-    }
-
-    #[test]
-    fn the_joiner_refuses_a_grant_for_another_device() {
-        let dir = scratch_dir("grant");
+        assert_eq!(grant.list.keys.len(), 2);
+        let dir = scratch_dir("apply");
         let mut store = open_store(&dir, "joiner.bin");
-        let own = JoinerDevice::from_store(&mut store).unwrap();
+        apply_grant(&mut store, &key_of(&joiner), &grant).expect("apply");
+        assert_eq!(store.signed_list().map(|list| list.version), Some(2));
+    }
+
+    #[test]
+    fn a_grant_for_another_device_is_refused() {
         let master = Account::new();
-        let list = signed_list_of(&master, 1, &[device().ed25519]);
-        let other = device();
-        let grant = build_grant(&master, &list, &other.ed25519).unwrap();
+        let list = signed_list_of(&master, 1, &[key()]);
+        let grant = build_grant(&master, &list, &key()).expect("grant");
+        let dir = scratch_dir("other-device");
+        let mut store = open_store(&dir, "joiner.bin");
         assert_eq!(
-            apply_grant(&mut store, &own.ed25519, &grant).unwrap_err(),
+            apply_grant(&mut store, &key(), &grant).unwrap_err(),
             FlowError::BadGrant
         );
         assert!(store.signed_list().is_none());
-        assert!(store.device_certificate().is_none());
-        let good = build_grant(&master, &list, &own.ed25519).unwrap();
-        apply_grant(&mut store, &own.ed25519, &good).unwrap();
-        assert_eq!(store.signed_list(), Some(good.list.clone()));
-        assert_eq!(store.device_certificate(), Some(good.certificate.clone()));
-        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_grant_with_a_bad_list_signature_is_refused() {
+        let master = Account::new();
+        let joiner = Account::new();
+        let list = signed_list_of(&master, 1, &[key()]);
+        let mut grant = build_grant(&master, &list, &key_of(&joiner)).expect("grant");
+        grant.list.signature = signature();
+        let dir = scratch_dir("bad-list");
+        let mut store = open_store(&dir, "joiner.bin");
+        assert_eq!(
+            apply_grant(&mut store, &key_of(&joiner), &grant).unwrap_err(),
+            FlowError::BadGrant
+        );
+    }
+
+    #[test]
+    fn a_grant_with_a_certificate_of_another_master_is_refused() {
+        let master = Account::new();
+        let joiner = Account::new();
+        let list = signed_list_of(&master, 1, &[key()]);
+        let mut grant = build_grant(&master, &list, &key_of(&joiner)).expect("grant");
+        grant.certificate.signature = signature();
+        let dir = scratch_dir("bad-cert");
+        let mut store = open_store(&dir, "joiner.bin");
+        assert_eq!(
+            apply_grant(&mut store, &key_of(&joiner), &grant).unwrap_err(),
+            FlowError::BadGrant
+        );
+    }
+
+    #[test]
+    fn a_full_list_gives_no_grant() {
+        let master = Account::new();
+        let keys: Vec<String> = (0..4).map(|_| key()).collect();
+        let list = signed_list_of(&master, 1, &keys);
+        assert_eq!(
+            build_grant(&master, &list, &key()).unwrap_err(),
+            FlowError::ListFull
+        );
+    }
+
+    #[test]
+    fn a_list_signed_by_another_master_gives_no_grant() {
+        let master = Account::new();
+        let list = signed_list_of(&Account::new(), 1, &[key()]);
+        assert_eq!(
+            build_grant(&master, &list, &key()).unwrap_err(),
+            FlowError::NoIdentity
+        );
     }
 
     // ---- pairing slot ----
 
     #[test]
-    fn the_slot_holds_a_record_without_keys_and_a_restart_empties_it() {
-        let dir = scratch_dir("slot");
-        let provider = fresh_key();
-        let path = dir.join("state.bin");
-        {
-            let mut store = E2eStateStore::open(path.clone(), &provider).unwrap();
-            let (session, link) =
-                PairingSession::create(&rendezvous(PairingRole::Creator), 5).unwrap();
-            save_pending(&mut store, &session).unwrap();
-            let text = store.pending_pairing().unwrap().to_string();
-            assert!(!text.contains(link.ephemeral_key()));
-            assert!(text.contains(ID));
-        }
-        // A restart: the record is stale, it is returned once and emptied.
-        let mut store = E2eStateStore::open(path.clone(), &provider).unwrap();
-        let stale = take_stale_pairing(&mut store).unwrap().expect("stale");
-        assert_eq!(stale.role, PairingRole::Creator);
-        assert_eq!(stale.rendezvous_id(), ID);
-        assert!(store.pending_pairing().is_none());
-        assert!(take_stale_pairing(&mut store).unwrap().is_none());
-        drop(store);
-        let store = E2eStateStore::open(path, &provider).unwrap();
-        assert!(store.pending_pairing().is_none());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn an_unreadable_record_is_emptied_too() {
+    fn a_restart_finds_the_open_rendezvous_once() {
         let dir = scratch_dir("stale");
         let mut store = open_store(&dir, "state.bin");
-        store.set_pending_pairing("not json").unwrap();
-        assert!(take_stale_pairing(&mut store).unwrap().is_none());
-        assert!(store.pending_pairing().is_none());
-        store
-            .set_pending_pairing(r#"{"v":9,"creator":true,"rendezvous_id":"x","started_at":1}"#)
-            .unwrap();
-        assert!(take_stale_pairing(&mut store).unwrap().is_none());
-        assert!(store.pending_pairing().is_none());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    // ---- fake server: relay and network routes ----
-
-    #[derive(Default)]
-    struct Fake {
-        joined: bool,
-        closed: bool,
-        messages: Vec<Value>,
-        list: Option<Value>,
-        devices: Vec<Value>,
-        keys: HashMap<String, (usize, bool)>,
-        list_puts: usize,
-        key_posts: usize,
-        pairing_calls: usize,
-    }
-
-    type Shared = Arc<Mutex<Fake>>;
-
-    fn body_of(request: &Request) -> Value {
-        serde_json::from_slice(&request.body).expect("json body")
-    }
-
-    fn is_joiner(request: &Request) -> bool {
-        request
-            .headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.contains(JOINER_TOKEN))
-    }
-
-    fn did_of_path(request: &Request) -> String {
-        request
-            .url
-            .path()
-            .split('/')
-            .nth(5)
-            .unwrap_or_default()
-            .to_string()
-    }
-
-    async fn fake_server(state: &Shared) -> MockServer {
-        let server = MockServer::start().await;
-        let rendezvous_json =
-            |role: &str| json!({"rendezvous": {"id": ID, "role": role, "expires_at": "later"}});
-
-        let s = Arc::clone(state);
-        Mock::given(method("POST"))
-            .and(path("/e2e/pairings"))
-            .respond_with(move |_: &Request| {
-                s.lock().unwrap().pairing_calls += 1;
-                ResponseTemplate::new(201).set_body_json(rendezvous_json("creator"))
-            })
-            .mount(&server)
-            .await;
-
-        let s = Arc::clone(state);
-        Mock::given(method("POST"))
-            .and(path(format!("/e2e/pairings/{ID}/join")))
-            .respond_with(move |_: &Request| {
-                let mut state = s.lock().unwrap();
-                state.pairing_calls += 1;
-                state.joined = true;
-                ResponseTemplate::new(200).set_body_json(rendezvous_json("joiner"))
-            })
-            .mount(&server)
-            .await;
-
-        let s = Arc::clone(state);
-        Mock::given(method("POST"))
-            .and(path(format!("/e2e/pairings/{ID}/messages")))
-            .respond_with(move |request: &Request| {
-                let mut state = s.lock().unwrap();
-                state.pairing_calls += 1;
-                let from = if is_joiner(request) {
-                    "joiner"
-                } else {
-                    "creator"
-                };
-                let message = json!({
-                    "seq": state.messages.len() + 1,
-                    "from": from,
-                    "payload": body_of(request)["payload"].clone(),
-                });
-                state.messages.push(message.clone());
-                ResponseTemplate::new(201).set_body_json(json!({"message": message}))
-            })
-            .mount(&server)
-            .await;
-
-        let s = Arc::clone(state);
-        Mock::given(method("GET"))
-            .and(path(format!("/e2e/pairings/{ID}/messages")))
-            .respond_with(move |request: &Request| {
-                let mut state = s.lock().unwrap();
-                state.pairing_calls += 1;
-                let after = request
-                    .url
-                    .query_pairs()
-                    .find(|(name, _)| name == "after")
-                    .and_then(|(_, value)| value.parse::<u64>().ok())
-                    .unwrap_or(0);
-                let messages: Vec<Value> = state
-                    .messages
-                    .iter()
-                    .filter(|message| message["seq"].as_u64() > Some(after))
-                    .cloned()
-                    .collect();
-                ResponseTemplate::new(200).set_body_json(json!({"messages": messages}))
-            })
-            .mount(&server)
-            .await;
-
-        let s = Arc::clone(state);
-        Mock::given(method("DELETE"))
-            .and(path(format!("/e2e/pairings/{ID}")))
-            .respond_with(move |_: &Request| {
-                let mut state = s.lock().unwrap();
-                state.pairing_calls += 1;
-                state.closed = true;
-                ResponseTemplate::new(204)
-            })
-            .mount(&server)
-            .await;
-
-        let s = Arc::clone(state);
-        Mock::given(method("GET"))
-            .and(path("/networks/libera/e2e/list"))
-            .respond_with(move |_: &Request| match &s.lock().unwrap().list {
-                Some(list) => ResponseTemplate::new(200).set_body_json(list),
-                None => ResponseTemplate::new(404).set_body_json(json!({"error": "not_found"})),
-            })
-            .mount(&server)
-            .await;
-
-        let s = Arc::clone(state);
-        Mock::given(method("PUT"))
-            .and(path("/networks/libera/e2e/list"))
-            .respond_with(move |request: &Request| {
-                let body = body_of(request);
-                let mut state = s.lock().unwrap();
-                state.list_puts += 1;
-                state.list = Some(body.clone());
-                ResponseTemplate::new(200).set_body_json(body)
-            })
-            .mount(&server)
-            .await;
-
-        let s = Arc::clone(state);
-        Mock::given(method("GET"))
-            .and(path("/networks/libera/e2e/devices"))
-            .respond_with(move |_: &Request| {
-                let devices = s.lock().unwrap().devices.clone();
-                ResponseTemplate::new(200).set_body_json(json!({"devices": devices}))
-            })
-            .mount(&server)
-            .await;
-
-        let s = Arc::clone(state);
-        Mock::given(method("POST"))
-            .and(path("/networks/libera/e2e/devices"))
-            .respond_with(move |request: &Request| {
-                let mut record = body_of(request);
-                let ed25519 = record["ed25519"].clone();
-                record["did"] = json!(did_from_key_text(ed25519.as_str().expect("key")).unwrap());
-                let mut state = s.lock().unwrap();
-                state.devices.retain(|device| device["ed25519"] != ed25519);
-                state.devices.push(record.clone());
-                ResponseTemplate::new(200).set_body_json(record)
-            })
-            .mount(&server)
-            .await;
-
-        let keys_path = r"^/networks/libera/e2e/devices/[A-Za-z0-9_-]{11}/keys$";
-        let s = Arc::clone(state);
-        Mock::given(method("GET"))
-            .and(path_regex(keys_path))
-            .respond_with(move |request: &Request| {
-                let state = s.lock().unwrap();
-                let (count, fallback) = state
-                    .keys
-                    .get(&did_of_path(request))
-                    .copied()
-                    .unwrap_or((0, false));
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"one_time_keys": count, "fallback": fallback}))
-            })
-            .mount(&server)
-            .await;
-
-        let s = Arc::clone(state);
-        Mock::given(method("POST"))
-            .and(path_regex(keys_path))
-            .respond_with(move |request: &Request| {
-                let body = body_of(request);
-                let mut state = s.lock().unwrap();
-                state.key_posts += 1;
-                let entry = state.keys.entry(did_of_path(request)).or_default();
-                entry.0 += body["one_time_keys"].as_array().map_or(0, Vec::len);
-                entry.1 |= body.get("fallback").is_some();
-                let (count, fallback) = *entry;
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({"one_time_keys": count, "fallback": fallback}))
-            })
-            .mount(&server)
-            .await;
-        server
-    }
-
-    /// A server, a provisioned creator and a joiner that has an identity but
-    /// no master. Both use the same server and the same account.
-    struct World {
-        server: MockServer,
-        state: Shared,
-        client: GrappaClient,
-        dir: PathBuf,
-        creator_store: E2eStateStore,
-        joiner_store: E2eStateStore,
-    }
-
-    async fn world(name: &str) -> World {
-        let dir = scratch_dir(name);
-        let state = Shared::default();
-        let server = fake_server(&state).await;
-        let client = GrappaClient::new(server.uri());
-        let mut creator_store = open_store(&dir, "creator.bin");
-        provision_device(
-            &client,
-            CREATOR_TOKEN,
-            "libera",
-            Some(49),
-            &mut creator_store,
-        )
-        .await
-        .expect("provision the creator");
-        let mut joiner_store = open_store(&dir, "joiner.bin");
-        JoinerDevice::from_store(&mut joiner_store).expect("identity");
-        World {
-            server,
-            state,
-            client,
-            dir,
-            creator_store,
-            joiner_store,
-        }
-    }
-
-    fn ctx<'a>(client: &'a GrappaClient, token: &'a str) -> PairingContext<'a> {
-        PairingContext {
-            client,
-            token,
-            protocol: PROTOCOL,
-            network_id: "libera",
-        }
-    }
-
-    #[tokio::test]
-    async fn a_new_device_pairs_and_a_peer_can_ask_for_its_keys() {
-        let mut w = world("success").await;
-        let creator_ctx = ctx(&w.client, CREATOR_TOKEN);
-        let joiner_ctx = ctx(&w.client, JOINER_TOKEN);
-        assert_eq!(w.state.lock().unwrap().list_puts, 1);
-
-        let (mut creator, link) = start_creator(&creator_ctx, &mut w.creator_store, 100)
-            .await
-            .expect("start creator");
-        assert!(w.creator_store.pending_pairing().is_some());
-        let mut text = link.url("grappa.example");
-        let mut joiner = start_joiner(&joiner_ctx, &mut w.joiner_store, &mut text, 100)
-            .await
-            .expect("start joiner");
-        assert!(text.is_empty(), "the link buffer is cleared");
-        assert!(w.joiner_store.pending_pairing().is_some());
-
-        pump(&creator_ctx, &mut w.creator_store, &mut creator)
-            .await
-            .expect("hello");
-        let code = code_text(&creator);
-        assert_eq!(code, code_text(&joiner));
-
-        // The joiner confirms; the creator has not: nothing is published.
-        confirm(&joiner_ctx, &mut w.joiner_store, &mut joiner, &code)
-            .await
-            .expect("joiner confirms");
-        pump(&creator_ctx, &mut w.creator_store, &mut creator)
-            .await
-            .expect("keys");
-        assert_eq!(w.state.lock().unwrap().list_puts, 1);
-        assert_eq!(creator.status(), PairingStatus::Code(code.clone()));
-
-        // The creator confirms: the list is signed and published, once.
-        confirm(&creator_ctx, &mut w.creator_store, &mut creator, &code)
-            .await
-            .expect("creator confirms");
-        assert_eq!(w.state.lock().unwrap().list_puts, 2);
-        assert_eq!(creator.status(), PairingStatus::Done);
-        assert!(w.creator_store.pending_pairing().is_none());
-
-        pump(&joiner_ctx, &mut w.joiner_store, &mut joiner)
-            .await
-            .expect("grant");
-        assert_eq!(joiner.status(), PairingStatus::Done);
-        assert!(w.joiner_store.pending_pairing().is_none());
-
-        let new_key = w
-            .joiner_store
-            .olm_identity()
-            .unwrap()
-            .unwrap()
-            .identity_keys()
-            .ed25519
-            .to_base64();
-        let new_did = did_from_key_text(&new_key).unwrap();
-        let fake = w.state.lock().unwrap();
-        assert!(fake.closed);
-        let list = fake.list.as_ref().unwrap();
-        assert_eq!(list["ver"], json!(2));
-        assert!(list["devices"]
-            .as_array()
-            .unwrap()
-            .contains(&json!(new_key)));
-        // The new device is registered and holds a public bundle that a
-        // peer can claim keys from.
-        assert!(fake.devices.iter().any(|d| d["did"] == json!(new_did)));
-        let (one_time, fallback) = fake.keys[&new_did];
-        assert!(one_time > 0 && fallback);
-        drop(fake);
-        assert!(w.joiner_store.device_certificate().is_some());
-        let _ = (&w.server, &w.dir);
-        let _ = fs::remove_dir_all(&w.dir);
-    }
-
-    #[tokio::test]
-    async fn the_joiner_confirming_alone_never_publishes_a_list() {
-        let mut w = world("alone").await;
-        let creator_ctx = ctx(&w.client, CREATOR_TOKEN);
-        let joiner_ctx = ctx(&w.client, JOINER_TOKEN);
-        let (mut creator, link) = start_creator(&creator_ctx, &mut w.creator_store, 0)
-            .await
-            .unwrap();
-        let mut text = link.code();
-        let mut joiner = start_joiner(&joiner_ctx, &mut w.joiner_store, &mut text, 0)
-            .await
-            .unwrap();
-        pump(&creator_ctx, &mut w.creator_store, &mut creator)
-            .await
-            .unwrap();
-        let code = code_text(&joiner);
-        confirm(&joiner_ctx, &mut w.joiner_store, &mut joiner, &code)
-            .await
-            .unwrap();
-        pump(&creator_ctx, &mut w.creator_store, &mut creator)
-            .await
-            .unwrap();
-        assert_eq!(w.state.lock().unwrap().list_puts, 1);
-        assert!(creator.is_active());
-        let _ = fs::remove_dir_all(&w.dir);
-    }
-
-    #[tokio::test]
-    async fn cancel_closes_the_rendezvous_and_empties_the_slot() {
-        let mut w = world("cancel").await;
-        let creator_ctx = ctx(&w.client, CREATOR_TOKEN);
-        let (mut creator, _link) = start_creator(&creator_ctx, &mut w.creator_store, 0)
-            .await
-            .unwrap();
-        cancel(&creator_ctx, &mut w.creator_store, &mut creator).await;
-        assert_eq!(creator.status(), PairingStatus::Ended(EndReason::Cancelled));
-        assert!(w.state.lock().unwrap().closed);
-        assert!(w.creator_store.pending_pairing().is_none());
-        let _ = fs::remove_dir_all(&w.dir);
-    }
-
-    #[tokio::test]
-    async fn a_bad_code_closes_the_rendezvous_and_a_retry_starts_clean() {
-        let mut w = world("badcode").await;
-        let creator_ctx = ctx(&w.client, CREATOR_TOKEN);
-        let joiner_ctx = ctx(&w.client, JOINER_TOKEN);
-        let (mut creator, link) = start_creator(&creator_ctx, &mut w.creator_store, 0)
-            .await
-            .unwrap();
-        let mut text = link.code();
-        let mut joiner = start_joiner(&joiner_ctx, &mut w.joiner_store, &mut text, 0)
-            .await
-            .unwrap();
-        pump(&creator_ctx, &mut w.creator_store, &mut creator)
-            .await
-            .unwrap();
-        let code: u8 = code_text(&creator).parse().unwrap();
-        let wrong = format!("{:02}", (code + 1) % 100);
-        let result = confirm(&joiner_ctx, &mut w.joiner_store, &mut joiner, &wrong).await;
-        assert!(matches!(
-            result,
-            Err(DriveError::Flow(FlowError::WrongCode))
-        ));
-        assert!(w.joiner_store.pending_pairing().is_none());
-        assert!(w.state.lock().unwrap().closed);
-        assert_eq!(w.state.lock().unwrap().list_puts, 1);
-
-        // Retry: a new pairing starts with a new session and a new slot.
-        let (retry, _link) = start_creator(&creator_ctx, &mut w.creator_store, 10)
-            .await
-            .unwrap();
-        assert!(retry.is_active());
-        assert!(w.creator_store.pending_pairing().is_some());
-        let _ = fs::remove_dir_all(&w.dir);
-    }
-
-    #[tokio::test]
-    async fn timeout_closes_the_rendezvous_and_empties_the_slot() {
-        let mut w = world("timeout").await;
-        let creator_ctx = ctx(&w.client, CREATOR_TOKEN);
-        let (mut creator, _link) = start_creator(&creator_ctx, &mut w.creator_store, 0)
-            .await
-            .unwrap();
-        assert!(!tick(&creator_ctx, &mut w.creator_store, &mut creator, 10).await);
-        assert!(w.creator_store.pending_pairing().is_some());
-        let late = i64::try_from(PAIRING_LIFETIME_SECS).unwrap();
-        assert!(tick(&creator_ctx, &mut w.creator_store, &mut creator, late).await);
-        assert_eq!(creator.status(), PairingStatus::Ended(EndReason::Timeout));
-        assert!(w.creator_store.pending_pairing().is_none());
-        assert!(w.state.lock().unwrap().closed);
-        let _ = fs::remove_dir_all(&w.dir);
-    }
-
-    #[tokio::test]
-    async fn events_for_another_rendezvous_are_stale_and_a_close_event_ends_the_pairing() {
-        let mut w = world("events").await;
-        let creator_ctx = ctx(&w.client, CREATOR_TOKEN);
-        let (mut creator, _link) = start_creator(&creator_ctx, &mut w.creator_store, 0)
-            .await
-            .unwrap();
-        let calls = w.state.lock().unwrap().pairing_calls;
-        let stale = PairingPush::Message {
-            rendezvous_id: "ZyXwVuTsRqPoNmLkJiHgFe".to_string(),
-            seq: 1,
-            from: PairingRole::Joiner,
-        };
-        on_push(&creator_ctx, &mut w.creator_store, &mut creator, &stale)
-            .await
-            .unwrap();
-        assert_eq!(w.state.lock().unwrap().pairing_calls, calls);
-        assert!(creator.is_active());
-        let closed = PairingPush::Closed {
-            rendezvous_id: ID.to_string(),
-            reason: ClosedReason::Replaced,
-        };
-        on_push(&creator_ctx, &mut w.creator_store, &mut creator, &closed)
-            .await
-            .unwrap();
-        assert_eq!(
-            creator.status(),
-            PairingStatus::Ended(EndReason::Closed(ClosedReason::Replaced))
-        );
-        assert!(w.creator_store.pending_pairing().is_none());
-        let _ = fs::remove_dir_all(&w.dir);
-    }
-
-    #[tokio::test]
-    async fn a_restart_closes_the_open_rendezvous_and_leaves_no_state() {
-        let mut w = world("restart").await;
-        let creator_ctx = ctx(&w.client, CREATOR_TOKEN);
-        let (_creator, _link) = start_creator(&creator_ctx, &mut w.creator_store, 0)
-            .await
-            .unwrap();
-        // The app stops here: the session is gone, the slot still holds the
-        // record. The next start reads it, closes the rendezvous, empties it.
-        let stale = take_stale_pairing(&mut w.creator_store)
-            .unwrap()
-            .expect("stale");
-        close_stale(&creator_ctx, &stale).await;
-        assert!(w.state.lock().unwrap().closed);
-        assert!(w.creator_store.pending_pairing().is_none());
-        let _ = fs::remove_dir_all(&w.dir);
-    }
-
-    #[tokio::test]
-    async fn a_server_below_protocol_48_gets_no_pairing_request() {
-        let w = world("old").await;
-        let old = PairingContext {
-            client: &w.client,
-            token: CREATOR_TOKEN,
-            protocol: Some(47),
-            network_id: "libera",
-        };
-        let mut store = open_store(&w.dir, "old.bin");
-        let before = w.state.lock().unwrap().pairing_calls;
-        let result = start_creator(&old, &mut store, 0).await;
-        assert!(
-            matches!(&result, Err(DriveError::Call(error)) if matches!(**error, PairingCallError::Unavailable))
-        );
-        assert_eq!(w.state.lock().unwrap().pairing_calls, before);
-        assert!(store.pending_pairing().is_none());
-        let _ = fs::remove_dir_all(&w.dir);
-    }
-
-    #[tokio::test]
-    async fn a_payload_over_the_limit_is_refused_before_the_call() {
-        let w = world("limit").await;
-        let before = w.state.lock().unwrap().pairing_calls;
-        let big = "A".repeat(PAIRING_MESSAGE_MAX_BYTES + 1);
-        let result = w
-            .client
-            .post_pairing_message(CREATOR_TOKEN, ID, &big, 0, 0, PROTOCOL)
-            .await;
-        assert!(matches!(result, Err(PairingCallError::TooLarge)));
-        let result = w
-            .client
-            .post_pairing_message(CREATOR_TOKEN, ID, "A", PAIRING_MAX_MESSAGES, 0, PROTOCOL)
-            .await;
-        assert!(matches!(result, Err(PairingCallError::TooLarge)));
-        assert_eq!(w.state.lock().unwrap().pairing_calls, before);
-        let _ = fs::remove_dir_all(&w.dir);
-    }
-
-    #[tokio::test]
-    async fn the_paired_device_provisions_again_without_a_master() {
-        let mut w = world("again").await;
-        let creator_ctx = ctx(&w.client, CREATOR_TOKEN);
-        let joiner_ctx = ctx(&w.client, JOINER_TOKEN);
-        let (mut creator, link) = start_creator(&creator_ctx, &mut w.creator_store, 0)
-            .await
-            .unwrap();
-        let mut text = link.code();
-        let mut joiner = start_joiner(&joiner_ctx, &mut w.joiner_store, &mut text, 0)
-            .await
-            .unwrap();
-        pump(&creator_ctx, &mut w.creator_store, &mut creator)
-            .await
-            .unwrap();
-        let code = code_text(&creator);
-        confirm(&joiner_ctx, &mut w.joiner_store, &mut joiner, &code)
-            .await
-            .unwrap();
-        confirm(&creator_ctx, &mut w.creator_store, &mut creator, &code)
-            .await
-            .unwrap();
-        // The creator reads the keys of the joiner now, and signs.
-        pump(&creator_ctx, &mut w.creator_store, &mut creator)
-            .await
-            .unwrap();
-        pump(&joiner_ctx, &mut w.joiner_store, &mut joiner)
-            .await
-            .unwrap();
-        // A later start runs the provision again: it needs no pairing.
-        let again = provision_device(
-            &w.client,
-            JOINER_TOKEN,
-            "libera",
-            Some(49),
-            &mut w.joiner_store,
-        )
-        .await
-        .expect("provision again");
-        assert!(!again.device_registered && !again.list_published);
-        assert!(w.joiner_store.master_key().unwrap().is_none());
-        let _ = fs::remove_dir_all(&w.dir);
+        let (session, _link) =
+            PairingSession::create(&rendezvous(PairingRole::Creator), NET, 100).expect("create");
+        save_pending(&mut store, &session).expect("save");
+        let stale = take_stale_pairing(&mut store)
+            .expect("take")
+            .expect("record");
+        assert_eq!(stale.rendezvous_id(), ID);
+        assert_eq!(stale.role, PairingRole::Creator);
+        assert!(take_stale_pairing(&mut store).expect("again").is_none());
     }
 }
