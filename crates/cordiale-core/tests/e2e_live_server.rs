@@ -20,7 +20,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Opt-in checks against a real Grappa server of protocol 50.
+//! Opt-in checks against a real Grappa server of protocol 51.
 //!
 //! These tests need a server that Cordiale cannot start by itself. They are
 //! `#[ignore]` and do not run in the normal test run. Run them with
@@ -45,7 +45,7 @@ fn variable(name: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "needs a protocol 50 server: see the module comment"]
+#[ignore = "needs a protocol 51 server: see the module comment"]
 async fn the_live_server_speaks_the_protocol_of_the_client() {
     let client = GrappaClient::new(variable("CORDIALE_LIVE_SERVER"));
     let config = client.fetch_config().await.expect("GET /api/config");
@@ -59,7 +59,7 @@ async fn the_live_server_speaks_the_protocol_of_the_client() {
 }
 
 #[tokio::test]
-#[ignore = "needs a protocol 50 server: see the module comment"]
+#[ignore = "needs a protocol 51 server: see the module comment"]
 async fn the_live_server_answers_the_device_and_list_routes_in_the_known_shapes() {
     let client = GrappaClient::new(variable("CORDIALE_LIVE_SERVER"));
     let token = variable("CORDIALE_LIVE_TOKEN");
