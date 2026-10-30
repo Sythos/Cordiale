@@ -10990,3 +10990,92 @@ fn alias_errors_map_to_distinct_status_kinds() {
     assert_eq!(AliasUpdateError::Read.status_kind(), "alias-read-failed");
     assert_eq!(AliasUpdateError::Write.status_kind(), "alias-save-failed");
 }
+
+fn history_row(id: i64) -> Value {
+    serde_json::json!({
+        "id": id,
+        "server_time": id * 10,
+        "kind": "privmsg",
+        "sender": "bob",
+        "body": format!("m{id}"),
+    })
+}
+
+/// Rows with an ID above `after`, ascending, at most `limit` of them.
+/// `overlap` moves the start back, so a page repeats rows of the page before.
+fn history_page(total: i64, after: Option<i64>, limit: usize, overlap: i64) -> Vec<Value> {
+    let start = (after.unwrap_or(0) - overlap).max(0) + 1;
+    (start..=total).take(limit).map(history_row).collect()
+}
+
+fn catch_up_test(
+    total: i64,
+    local: i64,
+    overlap: i64,
+    fail_on_call: Option<usize>,
+) -> (bool, Vec<Option<i64>>, Vec<i64>) {
+    let key = ("net".to_string(), "bob".to_string());
+    let mut state = WorkerState::new();
+    let local_rows: Vec<Value> = (1..=local).map(history_row).collect();
+    merge_query_history(&mut state, &key, &local_rows);
+    let calls = std::cell::RefCell::new(Vec::new());
+    let complete = upload_test_runtime().block_on(fetch_history_pages(
+        Some(local),
+        Some(200),
+        |after| {
+            let call = {
+                let mut calls = calls.borrow_mut();
+                calls.push(after);
+                calls.len()
+            };
+            let page = history_page(total, after, 200, overlap);
+            async move {
+                if fail_on_call == Some(call) {
+                    Err(())
+                } else {
+                    Ok(page)
+                }
+            }
+        },
+        |rows| {
+            merge_query_history(&mut state, &key, rows);
+            true
+        },
+    ));
+    let ids = state.transcript.messages[&key]
+        .iter()
+        .filter_map(|message| message.message_id)
+        .collect();
+    (complete, calls.into_inner(), ids)
+}
+
+#[test]
+fn query_catch_up_loads_more_than_one_page_in_order() {
+    let (complete, calls, ids) = catch_up_test(650, 10, 0, None);
+    assert!(complete);
+    assert_eq!(calls, vec![Some(10), Some(210), Some(410), Some(610)]);
+    assert_eq!(ids, (1..=650).collect::<Vec<_>>());
+}
+
+#[test]
+fn query_catch_up_stops_after_a_page_that_ends_the_history() {
+    let (complete, calls, _) = catch_up_test(410, 10, 0, None);
+    assert!(complete);
+    assert_eq!(calls, vec![Some(10), Some(210), Some(410)]);
+}
+
+#[test]
+fn query_catch_up_drops_rows_repeated_across_pages() {
+    let (complete, _, ids) = catch_up_test(650, 10, 5, None);
+    assert!(complete);
+    assert_eq!(ids, (1..=650).collect::<Vec<_>>());
+}
+
+#[test]
+fn query_catch_up_failure_is_incomplete_and_keeps_the_rows_read() {
+    let (complete, calls, ids) = catch_up_test(650, 10, 0, Some(2));
+    assert!(!complete);
+    assert_eq!(calls.len(), 2);
+    // The first page arrived: a retry resumes after its last row.
+    assert_eq!(ids, (1..=210).collect::<Vec<_>>());
+}

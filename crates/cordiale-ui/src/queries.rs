@@ -50,7 +50,14 @@ pub(crate) async fn handle_select_query(
     // of the history refresh that follows the Phoenix join ACK. The endpoint's
     // default page is newest-first, so merge_query_history restores chronological
     // display order and deduplicates any messages received live in the meantime.
-    if fetch_query_history(state, &query, None, None).await {
+    // With local rows, resume after the newest one and page up to the end, so
+    // no gap stays between the local rows and the newest page.
+    let (high_water, limit) = if query_view_key(state, &query) == key {
+        query_history_fetch_window(state, &identity, &key)
+    } else {
+        (None, None)
+    };
+    if fetch_query_history(state, &query, high_water, limit).await {
         state
             .transcript
             .query_full_history_required
@@ -242,37 +249,78 @@ pub(crate) async fn fetch_query_history(
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return false;
     };
-    let rows = match client
-        .fetch_messages(&token, &query.network, &query.target_nick, after_id, limit)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            persistence::log_line(&format!(
-                "query history fetch failed for {}/{}: {error:?}",
-                query.network, query.target_nick
-            ));
-            return false;
+    let fetch_page = |after: Option<i64>| {
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            client
+                .fetch_messages(&token, &query.network, &query.target_nick, after, limit)
+                .await
+                .map_err(|error| {
+                    persistence::log_line(&format!(
+                        "query history fetch failed for {}/{}: {error:?}",
+                        query.network, query.target_nick
+                    ));
+                })
         }
     };
+    let accept_page = |rows: &[Value]| {
+        // A newer full snapshot can close/rename this query while the request
+        // is in flight. The worker serializes awaits today, but retain the
+        // guard so a later async refactor cannot resurrect a stale
+        // conversation.
+        if find_query_window(
+            &state.transcript.query_windows,
+            &query.network,
+            &query.target_nick,
+        )
+        .is_none()
+        {
+            return false;
+        }
+        // Rows of a window folded into a followed peer's DM go to that DM.
+        let key = query_view_key(state, query);
+        merge_query_history(state, &key, rows);
+        note_history_source(state, query, rows);
+        true
+    };
+    fetch_history_pages(after_id, limit, fetch_page, accept_page).await
+}
 
-    // A newer full snapshot can close/rename this query while the request is
-    // in flight. The worker serializes awaits today, but retain the guard so a
-    // later async refactor cannot resurrect a stale conversation.
-    if find_query_window(
-        &state.transcript.query_windows,
-        &query.network,
-        &query.target_nick,
-    )
-    .is_none()
-    {
-        return false;
+/// Reads history pages until the server has no more rows. A request with an
+/// `after` cursor and a page limit gets ascending rows: a full page means more
+/// may follow, so the next request starts after the highest ID of the page.
+/// Any other request is one page. Each page goes to `accept` as it arrives, so
+/// a failure part-way keeps the rows read so far and a retry resumes after
+/// them. Returns `false` when a request fails or `accept` refuses a page; the
+/// catch-up is then incomplete.
+pub(crate) async fn fetch_history_pages<F, Fut>(
+    after_id: Option<i64>,
+    limit: Option<usize>,
+    mut fetch: F,
+    mut accept: impl FnMut(&[Value]) -> bool,
+) -> bool
+where
+    F: FnMut(Option<i64>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Value>, ()>>,
+{
+    let mut after = after_id;
+    loop {
+        let Ok(rows) = fetch(after).await else {
+            return false;
+        };
+        if !accept(&rows) {
+            return false;
+        }
+        let Some((cursor, limit)) = after.zip(limit) else {
+            return true;
+        };
+        let top = rows.iter().filter_map(message_id).max();
+        match top {
+            Some(top) if rows.len() >= limit && top > cursor => after = Some(top),
+            _ => return true,
+        }
     }
-    // Rows of a window folded into a followed peer's DM go to that DM.
-    let key = query_view_key(state, query);
-    merge_query_history(state, &key, &rows);
-    note_history_source(state, query, &rows);
-    true
 }
 
 /// How far back one query window was loaded. A DM view that folds in the
