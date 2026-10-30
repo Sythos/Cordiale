@@ -521,6 +521,9 @@ fn open_pairing_engine(state: &mut WorkerState, network: &str) -> bool {
     if state.conn.guest_session {
         return false;
     }
+    // The engine takes the one handle on the history file: let go of the
+    // history-only handle first.
+    state.e2e.histories.remove(network);
     match E2eEngine::open_for_pairing(client.base_url(), account, network) {
         Ok(engine) => {
             state.e2e.unavailable.remove(network);
@@ -529,6 +532,7 @@ fn open_pairing_engine(state: &mut WorkerState, network: &str) -> bool {
         }
         Err(error) => {
             persistence::log_line(&format!("e2e pairing engine not opened: {error:?}"));
+            open_history_only(state, network);
             false
         }
     }
