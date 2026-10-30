@@ -382,6 +382,16 @@ impl E2eStateStore {
         })
     }
 
+    /// Saves a list that the server holds already and clears the mark of
+    /// publication, in one write.
+    pub fn set_published_list(&mut self, list: &SignedList) -> Result<(), E2eStoreError> {
+        let list = list.clone();
+        self.commit(|data| {
+            data.signed_list = Some(list);
+            data.list_pending = false;
+        })
+    }
+
     /// True when the own list went through the key order migration.
     pub fn list_migrated(&self) -> bool {
         self.data.list_migrated
