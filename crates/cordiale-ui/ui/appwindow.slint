@@ -3874,11 +3874,26 @@ export component AppWindow inherits Window {
                         accessible-role: AccessibleRole.text;
                         accessible-live-region: AccessibleLiveness.polite;
                     }
-                    for shared-channel in shared-channels : Button {
-                        text: shared-channel;
-                        clicked => { channel-selected(shared-channels-network, shared-channel); }
+                    // The buttons scroll sideways, so a long list never
+                    // widens the chat pane.
+                    if shared-channels.length > 0 : Flickable {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        height: shared-chips.preferred-height;
+                        content-width: shared-chips.preferred-width;
+                        content-height: shared-chips.preferred-height;
+
+                        shared-chips := HorizontalLayout {
+                            width: self.preferred-width;
+                            spacing: 6px;
+                            alignment: start;
+                            for shared-channel in shared-channels : Button {
+                                text: shared-channel;
+                                clicked => { channel-selected(shared-channels-network, shared-channel); }
+                            }
+                        }
                     }
-                    Rectangle { horizontal-stretch: 1; }
+                    if shared-channels.length == 0 : Rectangle { horizontal-stretch: 1; }
                 }
             }
 
