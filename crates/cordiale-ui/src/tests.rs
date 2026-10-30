@@ -10585,3 +10585,69 @@ fn a_plain_history_row_never_carries_the_encrypted_mark() {
         assert!(locked_row_with_drop(&message, "me", "ada", None).encrypted);
     }
 }
+
+#[test]
+fn media_save_names_the_file_after_the_link() {
+    assert_eq!(media_save::file_name("photo.png", "png"), "photo.png");
+    assert_eq!(media_save::file_name("PHOTO.PNG", "png"), "PHOTO.PNG");
+    assert_eq!(media_save::file_name("photo", "jpg"), "photo.jpg");
+    assert_eq!(media_save::file_name("photo.php", "png"), "photo.png");
+    assert_eq!(media_save::file_name("a/b:c.png", "png"), "abc.png");
+    assert_eq!(media_save::file_name("", "gif"), "image.gif");
+    assert_eq!(media_save::file_name("..", "webp"), "image.webp");
+}
+
+#[test]
+fn media_save_writes_the_open_image_and_reports_outcomes() {
+    let dir = temp_files::private_dir().expect("private folder");
+    let path = dir.join("media-save-test.png");
+    media_save::forget();
+    assert_eq!(
+        media_save::save_open_image_to(&path),
+        media_save::Outcome::Failed
+    );
+
+    media_save::remember("PNG/", vec![1, 2, 3]);
+    assert_eq!(
+        media_save::save_open_image_to(&path),
+        media_save::Outcome::Done
+    );
+    assert_eq!(std::fs::read(&path).expect("saved file"), vec![1, 2, 3]);
+    let _ = std::fs::remove_file(&path);
+
+    let missing = dir.join("no-such-folder").join("media.png");
+    assert_eq!(
+        media_save::save_open_image_to(&missing),
+        media_save::Outcome::Failed
+    );
+    media_save::forget();
+    assert_eq!(
+        media_save::save_open_image_to(&path),
+        media_save::Outcome::Failed
+    );
+}
+
+#[test]
+fn media_save_status_keys_treat_a_cancel_as_normal() {
+    use media_save::Outcome::{Cancelled, Done, Failed};
+    assert_eq!(media_save::status_key(&Cancelled, true), None);
+    assert_eq!(media_save::status_key(&Cancelled, false), None);
+    assert_eq!(media_save::status_key(&Done, true), Some("media-saved"));
+    assert_eq!(
+        media_save::status_key(&Failed, true),
+        Some("media-save-failed")
+    );
+    assert_eq!(
+        media_save::status_key(&Done, false),
+        Some("media-link-copied")
+    );
+    assert_eq!(
+        media_save::status_key(&Failed, false),
+        Some("media-link-failed")
+    );
+}
+
+#[test]
+fn media_share_without_a_link_fails() {
+    assert_eq!(media_save::share_link(""), media_save::Outcome::Failed);
+}

@@ -1843,6 +1843,8 @@ export component AppWindow inherits Window {
     // "gone" or "failed".
     callback chat-link-clicked(string);
     callback media-open-in-browser();
+    callback media-download();
+    callback media-share();
     in property <string> media-url: "";
     in property <string> media-title: "";
     in property <string> media-kind: "";
@@ -2629,6 +2631,14 @@ export component AppWindow inherits Window {
             return @tr("Couldn't save the profile.");
         } else if status-kind == "avatar-saved" {
             return @tr("Avatar updated.");
+        } else if status-kind == "media-saved" {
+            return @tr("Image saved.");
+        } else if status-kind == "media-save-failed" {
+            return @tr("Couldn't save the image.");
+        } else if status-kind == "media-link-copied" {
+            return @tr("Image link copied.");
+        } else if status-kind == "media-link-failed" {
+            return @tr("Couldn't copy the image link.");
         } else if status-kind == "avatar-removed" {
             return @tr("Avatar removed.");
         } else if status-kind == "avatar-remove-failed" {
@@ -7818,6 +7828,17 @@ export component AppWindow inherits Window {
                 text: media-zoom ? @tr("Fit") : "1:1";
                 a11y-label: media-zoom ? @tr("Fit to the window") : @tr("Actual size");
                 clicked => { media-zoom = !media-zoom; }
+            }
+            CompactButton {
+                text: "💾  " + @tr("Download");
+                enabled: media-kind == "image";
+                clicked => { media-download(); }
+            }
+            CompactButton {
+                text: "🔗  " + @tr("Share");
+                a11y-label: @tr("Copy the image link");
+                enabled: media-kind == "image";
+                clicked => { media-share(); }
             }
             if media-kind != "gone" : CompactButton {
                 text: "🌐  " + @tr("Open in browser");

@@ -3620,6 +3620,34 @@ msgctxt "AppWindow"
 msgid "Pairing code"
 msgstr "Kopplungscode"
 
+msgctxt "AppWindow"
+msgid "Download"
+msgstr "Herunterladen"
+
+msgctxt "AppWindow"
+msgid "Share"
+msgstr "Teilen"
+
+msgctxt "AppWindow"
+msgid "Copy the image link"
+msgstr "Bildlink kopieren"
+
+msgctxt "AppWindow"
+msgid "Image saved."
+msgstr "Bild gespeichert."
+
+msgctxt "AppWindow"
+msgid "Couldn't save the image."
+msgstr "Das Bild konnte nicht gespeichert werden."
+
+msgctxt "AppWindow"
+msgid "Image link copied."
+msgstr "Bildlink kopiert."
+
+msgctxt "AppWindow"
+msgid "Couldn't copy the image link."
+msgstr "Der Bildlink konnte nicht kopiert werden."
+
 msgctxt "RenameTarget"
 msgid "Open a conversation with {}"
 msgstr "Öffne eine Unterhaltung mit {}"
