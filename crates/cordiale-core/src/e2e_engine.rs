@@ -1032,7 +1032,9 @@ impl E2eEngine {
 
     /// Records the known E2E capability of a peer. The caller sets it from
     /// the signal that tells it. Proof of E2E (keys or a message that the
-    /// engine read) sets it to true by itself.
+    /// engine read) sets it to true by itself. No source publishes a signal
+    /// that a peer has no E2E, and silence is not one: see
+    /// `docs/protocol-notes.md`, issue 482.
     pub fn set_peer_capability(&mut self, nick: &str, capable: bool) {
         let cm = self.casemapping;
         let wanted = cm.fold(nick);
@@ -5620,6 +5622,32 @@ mod tests {
         let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
         assert_eq!(p.bob.handle_row(&item, 200), RowOutcome::Stored);
         assert!(p.bob.peer_capable("ALICE"));
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_never_answers_is_never_refused() {
+        // No source says that a peer has no E2E, and silence is not a signal.
+        // The text expires as late, the peer stays capable, and the next text
+        // asks for the keys again (issue 482).
+        let (mut alice, _bob) = alice_without_keys("silent");
+        let client = GrappaClient::new("http://127.0.0.1:9");
+        alice
+            .send_or_queue(&client, TOKEN, "bob", "first", 100)
+            .await
+            .expect("queued");
+        assert_eq!(alice.take_keys_wanted(), vec!["bob".to_string()]);
+        alice.clock.advance(secs(88));
+        let late = alice.expire_queue();
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].reason, DropReason::Late);
+        assert!(alice.peer_capable("bob"));
+        let again = alice
+            .send_or_queue(&client, TOKEN, "bob", "second", 200)
+            .await
+            .expect("queued again");
+        assert!(again.msgid.is_none());
+        assert_eq!(alice.take_keys_wanted(), vec!["bob".to_string()]);
+        assert!(alice.peer_capable("bob"));
     }
 
     #[test]
