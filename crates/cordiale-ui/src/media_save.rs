@@ -3,6 +3,7 @@
 //! The viewer keeps the bytes of the open image in memory, so Download needs
 //! no second request. The bytes are never logged.
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -115,19 +116,45 @@ pub fn download(title: &str) -> Outcome {
     write_to(&path)
 }
 
+thread_local! {
+    /// The clipboard stays open after a copy. On Linux the copied text lives
+    /// only while a `Clipboard` exists, so a dropped one would lose the link.
+    static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
+}
+
 /// Shares the image link. Cordiale has no file share on any platform, so the
 /// link goes to the clipboard.
 pub fn share_link(url: &str) -> Outcome {
     if url.is_empty() {
         return Outcome::Failed;
     }
-    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(url.to_string())) {
-        Ok(()) => Outcome::Done,
-        Err(err) => {
-            cordiale_core::persistence::log_line(&format!("image link not copied: {err}"));
-            Outcome::Failed
+    CLIPBOARD.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let copied = match slot.as_mut() {
+            Some(clipboard) => clipboard.set_text(url.to_string()),
+            None => {
+                let mut clipboard = match arboard::Clipboard::new() {
+                    Ok(clipboard) => clipboard,
+                    Err(err) => return copy_failed(&err),
+                };
+                let copied = clipboard.set_text(url.to_string());
+                *slot = Some(clipboard);
+                copied
+            }
+        };
+        match copied {
+            Ok(()) => Outcome::Done,
+            Err(err) => {
+                *slot = None;
+                copy_failed(&err)
+            }
         }
-    }
+    })
+}
+
+fn copy_failed(err: &arboard::Error) -> Outcome {
+    cordiale_core::persistence::log_line(&format!("image link not copied: {err}"));
+    Outcome::Failed
 }
 
 /// The status key that reports an outcome, or `None` for a cancel.

@@ -10599,7 +10599,8 @@ fn media_save_names_the_file_after_the_link() {
 
 #[test]
 fn media_save_writes_the_open_image_and_reports_outcomes() {
-    let dir = temp_files::private_dir().expect("private folder");
+    let folder = tempfile::tempdir().expect("test folder");
+    let dir = folder.path();
     let path = dir.join("media-save-test.png");
     media_save::forget();
     assert_eq!(
