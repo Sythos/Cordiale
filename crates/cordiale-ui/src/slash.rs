@@ -461,6 +461,11 @@ pub(crate) async fn run_slash_command(
                     if state.prefs.settings_network.as_deref() == Some(network.as_str()) {
                         push_ignore_entries(ui, response.entries(), "");
                     }
+                    state
+                        .prefs
+                        .window_ignores
+                        .insert(network.clone(), response.entries());
+                    push_window_ignores(state, ui);
                     Ok(())
                 }
                 Err(err) => {

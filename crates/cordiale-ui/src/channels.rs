@@ -93,8 +93,8 @@ pub(crate) async fn handle_select_channel(
 
     push_window_note(state, ui);
     let label = format!("{network} — {channel}");
-    let ui = ui.clone();
-    let _ = ui.upgrade_in_event_loop(move |ui| {
+    let ui_weak = ui.clone();
+    let _ = ui_weak.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
         ui.set_current_topic(irc_topic.into());
         ui.set_window_status(window_status.into());
@@ -117,6 +117,7 @@ pub(crate) async fn handle_select_channel(
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
+    sync_window_ignores(state, ui).await;
 }
 
 /// A successful REST response is the server's acknowledgement of PART. Keep

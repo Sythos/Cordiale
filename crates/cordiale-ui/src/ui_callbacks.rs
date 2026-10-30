@@ -584,6 +584,20 @@ pub(crate) fn register_member_callbacks(
         let _ = tx_for_query.send(WorkerCommand::MemberQuery(nick.to_string()));
     });
 
+    let tx_for_ignore = worker_tx.clone();
+    ui.on_member_ignore_requested(move |nick, add| {
+        let _ = tx_for_ignore.send(WorkerCommand::MemberIgnore {
+            nick: nick.to_string(),
+            add,
+        });
+    });
+
+    ui.on_nick_ignored(|nick, masks| {
+        use slint::Model as _;
+        let masks: Vec<String> = masks.iter().map(|mask| mask.to_string()).collect();
+        nick_is_ignored(&nick, &masks)
+    });
+
     let tx_for_rename_target = worker_tx.clone();
     ui.on_rename_target_requested(move |nick| {
         let _ = tx_for_rename_target.send(WorkerCommand::OpenRenameTarget(nick.to_string()));
