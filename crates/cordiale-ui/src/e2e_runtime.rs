@@ -24,6 +24,7 @@ use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
 };
 use cordiale_core::e2e_protocol::E2eOperation;
+use cordiale_core::e2e_provision::provision_device;
 use cordiale_core::e2e_revoke::{
     finish_pending_revoke, reset_identity, resume_reset, revoke_device, OwnRoutes,
     ResetConfirmation,
@@ -69,6 +70,10 @@ pub(crate) struct E2eRuntime {
     /// above it are unread. It is not saved: after a restart every entry
     /// starts read.
     read_incoming: HashMap<(String, String), usize>,
+    /// Networks whose provisioning ended with success in this session. An
+    /// open engine is not proof: a run that failed after the Olm account was
+    /// saved still opens one, so the next connect provisions again.
+    provisioned: HashSet<String>,
 }
 
 /// An open pairing and the network whose identity it changes.
@@ -221,10 +226,8 @@ pub(crate) fn locked_entry_state(state: &WorkerState, network: &str, nick: &str)
             .and_then(|message| engine.dropped_reason(&message.id));
         let trust = engine.trust();
         signals.sas_verified = trust.is_sas_verified(network, nick);
-        signals.peer_revoked = trust
-            .listed_devices(network, nick)
-            .iter()
-            .any(|key| trust.is_revoked(network, nick, key, None));
+        // The current list never holds a revoked key: read the revoked set.
+        signals.peer_revoked = trust.has_revoked_devices(network, nick);
     }
     locked_chat_state(&signals)
 }
@@ -353,13 +356,14 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
 }
 
 /// Gives a first device its E2E identity: the master key, the state file and
-/// the published bundle. A network that has an engine, a reset network, a
-/// guest session or a server without the E2E routes is left as it is. A
-/// failure is logged by kind and the network stays without an engine.
+/// the published bundle. It runs on each connect until one run ends with
+/// success, also when an engine is open: a run that failed after the Olm
+/// account was saved leaves an engine without a master or a bundle. A reset
+/// network and a guest session are left as they are. A failure is logged by
+/// kind.
 async fn provision_network(state: &mut WorkerState, network: &str) {
     if state.e2e.reset.contains(network)
-        || state.e2e.engines.contains_key(network)
-        || state.e2e.unavailable.contains(network)
+        || state.e2e.provisioned.contains(network)
         || state.conn.guest_session
     {
         return;
@@ -372,17 +376,37 @@ async fn provision_network(state: &mut WorkerState, network: &str) {
         return;
     };
     let protocol = state.conn.server_protocol_version;
-    if let Err(error) = E2eEngine::provision_for_network(
-        &client,
-        &token,
-        client.base_url(),
-        &account,
-        network,
-        protocol,
-    )
-    .await
-    {
-        persistence::log_line(&format!("e2e identity not made for {network}: {error:?}"));
+    let result = match state.e2e.engines.remove(network) {
+        // The engine owns the one open handle on the state file, so the run
+        // writes through it.
+        Some(mut engine) => {
+            let result =
+                provision_device(&client, &token, network, protocol, engine.state_mut()).await;
+            state.e2e.engines.insert(network.to_string(), engine);
+            result
+        }
+        None => {
+            E2eEngine::provision_for_network(
+                &client,
+                &token,
+                client.base_url(),
+                &account,
+                network,
+                protocol,
+            )
+            .await
+        }
+    };
+    match result {
+        Ok(_) => {
+            state.e2e.provisioned.insert(network.to_string());
+            // A network without a state file before this run can open its
+            // engine now.
+            state.e2e.unavailable.remove(network);
+        }
+        Err(error) => {
+            persistence::log_line(&format!("e2e identity not made for {network}: {error:?}"));
+        }
     }
 }
 
@@ -1047,6 +1071,12 @@ async fn settle_engine(
             }
         }
     }
+    // A KEYS row, a claim answer or a first message under another master
+    // key: the engine reads it as an unread row, and the entry shows the
+    // trust alarm.
+    for nick in engine.take_trust_changed() {
+        state.e2e.trust_alarm.insert((network.to_string(), nick));
+    }
     let changed = engine.take_changed_peers();
     let own_nick = state
         .networks
@@ -1359,6 +1389,7 @@ pub(crate) async fn handle_send_locked(
         // The log gets the kind of the failure, never the text.
         persistence::log_line(&format!("e2e send failed for {network}: {error:?}"));
         set_e2e_status(ui, e2e_send_error_kind(error));
+        state.e2e.note_engine_error(&network, &nick, error);
     }
     settle_engine(state, ui, &network, engine).await;
 }
