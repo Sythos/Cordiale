@@ -727,6 +727,8 @@ impl Outgoing<'_> {
 
 /// The Olm message for one device, with the session that wrote it.
 struct Sealed {
+    /// The nick of the stored peer entry: the key of the saved session.
+    nick: String,
     did: String,
     prekey: bool,
     body: String,
@@ -988,9 +990,11 @@ impl E2eEngine {
     /// Olm session. The caller opens the locked query only then.
     pub fn is_ready(&self, nick: &str) -> bool {
         let trust = self.state.trust();
+        let cm = self.casemapping;
+        let folded = cm.fold(nick);
         self.peers
             .values()
-            .any(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+            .any(|entry| cm.fold(&entry.nick) == folded && self.entry_ready(entry, &trust))
     }
 
     /// The nicks that have a verified device ready to send to, in order. A
@@ -1384,7 +1388,7 @@ impl E2eEngine {
         } else {
             Outgoing::ListReq
         };
-        let Ok(sealed) = self.seal(&identity, &job.nick, &[entry], &outgoing, own.lv) else {
+        let Ok(sealed) = self.seal(&identity, &[entry], &outgoing, own.lv) else {
             return false;
         };
         self.emit(
@@ -2289,10 +2293,12 @@ impl E2eEngine {
     /// gives the order.
     fn pick_devices(&self, nick: &str) -> Vec<PeerEntry> {
         let trust = self.state.trust();
+        let cm = self.casemapping;
+        let folded = cm.fold(nick);
         let mut entries: Vec<PeerEntry> = self
             .peers
             .values()
-            .filter(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+            .filter(|entry| cm.fold(&entry.nick) == folded && self.entry_ready(entry, &trust))
             .cloned()
             .collect();
         entries.sort_by(|a, b| a.device.did().cmp(b.device.did()));
@@ -2304,9 +2310,12 @@ impl E2eEngine {
     /// device takes its place.
     fn pick_specific_device(&self, nick: &str, did: &str) -> Option<PeerEntry> {
         let trust = self.state.trust();
+        let cm = self.casemapping;
         self.peers
             .get(did)
-            .filter(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+            .filter(|entry| {
+                cm.fold(&entry.nick) == cm.fold(nick) && self.entry_ready(entry, &trust)
+            })
             .cloned()
     }
 
@@ -2452,6 +2461,9 @@ impl E2eEngine {
                 retry.push(item);
                 continue;
             }
+            // Use the nick of the peer for the session lookup: the queued
+            // target can differ in letter case only.
+            let nick = entries[0].nick.clone();
             let result = self
                 .deliver(
                     client,
@@ -2508,7 +2520,7 @@ impl E2eEngine {
     ) -> Result<SentText, EngineError> {
         let identity = self.state.olm_identity()?.ok_or(EngineError::NotReady)?;
         let own = self.own_wire(&identity)?;
-        let sealed = self.seal(&identity, nick, &entries, &Outgoing::Text(text), own.lv)?;
+        let sealed = self.seal(&identity, &entries, &Outgoing::Text(text), own.lv)?;
         let emitted = self
             .emit(client, token, nick, sealed, &own, E2eSendPriority::Text)
             .await?;
@@ -2561,7 +2573,6 @@ impl E2eEngine {
     fn seal(
         &self,
         identity: &Account,
-        nick: &str,
         entries: &[PeerEntry],
         out: &Outgoing<'_>,
         lv: u32,
@@ -2569,7 +2580,7 @@ impl E2eEngine {
         let mut sealed = Vec::new();
         for entry in entries {
             let did = entry.device.did().to_string();
-            let mut session = match self.state.peer_session(&self.network, nick, &did)? {
+            let mut session = match self.state.peer_session(&self.network, &entry.nick, &did)? {
                 Some(session) => session,
                 None => {
                     let one_time = entry.one_time_key.as_deref().ok_or(EngineError::NotReady)?;
@@ -2596,6 +2607,7 @@ impl E2eEngine {
                 OlmMessage::Normal(message) => (false, message.to_base64()),
             };
             sealed.push(Sealed {
+                nick: entry.nick.clone(),
                 did,
                 prekey,
                 body,
@@ -2665,8 +2677,12 @@ impl E2eEngine {
         // Save the sessions before the send: a skipped Olm message is
         // harmless, a reused one is not.
         for sealed in chunk {
-            self.state
-                .set_peer_session(&self.network, nick, &sealed.did, &sealed.session)?;
+            self.state.set_peer_session(
+                &self.network,
+                &sealed.nick,
+                &sealed.did,
+                &sealed.session,
+            )?;
             if let Some(entry) = self.peers.get_mut(&sealed.did) {
                 entry.one_time_key = None;
             }
@@ -2769,9 +2785,13 @@ impl E2eEngine {
             self.fail_send(&key, DropReason::SendFailed);
             return;
         }
+        let session_nick = self
+            .peers
+            .get(&record.dids[0])
+            .map_or_else(|| record.nick.clone(), |entry| entry.nick.clone());
         if self
             .state
-            .remove_peer_session(&self.network, &record.nick, &record.dids[0])
+            .remove_peer_session(&self.network, &session_nick, &record.dids[0])
             .is_err()
         {
             self.fail_send(&key, DropReason::SendFailed);
@@ -5451,6 +5471,53 @@ mod tests {
         );
         assert!(alice.queue.is_empty());
         assert!(alice.pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_queued_text_goes_out_when_the_keys_come_with_another_letter_case() {
+        let (mut alice, bob) = alice_without_keys("queuecase");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+        let bob_did = did_from_key_text(&ed(&bob.device)).expect("did");
+        alice
+            .send_or_queue(&client, TOKEN, "bob", "wait", 100)
+            .await
+            .expect("queued");
+        assert_eq!(alice.queue.len(), 1);
+        alice.accept_keys("Bob", &bob.keys()).expect("keys");
+        assert!(alice.flush_queue(&client, TOKEN, 101).await.is_empty());
+        assert!(alice.queue.is_empty());
+        assert!(alice
+            .state
+            .peer_session(NET, "Bob", &bob_did)
+            .expect("session")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_send_with_another_letter_case_keeps_the_session_under_the_stored_nick() {
+        let (mut alice, bob) = alice_without_keys("case");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+        let bob_did = did_from_key_text(&ed(&bob.device)).expect("did");
+        alice.accept_keys("bob", &bob.keys()).expect("keys");
+        alice
+            .send_text(&client, TOKEN, "Bob", "hello", 100)
+            .await
+            .expect("send");
+        assert!(alice
+            .state
+            .peer_session(NET, "bob", &bob_did)
+            .expect("session")
+            .is_some());
+        assert!(alice
+            .state
+            .peer_session(NET, "Bob", &bob_did)
+            .expect("session")
+            .is_none());
+        assert!(alice.is_ready("bob"));
     }
 
     #[tokio::test]
