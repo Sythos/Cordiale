@@ -159,7 +159,7 @@ Cordiale also covers:
   and the connect screen signs in with such a link or token from another
   device, for example one made in Cicchetto after a passkey sign-in.
 - **Connection and presence:** Cordiale declares the protocol revision it
-  was checked against (`client_proto=37`) and, if Grappa refuses the
+  was checked against (`client_proto=50`) and, if Grappa refuses the
   upgrade with `426`, stops and asks you to update instead of retrying.
   A dropped connection is retried after 1 s, then 2 s, 4 s and so on up to
   a minute (each wait varied by up to a quarter, so clients that dropped
