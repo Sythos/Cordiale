@@ -6086,6 +6086,142 @@ fn a_rejected_date_format_has_its_own_message() {
     assert_eq!(display_prefs_error_key(None), "display-prefs-save-failed");
 }
 
+fn ignore_entry(mask: &str, text_pattern: Option<&str>) -> IgnoreEntry {
+    IgnoreEntry {
+        mask: mask.to_string(),
+        text_pattern: text_pattern.map(str::to_string),
+    }
+}
+
+#[test]
+fn nick_menu_offers_ignore_or_unignore_from_the_plain_rules() {
+    let masks = vec!["Spammer!*@*".to_string(), "other!*@*".to_string()];
+    // No rule: the menu offers Ignore.
+    assert!(!nick_is_ignored("alice", &masks));
+    // A plain rule, whatever the case: the menu offers Unignore.
+    assert!(nick_is_ignored("spammer", &masks));
+    assert!(nick_is_ignored("OTHER", &masks));
+    // A wider mask is not the nick rule.
+    assert!(!nick_is_ignored("alice", &["*!*@host.example".to_string()]));
+    assert!(!nick_is_ignored("alice", &[]));
+}
+
+#[test]
+fn nick_menu_finds_only_the_plain_nick_rule() {
+    let entries = vec![
+        ignore_entry("relay!*@*", Some("<spammer>*")),
+        ignore_entry("spammer!*@host.example", None),
+        ignore_entry("Spammer!*@*", None),
+        ignore_entry("spammer!*@*", Some("buy*")),
+    ];
+    let rule = plain_nick_rule(&entries, "spammer").expect("plain rule");
+    assert_eq!(rule, &entries[2]);
+    assert_eq!(nick_ignore_mask("spammer"), "spammer!*@*");
+    // A nick that has only a pattern rule or a wider mask has no plain rule.
+    assert!(plain_nick_rule(&entries[..2], "spammer").is_none());
+    assert!(plain_nick_rule(&entries[3..], "spammer").is_none());
+    assert!(plain_nick_rule(&entries, "relay").is_none());
+}
+
+#[test]
+fn nick_menu_reports_both_request_outcomes() {
+    assert_eq!(
+        member_ignore_status(true, "alice", None),
+        ("ignore-added", "alice".to_string())
+    );
+    assert_eq!(
+        member_ignore_status(false, "alice", None),
+        ("ignore-removed", "alice".to_string())
+    );
+    let rejected = |code: Option<&str>| GrappaClientError::Rejected {
+        status: cordiale_core::client::StatusCode::UNPROCESSABLE_ENTITY,
+        code: code.map(str::to_string),
+        retry_after: None,
+    };
+    assert_eq!(
+        member_ignore_status(true, "alice", Some(&rejected(Some("invalid_mask")))),
+        ("ignore-invalid-mask", "Ignore alice".to_string())
+    );
+    assert_eq!(
+        member_ignore_status(false, "alice", Some(&rejected(None))),
+        ("command-failed", "Unignore alice".to_string())
+    );
+}
+
+#[test]
+fn nick_menu_state_follows_the_list_a_change_returns() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let mut state = WorkerState::new();
+    let response = |entries: serde_json::Value| -> cordiale_core::profile::IgnoreMutationResponse {
+        serde_json::from_value(serde_json::json!({
+            "entries": entries,
+            "mask": "alice!*@*",
+            "text_pattern": null,
+            "outcome": "added",
+        }))
+        .expect("response")
+    };
+    let added = Ok(response(serde_json::json!([
+        { "mask": "alice!*@*", "text_pattern": null },
+        { "mask": "bob!*@*", "text_pattern": "hi*" },
+    ])));
+    remember_window_ignores(&mut state, &ui, "libera", &added);
+    let stored = &state.prefs.window_ignores["libera"];
+    assert!(plain_nick_rule(stored, "alice").is_some());
+    assert!(plain_nick_rule(stored, "bob").is_none());
+    // A refused change keeps the list that was there.
+    let refused = Err(GrappaClientError::InvalidUrl("x".into()));
+    remember_window_ignores(&mut state, &ui, "libera", &refused);
+    assert_eq!(state.prefs.window_ignores["libera"].len(), 2);
+    // A removal returns the list without the rule.
+    let removed = Ok(response(serde_json::json!([])));
+    remember_window_ignores(&mut state, &ui, "libera", &removed);
+    assert!(state.prefs.window_ignores["libera"].is_empty());
+    assert!(!state.prefs.window_ignores.contains_key("oftc"));
+}
+
+#[test]
+fn nick_menu_texts_are_translated() {
+    let slint = include_str!("../ui/appwindow.slint");
+    for msgid in [
+        "Ignore",
+        "Unignore",
+        "Ignoring {}.",
+        "No longer ignoring {}.",
+    ] {
+        assert!(slint.contains(&format!("@tr(\"{msgid}\"")), "{msgid}");
+    }
+    for (lang, catalog) in [
+        ("it", include_str!("../lang/it/LC_MESSAGES/cordiale-ui.po")),
+        ("fr", include_str!("../lang/fr/LC_MESSAGES/cordiale-ui.po")),
+        ("de", include_str!("../lang/de/LC_MESSAGES/cordiale-ui.po")),
+        ("es", include_str!("../lang/es/LC_MESSAGES/cordiale-ui.po")),
+    ] {
+        for msgid in [
+            "Ignore",
+            "Unignore",
+            "Ignoring {}.",
+            "No longer ignoring {}.",
+        ] {
+            let line = format!("msgid \"{msgid}\"");
+            let msgstr = catalog
+                .lines()
+                .skip_while(|found| *found != line)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{lang}: missing msgid {msgid}"));
+            assert!(
+                msgstr.starts_with("msgstr \"") && msgstr.len() > "msgstr \"\"".len(),
+                "{lang}: {msgstr}"
+            );
+            assert_eq!(
+                msgstr.contains("{}"),
+                msgid.contains("{}"),
+                "{lang}: {msgstr}"
+            );
+        }
+    }
+}
+
 #[test]
 fn ignore_refusals_name_the_field_the_user_got_wrong() {
     let rejected = |code: Option<&str>| GrappaClientError::Rejected {

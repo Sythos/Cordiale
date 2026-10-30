@@ -15,6 +15,7 @@ pub(crate) async fn handle_select_query(
     // A locked entry is local: it has no Grappa window and no topic.
     if is_locked_name(&nick) {
         handle_select_locked_query(state, ui, network, &nick);
+        sync_window_ignores(state, ui).await;
         return;
     }
     let Some(query) = find_query_window(&state.transcript.query_windows, &network, &nick).cloned()
@@ -43,6 +44,7 @@ pub(crate) async fn handle_select_query(
     refresh_network_groups(state, ui);
     push_mute_bar(state, ui);
     show_query_window(state, ui, &query, &key);
+    sync_window_ignores(state, ui).await;
 
     // Cicchetto loads the latest page when a query is selected, independently
     // of the history refresh that follows the Phoenix join ACK. The endpoint's

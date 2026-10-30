@@ -3631,3 +3631,19 @@ msgstr "Canales en común:"
 msgctxt "AppWindow"
 msgid "No shared channels."
 msgstr "No hay canales en común."
+
+msgctxt "MemberContextMenu"
+msgid "Ignore"
+msgstr "Ignorar"
+
+msgctxt "MemberContextMenu"
+msgid "Unignore"
+msgstr "Dejar de ignorar"
+
+msgctxt "AppWindow"
+msgid "Ignoring {}."
+msgstr "Estás ignorando a {}."
+
+msgctxt "AppWindow"
+msgid "No longer ignoring {}."
+msgstr "Ya no ignoras a {}."

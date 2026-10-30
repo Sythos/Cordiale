@@ -875,7 +875,8 @@ per chiavi sconosciute); `PUT /admin/networks/:id/servers/:id` e
 `PATCH /admin/credentials/:user_id/:network_id` (chiavi ammesse: `nick`,
 `ident`, `realname`, `sasl_user`, `auth_method`, `auth_command_template`,
 `autojoin_channels`, `password`; cambiare password o `auth_method` ferma la
-sessione viva e non la riavvia: risposta `session_action: "stopped"`).
+sessione viva; dal protocollo 51 la riavvia (vedi §8, «Protocollo 51»); un server
+più vecchio la ferma soltanto e risponde `session_action: "stopped"`).
 Il cambio di `auth_method` non è esposto in UI.
 
 Ogni entry (`AdminSession`/`AdminUser`/`AdminNetwork`) è tenuta come
@@ -1233,7 +1234,8 @@ Fonte: `docs/CLIENT_PROTOCOL.md` e `lib/grappa/protocol.ex` di
 `@min_protocol_version` 1). `CLIENT_PROTOCOL_VERSION` non misura le singole
 funzioni: dichiara l'ultima revisione riletta per intero sul sorgente. Era 37 al
 momento di questa tabella; è 50 dalla fetta 37 dell'ombrello 416 (vedi
-`docs/e2e-contract.md`). Il floor interno `MIN_SUPPORTED_PROTOCOL_VERSION` resta 1: nessuna
+`docs/e2e-contract.md`, che resta al protocollo 50) e 51 dal cambio admin descritto
+sotto. Il floor interno `MIN_SUPPORTED_PROTOCOL_VERSION` resta 1: nessuna
 voce qui sotto lo richiede.
 
 | Versione | Contenuto | Stato in Cordiale |
@@ -1758,6 +1760,25 @@ slot e la pulizia. Cambia solo `e2e_pairing_flow.rs`.
 - **Grappa 2457 (decisione).** Non si applica: Cordiale non ha un messaggio SAS a più dispositivi
   da pulire. La conferma SAS è locale a questo dispositivo (`confirm_sas`) e non c'è un prompt SAS
   sugli altri dispositivi del peer.
+
+### Protocollo 51: riavvio della sessione dopo la modifica di una credenziale admin
+
+Non è una revisione E2E. Fonte: `lib/grappa/protocol.ex` di `vjt/grappa-irc` al
+commit `3f328bd0` (`@protocol_version` 51, `@min_protocol_version` 1; nessun
+protocollo 52 o successivo dichiarato). Issue server 2474.
+
+- Un `PATCH /admin/credentials/:user_id/:network_id` che tocca l'autenticazione di una
+  sessione viva ora la riavvia, invece di fermarla soltanto.
+- Esiti della risposta (`session_action`): `left_alone` (nessun riavvio), `spawned`
+  (riavviata) e `stopped` (riavvio rifiutato, riga parcheggiata); con `stopped` il campo
+  `session_error` porta il motivo del rifiuto.
+- Evento `credential_updated` sul topic admin: `session_action` può essere `spawned`.
+- Evento `capacity_reject`: il campo `flow` può essere `admin_credential_update`
+  (il riavvio è ammesso con un tag proprio, non quello del bind).
+- `min_protocol_version` resta 1: una console admin vecchia ignora un `session_action`
+  sconosciuto e nessun client non admin vede cambiamenti.
+- Il cambio lato server per le conversazioni silenziate in `mentions_bundle` non
+  cambia nessun payload e non richiede un filtro nel client.
 
 ## Contratto finale E2E (issue 459)
 

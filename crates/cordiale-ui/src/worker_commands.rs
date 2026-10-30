@@ -405,9 +405,11 @@ pub(crate) async fn run_ignore_add(
         &state.conn.token,
         &state.prefs.settings_network,
     ) {
+        let network = network.clone();
         let result = client
-            .add_ignore(token, network, &mask, text_pattern.as_deref())
+            .add_ignore(token, &network, &mask, text_pattern.as_deref())
             .await;
+        remember_window_ignores(state, ui, &network, &result);
         push_ignore_mutation(ui, result);
     }
 }
@@ -424,10 +426,168 @@ pub(crate) async fn run_ignore_remove(
         &state.conn.token,
         &state.prefs.settings_network,
     ) {
+        let network = network.clone();
         let result = client
-            .remove_ignore(token, network, &mask, text_pattern.as_deref())
+            .remove_ignore(token, &network, &mask, text_pattern.as_deref())
             .await;
+        remember_window_ignores(state, ui, &network, &result);
         push_ignore_mutation(ui, result);
+    }
+}
+
+/// The mask of the plain rule that ignores one nick on any user and host.
+pub(crate) fn nick_ignore_mask(nick: &str) -> String {
+    format!("{nick}!*@*")
+}
+
+/// The rule with no text pattern whose mask is exactly the nick rule. The
+/// comparison is ASCII-case-insensitive, like the server's. A rule with a
+/// text pattern or a wider mask never matches.
+pub(crate) fn plain_nick_rule<'a>(
+    entries: &'a [IgnoreEntry],
+    nick: &str,
+) -> Option<&'a IgnoreEntry> {
+    let wanted = ascii_fold_channel(&nick_ignore_mask(nick));
+    entries
+        .iter()
+        .find(|entry| entry.text_pattern.is_none() && ascii_fold_channel(&entry.mask) == wanted)
+}
+
+/// Whether `nick` has a plain rule among `masks`, the masks of the rules
+/// that have no text pattern.
+pub(crate) fn nick_is_ignored(nick: &str, masks: &[String]) -> bool {
+    let wanted = ascii_fold_channel(&nick_ignore_mask(nick));
+    masks.iter().any(|mask| ascii_fold_channel(mask) == wanted)
+}
+
+/// Keeps the ignore list of `network` that a successful change returned and
+/// shows it in the nick context menus.
+pub(crate) fn remember_window_ignores(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    result: &Result<cordiale_core::profile::IgnoreMutationResponse, GrappaClientError>,
+) {
+    if let Ok(response) = result {
+        state
+            .prefs
+            .window_ignores
+            .insert(network.to_string(), response.entries());
+        push_window_ignores(state, ui);
+    }
+}
+
+/// Shows the plain nick rules of the open window's network to the nick
+/// context menus.
+pub(crate) fn push_window_ignores(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let masks: Vec<String> = state
+        .windows
+        .current_channel
+        .as_ref()
+        .and_then(|(network, _)| state.prefs.window_ignores.get(network))
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.text_pattern.is_none())
+                .map(|entry| entry.mask.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let masks: Vec<slint::SharedString> = masks.into_iter().map(Into::into).collect();
+        ui.set_window_ignore_masks(Rc::new(slint::VecModel::from(masks)).into());
+    });
+}
+
+/// Loads the ignore list of the open window's network each time a window
+/// opens, then shows it to the nick context menus. A failed load keeps the
+/// list that was known before.
+pub(crate) async fn sync_window_ignores(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let Some((network, _)) = state.windows.current_channel.clone() else {
+        return;
+    };
+    // Never leave the masks of the previous window's network on screen.
+    push_window_ignores(state, ui);
+    if let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) {
+        match client.fetch_ignores(token, &network).await {
+            Ok(entries) => {
+                state.prefs.window_ignores.insert(network, entries);
+                push_window_ignores(state, ui);
+            }
+            Err(err) => persistence::log_line(&format!("ignore list load failed: {err:?}")),
+        }
+    }
+}
+
+/// Body of the `WorkerCommand::MemberIgnore` arm of `run_worker`: the same
+/// add and remove requests as `/ignore` and `/unignore`, on the open
+/// window's network. Unignore sends the mask of the stored plain nick rule,
+/// with no text pattern, so no other rule goes away.
+pub(crate) async fn run_member_ignore(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    nick: String,
+    add: bool,
+) {
+    let (Some(client), Some(token), Some((network, _))) = (
+        &state.conn.client,
+        &state.conn.token,
+        &state.windows.current_channel,
+    ) else {
+        return;
+    };
+    let network = network.clone();
+    let stored_mask = state
+        .prefs
+        .window_ignores
+        .get(&network)
+        .and_then(|entries| plain_nick_rule(entries, &nick))
+        .map(|entry| entry.mask.clone());
+    let result = if add {
+        client
+            .add_ignore(token, &network, &nick_ignore_mask(&nick), None)
+            .await
+    } else {
+        let mask = stored_mask.unwrap_or_else(|| nick_ignore_mask(&nick));
+        client.remove_ignore(token, &network, &mask, None).await
+    };
+    if let Ok(response) = &result {
+        if state.prefs.settings_network.as_deref() == Some(network.as_str()) {
+            push_ignore_entries(ui, response.entries(), "");
+        }
+    }
+    if let Err(err) = &result {
+        persistence::log_line(&format!("member ignore change failed: {err:?}"));
+    }
+    let (kind, hint) = member_ignore_status(add, &nick, result.as_ref().err());
+    set_command_status(ui, kind, hint);
+    remember_window_ignores(state, ui, &network, &result);
+}
+
+/// The status bar kind and text hint for the outcome of a menu ignore
+/// change: `error` is `None` when the request succeeded.
+pub(crate) fn member_ignore_status(
+    add: bool,
+    nick: &str,
+    error: Option<&GrappaClientError>,
+) -> (&'static str, String) {
+    match error {
+        None => (
+            if add {
+                "ignore-added"
+            } else {
+                "ignore-removed"
+            },
+            nick.to_string(),
+        ),
+        Some(err) => {
+            let kind = match ignore_error_key(err) {
+                "invalid-mask" => "ignore-invalid-mask",
+                _ => "command-failed",
+            };
+            let label = if add { "Ignore" } else { "Unignore" };
+            (kind, format!("{label} {nick}"))
+        }
     }
 }
 
