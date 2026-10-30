@@ -2920,12 +2920,14 @@ pub(crate) fn handle_isupport_changed(
     // The E2E pacers read the casemapping at every decision, so the engine
     // gets each change of the snapshot.
     let casemapping = event.state.casemapping;
+    let frame_budget_base = event.state.frame_budget_base;
     state
         .networks
         .isupport_by_network
         .insert(network.clone(), event.state);
     if let Some(engine) = state.e2e.engine_mut(network) {
         engine.set_casemapping(casemapping);
+        engine.set_frame_budget_base(frame_budget_base);
     }
 }
 

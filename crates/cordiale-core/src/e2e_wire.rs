@@ -559,6 +559,53 @@ pub fn format_frame(frame: &Frame) -> Result<String, WireError> {
     Ok(text)
 }
 
+/// Largest number of frames the network cuts one send into. A send that needs
+/// more is refused with 413. Source: Cicchetto `MAX_FRAGMENTS`.
+pub const MAX_FRAGMENTS: usize = 64;
+
+/// Length of the `msgid` that the network puts in each frame head.
+const FRAME_MSGID_LEN: usize = 11;
+
+/// The bytes that one relayed line leaves for a frame: the published
+/// `frame_budget_base` of the network minus the byte length of the target.
+pub fn frame_line_budget(frame_budget_base: u64, target: &str) -> usize {
+    usize::try_from(frame_budget_base)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(target.len())
+}
+
+/// The number of frames that a payload of `payload_len` bytes needs when sent
+/// as `verb` from `from` to `to` with `line_budget` bytes for each line. The
+/// head of a frame grows with the digits of the total, so the smallest total
+/// whose lines hold the payload sets the chunk size. `None` when no total up
+/// to [`MAX_FRAGMENTS`] fits: the network refuses such a send.
+pub fn frames_needed(
+    verb: Verb,
+    payload_len: usize,
+    line_budget: usize,
+    from: &str,
+    to: &str,
+) -> Option<usize> {
+    (1..=MAX_FRAGMENTS).find(|total| {
+        // `\x01E2E VERB msgid i/n from to ` and the closing `\x01`.
+        let digits = total.to_string().len();
+        let head = FRAME_PREFIX.len()
+            + verb.as_str().len()
+            + 1
+            + FRAME_MSGID_LEN
+            + 1
+            + 2 * digits
+            + 1
+            + 1
+            + from.len()
+            + 1
+            + to.len()
+            + 1;
+        let room = line_budget.saturating_sub(head + FRAME_SUFFIX.len_utf8());
+        room > 0 && room.saturating_mul(*total) >= payload_len
+    })
+}
+
 /// Joins the fragments of one message in index order. Any change of verb,
 /// msgid, `from`, `to` or total, a missing index or a repeated index drops
 /// the whole message.
@@ -649,6 +696,45 @@ mod tests {
         assert!(pairing_message_fits(1, PAIRING_TOTAL_MAX_BYTES - 10, 10));
         assert!(!pairing_message_fits(1, PAIRING_TOTAL_MAX_BYTES - 10, 11));
         assert!(!pairing_message_fits(1, usize::MAX, 1));
+    }
+
+    #[test]
+    fn frame_count_follows_the_line_budget() {
+        let did = "A".repeat(DID_LEN);
+        // Head of `MSG` to one device: 5 + 3 + 1 + 11 + 1 + 3 + 1 + 11 + 1 + 11 + 1.
+        let head = 49;
+        let budget = head + 1 + 100;
+        assert_eq!(frames_needed(Verb::Msg, 0, budget, &did, &did), Some(1));
+        assert_eq!(frames_needed(Verb::Msg, 100, budget, &did, &did), Some(1));
+        assert_eq!(frames_needed(Verb::Msg, 101, budget, &did, &did), Some(2));
+        // The wildcard address is shorter, so a line holds ten bytes more.
+        assert_eq!(frames_needed(Verb::Msg, 110, budget, &did, "*"), Some(1));
+        assert_eq!(frames_needed(Verb::Msg, 111, budget, &did, "*"), Some(2));
+    }
+
+    #[test]
+    fn frame_count_stops_at_the_frame_limit() {
+        let did = "A".repeat(DID_LEN);
+        // Two digits in the total add two bytes to the head.
+        let room = 100;
+        let budget = 49 + 2 + 1 + room;
+        let at_limit = MAX_FRAGMENTS * room;
+        assert_eq!(
+            frames_needed(Verb::Msg, at_limit, budget, &did, &did),
+            Some(MAX_FRAGMENTS)
+        );
+        assert_eq!(
+            frames_needed(Verb::Msg, at_limit + 1, budget, &did, &did),
+            None
+        );
+        // A budget smaller than the head holds nothing.
+        assert_eq!(frames_needed(Verb::Msg, 1, 10, &did, &did), None);
+    }
+
+    #[test]
+    fn line_budget_removes_the_target_bytes() {
+        assert_eq!(frame_line_budget(4096, "bob"), 4093);
+        assert_eq!(frame_line_budget(2, "bob"), 0);
     }
 
     fn key_text(byte: u8) -> String {
