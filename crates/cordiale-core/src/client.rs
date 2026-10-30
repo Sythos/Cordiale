@@ -38,7 +38,7 @@ use serde_json::Value;
 use crate::admin::{
     AdminNetworkMessageCount, AdminNetworksResponse, AdminOverview, AdminReaperRunResponse,
     AdminSessionLogResponse, AdminSessionsResponse, AdminUploadsResponse, AdminUsersResponse,
-    AdminVisitorsResponse,
+    AdminVisitorsResponse, CredentialSessionOutcome,
 };
 use crate::backoff::rate_limit_wait;
 use crate::e2e_device_routes::{
@@ -2636,17 +2636,17 @@ impl GrappaClient {
     /// `ident`, `realname`, `sasl_user`, `auth_method`,
     /// `auth_command_template`, `autojoin_channels` and `password` (any other
     /// key is a 400). Changing the password or the auth method stops a live
-    /// session, since it authenticated with the old one, and Grappa does not
-    /// dial it again: the answer is `true` in that case, `false` when the
-    /// session was left alone. A new auth method needs a fresh password (422
-    /// without one).
+    /// session, since it authenticated with the old one. A success only means
+    /// the edit was saved; the answer keeps the session result
+    /// (`left_alone`, `spawned`, `stopped` with its token, unknown, missing).
+    /// A new auth method needs a fresh password (422 without one).
     pub async fn update_admin_credential(
         &self,
         token: &str,
         user_id: &str,
         network_id: &str,
         changes: &Value,
-    ) -> Result<bool, GrappaClientError> {
+    ) -> Result<CredentialSessionOutcome, GrappaClientError> {
         let mut url = reqwest::Url::parse(&self.base_url)
             .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
         url.path_segments_mut()
@@ -2662,7 +2662,7 @@ impl GrappaClient {
             .error_for_status()?
             .json::<Value>()
             .await?;
-        Ok(body.get("session_action").and_then(Value::as_str) == Some("stopped"))
+        Ok(CredentialSessionOutcome::from_reply(&body))
     }
 
     /// `DELETE /admin/credentials/:user_id/:network_id` — unbinds and stops
@@ -7044,13 +7044,26 @@ mod tests {
         Mock::given(method("PATCH"))
             .and(path("/admin/credentials/u-1/8"))
             .and(body_json(serde_json::json!({"password": rotated})))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"nick": "ada", "session_action": "stopped"})),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "nick": "ada",
+                "session_action": "stopped",
+                "session_error": "capacity_exceeded"
+            })))
             .expect(1)
             .mount(&mock_server)
             .await;
+        for (net, body) in [
+            ("9", serde_json::json!({"session_action": "spawned"})),
+            ("10", serde_json::json!({"session_action": "paused"})),
+            ("11", serde_json::json!({"nick": "ada"})),
+        ] {
+            Mock::given(method("PATCH"))
+                .and(path(format!("/admin/credentials/u-1/{net}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1)
+                .mount(&mock_server)
+                .await;
+        }
 
         let client = GrappaClient::new(mock_server.uri());
         client
@@ -7062,14 +7075,35 @@ mod tests {
             )
             .await
             .expect("edit server");
-        assert!(!client
-            .update_admin_credential("t", "u-1", "7", &serde_json::json!({"realname": "Ada"}))
-            .await
-            .expect("cosmetic edit"));
-        assert!(client
-            .update_admin_credential("t", "u-1", "8", &serde_json::json!({"password": rotated}))
-            .await
-            .expect("password edit"));
+        assert_eq!(
+            client
+                .update_admin_credential("t", "u-1", "7", &serde_json::json!({"realname": "Ada"}))
+                .await
+                .expect("cosmetic edit"),
+            CredentialSessionOutcome::LeftAlone
+        );
+        assert_eq!(
+            client
+                .update_admin_credential("t", "u-1", "8", &serde_json::json!({"password": rotated}))
+                .await
+                .expect("password edit"),
+            CredentialSessionOutcome::Stopped {
+                session_error: "capacity_exceeded".into()
+            }
+        );
+        for (net, expected) in [
+            ("9", CredentialSessionOutcome::Spawned),
+            ("10", CredentialSessionOutcome::Unknown("paused".into())),
+            ("11", CredentialSessionOutcome::Missing),
+        ] {
+            assert_eq!(
+                client
+                    .update_admin_credential("t", "u-1", net, &serde_json::json!({"nick": "x"}))
+                    .await
+                    .expect("edit"),
+                expected
+            );
+        }
     }
 
     #[tokio::test]
