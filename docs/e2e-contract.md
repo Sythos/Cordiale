@@ -36,6 +36,26 @@ prevale il sorgente di Grappa.
    `a_202_answer_sets_the_accepted_state_only` e
    `an_accepted_send_can_become_a_dropped_send_and_never_a_delivered_one`;
    `tests/fixtures/e2e/send_dropped.json`.
+   **Invio a più dispositivi.** Il motore cifra un corpo per dispositivo e tiene
+   separati `msg` e `pkmsg`. Prima del primo invio pianifica tutte le richieste:
+   ognuna ha al massimo 4 corpi e rispetta il limite di byte (32 KiB), di righe
+   (64) e di frame (64). I frame si contano come Cicchetto (`linesNeeded`): la
+   testa del frame (verbo, msgid, `i/n`, `from`, `to`) più il payload, con
+   `frame_budget_base` di ISUPPORT meno i byte del nick. Un gruppo troppo grande
+   si divide in modo goloso. `to` è il `did` se la richiesta ha un solo corpo,
+   `*` se ne ha più d'uno. Se un corpo non sta da solo, la chiamata fallisce con
+   `PayloadTooLarge` prima di ogni richiesta e il testo non esce mai in chiaro.
+   Senza `frame_budget_base` noto il motore non conta i frame e lascia quel limite
+   al server. Ogni corpo usa il proprio messaggio Olm: nessuno si riusa per un
+   altro dispositivo. Una richiesta non accettata non diventa `Accepted`; dopo la
+   prima richiesta accettata, il fallimento di una successiva lascia quel gruppo
+   senza il messaggio. Fonte: CIC `wire.ts` (`linesNeeded`, `MAX_FRAGMENTS`);
+   OLM-4 `engine.py` (`_emit_group`). Codice: `e2e_wire.rs` (`frames_needed`),
+   `e2e_engine.rs` (`split_by_limits`, `request_fits`). Prove: `e2e_engine.rs`
+   `a_pre_key_send_uses_one_request_when_the_frames_fit`,
+   `a_pre_key_send_splits_when_the_group_is_above_the_frame_limit`,
+   `a_body_that_does_not_fit_alone_fails_before_any_request`,
+   `both_message_kinds_split_by_the_frame_limit`.
 5. **Copie S1 (v50).** Le porte `claim` e `copies` agiscono solo dentro l'account,
    mai su IRC. Una copia si crea solo dopo il 202 dell'originale e solo per i
    dispositivi della lista firmata al momento del 202. Il testo interno è
@@ -85,8 +105,8 @@ prevale il sorgente di Grappa.
      per questo dispositivo solo se `meta.e2e_device` è un `did` proprio; per un
      altro dispositivo il testo cita il `did`. Senza `e2e_device` vale per
      questo dispositivo.
-   - **2456**: rinviata. Il motore invia un solo corpo per messaggio a un solo
-     dispositivo del peer, quindi non c'è un gruppo da ridurre.
+   - **2456**: il motore invia un corpo per ogni dispositivo del peer e divide il
+     gruppo per byte, righe e frame (vedi punto 4, «Invio a più dispositivi»).
    - **2457**: non si applica. Cordiale non ha un messaggio SAS a più
      dispositivi.
    Dettagli: `docs/protocol-notes.md`, issue 453 e 458.
