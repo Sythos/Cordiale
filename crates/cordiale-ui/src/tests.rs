@@ -10990,3 +10990,29 @@ fn alias_errors_map_to_distinct_status_kinds() {
     assert_eq!(AliasUpdateError::Read.status_kind(), "alias-read-failed");
     assert_eq!(AliasUpdateError::Write.status_kind(), "alias-save-failed");
 }
+
+#[test]
+fn admin_fetch_keeps_a_failed_request_apart_from_an_empty_answer() {
+    let mut failed = Vec::new();
+    let empty: Result<Vec<u8>, &str> = Ok(Vec::new());
+    assert_eq!(
+        crate::admin_handlers::settle_admin_fetch("users", empty, &mut failed),
+        Some(Vec::new())
+    );
+    assert!(failed.is_empty());
+    let broken: Result<Vec<u8>, &str> = Err("network down");
+    assert_eq!(
+        crate::admin_handlers::settle_admin_fetch("sessions", broken, &mut failed),
+        None
+    );
+    assert_eq!(failed, vec!["sessions"]);
+}
+
+#[test]
+fn admin_refresh_error_text_names_each_failed_section() {
+    assert_eq!(crate::admin_handlers::admin_refresh_error_text(&[]), "");
+    assert_eq!(
+        crate::admin_handlers::admin_refresh_error_text(&["users", "networks"]),
+        "users, networks"
+    );
+}
