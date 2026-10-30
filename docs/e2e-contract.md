@@ -155,7 +155,10 @@ un altro dispositivo: `wire_v2.json` (frame, liste, certificati, righe),
 
 Nessun server di test o di staging con protocollo 50 è raggiungibile da questo
 ambiente. Le prove con server simulato (`wiremock`) non sono interoperabilità
-reale. Vedi `docs/e2e-interop-report.md` per il blocco esterno.
+reale. Vedi `docs/e2e-interop-report.md` per il blocco esterno. Il file
+`tests/e2e_live_server.rs` ha due prove in sola lettura, `#[ignore]`, per un server
+reale (variabili `CORDIALE_LIVE_*`); il rapporto spiega come eseguirle e come
+provare a mano lo scambio con irc-olm.
 
 ## Lista di approvazione finale
 

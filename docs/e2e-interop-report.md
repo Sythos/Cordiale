@@ -56,6 +56,24 @@ dell'ombrello 416). Il contratto finale è in `docs/e2e-contract.md`.
   Le prove nelle due direzioni controllano la forma comune sul filo e i testi
   firmati, non uno scambio dal vivo con sessioni Olm di irc-olm.
 
+## Come eseguire le prove dal vivo
+
+Servono un server Grappa con protocollo 50, un account di prova e (per lo scambio
+con irc-olm) un processo irc-olm PR 4 collegato alla stessa rete.
+
+1. Server: imposta `CORDIALE_LIVE_SERVER`, `CORDIALE_LIVE_TOKEN` e
+   `CORDIALE_LIVE_NETWORK`. Poi esegui
+   `cargo test -p cordiale-core --test e2e_live_server -- --ignored`.
+   I test sono `#[ignore]`: la CI non li esegue e non risultano mai «verdi» senza
+   un server. Leggono soltanto (protocollo, rotte dispositivi e lista).
+2. irc-olm: avvia irc-olm PR 4 con un account di prova, accoppia Cordiale con
+   `/e2e` e scambia un messaggio in ogni direzione dalla voce `🔒<user>`.
+   Controlla che il 202 mostri «accettato» e che la copia S1 compaia una volta.
+   Questo scambio è manuale: non ha un test automatico.
+
+Fino a quando qualcuno non esegue questi passi, la riga «Prove con un server» sopra
+resta un blocco esterno.
+
 ## Lacune note
 
 - Scambio dal vivo con irc-olm PR 4 (sessioni Olm reali) e prove con un server
