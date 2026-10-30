@@ -23,12 +23,17 @@ use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
 };
 use cordiale_core::e2e_protocol::E2eOperation;
+use cordiale_core::e2e_revoke::{
+    finish_pending_revoke, reset_identity, resume_reset, revoke_device, OwnRoutes,
+    ResetConfirmation,
+};
 use cordiale_core::e2e_store::E2eMessage;
+use cordiale_core::e2e_wire::did_from_key_text;
 use cordiale_core::phoenix::PhoenixMessage;
 use cordiale_core::session::{route_e2e_message, route_e2e_pairing};
-use cordiale_core::slash::E2ePairAction;
+use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
-use crate::e2e_view::{pairing_error_key, pairing_status_key};
+use crate::e2e_view::{pairing_error_key, pairing_status_key, reset_status_key, revoke_status_key};
 
 /// How often the timers of the engines run: queued texts expire or go out.
 pub(crate) const E2E_TICK: std::time::Duration = std::time::Duration::from_secs(15);
@@ -47,6 +52,12 @@ pub(crate) struct E2eRuntime {
     /// Rendezvous that an earlier run left open. They are closed when the
     /// session is ready, and their slot is already empty.
     stale_pairings: Vec<(String, StalePairing)>,
+    /// The network for which the user got the question to confirm a reset.
+    /// Any other `/e2e` step clears it.
+    reset_asked: Option<String>,
+    /// Networks whose identity this device reset. They have no engine work:
+    /// no inbox, no key request and no send. The sealed history stays.
+    reset: HashSet<String>,
 }
 
 /// An open pairing and the network whose identity it changes.
@@ -164,7 +175,7 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
     if state.e2e.engines.contains_key(network) {
         return true;
     }
-    if state.e2e.unavailable.contains(network) {
+    if state.e2e.unavailable.contains(network) || state.e2e.reset.contains(network) {
         return false;
     }
     // The server version can still be unknown here: ask again later.
@@ -224,6 +235,9 @@ pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<
     networks.sort();
     for network in networks {
         if ensure_engine(state, &network) {
+            // A revoke or a reset that an earlier run left open ends first,
+            // so a revoked device gets no inbox work.
+            resume_pending_manage(state, ui, &network).await;
             drain_network(state, ui, &network).await;
         }
     }
@@ -395,6 +409,172 @@ pub(crate) async fn run_e2e_pair(
             end_active_pairing(state).await;
             show_pairing(ui, &PairingStatus::Ended(pairing::EndReason::Cancelled));
         }
+    }
+}
+
+/// Shows the result of a revoke or a reset in the status bar. It is control
+/// state, never a chat line. `hint` and `message` fill the text of the kind.
+fn show_manage_kind(
+    ui: &slint::Weak<AppWindow>,
+    kind: &'static str,
+    hint: String,
+    message: String,
+) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_command_hint(hint.into());
+        ui.set_status_message(message.into());
+        ui.set_status_kind(kind.into());
+    });
+}
+
+/// Runs one `/e2e devices`, `revoke` or `reset` step on `network`. A reset
+/// runs only after the question and the answer `/e2e reset yes` for the same
+/// network.
+pub(crate) async fn run_e2e_manage(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    action: E2eManageAction,
+) {
+    let asked = state.e2e.reset_asked.take();
+    let not_ready = || show_manage_kind(ui, "e2e-not-ready", String::new(), String::new());
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
+    let Some(own_nick) = state.networks.own_nicks.get(&network).cloned() else {
+        return not_ready();
+    };
+    if !ensure_engine(state, &network) {
+        return not_ready();
+    }
+    let protocol = state.conn.server_protocol_version;
+    match action {
+        E2eManageAction::Devices => {
+            let Some(engine) = state.e2e.engines.get_mut(&network) else {
+                return not_ready();
+            };
+            let own = engine.own_did().to_string();
+            let Some(list) = engine.state_mut().signed_list() else {
+                return not_ready();
+            };
+            let ids: Vec<String> = list
+                .keys
+                .iter()
+                .filter_map(|key| did_from_key_text(key).ok())
+                .collect();
+            show_manage_kind(ui, "e2e-devices", ids.join(" "), own);
+        }
+        E2eManageAction::Revoke(did) => {
+            let Some(mut engine) = state.e2e.engines.remove(&network) else {
+                return not_ready();
+            };
+            let routes = OwnRoutes {
+                client: &client,
+                token: &token,
+                network: &network,
+                own_nick: &own_nick,
+                server_protocol: protocol,
+            };
+            let result = revoke_device(&routes, engine.state_mut(), &did).await;
+            state.e2e.engines.insert(network, engine);
+            if let Err(error) = &result {
+                persistence::log_line(&format!("e2e revoke not finished: {error:?}"));
+            }
+            let (kind, hint) = revoke_status_key(&result);
+            show_manage_kind(ui, kind, hint, String::new());
+        }
+        E2eManageAction::Reset => {
+            state.e2e.reset_asked = Some(network);
+            show_manage_kind(ui, "e2e-reset-confirm", String::new(), String::new());
+        }
+        E2eManageAction::ResetConfirm => {
+            // An answer without the question asks the question first.
+            if asked.as_deref() != Some(network.as_str()) {
+                state.e2e.reset_asked = Some(network);
+                return show_manage_kind(ui, "e2e-reset-confirm", String::new(), String::new());
+            }
+            let Some(mut engine) = state.e2e.engines.remove(&network) else {
+                return not_ready();
+            };
+            let routes = OwnRoutes {
+                client: &client,
+                token: &token,
+                network: &network,
+                own_nick: &own_nick,
+                server_protocol: protocol,
+            };
+            let result = reset_identity(
+                &routes,
+                engine.state_mut(),
+                ResetConfirmation::user_confirmed(),
+            )
+            .await;
+            state.e2e.engines.insert(network.clone(), engine);
+            if let Err(error) = &result {
+                persistence::log_line(&format!("e2e reset not finished: {error:?}"));
+            } else {
+                state.e2e.reset.insert(network);
+            }
+            show_manage_kind(ui, reset_status_key(&result), String::new(), String::new());
+        }
+    }
+}
+
+/// Ends a reset or a revoke that an earlier run left open, for example after
+/// a restart or an offline step. A reset here was confirmed by the user
+/// before. A failed step keeps the state pending for the next start.
+async fn resume_pending_manage(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
+    let Some(own_nick) = state.networks.own_nicks.get(network).cloned() else {
+        return;
+    };
+    let Some(mut engine) = state.e2e.engines.remove(network) else {
+        return;
+    };
+    let routes = OwnRoutes {
+        client: &client,
+        token: &token,
+        network,
+        own_nick: &own_nick,
+        server_protocol: state.conn.server_protocol_version,
+    };
+    let mut reset_done = false;
+    match resume_reset(&routes, engine.state_mut()).await {
+        Ok(true) => {
+            reset_done = true;
+            show_manage_kind(ui, "e2e-reset-done", String::new(), String::new());
+        }
+        Ok(false) => match finish_pending_revoke(&routes, engine.state_mut()).await {
+            Ok(None) => {}
+            Ok(Some(done)) => {
+                let (kind, hint) = revoke_status_key(&Ok(done));
+                show_manage_kind(ui, kind, hint, String::new());
+            }
+            Err(error) => {
+                persistence::log_line(&format!("e2e revoke not finished: {error:?}"));
+                let (kind, hint) = revoke_status_key(&Err(error));
+                show_manage_kind(ui, kind, hint, String::new());
+            }
+        },
+        Err(error) => {
+            persistence::log_line(&format!("e2e reset not finished: {error:?}"));
+            show_manage_kind(
+                ui,
+                reset_status_key(&Err(error)),
+                String::new(),
+                String::new(),
+            );
+        }
+    }
+    state.e2e.engines.insert(network.to_string(), engine);
+    if reset_done {
+        state.e2e.reset.insert(network.to_string());
     }
 }
 
@@ -849,6 +1029,12 @@ pub(crate) async fn handle_send_locked(
         set_e2e_status(ui, "e2e-not-ready");
         return;
     };
+    // After a reset the locked query cannot send, and nothing goes out as
+    // clear text.
+    if state.e2e.reset.contains(&network) {
+        set_e2e_status(ui, "e2e-not-ready");
+        return;
+    }
     let Some(mut engine) = state.e2e.engines.remove(&network) else {
         set_e2e_status(ui, "e2e-not-ready");
         return;

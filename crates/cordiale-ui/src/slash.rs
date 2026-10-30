@@ -66,6 +66,10 @@ pub(crate) async fn run_slash_command(
             run_e2e_pair(state, ui, network, action).await;
             return;
         }
+        SlashCommand::E2eManage(action) => {
+            run_e2e_manage(state, ui, network, action).await;
+            return;
+        }
         other => other,
     };
     if channel == SERVER_WINDOW_NAME
@@ -525,7 +529,9 @@ pub(crate) async fn run_slash_command(
         SlashCommand::Unknown(name) => {
             return set_command_status(ui, "command-unknown", name);
         }
-        SlashCommand::E2ePair(_) => unreachable!("handled before request dispatch"),
+        SlashCommand::E2ePair(_) | SlashCommand::E2eManage(_) => {
+            unreachable!("handled before request dispatch")
+        }
     };
     if let Err(err) = result {
         persistence::log_line(&format!("{label} failed: {err:?}"));
