@@ -3652,6 +3652,14 @@ msgctxt "RenameTarget"
 msgid "Open a conversation with {}"
 msgstr "Apri una conversazione con {}"
 
+msgctxt "AppWindow"
+msgid "Shared channels:"
+msgstr "Canali in comune:"
+
+msgctxt "AppWindow"
+msgid "No shared channels."
+msgstr "Nessun canale in comune."
+
 msgctxt "MemberContextMenu"
 msgid "Ignore"
 msgstr "Ignora"

@@ -685,6 +685,7 @@ pub(crate) async fn handle_frame(
                     "members_seeded applied: {}/{} -> {count} member(s)",
                     key.0, key.1
                 ));
+                push_query_shared_channels(state, ui);
                 if state.windows.current_channel.as_ref() == Some(&key) {
                     push_members_update(state, ui, &key);
                 }
@@ -765,6 +766,7 @@ pub(crate) async fn handle_frame(
         if let Some(key) = apply_members_seeded(state, &frame.payload) {
             reply_presence::refresh_roster(state, &key);
             reply_presence::push_reply_presence(state, ui);
+            push_query_shared_channels(state, ui);
             if state.windows.current_channel.as_ref() == Some(&key) {
                 push_members_update(state, ui, &key);
             }
@@ -1048,6 +1050,9 @@ pub(crate) async fn handle_frame(
     }
     if let Some(rewrite) = rewrite {
         reply_presence::apply_draft_rewrite(state, ui, &key, rewrite);
+    }
+    if members_changed {
+        push_query_shared_channels(state, ui);
     }
     if members_changed && state.windows.current_channel.as_ref() == Some(&key) {
         push_members_update(state, ui, &key);
