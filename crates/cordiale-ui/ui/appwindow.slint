@@ -2776,7 +2776,15 @@ export component AppWindow inherits Window {
         } else if status-kind == "admin-network-in-use" {
             return @tr("That network still has accounts bound to it. Unbind them on the Credentials tab first.");
         } else if status-kind == "admin-credential-stopped" {
-            return @tr("Saved. The account's live session was stopped because its login changed; it has to reconnect.");
+            return @tr("Saved. The server could not restart the session and parked it. Reason: {}", status-command-hint);
+        } else if status-kind == "admin-credential-session-stopped" {
+            return @tr("Saved. The server stopped the session. The account must connect again.");
+        } else if status-kind == "admin-credential-left-alone" {
+            return @tr("Saved. The session did not need a restart.");
+        } else if status-kind == "admin-credential-spawned" {
+            return @tr("Saved. The server started a replacement session. Check the account list for its state.");
+        } else if status-kind == "admin-credential-unknown" {
+            return @tr("Saved. The server did not report what happened to the session.");
         } else if status-kind == "admin-credential-invalid" {
             return @tr("A credential needs an account, a network and a nickname.");
         } else if status-kind == "admin-server-invalid" {

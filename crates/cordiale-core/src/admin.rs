@@ -601,6 +601,53 @@ pub fn admin_vhost_label(entry: &Value) -> String {
 /// event, `session_log_event`s and periodic `overview` pushes.
 pub const ADMIN_EVENTS_TOPIC: &str = "grappa:admin:events";
 
+/// Longest `session_error` token kept for display.
+const SESSION_ERROR_TOKEN_MAX: usize = 48;
+
+/// Keeps only token characters (letters, digits, `_`, `-`, `.`, `:`) of a
+/// `session_error` value and limits its length, so it is safe to show.
+pub fn safe_session_error_token(raw: &str) -> String {
+    raw.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+        .take(SESSION_ERROR_TOKEN_MAX)
+        .collect()
+}
+
+/// What happened to the live session after a saved credential edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialSessionOutcome {
+    /// The session did not need a restart.
+    LeftAlone,
+    /// The server started a replacement session.
+    Spawned,
+    /// The restart failed and the row is parked; carries the safe
+    /// `session_error` token (empty when the server sent none).
+    Stopped { session_error: String },
+    /// A `session_action` value this client does not know.
+    Unknown(String),
+    /// The reply has no `session_action`.
+    Missing,
+}
+
+impl CredentialSessionOutcome {
+    /// Reads `session_action` and `session_error` from a PATCH reply.
+    pub fn from_reply(body: &Value) -> Self {
+        match body.get("session_action").and_then(Value::as_str) {
+            Some("left_alone") => Self::LeftAlone,
+            Some("spawned") => Self::Spawned,
+            Some("stopped") => Self::Stopped {
+                session_error: body
+                    .get("session_error")
+                    .and_then(Value::as_str)
+                    .map(safe_session_error_token)
+                    .unwrap_or_default(),
+            },
+            Some(other) => Self::Unknown(other.to_string()),
+            None => Self::Missing,
+        }
+    }
+}
+
 /// One line for an admin audit event (`user_created`, `circuit_open`,
 /// `network_caps_updated`, ...): time, kind, what it's about and who did it.
 pub fn admin_event_line(entry: &Value) -> String {
@@ -627,6 +674,11 @@ pub fn admin_event_line(entry: &Value) -> String {
     }
     if let Some(actor) = text("actor_user_name") {
         line.push_str(&format!(" · by {actor}"));
+    }
+    for key in ["session_action", "flow"] {
+        if let Some(value) = entry.get(key).and_then(Value::as_str) {
+            line.push_str(&format!(" · {key}={}", safe_session_error_token(value)));
+        }
     }
     line
 }
@@ -685,6 +737,64 @@ mod tests {
             "at": "t"
         }));
         assert_eq!(line, "t · server_added · libera · irc.libera.chat:6697");
+    }
+
+    #[test]
+    fn admin_event_line_shows_session_action_and_flow() {
+        let line = admin_event_line(&serde_json::json!({
+            "kind": "credential_updated", "user_name": "ada", "network_slug": "libera",
+            "session_action": "spawned", "at": "t"
+        }));
+        assert_eq!(
+            line,
+            "t · credential_updated · ada · session_action=spawned"
+        );
+        let line = admin_event_line(&serde_json::json!({
+            "kind": "capacity_reject", "network_slug": "libera",
+            "flow": "admin_credential_update", "at": "t"
+        }));
+        assert_eq!(
+            line,
+            "t · capacity_reject · libera · flow=admin_credential_update"
+        );
+        let line = admin_event_line(&serde_json::json!({
+            "kind": "capacity_reject", "flow": "new flow!\n", "session_action": 7, "at": "t"
+        }));
+        assert_eq!(line, "t · capacity_reject · flow=newflow");
+    }
+
+    #[test]
+    fn session_error_token_is_filtered_and_limited() {
+        assert_eq!(
+            safe_session_error_token("bad_pass:1 <b>x</b>\n"),
+            "bad_pass:1bxb"
+        );
+        assert_eq!(safe_session_error_token(&"a".repeat(500)).len(), 48);
+    }
+
+    #[test]
+    fn credential_outcome_reads_every_value() {
+        use CredentialSessionOutcome as O;
+        let parse = |v: serde_json::Value| O::from_reply(&v);
+        assert_eq!(
+            parse(serde_json::json!({"session_action": "left_alone"})),
+            O::LeftAlone
+        );
+        assert_eq!(
+            parse(serde_json::json!({"session_action": "spawned"})),
+            O::Spawned
+        );
+        assert_eq!(
+            parse(serde_json::json!({"session_action": "stopped", "session_error": "nope!"})),
+            O::Stopped {
+                session_error: "nope".into()
+            }
+        );
+        assert_eq!(
+            parse(serde_json::json!({"session_action": "later"})),
+            O::Unknown("later".into())
+        );
+        assert_eq!(parse(serde_json::json!({"nick": "ada"})), O::Missing);
     }
 
     #[test]

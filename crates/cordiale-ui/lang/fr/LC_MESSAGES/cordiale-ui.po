@@ -2841,8 +2841,24 @@ msgid "That network still has accounts bound to it. Unbind them on the Credentia
 msgstr "Des comptes sont encore associés à ce réseau. Dissocie-les d'abord dans l'onglet Identifiants."
 
 msgctxt "AppWindow"
-msgid "Saved. The account's live session was stopped because its login changed; it has to reconnect."
-msgstr "Enregistré. La session active du compte a été arrêtée parce que ses identifiants ont changé ; il devra se reconnecter."
+msgid "Saved. The server could not restart the session and parked it. Reason: {}"
+msgstr "Enregistré. Le serveur n'a pas pu redémarrer la session et l'a mise de côté. Motif : {}"
+
+msgctxt "AppWindow"
+msgid "Saved. The server stopped the session. The account must connect again."
+msgstr "Enregistré. Le serveur a arrêté la session. Le compte doit se reconnecter."
+
+msgctxt "AppWindow"
+msgid "Saved. The session did not need a restart."
+msgstr "Enregistré. La session n'avait pas besoin d'être redémarrée."
+
+msgctxt "AppWindow"
+msgid "Saved. The server started a replacement session. Check the account list for its state."
+msgstr "Enregistré. Le serveur a démarré une session de remplacement. Vérifie son état dans la liste des comptes."
+
+msgctxt "AppWindow"
+msgid "Saved. The server did not report what happened to the session."
+msgstr "Enregistré. Le serveur n'a pas indiqué ce qui est arrivé à la session."
 
 msgctxt "AppWindow"
 msgid "Terminate the session of {}? Its connection is stopped; the account and its network binding stay as they are."

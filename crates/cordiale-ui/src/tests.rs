@@ -4983,6 +4983,42 @@ fn admin_settings_round_trip_and_leave_addressing_alone() {
 }
 
 #[test]
+fn credential_outcome_maps_to_a_status_without_an_online_claim() {
+    use cordiale_core::admin::CredentialSessionOutcome as O;
+    let status = |outcome: &O| admin_credential_outcome_status(outcome, Some(51));
+    assert_eq!(
+        status(&O::LeftAlone),
+        ("admin-credential-left-alone", String::new())
+    );
+    assert_eq!(
+        status(&O::Spawned),
+        ("admin-credential-spawned", String::new())
+    );
+    let refused = O::Stopped {
+        session_error: "capacity_exceeded".into(),
+    };
+    assert_eq!(
+        status(&refused),
+        ("admin-credential-stopped", "capacity_exceeded".to_string())
+    );
+    // An older server stops the session without a restart attempt.
+    let neutral = ("admin-credential-session-stopped", String::new());
+    assert_eq!(admin_credential_outcome_status(&refused, Some(50)), neutral);
+    assert_eq!(admin_credential_outcome_status(&refused, None), neutral);
+    let no_token = O::Stopped {
+        session_error: String::new(),
+    };
+    assert_eq!(status(&no_token), neutral);
+    let unknown = ("admin-credential-unknown", String::new());
+    assert_eq!(status(&O::Unknown("x".into())), unknown);
+    assert_eq!(status(&O::Missing), unknown);
+    for outcome in [O::Spawned, O::Missing, O::Unknown("x".into()), no_token] {
+        let (kind, _) = status(&outcome);
+        assert!(!kind.contains("connected") && !kind.contains("registered"));
+    }
+}
+
+#[test]
 fn a_refused_admin_write_is_told_apart() {
     assert_eq!(admin_failure_kind(Some(403), false), "admin-forbidden");
     assert_eq!(admin_failure_kind(Some(403), true), "admin-forbidden");
