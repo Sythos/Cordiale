@@ -469,6 +469,9 @@ component MemberContextMenu {
     in property <string> reply-body: "";
     in property <string> reply-id: "";
     in property <bool> can-moderate;
+    // Whether the nick has a plain ignore rule: the menu then offers
+    // Unignore instead of Ignore.
+    in property <bool> is-ignored: false;
     in property <string> display-text;
     in property <color> text-color;
     // An optional role marker drawn before the text in its own color.
@@ -484,6 +487,7 @@ component MemberContextMenu {
     callback whois(string);
     callback ctcp(string, string); // nick, verb
     callback query(string);
+    callback ignore(string, bool); // nick, true to ignore
     callback reply(string, string, string); // nick, raw message body, message id
 
     ContextMenuArea {
@@ -549,6 +553,14 @@ component MemberContextMenu {
             MenuItem {
                 title: "💬  " + @tr("Query");
                 activated => { query(target-nick); }
+            }
+            if !is-ignored : MenuItem {
+                title: "🙈  " + @tr("Ignore");
+                activated => { ignore(target-nick, true); }
+            }
+            if is-ignored : MenuItem {
+                title: "👁  " + @tr("Unignore");
+                activated => { ignore(target-nick, false); }
             }
         }
 
@@ -1750,6 +1762,11 @@ export component AppWindow inherits Window {
     callback member-whois-requested(string);
     callback member-ctcp-requested(string, string); // nick, verb
     callback member-query-requested(string);
+    callback member-ignore-requested(string, bool); // nick, true to ignore
+    // The masks of the plain (no text pattern) ignore rules of the open
+    // window's network, and the test the nick menus run against them.
+    in property <[string]> window-ignore-masks: [];
+    pure callback nick-ignored(string, [string]) -> bool;
     callback rename-target-requested(string); // new nick of a rename row
     callback channel-selected(string, string);
     callback channel-part-requested(string, string);
@@ -2863,6 +2880,10 @@ export component AppWindow inherits Window {
             return @tr("{} is larger than the server allows for this type of file.", status-attach-name);
         } else if status-kind == "ignore-invalid-text-pattern" {
             return @tr("The text pattern can't be blank or span more than one line.");
+        } else if status-kind == "ignore-added" {
+            return @tr("Ignoring {}.", status-command-hint);
+        } else if status-kind == "ignore-removed" {
+            return @tr("No longer ignoring {}.", status-command-hint);
         } else if status-kind == "ignore-invalid-mask" {
             return @tr("That mask isn't valid.");
         } else if status-kind == "display-prefs-rejected" {
@@ -4288,6 +4309,7 @@ export component AppWindow inherits Window {
                             reply-body: line.reply-body;
                             reply-id: line.reply-id;
                             can-moderate: can-moderate-members;
+                            is-ignored: nick-ignored(line.nick, window-ignore-masks);
                             display-text: "<" + line.nick-prefix + line.nick + "> ";
                             text-color: line.nick-color;
                             text-bold: true;
@@ -4300,6 +4322,7 @@ export component AppWindow inherits Window {
                             whois(nick) => { member-whois-requested(nick); }
                             ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                             query(nick) => { member-query-requested(nick); }
+                            ignore(nick, add) => { member-ignore-requested(nick, add); }
                             // The worker bumps `compose-focus-request` once the
                             // quote is in the compose field.
                             reply(nick, body, id) => {
@@ -4545,6 +4568,7 @@ export component AppWindow inherits Window {
                 for member in channel-members : MemberContextMenu {
                     target-nick: member.name;
                     can-moderate: can-moderate-members;
+                    is-ignored: nick-ignored(member.name, window-ignore-masks);
                     prefix-text: member.prefix == "" ? "" : "[" + member.prefix + "] ";
                     prefix-color: member.prefix-color;
                     display-text: member.name;
@@ -4557,6 +4581,7 @@ export component AppWindow inherits Window {
                     whois(nick) => { member-whois-requested(nick); }
                     ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                     query(nick) => { member-query-requested(nick); }
+                    ignore(nick, add) => { member-ignore-requested(nick, add); }
                 }
             }
 

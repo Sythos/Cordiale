@@ -43,6 +43,7 @@ pub(crate) async fn handle_select_query(
     refresh_network_groups(state, ui);
     push_mute_bar(state, ui);
     show_query_window(state, ui, &query, &key);
+    sync_window_ignores(state, ui).await;
 
     // Cicchetto loads the latest page when a query is selected, independently
     // of the history refresh that follows the Phoenix join ACK. The endpoint's

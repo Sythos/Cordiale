@@ -3623,3 +3623,19 @@ msgstr "Code d'appairage"
 msgctxt "RenameTarget"
 msgid "Open a conversation with {}"
 msgstr "Ouvrir une conversation avec {}"
+
+msgctxt "MemberContextMenu"
+msgid "Ignore"
+msgstr "Ignorer"
+
+msgctxt "MemberContextMenu"
+msgid "Unignore"
+msgstr "Ne plus ignorer"
+
+msgctxt "AppWindow"
+msgid "Ignoring {}."
+msgstr "Tu ignores {}."
+
+msgctxt "AppWindow"
+msgid "No longer ignoring {}."
+msgstr "Tu n'ignores plus {}."

@@ -485,6 +485,12 @@ enum WorkerCommand {
         verb: String,
     },
     MemberQuery(String),
+    /// Ignore (`add`) or unignore the plain nick rule of a menu nick on
+    /// the open window's network.
+    MemberIgnore {
+        nick: String,
+        add: bool,
+    },
     /// The new nick of a peer rename row was clicked: open its query on the
     /// network of the open window, then select it once the server lists it.
     OpenRenameTarget(String),
@@ -1210,6 +1216,9 @@ struct SettingsState {
     /// The network the self-service Identity/Ignores/Perform/Notify
     /// sections currently act on.
     settings_network: Option<String>,
+    /// The ignore rules of each network the user opened a window on, as
+    /// Grappa last reported them; the nick context menu reads it.
+    window_ignores: HashMap<String, Vec<IgnoreEntry>>,
     /// The profile fields as Grappa last reported them for
     /// `settings_network`; a save sends only what differs from this.
     profile_baseline: ProfileFields,
@@ -1535,6 +1544,7 @@ impl WorkerState {
                 auto_away_reason: None,
                 away_nick_suffix: None,
                 settings_network: None,
+                window_ignores: HashMap::new(),
                 profile_baseline: ProfileFields::default(),
                 upload_limits: None,
                 server_auto_away_default: None,
@@ -2560,6 +2570,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::MemberQuery(nick)) => {
                         send_member_query(&state, &nick);
+                    }
+                    Some(WorkerCommand::MemberIgnore { nick, add }) => {
+                        run_member_ignore(&mut state, &ui, nick, add).await;
                     }
                     Some(WorkerCommand::OpenRenameTarget(nick)) => {
                         handle_open_rename_target(&mut state, &ui, nick).await;
