@@ -524,6 +524,21 @@ fn bound_to(inner: Inner, expected_fb: &str) -> Option<Inner> {
     (inner.fb.as_deref() == Some(expected_fb)).then_some(inner)
 }
 
+/// An id for a send that has no `msgid`. It is random: a counter starts again
+/// at 0 after a restart and would repeat an id of an earlier send.
+fn fresh_local_id() -> String {
+    use chacha20poly1305::aead::{Generate, Nonce};
+    use std::fmt::Write;
+    let nonce = Nonce::<chacha20poly1305::XChaCha20Poly1305>::generate();
+    nonce
+        .iter()
+        .take(16)
+        .fold(String::from("local"), |mut id, byte| {
+            let _ = write!(id, "{byte:02x}");
+            id
+        })
+}
+
 fn valid_peer(peer: &str) -> bool {
     !peer.is_empty()
         && peer.chars().count() <= 64
@@ -2496,10 +2511,7 @@ impl E2eEngine {
         let key = first_msgid
             .as_deref()
             .map(|msgid| SendKey::new(&self.network, nick, msgid));
-        self.local_sends += 1;
-        let suffix = first_msgid
-            .clone()
-            .unwrap_or_else(|| format!("local{}", self.local_sends));
+        let suffix = first_msgid.clone().unwrap_or_else(fresh_local_id);
         let row_id = match row_id {
             Some(row_id) => row_id,
             None => {
@@ -6180,6 +6192,14 @@ mod tests {
             assert_eq!(t.second.handle_row(&item, now), RowOutcome::StaleList);
             t.second.release_stale_try(item.id);
         }
+    }
+
+    #[test]
+    fn a_local_id_is_unique_and_valid() {
+        let first = fresh_local_id();
+        let second = fresh_local_id();
+        assert_ne!(first, second);
+        assert!(valid_peer(&first));
     }
 
     #[test]
