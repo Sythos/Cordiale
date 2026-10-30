@@ -122,8 +122,36 @@ thread_local! {
     static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
 }
 
-/// Shares the image link. Cordiale has no file share on any platform, so the
-/// link goes to the clipboard.
+/// What the Share action hands over.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ShareMode {
+    File,
+    Link,
+}
+
+/// The Share path for a platform. Cordiale has no file share on any platform,
+/// so every platform gets the link.
+pub fn share_mode(file_share_available: bool) -> ShareMode {
+    if file_share_available {
+        ShareMode::File
+    } else {
+        ShareMode::Link
+    }
+}
+
+/// Whether the platform can share the image file. No platform can yet.
+pub fn file_share_available() -> bool {
+    false
+}
+
+/// Shares the image through the path that the platform supports.
+pub fn share(url: &str) -> Outcome {
+    match share_mode(file_share_available()) {
+        ShareMode::File | ShareMode::Link => share_link(url),
+    }
+}
+
+/// Shares the image link: the link goes to the clipboard.
 pub fn share_link(url: &str) -> Outcome {
     if url.is_empty() {
         return Outcome::Failed;
