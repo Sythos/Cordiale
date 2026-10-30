@@ -1683,12 +1683,22 @@ riassembla e consegna messaggi interi.
   della cronologia cifrata (`E2eEngine::dropped_reason`) e compaiono solo nella finestra
   `🔒<user>` (segno ⚠ e corsivo). Un 202 può diventare scartato; nessuno stato dice
   «consegnato». I motivi stanno in memoria: non sono salvati nella cronologia cifrata.
-- **Capacità E2E del peer.** `set_peer_capability(nick, false)` blocca il KEYREQ e
-  l'accodamento (`PeerNotCapable`); chiavi lette dal peer o un suo messaggio E2E letto dal
-  motore (non una copia di un dispositivo proprio) la mettono a vero. **La fonte di un
-  segnale negativo (peer senza E2E) non esiste né in `CLIENT_PROTOCOL.md` né in irc-olm né
-  in cicchetto**: senza segnale un peer sconosciuto può ricevere un KEYREQ (primo contatto).
-  Il ramo `false` resta da collegare quando Grappa pubblica il segnale.
+- **Capacità E2E del peer (issue 482, decisa).** Nessuna fonte pubblica un segnale negativo
+  (peer senza E2E): non `CLIENT_PROTOCOL.md` (le rotte `/e2e/*` riguardano solo i dispositivi
+  del proprio account), non irc-olm (`README.md` e `engine.py` al commit `1606c85`), non
+  cicchetto (`cicchetto/src/lib/e2e/`), non la discussione di Grappa 2430 e nemmeno il codice
+  del server. I client di riferimento trattano il caso in modo implicito: un KEYREQ al massimo
+  ogni 30 s per nick (`KEYREQ_RETRY` di irc-olm, `KEYREQ_RETRY_MS` di cicchetto); il testo in
+  coda aspetta le chiavi e dopo 90 s (`OUTQ_TTL`, `OUTQ_TTL_MS`) scade e viene segnalato. Il
+  silenzio non è un segnale: un peer sconosciuto è un primo contatto e riceve un KEYREQ.
+  Cordiale fa lo stesso: il peer che non risponde non è mai rifiutato, il testo scade come
+  `late` (test `a_queued_text_that_waits_too_long_is_a_late_drop` e
+  `a_peer_that_never_answers_is_never_refused`) e il KEYREQ resta a uno ogni 30 s
+  (`keyreq_once_per_nick_every_30_seconds`). `set_peer_capability(nick, false)` blocca il
+  KEYREQ e l'accodamento (`PeerNotCapable`) ma nessun codice di produzione lo chiama con
+  `false`: serve solo se un segnale esplicito esisterà; chiavi lette dal peer o un suo
+  messaggio E2E letto dal motore (non una copia di un dispositivo proprio) la mettono a vero.
+  Se Grappa pubblica un segnale, si apre una issue nuova con la fonte.
 - **Grappa 2456 (invio per gruppi di dispositivi più piccoli): rinviata.** Il motore
   invia un solo corpo per messaggio, a un solo dispositivo del peer: il limite di righe non
   cresce con il numero di dispositivi, quindi non c'è un gruppo da ridurre. Un messaggio è
