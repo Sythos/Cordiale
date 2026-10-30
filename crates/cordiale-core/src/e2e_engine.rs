@@ -2672,6 +2672,14 @@ impl E2eEngine {
         let line_budget = self
             .frame_budget_base
             .map(|base| frame_line_budget(base, nick));
+        // A body that does not fit alone fails the call, even when the
+        // shorter wildcard address would let a group carry it.
+        if sealed
+            .iter()
+            .any(|s| !request_fits(&[s], own, &self.own_did, line_budget))
+        {
+            return Err(EngineError::Wire(WireError::PayloadTooLarge));
+        }
         let mut plan = Vec::new();
         for prekey in [false, true] {
             let group: Vec<&Sealed> = sealed.iter().filter(|s| s.prekey == prekey).collect();
@@ -4092,7 +4100,7 @@ mod tests {
 
     /// The smallest line budget that holds each single request and the one
     /// request with every body, for the pre-key messages of `alice`.
-    fn probe_budgets(alice: &E2eEngine) -> (usize, usize) {
+    fn probe_budgets(alice: &E2eEngine, text: &str) -> (usize, usize) {
         let identity = alice
             .state
             .olm_identity()
@@ -4101,7 +4109,7 @@ mod tests {
         let own = alice.own_wire(&identity).expect("own wire");
         let entries = alice.pick_devices("bob");
         let sealed = alice
-            .seal(&identity, &entries, &Outgoing::Text("hello"), own.lv)
+            .seal(&identity, &entries, &Outgoing::Text(text), own.lv)
             .expect("seal");
         assert!(sealed.iter().all(|s| s.prekey));
         let single = sealed
@@ -4160,14 +4168,17 @@ mod tests {
     async fn a_pre_key_send_uses_one_request_when_the_frames_fit() {
         for count in [1, 2, 4] {
             let mut alice = alice_with_bob_devices(&format!("fit{count}"), count);
-            let (_, group) = probe_budgets(&alice);
+            // A long text: each added body costs more than the ten bytes
+            // that the wildcard address saves on each line.
+            let text = "x".repeat(1500);
+            let (_, group) = probe_budgets(&alice, &text);
             // The group fits at exactly the frame limit.
             alice.set_frame_budget_base(group as u64 + "bob".len() as u64);
             let server = MockServer::start().await;
             mount_send(&server, "msgid1").await;
             let client = GrappaClient::new(server.uri());
             alice
-                .send_text(&client, TOKEN, "bob", "hello", 100)
+                .send_text(&client, TOKEN, "bob", &text, 100)
                 .await
                 .expect("send");
             let groups = sent_groups(&server).await;
@@ -4187,7 +4198,8 @@ mod tests {
     async fn a_pre_key_send_splits_when_the_group_is_above_the_frame_limit() {
         for count in [2, 4] {
             let mut alice = alice_with_bob_devices(&format!("split{count}"), count);
-            let (single, group) = probe_budgets(&alice);
+            let text = "x".repeat(1500);
+            let (single, group) = probe_budgets(&alice, &text);
             assert!(group > single);
             // One byte less than the group needs: the group splits.
             alice.set_frame_budget_base(group as u64 - 1 + "bob".len() as u64);
@@ -4195,7 +4207,7 @@ mod tests {
             mount_send(&server, "msgid1").await;
             let client = GrappaClient::new(server.uri());
             alice
-                .send_text(&client, TOKEN, "bob", "hello", 100)
+                .send_text(&client, TOKEN, "bob", &text, 100)
                 .await
                 .expect("send");
             let groups = sent_groups(&server).await;
@@ -4220,7 +4232,7 @@ mod tests {
     #[tokio::test]
     async fn a_body_that_does_not_fit_alone_fails_before_any_request() {
         let mut alice = alice_with_bob_devices("alone", 2);
-        let (single, _) = probe_budgets(&alice);
+        let (single, _) = probe_budgets(&alice, "hello");
         alice.set_frame_budget_base(single as u64 - 1 + "bob".len() as u64);
         let server = MockServer::start().await;
         mount_send(&server, "msgid1").await;
