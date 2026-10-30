@@ -651,7 +651,13 @@ pub(crate) fn push_query_shared_channels(state: &WorkerState, ui: &slint::Weak<A
         return;
     };
     let local = crate::e2e_view::LocalQuery::from_window(network, window);
-    let peer = query_send_target(state, network, &local.nick);
+    // A locked window keeps the nick it was opened with: it never follows a
+    // nick change.
+    let peer = if local.is_locked() {
+        local.nick.clone()
+    } else {
+        query_send_target(state, network, &local.nick)
+    };
     push_shared_channels(state, ui, network, &peer);
 }
 
