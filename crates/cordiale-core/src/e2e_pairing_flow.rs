@@ -669,7 +669,7 @@ impl PairingSession {
             (PairingRole::Creator, Some(Wire::Join { devices, .. })) => self.take_join(devices),
             (PairingRole::Joiner, Some(Wire::Signed { devices, .. })) => self.take_signed(devices),
             (PairingRole::Creator, Some(Wire::Done { paired, .. })) => {
-                if self.offer_sent && paired.iter().any(|network| *network == self.network) {
+                if self.offer_sent && paired.contains(&self.network) {
                     Ok(Some(FlowEvent::Paired))
                 } else {
                     Err(self.fail(EndReason::Failed, FlowError::BadMessage))
@@ -1382,7 +1382,7 @@ async fn finish_creator(
         .map_err(|_| FlowError::Store)?
         .ok_or(FlowError::NoIdentity)?;
     let current = store.signed_list().ok_or(FlowError::NoIdentity)?;
-    if current.keys.iter().any(|key| *key == device.ed25519) {
+    if current.keys.contains(&device.ed25519) {
         return refuse(ctx, store, session, "paired").await;
     }
     let grant = match build_grant(&master, &current, &device.ed25519) {
@@ -1971,7 +1971,10 @@ mod tests {
         let code = code_text(&pair.creator);
         let offer = pair.creator.confirm(&code).expect("code").expect("offer");
         let message = relay(2, PairingRole::Creator, &offer);
-        let first = pair.joiner.accept(&[message.clone()]).expect("offer");
+        let first = pair
+            .joiner
+            .accept(std::slice::from_ref(&message))
+            .expect("offer");
         assert_eq!(first, vec![FlowEvent::Offered]);
         let again = pair.joiner.accept(&[message]).expect("repeat");
         assert!(again.is_empty());
