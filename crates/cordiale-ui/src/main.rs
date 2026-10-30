@@ -7817,6 +7817,15 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
         )),
         _ => None,
     };
+    // The undeliverable row of the E2E inbox: a notice for the device that
+    // `meta.e2e_device` names, not for every device of the account.
+    let event_text = event_text.or_else(|| {
+        if kind == Some("server_event") {
+            e2e_view::undeliverable_text(payload, nick.unwrap_or("someone"))
+        } else {
+            None
+        }
+    });
     if let Some(text) = event_text {
         return RenderedMessage {
             timestamp,
@@ -8570,7 +8579,8 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     apply_connecting_labels(&mut data, &state.networks.connecting_networks);
     let window_states = state.windows.window_states.clone();
     let window_mentions = merge_followed_query_counts(state, &state.windows.window_mentions);
-    let window_messages = merge_followed_query_counts(state, &state.windows.window_messages);
+    let mut window_messages = merge_followed_query_counts(state, &state.windows.window_messages);
+    window_messages.extend(e2e_runtime::locked_unread_counts(state));
     let selected = selected_window(state);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {

@@ -1345,6 +1345,13 @@ export component AppWindow inherits Window {
     // The open query has a confirmed active E2E send path; false when the
     // state is unknown, lost or not E2E.
     in property <bool> current-query-e2e: false;
+    // The encryption state of the open query as a key (`e2e-chat-*`); an
+    // empty value hides the banner. It is not a send-button or message mark.
+    in property <string> current-query-e2e-state: "";
+    // The pairing QR code of `/e2e pair`, drawn from the pairing link URL.
+    in property <image> e2e-pair-qr;
+    in property <string> e2e-pair-qr-code: "";
+    in-out property <bool> e2e-pair-qr-visible: false;
     // Only show the roster after Grappa confirms this window is joined.
     // Autojoin entries in `/boot` can be known but not currently connected.
     in property <bool> current-window-is-joined: false;
@@ -2513,6 +2520,34 @@ export component AppWindow inherits Window {
             return @tr("Grappa asked for a kind of passkey this security key can't create.");
         } else if reason == "key-failed" {
             return @tr("The security key didn't answer as expected. Try again.");
+        }
+        return "";
+    }
+
+    // The banner text of the encryption state of the open query.
+    function e2e-chat-state-text() -> string {
+        if current-query-e2e-state == "e2e-chat-clear" {
+            return @tr("This chat is clear text. Its messages are not end-to-end encrypted.");
+        } else if current-query-e2e-state == "e2e-chat-active" {
+            return @tr("End-to-end encryption is active.");
+        } else if current-query-e2e-state == "e2e-chat-trust" {
+            return @tr("The master key of this contact changed. Do not trust this chat until you verify it.");
+        } else if current-query-e2e-state == "e2e-chat-keys" {
+            return @tr("The keys of this contact are missing. Waiting for the keys.");
+        } else if current-query-e2e-state == "e2e-chat-pairing" {
+            return @tr("A device pairing is open. Finish it first.");
+        } else if current-query-e2e-state == "e2e-chat-sas" {
+            return @tr("Compare the SAS code with this contact to verify the devices.");
+        } else if current-query-e2e-state == "e2e-chat-revoked" {
+            return @tr("A device of this contact was revoked. No device is left to send to.");
+        } else if current-query-e2e-state == "e2e-chat-reset" {
+            return @tr("The E2E identity of this device was reset. This chat cannot send.");
+        } else if current-query-e2e-state == "e2e-chat-expired" {
+            return @tr("The last message expired before the keys came. It was not sent.");
+        } else if current-query-e2e-state == "e2e-chat-send-failed" {
+            return @tr("The last message was not sent.");
+        } else if current-query-e2e-state == "e2e-chat-unavailable" {
+            return @tr("Encryption is not available for this chat. Nothing is sent as clear text.");
         }
         return "";
     }
@@ -3808,6 +3843,21 @@ export component AppWindow inherits Window {
                         text: @tr("Dismiss");
                         accessible-label: @tr("Dismiss away message");
                         clicked => { peer-away-dismiss-requested(); }
+                    }
+                }
+            }
+
+            if current-query && current-query-e2e-state != "" : Rectangle {
+                background: theme == "dark" ? #1f2f3a : #e3f1fb;
+                border-width: 1px;
+                border-color: theme == "dark" ? #3d7ea6 : #2b7bb9;
+                HorizontalBox {
+                    Text {
+                        text: e2e-chat-state-text();
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
                     }
                 }
             }
@@ -8310,6 +8360,84 @@ export component AppWindow inherits Window {
                             enabled: service-console-command != "";
                             clicked => { service-console-send-requested(service-console-command); }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    if e2e-pair-qr-visible : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        FocusScope {
+            width: parent.width;
+            height: parent.height;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    e2e-pair-qr-visible = false;
+                    return accept;
+                }
+                return reject;
+            }
+
+            Rectangle {
+                width: min(420px, parent.width - 32px);
+                height: min(460px, parent.height - 32px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-width: 1px;
+                border-radius: 8px;
+                border-color: #8080806a;
+                background: theme == "dark" ? #242424 : white;
+
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 12px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: @tr("Pair a new device");
+                            font-size: 18px * FontScale.percent / 100;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: "✕";
+                            accessible-label: @tr("Close the pairing code");
+                            clicked => { e2e-pair-qr-visible = false; }
+                        }
+                    }
+
+                    Text {
+                        text: @tr("Scan this code on the new device. Anyone who has it can pair a device until it expires, so do not post it.");
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+
+                        Image {
+                            source: e2e-pair-qr;
+                            width: 192px;
+                            height: 192px;
+                            image-rendering: pixelated;
+                            accessible-role: AccessibleRole.image;
+                            accessible-label: @tr("QR code of the pairing link");
+                        }
+                    }
+                    LineEdit {
+                        text: e2e-pair-qr-code;
+                        read-only: true;
+                        accessible-label: @tr("Pairing code");
                     }
                 }
             }

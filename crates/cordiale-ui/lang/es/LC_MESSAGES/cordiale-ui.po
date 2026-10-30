@@ -3540,6 +3540,70 @@ msgctxt "AppWindow"
 msgid "Close notice"
 msgstr "Cerrar aviso"
 
+msgctxt "AppWindow"
+msgid "This chat is clear text. Its messages are not end-to-end encrypted."
+msgstr "Este chat está en texto claro. Sus mensajes no están cifrados de extremo a extremo."
+
+msgctxt "AppWindow"
+msgid "End-to-end encryption is active."
+msgstr "El cifrado de extremo a extremo está activo."
+
+msgctxt "AppWindow"
+msgid "The master key of this contact changed. Do not trust this chat until you verify it."
+msgstr "La clave maestra de este contacto cambió. No confíes en este chat hasta verificarlo."
+
+msgctxt "AppWindow"
+msgid "The keys of this contact are missing. Waiting for the keys."
+msgstr "Faltan las claves de este contacto. Esperando las claves."
+
+msgctxt "AppWindow"
+msgid "A device pairing is open. Finish it first."
+msgstr "Hay un emparejamiento de dispositivo abierto. Termínalo primero."
+
+msgctxt "AppWindow"
+msgid "Compare the SAS code with this contact to verify the devices."
+msgstr "Compara el código SAS con este contacto para verificar los dispositivos."
+
+msgctxt "AppWindow"
+msgid "A device of this contact was revoked. No device is left to send to."
+msgstr "Se revocó un dispositivo de este contacto. No queda ningún dispositivo al que enviar."
+
+msgctxt "AppWindow"
+msgid "The E2E identity of this device was reset. This chat cannot send."
+msgstr "La identidad E2E de este dispositivo se restableció. Este chat no puede enviar."
+
+msgctxt "AppWindow"
+msgid "The last message expired before the keys came. It was not sent."
+msgstr "El último mensaje caducó antes de que llegaran las claves. No se envió."
+
+msgctxt "AppWindow"
+msgid "The last message was not sent."
+msgstr "El último mensaje no se envió."
+
+msgctxt "AppWindow"
+msgid "Encryption is not available for this chat. Nothing is sent as clear text."
+msgstr "El cifrado no está disponible para este chat. No se envía nada en texto claro."
+
+msgctxt "AppWindow"
+msgid "Pair a new device"
+msgstr "Emparejar un dispositivo nuevo"
+
+msgctxt "AppWindow"
+msgid "Close the pairing code"
+msgstr "Cerrar el código de emparejamiento"
+
+msgctxt "AppWindow"
+msgid "Scan this code on the new device. Anyone who has it can pair a device until it expires, so do not post it."
+msgstr "Escanea este código en el dispositivo nuevo. Quien lo tenga puede emparejar un dispositivo hasta que caduque, así que no lo publiques."
+
+msgctxt "AppWindow"
+msgid "QR code of the pairing link"
+msgstr "Código QR del enlace de emparejamiento"
+
+msgctxt "AppWindow"
+msgid "Pairing code"
+msgstr "Código de emparejamiento"
+
 msgctxt "RenameTarget"
 msgid "Open a conversation with {}"
 msgstr "Abre una conversación con {}"
