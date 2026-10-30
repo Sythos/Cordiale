@@ -17,7 +17,7 @@ Ultimo allineamento (2026-10-03): riletto contro il tag `v1.5.12` di Grappa
 `protocol_version` 37, `min_protocol_version` 1 (letti dal sorgente server in
 `lib/grappa/protocol.ex` al tag; `GET /api/config` del server dell'autore
 risponde `version` 1.5.12 e protocollo 37). Cordiale dichiara
-`client_proto=37` (§2). Le forme di riga di scrollback (`dm_with` opzionale),
+`client_proto=50` dalla fetta 37 dell'ombrello 416 (§2; era 37). Le forme di riga di scrollback (`dm_with` opzionale),
 di `query_windows_list` (`network_id`, `target_nick`, `opened_at`) e di
 `mentions_bundle` (`id` e `dm_with` opzionali) sono state controllate sul
 sorgente del tag; i flussi in una sessione reale restano da provare a mano.
@@ -310,7 +310,7 @@ il resto della sezione Sicurezza resta in Cicchetto:
   - Nessun limite superiore: non esiste (né esisterà) un
     `max_protocol_version`.
   - Il controllo versione avviene **prima** dell'autenticazione.
-  - **Cordiale** dichiara `client_proto=37` (intero semplice, la revisione
+  - **Cordiale** dichiara `client_proto=50` (intero semplice, la revisione
     del protocollo contro cui è stato verificato leggendo il sorgente del
     server: `CLIENT_PROTOCOL_VERSION` in `protocol.rs`, da alzare solo dopo
     aver riverificato il contratto). Su un `426` la sessione si ferma senza
@@ -1230,9 +1230,10 @@ letto in una spec:
 
 Fonte: `docs/CLIENT_PROTOCOL.md` e `lib/grappa/protocol.ex` di
 `vjt/grappa-irc` al commit `f88df4fa` (`@protocol_version` 46,
-`@min_protocol_version` 1). `CLIENT_PROTOCOL_VERSION` resta 37 e non misura
-le singole funzioni: dichiara l'ultima revisione riletta per intero sul
-sorgente. Il floor interno `MIN_SUPPORTED_PROTOCOL_VERSION` resta 1: nessuna
+`@min_protocol_version` 1). `CLIENT_PROTOCOL_VERSION` non misura le singole
+funzioni: dichiara l'ultima revisione riletta per intero sul sorgente. Era 37 al
+momento di questa tabella; è 50 dalla fetta 37 dell'ombrello 416 (vedi
+`docs/e2e-contract.md`). Il floor interno `MIN_SUPPORTED_PROTOCOL_VERSION` resta 1: nessuna
 voce qui sotto lo richiede.
 
 | Versione | Contenuto | Stato in Cordiale |

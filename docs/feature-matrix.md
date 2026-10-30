@@ -173,7 +173,8 @@ badge solo su Windows, pulsanti e menu con lo stile dei widget di Slint;
 ident e realname non sono più esposti da Grappa.
 
 **Aggiornamento (2026-10-02) — allineamento a `protocol_version` da 34 a 37.**
-Cordiale dichiara `client_proto=37` sull'URL del WebSocket e su un `426
+Cordiale dichiara `client_proto=50` (era 37 quando fu scritto questo
+aggiornamento) sull'URL del WebSocket e su un `426
 upgrade_required` si ferma invece di ritentare (non verificato contro un
 server che alzi il floor). Stato delle novità: quelle che parlano col server
 sono coperte da test con server simulato e dal suo sorgente, **non ancora
@@ -287,13 +288,14 @@ un'impostazione di account (`GET/PUT /me/settings/ban-mask-form`, protocollo
 attivo cambia solo a risposta riuscita; assente o 404 (server pre-38) vale
 `host`. Il vecchio campo locale `default_ban_type` è ritirato e ignorato in
 `settings.json`, senza caricarlo sul server. Cordiale dichiara ancora
-`client_proto=37`: il bump a 38 va riletto sul sorgente di Grappa. Limiti: la grafia `*!user@host` è quella IRC usuale, non
+`client_proto=37` (poi alzato a 50, vedi sotto). Limiti: la grafia `*!user@host` è quella IRC usuale, non
 riletta sul sorgente upstream (issue upstream 2347), e va riallineata quando
 Cicchetto fissa dove salva l'impostazione. Il menu Kickban e le voci Ban nick
 / Ban host (issue 246) non ci sono ancora: potranno usare `BanType::mask`.
 
 **Aggiornamento (2026-10-22)**: stato dei protocolli 38–46 (issue 345).
-Il dettaglio sta in `protocol-notes.md` §8; `client_proto` resta 37.
+Il dettaglio sta in `protocol-notes.md` §8. `client_proto` è 50 dalla fetta 37
+dell'ombrello 416: il testo completo del protocollo 50 è stato riletto.
 
 | Protocollo | Funzione | Stato |
 |---|---|---|
@@ -301,6 +303,10 @@ Il dettaglio sta in `protocol-notes.md` §8; `client_proto` resta 37.
 | 39 | Default server dell'auto-away in Settings | Supportato; senza il campo (server < 39) non si mostra nessun numero |
 | 40 | Cursori di cronologia a tempo | Solo livello REST (`fetch_messages_by_time`); la UI usa ancora gli id. Opzionale, non serve all'E2E |
 | 41 | Marcatore `truncated` delle menzioni | Già supportato |
-| 42–44 | Relay, coda offline e bundle di chiavi E2E | In attesa del contratto per dispositivo di Grappa; non implementato |
+| 42–44 | Relay, coda offline e bundle di chiavi E2E | Implementato per dispositivo (v49): invio, inbox con `id`, bundle di chiavi; vedi `docs/e2e-contract.md` |
 | 45 | Buste E2E dichiarate nello schema | Nessun cambio sul filo, niente da fare |
 | 46 | Pacing e `expires_at` | Valori finali, coda, NACK e motivi di scarto nel motore (issue 454, vedi `protocol-notes.md`) |
+| 47 | `network` in `isupport_changed` | Nessuna sfida CHAL in Cordiale: il campo non serve |
+| 48 | Accoppiamento di due dispositivi (§4g) | Implementato per una rete per volta (`e2e_pairing_flow.rs`) |
+| 49 | Dispositivi, liste firmate, `to_did`/`from_did` | Implementato (`e2e_device_routes.rs`, `e2e_trust.rs`) |
+| 50 | Copie S1 e `own` | Implementato (`e2e_selfcopy.rs`, motore) |

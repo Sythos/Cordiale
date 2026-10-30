@@ -55,7 +55,14 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// any more (a renamed peer's next message opens a new window). Last
 /// re-checked against the Grappa source at tag `v1.5.12`, the first release
 /// that speaks 37.
-pub const CLIENT_PROTOCOL_VERSION: u32 = 37;
+///
+/// 38 to 41 add the ban mask form, the auto-away site default, the time
+/// cursors and the `truncated` mark of the away bundle; 42 to 50 add the
+/// end-to-end encrypted queries (relay, offline queue, key bundle, pacer and
+/// `expires_at`, network name, pairing, devices, copies to other devices).
+/// The full text of the client protocol document was read again for 50;
+/// `docs/e2e-contract.md` lists the sources of the E2E part.
+pub const CLIENT_PROTOCOL_VERSION: u32 = 50;
 
 /// The first Grappa `protocol_version` that reads the `before_time`,
 /// `after_time` and `around_time` history cursors. An older server ignores
