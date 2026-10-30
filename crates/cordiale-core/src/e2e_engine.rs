@@ -3199,6 +3199,282 @@ mod tests {
         );
     }
 
+    /// The checks that `_on_pkmsg`, `_on_msg` and `_own_body` of irc-olm make
+    /// on the shape of a payload before they read a body. `dst` is the `to` of
+    /// the frame. The error is the name of the drop reason of irc-olm.
+    fn irc_olm_takes(
+        verb: &str,
+        payload: &Value,
+        dst: &str,
+        from_did: &str,
+        own_did: &str,
+    ) -> Result<(), &'static str> {
+        use crate::e2e_wire::{decode_key, decode_signature, device_certificate_signed_text};
+        let key = |value: &Value| {
+            value
+                .as_str()
+                .filter(|text| decode_key(text).is_ok())
+                .map(str::to_string)
+        };
+        if payload["v"] != 2 {
+            return Err("bad-version");
+        }
+        if verb == "pkmsg" {
+            let id = &payload["id"];
+            let ed = key(&id["ed25519"]).ok_or("malformed-id")?;
+            let curve = key(&id["curve25519"]).ok_or("malformed-id")?;
+            let id_sig = id["sig"].as_str().ok_or("malformed-id")?;
+            if did_from_key_text(&ed).ok().as_deref() != Some(from_did) {
+                return Err("from-mismatch");
+            }
+            let master = key(&payload["master"]["ed25519"]).ok_or("invalid-master")?;
+            let ver = payload["master"]["ver"]
+                .as_u64()
+                .and_then(|ver| u32::try_from(ver).ok())
+                .filter(|ver| (1..=MAX_VERSION).contains(ver))
+                .ok_or("invalid-master")?;
+            let cert = payload["master"]["cert"]
+                .as_str()
+                .filter(|cert| decode_signature(cert).is_ok())
+                .ok_or("invalid-master")?;
+            let cert_text =
+                device_certificate_signed_text(ver, &ed).map_err(|_| "invalid-master")?;
+            verify_signature(&master, cert, &cert_text).map_err(|_| "bad-certificate")?;
+            let id_text = device_id_signed_text(&curve, &master);
+            verify_signature(&ed, id_sig, id_text.as_bytes()).map_err(|_| "bad-id-block")?;
+        } else if key(&payload["ck"]).is_none() {
+            return Err("malformed-ck");
+        }
+        let bodies = payload["bodies"].as_object().ok_or("malformed-bodies")?;
+        if !(1..=MAX_LIST_DEVICES).contains(&bodies.len())
+            || (dst == WILDCARD) != (bodies.len() > 1)
+        {
+            return Err("malformed-bodies");
+        }
+        match bodies.get(own_did) {
+            Some(Value::String(_)) => Ok(()),
+            _ => Err("not-for-this-device"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_payloads_that_cordiale_sends_pass_the_shape_checks_of_irc_olm() {
+        let alice_id = Ident::new("alice-olm");
+        let bob_id = Ident::new("bob-olm");
+        let mut alice = alice_id.engine();
+        let mut bob = bob_id.engine();
+        alice
+            .accept_keys("bob", &bob_id.keys())
+            .expect("alice reads bob");
+        let alice_did = did_from_key_text(&ed(&alice_id.device)).expect("did");
+        let bob_did = did_from_key_text(&ed(&bob_id.device)).expect("did");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+
+        // The first message of Alice is a pre-key message with the id block
+        // and the certificate of the master.
+        let (_, first) = alice_sends(&mut alice, &server, "one").await;
+        assert_eq!(first["verb"], "pkmsg");
+        let payload: Value =
+            serde_json::from_str(first["payload"].as_str().expect("payload")).expect("json");
+        let to = first["to"].as_str().expect("to");
+        assert_eq!(
+            irc_olm_takes("pkmsg", &payload, to, &alice_did, &bob_did),
+            Ok(())
+        );
+        // The same payload is refused for the wrong sender, the wrong
+        // recipient and the wrong address form.
+        assert_eq!(
+            irc_olm_takes("pkmsg", &payload, to, &bob_did, &bob_did),
+            Err("from-mismatch")
+        );
+        assert_eq!(
+            irc_olm_takes("pkmsg", &payload, to, &alice_did, &alice_did),
+            Err("not-for-this-device")
+        );
+        assert_eq!(
+            irc_olm_takes("pkmsg", &payload, WILDCARD, &alice_did, &bob_did),
+            Err("malformed-bodies")
+        );
+
+        // Bob answers, so the next message of Alice is a normal one.
+        let value = row(
+            5,
+            "alice",
+            &alice_did,
+            &bob_did,
+            "pkmsg",
+            "msgid1",
+            first["payload"].as_str().expect("payload"),
+        );
+        let first_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(bob.handle_row(&first_row, 200), RowOutcome::Stored);
+        let client = GrappaClient::new(server.uri());
+        let before = server.received_requests().await.expect("requests").len();
+        bob.send_text(&client, TOKEN, "alice", "reply", 210)
+            .await
+            .expect("reply");
+        let requests = server.received_requests().await.expect("requests");
+        let reply: Value = serde_json::from_slice(&requests[before].body).expect("body");
+        let reply_verb = reply["verb"].as_str().expect("verb");
+        let reply_payload: Value =
+            serde_json::from_str(reply["payload"].as_str().expect("payload")).expect("json");
+        assert_eq!(
+            irc_olm_takes(
+                reply_verb,
+                &reply_payload,
+                reply["to"].as_str().expect("to"),
+                &bob_did,
+                &alice_did
+            ),
+            Ok(())
+        );
+        let value = row(
+            6,
+            "bob",
+            &bob_did,
+            &alice_did,
+            reply_verb,
+            "msgid1",
+            reply["payload"].as_str().expect("payload"),
+        );
+        let reply_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(alice.handle_row(&reply_row, 220), RowOutcome::Stored);
+
+        let (_, second) = alice_sends(&mut alice, &server, "two").await;
+        assert_eq!(second["verb"], "msg");
+        let msg: Value =
+            serde_json::from_str(second["payload"].as_str().expect("payload")).expect("json");
+        assert_eq!(
+            irc_olm_takes(
+                "msg",
+                &msg,
+                second["to"].as_str().expect("to"),
+                &alice_did,
+                &bob_did
+            ),
+            Ok(())
+        );
+        // A `msg` without the sender curve key is dropped.
+        let mut no_ck = msg.clone();
+        no_ck.as_object_mut().expect("object").remove("ck");
+        assert_eq!(
+            irc_olm_takes(
+                "msg",
+                &no_ck,
+                second["to"].as_str().expect("to"),
+                &alice_did,
+                &bob_did
+            ),
+            Err("malformed-ck")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_pkmsg_gives_no_second_row_under_any_row_id_or_msgid() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, "once").await;
+        let payload = body["payload"].as_str().expect("payload").to_string();
+        let original = row(
+            5,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "pkmsg",
+            "msgid1",
+            &payload,
+        );
+        let item = InboxRow::from_value(&original, PROTOCOL).expect("row");
+        assert_eq!(p.bob.handle_row(&item, 200), RowOutcome::Stored);
+
+        // The same message under a new row id: the msgid is a replay.
+        let same_msgid = row(
+            6,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "pkmsg",
+            "msgid1",
+            &payload,
+        );
+        let item = InboxRow::from_value(&same_msgid, PROTOCOL).expect("row");
+        assert_eq!(p.bob.handle_row(&item, 201), RowOutcome::Undecryptable);
+
+        // The same ciphertext under a new row id and a new msgid: the Olm
+        // message key is used up.
+        let new_msgid = row(
+            7,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "pkmsg",
+            "msgid-new",
+            &payload,
+        );
+        let item = InboxRow::from_value(&new_msgid, PROTOCOL).expect("row");
+        assert_eq!(p.bob.handle_row(&item, 202), RowOutcome::Undecryptable);
+
+        let rows = p.bob.history().messages(&conversation_id(NET, "alice"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "once");
+    }
+
+    #[tokio::test]
+    async fn a_message_for_another_device_gives_no_row() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, "not for you").await;
+        let mut payload: Value =
+            serde_json::from_str(body["payload"].as_str().expect("payload")).expect("json");
+        // The only body names a device that is not this one.
+        let sealed = payload["bodies"][&p.bob_did].clone();
+        let mut bodies = serde_json::Map::new();
+        bodies.insert(p.alice_did.clone(), sealed);
+        payload["bodies"] = Value::Object(bodies);
+        let value = row(
+            5,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "pkmsg",
+            "msgid1",
+            &payload.to_string(),
+        );
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(p.bob.handle_row(&item, 200), RowOutcome::Undecryptable);
+        assert!(p
+            .bob
+            .history()
+            .messages(&conversation_id(NET, "alice"))
+            .is_empty());
+    }
+
+    #[test]
+    fn the_inner_text_of_cordiale_equals_the_bytes_of_irc_olm() {
+        let all: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/e2e/irc_olm_v2.json"))
+                .expect("fixture file is JSON");
+        let cases = all["from_irc_olm"]["inner"].as_array().expect("cases");
+        let mut checked = 0;
+        for case in cases.iter().filter(|case| case["kind"] == "text") {
+            let lv = u32::try_from(case["lv"].as_u64().expect("lv")).expect("lv");
+            let written = InnerOut {
+                t: "text",
+                peer: None,
+                body: case["body"].as_str().expect("body"),
+                lv,
+                fb: case["fb"].as_str(),
+            }
+            .to_json();
+            assert_eq!(written, case["plain"].as_str().expect("plain"));
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
+    }
+
     #[tokio::test]
     async fn an_undecryptable_item_is_acknowledged() {
         let mut p = pair();

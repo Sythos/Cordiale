@@ -1,0 +1,405 @@
+{
+  "fixture_revision": 1,
+  "status": "revocation, sessions and expiry cases for protocols 46 to 50; keys are throw-away test keys; signatures follow the signed texts of sections 4f and 4g of the Grappa client protocol",
+  "keys": {
+    "master": "HQpqLpnMhhUxnjcQhrQjr+zQM9NXwIWfw0Z9f07sbDM",
+    "other_master": "zobZxVWcsKgEpJRO+USs3z4Y0VpUkmdtRQQliB0gTok",
+    "devices": [
+      {
+        "ed25519": "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM",
+        "curve25519": "htRU9mnsWSXyRVz8AwY6UlEQwnRJo0OIOgACaLmEn24",
+        "did": "ndFqYLm6Nc0"
+      },
+      {
+        "ed25519": "DAs7JejEGQDThdnDc6RmnE+6rUAJnrO8SBg6vEE5jDg",
+        "curve25519": "xYZ65Yre8KoIKPIz5PkXjXCNTJ5PwmZ55A/JKtPlPRI",
+        "did": "KbQxN6ksKxI"
+      },
+      {
+        "ed25519": "0Wsu0Qcmo7weoN0Mvru/wZvjmVXL6bHdWpztZVovEmI",
+        "curve25519": "zrH1BJAOZk/2SINtTHAa6kP17W+9F+yboOKK19bEChM",
+        "did": "8cSEFx3wH78"
+      },
+      {
+        "ed25519": "VFQl7FQh4EpCLikfgLyACQBlZ42j7v6qCJKqQ2B9Nmk",
+        "curve25519": "tC4dN1u0WnuO9O56kw/j972cA9ylvDuGKYYpT+2QynA",
+        "did": "GrxOoXsSwII"
+      }
+    ]
+  },
+  "revocation": [
+    {
+      "case": "first list names two devices",
+      "master": "HQpqLpnMhhUxnjcQhrQjr+zQM9NXwIWfw0Z9f07sbDM",
+      "version": 1,
+      "keys": [
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM",
+        "DAs7JejEGQDThdnDc6RmnE+6rUAJnrO8SBg6vEE5jDg"
+      ],
+      "signature": "U/y7//7eTh0sikFq8DJ6q4juuL0xRSjZiZa7AB3zm/2WY6WI3iwmPhAj6lswKzMO9h+PI+TJBJiweVNekNRnCw",
+      "result": "Replace",
+      "not_revoked": [
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM",
+        "DAs7JejEGQDThdnDc6RmnE+6rUAJnrO8SBg6vEE5jDg"
+      ]
+    },
+    {
+      "case": "the same list again changes nothing",
+      "master": "HQpqLpnMhhUxnjcQhrQjr+zQM9NXwIWfw0Z9f07sbDM",
+      "version": 1,
+      "keys": [
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM",
+        "DAs7JejEGQDThdnDc6RmnE+6rUAJnrO8SBg6vEE5jDg"
+      ],
+      "signature": "U/y7//7eTh0sikFq8DJ6q4juuL0xRSjZiZa7AB3zm/2WY6WI3iwmPhAj6lswKzMO9h+PI+TJBJiweVNekNRnCw",
+      "result": "NoOp"
+    },
+    {
+      "case": "a higher list without the second device revokes it",
+      "master": "HQpqLpnMhhUxnjcQhrQjr+zQM9NXwIWfw0Z9f07sbDM",
+      "version": 2,
+      "keys": [
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM"
+      ],
+      "signature": "pdwrXaA9CGYqb8O3+gWFQSKbMaVZX85grbsFo7IiAwREANS0z2j9EJq6GNGowUe3p2TAb+6qi2V0gGd0atNYCw",
+      "result": "Replace",
+      "revoked": [
+        "DAs7JejEGQDThdnDc6RmnE+6rUAJnrO8SBg6vEE5jDg"
+      ],
+      "not_revoked": [
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM"
+      ]
+    },
+    {
+      "case": "a list with the revoked device is refused",
+      "master": "HQpqLpnMhhUxnjcQhrQjr+zQM9NXwIWfw0Z9f07sbDM",
+      "version": 3,
+      "keys": [
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM",
+        "DAs7JejEGQDThdnDc6RmnE+6rUAJnrO8SBg6vEE5jDg"
+      ],
+      "signature": "Xr1DlCYs/XQYCzWH4Vx6rfloto/q9fI9kffIobOEDYypaCUo4U1sUPuw9OdLDoxCQBUH2m+KA6Na+wFDof/qBw",
+      "result": "RevokedDevice"
+    },
+    {
+      "case": "a lower list is stale",
+      "master": "HQpqLpnMhhUxnjcQhrQjr+zQM9NXwIWfw0Z9f07sbDM",
+      "version": 1,
+      "keys": [
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM"
+      ],
+      "signature": "Sx4/gibi+N37OuwNql8nhfCi0qy08uvLfpboenjQ7Lb3FPfJN+0XJ+5ePLDgrZlKP929SL8R6X9qlN2d3/eICA",
+      "result": "StaleList"
+    },
+    {
+      "case": "the same version with other keys is stale",
+      "master": "HQpqLpnMhhUxnjcQhrQjr+zQM9NXwIWfw0Z9f07sbDM",
+      "version": 2,
+      "keys": [
+        "0Wsu0Qcmo7weoN0Mvru/wZvjmVXL6bHdWpztZVovEmI",
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM"
+      ],
+      "signature": "GJ0viFmexSrFYID0OMSh5nmetvGyhYgpq5955tZkhoA17QnmU6myBTh7oLdufeY8NGu2Gzp2MV8YcT/ZClNKDw",
+      "result": "StaleList"
+    },
+    {
+      "case": "a list signed by another master under the stored master",
+      "master": "HQpqLpnMhhUxnjcQhrQjr+zQM9NXwIWfw0Z9f07sbDM",
+      "version": 3,
+      "keys": [
+        "0Wsu0Qcmo7weoN0Mvru/wZvjmVXL6bHdWpztZVovEmI",
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM"
+      ],
+      "signature": "W/0iYDqHt0tpCSilIOCk2EUNpJXrOj0vif5jk61uR1F4PzTDjGSk1xmQSfJvqZvrnv8uPX8DciC4l1Cq/xqRAg",
+      "result": "BadSignature"
+    },
+    {
+      "case": "a list that another master signed for itself",
+      "master": "zobZxVWcsKgEpJRO+USs3z4Y0VpUkmdtRQQliB0gTok",
+      "version": 3,
+      "keys": [
+        "0Wsu0Qcmo7weoN0Mvru/wZvjmVXL6bHdWpztZVovEmI",
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM"
+      ],
+      "signature": "W/0iYDqHt0tpCSilIOCk2EUNpJXrOj0vif5jk61uR1F4PzTDjGSk1xmQSfJvqZvrnv8uPX8DciC4l1Cq/xqRAg",
+      "result": "MasterChanged"
+    },
+    {
+      "case": "a higher list adds a new device",
+      "master": "HQpqLpnMhhUxnjcQhrQjr+zQM9NXwIWfw0Z9f07sbDM",
+      "version": 3,
+      "keys": [
+        "0Wsu0Qcmo7weoN0Mvru/wZvjmVXL6bHdWpztZVovEmI",
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM"
+      ],
+      "signature": "ThM2fkSAaSl2pz+GajBjRSvhGhcM7Xkyx5q4BT1JwTVdXbQ0jY7ny1YRyFzZlV/PEz00Ys5OowsUJ9yey03+Cw",
+      "result": "Replace",
+      "revoked": [
+        "DAs7JejEGQDThdnDc6RmnE+6rUAJnrO8SBg6vEE5jDg"
+      ],
+      "not_revoked": [
+        "327HjFpadZh76qyvnLIKmxLpzyEsFCY+VWukijeF/NM",
+        "0Wsu0Qcmo7weoN0Mvru/wZvjmVXL6bHdWpztZVovEmI"
+      ]
+    }
+  ],
+  "sessions": {
+    "window": 256,
+    "first_messages": [
+      {
+        "case": "first message of the first device",
+        "did": "ndFqYLm6Nc0",
+        "id": "m1",
+        "result": "ok"
+      },
+      {
+        "case": "same message again",
+        "did": "ndFqYLm6Nc0",
+        "id": "m1",
+        "result": "Replay"
+      },
+      {
+        "case": "same msgid from another device",
+        "did": "KbQxN6ksKxI",
+        "id": "m1",
+        "result": "ok"
+      },
+      {
+        "case": "next message of the first device",
+        "did": "ndFqYLm6Nc0",
+        "id": "m2",
+        "result": "ok"
+      }
+    ],
+    "new_sessions": [
+      {
+        "case": "first session of the first device",
+        "did": "ndFqYLm6Nc0",
+        "id": "s1",
+        "result": "ok"
+      },
+      {
+        "case": "same session again",
+        "did": "ndFqYLm6Nc0",
+        "id": "s1",
+        "result": "Replay"
+      },
+      {
+        "case": "a session id that was a message id",
+        "did": "ndFqYLm6Nc0",
+        "id": "m1",
+        "result": "ok"
+      },
+      {
+        "case": "same session id on another device",
+        "did": "KbQxN6ksKxI",
+        "id": "s1",
+        "result": "ok"
+      }
+    ]
+  },
+  "expiry": {
+    "lifetime_secs": 604800,
+    "is_expired": [
+      {
+        "case": "just created",
+        "created_at": 1000,
+        "now": 1000,
+        "expired": false
+      },
+      {
+        "case": "one second before the end",
+        "created_at": 1000,
+        "now": 605799,
+        "expired": false
+      },
+      {
+        "case": "at the end",
+        "created_at": 1000,
+        "now": 605800,
+        "expired": true
+      },
+      {
+        "case": "long after",
+        "created_at": 1000,
+        "now": 9999999,
+        "expired": true
+      },
+      {
+        "case": "clock before creation",
+        "created_at": 1000,
+        "now": 5,
+        "expired": false
+      }
+    ],
+    "copy_states": [
+      {
+        "case": "queued copy is not delivered",
+        "steps": [
+          {
+            "do": "queued",
+            "created_at": 1000
+          }
+        ],
+        "state": "Queued"
+      },
+      {
+        "case": "an acknowledgement delivers",
+        "steps": [
+          {
+            "do": "queued",
+            "created_at": 1000
+          },
+          {
+            "do": "ack"
+          }
+        ],
+        "state": "Delivered"
+      },
+      {
+        "case": "expiry beats a late acknowledgement",
+        "steps": [
+          {
+            "do": "queued",
+            "created_at": 1000
+          },
+          {
+            "do": "expire",
+            "now": 605800
+          },
+          {
+            "do": "ack"
+          }
+        ],
+        "state": "Expired"
+      },
+      {
+        "case": "a missing copy stays missing",
+        "steps": [
+          {
+            "do": "queued",
+            "created_at": 1000
+          },
+          {
+            "do": "missing"
+          },
+          {
+            "do": "ack"
+          }
+        ],
+        "state": "Missing"
+      },
+      {
+        "case": "expiry before the end changes nothing",
+        "steps": [
+          {
+            "do": "queued",
+            "created_at": 1000
+          },
+          {
+            "do": "expire",
+            "now": 605799
+          }
+        ],
+        "state": "Queued"
+      },
+      {
+        "case": "an acknowledgement for an unknown copy",
+        "steps": [
+          {
+            "do": "ack"
+          }
+        ],
+        "state": null
+      }
+    ],
+    "inbox_limits": {
+      "total": 4194304,
+      "per_sender": 1048576,
+      "entry_cost": 256,
+      "cases": [
+        {
+          "case": "empty inbox",
+          "total_bytes": 0,
+          "sender_bytes": 0,
+          "next_len": 100,
+          "accepts": true
+        },
+        {
+          "case": "sender share exactly full",
+          "total_bytes": 0,
+          "sender_bytes": 1048220,
+          "next_len": 100,
+          "accepts": true
+        },
+        {
+          "case": "sender share one byte over",
+          "total_bytes": 0,
+          "sender_bytes": 1048221,
+          "next_len": 100,
+          "accepts": false
+        },
+        {
+          "case": "inbox exactly full",
+          "total_bytes": 4193948,
+          "sender_bytes": 0,
+          "next_len": 100,
+          "accepts": true
+        },
+        {
+          "case": "inbox one byte over",
+          "total_bytes": 4193949,
+          "sender_bytes": 0,
+          "next_len": 100,
+          "accepts": false
+        }
+      ]
+    },
+    "drain": {
+      "now": 700000,
+      "paired_at": 450000,
+      "items": [
+        {
+          "case": "readable item",
+          "id": "i1",
+          "created_at": 460000,
+          "sender_did": "ndFqYLm6Nc0",
+          "ciphertext": "ok",
+          "outcome": "Stored"
+        },
+        {
+          "case": "same item again",
+          "id": "i1",
+          "created_at": 460000,
+          "sender_did": "ndFqYLm6Nc0",
+          "ciphertext": "ok",
+          "outcome": "Duplicate"
+        },
+        {
+          "case": "item past its lifetime",
+          "id": "i2",
+          "created_at": 95000,
+          "sender_did": "ndFqYLm6Nc0",
+          "ciphertext": "ok",
+          "outcome": "Expired"
+        },
+        {
+          "case": "item from before the pairing",
+          "id": "i3",
+          "created_at": 440000,
+          "sender_did": "ndFqYLm6Nc0",
+          "ciphertext": "ok",
+          "outcome": "BeforePairing"
+        },
+        {
+          "case": "unreadable item",
+          "id": "i4",
+          "created_at": 460000,
+          "sender_did": "KbQxN6ksKxI",
+          "ciphertext": "bad",
+          "outcome": "Undecryptable"
+        }
+      ]
+    }
+  }
+}
