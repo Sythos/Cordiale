@@ -1565,8 +1565,9 @@ senza essere salvati.
 
 **Issue 453, passo 2: worker, finestre `🔒<user>` e copie `own` (S1).**
 Copie `own`: una riga `pkmsg`/`msg` con `own` si decifra come le altre; il testo in
-chiaro è un `CopyBody` JSON `{"peer","text"}` (formato **candidato**, non letto da
-§4f: la riga di inbox non dice con chi è la conversazione). La riga va nella
+chiaro è un JSON `{"t":"copy","peer","body"}` (formato **finale**, da CIC `wire.ts`
+`CopyInner`; sostituisce la bozza `{"peer","text"}`: la riga di inbox non dice con chi
+è la conversazione). La riga va nella
 conversazione di `peer`, con `sender_device` = `own` e id `<rete>:own:<id>`; un
 `peer` vuoto, con spazi o controlli, o con l'etichetta `🔒` rende la copia
 illeggibile (confermata, non salvata). Il lato che *crea* le copie non c'è ancora.
@@ -1694,8 +1695,11 @@ riassembla e consegna messaggi interi.
   Il ripiego serve quando il motore invierà a tutti i dispositivi (`bodies` con più voci).
 
 **Issue 455 (fetta 33 di 37 dell'ombrello 416): flusso X1 tra due dispositivi.**
-Il testo di Grappa §4g non era raggiungibile: i punti sotto sono un **formato
-candidato**, da verificare. Cambia solo `e2e_pairing_flow.rs`.
+Il testo di Grappa §4g non era raggiungibile: i punti sotto erano un **formato
+candidato**. I messaggi del canale (`Hello`/`Confirm`/`Grant`), il modo cifre
+`NoLeadingZero` e il primo payload senza base64url sono **superati** dalla fetta 37 (vedi
+la sezione «Contratto finale E2E», in fondo). Restano valide le rotte, la sessione, lo
+slot e la pulizia. Cambia solo `e2e_pairing_flow.rs`.
 
 - **Rotte.** `PairingOperation` in `e2e_protocol.rs`: `POST /e2e/pairings`, `/join`,
   `POST` e `GET` `/messages` (con `?after=<seq>`, **ipotesi**) e `DELETE /e2e/pairings/:id`
@@ -1743,3 +1747,18 @@ candidato**, da verificare. Cambia solo `e2e_pairing_flow.rs`.
 - **Grappa 2457 (decisione).** Non si applica: Cordiale non ha un messaggio SAS a più dispositivi
   da pulire. La conferma SAS è locale a questo dispositivo (`confirm_sas`) e non c'è un prompt SAS
   sugli altri dispositivi del peer.
+
+## Contratto finale E2E (issue 459)
+
+Il contratto finale è in `docs/e2e-contract.md`. I formati marcati «candidato» sopra sono
+confermati o sostituiti dal testo di Grappa §4f e §4g e da Cicchetto:
+
+- **Confermati:** testo del certificato (`irc-e2e:v2:dev:<ver>:<ed25519>`), testo della
+  lista, testo dell'id, info `irc-e2e:v2:pair`, rotte `claim` e `copies`.
+- **Sostituiti:** testo interno della copia S1 (`{"t":"copy","peer","body"}`); canale di
+  accoppiamento (`hello`, `offer`, `join`, `signed`, `done`, `v: 1`, modo cifre
+  `AllowLeadingZero`, primo payload in base64url). Il detentore digita il codice mostrato
+  dal nuovo dispositivo e manda l'`offer`; il nuovo dispositivo manda `join` con la firma
+  dell'id (S1); il detentore firma e manda `signed`; il nuovo dispositivo manda `done` e il
+  detentore chiude il rendezvous. Cordiale accoppia una rete per volta.
+- **Scelta del client:** la finestra di replay di 256 id per dispositivo (`e2e_peer.rs`).

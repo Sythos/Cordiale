@@ -1,6 +1,31 @@
 {
-  "fixture_revision": 3,
-  "status": "list order is ascending by the plain key text; the signed texts wait for the final MD-3 pin",
+  "fixture_revision": 4,
+  "status": "list order is ascending by the plain key text; the signed texts follow the final text of sections 4f and 4g of the Grappa client protocol and irc-olm PR 4",
+  "copy_inner": {
+    "valid": [
+      {
+        "case": "copy of a text sent to carol",
+        "plain": "{\"t\":\"copy\",\"peer\":\"carol\",\"body\":\"hi\",\"lv\":1}",
+        "peer": "carol",
+        "body": "hi",
+        "lv": 1
+      },
+      {
+        "case": "copy in a pre-key body with a recipient binding",
+        "plain": "{\"t\":\"copy\",\"peer\":\"carol\",\"body\":\"hi\",\"fb\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo\",\"lv\":2}",
+        "peer": "carol",
+        "body": "hi",
+        "lv": 2
+      }
+    ],
+    "invalid": [
+      {"case": "no body", "plain": "{\"t\":\"copy\",\"peer\":\"carol\",\"lv\":1}"},
+      {"case": "no peer", "plain": "{\"t\":\"copy\",\"body\":\"hi\",\"lv\":1}"},
+      {"case": "peer of the wrong type", "plain": "{\"t\":\"copy\",\"peer\":5,\"body\":\"hi\",\"lv\":1}"},
+      {"case": "old text field of an earlier draft", "plain": "{\"t\":\"copy\",\"peer\":\"carol\",\"text\":\"hi\",\"lv\":1}"}
+    ],
+    "not_a_message": ["[]", "\"copy\"", "{\"peer\":\"carol\",\"body\":\"hi\"}", "not json"]
+  },
   "did": [
     {
       "case": "RFC 8032 test key",

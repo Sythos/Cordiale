@@ -28,8 +28,8 @@
 //! [`ListState`], and keeps every key that a list removed. The state is public
 //! values only and serializes to JSON, so a restart keeps the revocations.
 //!
-//! The signed texts follow the current candidate of the coordinated protocol
-//! change. They live in `e2e_wire`, so a later ruling changes that file only.
+//! The signed texts follow the final text of the Grappa client protocol
+//! (section 4f). They live in `e2e_wire`, so a later ruling changes that file only.
 //!
 //! Not in this phase: the check of a first message from a new device, the
 //! replay guard, the Olm sessions for each device, the disk file for this

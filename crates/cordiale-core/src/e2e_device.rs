@@ -27,8 +27,9 @@
 //! maintained by the Matrix project, pure Rust), the library chosen for the
 //! Olm engine of the next phase. This module holds public values only.
 //!
-//! The versioned certificate and the signed device list are candidate
-//! formats: see [`VersionedDeviceCertificate`].
+//! The versioned certificate and the signed device list follow the final text
+//! of sections 4f and 4g of the Grappa client protocol: see
+//! [`VersionedDeviceCertificate`].
 //!
 //! Not in this phase: the Olm account and sessions, their storage and the
 //! link to the client events.
@@ -171,11 +172,10 @@ pub(crate) fn verify_signature(
         .map_err(|_| E2eError::BadSignature)
 }
 
-/// The MD-3 certificate candidate: the master key signs
-/// `irc-e2e:v2:dev:<N>:<E>` for one device key. This is the current
-/// candidate of the coordinated protocol change, not a final ruling. Only the
-/// builder and parser in `e2e_wire` know the text form, so a later change
-/// stays in that one place.
+/// The MD-3 certificate: the master key signs `irc-e2e:v2:dev:<N>:<E>` for one
+/// device key. Source: the `signed` message of section 4g of the Grappa client
+/// protocol. Only the builder and parser in `e2e_wire` know the text form, so
+/// a later change stays in that one place.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionedDeviceCertificate {
     /// N: the version of the first signed list that holds the device.
@@ -397,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn versioned_certificate_signs_the_candidate_bytes() {
+    fn versioned_certificate_signs_the_final_bytes() {
         let master = Account::new();
         let master_key = master.identity_keys().ed25519.to_base64();
         let device_key = Account::new().identity_keys().ed25519.to_base64();
