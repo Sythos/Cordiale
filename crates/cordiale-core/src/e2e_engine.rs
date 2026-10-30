@@ -950,9 +950,11 @@ impl E2eEngine {
     /// Olm session. The caller opens the locked query only then.
     pub fn is_ready(&self, nick: &str) -> bool {
         let trust = self.state.trust();
+        let cm = self.casemapping;
+        let folded = cm.fold(nick);
         self.peers
             .values()
-            .any(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+            .any(|entry| cm.fold(&entry.nick) == folded && self.entry_ready(entry, &trust))
     }
 
     /// The nicks that have a verified device ready to send to, in order. A
@@ -2227,10 +2229,12 @@ impl E2eEngine {
     /// gives the order.
     fn pick_devices(&self, nick: &str) -> Vec<PeerEntry> {
         let trust = self.state.trust();
+        let cm = self.casemapping;
+        let folded = cm.fold(nick);
         let mut entries: Vec<PeerEntry> = self
             .peers
             .values()
-            .filter(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+            .filter(|entry| cm.fold(&entry.nick) == folded && self.entry_ready(entry, &trust))
             .cloned()
             .collect();
         entries.sort_by(|a, b| a.device.did().cmp(b.device.did()));
@@ -2242,9 +2246,12 @@ impl E2eEngine {
     /// device takes its place.
     fn pick_specific_device(&self, nick: &str, did: &str) -> Option<PeerEntry> {
         let trust = self.state.trust();
+        let cm = self.casemapping;
         self.peers
             .get(did)
-            .filter(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
+            .filter(|entry| {
+                cm.fold(&entry.nick) == cm.fold(nick) && self.entry_ready(entry, &trust)
+            })
             .cloned()
     }
 
@@ -2390,6 +2397,9 @@ impl E2eEngine {
                 retry.push(item);
                 continue;
             }
+            // Use the nick of the peer for the session lookup: the queued
+            // target can differ in letter case only.
+            let nick = entries[0].nick.clone();
             let result = self
                 .deliver(
                     client,
