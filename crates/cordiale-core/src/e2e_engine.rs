@@ -160,6 +160,18 @@ pub fn conversation_id(network: &str, nick: &str) -> String {
     format!("{network}\u{0}{nick}")
 }
 
+/// The nicks that have a conversation on `network` in `history`.
+pub fn history_peers_of(history: &E2eHistoryStore, network: &str) -> Vec<String> {
+    let prefix = conversation_id(network, "");
+    let mut peers: Vec<String> = history
+        .conversation_ids()
+        .iter()
+        .filter_map(|id| id.strip_prefix(&prefix).map(str::to_string))
+        .collect();
+    peers.sort();
+    peers
+}
+
 /// The part of the engine file names for one network of one account on one
 /// server: a hash, so two servers or two accounts with the same network slug
 /// never share an identity or a history. A guest (`visitor:`) or an empty
@@ -893,6 +905,24 @@ impl E2eEngine {
         Self::new(network, state, history)
     }
 
+    /// Opens only the sealed history of `network`, without a device
+    /// identity. A reset removes the identity but keeps the history, so this
+    /// is the way to read it in a later session. `None` when there is no
+    /// history file.
+    pub fn open_history_for_network(
+        server: &str,
+        account: &str,
+        network: &str,
+    ) -> Result<Option<E2eHistoryStore>, EngineError> {
+        let part = storage_part(server, account, network).ok_or(EngineError::NotReady)?;
+        let dir = data_dir().ok_or(EngineError::Store(E2eStoreError::NoDataDir))?;
+        let path = dir.join(format!("e2e_history_{part}.bin"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(E2eHistoryStore::open(path, &KeyringKeyProvider)?))
+    }
+
     /// Makes the E2E identity of this device on first use, with the state
     /// file in the data folder, and publishes its bundle. On a later run it
     /// only completes what is missing. Call it before [`Self::open_for_network`]
@@ -950,15 +980,7 @@ impl E2eEngine {
     /// The nicks that have a conversation in the sealed history of this
     /// network.
     pub fn history_peers(&self) -> Vec<String> {
-        let prefix = conversation_id(&self.network, "");
-        let mut peers: Vec<String> = self
-            .history
-            .conversation_ids()
-            .iter()
-            .filter_map(|id| id.strip_prefix(&prefix).map(str::to_string))
-            .collect();
-        peers.sort();
-        peers
+        history_peers_of(&self.history, &self.network)
     }
 
     /// The nicks whose conversation changed since the last call. The list is
