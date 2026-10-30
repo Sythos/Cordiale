@@ -484,6 +484,9 @@ pub(crate) async fn run_slash_command(
             if state.prefs.notification_prefs.is_none() {
                 handle_load_notification_prefs(state, ui).await;
             }
+            if state.prefs.notification_prefs.is_none() {
+                return set_command_status(ui, "notify-prefs-failed", String::new());
+            }
             let sound = state
                 .prefs
                 .notification_prefs
@@ -498,7 +501,10 @@ pub(crate) async fn run_slash_command(
             if !NOTIFICATION_SOUNDS.contains(&sound.as_str()) {
                 return set_command_status(ui, "beep-unknown", NOTIFICATION_SOUNDS.join(", "));
             }
-            handle_notification_edit(state, ui, NotificationEdit::Sound(sound.clone())).await;
+            let edit = NotificationEdit::Sound(sound.clone());
+            if !handle_notification_edit(state, ui, edit).await {
+                return;
+            }
             return set_command_status(ui, "beep-set", sound);
         }
         SlashCommand::AliasDefine { name, expansion } => {

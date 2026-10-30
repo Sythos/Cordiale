@@ -6151,12 +6151,14 @@ fn update_mute_countdown(ui: &AppWindow, now: i64) {
 }
 
 /// Applies one notification edit over the stored map (read first when
-/// needed) and saves the whole map, as Grappa's PUT requires.
+/// needed) and saves the whole map, as Grappa's PUT requires. Returns true
+/// only when the server accepted the map; every failure shows the
+/// "notify-prefs-failed" status and keeps the lists at the stored values.
 async fn handle_notification_edit(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     edit: NotificationEdit,
-) {
+) -> bool {
     if state.prefs.notification_prefs.is_none() {
         handle_load_notification_prefs(state, ui).await;
     }
@@ -6165,11 +6167,13 @@ async fn handle_notification_edit(
         state.conn.token.clone(),
         state.prefs.notification_prefs.clone(),
     ) else {
-        return;
+        report_notification_prefs_failed(ui);
+        return false;
     };
     let mut prefs = stored.clone();
     if !apply_notification_edit(&mut prefs, &edit) {
-        return;
+        report_notification_prefs_failed(ui);
+        return false;
     }
     match client.set_notification_prefs(&token, &prefs).await {
         Ok(()) => {
@@ -6183,13 +6187,19 @@ async fn handle_notification_edit(
                 save_mute_settings(state);
             }
             sync_mute_bar(state, ui);
+            true
         }
         Err(err) => {
             persistence::log_line(&format!("notification prefs save failed: {err:?}"));
             push_notification_lists(ui, &stored);
-            let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("notify-prefs-failed".into()));
+            report_notification_prefs_failed(ui);
+            false
         }
     }
+}
+
+fn report_notification_prefs_failed(ui: &slint::Weak<AppWindow>) {
+    let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("notify-prefs-failed".into()));
 }
 
 /// Rows fetched per older-history page.

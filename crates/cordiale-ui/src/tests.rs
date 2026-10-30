@@ -5774,6 +5774,104 @@ fn notification_edits_change_only_their_field() {
     assert_eq!(muted_rows(&prefs)[0].1, "libera #rust");
 }
 
+/// Serves one request on a local port with `status` and returns the base URL.
+fn one_shot_server(status: u16) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut data = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let Ok(read) = stream.read(&mut chunk) else {
+                break;
+            };
+            if read == 0 {
+                break;
+            }
+            data.extend_from_slice(&chunk[..read]);
+            let text = String::from_utf8_lossy(&data).to_string();
+            let Some(split) = text.find("\r\n\r\n") else {
+                continue;
+            };
+            let length = text[..split]
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            if data.len() >= split + 4 + length {
+                break;
+            }
+        }
+        let reply =
+            format!("HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = stream.write_all(reply.as_bytes());
+    });
+    url
+}
+
+fn sound_edit_state(base_url: &str) -> WorkerState {
+    let mut state = WorkerState::new();
+    state.conn.client = Some(GrappaClient::new(base_url));
+    state.conn.token = Some("test-token".to_string());
+    state.prefs.notification_prefs = serde_json::json!({"notification_sound": "none"})
+        .as_object()
+        .cloned();
+    state
+}
+
+#[test]
+fn sound_edit_reports_success_only_after_the_save() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let mut state = sound_edit_state(&one_shot_server(204));
+    let saved = upload_test_runtime().block_on(handle_notification_edit(
+        &mut state,
+        &ui,
+        NotificationEdit::Sound("chime".to_string()),
+    ));
+    assert!(saved);
+    assert_eq!(
+        state.prefs.notification_prefs.as_ref().unwrap()["notification_sound"],
+        "chime"
+    );
+}
+
+#[test]
+fn sound_edit_fails_and_keeps_the_stored_value_when_the_save_fails() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let mut state = sound_edit_state(&one_shot_server(500));
+    let saved = upload_test_runtime().block_on(handle_notification_edit(
+        &mut state,
+        &ui,
+        NotificationEdit::Sound("chime".to_string()),
+    ));
+    assert!(!saved);
+    assert_eq!(
+        state.prefs.notification_prefs.as_ref().unwrap()["notification_sound"],
+        "none"
+    );
+}
+
+#[test]
+fn sound_edit_fails_when_the_prefs_cannot_be_loaded() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let mut state = sound_edit_state(&one_shot_server(500));
+    state.prefs.notification_prefs = None;
+    let saved = upload_test_runtime().block_on(handle_notification_edit(
+        &mut state,
+        &ui,
+        NotificationEdit::Sound("chime".to_string()),
+    ));
+    assert!(!saved);
+    assert!(state.prefs.notification_prefs.is_none());
+}
+
 #[test]
 fn watchlist_reply_and_network_nick() {
     assert_eq!(
