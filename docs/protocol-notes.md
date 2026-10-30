@@ -1705,6 +1705,28 @@ candidato**, da verificare. Cambia solo `e2e_pairing_flow.rs`.
   inizio). Si svuota a successo, annullamento, scadenza (300 s), errore e riavvio
   (`take_stale_pairing`: il record trovato all'avvio è sempre vecchio; il rendezvous si chiude).
 - **UI.** Comandi `/e2e pair | join <link> | code <nn> | cancel`. Il link si mostra come testo
-  nella barra di stato; l'immagine QR non è inclusa (il dato è `PairingLink::url`; `qrcode` è
-  già una dipendenza di `cordiale-ui`). Il provisioning dell'identità all'avvio non è ancora
-  collegato all'app: il creatore deve avere già uno stato con la master.
+  nella barra di stato e come immagine QR in una finestra (dato: `PairingLink::url`, disegno con
+  `qrcode`). All'avvio della sessione `E2eEngine::provision_for_network` crea l'identità di un
+  primo dispositivo (master, file di stato, bundle pubblicato); un server senza le rotte E2E o una
+  rete azzerata restano come prima.
+
+## Stati E2E e query separate (issue 458)
+
+- **Due voci per ogni peer.** `<user>` è la query legacy, `🔒<user>` è la voce E2E locale. Il
+  tipo `LocalQuery` (`e2e_view.rs`) porta rete, corsia (`QueryLane::Plain` o `Locked`) e nick
+  reale; l'etichetta serve solo alla vista. Selezione, cronologia, bozze, non letti e stato dei
+  messaggi usano la chiave della propria voce. Le righe in chiaro vanno solo alla voce legacy;
+  le righe E2E decifrate e le copie S1 solo alla voce bloccata. I non letti della voce bloccata
+  sono locali e non si salvano: dopo un riavvio la voce riparte letta.
+- **Stati mostrati** (banner sopra la chat, chiavi `e2e-chat-*`): chiaro, attiva, allarme di
+  fiducia, chiavi mancanti, abbinamento, verifica SAS, revoca, azzeramento, scaduto, invio
+  fallito, non disponibile. Lo stato non si ricava dalla query aperta: viene da motore e sessione.
+- **Stato dei messaggi.** Il segno di una riga caduta (`late`, `send_failed`, `session_ended`)
+  si salva nel file di stato E2E (`dropped_rows`) e resta dopo il riavvio.
+- **Grappa 2454 (decisione).** La riga `server_event` con `meta.e2e_undeliverable` si mostra come
+  avviso per questo dispositivo solo se `meta.e2e_device` è un `did` proprio. Se nomina un altro
+  dispositivo, il testo lo dice e cita il `did`. Senza `e2e_device` (server prima del v49) vale per
+  questo dispositivo.
+- **Grappa 2457 (decisione).** Non si applica: Cordiale non ha un messaggio SAS a più dispositivi
+  da pulire. La conferma SAS è locale a questo dispositivo (`confirm_sas`) e non c'è un prompt SAS
+  sugli altri dispositivi del peer.
