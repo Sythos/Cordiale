@@ -550,7 +550,11 @@ pub(crate) async fn handle_frame(
         return;
     }
     if payload_kind == "own_nick_changed" {
-        handle_own_nick_changed(state, &frame.topic, &frame.payload);
+        if let Some(network) = handle_own_nick_changed(state, &frame.topic, &frame.payload) {
+            if let Some(key) = members_refresh_key(state, &network) {
+                push_members_update(state, ui, &key);
+            }
+        }
         return;
     }
     // `read_cursor_set` omits both network and target from its payload; the
@@ -3089,20 +3093,36 @@ pub(crate) fn handle_own_nick_listener_join_reply(
     }
 }
 
-fn handle_own_nick_changed(state: &mut WorkerState, carrier_topic: &str, payload: &Value) {
-    let Some(user) = state.conn.identifier.clone() else {
-        return;
-    };
+/// The selected channel window of `network`, whose moderation state depends
+/// on the own nick of that network. `None` for another network, a query
+/// window or no selection.
+pub(crate) fn members_refresh_key(state: &WorkerState, network: &str) -> Option<(String, String)> {
+    state
+        .windows
+        .current_channel
+        .as_ref()
+        .filter(|key| !state.windows.current_query && key.0 == network)
+        .cloned()
+}
+
+/// Applies an own-nick change and returns the network it applies to, so the
+/// caller can refresh the moderation state of the selected channel.
+fn handle_own_nick_changed(
+    state: &mut WorkerState,
+    carrier_topic: &str,
+    payload: &Value,
+) -> Option<String> {
+    let user = state.conn.identifier.clone()?;
     if carrier_topic != format!("grappa:user:{user}") {
-        return;
+        return None;
     }
     let Some(network_slugs) = network_slugs_by_id(&state.networks.network_ids) else {
         persistence::log_line("own_nick_changed rejected: ambiguous network ID map");
-        return;
+        return None;
     };
     let Some((network, nick)) = parse_own_nick_changed(payload, &network_slugs) else {
         persistence::log_line("own_nick_changed rejected: invalid or unknown network");
-        return;
+        return None;
     };
 
     let actions = apply_own_nick_change(state, &user, &network, &nick);
@@ -3114,6 +3134,7 @@ fn handle_own_nick_changed(state: &mut WorkerState, carrier_topic: &str, payload
             }
         }
     }
+    Some(network)
 }
 
 pub(crate) fn is_channels_changed_signal(user: &str, carrier_topic: &str, payload: &Value) -> bool {

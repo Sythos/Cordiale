@@ -5509,6 +5509,58 @@ fn moderation_gate_uses_the_nick_of_the_selected_network() {
 }
 
 #[test]
+fn moderation_gate_follows_an_own_nick_change() {
+    let isupport = network_with_prefix(&[("o", "@"), ("v", "+")]);
+    let ranking = MemberRanking::new(Some(&isupport));
+    let mut state = WorkerState::new();
+    state.conn.identifier = Some("account".to_string());
+    state
+        .networks
+        .own_nicks
+        .insert("libera".to_string(), "Old".to_string());
+    state
+        .networks
+        .own_nicks
+        .insert("azzurra".to_string(), "Old".to_string());
+    let key = ("libera".to_string(), "#c".to_string());
+    let other = ("azzurra".to_string(), "#c".to_string());
+    state
+        .transcript
+        .members
+        .insert(key.clone(), roster(&[("Old", "@")]));
+    state
+        .transcript
+        .members
+        .insert(other.clone(), roster(&[("Old", "@")]));
+    let change = serde_json::json!({
+        "kind": "nick_change",
+        "from": "Old",
+        "meta": {"new_nick": "New"},
+    });
+    assert!(update_members_from_frame(&mut state, &key, &change));
+    let members = state.transcript.members[&key].clone();
+    // The roster has the new nick before the own-nick frame arrives.
+    assert!(!can_moderate_members(&state, "libera", &members, &ranking));
+    let _ = apply_own_nick_change(&mut state, "account", "libera", "New");
+    assert!(can_moderate_members(&state, "libera", &members, &ranking));
+    // The other network keeps its own nick and roster.
+    let others = state.transcript.members[&other].clone();
+    assert!(can_moderate_members(&state, "azzurra", &others, &ranking));
+}
+
+#[test]
+fn members_refresh_key_is_scoped_to_the_selected_channel() {
+    let mut state = WorkerState::new();
+    assert_eq!(members_refresh_key(&state, "libera"), None);
+    let key = ("libera".to_string(), "#c".to_string());
+    state.windows.current_channel = Some(key.clone());
+    assert_eq!(members_refresh_key(&state, "libera"), Some(key));
+    assert_eq!(members_refresh_key(&state, "azzurra"), None);
+    state.windows.current_query = true;
+    assert_eq!(members_refresh_key(&state, "libera"), None);
+}
+
+#[test]
 fn member_roles_on_an_ov_network() {
     let network = network_with_prefix(&[("o", "@"), ("v", "+")]);
     let members = seeded_roster(
