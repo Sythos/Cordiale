@@ -72,6 +72,10 @@ struct PeerRecord {
     /// that a first message certified and no stored list holds yet.
     #[serde(default)]
     certified: BTreeMap<String, u32>,
+    /// True after a reset of the own identity dropped the master. The next
+    /// master takes its place as new. The revoked keys stay.
+    #[serde(default)]
+    released: bool,
 }
 
 impl PeerRecord {
@@ -85,7 +89,15 @@ impl PeerRecord {
             revoked_curves: BTreeSet::new(),
             needs_new_list: false,
             certified: BTreeMap::new(),
+            released: false,
         }
+    }
+
+    /// Takes `master` in place of a released master, unverified and without
+    /// a list. The revoked keys stay.
+    fn take_master(&mut self, master: &str) {
+        self.master = master.to_string();
+        self.released = false;
     }
 
     fn is_revoked(&self, ed25519: &str, curve25519: Option<&str>) -> bool {
@@ -116,7 +128,8 @@ impl PeerTrust {
     }
 
     /// Compares a master key with the stored one. A new master for a known
-    /// peer is `Changed` and replaces nothing.
+    /// peer is `Changed` and replaces nothing. A released master takes the
+    /// new one, which is `New`.
     pub fn observe_master(
         &mut self,
         network: &str,
@@ -125,9 +138,13 @@ impl PeerTrust {
     ) -> Result<MasterStatus, E2eError> {
         decode_key(master)?;
         let key = peer_key(network, nick);
-        match self.peers.get(&key) {
+        match self.peers.get_mut(&key) {
             None => {
                 self.peers.insert(key, PeerRecord::new(master));
+                Ok(MasterStatus::New)
+            }
+            Some(record) if record.released => {
+                record.take_master(master);
                 Ok(MasterStatus::New)
             }
             Some(record) if record.master == master => Ok(MasterStatus::Same),
@@ -135,10 +152,11 @@ impl PeerTrust {
         }
     }
 
-    /// The stored master of a peer.
+    /// The stored master of a peer. A released master is `None`.
     pub fn master(&self, network: &str, nick: &str) -> Option<&str> {
         self.peers
             .get(&peer_key(network, nick))
+            .filter(|record| !record.released)
             .map(|record| record.master.as_str())
     }
 
@@ -158,11 +176,25 @@ impl PeerTrust {
         master: &str,
     ) -> Result<(), E2eError> {
         match self.peers.get_mut(&peer_key(network, nick)) {
-            Some(record) if record.master == master => {
+            Some(record) if !record.released && record.master == master => {
                 record.sas_verified = true;
                 Ok(())
             }
             _ => Err(E2eError::MasterChanged),
+        }
+    }
+
+    /// Drops the master of an account after a reset of the own identity. The
+    /// list, the devices and the SAS check go. The revoked keys stay, so a
+    /// revoked device stays revoked. The next master is `New`.
+    pub fn release_master(&mut self, network: &str, nick: &str) {
+        if let Some(record) = self.peers.get_mut(&peer_key(network, nick)) {
+            record.released = true;
+            record.sas_verified = false;
+            record.list = ListState::default();
+            record.curves.clear();
+            record.certified.clear();
+            record.needs_new_list = false;
         }
     }
 
@@ -211,6 +243,11 @@ impl PeerTrust {
             return Err(err);
         }
         let mut record = match self.peers.get(&key) {
+            Some(record) if record.released => {
+                let mut record = record.clone();
+                record.take_master(master);
+                record
+            }
             Some(record) if record.master != master => return Err(E2eError::MasterChanged),
             Some(record) => record.clone(),
             None => PeerRecord::new(master),
@@ -612,6 +649,64 @@ mod tests {
             .unwrap();
         assert_eq!(trust.master(NET, NICK), Some(key_of(&other).as_str()));
         assert!(!trust.is_sas_verified(NET, NICK));
+    }
+
+    #[test]
+    fn a_released_master_takes_the_next_one_and_keeps_the_revocations() {
+        let master = Account::new();
+        let master_key = key_of(&master);
+        let keys = new_keys(2);
+        let mut trust = PeerTrust::default();
+        accept(&mut trust, &master, 1, &keys).unwrap();
+        trust.mark_sas_verified(NET, NICK, &master_key).unwrap();
+        trust
+            .revoke_device(NET, NICK, &master_key, &keys[1])
+            .unwrap();
+        trust.release_master(NET, NICK);
+        let mut trust = PeerTrust::from_json(&trust.to_json().unwrap()).unwrap();
+        assert_eq!(trust.master(NET, NICK), None);
+        assert!(!trust.is_sas_verified(NET, NICK));
+        assert!(trust.listed_devices(NET, NICK).is_empty());
+        assert_eq!(
+            trust.mark_sas_verified(NET, NICK, &master_key),
+            Err(E2eError::MasterChanged)
+        );
+        // The next master is new, not changed.
+        let next = Account::new();
+        assert_eq!(
+            trust.observe_master(NET, NICK, &key_of(&next)),
+            Ok(MasterStatus::New)
+        );
+        assert_eq!(trust.master(NET, NICK), Some(key_of(&next).as_str()));
+        assert_eq!(
+            trust.observe_master(NET, NICK, &master_key),
+            Ok(MasterStatus::Changed)
+        );
+        // A list of the next master is taken, a revoked key never.
+        let fresh = new_keys(1);
+        assert_eq!(
+            accept(&mut trust, &next, 1, &fresh),
+            Ok(ListDecision::Replace)
+        );
+        assert!(trust.is_revoked(NET, NICK, &keys[1], None));
+        assert_eq!(
+            accept(&mut trust, &next, 2, &[fresh[0].clone(), keys[1].clone()]),
+            Err(E2eError::RevokedDevice)
+        );
+    }
+
+    #[test]
+    fn a_released_master_takes_a_list_of_the_next_master() {
+        let master = Account::new();
+        let mut trust = PeerTrust::default();
+        accept(&mut trust, &master, 3, &new_keys(1)).unwrap();
+        trust.release_master(NET, NICK);
+        let next = Account::new();
+        assert_eq!(
+            accept(&mut trust, &next, 1, &new_keys(1)),
+            Ok(ListDecision::Replace)
+        );
+        assert_eq!(trust.master(NET, NICK), Some(key_of(&next).as_str()));
     }
 
     #[test]

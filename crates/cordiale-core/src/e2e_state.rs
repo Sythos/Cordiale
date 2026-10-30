@@ -481,10 +481,12 @@ impl E2eStateStore {
 
     /// Removes the private state of the identity: the Olm account, the
     /// sessions, the master key, the own list and certificate and the
-    /// pending states. The peer trust and the replay state stay, so a revoked
-    /// peer device stays revoked.
-    pub fn finish_reset(&mut self) -> Result<(), E2eStoreError> {
+    /// pending states. The trust of `own_nick` on `network` releases its
+    /// master in the same write, so the next identity is new and not changed.
+    /// The other peer trust, all revocations and the replay state stay.
+    pub fn finish_reset(&mut self, network: &str, own_nick: &str) -> Result<(), E2eStoreError> {
         self.commit(|data| {
+            data.trust.release_master(network, own_nick);
             if let Some(text) = data.account.as_mut() {
                 text.zeroize();
             }
@@ -508,6 +510,12 @@ impl E2eStateStore {
             data.own_revoked.clear();
             data.reset_pending = false;
         })
+    }
+
+    /// Replaces the file writer, for tests of a failed write.
+    #[cfg(test)]
+    pub(crate) fn set_writer(&mut self, writer: Writer) {
+        self.writer = writer;
     }
 
     /// Applies `change` to a copy, writes the copy, and only then keeps it.

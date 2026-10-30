@@ -3306,7 +3306,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn a_copy_without_a_valid_peer_is_acknowledged_and_not_stored() {
         let mut s = siblings();
         let locked = locked_label("carol");

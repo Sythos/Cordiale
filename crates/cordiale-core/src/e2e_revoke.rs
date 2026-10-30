@@ -25,10 +25,10 @@
 //! A revoke signs a new device list with the master key. The list has a
 //! higher version and lacks the revoked device. The steps are:
 //!
-//! 1. The revoked key goes to the trust state of the own nick and to the
+//! 1. The new list and the pending revoke go to the sealed store in one write.
+//! 2. The revoked key goes to the trust state of the own nick and to the
 //!    sealed store. From then on no key request, copy, inbox row or session
 //!    uses the device, and an older list never restores it.
-//! 2. The new list and the pending revoke go to the sealed store in one write.
 //! 3. The list goes to the server. A stale answer reads the held list and
 //!    signs again above it, without any revoked key.
 //! 4. The server drops the device (`DELETE /e2e/devices/:did`). A device that
@@ -192,7 +192,8 @@ pub async fn revoke_device(
         ed25519: target,
         did: did.to_string(),
     };
-    stop_routing(routes, store, &pending)?;
+    // The pending revoke goes to the store before any routing write, so a
+    // failed later step stays resumable.
     store.begin_revoke(&pending, &next)?;
     finish_revoke(routes, store, pending).await
 }
@@ -377,17 +378,23 @@ async fn complete_reset(
         }) => {}
         Err(err) => return Err(err.into()),
     }
-    Ok(store.finish_reset()?)
+    Ok(store.finish_reset(routes.network, routes.own_nick)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::e2e_manage::SignedList;
+    use crate::e2e_peer::apply_peer_list;
     use crate::e2e_store::E2eKeyProvider;
+    use crate::e2e_trust::MasterStatus;
+    use crate::e2e_wire::ListDecision;
+    use crate::persistence::write_atomic;
     use serde_json::{json, Value};
+    use std::cell::Cell;
     use std::fs;
-    use std::path::PathBuf;
+    use std::io;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use vodozemac::olm::Account;
@@ -574,9 +581,29 @@ mod tests {
         }
     }
 
+    /// Closes the store and opens it again, as a restart does. The old handle
+    /// holds the lock, so it closes before the new open.
     fn reopen(setup: &mut Setup) {
+        let spare =
+            E2eStateStore::open(setup.dir.join("spare.bin"), &setup.provider).expect("spare");
+        drop(std::mem::replace(&mut setup.store, spare));
         setup.store =
             E2eStateStore::open(setup.dir.join("state.bin"), &setup.provider).expect("reopen");
+    }
+
+    thread_local! {
+        /// The number of store writes that succeed before every write fails.
+        static WRITES_LEFT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn limited_writer(path: &Path, contents: &[u8]) -> io::Result<()> {
+        WRITES_LEFT.with(|left| match left.get() {
+            0 => Err(io::Error::other("write interrupted")),
+            n => {
+                left.set(n - 1);
+                write_atomic(path, contents)
+            }
+        })
     }
 
     /// The server holds the list of the store.
@@ -665,6 +692,40 @@ mod tests {
             .await
             .expect("nothing");
         assert!(again.is_none());
+        let _ = fs::remove_dir_all(&s.dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_routing_write_keeps_the_revoke_pending_through_a_restart() {
+        let mut s = setup("routing-write");
+        let state = Shared::default();
+        hold_stored_list(&s, &state);
+        let server = fake_server(&state).await;
+        let client = GrappaClient::new(server.uri());
+
+        // The pending revoke is written. The write of the trust state fails.
+        WRITES_LEFT.with(|left| left.set(1));
+        s.store.set_writer(limited_writer);
+        let failed = revoke_device(&routes(&client, PROTOCOL), &mut s.store, &s.second_did).await;
+
+        assert!(matches!(failed, Err(RevokeError::Store(_))));
+        assert!(server.received_requests().await.unwrap().is_empty());
+        reopen(&mut s);
+        assert_eq!(s.store.pending_revoke().unwrap().did, s.second_did);
+        assert!(s.store.list_pending());
+        assert_eq!(s.store.signed_list().unwrap().version, 2);
+
+        let done = finish_pending_revoke(&routes(&client, PROTOCOL), &mut s.store)
+            .await
+            .expect("retry")
+            .expect("pending");
+        assert_eq!(done.list_version, 2);
+        assert!(s.store.trust().is_did_revoked(NETWORK, NICK, &s.second_did));
+        assert!(s.store.pending_revoke().is_none());
+        let fake = state.lock().unwrap();
+        assert_eq!(fake.list.as_ref().unwrap()["ver"], 2);
+        assert_eq!(fake.drops, vec![s.second_did.clone()]);
+        drop(fake);
         let _ = fs::remove_dir_all(&s.dir);
     }
 
@@ -878,6 +939,33 @@ mod tests {
 
         assert!(s.store.signed_list().is_none());
         assert!(s.store.trust().is_did_revoked(NETWORK, NICK, &s.second_did));
+
+        // The next identity of the own account is new, not a changed master,
+        // also after a restart. The revoked device stays revoked.
+        reopen(&mut s);
+        let mut trust = s.store.trust();
+        assert_eq!(trust.master(NETWORK, NICK), None);
+        let next = Account::new();
+        let next_key = ed25519_of(&next);
+        let sibling = ed25519_of(&Account::new());
+        let list = sign_list(&next, 1, std::slice::from_ref(&sibling)).expect("list");
+        assert_eq!(
+            apply_peer_list(
+                &mut trust,
+                NETWORK,
+                NICK,
+                &next_key,
+                list.version,
+                &list.keys,
+                &list.signature,
+            ),
+            Ok(ListDecision::Replace)
+        );
+        assert_eq!(
+            trust.observe_master(NETWORK, NICK, &next_key),
+            Ok(MasterStatus::New)
+        );
+        assert!(trust.is_did_revoked(NETWORK, NICK, &s.second_did));
         let _ = fs::remove_dir_all(&s.dir);
     }
 }
