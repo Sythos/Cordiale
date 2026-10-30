@@ -585,7 +585,7 @@ async fn read_playlist_body<S: ChunkSource>(
     source: &mut S,
     max_bytes: usize,
     limit: std::time::Duration,
-) -> Result<String, RadioError> {
+) -> Result<Vec<u8>, RadioError> {
     let read = async {
         let mut body = Vec::new();
         while let Some(chunk) = source.next_chunk().await? {
@@ -594,13 +594,32 @@ async fn read_playlist_body<S: ChunkSource>(
             }
             body.extend_from_slice(&chunk);
         }
-        Ok(String::from_utf8_lossy(&body).into_owned())
+        Ok(body)
     };
     tokio::time::timeout(limit, read).await.unwrap_or_else(|_| {
         Err(RadioError::Refused(
             "the playlist took too long".to_string(),
         ))
     })
+}
+
+/// Decodes a playlist body like `reqwest::Response::text`: the `charset` of
+/// the `Content-Type` is used, UTF-8 is the default, and a byte order mark
+/// overrides both and is removed.
+fn decode_playlist(body: &[u8], content_type: Option<&HeaderValue>) -> String {
+    let encoding = content_type
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value.split(';').skip(1).find_map(|param| {
+                let (key, label) = param.split_once('=')?;
+                key.trim()
+                    .eq_ignore_ascii_case("charset")
+                    .then(|| label.trim().trim_matches('"'))
+            })
+        })
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    encoding.decode(body).0.into_owned()
 }
 
 /// Why a stream couldn't be opened or read.
@@ -650,8 +669,10 @@ impl RadioStream {
             if declared.is_some_and(|length| length > MAX_PLAYLIST_BYTES as u64) {
                 return Err(RadioError::Refused("the playlist is too large".to_string()));
             }
-            let text = read_playlist_body(&mut response, MAX_PLAYLIST_BYTES, PLAYLIST_BODY_TIMEOUT)
+            let declared_type = response.headers().get(CONTENT_TYPE).cloned();
+            let body = read_playlist_body(&mut response, MAX_PLAYLIST_BYTES, PLAYLIST_BODY_TIMEOUT)
                 .await?;
+            let text = decode_playlist(&body, declared_type.as_ref());
             let stream = playlist_urls(&text)
                 .into_iter()
                 .next()
@@ -843,8 +864,34 @@ mod tests {
     #[tokio::test]
     async fn a_normal_playlist_is_read_in_chunks() {
         let mut source = Chunks::new(&[b"#EXTM3U\nhttp://exam", b"ple.org/a.ogg\n"], NO_DELAY);
-        let text = read_playlist_body(&mut source, 1024, LONG).await.unwrap();
+        let body = read_playlist_body(&mut source, 1024, LONG).await.unwrap();
+        let text = decode_playlist(&body, None);
         assert_eq!(playlist_urls(&text), vec!["http://example.org/a.ogg"]);
+    }
+
+    #[test]
+    fn a_utf8_byte_order_mark_is_removed() {
+        let text = decode_playlist(b"\xEF\xBB\xBFhttp://example.org/a.ogg\n", None);
+        assert_eq!(playlist_urls(&text), vec!["http://example.org/a.ogg"]);
+    }
+
+    #[test]
+    fn a_utf16_playlist_is_decoded() {
+        let mut body = vec![0xFF, 0xFE];
+        for unit in "File1=http://example.org/a.ogg\n".encode_utf16() {
+            body.extend_from_slice(&unit.to_le_bytes());
+        }
+        let text = decode_playlist(&body, None);
+        assert_eq!(playlist_urls(&text), vec!["http://example.org/a.ogg"]);
+    }
+
+    #[test]
+    fn the_declared_charset_is_used() {
+        let header = HeaderValue::from_static("audio/x-scpls; charset=\"ISO-8859-1\"");
+        let text = decode_playlist(b"File1=http://example.org/caf\xE9\n", Some(&header));
+        assert_eq!(playlist_urls(&text), vec!["http://example.org/café"]);
+        let plain = decode_playlist(b"File1=http://example.org/a\n", None);
+        assert_eq!(plain, "File1=http://example.org/a\n");
     }
 
     #[tokio::test]
