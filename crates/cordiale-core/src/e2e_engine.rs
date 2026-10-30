@@ -2189,18 +2189,22 @@ impl E2eEngine {
 
     /// The id block, the master block and the list version that this device
     /// writes in its messages. They come from the provisioning: a device
-    /// without a master key, a certificate or a signed list is not ready.
+    /// without a certificate or a signed list is not ready. A device that
+    /// joined by pairing holds no master secret: the master public key is the
+    /// one in its certificate. A master holder must match that key.
     fn own_wire(&self, identity: &Account) -> Result<OwnWire, EngineError> {
-        let master = self.state.master_key()?.ok_or(EngineError::NotReady)?;
-        let master_ed25519 = master.identity_keys().ed25519.to_base64();
         let certificate = self
             .state
             .device_certificate()
             .ok_or(EngineError::NotReady)?;
+        let master_ed25519 = certificate.master_ed25519.clone();
+        if let Some(master) = self.state.master_key()? {
+            if master.identity_keys().ed25519.to_base64() != master_ed25519 {
+                return Err(EngineError::NotReady);
+            }
+        }
         let list = self.state.signed_list().ok_or(EngineError::NotReady)?;
-        if certificate.device_ed25519 != self.own_ed25519
-            || certificate.master_ed25519 != master_ed25519
-        {
+        if certificate.device_ed25519 != self.own_ed25519 {
             return Err(EngineError::NotReady);
         }
         let curve25519 = identity.identity_keys().curve25519.to_base64();
