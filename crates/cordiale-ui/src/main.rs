@@ -6460,7 +6460,8 @@ async fn handle_settings_network_refresh(state: &mut WorkerState, ui: &slint::We
             .unwrap_or_default(),
         None => String::new(),
     };
-    let aliases = client.fetch_aliases(token).await.unwrap_or_default();
+    // A failed read leaves the visible alias list untouched.
+    let aliases = client.fetch_aliases(token).await.ok();
     let vhost = client.fetch_vhost_settings(token).await.ok();
     let dcc_auto_accept = match &state.prefs.settings_network {
         Some(network) => client
@@ -6470,13 +6471,15 @@ async fn handle_settings_network_refresh(state: &mut WorkerState, ui: &slint::We
         None => false,
     };
 
-    let alias_rows: Vec<AliasRow> = aliases
-        .into_iter()
-        .map(|(command, expansion)| AliasRow {
-            command: command.into(),
-            expansion: expansion.into(),
-        })
-        .collect();
+    let alias_rows: Option<Vec<AliasRow>> = aliases.map(|aliases| {
+        aliases
+            .into_iter()
+            .map(|(command, expansion)| AliasRow {
+                command: command.into(),
+                expansion: expansion.into(),
+            })
+            .collect()
+    });
 
     let vhost_rows: Vec<VhostOptionRow> = match vhost {
         Some(view) => {
@@ -6505,7 +6508,9 @@ async fn handle_settings_network_refresh(state: &mut WorkerState, ui: &slint::We
         ui.set_settings_ignores(ignore_rows_model(ignores));
         ui.set_settings_ignore_error("".into());
         ui.set_perform_text(perform_text.into());
-        ui.set_settings_aliases(Rc::new(slint::VecModel::from(alias_rows)).into());
+        if let Some(alias_rows) = alias_rows {
+            ui.set_settings_aliases(Rc::new(slint::VecModel::from(alias_rows)).into());
+        }
         ui.set_settings_vhost_options(Rc::new(slint::VecModel::from(vhost_rows)).into());
         ui.set_pref_dcc_auto_accept(dcc_auto_accept);
     });
@@ -6710,6 +6715,92 @@ async fn handle_identity_save(state: &WorkerState, nick: String, ident: String, 
         .await;
 }
 
+/// One change to the account's alias map.
+enum AliasChange {
+    Set(String, String),
+    Remove(String),
+}
+
+/// Why an alias update did not reach the server.
+#[derive(Debug, PartialEq, Eq)]
+enum AliasUpdateError {
+    /// The current map could not be read, so nothing was written.
+    Read,
+    /// The write failed.
+    Write,
+}
+
+impl AliasUpdateError {
+    fn status_kind(&self) -> &'static str {
+        match self {
+            AliasUpdateError::Read => "alias-read-failed",
+            AliasUpdateError::Write => "alias-save-failed",
+        }
+    }
+}
+
+/// Applies `change` to the map from `read` and hands the result to `write`.
+/// `PUT /me/settings/aliases` replaces the whole map, so a failed read must
+/// never reach `write`: an empty map would wipe every saved alias.
+async fn apply_alias_change<R, RF, W, WF>(
+    read: R,
+    write: W,
+    change: AliasChange,
+) -> Result<(), AliasUpdateError>
+where
+    R: FnOnce() -> RF,
+    RF: std::future::Future<Output = Option<HashMap<String, String>>>,
+    W: FnOnce(HashMap<String, String>) -> WF,
+    WF: std::future::Future<Output = bool>,
+{
+    let mut aliases = read().await.ok_or(AliasUpdateError::Read)?;
+    match change {
+        AliasChange::Set(command, expansion) => {
+            if !command.is_empty() {
+                aliases.insert(command, expansion);
+            }
+        }
+        AliasChange::Remove(command) => {
+            aliases.remove(&command);
+        }
+    }
+    if write(aliases).await {
+        Ok(())
+    } else {
+        Err(AliasUpdateError::Write)
+    }
+}
+
+/// Reads, changes and writes back the alias map. On failure the status bar
+/// shows the error and the visible list stays as it was.
+async fn run_alias_change(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    change: AliasChange,
+) {
+    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
+        return;
+    };
+    let outcome = apply_alias_change(
+        || async move {
+            match client.fetch_aliases(token).await {
+                Ok(aliases) => Some(aliases),
+                Err(err) => {
+                    persistence::log_line(&format!("aliases fetch failed: {err:?}"));
+                    None
+                }
+            }
+        },
+        |aliases| async move { client.update_aliases(token, aliases).await.is_ok() },
+        change,
+    )
+    .await;
+    match outcome {
+        Ok(()) => handle_settings_network_refresh(state, ui).await,
+        Err(err) => set_command_status(ui, err.status_kind(), String::new()),
+    }
+}
+
 /// Adds/edits one alias — Grappa's `PUT /me/settings/aliases` replaces
 /// the whole map, so this fetches the current one, applies the change,
 /// and writes the whole thing back (no diff/patch endpoint exists).
@@ -6718,17 +6809,9 @@ async fn handle_alias_upsert(
     ui: &slint::Weak<AppWindow>,
     new_entry: Option<(String, String)>,
 ) {
-    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
-        return;
-    };
-    let mut aliases = client.fetch_aliases(token).await.unwrap_or_default();
     if let Some((command, expansion)) = new_entry {
-        if !command.is_empty() {
-            aliases.insert(command, expansion);
-        }
+        run_alias_change(state, ui, AliasChange::Set(command, expansion)).await;
     }
-    let _ = client.update_aliases(token, aliases).await;
-    handle_settings_network_refresh(state, ui).await;
 }
 
 async fn handle_alias_remove(
@@ -6736,13 +6819,7 @@ async fn handle_alias_remove(
     ui: &slint::Weak<AppWindow>,
     command: String,
 ) {
-    let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
-        return;
-    };
-    let mut aliases = client.fetch_aliases(token).await.unwrap_or_default();
-    aliases.remove(&command);
-    let _ = client.update_aliases(token, aliases).await;
-    handle_settings_network_refresh(state, ui).await;
+    run_alias_change(state, ui, AliasChange::Remove(command)).await;
 }
 
 /// Toggles one address in the vhost selection — `PUT /me/settings/vhost`

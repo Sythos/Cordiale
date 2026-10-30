@@ -3081,6 +3081,14 @@ msgid "Couldn't remove the avatar."
 msgstr "No se pudo quitar el avatar."
 
 msgctxt "AppWindow"
+msgid "Couldn't read your aliases, so nothing was changed. Try again."
+msgstr "No se pudieron leer tus alias, así que no se cambió nada. Inténtalo de nuevo."
+
+msgctxt "AppWindow"
+msgid "Couldn't save your aliases. Try again."
+msgstr "No se pudieron guardar tus alias. Inténtalo de nuevo."
+
+msgctxt "AppWindow"
 msgid "Network profile"
 msgstr "Perfil de la red"
 
