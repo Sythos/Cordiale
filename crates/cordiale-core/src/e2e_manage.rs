@@ -26,9 +26,9 @@
 //! [`PeerDirectory`] checks the master signature before any state changes. It
 //! never replaces the master key by itself, and a revoked key stays revoked.
 //!
-//! Not in this slice: the signing side of the own account (revoke and reset),
-//! the storage in the encrypted store, the adapter for the route names and
-//! error tokens of protocol 49 and the device screens.
+//! The signing side of the own account (revoke and reset) is in `e2e_revoke`.
+//! Not in this module: the storage in the encrypted store, the adapter for the
+//! route names and error tokens of protocol 49 and the device screens.
 
 use serde::{Deserialize, Serialize};
 

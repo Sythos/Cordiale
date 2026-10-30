@@ -25,9 +25,21 @@ fn main() {
     // `.po` files itself at build time, no external `msgfmt`/gettext
     // toolchain needed on any platform. Domain is the crate name, per
     // Slint's own convention.
-    let config = slint_build::CompilerConfiguration::new().with_bundled_translations("lang");
-    slint_build::compile_with_config("ui/appwindow.slint", config)
-        .expect("failed to compile the Slint UI");
+    //
+    // The compile runs in a thread with a large stack: the Slint compiler
+    // walks the long `else if` chains of `appwindow.slint` recursively, and
+    // the 1 MiB main thread of a Windows build script is too small for them.
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let config =
+                slint_build::CompilerConfiguration::new().with_bundled_translations("lang");
+            slint_build::compile_with_config("ui/appwindow.slint", config)
+                .expect("failed to compile the Slint UI");
+        })
+        .expect("failed to start the Slint compiler thread")
+        .join()
+        .expect("the Slint compiler thread panicked");
 
     // Embed the app icon into the .exe on Windows. The .ico is generated
     // from resources/branding/cordiale_icona.png by the release-building

@@ -3284,6 +3284,28 @@ mod tests {
     }
 
     #[test]
+    fn a_revoked_own_device_gets_no_inbox_work_and_is_never_a_target() {
+        let mut s = siblings();
+        let mut trust = s.bob.state_mut().trust();
+        let master = ed(&s.bob_id.master);
+        trust
+            .revoke_device(NET, "bob", &master, &ed(&s.second))
+            .expect("revoke");
+        s.bob.state_mut().set_trust(&trust).expect("trust");
+
+        let value = copy_row(&s, 3, "msgid2", "carol", "from the revoked device", "");
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(s.bob.handle_row(&item, 50), RowOutcome::Undecryptable);
+        assert!(s
+            .bob
+            .history()
+            .messages(&conversation_id(NET, "carol"))
+            .is_empty());
+        assert!(!s.bob.is_ready("bob"));
+        assert!(s.bob.ready_peers().is_empty());
+    }
+
+    #[test]
     fn a_copy_without_a_valid_peer_is_acknowledged_and_not_stored() {
         let mut s = siblings();
         let locked = locked_label("carol");

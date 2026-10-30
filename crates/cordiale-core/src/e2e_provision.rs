@@ -96,6 +96,8 @@ pub enum ProvisionError {
     NeedsPairing,
     /// The master of the list on the server is not the stored master.
     MasterMismatch,
+    /// An identity reset is not finished. No identity is made before it ends.
+    ResetPending,
 }
 
 impl From<E2eStoreError> for ProvisionError {
@@ -172,6 +174,9 @@ pub async fn provision_device(
         .any(|operation| !operation.available(server_protocol))
     {
         return Err(E2eRouteError::Unavailable.into());
+    }
+    if store.reset_pending() {
+        return Err(ProvisionError::ResetPending);
     }
 
     let (account, identity_created) = match store.olm_identity()? {
@@ -355,7 +360,11 @@ fn is_paired_under(store: &E2eStateStore, master: &str, device_ed25519: &str) ->
 
 /// Signs a device list with the master key. The keys are sorted by the
 /// builder of the signature.
-fn sign_list(master: &Account, version: u32, keys: &[String]) -> Result<SignedList, E2eError> {
+pub(crate) fn sign_list(
+    master: &Account,
+    version: u32,
+    keys: &[String],
+) -> Result<SignedList, E2eError> {
     let signature =
         build_signed_list_signature(version, keys, |text| master.sign(text).to_base64())?;
     let mut sorted = keys.to_vec();

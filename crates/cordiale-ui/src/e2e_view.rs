@@ -31,6 +31,8 @@
 
 use cordiale_core::e2e_pairing::{ClosedReason, PairingCallError};
 use cordiale_core::e2e_pairing_flow::{DriveError, EndReason, FlowError, PairingStatus};
+use cordiale_core::e2e_refusal::E2eRouteError;
+use cordiale_core::e2e_revoke::{RevokeError, Revoked};
 use cordiale_core::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError};
 
 /// What the user sees for one E2E message.
@@ -172,6 +174,32 @@ pub fn pairing_error_key(error: &DriveError) -> &'static str {
     }
 }
 
+/// The `status-kind` key and the hint of a revoke result. The hint is the id
+/// of the revoked device after a success, and empty otherwise. A failed
+/// network step keeps the revoke pending: the user tries again. The result
+/// is E2E control state shown in the status bar. It never enters a query.
+pub fn revoke_status_key(result: &Result<Revoked, RevokeError>) -> (&'static str, String) {
+    match result {
+        Ok(done) => ("e2e-revoke-done", done.did.clone()),
+        Err(RevokeError::Route(E2eRouteError::Unavailable)) => {
+            ("e2e-revoke-unavailable", String::new())
+        }
+        Err(RevokeError::Route(_) | RevokeError::Store(_)) => ("e2e-revoke-pending", String::new()),
+        Err(_) => ("e2e-revoke-failed", String::new()),
+    }
+}
+
+/// The `status-kind` key of a reset result. The locked query has no identity
+/// after a reset and never falls back to clear text.
+pub fn reset_status_key(result: &Result<(), RevokeError>) -> &'static str {
+    match result {
+        Ok(()) => "e2e-reset-done",
+        Err(RevokeError::Route(E2eRouteError::Unavailable)) => "e2e-reset-unavailable",
+        Err(RevokeError::Route(_) | RevokeError::Store(_)) => "e2e-reset-pending",
+        Err(_) => "e2e-reset-failed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +276,27 @@ mod tests {
         assert_eq!(pairing_error_key(&none), "e2e-pair-none");
         let other = DriveError::Flow(FlowError::TooLarge);
         assert_eq!(pairing_error_key(&other), "e2e-pair-failed");
+    }
+
+    #[test]
+    fn revoke_and_reset_results_map_to_status_keys() {
+        let done = Revoked {
+            did: "abcdefghijk".to_string(),
+            list_version: 2,
+        };
+        assert_eq!(
+            revoke_status_key(&Ok(done)),
+            ("e2e-revoke-done", "abcdefghijk".to_string())
+        );
+        let old = RevokeError::Route(E2eRouteError::Unavailable);
+        assert_eq!(revoke_status_key(&Err(old)).0, "e2e-revoke-unavailable");
+        let old = RevokeError::Route(E2eRouteError::Unavailable);
+        assert_eq!(reset_status_key(&Err(old)), "e2e-reset-unavailable");
+        let unknown = RevokeError::UnknownDevice;
+        assert_eq!(revoke_status_key(&Err(unknown)).0, "e2e-revoke-failed");
+        assert_eq!(reset_status_key(&Ok(())), "e2e-reset-done");
+        let pending = RevokeError::ResetPending;
+        assert_eq!(reset_status_key(&Err(pending)), "e2e-reset-failed");
     }
 
     #[test]

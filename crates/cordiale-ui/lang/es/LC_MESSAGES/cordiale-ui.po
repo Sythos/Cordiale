@@ -297,6 +297,38 @@ msgid "No pairing is open. Type /e2e pair on the first device."
 msgstr "No hay ningún emparejamiento abierto. Escribe /e2e pair en el primer dispositivo."
 
 msgctxt "AppWindow"
+msgid "Device {} was revoked."
+msgstr "El dispositivo {} fue revocado."
+
+msgctxt "AppWindow"
+msgid "The revoke is not finished. Try again later."
+msgstr "La revocación no ha terminado. Inténtalo de nuevo más tarde."
+
+msgctxt "AppWindow"
+msgid "This server does not support device revoke."
+msgstr "Este servidor no admite la revocación de dispositivos."
+
+msgctxt "AppWindow"
+msgid "The device was not revoked."
+msgstr "El dispositivo no fue revocado."
+
+msgctxt "AppWindow"
+msgid "The E2E identity was reset. The locked query cannot send now."
+msgstr "La identidad E2E se restableció. La consulta bloqueada ya no puede enviar."
+
+msgctxt "AppWindow"
+msgid "The reset is not finished. Try again later."
+msgstr "El restablecimiento no ha terminado. Inténtalo de nuevo más tarde."
+
+msgctxt "AppWindow"
+msgid "This server does not support the reset of the E2E identity."
+msgstr "Este servidor no admite el restablecimiento de la identidad E2E."
+
+msgctxt "AppWindow"
+msgid "The E2E identity was not reset."
+msgstr "La identidad E2E no se restableció."
+
+msgctxt "AppWindow"
 msgid "Disconnected. Reconnecting…"
 msgstr "Desconectado. Reconectando…"
 
