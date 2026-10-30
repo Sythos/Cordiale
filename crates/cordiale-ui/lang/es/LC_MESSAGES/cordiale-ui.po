@@ -3623,3 +3623,11 @@ msgstr "Código de emparejamiento"
 msgctxt "RenameTarget"
 msgid "Open a conversation with {}"
 msgstr "Abre una conversación con {}"
+
+msgctxt "AppWindow"
+msgid "Shared channels:"
+msgstr "Canales en común:"
+
+msgctxt "AppWindow"
+msgid "No shared channels."
+msgstr "No hay canales en común."

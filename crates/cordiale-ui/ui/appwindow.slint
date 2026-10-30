@@ -1329,6 +1329,10 @@ export component AppWindow inherits Window {
     // `current-query`, so it's always valid whenever `current-query` is
     // true. Tab-completion's only candidate in a query window.
     in property <string> current-query-peer-nick: "";
+    // Channels of `shared-channels-network` that the user joined and where
+    // the open query's peer is listed. Empty when there are none.
+    in property <[string]> shared-channels: [];
+    in property <string> shared-channels-network: "";
     // Away message of the open private window's peer (a standalone 301);
     // `peer-away-message` may be empty when the peer gave no text.
     in property <bool> peer-away-visible: false;
@@ -3852,6 +3856,29 @@ export component AppWindow inherits Window {
                         accessible-label: @tr("Dismiss away message");
                         clicked => { peer-away-dismiss-requested(); }
                     }
+                }
+            }
+
+            if current-query : Rectangle {
+                background: theme == "dark" ? #232a31 : #eef2f6;
+                border-width: 1px;
+                border-color: theme == "dark" ? #3b4650 : #c5ced8;
+                HorizontalBox {
+                    spacing: 6px;
+                    Text {
+                        text: shared-channels.length == 0
+                            ? @tr("No shared channels.")
+                            : @tr("Shared channels:");
+                        vertical-alignment: center;
+                        overflow: elide;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    for shared-channel in shared-channels : Button {
+                        text: shared-channel;
+                        clicked => { channel-selected(shared-channels-network, shared-channel); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
                 }
             }
 

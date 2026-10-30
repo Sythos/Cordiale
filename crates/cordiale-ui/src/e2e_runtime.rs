@@ -1296,6 +1296,7 @@ fn show_locked_window(state: &WorkerState, ui: &slint::Weak<AppWindow>, network:
     let label = format!("{network} — {}", key.1);
     let window_status = window_status_for(state);
     let peer_nick = nick.to_string();
+    crate::queries::push_shared_channels(state, ui, network, nick);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());

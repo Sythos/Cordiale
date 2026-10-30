@@ -10585,3 +10585,119 @@ fn a_plain_history_row_never_carries_the_encrypted_mark() {
         assert!(locked_row_with_drop(&message, "me", "ada", None).encrypted);
     }
 }
+
+fn shared_state(joined: &[&str]) -> WorkerState {
+    let mut state = WorkerState::new();
+    for channel in joined {
+        state
+            .windows
+            .window_states
+            .insert(window_state_key("net", channel), ChannelWindowState::Joined);
+    }
+    state
+}
+
+fn shared_for(state: &WorkerState, peer: &str) -> Vec<String> {
+    shared_channels(
+        &state.transcript.members,
+        &state.windows.window_states,
+        "net",
+        peer,
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+    )
+}
+
+fn shared_key(channel: &str) -> (String, String) {
+    ("net".to_string(), channel.to_string())
+}
+
+#[test]
+fn shared_channels_lists_only_joined_channels_with_the_peer() {
+    let mut state = shared_state(&["#b", "#a", "#left"]);
+    let members = &mut state.transcript.members;
+    members.insert(shared_key("#b"), roster(&[("ada", ""), ("me", "")]));
+    members.insert(shared_key("#a"), roster(&[("ada", "@")]));
+    members.insert(shared_key("#left"), roster(&[("bob", "")]));
+    // A stale roster of a channel that is not joined is not shared.
+    members.insert(shared_key("#old"), roster(&[("ada", "")]));
+    // Another network never counts.
+    members.insert(
+        ("elsewhere".to_string(), "#b".to_string()),
+        roster(&[("ada", "")]),
+    );
+    assert_eq!(shared_for(&state, "ada"), vec!["#a", "#b"]);
+}
+
+#[test]
+fn shared_channels_is_empty_without_a_shared_channel() {
+    let mut state = shared_state(&["#a"]);
+    assert!(shared_for(&state, "ada").is_empty());
+    state
+        .transcript
+        .members
+        .insert(shared_key("#a"), roster(&[("bob", "")]));
+    assert!(shared_for(&state, "ada").is_empty());
+}
+
+#[test]
+fn shared_channels_follow_membership_and_nick_changes() {
+    let mut state = shared_state(&["#a", "#b"]);
+    let a = shared_key("#a");
+    let b = shared_key("#b");
+    state
+        .transcript
+        .members
+        .insert(a.clone(), roster(&[("ada", "")]));
+    state
+        .transcript
+        .members
+        .insert(b.clone(), roster(&[("ada", "")]));
+    assert_eq!(shared_for(&state, "ada"), vec!["#a", "#b"]);
+
+    let part = serde_json::json!({"kind": "part", "from": "ada"});
+    assert!(update_members_from_frame(&mut state, &a, &part));
+    assert_eq!(shared_for(&state, "ada"), vec!["#b"]);
+
+    let join = serde_json::json!({"kind": "join", "from": "ada"});
+    assert!(update_members_from_frame(&mut state, &a, &join));
+    assert_eq!(shared_for(&state, "ada"), vec!["#a", "#b"]);
+
+    let kick = serde_json::json!({"kind": "kick", "meta": {"target": "ada"}});
+    assert!(update_members_from_frame(&mut state, &b, &kick));
+    assert_eq!(shared_for(&state, "ada"), vec!["#a"]);
+
+    let quit = serde_json::json!({"kind": "quit", "from": "ada"});
+    assert!(update_members_from_frame(&mut state, &a, &quit));
+    assert!(shared_for(&state, "ada").is_empty());
+
+    state
+        .transcript
+        .members
+        .insert(a.clone(), roster(&[("ada", "")]));
+    let rename = serde_json::json!({
+        "kind": "nick_change",
+        "from": "ada",
+        "meta": {"new_nick": "Ada[]"}
+    });
+    assert!(update_members_from_frame(&mut state, &a, &rename));
+    assert!(shared_for(&state, "ada").is_empty());
+    // The network case mapping decides when two nicks are the same.
+    assert_eq!(shared_for(&state, "ada{}"), vec!["#a"]);
+}
+
+#[test]
+fn shared_channels_use_the_real_peer_nick_of_a_locked_query() {
+    let window = crate::e2e_view::LocalQuery::new("net", crate::e2e_view::QueryLane::Locked, "ada")
+        .window_name();
+    assert_ne!(window, "ada");
+    let local = crate::e2e_view::LocalQuery::from_window("net", &window);
+    assert_eq!(local.nick, "ada");
+
+    let mut state = shared_state(&["#a"]);
+    state
+        .transcript
+        .members
+        .insert(shared_key("#a"), roster(&[("ada", "")]));
+    assert_eq!(shared_for(&state, &local.nick), vec!["#a"]);
+    assert!(shared_for(&state, &window).is_empty());
+}

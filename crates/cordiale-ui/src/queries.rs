@@ -204,6 +204,7 @@ pub(crate) fn show_query_window(
     let window_status = window_status_for(state);
     let chat_state = crate::e2e_runtime::plain_entry_state_key(state, &query.network);
     push_peer_away_banner(state, ui);
+    push_shared_channels(state, ui, &query.network, &peer_nick);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
@@ -588,6 +589,70 @@ pub(crate) fn query_label(state: &WorkerState, query: &QueryWindow) -> (String, 
     (label, peer)
 }
 
+/// The channels of `network` that the user has joined and whose roster lists
+/// `peer`, sorted by name. It reads only the rosters and window states that
+/// the session already keeps: no request is sent. The peer nick is compared
+/// with the case mapping of the network.
+pub(crate) fn shared_channels(
+    members: &MembersByChannel,
+    window_states: &HashMap<(String, String), ChannelWindowState>,
+    network: &str,
+    peer: &str,
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> Vec<String> {
+    let mut channels: Vec<String> = members
+        .iter()
+        .filter(|((member_network, channel), roster)| {
+            member_network == network
+                && window_states.get(&window_state_key(network, channel))
+                    == Some(&ChannelWindowState::Joined)
+                && roster
+                    .iter()
+                    .any(|(nick, _)| casemapping.nick_eq(nick, peer))
+        })
+        .map(|((_, channel), _)| channel.clone())
+        .collect();
+    channels.sort_by_key(|channel| ascii_fold_channel(channel));
+    channels
+}
+
+/// Shows the channels shared with `peer` in the open query of `network`.
+pub(crate) fn push_shared_channels(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    peer: &str,
+) {
+    let channels = shared_channels(
+        &state.transcript.members,
+        &state.windows.window_states,
+        network,
+        peer,
+        network_casemapping(state, network),
+    );
+    let network = network.to_string();
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let rows: Vec<slint::SharedString> = channels.into_iter().map(Into::into).collect();
+        ui.set_shared_channels_network(network.into());
+        ui.set_shared_channels(Rc::new(slint::VecModel::from(rows)).into());
+    });
+}
+
+/// Refreshes the shared channels of the open query after a roster or a
+/// window state changed. The peer is the real nick of the open window.
+pub(crate) fn push_query_shared_channels(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    if !state.windows.current_query {
+        return;
+    }
+    let Some((network, window)) = state.windows.current_channel.as_ref() else {
+        return;
+    };
+    let local = crate::e2e_view::LocalQuery::from_window(network, window);
+    let peer = query_send_target(state, network, &local.nick);
+    push_shared_channels(state, ui, network, &peer);
+}
+
 /// Records a peer's nick change seen on `network` and returns whether a DM
 /// view changed. Only an observed `old` → `new` event links windows, and
 /// only when it cannot join two conversations: our own nick is skipped, and
@@ -810,6 +875,7 @@ pub(crate) fn push_query_peer_label(state: &WorkerState, ui: &slint::Weak<AppWin
         return;
     };
     let (label, peer) = query_label(state, query);
+    push_shared_channels(state, ui, network, &peer);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());

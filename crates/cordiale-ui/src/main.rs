@@ -8569,6 +8569,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
         let _ = ui.upgrade_in_event_loop(move |ui| ui.set_unread_badge(unread_badge));
     }
     push_window_note(state, ui);
+    push_query_shared_channels(state, ui);
     let mut data = network_groups_data(
         &state.windows.channel_entries,
         &sidebar_query_windows(state),
