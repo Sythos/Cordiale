@@ -1055,6 +1055,7 @@ async fn settle_engine(
             set_e2e_status(ui, "e2e-send-failed");
         }
         send_copies(state, network, &mut engine, &client, &token).await;
+        engine.send_list_messages(&client, &token).await;
     }
     let wanted = engine.take_keys_wanted();
     if let (false, Some(client), Some(token)) = (

@@ -59,9 +59,14 @@
 //! The Olm plaintext is a compact JSON object [`Inner`]: `t` is the kind
 //! (`text` for chat text, `copy` for an own copy), `lv` is the version of the
 //! list of the sender, and a body of a `pkmsg` also holds `fb`, the binding of
-//! the two device keys. The engine reads `text` and `copy`. It does not act on
-//! a list (`list`, `listreq`) inside an Olm message: it keeps the session and
-//! stores no row.
+//! the two device keys. The engine reads `text` and `copy`.
+//!
+//! Lists inside Olm messages: a `listreq` gets the own signed list as a
+//! `{"t":"list","master":{…}}` message. A `list` is applied only when its
+//! signature and its master verify and its version is higher. A higher `lv`
+//! of a peer causes one `listreq`. The engine queues these answers and
+//! requests; [`E2eEngine::send_list_messages`] sends them. A message for a
+//! peer goes to every trusted device of the peer, one body for each device.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
@@ -96,7 +101,8 @@ use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError, KeyringKeyPro
 use crate::e2e_trust::PeerTrust;
 use crate::e2e_wire::{
     bundle_key_signed_text, device_id_signed_text, did_from_key_text, is_did_shape, parse_payload,
-    recipient_binding, WireError, INBOX_PAGE_MAX, MAX_LIST_DEVICES, MAX_VERSION, WILDCARD,
+    recipient_binding, ListDecision, WireError, INBOX_PAGE_MAX, MAX_LIST_DEVICES, MAX_VERSION,
+    WILDCARD,
 };
 use crate::isupport::CaseMapping;
 use crate::persistence::data_dir;
@@ -419,8 +425,12 @@ pub enum InnerKind {
     /// A copy of the text that another device of the account sent to `peer`:
     /// `{"t":"copy","peer":…,"body":…}`.
     Copy { peer: String, body: String },
-    /// Any other kind: a list, a list request, a challenge, an unknown one.
-    /// The engine keeps the session and stores nothing.
+    /// The signed list of the sender: `{"t":"list","master":{…}}`.
+    List { master: MasterBlock },
+    /// A request for the signed list of the receiver: `{"t":"listreq"}`.
+    ListReq,
+    /// Any other kind: a challenge, an unknown one. The engine keeps the
+    /// session and stores nothing.
     Other,
 }
 
@@ -452,6 +462,11 @@ impl Inner {
                 },
                 _ => InnerKind::Other,
             },
+            "list" => map
+                .get("master")
+                .and_then(|master| serde_json::from_value(master.clone()).ok())
+                .map_or(InnerKind::Other, |master| InnerKind::List { master }),
+            "listreq" => InnerKind::ListReq,
             _ => InnerKind::Other,
         };
         Some(Self {
@@ -550,8 +565,8 @@ struct PendingText {
 #[derive(Debug, Clone)]
 struct SentRecord {
     nick: String,
-    /// The device the message was for. Only this device may NACK it.
-    did: String,
+    /// The devices the message was for. Only these devices may NACK it.
+    dids: Vec<String>,
     text: String,
     sends: u8,
     row_id: String,
@@ -626,10 +641,73 @@ struct PeerEntry {
 
 /// What this device writes about itself in a message: its id block, its
 /// master block and the version of its list.
+#[derive(Clone)]
 struct OwnWire {
     id: IdBlock,
     master: MasterRef,
     lv: u32,
+}
+
+/// What the engine writes in an Olm message.
+enum Outgoing<'a> {
+    Text(&'a str),
+    List(&'a MasterBlock),
+    ListReq,
+}
+
+impl Outgoing<'_> {
+    fn to_json(&self, lv: u32, fb: Option<&str>) -> String {
+        let (t, master) = match self {
+            Outgoing::Text(body) => {
+                return InnerOut {
+                    t: "text",
+                    peer: None,
+                    body,
+                    lv,
+                    fb,
+                }
+                .to_json()
+            }
+            Outgoing::List(master) => ("list", Some(*master)),
+            Outgoing::ListReq => ("listreq", None),
+        };
+        let mut map = serde_json::Map::new();
+        map.insert("t".to_string(), Value::from(t));
+        if let Some(master) = master {
+            map.insert(
+                "master".to_string(),
+                serde_json::to_value(master).unwrap_or(Value::Null),
+            );
+        }
+        map.insert("lv".to_string(), Value::from(lv));
+        if let Some(fb) = fb {
+            map.insert("fb".to_string(), Value::from(fb));
+        }
+        Value::Object(map).to_string()
+    }
+}
+
+/// The Olm message for one device, with the session that wrote it.
+struct Sealed {
+    did: String,
+    prekey: bool,
+    body: String,
+    session: Session,
+}
+
+/// A request that the relay accepted: the devices it holds a body for.
+struct Emitted {
+    dids: Vec<String>,
+    msgid: Option<String>,
+}
+
+/// A list message that waits to go to one device of a peer.
+#[derive(Debug, Clone)]
+struct ListJob {
+    nick: String,
+    did: String,
+    /// True for the own list (an answer), false for a `listreq`.
+    reply: bool,
 }
 
 /// The decrypted inner message and the state to save after the history write.
@@ -690,6 +768,14 @@ pub struct E2eEngine {
     copy_tracker: DeliveryTracker,
     /// How often a copy row waited for a newer own list, by inbox id.
     stale_tries: HashMap<u64, u8>,
+    /// List answers and list requests that wait to go out.
+    list_jobs: Vec<ListJob>,
+    /// When a list went to a device of a peer, by folded nick and `did`.
+    list_answered: HashMap<(String, String), Duration>,
+    /// At most one `listreq` for each nick in the list request interval.
+    listreq: IntervalLimiter,
+    /// The list versions that a `listreq` asked for, by folded nick.
+    listreq_lv: HashMap<String, HashSet<u32>>,
 }
 
 impl E2eEngine {
@@ -735,6 +821,10 @@ impl E2eEngine {
             copy_jobs: Vec::new(),
             copy_tracker: DeliveryTracker::default(),
             stale_tries: HashMap::new(),
+            list_jobs: Vec::new(),
+            list_answered: HashMap::new(),
+            listreq: IntervalLimiter::new(md3_pacing::LISTREQ_INTERVAL),
+            listreq_lv: HashMap::new(),
         })
     }
 
@@ -1093,18 +1183,8 @@ impl E2eEngine {
             self.note_trust_changed(nick);
         }
         self.state.set_trust(&trust)?;
-        // A newer list stays even when a device is refused: drop every
-        // cached device that the trust state now revokes.
-        let revoked: Vec<String> = self
-            .peers
-            .iter()
-            .filter(|(_, entry)| self.entry_revoked(entry, &trust))
-            .map(|(did, _)| did.clone())
-            .collect();
-        for did in revoked {
-            self.peers.remove(&did);
-            self.revoked_dids.insert(did);
-        }
+        // A newer list stays even when a device is refused.
+        self.forget_revoked(&trust);
         let mut dids = Vec::new();
         for (device, one_time_key) in accepted {
             let did = device.did().to_string();
@@ -1128,6 +1208,144 @@ impl E2eEngine {
             (true, Some(err)) => Err(err.into()),
             (true, None) => Err(WireError::BadDeviceCount.into()),
         }
+    }
+
+    /// Drops every cached device that `trust` revokes.
+    fn forget_revoked(&mut self, trust: &PeerTrust) {
+        let revoked: Vec<String> = self
+            .peers
+            .iter()
+            .filter(|(_, entry)| self.entry_revoked(entry, trust))
+            .map(|(did, _)| did.clone())
+            .collect();
+        for did in revoked {
+            self.peers.remove(&did);
+            self.revoked_dids.insert(did);
+        }
+    }
+
+    /// Applies the signed list of a `list` message. The list must verify, come
+    /// from the stored master and have a higher version. Anything else changes
+    /// nothing; another master is a trust alarm.
+    fn apply_list_message(&mut self, nick: &str, block: &MasterBlock) -> Result<(), EngineError> {
+        let mut trust = self.state.trust();
+        let decision = apply_peer_list(
+            &mut trust,
+            &self.network,
+            nick,
+            &block.ed25519,
+            block.list.ver,
+            &block.list.devices,
+            &block.sig,
+        );
+        match decision {
+            Ok(ListDecision::Replace) => {
+                self.state.set_trust(&trust)?;
+                self.forget_revoked(&trust);
+                self.listreq_lv.remove(&self.casemapping.fold(nick));
+                Ok(())
+            }
+            Ok(_) => Ok(()),
+            Err(err) => {
+                if err == E2eError::MasterChanged {
+                    self.note_trust_changed(nick);
+                }
+                Err(err.into())
+            }
+        }
+    }
+
+    /// Queues the own list for the device `did` of `nick`: once for each
+    /// device in the list request interval.
+    fn queue_list_reply(&mut self, nick: &str, did: &str) {
+        let now = self.clock.now();
+        self.list_answered
+            .retain(|_, at| now.saturating_sub(*at) < md3_pacing::LISTREQ_INTERVAL);
+        let key = (self.casemapping.fold(nick), did.to_string());
+        if self.list_answered.contains_key(&key) {
+            return;
+        }
+        self.list_answered.insert(key, now);
+        self.list_jobs.push(ListJob {
+            nick: nick.to_string(),
+            did: did.to_string(),
+            reply: true,
+        });
+    }
+
+    /// Queues one `listreq` when the sender holds a list newer than the
+    /// stored one: once for each list version, and once for each nick in the
+    /// list request interval.
+    fn maybe_list_request(&mut self, nick: &str, did: &str, lv: u32) {
+        let version = self.state.trust().list_version(&self.network, nick);
+        let key = self.casemapping.fold(nick);
+        let asked = self.listreq_lv.entry(key).or_default();
+        asked.retain(|asked| *asked > version);
+        if lv <= version || asked.contains(&lv) {
+            return;
+        }
+        if !self
+            .listreq
+            .try_acquire(nick, self.casemapping, self.clock.now())
+        {
+            return;
+        }
+        asked.insert(lv);
+        self.list_jobs.push(ListJob {
+            nick: nick.to_string(),
+            did: did.to_string(),
+            reply: false,
+        });
+    }
+
+    /// Sends the queued list answers and list requests, each to the device
+    /// that caused it. A device that is not ready gets nothing. Returns the
+    /// number of requests that the relay accepted.
+    pub async fn send_list_messages(&mut self, client: &GrappaClient, token: &str) -> usize {
+        let mut sent = 0;
+        for job in std::mem::take(&mut self.list_jobs) {
+            let Some(entry) = self.pick_specific_device(&job.nick, &job.did) else {
+                continue;
+            };
+            let Ok(Some(identity)) = self.state.olm_identity() else {
+                continue;
+            };
+            let Ok(own) = self.own_wire(&identity) else {
+                continue;
+            };
+            let block;
+            let outgoing = if job.reply {
+                let Some((list, master)) = self.own_list() else {
+                    continue;
+                };
+                block = MasterBlock {
+                    ed25519: master,
+                    list: MasterList {
+                        ver: list.version,
+                        devices: list.keys,
+                    },
+                    sig: list.signature,
+                };
+                Outgoing::List(&block)
+            } else {
+                Outgoing::ListReq
+            };
+            let Ok(sealed) = self.seal(&identity, &job.nick, &[entry], &outgoing, own.lv) else {
+                continue;
+            };
+            let result = self
+                .emit(
+                    client,
+                    token,
+                    &job.nick,
+                    sealed,
+                    &own,
+                    E2eSendPriority::Control,
+                )
+                .await;
+            sent += result.map_or(0, |emitted| emitted.len());
+        }
+        sent
     }
 
     /// Reads one inbox row. It never sends and never acknowledges: the
@@ -1209,10 +1427,14 @@ impl E2eEngine {
                 body,
                 now,
             ),
-            InnerKind::Other => match self.save_state(&nick, &row.from_did, &decrypted) {
-                Ok(()) => RowOutcome::Ignored,
-                Err(_) => RowOutcome::StoreFailed,
-            },
+            // A list message from a sibling keeps the session. The own list
+            // comes from the server, never from a copy.
+            InnerKind::Other | InnerKind::List { .. } | InnerKind::ListReq => {
+                match self.save_state(&nick, &row.from_did, &decrypted) {
+                    Ok(()) => RowOutcome::Ignored,
+                    Err(_) => RowOutcome::StoreFailed,
+                }
+            }
             _ => RowOutcome::Undecryptable,
         }
     }
@@ -1270,7 +1492,7 @@ impl E2eEngine {
         // Text from a person goes to the conversation of the sender. A message
         // that does not fit is acknowledged and not stored. A kind that is no
         // text only moves the session on.
-        match &decrypted.inner.kind {
+        let outcome = match &decrypted.inner.kind {
             InnerKind::Text { body } => self.store_decrypted(
                 &nick,
                 row,
@@ -1281,12 +1503,31 @@ impl E2eEngine {
                 body.clone(),
                 now,
             ),
-            InnerKind::Other => match self.save_state(&nick, &row.from_did, &decrypted) {
-                Ok(()) => RowOutcome::Ignored,
-                Err(_) => RowOutcome::StoreFailed,
-            },
+            InnerKind::Other | InnerKind::List { .. } | InnerKind::ListReq => {
+                match self.save_state(&nick, &row.from_did, &decrypted) {
+                    Ok(()) => {
+                        match &decrypted.inner.kind {
+                            // A list that does not verify changes nothing.
+                            InnerKind::List { master } => {
+                                let _ = self.apply_list_message(&nick, master);
+                            }
+                            InnerKind::ListReq => self.queue_list_reply(&nick, &row.from_did),
+                            _ => {}
+                        }
+                        RowOutcome::Ignored
+                    }
+                    Err(_) => RowOutcome::StoreFailed,
+                }
+            }
             InnerKind::Copy { .. } => RowOutcome::Undecryptable,
+        };
+        // The sender holds a newer list than the stored one: ask for it.
+        if matches!(outcome, RowOutcome::Stored | RowOutcome::Ignored) {
+            if let Some(lv) = decrypted.inner.lv {
+                self.maybe_list_request(&nick, &row.from_did, lv);
+            }
         }
+        outcome
     }
 
     /// Writes the text of a decrypted row to the conversation of `peer`, then
@@ -1960,23 +2201,22 @@ impl E2eEngine {
         })
     }
 
-    /// The device of `nick` to send to: not revoked and ready, with a session
-    /// first. The order of the devices does not decide; the `did` breaks a tie.
-    fn pick_device(&self, nick: &str) -> Option<PeerEntry> {
+    /// The trusted devices of `nick` to send to: not revoked and ready. The
+    /// trust state holds the verified signed list of the peer and revokes a
+    /// device that a newer list drops. A request holds [`MAX_LIST_DEVICES`]
+    /// bodies at most, so the list of the peer bounds the result. The `did`
+    /// gives the order.
+    fn pick_devices(&self, nick: &str) -> Vec<PeerEntry> {
         let trust = self.state.trust();
-        self.peers
+        let mut entries: Vec<PeerEntry> = self
+            .peers
             .values()
             .filter(|entry| entry.nick == nick && self.entry_ready(entry, &trust))
-            .min_by_key(|entry| {
-                let has_session = self
-                    .state
-                    .peer_session(&self.network, nick, entry.device.did())
-                    .ok()
-                    .flatten()
-                    .is_some();
-                (!has_session, entry.device.did().to_string())
-            })
             .cloned()
+            .collect();
+        entries.sort_by(|a, b| a.device.did().cmp(b.device.did()));
+        entries.truncate(MAX_LIST_DEVICES);
+        entries
     }
 
     /// The device `did` of `nick`, when it is not revoked and ready. No other
@@ -2003,8 +2243,11 @@ impl E2eEngine {
         if nick.contains(QUERY_LOCK_LABEL) {
             return Err(EngineError::Wire(WireError::BadTarget));
         }
-        let entry = self.pick_device(nick).ok_or(EngineError::NotReady)?;
-        self.deliver(client, token, nick, text, entry, 1, None, now)
+        let entries = self.pick_devices(nick);
+        if entries.is_empty() {
+            return Err(EngineError::NotReady);
+        }
+        self.deliver(client, token, nick, text, entries, 1, None, now)
             .await
     }
 
@@ -2119,22 +2362,22 @@ impl E2eEngine {
                 drops.extend(self.fail_send(&item.key, DropReason::Late));
                 continue;
             }
-            let entry = match &pending.did {
-                Some(did) => self.pick_specific_device(&nick, did),
-                None => self.pick_device(&nick),
+            let entries: Vec<PeerEntry> = match &pending.did {
+                Some(did) => self.pick_specific_device(&nick, did).into_iter().collect(),
+                None => self.pick_devices(&nick),
             };
-            let Some(entry) = entry else {
+            if entries.is_empty() {
                 self.pending.insert(item.key.clone(), pending);
                 retry.push(item);
                 continue;
-            };
+            }
             let result = self
                 .deliver(
                     client,
                     token,
                     &nick,
                     &pending.text,
-                    entry,
+                    entries,
                     pending.sends,
                     Some(pending.row_id.clone()),
                     now,
@@ -2165,10 +2408,11 @@ impl E2eEngine {
         drops
     }
 
-    /// Sends `text` to `entry`, a device of `nick`. `row_id` is the history
-    /// row of a text that waited in the queue or that goes out again after a
-    /// NACK; without it the call writes the row. `sends` counts the sends of
-    /// the text.
+    /// Sends `text` to `entries`, the devices of `nick`: one request for each
+    /// kind of Olm message, with one body for each device. `row_id` is the
+    /// history row of a text that waited in the queue or that goes out again
+    /// after a NACK; without it the call writes the row. `sends` counts the
+    /// sends of the text.
     #[allow(clippy::too_many_arguments)]
     async fn deliver(
         &mut self,
@@ -2176,97 +2420,24 @@ impl E2eEngine {
         token: &str,
         nick: &str,
         text: &str,
-        entry: PeerEntry,
+        entries: Vec<PeerEntry>,
         sends: u8,
         row_id: Option<String>,
         now: i64,
     ) -> Result<SentText, EngineError> {
-        let did = entry.device.did().to_string();
         let identity = self.state.olm_identity()?.ok_or(EngineError::NotReady)?;
         let own = self.own_wire(&identity)?;
-        let mut session = match self.state.peer_session(&self.network, nick, &did)? {
-            Some(session) => session,
-            None => {
-                let one_time = entry.one_time_key.as_deref().ok_or(EngineError::NotReady)?;
-                let curve = Curve25519PublicKey::from_base64(entry.device.curve25519())
-                    .map_err(|_| EngineError::EncryptionFailed)?;
-                let one_time = Curve25519PublicKey::from_base64(one_time)
-                    .map_err(|_| EngineError::EncryptionFailed)?;
-                identity
-                    .create_outbound_session(SessionConfig::version_1(), curve, one_time)
-                    .map_err(|_| EngineError::EncryptionFailed)?
-            }
-        };
-        // A session that has not received a message writes pre-key messages.
-        // The inner message of a pre-key message holds `fb`, the binding of
-        // the two device keys.
-        let fb = (!session.has_received_message())
-            .then(|| recipient_binding(&self.own_ed25519, entry.device.ed25519()));
-        let inner = InnerOut {
-            t: "text",
-            peer: None,
-            body: text,
-            lv: own.lv,
-            fb: fb.as_deref(),
-        }
-        .to_json();
-        let message = session
-            .encrypt(inner.as_bytes())
-            .map_err(|_| EngineError::EncryptionFailed)?;
-        let (verb, payload) = match message {
-            OlmMessage::PreKey(message) => (
-                E2eSendVerb::PkMsg,
-                MessagePayload::PreKey(PreKeyPayload {
-                    v: PAYLOAD_VERSION,
-                    id: own.id,
-                    master: own.master,
-                    bodies: BTreeMap::from([(did.clone(), message.to_base64())]),
-                })
-                .to_json(),
-            ),
-            OlmMessage::Normal(message) => (
-                E2eSendVerb::Msg,
-                MessagePayload::Normal(MsgPayload {
-                    v: PAYLOAD_VERSION,
-                    ck: own.id.curve25519,
-                    bodies: BTreeMap::from([(did.clone(), message.to_base64())]),
-                })
-                .to_json(),
-            ),
-        };
-        let request = E2eSendRequest::new(
-            nick,
-            verb,
-            &self.own_did,
-            &did,
-            &payload,
-            Some(E2eSendPriority::Text),
-            None,
-        )?;
-        // Save the session before the send: a skipped Olm message is
-        // harmless, a reused one is not.
-        self.state
-            .set_peer_session(&self.network, nick, &did, &session)?;
-        if let Some(entry) = self.peers.get_mut(&did) {
-            entry.one_time_key = None;
-        }
-        let answer = client
-            .send_e2e_message(token, &self.network, &request)
+        let sealed = self.seal(&identity, nick, &entries, &Outgoing::Text(text), own.lv)?;
+        let emitted = self
+            .emit(client, token, nick, sealed, &own, E2eSendPriority::Text)
             .await?;
-        if answer.response != SendResponse::Accepted {
-            return Err(EngineError::Rejected(answer.response));
-        }
-        let key = answer
-            .msgid
+        let first = emitted.first().ok_or(EngineError::NotReady)?;
+        let first_msgid = first.msgid.clone();
+        let key = first_msgid
             .as_deref()
             .map(|msgid| SendKey::new(&self.network, nick, msgid));
-        if let Some(key) = &key {
-            self.book.start(key.clone());
-            self.book.apply_response(key, SendResponse::Accepted);
-        }
         self.local_sends += 1;
-        let suffix = answer
-            .msgid
+        let suffix = first_msgid
             .clone()
             .unwrap_or_else(|| format!("local{}", self.local_sends));
         let row_id = match row_id {
@@ -2285,9 +2456,15 @@ impl E2eEngine {
                 row_id
             }
         };
-        if let (Some(key), Some(msgid)) = (&key, &answer.msgid) {
-            self.row_ids.insert(key.clone(), row_id.clone());
-            self.remember_sent(msgid, nick, &did, text, sends, &row_id);
+        for sent in &emitted {
+            let Some(msgid) = &sent.msgid else {
+                continue;
+            };
+            let sent_key = SendKey::new(&self.network, nick, msgid);
+            self.book.start(sent_key.clone());
+            self.book.apply_response(&sent_key, SendResponse::Accepted);
+            self.row_ids.insert(sent_key, row_id.clone());
+            self.remember_sent(msgid, nick, &sent.dids, text, sends, &row_id);
         }
         // The copies for the other devices of the account follow the 202
         // answer. A re-send after a NACK makes no second copy.
@@ -2296,8 +2473,160 @@ impl E2eEngine {
         }
         self.note_changed(nick);
         Ok(SentText {
-            msgid: answer.msgid,
+            msgid: first_msgid,
             key,
+        })
+    }
+
+    /// Writes `out` as an Olm message for each of `entries`. A device without
+    /// a session starts one with its one-time key. Nothing is saved or sent.
+    fn seal(
+        &self,
+        identity: &Account,
+        nick: &str,
+        entries: &[PeerEntry],
+        out: &Outgoing<'_>,
+        lv: u32,
+    ) -> Result<Vec<Sealed>, EngineError> {
+        let mut sealed = Vec::new();
+        for entry in entries {
+            let did = entry.device.did().to_string();
+            let mut session = match self.state.peer_session(&self.network, nick, &did)? {
+                Some(session) => session,
+                None => {
+                    let one_time = entry.one_time_key.as_deref().ok_or(EngineError::NotReady)?;
+                    let curve = Curve25519PublicKey::from_base64(entry.device.curve25519())
+                        .map_err(|_| EngineError::EncryptionFailed)?;
+                    let one_time = Curve25519PublicKey::from_base64(one_time)
+                        .map_err(|_| EngineError::EncryptionFailed)?;
+                    identity
+                        .create_outbound_session(SessionConfig::version_1(), curve, one_time)
+                        .map_err(|_| EngineError::EncryptionFailed)?
+                }
+            };
+            // A session that has not received a message writes pre-key
+            // messages. The inner message of a pre-key message holds `fb`, the
+            // binding of the two device keys.
+            let fb = (!session.has_received_message())
+                .then(|| recipient_binding(&self.own_ed25519, entry.device.ed25519()));
+            let inner = out.to_json(lv, fb.as_deref());
+            let (prekey, body) = match session
+                .encrypt(inner.as_bytes())
+                .map_err(|_| EngineError::EncryptionFailed)?
+            {
+                OlmMessage::PreKey(message) => (true, message.to_base64()),
+                OlmMessage::Normal(message) => (false, message.to_base64()),
+            };
+            sealed.push(Sealed {
+                did,
+                prekey,
+                body,
+                session,
+            });
+        }
+        if sealed.is_empty() {
+            return Err(EngineError::NotReady);
+        }
+        Ok(sealed)
+    }
+
+    /// Sends sealed messages. A `msg` and a `pkmsg` never share a request; a
+    /// request holds at most [`MAX_LIST_DEVICES`] bodies. The first request
+    /// decides the result: when it fails, the call fails. A later failure
+    /// leaves that group without the message.
+    async fn emit(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        nick: &str,
+        sealed: Vec<Sealed>,
+        own: &OwnWire,
+        priority: E2eSendPriority,
+    ) -> Result<Vec<Emitted>, EngineError> {
+        let mut emitted = Vec::new();
+        for prekey in [false, true] {
+            let group: Vec<&Sealed> = sealed.iter().filter(|s| s.prekey == prekey).collect();
+            for chunk in group.chunks(MAX_LIST_DEVICES) {
+                match self
+                    .emit_group(client, token, nick, chunk, own, priority)
+                    .await
+                {
+                    Ok(sent) => emitted.push(sent),
+                    Err(err) if emitted.is_empty() => return Err(err),
+                    Err(_) => {}
+                }
+            }
+        }
+        Ok(emitted)
+    }
+
+    /// Sends one request with a body for each of `chunk`.
+    async fn emit_group(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        nick: &str,
+        chunk: &[&Sealed],
+        own: &OwnWire,
+        priority: E2eSendPriority,
+    ) -> Result<Emitted, EngineError> {
+        let bodies: BTreeMap<String, String> = chunk
+            .iter()
+            .map(|sealed| (sealed.did.clone(), sealed.body.clone()))
+            .collect();
+        let (verb, payload) = if chunk.first().is_some_and(|sealed| sealed.prekey) {
+            (
+                E2eSendVerb::PkMsg,
+                MessagePayload::PreKey(PreKeyPayload {
+                    v: PAYLOAD_VERSION,
+                    id: own.id.clone(),
+                    master: own.master.clone(),
+                    bodies,
+                })
+                .to_json(),
+            )
+        } else {
+            (
+                E2eSendVerb::Msg,
+                MessagePayload::Normal(MsgPayload {
+                    v: PAYLOAD_VERSION,
+                    ck: own.id.curve25519.clone(),
+                    bodies,
+                })
+                .to_json(),
+            )
+        };
+        let to = match chunk {
+            [only] => only.did.as_str(),
+            _ => WILDCARD,
+        };
+        let request = E2eSendRequest::new(
+            nick,
+            verb,
+            &self.own_did,
+            to,
+            &payload,
+            Some(priority),
+            None,
+        )?;
+        // Save the sessions before the send: a skipped Olm message is
+        // harmless, a reused one is not.
+        for sealed in chunk {
+            self.state
+                .set_peer_session(&self.network, nick, &sealed.did, &sealed.session)?;
+            if let Some(entry) = self.peers.get_mut(&sealed.did) {
+                entry.one_time_key = None;
+            }
+        }
+        let answer = client
+            .send_e2e_message(token, &self.network, &request)
+            .await?;
+        if answer.response != SendResponse::Accepted {
+            return Err(EngineError::Rejected(answer.response));
+        }
+        Ok(Emitted {
+            dids: chunk.iter().map(|sealed| sealed.did.clone()).collect(),
+            msgid: answer.msgid,
         })
     }
 
@@ -2307,14 +2636,14 @@ impl E2eEngine {
         &mut self,
         msgid: &str,
         nick: &str,
-        did: &str,
+        dids: &[String],
         text: &str,
         sends: u8,
         row_id: &str,
     ) {
         let record = SentRecord {
             nick: nick.to_string(),
-            did: did.to_string(),
+            dids: dids.to_vec(),
             text: text.to_string(),
             sends,
             row_id: row_id.to_string(),
@@ -2357,13 +2686,27 @@ impl E2eEngine {
         if self
             .sent
             .get(&reference)
-            .is_none_or(|record| record.did != row.from_did)
+            .is_none_or(|record| !record.dids.contains(&row.from_did))
         {
             return;
         }
-        let Some(record) = self.sent.remove(&reference) else {
+        let Some(mut record) = self.sent.remove(&reference) else {
             return;
         };
+        // The other devices of the message keep their NACK right.
+        let nacked = row.from_did.clone();
+        let others: Vec<String> = record
+            .dids
+            .iter()
+            .filter(|did| **did != nacked)
+            .cloned()
+            .collect();
+        if !others.is_empty() {
+            let mut rest = record.clone();
+            rest.dids = others;
+            self.sent.insert(reference.clone(), rest);
+        }
+        record.dids = vec![nacked];
         let cm = self.casemapping;
         let key = SendKey::new(&self.network, &record.nick, &reference);
         if cm.fold(&record.nick) != cm.fold(&row.from)
@@ -2375,7 +2718,7 @@ impl E2eEngine {
         }
         if self
             .state
-            .remove_peer_session(&self.network, &record.nick, &record.did)
+            .remove_peer_session(&self.network, &record.nick, &record.dids[0])
             .is_err()
         {
             self.fail_send(&key, DropReason::SendFailed);
@@ -2402,7 +2745,7 @@ impl E2eEngine {
                 text: record.text,
                 sends: record.sends + 1,
                 row_id: record.row_id,
-                did: Some(record.did),
+                did: Some(record.dids[0].clone()),
             },
         );
         self.want_keys(&record.nick);
@@ -3776,7 +4119,6 @@ mod tests {
         // Other kinds and incomplete texts are not chat text.
         for plain in [
             r#"{"t":"list","lv":2}"#,
-            r#"{"t":"listreq","lv":2}"#,
             r#"{"t":"text"}"#,
             r#"{"t":"copy","peer":"x"}"#,
             r#"{"t":"chal","nonce":"n"}"#,
@@ -3784,6 +4126,24 @@ mod tests {
             let inner = Inner::parse(plain.as_bytes()).expect("inner");
             assert_eq!(inner.kind, InnerKind::Other, "{plain}");
         }
+        // A list request and a list with a master block.
+        let inner = Inner::parse(br#"{"t":"listreq","lv":2}"#).expect("inner");
+        assert_eq!(inner.kind, InnerKind::ListReq);
+        let list = r#"{"t":"list","master":{"ed25519":"M","list":{"ver":2,"devices":["D"]},"sig":"S"},"lv":2}"#;
+        let inner = Inner::parse(list.as_bytes()).expect("inner");
+        assert_eq!(
+            inner.kind,
+            InnerKind::List {
+                master: MasterBlock {
+                    ed25519: "M".to_string(),
+                    list: MasterList {
+                        ver: 2,
+                        devices: vec!["D".to_string()]
+                    },
+                    sig: "S".to_string()
+                }
+            }
+        );
         // Not an object with a string `t`.
         for plain in ["not json", "[]", r#"{"body":"x"}"#, r#"{"t":1}"#] {
             assert_eq!(Inner::parse(plain.as_bytes()), None, "{plain}");
@@ -3791,6 +4151,254 @@ mod tests {
         // A bad `lv` is no version.
         let inner = Inner::parse(br#"{"t":"text","body":"x","lv":0}"#).expect("inner");
         assert_eq!(inner.lv, None);
+    }
+
+    fn bob_keys_text(bob_id: &Ident, device: &Account, listed: &[String], version: u32) -> String {
+        serde_json::to_string(&keys_struct(&bob_id.master, device, listed, version)).expect("json")
+    }
+
+    fn inbox_row(id: u64, from: &str, from_did: &str, to_did: &str, sent: &Value) -> InboxRow {
+        let value = row(
+            id,
+            from,
+            from_did,
+            to_did,
+            sent["verb"].as_str().expect("verb"),
+            &format!("m{id}"),
+            sent["payload"].as_str().expect("payload"),
+        );
+        InboxRow::from_value(&value, PROTOCOL).expect("row")
+    }
+
+    async fn sent_requests(server: &MockServer) -> Vec<Value> {
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .map(|request| serde_json::from_slice(&request.body).expect("body"))
+            .collect()
+    }
+
+    fn bodies_of(sent: &Value) -> Vec<String> {
+        let payload: Value =
+            serde_json::from_str(sent["payload"].as_str().expect("payload")).expect("json");
+        let mut dids: Vec<String> = payload["bodies"]
+            .as_object()
+            .expect("bodies")
+            .keys()
+            .cloned()
+            .collect();
+        dids.sort();
+        dids
+    }
+
+    /// Gives the engine a signed own list of `version` with its own device.
+    fn raise_own_list(engine: &mut E2eEngine, version: u32) {
+        let master = engine.state.master_key().expect("key").expect("master");
+        let keys = vec![engine.own_ed25519.clone()];
+        let signature =
+            build_signed_list_signature(version, &keys, |text| master.sign(text).to_base64())
+                .expect("list");
+        engine
+            .state_mut()
+            .set_signed_list(&SignedList {
+                version,
+                keys,
+                signature,
+            })
+            .expect("own list");
+    }
+
+    #[tokio::test]
+    async fn a_peer_with_two_trusted_devices_gets_one_message_with_two_bodies() {
+        let alice_id = Ident::new("alice");
+        let bob_id = Ident::new("bob");
+        let second = fresh_device();
+        let mut alice = alice_id.engine();
+        let listed = [ed(&bob_id.device), ed(&second)];
+        alice
+            .accept_keys("bob", &bob_keys_text(&bob_id, &bob_id.device, &listed, 1))
+            .expect("first device");
+        alice
+            .accept_keys("bob", &bob_keys_text(&bob_id, &second, &listed, 1))
+            .expect("second device");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (sent, body) = alice_sends(&mut alice, &server, "hello both").await;
+        assert_eq!(sent_requests(&server).await.len(), 1);
+        assert_eq!(body["verb"], "pkmsg");
+        assert_eq!(body["to"], WILDCARD);
+        assert!(!body.to_string().contains("hello both"));
+        let mut expected = vec![
+            did_from_key_text(&ed(&bob_id.device)).expect("did"),
+            did_from_key_text(&ed(&second)).expect("did"),
+        ];
+        expected.sort();
+        assert_eq!(bodies_of(&body), expected);
+        assert!(sent.key.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_device_that_is_not_on_the_verified_list_gets_no_body() {
+        let alice_id = Ident::new("alice");
+        let bob_id = Ident::new("bob");
+        let outsider = fresh_device();
+        let mut alice = alice_id.engine();
+        let listed = [ed(&bob_id.device)];
+        alice
+            .accept_keys("bob", &bob_keys_text(&bob_id, &bob_id.device, &listed, 1))
+            .expect("listed device");
+        assert!(alice
+            .accept_keys("bob", &bob_keys_text(&bob_id, &outsider, &listed, 1))
+            .is_err());
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, body) = alice_sends(&mut alice, &server, "only the listed one").await;
+        let bob_did = did_from_key_text(&ed(&bob_id.device)).expect("did");
+        assert_eq!(bodies_of(&body), vec![bob_did.clone()]);
+        assert_eq!(body["to"], bob_did.as_str());
+    }
+
+    /// Alice sends a first text to Bob, and Bob reads it: both have a session.
+    async fn started_pair() -> Pair {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "first").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, "start").await;
+        let item = inbox_row(1, "alice", &p.alice_did, &p.bob_did, &body);
+        assert_eq!(p.bob.handle_row(&item, 10), RowOutcome::Stored);
+        p
+    }
+
+    #[tokio::test]
+    async fn a_listreq_gets_the_own_signed_list_and_the_list_is_applied() {
+        let mut p = started_pair().await;
+        // Bob has a newer list than Alice knows.
+        raise_own_list(&mut p.bob, 2);
+
+        // Alice asks for the list of Bob.
+        p.alice.list_jobs.push(ListJob {
+            nick: "bob".to_string(),
+            did: p.bob_did.clone(),
+            reply: false,
+        });
+        let alice_server = MockServer::start().await;
+        mount_send(&alice_server, "ask").await;
+        let client = GrappaClient::new(alice_server.uri());
+        assert_eq!(p.alice.send_list_messages(&client, TOKEN).await, 1);
+        let ask = sent_requests(&alice_server).await.remove(0);
+        assert_eq!(ask["to"], p.bob_did.as_str());
+        let item = inbox_row(2, "alice", &p.alice_did, &p.bob_did, &ask);
+        assert_eq!(p.bob.handle_row(&item, 20), RowOutcome::Ignored);
+
+        // Bob answers with the own signed list.
+        let bob_server = MockServer::start().await;
+        mount_send(&bob_server, "answer").await;
+        let client = GrappaClient::new(bob_server.uri());
+        assert_eq!(p.bob.send_list_messages(&client, TOKEN).await, 1);
+        let answer = sent_requests(&bob_server).await.remove(0);
+        assert_eq!(answer["verb"], "msg");
+        assert_eq!(bodies_of(&answer), vec![p.alice_did.clone()]);
+        assert_eq!(p.alice.state.trust().list_version(NET, "bob"), 1);
+        let item = inbox_row(3, "bob", &p.bob_did, &p.alice_did, &answer);
+        assert_eq!(p.alice.handle_row(&item, 30), RowOutcome::Ignored);
+        assert_eq!(p.alice.state.trust().list_version(NET, "bob"), 2);
+        // The list brought the version up: no listreq follows.
+        assert!(p.alice.list_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_second_listreq_of_the_same_device_in_a_minute_gets_no_answer() {
+        let mut p = started_pair().await;
+        let did = p.alice_did.clone();
+        p.bob.queue_list_reply("alice", &did);
+        p.bob.queue_list_reply("alice", &did);
+        assert_eq!(p.bob.list_jobs.len(), 1);
+    }
+
+    #[test]
+    fn a_list_that_does_not_verify_or_is_not_newer_changes_nothing() {
+        let mut p = pair();
+        let master = p.bob.state.master_key().expect("key").expect("master");
+        let devices = vec![p.bob.own_ed25519.clone()];
+        let block = |version: u32, signer: &Account| MasterBlock {
+            ed25519: ed(&master),
+            list: MasterList {
+                ver: version,
+                devices: devices.clone(),
+            },
+            sig: build_signed_list_signature(version, &devices, |text| {
+                signer.sign(text).to_base64()
+            })
+            .expect("list"),
+        };
+        assert_eq!(p.alice.state.trust().list_version(NET, "bob"), 1);
+        p.alice
+            .apply_list_message("bob", &block(3, &master))
+            .expect("newer list");
+        assert_eq!(p.alice.state.trust().list_version(NET, "bob"), 3);
+        // A lower version.
+        let _ = p.alice.apply_list_message("bob", &block(2, &master));
+        assert_eq!(p.alice.state.trust().list_version(NET, "bob"), 3);
+        // A signature of another key.
+        let other = Account::new();
+        assert!(p
+            .alice
+            .apply_list_message("bob", &block(4, &other))
+            .is_err());
+        assert_eq!(p.alice.state.trust().list_version(NET, "bob"), 3);
+        // Another master is a trust alarm.
+        let foreign = MasterBlock {
+            ed25519: ed(&other),
+            list: MasterList {
+                ver: 5,
+                devices: devices.clone(),
+            },
+            sig: build_signed_list_signature(5, &devices, |text| other.sign(text).to_base64())
+                .expect("list"),
+        };
+        assert!(p.alice.apply_list_message("bob", &foreign).is_err());
+        assert_eq!(p.alice.take_trust_changed(), vec!["bob".to_string()]);
+        assert_eq!(p.alice.state.trust().list_version(NET, "bob"), 3);
+    }
+
+    #[tokio::test]
+    async fn a_higher_lv_of_a_peer_causes_one_listreq() {
+        let mut p = started_pair().await;
+        raise_own_list(&mut p.bob, 2);
+        let bob_server = MockServer::start().await;
+        for msgid in ["text1", "text2"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/networks/{NET}/e2e/messages")))
+                .respond_with(
+                    ResponseTemplate::new(202).set_body_json(json!({"id": 1, "msgid": msgid})),
+                )
+                .up_to_n_times(1)
+                .mount(&bob_server)
+                .await;
+        }
+        let client = GrappaClient::new(bob_server.uri());
+        for (text, at) in [("one", 40), ("two", 41)] {
+            p.bob
+                .send_text(&client, TOKEN, "alice", text, at)
+                .await
+                .expect("text");
+        }
+        let texts = sent_requests(&bob_server).await;
+        let first = inbox_row(4, "bob", &p.bob_did, &p.alice_did, &texts[0]);
+        assert_eq!(p.alice.handle_row(&first, 50), RowOutcome::Stored);
+        let second = inbox_row(5, "bob", &p.bob_did, &p.alice_did, &texts[1]);
+        assert_eq!(p.alice.handle_row(&second, 51), RowOutcome::Stored);
+        assert_eq!(p.alice.list_jobs.len(), 1);
+
+        let alice_server = MockServer::start().await;
+        mount_send(&alice_server, "ask").await;
+        let client = GrappaClient::new(alice_server.uri());
+        assert_eq!(p.alice.send_list_messages(&client, TOKEN).await, 1);
+        let requests = sent_requests(&alice_server).await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["to"], p.bob_did.as_str());
     }
 
     #[test]

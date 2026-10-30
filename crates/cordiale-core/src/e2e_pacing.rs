@@ -99,6 +99,11 @@ pub mod md3_pacing {
     /// Most sent texts kept for a re-send. Source: irc-olm `SENT_MAX = 1200`.
     pub const SENT_MAX: usize = 1200;
 
+    /// Minimum time between two list requests to one nickname, and between
+    /// two list answers to one device. Source: irc-olm
+    /// `LISTREQ_INTERVAL = 60.0`.
+    pub const LISTREQ_INTERVAL: Duration = Duration::from_secs(60);
+
     /// A message goes out at most this many times to a device: once, and
     /// once more on a new session after a NACK. Source: irc-olm
     /// `MAX_SENDS = 2` and cicchetto `MAX_SENDS`.
