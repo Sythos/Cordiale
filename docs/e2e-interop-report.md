@@ -41,6 +41,8 @@ dell'ombrello 416). Il contratto finale è in `docs/e2e-contract.md`.
 - `e2e_pairing_flow`: canale di accoppiamento di 4g (`hello`, `offer`, `join`,
   `signed`, `done`), codice errato, firma id errata, rifiuti, ripetizioni,
   payload troppo grande, scadenza, lista piena, certificato errato.
+- `e2e_contract_guard`: nessun marcatore «candidato» nei moduli `e2e_*` e ogni test
+  citato da `docs/e2e-contract.md` esiste ancora.
 - `cordiale-ui`: due voci per peer (`<user>` e `🔒<user>`) con chiavi, cronologie
   e bozze separate.
 

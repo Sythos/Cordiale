@@ -168,7 +168,7 @@ il corpo della PR riporta la stessa tabella.
 | Casella | Prova |
 |---|---|
 | `docs/e2e-contract.md` esiste e cita le fonti | questo documento, sezioni «Fonti» e «Contratto» |
-| nessun marcatore «candidato» nei moduli E2E senza fonte finale | `grep -i candidat crates/cordiale-core/src/e2e_*.rs` non trova nulla; formati confermati in `docs/protocol-notes.md` («Contratto finale E2E») |
+| nessun marcatore «candidato» nei moduli E2E senza fonte finale | test `no_e2e_module_keeps_a_candidate_marker` (`tests/e2e_contract_guard.rs`); formati confermati in `docs/protocol-notes.md` («Contratto finale E2E») |
 | fixture per ogni area, con revisione corrente | tabella «Fixture»; `every_fixture_file_has_the_revision_of_the_interop_report` |
 | due voci per peer, senza righe né cronologia incrociate | punto 8 del contratto; `plain_and_locked_sends_stay_in_their_own_entries`, `a_copy_shows_as_sent_in_the_locked_query_and_once_only` |
 | il 202 non è una consegna; le copie S1 seguono il caso accettato | punti 4 e 5 del contratto; `a_202_answer_sets_the_accepted_state_only`, `the_accepted_original_that_is_dropped_leaves_a_sent_copy_and_a_failed_row` |
