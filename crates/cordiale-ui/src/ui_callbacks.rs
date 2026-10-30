@@ -806,6 +806,26 @@ pub(crate) fn register_link_callbacks(
         }
     });
 
+    let weak_for_media_download = ui.as_weak();
+    ui.on_media_download(move || {
+        if let Some(ui) = weak_for_media_download.upgrade() {
+            let outcome = media_save::download(ui.get_media_title().as_str());
+            if let Some(key) = media_save::status_key(&outcome, true) {
+                ui.set_status_kind(key.into());
+            }
+        }
+    });
+
+    let weak_for_media_share = ui.as_weak();
+    ui.on_media_share(move || {
+        if let Some(ui) = weak_for_media_share.upgrade() {
+            let outcome = media_save::share_link(ui.get_media_url().as_str());
+            if let Some(key) = media_save::status_key(&outcome, false) {
+                ui.set_status_kind(key.into());
+            }
+        }
+    });
+
     ui.on_credits_link_clicked(|href| open_in_browser(&href));
 
     let weak_for_debug = ui.as_weak();

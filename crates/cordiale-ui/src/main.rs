@@ -39,6 +39,7 @@ mod history;
 mod home;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
 mod key_prompt;
+mod media_save;
 mod mentions;
 mod passkeys;
 mod player;
@@ -9179,6 +9180,7 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
         .to_string();
     let url = href.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        media_save::forget();
         ui.set_media_url(url.into());
         ui.set_media_title(title.into());
         ui.set_media_kind("loading".into());
@@ -9217,23 +9219,24 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
                 .unwrap_or("png")
                 .to_ascii_lowercase();
             match temp_files::write_private("media", &format!(".{extension}"), &bytes) {
-                Ok(path) => MediaContent::Image(path),
+                Ok(path) => MediaContent::Image(path, extension, bytes),
                 Err(err) => MediaContent::Failed(err.to_string()),
             }
         });
         let _ = ui.upgrade_in_event_loop(move |ui| {
             if ui.get_media_url().as_str() != href {
-                if let Ok(MediaContent::Image(path)) = &outcome {
+                if let Ok(MediaContent::Image(path, ..)) = &outcome {
                     temp_files::discard(path);
                 }
                 return;
             }
             match outcome {
-                Ok(MediaContent::Image(path)) => {
+                Ok(MediaContent::Image(path, extension, bytes)) => {
                     let loaded = slint::Image::load_from_path(&path);
                     temp_files::discard(&path);
                     match loaded {
                         Ok(image) => {
+                            media_save::remember(&extension, bytes);
                             ui.set_media_image(image);
                             ui.set_media_kind("image".into());
                         }
@@ -9269,7 +9272,8 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
 
 /// What the viewer shows once a file is downloaded.
 enum MediaContent {
-    Image(std::path::PathBuf),
+    /// The temporary file, the file type and the bytes for Download.
+    Image(std::path::PathBuf, String, Vec<u8>),
     /// The text, and whether it was cut at the size limit.
     Text(String, bool),
     Failed(String),
