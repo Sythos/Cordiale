@@ -41,7 +41,8 @@
 //! part of a key, so the plain and locked entries of one peer share one
 //! record and one session.
 //!
-//! The replay rule is a candidate. A first message is refused when its msgid
+//! The replay rule follows the seen-session check of the irc-olm engine (PR 4);
+//! the window size is a choice of this client. A first message is refused when its msgid
 //! was seen for the same device. A new session is refused when its session id
 //! was seen. The state keeps the newest [`REPLAY_WINDOW`] ids for each device
 //! and each kind. It is public values only and serializes to JSON for the

@@ -309,9 +309,9 @@ fn check_version(version: u32) -> Result<(), WireError> {
 /// Text the master key signs to certify one device: `irc-e2e:v2:dev:<N>:<E>`.
 ///
 /// `first_list_version` is N, the first accepted list version that holds the
-/// device. `device_ed25519_key` is E, the public device key. Candidate format:
-/// the final contract is not approved yet. Returns the exact UTF-8 bytes for
-/// signing, apart from any signature or `did` text.
+/// device. `device_ed25519_key` is E, the public device key. Final format:
+/// section 4f and 4g of the Grappa client protocol. Returns the exact UTF-8
+/// bytes for signing, apart from any signature or `did` text.
 pub fn device_certificate_signed_text(
     first_list_version: u32,
     device_ed25519_key: &str,
@@ -331,7 +331,7 @@ const DEVICE_CERTIFICATE_PREFIX: &str = "irc-e2e:v2:dev:";
 /// Strict inverse of [`device_certificate_signed_text`]: the version is plain
 /// decimal without sign or leading zero, and the key is canonical. Any other
 /// text is rejected, so a verifier checks the signature only over bytes that
-/// this module would build itself. Candidate format, like the builder.
+/// this module would build itself. Final format, like the builder.
 pub fn parse_device_certificate_signed_text(bytes: &[u8]) -> Result<(u32, String), WireError> {
     let text = std::str::from_utf8(bytes).map_err(|_| WireError::BadPayload)?;
     let rest = text
