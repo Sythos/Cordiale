@@ -94,6 +94,10 @@ struct StateData {
     /// after the server answered 2xx to the put.
     #[serde(default)]
     list_pending: bool,
+    /// True after the own list went through the key order migration. It keeps
+    /// the migration from running again after a restart.
+    #[serde(default)]
+    list_migrated: bool,
     /// The certificate of this device: the master signature for the first
     /// list version that holds the device (public values).
     #[serde(default)]
@@ -378,6 +382,30 @@ impl E2eStateStore {
         })
     }
 
+    /// True when the own list went through the key order migration.
+    pub fn list_migrated(&self) -> bool {
+        self.data.list_migrated
+    }
+
+    /// Marks the key order migration as done. The list stays as it is.
+    pub fn set_list_migrated(&mut self) -> Result<(), E2eStoreError> {
+        if self.data.list_migrated {
+            return Ok(());
+        }
+        self.commit(|data| data.list_migrated = true)
+    }
+
+    /// Saves the re-signed own list, marks it as waiting for publication and
+    /// marks the migration as done, in one write.
+    pub fn set_migrated_list_pending(&mut self, list: &SignedList) -> Result<(), E2eStoreError> {
+        let list = list.clone();
+        self.commit(|data| {
+            data.signed_list = Some(list);
+            data.list_pending = true;
+            data.list_migrated = true;
+        })
+    }
+
     /// Clears the mark after the server accepted the list.
     pub fn clear_list_pending(&mut self) -> Result<(), E2eStoreError> {
         if !self.data.list_pending {
@@ -525,6 +553,7 @@ impl E2eStateStore {
             data.pending_pairing = None;
             data.signed_list = None;
             data.list_pending = false;
+            data.list_migrated = false;
             data.device_certificate = None;
             data.pending_revoke = None;
             data.own_revoked.clear();
@@ -1352,6 +1381,31 @@ mod tests {
         let store = E2eStateStore::open(path, &provider).expect("reopen");
         assert!(!store.list_pending());
         assert_eq!(store.signed_list(), Some(list));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_migrated_list_and_the_flag_survive_a_restart_in_one_write() {
+        let dir = scratch_dir("migrated-list");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let master = Account::new();
+        let device = ed25519_of(&Account::new());
+        let list = sample_list(&master, 2, std::slice::from_ref(&device));
+        let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+        assert!(!store.list_migrated());
+        store.writer = failing_writer;
+        assert!(store.set_migrated_list_pending(&list).is_err());
+        assert!(!store.list_migrated() && !store.list_pending());
+        assert_eq!(store.signed_list(), None);
+        store.writer = write_atomic;
+        store.set_migrated_list_pending(&list).expect("save");
+        drop(store);
+        let mut store = E2eStateStore::open(path, &provider).expect("reopen");
+        assert!(store.list_migrated() && store.list_pending());
+        assert_eq!(store.signed_list(), Some(list));
+        store.clear_list_pending().expect("clear");
+        assert!(store.list_migrated() && !store.list_pending());
         let _ = fs::remove_dir_all(&dir);
     }
 
