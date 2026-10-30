@@ -1,37 +1,52 @@
 # Rapporto di interoperabilità E2E v2
 
-Rapporto breve del cancello di accettazione (issue 390). È **parziale**: il
-cancello completo non può chiudersi finché i contratti a monte non sono finali.
+Rapporto del cancello di accettazione (issue 390, aggiornato dalla fetta 37
+dell'ombrello 416). Il contratto finale è in `docs/e2e-contract.md`.
 
 ## Revisioni
 
-- Fixture: `crates/cordiale-core/tests/fixtures/e2e/wire_v2.json`, revisione 1
-  (più `send_request.json`, già in uso da `rest.rs`).
+- Fixture in `crates/cordiale-core/tests/fixtures/e2e/`: `wire_v2.json`
+  revisione 4, `send_request.json` e `send_dropped.json` revisione 3,
+  `pairing_v1.json` revisione 1.
 - Pin MD-3 di irc-olm: PR 4 unita (merge `1606c85`). Il motore (`e2e_engine.rs`)
-  segue il suo formato di KEYS, `pkmsg`, `msg` e messaggio interno; vedi
-  `docs/protocol-notes.md`, issue 453 passo 4. Nessun test usa il vecchio pin v1
-  come prova v2.
-- Protocolli: 46, 47 e 48 hanno modifiche unite a monte. Il protocollo 49 è il
-  candidato della PR 2452 di Grappa (bozza): non è definitivo.
+  segue il suo formato di KEYS, `pkmsg`, `msg` e messaggio interno. Nessun test
+  usa il vecchio pin v1 come prova v2.
+- Protocolli 46-50: il testo di Grappa (`CLIENT_PROTOCOL.md`, sezioni 4f e 4g) è
+  riletto nella fetta 37. I testi firmati e i messaggi di accoppiamento non sono
+  più candidati.
 
-## Controlli eseguiti (test `e2e_wire_fixtures`, nessun server)
+## Controlli eseguiti (test senza server)
 
-- `did`: due vettori approvati, compreso quello con `-` e `_`.
-- Certificato di dispositivo: testo firmato esatto, lettura inversa, rifiuto di
-  zero iniziale, versione 0, versione oltre il limite, chiave corta, prefisso v1.
-- Lista firmata: testo esatto, ordine delle chiavi indipendente da chi chiama,
-  rifiuto di lista vuota, doppioni, versione 0 e chiave non valida.
-- Frame: cinque verbi validi con ritorno identico a `format_frame`; rifiuto di
-  frame senza campi `from`/`to` (forma v1), verbo sconosciuto, coppie di
-  indirizzi non ammesse, frammenti non validi e testo non ASCII.
+- `e2e_wire_fixtures`: `did` (due vettori), certificato, lista firmata, frame,
+  righe di inbox con `own`, rifiuti del relay, testo interno `copy` di S1.
+- `e2e_engine`: la risposta 202 dà solo lo stato "accettato"; un invio accettato
+  può cadere e non diventa mai "consegnato".
+- `e2e_engine`: copie S1 solo dopo il 202, solo per i dispositivi della lista
+  firmata, scadenza, liste vecchie, dispositivo non elencato.
+- `e2e_pairing_flow`: canale di accoppiamento di 4g (`hello`, `offer`, `join`,
+  `signed`, `done`), codice errato, firma id errata, rifiuti, ripetizioni,
+  payload troppo grande, scadenza, lista piena, certificato errato.
+- `cordiale-ui`: due voci per peer (`<user>` e `🔒<user>`) con chiavi, cronologie
+  e bozze separate.
+
+## Prove con un server
+
+- **Blocco esterno:** nessun server di test o di staging con protocollo 50 è
+  raggiungibile da questo ambiente. Nessuna prova bidirezionale con un server
+  è stata eseguita.
+- I test con server simulato (`wiremock` in `e2e_engine.rs`) provano la logica
+  del client. Non sono interoperabilità reale.
+- I vettori di irc-olm PR 4 sono letti dal sorgente di riferimento. Non c'è un
+  processo irc-olm collegato ai test: le prove nelle due direzioni restano da
+  eseguire.
 
 ## Lacune note
 
-- Nessuna prova bidirezionale con il pin MD-3 finale.
-- Nessuna prova contro un server di staging o di test.
-- Fixture mancanti: chiavi, sessioni, esiti di invio, accoppiamento (X1),
-  cambi di dispositivo, copie proprie (S1).
-- Il testo firmato, l'ordine delle chiavi e le rotte, i campi e gli errori del
-  protocollo 49 restano da ricontrollare dopo l'unione della PR 2452.
-- Da verificare: nessuna risposta 202 va riportata come consegna.
-- Il documento `docs/e2e-contract.md` citato nella issue non esiste.
+- Prove bidirezionali con irc-olm PR 4 e con un server reale.
+- Fixture di chiavi, sessioni e revoche: coperte da test unitari, non da file di
+  fixture condivisi.
+- L'accoppiamento segue 4g per una rete per volta. Un `offer` con più reti si
+  legge per la rete scelta; le altre vanno in `skipped`. L'accoppiamento con
+  Cicchetto non è provato con un server reale.
+- Non eseguito in questo ambiente: build e test Rust (il compilatore locale è
+  troppo vecchio per le dipendenze). La CI della PR li esegue.
