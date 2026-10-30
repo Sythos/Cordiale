@@ -9424,18 +9424,22 @@ fn normalize_server_url_leaves_an_explicit_http_scheme_alone() {
 #[test]
 fn normalize_server_url_drops_user_information_query_and_fragment() {
     let secret = format!("pw{}", 6 * 7);
-    for typed in [
+    // The messages name the case only: the URLs hold a password.
+    for (case, typed) in [
         "https://alice@irc.sythos.dev".to_string(),
         format!("https://:{secret}@irc.sythos.dev"),
         format!("https://alice:{secret}@irc.sythos.dev/"),
         "https://irc.sythos.dev?token=abc".to_string(),
         "irc.sythos.dev/#frag".to_string(),
         format!("http://alice:{secret}@irc.sythos.dev?x=1#frag"),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let normalized = normalize_server_url(&typed);
-        assert!(server_url_is_safe(&normalized), "{typed}");
-        assert!(!normalized.contains(&secret), "{typed}");
-        assert!(!normalized.contains("alice"), "{typed}");
+        assert!(server_url_is_safe(&normalized), "case {case}");
+        assert!(!normalized.contains(&secret), "case {case}");
+        assert!(!normalized.contains("alice"), "case {case}");
     }
     assert_eq!(
         normalize_server_url("https://alice@irc.sythos.dev/?a=b#c"),

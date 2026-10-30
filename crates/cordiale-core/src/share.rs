@@ -93,15 +93,19 @@ mod tests {
     fn the_link_never_carries_user_information_query_or_fragment() {
         let secret = format!("pw{}", 7 * 6);
         let expected = "https://irc.example:8443/share#tok";
-        for base in [
+        // The messages name the case only: the URLs hold a password.
+        for (case, base) in [
             "https://alice@irc.example:8443?x=1#frag".to_string(),
             format!("https://alice:{secret}@irc.example:8443/"),
             format!("https://:{secret}@irc.example:8443"),
             "https://irc.example:8443/?a=b".to_string(),
             "https://irc.example:8443/#frag".to_string(),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let link = share_link(&base, "tok");
-            assert_eq!(link, expected, "base {base}");
+            assert!(link == expected, "case {case}");
             assert!(!link.contains(&secret));
         }
     }
