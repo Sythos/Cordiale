@@ -4111,14 +4111,33 @@ fn realtime_identifier(me: &MeResponse, guest: bool, typed: &str) -> String {
     })
 }
 
-/// Whether `identifier` appears in `members` holding op or any role the
-/// network ranks above it — gates `MemberContextMenu`'s
-/// Op/Deop/Voice/Devoice/Kick/Ban items, as accurate as `members`
-/// (snapshots plus live MODE changes).
-fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str, ranking: &MemberRanking) -> bool {
+/// Whether `nick` appears in `members` holding op or any role the network
+/// ranks above it, comparing nicks under the network's case mapping — gates
+/// `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items, as accurate as
+/// `members` (snapshots plus live MODE changes). The server still checks
+/// every action.
+fn is_own_nick_an_op(
+    members: &[MemberEntry],
+    nick: &str,
+    casemapping: cordiale_core::isupport::CaseMapping,
+    ranking: &MemberRanking,
+) -> bool {
     members
         .iter()
-        .any(|(name, prefix)| name == identifier && ranking.is_op_or_above(prefix))
+        .any(|(name, prefix)| casemapping.nick_eq(name, nick) && ranking.is_op_or_above(prefix))
+}
+
+/// Whether the current nick of `network` holds op in `members`. A network
+/// with no known nick never gets moderation items.
+fn can_moderate_members(
+    state: &WorkerState,
+    network: &str,
+    members: &[MemberEntry],
+    ranking: &MemberRanking,
+) -> bool {
+    state.networks.own_nicks.get(network).is_some_and(|nick| {
+        is_own_nick_an_op(members, nick, network_casemapping(state, network), ranking)
+    })
 }
 
 /// What `$C` means in an alias: the channel of the open window, the peer of
@@ -7682,11 +7701,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
         .cloned()
         .unwrap_or_default();
     let ranking = MemberRanking::new(state.networks.isupport_by_network.get(&key.0));
-    let can_moderate = state
-        .conn
-        .identifier
-        .as_deref()
-        .is_some_and(|identifier| is_own_nick_an_op(&members, identifier, &ranking));
+    let can_moderate = can_moderate_members(state, &key.0, &members, &ranking);
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let lines = state

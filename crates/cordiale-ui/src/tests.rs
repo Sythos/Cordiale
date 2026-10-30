@@ -5408,7 +5408,12 @@ fn member_roles_on_a_full_prefix_ladder() {
         ("zed", false),
     ] {
         assert_eq!(
-            is_own_nick_an_op(&members, nick, &ranking),
+            is_own_nick_an_op(
+                &members,
+                nick,
+                cordiale_core::isupport::CaseMapping::Rfc1459,
+                &ranking
+            ),
             can_moderate,
             "{nick}"
         );
@@ -5437,9 +5442,70 @@ fn member_roles_on_an_ohv_network_drop_levels_it_lacks() {
         roster(&[("opy", "@"), ("hal", "%"), ("own", ""), ("qq", "")])
     );
     let ranking = MemberRanking::new(Some(&network));
-    assert!(is_own_nick_an_op(&members, "opy", &ranking));
-    assert!(!is_own_nick_an_op(&members, "hal", &ranking));
-    assert!(!is_own_nick_an_op(&members, "own", &ranking));
+    assert!(is_own_nick_an_op(
+        &members,
+        "opy",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(!is_own_nick_an_op(
+        &members,
+        "hal",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(!is_own_nick_an_op(
+        &members,
+        "own",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+}
+
+#[test]
+fn moderation_gate_uses_the_nick_of_the_selected_network() {
+    use cordiale_core::isupport::CaseMapping;
+    let mut rfc = network_with_prefix(&[("o", "@"), ("v", "+")]);
+    rfc.casemapping = CaseMapping::Rfc1459;
+    let mut ascii = rfc.clone();
+    ascii.casemapping = CaseMapping::Ascii;
+    let mut state = WorkerState::new();
+    state.conn.identifier = Some("account".to_string());
+    state
+        .networks
+        .isupport_by_network
+        .insert("a".to_string(), rfc.clone());
+    state
+        .networks
+        .isupport_by_network
+        .insert("b".to_string(), ascii);
+    state
+        .networks
+        .own_nicks
+        .insert("a".to_string(), "Boss[".to_string());
+    state
+        .networks
+        .own_nicks
+        .insert("b".to_string(), "Other".to_string());
+    let ranking = MemberRanking::new(Some(&rfc));
+
+    // The account identifier is a member, but only the network nick counts.
+    let members = roster(&[("account", "@"), ("boss{", "@"), ("other", "+")]);
+    // Rfc1459 folds `[` to `{` and case: "Boss[" is "boss{".
+    assert!(can_moderate_members(&state, "a", &members, &ranking));
+    // Same roster on network "b": "Other" is only voiced.
+    assert!(!can_moderate_members(&state, "b", &members, &ranking));
+    // Another channel where the nick has no role.
+    let elsewhere = roster(&[("account", "@"), ("boss{", "")]);
+    assert!(!can_moderate_members(&state, "a", &elsewhere, &ranking));
+    // Ascii mapping does not fold brackets.
+    state
+        .networks
+        .own_nicks
+        .insert("b".to_string(), "Boss[".to_string());
+    assert!(!can_moderate_members(&state, "b", &members, &ranking));
+    // A network without a known nick gets nothing.
+    assert!(!can_moderate_members(&state, "c", &members, &ranking));
 }
 
 #[test]
@@ -5455,8 +5521,18 @@ fn member_roles_on_an_ov_network() {
     );
     assert_eq!(members, roster(&[("bob", "@"), ("ann", "+"), ("cy", "")]));
     let ranking = MemberRanking::new(Some(&network));
-    assert!(is_own_nick_an_op(&members, "bob", &ranking));
-    assert!(!is_own_nick_an_op(&members, "ann", &ranking));
+    assert!(is_own_nick_an_op(
+        &members,
+        "bob",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(!is_own_nick_an_op(
+        &members,
+        "ann",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
     // `~` is not a role here, so it never reaches the moderation gate.
     assert!(!ranking.is_op_or_above("~"));
     let order = cordiale_core::isupport::prefix_symbol_order(Some(&network));
@@ -5502,10 +5578,30 @@ fn member_roles_on_a_network_with_an_extra_sigil() {
     );
     assert_eq!(highest_prefix(&members[0].1), "!");
     let ranking = MemberRanking::new(Some(&network));
-    assert!(is_own_nick_an_op(&members, "boss", &ranking));
-    assert!(is_own_nick_an_op(&members, "lord", &ranking));
-    assert!(is_own_nick_an_op(&members, "opy", &ranking));
-    assert!(!is_own_nick_an_op(&members, "vic", &ranking));
+    assert!(is_own_nick_an_op(
+        &members,
+        "boss",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(is_own_nick_an_op(
+        &members,
+        "lord",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(is_own_nick_an_op(
+        &members,
+        "opy",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(!is_own_nick_an_op(
+        &members,
+        "vic",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
     assert!(!ranking.is_op_or_above("x"));
 
     let order = cordiale_core::isupport::prefix_symbol_order(Some(&network));
