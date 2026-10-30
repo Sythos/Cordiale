@@ -650,7 +650,7 @@ impl E2eSendVerb {
     }
 
     /// The frame verb that sets which `from` and `to` pairs are valid.
-    fn frame_verb(self) -> Verb {
+    pub fn frame_verb(self) -> Verb {
         match self {
             Self::KeyReq => Verb::KeyReq,
             Self::PkMsg => Verb::PkMsg,
