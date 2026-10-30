@@ -1304,48 +1304,59 @@ impl E2eEngine {
     pub async fn send_list_messages(&mut self, client: &GrappaClient, token: &str) -> usize {
         let mut sent = 0;
         for job in std::mem::take(&mut self.list_jobs) {
-            let Some(entry) = self.pick_specific_device(&job.nick, &job.did) else {
-                continue;
-            };
-            let Ok(Some(identity)) = self.state.olm_identity() else {
-                continue;
-            };
-            let Ok(own) = self.own_wire(&identity) else {
-                continue;
-            };
-            let block;
-            let outgoing = if job.reply {
-                let Some((list, master)) = self.own_list() else {
-                    continue;
-                };
-                block = MasterBlock {
-                    ed25519: master,
-                    list: MasterList {
-                        ver: list.version,
-                        devices: list.keys,
-                    },
-                    sig: list.signature,
-                };
-                Outgoing::List(&block)
-            } else {
-                Outgoing::ListReq
-            };
-            let Ok(sealed) = self.seal(&identity, &job.nick, &[entry], &outgoing, own.lv) else {
-                continue;
-            };
-            let result = self
-                .emit(
-                    client,
-                    token,
-                    &job.nick,
-                    sealed,
-                    &own,
-                    E2eSendPriority::Control,
-                )
-                .await;
-            sent += result.map_or(0, |emitted| emitted.len());
+            if self.send_list_job(client, token, &job).await {
+                sent += 1;
+            } else if !job.reply {
+                // The request did not go out: a later message that shows the
+                // same version can ask again when the interval allows it.
+                let key = self.casemapping.fold(&job.nick);
+                self.listreq_lv.remove(&key);
+            }
         }
         sent
+    }
+
+    /// Sends one queued list message. True when the relay accepted it.
+    async fn send_list_job(&mut self, client: &GrappaClient, token: &str, job: &ListJob) -> bool {
+        let Some(entry) = self.pick_specific_device(&job.nick, &job.did) else {
+            return false;
+        };
+        let Ok(Some(identity)) = self.state.olm_identity() else {
+            return false;
+        };
+        let Ok(own) = self.own_wire(&identity) else {
+            return false;
+        };
+        let block;
+        let outgoing = if job.reply {
+            let Some((list, master)) = self.own_list() else {
+                return false;
+            };
+            block = MasterBlock {
+                ed25519: master,
+                list: MasterList {
+                    ver: list.version,
+                    devices: list.keys,
+                },
+                sig: list.signature,
+            };
+            Outgoing::List(&block)
+        } else {
+            Outgoing::ListReq
+        };
+        let Ok(sealed) = self.seal(&identity, &job.nick, &[entry], &outgoing, own.lv) else {
+            return false;
+        };
+        self.emit(
+            client,
+            token,
+            &job.nick,
+            sealed,
+            &own,
+            E2eSendPriority::Control,
+        )
+        .await
+        .is_ok_and(|emitted| !emitted.is_empty())
     }
 
     /// Reads one inbox row. It never sends and never acknowledges: the
@@ -1507,9 +1518,17 @@ impl E2eEngine {
                 match self.save_state(&nick, &row.from_did, &decrypted) {
                     Ok(()) => {
                         match &decrypted.inner.kind {
-                            // A list that does not verify changes nothing.
                             InnerKind::List { master } => {
-                                let _ = self.apply_list_message(&nick, master);
+                                // A list that does not verify changes nothing.
+                                // A failed write loses a valid list: leave the
+                                // row open and let a later `listreq` ask again.
+                                if let Err(EngineError::Store(_)) =
+                                    self.apply_list_message(&nick, master)
+                                {
+                                    let key = self.casemapping.fold(&nick);
+                                    self.listreq_lv.remove(&key);
+                                    return RowOutcome::StoreFailed;
+                                }
                             }
                             InnerKind::ListReq => self.queue_list_reply(&nick, &row.from_did),
                             _ => {}
@@ -3548,7 +3567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_send_goes_to_a_ready_device_of_a_peer_with_two_devices() {
+    async fn a_send_goes_to_every_ready_device_of_a_peer_with_two_devices() {
         let alice_id = Ident::new("alice-two");
         let bob_id = Ident::new("bob-two");
         let other = fresh_device();
@@ -3573,13 +3592,14 @@ mod tests {
         let server = MockServer::start().await;
         mount_send(&server, "msgid1").await;
         let (_, body) = alice_sends(&mut alice, &server, "hello").await;
-        // Neither device has a session: the lowest `did` wins.
-        let lowest = [&other, &bob_id.device]
+        // Both ready devices get a body; the refused device gets none.
+        let mut ready = [&other, &bob_id.device]
             .iter()
             .map(|device| did_from_key_text(&ed(device)).expect("did"))
-            .min()
-            .expect("two devices");
-        assert_eq!(body["to"], lowest.as_str());
+            .collect::<Vec<_>>();
+        ready.sort();
+        assert_eq!(body["to"], WILDCARD);
+        assert_eq!(bodies_of(&body), ready);
     }
 
     #[test]
@@ -4268,6 +4288,11 @@ mod tests {
         let (_, body) = alice_sends(&mut p.alice, &server, "start").await;
         let item = inbox_row(1, "alice", &p.alice_did, &p.bob_did, &body);
         assert_eq!(p.bob.handle_row(&item, 10), RowOutcome::Stored);
+        // Bob knows Alice only from the certificate, so her `lv` 1 is higher
+        // than his stored version 0.
+        assert_eq!(p.bob.list_jobs.len(), 1);
+        assert!(!p.bob.list_jobs[0].reply);
+        p.bob.list_jobs.clear();
         p
     }
 
@@ -5176,9 +5201,11 @@ mod tests {
         mount_send(&server, "msgid2").await;
         let client = GrappaClient::new(server.uri());
         let (_, body) = alice_sends(&mut alice, &server, "hi").await;
-        let first = body["to"].as_str().expect("to").to_string();
+        assert_eq!(body["to"], WILDCARD);
+        let first = bodies_of(&body)[0].clone();
 
-        // The other device has a session, so a plain pick would prefer it.
+        // The other device has a session; the re-send goes only to the
+        // device that sent the NACK.
         let other = if did_from_key_text(&ed(&d1)).expect("did") == first {
             &d2
         } else {
