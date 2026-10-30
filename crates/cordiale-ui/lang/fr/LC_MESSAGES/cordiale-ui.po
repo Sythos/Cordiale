@@ -2965,6 +2965,10 @@ msgid "Please include these details when you open an issue:"
 msgstr "Inclus ces détails quand tu signales un problème :"
 
 msgctxt "AppWindow"
+msgid "The server address is not valid. Remove any user name, password, query or fragment from it."
+msgstr "L'adresse du serveur n'est pas valide. Retire le nom d'utilisateur, le mot de passe, la requête ou le fragment."
+
+msgctxt "AppWindow"
 msgid "That isn't a share token or link Grappa accepts. Copy it again from the other device."
 msgstr "Ce n'est pas un jeton ou un lien de partage accepté par Grappa. Copiez-le à nouveau depuis l'autre appareil."
 

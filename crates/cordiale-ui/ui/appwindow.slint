@@ -2760,6 +2760,8 @@ export component AppWindow inherits Window {
             return @tr("Grappa is busy right now. Try again in a moment.");
         } else if status-kind == "recovery-failed" {
             return @tr("Couldn't sign in with that recovery code. Try again.");
+        } else if status-kind == "server-url-unsafe" {
+            return @tr("The server address is not valid. Remove any user name, password, query or fragment from it.");
         } else if status-kind == "share-invalid" {
             return @tr("That isn't a share token or link Grappa accepts. Copy it again from the other device.");
         } else if status-kind == "share-expired" {
