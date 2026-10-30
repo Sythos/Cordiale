@@ -88,6 +88,7 @@ use crate::e2e_peer::{
     apply_peer_list, verify_certified_device, verify_peer_device, CertifiedBundle, PeerBundle,
     ReplayState,
 };
+use crate::e2e_provision::{provision_device_at, ProvisionError, Provisioned};
 use crate::e2e_refusal::{E2eRefusal, E2eRouteError};
 use crate::e2e_selfcopy::{inbox_accepts, is_expired, DeliveryTracker};
 use crate::e2e_state::E2eStateStore;
@@ -661,6 +662,9 @@ pub struct E2eEngine {
     revoked_dids: HashSet<String>,
     /// Nicks that sent a message the engine could not read for lack of keys.
     keys_wanted: Vec<String>,
+    /// Nicks whose KEYS or first message came under a master key that is not
+    /// the stored one. The view shows the trust alarm for them.
+    trust_changed: Vec<String>,
     /// Texts that wait for the keys of their peer, oldest first.
     queue: OutgoingQueue,
     pending: HashMap<SendKey, PendingText>,
@@ -699,6 +703,11 @@ impl E2eEngine {
     ) -> Result<Self, EngineError> {
         let own_ed25519 = state.device_key()?.ok_or(EngineError::NotReady)?;
         let own_did = did_from_key_text(&own_ed25519)?;
+        let dropped_rows = state
+            .dropped_rows()
+            .iter()
+            .filter_map(|(id, reason)| Some((id.clone(), DropReason::from_wire(reason)?)))
+            .collect();
         Ok(Self {
             network: network.to_string(),
             own_did,
@@ -713,12 +722,13 @@ impl E2eEngine {
             clock: MonotonicClock::new(),
             revoked_dids: HashSet::new(),
             keys_wanted: Vec::new(),
+            trust_changed: Vec::new(),
             queue: OutgoingQueue::new(),
             pending: HashMap::new(),
             sent: HashMap::new(),
             rekey: IntervalLimiter::new(md3_pacing::REKEY_INTERVAL),
             row_ids: HashMap::new(),
-            dropped_rows: HashMap::new(),
+            dropped_rows,
             capability: Vec::new(),
             changed_peers: Vec::new(),
             local_sends: 0,
@@ -751,6 +761,31 @@ impl E2eEngine {
             &KeyringKeyProvider,
         )?;
         Self::new(network, state, history)
+    }
+
+    /// Makes the E2E identity of this device on first use, with the state
+    /// file in the data folder, and publishes its bundle. On a later run it
+    /// only completes what is missing. Call it before [`Self::open_for_network`]
+    /// so a first device gets its master key and its state file.
+    pub async fn provision_for_network(
+        client: &GrappaClient,
+        token: &str,
+        server: &str,
+        account: &str,
+        network: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<Provisioned, ProvisionError> {
+        let part = storage_part(server, account, network).ok_or(E2eStoreError::NoDataDir)?;
+        let dir = data_dir().ok_or(E2eStoreError::NoDataDir)?;
+        provision_device_at(
+            client,
+            token,
+            network,
+            server_protocol,
+            dir.join(format!("e2e_state_{part}.bin")),
+            &KeyringKeyProvider,
+        )
+        .await
     }
 
     /// Like [`Self::open_for_network`], but for a device that joins by X1
@@ -810,6 +845,11 @@ impl E2eEngine {
 
     pub fn own_did(&self) -> &str {
         &self.own_did
+    }
+
+    /// A copy of the trust state of the peers, for the views.
+    pub fn trust(&self) -> PeerTrust {
+        self.state.trust()
     }
 
     pub fn history(&self) -> &E2eHistoryStore {
@@ -932,6 +972,8 @@ impl E2eEngine {
     fn note_drops(&mut self, drops: &[SendDropped]) {
         for drop in drops {
             if let Some(row_id) = self.row_ids.get(&drop.key).cloned() {
+                // A failed save leaves the mark in memory for this run.
+                let _ = self.state.set_dropped_row(&row_id, drop.reason.wire_name());
                 self.dropped_rows.entry(row_id).or_insert(drop.reason);
             }
             self.note_changed(&drop.key.target);
@@ -977,6 +1019,19 @@ impl E2eEngine {
         std::mem::take(&mut self.keys_wanted)
     }
 
+    /// The nicks whose master key changed since the last call. The list is
+    /// cleared. The stored master stays: the engine reads nothing under the
+    /// new master.
+    pub fn take_trust_changed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.trust_changed)
+    }
+
+    fn note_trust_changed(&mut self, nick: &str) {
+        if !self.trust_changed.iter().any(|known| known == nick) {
+            self.trust_changed.push(nick.to_string());
+        }
+    }
+
     /// Reads a KEYS text into the engine: a KEYS row or a claim answer. Each
     /// device of the answer must pass [`verify_peer_device`] and carry a good
     /// signature on its key. A device that is refused is skipped, the others
@@ -990,6 +1045,7 @@ impl E2eEngine {
         let mut trust = self.state.trust();
         let mut accepted = Vec::new();
         let mut first_error = None;
+        let mut master_changed = false;
         // The list revokes the devices that it drops, with or without a
         // device entry in the answer.
         if let Err(err) = apply_peer_list(
@@ -1001,6 +1057,7 @@ impl E2eEngine {
             &master.list.devices,
             &master.sig,
         ) {
+            master_changed |= err == E2eError::MasterChanged;
             first_error = Some(err);
         }
         let mut seen = HashSet::new();
@@ -1027,9 +1084,13 @@ impl E2eEngine {
             match checked {
                 Ok(device) => accepted.push((device, entry.otk.key.clone())),
                 Err(err) => {
+                    master_changed |= err == E2eError::MasterChanged;
                     first_error.get_or_insert(err);
                 }
             }
+        }
+        if master_changed {
+            self.note_trust_changed(nick);
         }
         self.state.set_trust(&trust)?;
         // A newer list stays even when a device is refused: drop every
@@ -1189,6 +1250,16 @@ impl E2eEngine {
             return RowOutcome::Undecryptable;
         }
         let Some(decrypted) = self.decrypt_row(row, entry.as_ref(), &nick) else {
+            // A first message under another master than the stored one is a
+            // trust alarm, not only an unread row.
+            if let Ok(MessagePayload::PreKey(pre)) = MessagePayload::parse(row.verb, &row.payload) {
+                if trust
+                    .master(&self.network, &nick)
+                    .is_some_and(|master| master != pre.master.ed25519)
+                {
+                    self.note_trust_changed(&nick);
+                }
+            }
             if entry.is_none() && !self.keys_wanted.contains(&nick) {
                 self.keys_wanted.push(nick);
             }
@@ -2929,6 +3000,9 @@ mod tests {
         ));
         assert!(alice.peers.is_empty());
         assert!(!alice.is_ready("bob"));
+        // The revocation is in the trust state, not in the current list.
+        assert!(alice.trust().has_revoked_devices(NET, "bob"));
+        assert!(!alice.trust().has_revoked_devices(NET, "carol"));
         let server = MockServer::start().await;
         mount_send(&server, "msgid1").await;
         let sent = alice
@@ -2940,6 +3014,61 @@ mod tests {
             .await
             .expect("requests")
             .is_empty());
+    }
+
+    #[test]
+    fn a_keys_row_under_another_master_is_a_trust_change() {
+        let alice_id = Ident::new("alice-master");
+        let bob_id = Ident::new("bob-master");
+        let other_id = Ident::new("bob-other-master");
+        let mut alice = alice_id.engine();
+        alice
+            .accept_keys("bob", &bob_id.keys())
+            .expect("alice reads bob");
+        assert!(alice.take_trust_changed().is_empty());
+        let alice_did = alice.own_did().to_string();
+        let value = row(
+            4,
+            "bob",
+            WILDCARD,
+            &alice_did,
+            "keys",
+            "k2",
+            &other_id.keys(),
+        );
+        let keys_row = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(alice.handle_row(&keys_row, 1), RowOutcome::Undecryptable);
+        assert_eq!(alice.take_trust_changed(), ["bob"]);
+        assert!(alice.take_trust_changed().is_empty());
+        // The stored master stays.
+        assert!(alice.is_ready("bob"));
+    }
+
+    #[tokio::test]
+    async fn a_first_message_under_another_master_is_a_trust_change() {
+        let mut p = pair();
+        // Bob knows another master for the nick of Alice.
+        let other_id = Ident::new("alice-other-master");
+        p.bob
+            .accept_keys("alice", &other_id.keys())
+            .expect("bob reads the other master");
+        assert!(p.bob.take_trust_changed().is_empty());
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, "hello").await;
+        let payload = body["payload"].as_str().expect("payload").to_string();
+        let value = row(
+            5,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "pkmsg",
+            "msgid1",
+            &payload,
+        );
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(p.bob.handle_row(&item, 200), RowOutcome::Undecryptable);
+        assert_eq!(p.bob.take_trust_changed(), ["alice"]);
     }
 
     #[tokio::test]

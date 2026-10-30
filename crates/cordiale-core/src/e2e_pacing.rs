@@ -529,6 +529,15 @@ impl DropReason {
             _ => None,
         }
     }
+
+    /// The wire name, the inverse of [`DropReason::from_wire`].
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Late => "late",
+            Self::SendFailed => "send_failed",
+            Self::SessionEnded => "session_ended",
+        }
+    }
 }
 
 /// Local status of one send. No variant means "delivered": the relay gives no

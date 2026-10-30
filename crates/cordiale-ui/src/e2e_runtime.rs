@@ -15,15 +15,16 @@ use super::*;
 
 use std::collections::BTreeSet;
 
+use cordiale_core::e2e_device::E2eError;
 use cordiale_core::e2e_engine::{
-    conversation_id, locked_label, route_for_window, E2eEngine, EngineError, RowOutcome, SendRoute,
-    OWN_DEVICE,
+    conversation_id, route_for_window, E2eEngine, EngineError, RowOutcome, SendRoute, OWN_DEVICE,
 };
 use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
 };
 use cordiale_core::e2e_protocol::E2eOperation;
+use cordiale_core::e2e_provision::provision_device;
 use cordiale_core::e2e_revoke::{
     finish_pending_revoke, reset_identity, resume_reset, revoke_device, OwnRoutes,
     ResetConfirmation,
@@ -34,7 +35,10 @@ use cordiale_core::phoenix::PhoenixMessage;
 use cordiale_core::session::{route_e2e_message, route_e2e_pairing};
 use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
-use crate::e2e_view::{pairing_error_key, pairing_status_key, reset_status_key, revoke_status_key};
+use crate::e2e_view::{
+    locked_chat_state, pairing_error_key, pairing_status_key, register_own_device,
+    reset_status_key, revoke_status_key, ChatSignals, ChatState, LocalQuery, QueryLane,
+};
 
 /// How often the timers of the engines run: queued texts expire or go out.
 pub(crate) const E2E_TICK: std::time::Duration = std::time::Duration::from_secs(15);
@@ -59,6 +63,17 @@ pub(crate) struct E2eRuntime {
     /// Networks whose identity this device reset. They have no engine work:
     /// no inbox, no key request and no send. The sealed history stays.
     reset: HashSet<String>,
+    /// Peers whose master key changed: `(network, nick)`. The locked entry
+    /// of such a peer shows the trust alarm.
+    trust_alarm: HashSet<(String, String)>,
+    /// How many incoming rows of each locked entry the user has seen. Rows
+    /// above it are unread. It is not saved: after a restart every entry
+    /// starts read.
+    read_incoming: HashMap<(String, String), usize>,
+    /// Networks whose provisioning ended with success in this session. An
+    /// open engine is not proof: a run that failed after the Olm account was
+    /// saved still opens one, so the next connect provisions again.
+    provisioned: HashSet<String>,
 }
 
 /// An open pairing and the network whose identity it changes.
@@ -75,7 +90,7 @@ impl E2eRuntime {
             .iter()
             .map(|(network, nick)| QueryWindow {
                 network: network.clone(),
-                target_nick: locked_label(nick),
+                target_nick: LocalQuery::new(network, QueryLane::Locked, nick).window_name(),
                 opened_at: String::new(),
                 dm_conversation_id: None,
             })
@@ -85,6 +100,15 @@ impl E2eRuntime {
     /// Adds the locked entry of `nick`; true when it is new.
     pub(crate) fn add_locked(&mut self, network: &str, nick: &str) -> bool {
         self.locked.insert((network.to_string(), nick.to_string()))
+    }
+
+    /// Notes an engine failure of a peer. A changed master key is the trust
+    /// alarm of the locked entry.
+    pub(crate) fn note_engine_error(&mut self, network: &str, nick: &str, error: &EngineError) {
+        if matches!(error, EngineError::Device(E2eError::MasterChanged)) {
+            self.trust_alarm
+                .insert((network.to_string(), nick.to_string()));
+        }
     }
 
     pub(crate) fn engine_mut(&mut self, network: &str) -> Option<&mut E2eEngine> {
@@ -123,6 +147,97 @@ pub(crate) fn e2e_send_error_kind(error: &EngineError) -> &'static str {
             "e2e-not-ready"
         }
         _ => "e2e-send-failed",
+    }
+}
+
+/// How many rows of the locked entry of `nick` the peer sent.
+fn incoming_rows(engine: &E2eEngine, network: &str, nick: &str) -> usize {
+    engine
+        .history()
+        .messages(&conversation_id(network, nick))
+        .iter()
+        .filter(|message| message.sender_device != OWN_DEVICE)
+        .count()
+}
+
+/// The unread counts of the locked entries, keyed like the counts of the
+/// plain windows. Only the entries with unread rows are in the map.
+pub(crate) fn locked_unread_counts(state: &WorkerState) -> HashMap<(String, String), u64> {
+    let mut counts = HashMap::new();
+    for (network, nick) in &state.e2e.locked {
+        let Some(engine) = state.e2e.engines.get(network) else {
+            continue;
+        };
+        let seen = state
+            .e2e
+            .read_incoming
+            .get(&(network.clone(), nick.clone()))
+            .copied()
+            .unwrap_or(0);
+        let unread = incoming_rows(engine, network, nick).saturating_sub(seen);
+        if unread > 0 {
+            let name = LocalQuery::new(network, QueryLane::Locked, nick).window_name();
+            counts.insert(window_counts_key(network, &name), unread as u64);
+        }
+    }
+    counts
+}
+
+/// Marks every incoming row of the locked entry as seen.
+fn mark_locked_read(state: &mut WorkerState, network: &str, nick: &str) {
+    let seen = state
+        .e2e
+        .engines
+        .get(network)
+        .map(|engine| incoming_rows(engine, network, nick))
+        .unwrap_or(0);
+    state
+        .e2e
+        .read_incoming
+        .insert((network.to_string(), nick.to_string()), seen);
+}
+
+/// The state of the locked entry of `nick`, read from the engine and the
+/// session.
+pub(crate) fn locked_entry_state(state: &WorkerState, network: &str, nick: &str) -> ChatState {
+    let engine = state.e2e.engines.get(network);
+    let mut signals = ChatSignals {
+        reset: state.e2e.reset.contains(network),
+        engine: engine.is_some(),
+        trust_alarm: state
+            .e2e
+            .trust_alarm
+            .contains(&(network.to_string(), nick.to_string())),
+        pairing: state
+            .e2e
+            .pairing
+            .as_ref()
+            .is_some_and(|active| active.network == network),
+        ..ChatSignals::default()
+    };
+    if let Some(engine) = engine {
+        signals.ready = engine.is_ready(nick);
+        signals.last_drop = engine
+            .history()
+            .messages(&conversation_id(network, nick))
+            .into_iter()
+            .rev()
+            .find(|message| message.sender_device == OWN_DEVICE)
+            .and_then(|message| engine.dropped_reason(&message.id));
+        let trust = engine.trust();
+        signals.sas_verified = trust.is_sas_verified(network, nick);
+        // The current list never holds a revoked key: read the revoked set.
+        signals.peer_revoked = trust.has_revoked_devices(network, nick);
+    }
+    locked_chat_state(&signals)
+}
+
+/// The state key of a plain query: clear text when the network has E2E.
+pub(crate) fn plain_entry_state_key(state: &WorkerState, network: &str) -> &'static str {
+    if state.e2e.engines.contains_key(network) {
+        ChatState::ClearText.key()
+    } else {
+        ""
     }
 }
 
@@ -209,8 +324,14 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
             if let Some(isupport) = state.networks.isupport_by_network.get(network) {
                 engine.set_casemapping(isupport.casemapping);
             }
+            register_own_device(engine.own_did());
             for peer in engine.history_peers() {
                 state.e2e.add_locked(network, &peer);
+                let seen = incoming_rows(&engine, network, &peer);
+                state
+                    .e2e
+                    .read_incoming
+                    .insert((network.to_string(), peer), seen);
             }
             // The channel secret of a pairing lives in memory only, so a
             // pairing left in the slot by an earlier run is stale.
@@ -234,12 +355,68 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
     }
 }
 
+/// Gives a first device its E2E identity: the master key, the state file and
+/// the published bundle. It runs on each connect until one run ends with
+/// success, also when an engine is open: a run that failed after the Olm
+/// account was saved leaves an engine without a master or a bundle. A reset
+/// network and a guest session are left as they are. A failure is logged by
+/// kind.
+async fn provision_network(state: &mut WorkerState, network: &str) {
+    if state.e2e.reset.contains(network)
+        || state.e2e.provisioned.contains(network)
+        || state.conn.guest_session
+    {
+        return;
+    }
+    let (Some(client), Some(token), Some(account)) = (
+        state.conn.client.clone(),
+        state.conn.token.clone(),
+        state.conn.identifier.clone(),
+    ) else {
+        return;
+    };
+    let protocol = state.conn.server_protocol_version;
+    let result = match state.e2e.engines.remove(network) {
+        // The engine owns the one open handle on the state file, so the run
+        // writes through it.
+        Some(mut engine) => {
+            let result =
+                provision_device(&client, &token, network, protocol, engine.state_mut()).await;
+            state.e2e.engines.insert(network.to_string(), engine);
+            result
+        }
+        None => {
+            E2eEngine::provision_for_network(
+                &client,
+                &token,
+                client.base_url(),
+                &account,
+                network,
+                protocol,
+            )
+            .await
+        }
+    };
+    match result {
+        Ok(_) => {
+            state.e2e.provisioned.insert(network.to_string());
+            // A network without a state file before this run can open its
+            // engine now.
+            state.e2e.unavailable.remove(network);
+        }
+        Err(error) => {
+            persistence::log_line(&format!("e2e identity not made for {network}: {error:?}"));
+        }
+    }
+}
+
 /// Opens the engines of the signed-in networks and reads their inboxes. Call
 /// it when the session connects, also after a reconnect.
 pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     let mut networks: Vec<String> = state.networks.own_nicks.keys().cloned().collect();
     networks.sort();
     for network in networks {
+        provision_network(state, &network).await;
         if ensure_engine(state, &network) {
             // A revoke or a reset that an earlier run left open ends first,
             // so a revoked device gets no inbox work.
@@ -322,6 +499,32 @@ fn show_pairing(ui: &slint::Weak<AppWindow>, status: &PairingStatus) {
     show_pairing_kind(ui, kind, hint);
 }
 
+/// The host part of a server base URL, for the pairing link.
+pub(crate) fn pairing_host(base_url: &str) -> String {
+    let rest = base_url
+        .split_once("://")
+        .map_or(base_url, |(_, rest)| rest);
+    rest.split('/').next().unwrap_or(rest).to_string()
+}
+
+/// Draws the QR code of the pairing link in a dialog. The link and the code
+/// are never logged.
+fn show_pairing_qr(ui: &slint::Weak<AppWindow>, url: &str, code: String) {
+    let qr = crate::totp::qr_rgb(url);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        let image = qr
+            .map(|(side, rgb)| {
+                slint::Image::from_rgb8(slint::SharedPixelBuffer::clone_from_slice(
+                    &rgb, side, side,
+                ))
+            })
+            .unwrap_or_default();
+        ui.set_e2e_pair_qr(image);
+        ui.set_e2e_pair_qr_code(code.into());
+        ui.set_e2e_pair_qr_visible(true);
+    });
+}
+
 fn show_pairing_kind(ui: &slint::Weak<AppWindow>, kind: &'static str, hint: String) {
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_status_command_hint(hint.into());
@@ -370,6 +573,7 @@ pub(crate) async fn run_e2e_pair(
                         session,
                     });
                     show_pairing_kind(ui, "e2e-pair-link", link.code());
+                    show_pairing_qr(ui, &link.url(&pairing_host(client.base_url())), link.code());
                 }
                 Err(error) => show_pairing_kind(ui, pairing_error_key(&error), String::new()),
             }
@@ -825,6 +1029,7 @@ pub(crate) async fn handle_e2e_message(
             Ok(_) => break,
             Err(error) => {
                 persistence::log_line(&format!("e2e item not read for {}: {error:?}", row.network));
+                state.e2e.note_engine_error(&row.network, &row.from, &error);
                 break;
             }
         }
@@ -859,11 +1064,18 @@ async fn settle_engine(
     ) {
         for nick in wanted {
             if let Err(error) = engine.request_keys(&client, &token, &nick).await {
+                state.e2e.note_engine_error(network, &nick, &error);
                 if !matches!(error, EngineError::Paced(_) | EngineError::PeerNotCapable) {
                     persistence::log_line(&format!("e2e key request failed: {error:?}"));
                 }
             }
         }
+    }
+    // A KEYS row, a claim answer or a first message under another master
+    // key: the engine reads it as an unread row, and the entry shows the
+    // trust alarm.
+    for nick in engine.take_trust_changed() {
+        state.e2e.trust_alarm.insert((network.to_string(), nick));
     }
     let changed = engine.take_changed_peers();
     let own_nick = state
@@ -885,9 +1097,11 @@ async fn settle_engine(
     for nick in &changed {
         refresh_locked_view(state, ui, network, nick);
     }
-    if sidebar_changed {
+    // The unread counts of the locked entries change with each new row.
+    if sidebar_changed || !changed.is_empty() {
         refresh_network_groups(state, ui);
     }
+    push_open_locked_state(state, ui);
 }
 
 /// Queues the copies of the sent texts in the inboxes of the other devices
@@ -942,9 +1156,19 @@ fn refresh_locked_view(
     let is_open = open_locked_window(state)
         .is_some_and(|(open_network, open_nick)| open_network == network && open_nick == nick);
     if is_open {
+        mark_locked_read(state, network, nick);
         load_locked_rows(state, network, nick);
         show_locked_rows(state, ui, network, nick);
     }
+}
+
+/// Pushes the state banner of the open locked entry.
+fn push_open_locked_state(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let Some((network, nick)) = open_locked_window(state) else {
+        return;
+    };
+    let key = locked_entry_state(state, &network, &nick).key();
+    let _ = ui.upgrade_in_event_loop(move |ui| ui.set_current_query_e2e_state(key.into()));
 }
 
 /// Redraws only the rows of the locked window of `nick`.
@@ -952,7 +1176,7 @@ fn show_locked_rows(state: &WorkerState, ui: &slint::Weak<AppWindow>, network: &
     let lines = state
         .transcript
         .messages
-        .get(&(network.to_string(), locked_label(nick)))
+        .get(&LocalQuery::new(network, QueryLane::Locked, nick).key())
         .cloned()
         .unwrap_or_default();
     let dark_theme = state.prefs.theme == Theme::Dark;
@@ -986,16 +1210,17 @@ fn load_locked_rows(state: &mut WorkerState, network: &str, nick: &str) {
                 .collect()
         })
         .unwrap_or_default();
-    state
-        .transcript
-        .messages
-        .insert((network.to_string(), locked_label(nick)), rows);
+    state.transcript.messages.insert(
+        LocalQuery::new(network, QueryLane::Locked, nick).key(),
+        rows,
+    );
 }
 
 /// Shows the locked window of `nick`. It is not a Grappa window: nothing is
 /// fetched, and the peer nick the view gets is the real one.
 fn show_locked_window(state: &WorkerState, ui: &slint::Weak<AppWindow>, network: &str, nick: &str) {
-    let key = (network.to_string(), locked_label(nick));
+    let key = LocalQuery::new(network, QueryLane::Locked, nick).key();
+    let chat_state = locked_entry_state(state, network, nick).key();
     let lines = state
         .transcript
         .messages
@@ -1024,6 +1249,7 @@ fn show_locked_window(state: &WorkerState, ui: &slint::Weak<AppWindow>, network:
         ui.set_current_query(true);
         ui.set_current_query_ready(true);
         ui.set_current_query_e2e(true);
+        ui.set_current_query_e2e_state(chat_state.into());
         ui.set_current_query_peer_nick(peer_nick.into());
         ui.set_compose_text(draft.into());
         ui.set_reply_target_left(false);
@@ -1058,6 +1284,7 @@ pub(crate) fn handle_select_locked_query(
     state.windows.current_query = true;
     state.windows.current_query_ready = true;
     open_window(state, &key);
+    mark_locked_read(state, &network, &nick);
     load_locked_rows(state, &network, &nick);
     refresh_network_groups(state, ui);
     show_locked_window(state, ui, &network, &nick);
@@ -1110,6 +1337,7 @@ pub(crate) async fn offer_locked_query(
     if !engine.is_ready(&peer) {
         if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
             if let Err(error) = engine.request_keys(&client, &token, &peer).await {
+                state.e2e.note_engine_error(network, &peer, &error);
                 if !matches!(error, EngineError::Paced(_)) {
                     persistence::log_line(&format!("e2e key request failed: {error:?}"));
                 }
@@ -1161,6 +1389,7 @@ pub(crate) async fn handle_send_locked(
         // The log gets the kind of the failure, never the text.
         persistence::log_line(&format!("e2e send failed for {network}: {error:?}"));
         set_e2e_status(ui, e2e_send_error_kind(error));
+        state.e2e.note_engine_error(&network, &nick, error);
     }
     settle_engine(state, ui, &network, engine).await;
 }
@@ -1224,5 +1453,90 @@ mod tests {
         // With no client the new engine of a join does not open.
         assert!(take_pairing_engine(&mut state, "net", true).is_none());
         assert!(state.e2e.reset.contains("net"));
+    }
+
+    #[test]
+    fn the_pairing_host_has_no_scheme_or_path() {
+        assert_eq!(
+            pairing_host("https://grappa.example.org"),
+            "grappa.example.org"
+        );
+        assert_eq!(
+            pairing_host("https://grappa.example.org:8443/"),
+            "grappa.example.org:8443"
+        );
+        assert_eq!(pairing_host("grappa.example.org"), "grappa.example.org");
+    }
+
+    #[test]
+    fn one_peer_has_two_entries_with_separate_keys() {
+        let mut state = WorkerState::new();
+        assert!(state.e2e.add_locked("net", "ada"));
+        let locked = LocalQuery::new("net", QueryLane::Locked, "ada");
+        let plain = LocalQuery::new("net", QueryLane::Plain, "ada");
+        let windows = state.e2e.locked_windows();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].target_nick, locked.window_name());
+        assert_ne!(windows[0].target_nick, plain.window_name());
+
+        // History, drafts and the open window use the key of their lane.
+        state
+            .transcript
+            .drafts
+            .insert(plain.key(), "plain draft".to_string());
+        state
+            .transcript
+            .drafts
+            .insert(locked.key(), "locked draft".to_string());
+        assert_eq!(state.transcript.drafts[&plain.key()], "plain draft");
+        assert_eq!(state.transcript.drafts[&locked.key()], "locked draft");
+        state.windows.current_query = true;
+        state.windows.current_channel = Some(locked.key());
+        assert_eq!(
+            open_locked_window(&state),
+            Some(("net".to_string(), "ada".to_string()))
+        );
+        state.windows.current_channel = Some(plain.key());
+        assert_eq!(open_locked_window(&state), None);
+        assert!(is_locked_name(&locked.window_name()));
+        assert!(!is_locked_name(&plain.window_name()));
+    }
+
+    #[test]
+    fn the_state_of_an_entry_follows_the_session() {
+        let mut state = WorkerState::new();
+        // No engine: encryption is unavailable and the plain query has no
+        // clear-text banner.
+        assert_eq!(
+            locked_entry_state(&state, "net", "ada"),
+            ChatState::Unavailable
+        );
+        assert_eq!(plain_entry_state_key(&state, "net"), "");
+        // A reset network cannot send.
+        state.e2e.reset.insert("net".to_string());
+        assert_eq!(locked_entry_state(&state, "net", "ada"), ChatState::Reset);
+        // A changed master key is a trust alarm for that peer only.
+        let mut state = WorkerState::new();
+        state
+            .e2e
+            .note_engine_error("net", "ada", &EngineError::Device(E2eError::MasterChanged));
+        state
+            .e2e
+            .note_engine_error("net", "bob", &EngineError::NotReady);
+        assert!(state
+            .e2e
+            .trust_alarm
+            .contains(&("net".to_string(), "ada".to_string())));
+        assert!(!state
+            .e2e
+            .trust_alarm
+            .contains(&("net".to_string(), "bob".to_string())));
+    }
+
+    #[test]
+    fn an_entry_without_an_engine_has_no_unread_count() {
+        let mut state = WorkerState::new();
+        state.e2e.add_locked("net", "ada");
+        assert!(locked_unread_counts(&state).is_empty());
     }
 }

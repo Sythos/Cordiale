@@ -118,6 +118,10 @@ struct StateData {
     /// state stays until the server dropped the identity.
     #[serde(default)]
     reset_pending: bool,
+    /// History row id to the wire name of the drop reason of its send
+    /// (public values). The mark survives a restart.
+    #[serde(default)]
+    dropped_rows: BTreeMap<String, String>,
 }
 
 /// An own device that a revoke removes from the list (public values).
@@ -406,6 +410,22 @@ impl E2eStateStore {
     pub fn set_trust(&mut self, trust: &PeerTrust) -> Result<(), E2eStoreError> {
         let trust = trust.clone();
         self.commit(|data| data.trust = trust)
+    }
+
+    /// The drop marks of the sent rows: row id to the wire name of the reason.
+    pub fn dropped_rows(&self) -> &BTreeMap<String, String> {
+        &self.data.dropped_rows
+    }
+
+    /// Saves the drop mark of one sent row. A mark that exists stays.
+    pub fn set_dropped_row(&mut self, row_id: &str, reason: &str) -> Result<(), E2eStoreError> {
+        if self.data.dropped_rows.contains_key(row_id) {
+            return Ok(());
+        }
+        let (row_id, reason) = (row_id.to_string(), reason.to_string());
+        self.commit(|data| {
+            data.dropped_rows.insert(row_id, reason);
+        })
     }
 
     /// The pending pairing state, or `None` when no pairing is open.
@@ -739,6 +759,28 @@ mod tests {
         let loaded = store.session("peer-1").expect("session").expect("present");
         assert_eq!(loaded.session_id(), session.session_id());
         assert!(store.session("other").expect("session").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_drop_mark_survives_a_restart_and_stays_once_set() {
+        let dir = scratch_dir("drop-mark");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        {
+            let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+            assert!(store.dropped_rows().is_empty());
+            store.set_dropped_row("row-1", "late").expect("mark");
+            store
+                .set_dropped_row("row-1", "send_failed")
+                .expect("again");
+        }
+        let store = E2eStateStore::open(path, &provider).expect("reopen");
+        assert_eq!(
+            store.dropped_rows().get("row-1").map(String::as_str),
+            Some("late")
+        );
+        assert_eq!(store.dropped_rows().len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

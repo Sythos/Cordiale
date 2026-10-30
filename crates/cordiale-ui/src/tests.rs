@@ -10498,3 +10498,54 @@ fn a_locked_window_without_an_engine_sends_nothing() {
     // appeared for it.
     assert!(state.transcript.messages.is_empty());
 }
+
+#[test]
+fn an_undeliverable_row_is_a_notice_for_the_device_it_names() {
+    crate::e2e_view::register_own_device("ThisDeviceDid");
+    let here = serde_json::json!({
+        "kind": "server_event",
+        "sender": "ada",
+        "meta": {"e2e_undeliverable": 2, "e2e_device": "ThisDeviceDid"}
+    });
+    let rendered = render_message(&here, None);
+    assert_eq!(
+        rendered.text,
+        "*** ada sent you 2 encrypted messages that cannot be read here"
+    );
+    assert!(rendered.italic && rendered.nick.is_none() && !rendered.encrypted);
+
+    let other = serde_json::json!({
+        "kind": "server_event",
+        "sender": "ada",
+        "meta": {"e2e_undeliverable": 2, "e2e_device": "SomeOtherDid"}
+    });
+    let rendered = render_message(&other, None);
+    assert!(rendered.text.contains("SomeOtherDid"));
+    assert!(!rendered.text.contains("cannot be read here"));
+
+    // A server event without the E2E meta stays an ordinary line.
+    let plain = serde_json::json!({
+        "kind": "server_event", "sender": "irc.example.org", "body": "Going down"
+    });
+    assert_eq!(render_message(&plain, None).text, "Going down");
+}
+
+#[test]
+fn a_plain_history_row_never_carries_the_encrypted_mark() {
+    let plain = serde_json::json!({"id": 1, "sender": "ada", "body": "hi", "kind": "privmsg"});
+    assert!(!render_history_entry(&plain).encrypted);
+    assert!(!render_history_entry(&plain).encrypted);
+    use cordiale_core::e2e_store::E2eMessage;
+    let message = E2eMessage {
+        id: "net:in:1".to_string(),
+        conversation_id: "net\u{0}ada".to_string(),
+        sender_device: "AAAAAAAAAAA".to_string(),
+        sent_at: 1_700_000_000,
+        text: "secret".to_string(),
+        encrypted: true,
+    };
+    // Each reload builds the locked row again with its own mark.
+    for _ in 0..2 {
+        assert!(locked_row_with_drop(&message, "me", "ada", None).encrypted);
+    }
+}

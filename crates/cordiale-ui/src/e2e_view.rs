@@ -29,6 +29,11 @@
 // The views and the worker commands that call this module are a later step.
 #![allow(dead_code)]
 
+use std::collections::BTreeSet;
+use std::sync::Mutex;
+
+use cordiale_core::e2e_engine::{locked_label, route_for_window, SendRoute};
+use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing::{ClosedReason, PairingCallError};
 use cordiale_core::e2e_pairing_flow::{DriveError, EndReason, FlowError, PairingStatus};
 use cordiale_core::e2e_refusal::E2eRouteError;
@@ -200,6 +205,197 @@ pub fn reset_status_key(result: &Result<(), RevokeError>) -> &'static str {
     }
 }
 
+/// The two lanes of one peer. The plain lane is the legacy query `<user>`.
+/// The locked lane is the local E2E entry `🔒<user>`. A row is in one lane
+/// only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QueryLane {
+    Plain,
+    Locked,
+}
+
+/// The identity of a local query window: network, lane and the real peer
+/// nick. The display label is made from the parts and is never stored in the
+/// nick.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LocalQuery {
+    pub network: String,
+    pub lane: QueryLane,
+    pub nick: String,
+}
+
+impl LocalQuery {
+    pub fn new(network: &str, lane: QueryLane, nick: &str) -> Self {
+        LocalQuery {
+            network: network.to_string(),
+            lane,
+            nick: nick.to_string(),
+        }
+    }
+
+    /// Reads the identity of a window from its network and window name.
+    pub fn from_window(network: &str, window_name: &str) -> Self {
+        match route_for_window(window_name) {
+            SendRoute::Encrypted { nick } => LocalQuery::new(network, QueryLane::Locked, &nick),
+            SendRoute::Plain { nick } => LocalQuery::new(network, QueryLane::Plain, &nick),
+        }
+    }
+
+    /// The window name used in the keys of selection, history, drafts,
+    /// unread counts and message status. The two lanes of one peer give two
+    /// different names.
+    pub fn window_name(&self) -> String {
+        match self.lane {
+            QueryLane::Plain => self.nick.clone(),
+            QueryLane::Locked => locked_label(&self.nick),
+        }
+    }
+
+    /// The `(network, window name)` key of the window.
+    pub fn key(&self) -> (String, String) {
+        (self.network.clone(), self.window_name())
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.lane == QueryLane::Locked
+    }
+}
+
+/// What the open chat knows about its encryption. The order of the variants
+/// is the order of priority when two states apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatState {
+    /// A legacy query: clear text.
+    ClearText,
+    /// The E2E identity of this device was reset.
+    Reset,
+    /// No engine for this network.
+    Unavailable,
+    /// The master key of the peer changed.
+    TrustAlarm,
+    /// A device pairing is open.
+    Pairing,
+    /// A device of the peer was revoked and no device is left to send to.
+    Revoked,
+    /// The keys of the peer are missing.
+    MissingKeys,
+    /// The last sent text was not sent.
+    SendFailed,
+    /// The last sent text waited too long for keys.
+    Expired,
+    /// The master key of the peer has no SAS check.
+    SasPending,
+    /// Encryption is active.
+    Active,
+}
+
+impl ChatState {
+    /// The `status-kind` style key that selects the translated banner text.
+    pub fn key(self) -> &'static str {
+        match self {
+            ChatState::ClearText => "e2e-chat-clear",
+            ChatState::Reset => "e2e-chat-reset",
+            ChatState::Unavailable => "e2e-chat-unavailable",
+            ChatState::TrustAlarm => "e2e-chat-trust",
+            ChatState::Pairing => "e2e-chat-pairing",
+            ChatState::Revoked => "e2e-chat-revoked",
+            ChatState::MissingKeys => "e2e-chat-keys",
+            ChatState::SendFailed => "e2e-chat-send-failed",
+            ChatState::Expired => "e2e-chat-expired",
+            ChatState::SasPending => "e2e-chat-sas",
+            ChatState::Active => "e2e-chat-active",
+        }
+    }
+}
+
+/// The facts about one locked entry. The worker reads them from the engine
+/// and the session; the state follows from them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChatSignals {
+    pub reset: bool,
+    pub engine: bool,
+    pub trust_alarm: bool,
+    pub pairing: bool,
+    pub peer_revoked: bool,
+    pub ready: bool,
+    pub sas_verified: bool,
+    /// The drop reason of the newest sent row, if it was dropped.
+    pub last_drop: Option<DropReason>,
+}
+
+/// The state of a locked entry.
+pub fn locked_chat_state(signals: &ChatSignals) -> ChatState {
+    if signals.reset {
+        ChatState::Reset
+    } else if !signals.engine {
+        ChatState::Unavailable
+    } else if signals.trust_alarm {
+        ChatState::TrustAlarm
+    } else if signals.pairing {
+        ChatState::Pairing
+    } else if !signals.ready && signals.peer_revoked {
+        ChatState::Revoked
+    } else if !signals.ready {
+        ChatState::MissingKeys
+    } else if matches!(
+        signals.last_drop,
+        Some(DropReason::SendFailed | DropReason::SessionEnded)
+    ) {
+        ChatState::SendFailed
+    } else if signals.last_drop == Some(DropReason::Late) {
+        ChatState::Expired
+    } else if !signals.sas_verified {
+        ChatState::SasPending
+    } else {
+        ChatState::Active
+    }
+}
+
+/// The own devices of the open engines. The notice of an undeliverable row
+/// compares its device with this list.
+static OWN_DEVICES: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Records the `did` of the device of an open engine.
+pub fn register_own_device(did: &str) {
+    if let Ok(mut devices) = OWN_DEVICES.lock() {
+        devices.insert(did.to_string());
+    }
+}
+
+fn is_own_device(did: &str) -> bool {
+    OWN_DEVICES
+        .lock()
+        .map(|devices| devices.contains(did))
+        .unwrap_or(false)
+}
+
+/// The text of the row that Grappa writes when a device will never read some
+/// messages of a peer: `meta.e2e_undeliverable` is the count and
+/// `meta.e2e_device` the `did` of the device. `None` when the row is not such
+/// a row. A row without a device comes from a server before protocol 49 and
+/// counts for this device.
+pub fn undeliverable_text(payload: &serde_json::Value, peer: &str) -> Option<String> {
+    undeliverable_text_for(payload, peer, is_own_device)
+}
+
+fn undeliverable_text_for(
+    payload: &serde_json::Value,
+    peer: &str,
+    is_own: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let meta = payload.get("meta")?;
+    let count = meta.get("e2e_undeliverable")?.as_u64()?;
+    let messages = if count == 1 { "message" } else { "messages" };
+    match meta.get("e2e_device").and_then(serde_json::Value::as_str) {
+        Some(did) if !is_own(did) => Some(format!(
+            "*** {peer} sent {count} encrypted {messages} that cannot be read on your other device {did}"
+        )),
+        _ => Some(format!(
+            "*** {peer} sent you {count} encrypted {messages} that cannot be read here"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +544,159 @@ mod tests {
         assert!(delete_confirmed(&mut store, &plan, true).expect("confirmed"));
         assert!(store.messages("a").is_empty());
         assert_eq!(store.messages("b").len(), 1);
+    }
+
+    #[test]
+    fn the_two_lanes_of_one_peer_have_two_keys_and_one_real_nick() {
+        let plain = LocalQuery::new("net", QueryLane::Plain, "ada");
+        let locked = LocalQuery::new("net", QueryLane::Locked, "ada");
+        assert_ne!(plain.key(), locked.key());
+        assert_eq!(plain.window_name(), "ada");
+        assert_eq!(locked.window_name(), locked_label("ada"));
+        // The label is for display: the identity keeps the real nick.
+        assert_eq!(
+            LocalQuery::from_window("net", &locked.window_name()),
+            locked
+        );
+        assert_eq!(LocalQuery::from_window("net", "ada"), plain);
+        assert_eq!(locked.nick, "ada");
+        assert!(locked.is_locked() && !plain.is_locked());
+    }
+
+    fn ready() -> ChatSignals {
+        ChatSignals {
+            engine: true,
+            ready: true,
+            sas_verified: true,
+            ..ChatSignals::default()
+        }
+    }
+
+    #[test]
+    fn every_listed_chat_state_is_reachable_and_has_its_own_key() {
+        let cases = [
+            (
+                ChatSignals {
+                    reset: true,
+                    ..ready()
+                },
+                ChatState::Reset,
+            ),
+            (
+                ChatSignals {
+                    engine: false,
+                    ..ready()
+                },
+                ChatState::Unavailable,
+            ),
+            (
+                ChatSignals {
+                    trust_alarm: true,
+                    ..ready()
+                },
+                ChatState::TrustAlarm,
+            ),
+            (
+                ChatSignals {
+                    pairing: true,
+                    ..ready()
+                },
+                ChatState::Pairing,
+            ),
+            (
+                ChatSignals {
+                    ready: false,
+                    peer_revoked: true,
+                    ..ready()
+                },
+                ChatState::Revoked,
+            ),
+            (
+                ChatSignals {
+                    ready: false,
+                    ..ready()
+                },
+                ChatState::MissingKeys,
+            ),
+            (
+                ChatSignals {
+                    last_drop: Some(DropReason::SendFailed),
+                    ..ready()
+                },
+                ChatState::SendFailed,
+            ),
+            (
+                ChatSignals {
+                    last_drop: Some(DropReason::SessionEnded),
+                    ..ready()
+                },
+                ChatState::SendFailed,
+            ),
+            (
+                ChatSignals {
+                    last_drop: Some(DropReason::Late),
+                    ..ready()
+                },
+                ChatState::Expired,
+            ),
+            (
+                ChatSignals {
+                    sas_verified: false,
+                    ..ready()
+                },
+                ChatState::SasPending,
+            ),
+            (ready(), ChatState::Active),
+        ];
+        let mut keys = vec![ChatState::ClearText.key()];
+        for (signals, expected) in cases {
+            let state = locked_chat_state(&signals);
+            assert_eq!(state, expected);
+            keys.push(state.key());
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), 11);
+    }
+
+    #[test]
+    fn a_reset_wins_over_every_other_chat_state() {
+        let signals = ChatSignals {
+            reset: true,
+            trust_alarm: true,
+            pairing: true,
+            ..ready()
+        };
+        assert_eq!(locked_chat_state(&signals), ChatState::Reset);
+    }
+
+    #[test]
+    fn an_undeliverable_notice_names_the_device_of_the_meta() {
+        let row = serde_json::json!({
+            "kind": "server_event",
+            "meta": {"e2e_undeliverable": 3, "e2e_device": "other-device"}
+        });
+        let here = |did: &str| did == "this-device";
+        let text = undeliverable_text_for(&row, "ada", here).expect("notice");
+        assert!(text.contains("other-device") && text.contains("other device"));
+        assert!(!text.contains("cannot be read here"));
+
+        let row = serde_json::json!({
+            "kind": "server_event",
+            "meta": {"e2e_undeliverable": 1, "e2e_device": "this-device"}
+        });
+        let text = undeliverable_text_for(&row, "ada", here).expect("notice");
+        assert_eq!(
+            text,
+            "*** ada sent you 1 encrypted message that cannot be read here"
+        );
+
+        let old = serde_json::json!({"kind": "server_event", "meta": {"e2e_undeliverable": 2}});
+        let text = undeliverable_text_for(&old, "ada", here).expect("notice");
+        assert!(text.ends_with("cannot be read here"));
+
+        let other = serde_json::json!({"kind": "server_event", "meta": {}});
+        assert!(undeliverable_text_for(&other, "ada", here).is_none());
     }
 
     #[test]
