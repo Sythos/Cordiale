@@ -76,6 +76,17 @@ pub fn supports_time_cursors(protocol_version: Option<u32>) -> bool {
     protocol_version.is_some_and(|version| version >= TIME_CURSOR_MIN_PROTOCOL_VERSION)
 }
 
+/// The first Grappa `protocol_version` that restarts a live session after a
+/// credential edit. An older server only stops the session and replies
+/// `session_action: "stopped"` without a restart attempt.
+pub const CREDENTIAL_RESTART_MIN_PROTOCOL_VERSION: u32 = 51;
+
+/// Whether a server that announced `protocol_version` restarts credential
+/// sessions. An unknown version (`None`) counts as no.
+pub fn restarts_credential_sessions(protocol_version: Option<u32>) -> bool {
+    protocol_version.is_some_and(|version| version >= CREDENTIAL_RESTART_MIN_PROTOCOL_VERSION)
+}
+
 /// The bootstrap compatibility fields from `GET /api/config`, and echoed
 /// again in the WebSocket user-topic join response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +137,13 @@ mod tests {
         assert!(!supports_time_cursors(Some(39)));
         assert!(supports_time_cursors(Some(40)));
         assert!(supports_time_cursors(Some(46)));
+    }
+
+    #[test]
+    fn credential_restart_needs_a_server_at_version_51_or_newer() {
+        assert!(!restarts_credential_sessions(None));
+        assert!(!restarts_credential_sessions(Some(50)));
+        assert!(restarts_credential_sessions(Some(51)));
     }
 
     #[test]

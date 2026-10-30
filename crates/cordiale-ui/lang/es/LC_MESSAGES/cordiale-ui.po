@@ -2845,6 +2845,10 @@ msgid "Saved. The server could not restart the session and parked it. Reason: {}
 msgstr "Guardado. El servidor no pudo reiniciar la sesión y la dejó en pausa. Motivo: {}"
 
 msgctxt "AppWindow"
+msgid "Saved. The server stopped the session. The account must connect again."
+msgstr "Guardado. El servidor detuvo la sesión. La cuenta debe volver a conectarse."
+
+msgctxt "AppWindow"
 msgid "Saved. The session did not need a restart."
 msgstr "Guardado. La sesión no necesitaba reiniciarse."
 

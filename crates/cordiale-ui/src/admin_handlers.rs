@@ -1,16 +1,26 @@
 use super::*;
 use cordiale_core::admin::CredentialSessionOutcome;
+use cordiale_core::protocol::restarts_credential_sessions;
 
 /// The status kind and hint for a saved credential edit, one kind for each
 /// session outcome. A saved edit never claims that the session is online.
+/// A `stopped` reply only means a failed restart on a server that restarts
+/// sessions and names the reason; any other server just stopped the session.
 pub(crate) fn admin_credential_outcome_status(
     outcome: &CredentialSessionOutcome,
+    server_protocol_version: Option<u32>,
 ) -> (&'static str, String) {
     match outcome {
         CredentialSessionOutcome::LeftAlone => ("admin-credential-left-alone", String::new()),
         CredentialSessionOutcome::Spawned => ("admin-credential-spawned", String::new()),
-        CredentialSessionOutcome::Stopped { session_error } => {
+        CredentialSessionOutcome::Stopped { session_error }
+            if restarts_credential_sessions(server_protocol_version)
+                && !session_error.is_empty() =>
+        {
             ("admin-credential-stopped", session_error.clone())
+        }
+        CredentialSessionOutcome::Stopped { .. } => {
+            ("admin-credential-session-stopped", String::new())
         }
         CredentialSessionOutcome::Unknown(_) | CredentialSessionOutcome::Missing => {
             ("admin-credential-unknown", String::new())
@@ -257,6 +267,7 @@ pub(crate) async fn handle_admin_write(
             Err(err) => (Err(err), ""),
         },
     };
+    let server_protocol_version = state.conn.server_protocol_version;
     match result {
         Ok(()) => {
             let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -291,7 +302,8 @@ pub(crate) async fn handle_admin_write(
                 }
                 match &credential_outcome {
                     Some(outcome) => {
-                        let (kind, hint) = admin_credential_outcome_status(outcome);
+                        let (kind, hint) =
+                            admin_credential_outcome_status(outcome, server_protocol_version);
                         ui.set_status_command_hint(hint.into());
                         ui.set_status_kind(kind.into());
                     }
