@@ -980,6 +980,11 @@ async fn drain_network(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, net
                     persistence::log_line(&format!(
                         "e2e own list not read for {network}: {error:?}"
                     ));
+                    for (id, outcome) in &outcomes {
+                        if *outcome == RowOutcome::StaleList {
+                            engine.release_stale_try(*id);
+                        }
+                    }
                     break;
                 }
             }
@@ -1024,6 +1029,8 @@ pub(crate) async fn handle_e2e_message(
                         "e2e own list not read for {}: {error:?}",
                         row.network
                     ));
+                    engine.release_stale_try(row.id);
+                    break;
                 }
             }
             Ok(_) => break,
