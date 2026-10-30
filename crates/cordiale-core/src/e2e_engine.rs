@@ -100,9 +100,10 @@ use crate::e2e_state::E2eStateStore;
 use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError, KeyringKeyProvider};
 use crate::e2e_trust::PeerTrust;
 use crate::e2e_wire::{
-    bundle_key_signed_text, device_id_signed_text, did_from_key_text, is_did_shape, parse_payload,
-    recipient_binding, ListDecision, WireError, INBOX_PAGE_MAX, MAX_LIST_DEVICES, MAX_VERSION,
-    SEND_PAYLOAD_MAX_BYTES, WILDCARD,
+    bundle_key_signed_text, device_id_signed_text, did_from_key_text, frame_line_budget,
+    frames_needed, is_did_shape, parse_payload, recipient_binding, ListDecision, WireError,
+    INBOX_PAGE_MAX, MAX_FRAGMENTS, MAX_LIST_DEVICES, MAX_VERSION, SEND_PAYLOAD_MAX_BYTES,
+    SEND_PAYLOAD_MAX_LINES, WILDCARD,
 };
 use crate::isupport::CaseMapping;
 use crate::persistence::data_dir;
@@ -787,6 +788,8 @@ pub struct E2eEngine {
     keyreq: KeyReqPacer,
     /// Casemapping of the network, read again for every pacing decision.
     casemapping: CaseMapping,
+    /// `frame_budget_base` of the network, when its ISUPPORT snapshot is known.
+    frame_budget_base: Option<u64>,
     clock: MonotonicClock,
     /// Devices that a newer signed list revoked. Their rows are not read.
     revoked_dids: HashSet<String>,
@@ -857,6 +860,7 @@ impl E2eEngine {
             book: SendBook::new(),
             keyreq: KeyReqPacer::new(KEYS_REASSEMBLY_TIMEOUT),
             casemapping: CaseMapping::Rfc1459,
+            frame_budget_base: None,
             clock: MonotonicClock::new(),
             revoked_dids: HashSet::new(),
             keys_wanted: Vec::new(),
@@ -1066,6 +1070,13 @@ impl E2eEngine {
     /// snapshot changes. The pacers use the value on their next decision.
     pub fn set_casemapping(&mut self, casemapping: CaseMapping) {
         self.casemapping = casemapping;
+    }
+
+    /// Sets the `frame_budget_base` of the network. Call it when the ISUPPORT
+    /// snapshot changes. Without it, the engine cannot count frames and
+    /// leaves that limit to the server.
+    pub fn set_frame_budget_base(&mut self, frame_budget_base: u64) {
+        self.frame_budget_base = Some(frame_budget_base);
     }
 
     /// The session ended: every open send and every queued text becomes a
@@ -2643,9 +2654,12 @@ impl E2eEngine {
     }
 
     /// Sends sealed messages. A `msg` and a `pkmsg` never share a request; a
-    /// request holds at most [`MAX_LIST_DEVICES`] bodies and at most
-    /// `SEND_PAYLOAD_MAX_BYTES` bytes of payload. The first request decides the result: when it fails, the call fails. A later failure
-    /// leaves that group without the message.
+    /// request holds at most [`MAX_LIST_DEVICES`] bodies and fits the byte,
+    /// the line and the frame limit. The engine plans every request before it
+    /// sends the first: a body that does not fit alone fails the call with
+    /// nothing sent. After the plan, the first request decides the result:
+    /// when it fails, the call fails. A later failure leaves that group
+    /// without the message.
     async fn emit(
         &mut self,
         client: &GrappaClient,
@@ -2655,18 +2669,28 @@ impl E2eEngine {
         own: &OwnWire,
         priority: E2eSendPriority,
     ) -> Result<Vec<Emitted>, EngineError> {
-        let mut emitted = Vec::new();
+        let line_budget = self
+            .frame_budget_base
+            .map(|base| frame_line_budget(base, nick));
+        let mut plan = Vec::new();
         for prekey in [false, true] {
             let group: Vec<&Sealed> = sealed.iter().filter(|s| s.prekey == prekey).collect();
-            for chunk in split_by_payload_size(&group, own) {
-                match self
-                    .emit_group(client, token, nick, &chunk, own, priority)
-                    .await
-                {
-                    Ok(sent) => emitted.push(sent),
-                    Err(err) if emitted.is_empty() => return Err(err),
-                    Err(_) => {}
+            for chunk in split_by_limits(&group, own, &self.own_did, line_budget) {
+                if !request_fits(&chunk, own, &self.own_did, line_budget) {
+                    return Err(EngineError::Wire(WireError::PayloadTooLarge));
                 }
+                plan.push(chunk);
+            }
+        }
+        let mut emitted = Vec::new();
+        for chunk in plan {
+            match self
+                .emit_group(client, token, nick, &chunk, own, priority)
+                .await
+            {
+                Ok(sent) => emitted.push(sent),
+                Err(err) if emitted.is_empty() => return Err(err),
+                Err(_) => {}
             }
         }
         Ok(emitted)
@@ -2902,17 +2926,46 @@ fn chunk_payload(chunk: &[&Sealed], own: &OwnWire) -> (E2eSendVerb, String) {
     }
 }
 
-/// Splits `group` into requests of at most [`MAX_LIST_DEVICES`] bodies whose
-/// payload fits `SEND_PAYLOAD_MAX_BYTES`. A body that does not fit alone stays
-/// in a request of its own: the request builder refuses it.
-fn split_by_payload_size<'a>(group: &[&'a Sealed], own: &OwnWire) -> Vec<Vec<&'a Sealed>> {
+/// True when one request with a body for each of `chunk` fits the byte limit,
+/// the line limit and, when `line_budget` is known, the frame limit. The
+/// address `to` is the device id for one body and `*` for more.
+fn request_fits(
+    chunk: &[&Sealed],
+    own: &OwnWire,
+    own_did: &str,
+    line_budget: Option<usize>,
+) -> bool {
+    let (verb, payload) = chunk_payload(chunk, own);
+    if payload.len() > SEND_PAYLOAD_MAX_BYTES || payload.lines().count() > SEND_PAYLOAD_MAX_LINES {
+        return false;
+    }
+    let Some(line_budget) = line_budget else {
+        return true;
+    };
+    let to = match chunk {
+        [only] => only.did.as_str(),
+        _ => WILDCARD,
+    };
+    frames_needed(verb.frame_verb(), payload.len(), line_budget, own_did, to)
+        .is_some_and(|frames| frames <= MAX_FRAGMENTS)
+}
+
+/// Splits `group` into requests of at most [`MAX_LIST_DEVICES`] bodies that
+/// fit the limits of [`request_fits`]. A body that does not fit alone stays in
+/// a request of its own: the caller refuses it.
+fn split_by_limits<'a>(
+    group: &[&'a Sealed],
+    own: &OwnWire,
+    own_did: &str,
+    line_budget: Option<usize>,
+) -> Vec<Vec<&'a Sealed>> {
     let mut chunks: Vec<Vec<&'a Sealed>> = Vec::new();
     let mut current: Vec<&'a Sealed> = Vec::new();
     for &sealed in group {
         current.push(sealed);
         if current.len() > 1
             && (current.len() > MAX_LIST_DEVICES
-                || chunk_payload(&current, own).1.len() > SEND_PAYLOAD_MAX_BYTES)
+                || !request_fits(&current, own, own_did, line_budget))
         {
             let last = current.pop();
             chunks.push(std::mem::take(&mut current));
@@ -4006,6 +4059,263 @@ mod tests {
         ready.sort();
         assert_eq!(body["to"], WILDCARD);
         assert_eq!(bodies_of(&body), ready);
+    }
+
+    /// The smallest line budget for which a payload of `len` bytes needs at
+    /// most [`MAX_FRAGMENTS`] frames.
+    fn min_line_budget(verb: E2eSendVerb, len: usize, from: &str, to: &str) -> usize {
+        (0..)
+            .find(|budget| {
+                frames_needed(verb.frame_verb(), len, *budget, from, to)
+                    .is_some_and(|frames| frames <= MAX_FRAGMENTS)
+            })
+            .expect("budget")
+    }
+
+    /// Alice with `count` ready devices of Bob. Nothing was sent yet, so every
+    /// message is a pre-key message.
+    fn alice_with_bob_devices(tag: &str, count: usize) -> E2eEngine {
+        let alice_id = Ident::new(&format!("alice-{tag}"));
+        let bob_id = Ident::new(&format!("bob-{tag}"));
+        let mut devices = vec![fresh_device()];
+        devices.extend((1..count).map(|_| fresh_device()));
+        let listed: Vec<String> = devices.iter().map(ed).collect();
+        let mut alice = alice_id.engine();
+        for device in &devices {
+            alice
+                .accept_keys("bob", &keys_payload(&bob_id.master, device, &listed, 1))
+                .expect("device with a key");
+        }
+        assert_eq!(alice.peers.len(), count);
+        alice
+    }
+
+    /// The smallest line budget that holds each single request and the one
+    /// request with every body, for the pre-key messages of `alice`.
+    fn probe_budgets(alice: &E2eEngine) -> (usize, usize) {
+        let identity = alice
+            .state
+            .olm_identity()
+            .expect("state")
+            .expect("identity");
+        let own = alice.own_wire(&identity).expect("own wire");
+        let entries = alice.pick_devices("bob");
+        let sealed = alice
+            .seal(&identity, &entries, &Outgoing::Text("hello"), own.lv)
+            .expect("seal");
+        assert!(sealed.iter().all(|s| s.prekey));
+        let single = sealed
+            .iter()
+            .map(|s| {
+                let (verb, payload) = chunk_payload(&[s], &own);
+                min_line_budget(verb, payload.len(), &alice.own_did, &s.did)
+            })
+            .max()
+            .expect("single");
+        let all: Vec<&Sealed> = sealed.iter().collect();
+        let (verb, payload) = chunk_payload(&all, &own);
+        let to = match all.as_slice() {
+            [only] => only.did.as_str(),
+            _ => WILDCARD,
+        };
+        let group = min_line_budget(verb, payload.len(), &alice.own_did, to);
+        (single, group)
+    }
+
+    /// The `to` and the device ids of each request that the server got.
+    async fn sent_groups(server: &MockServer) -> Vec<(String, Vec<String>)> {
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .map(|request| {
+                let body: Value = serde_json::from_slice(&request.body).expect("body");
+                (
+                    body["to"].as_str().expect("to").to_string(),
+                    bodies_of(&body),
+                )
+            })
+            .collect()
+    }
+
+    /// Every request that the server got fits the line budget.
+    async fn assert_requests_fit(server: &MockServer, own_did: &str, line_budget: usize) {
+        for request in server.received_requests().await.expect("requests") {
+            let body: Value = serde_json::from_slice(&request.body).expect("body");
+            let payload = body["payload"].as_str().expect("payload");
+            assert!(payload.len() <= SEND_PAYLOAD_MAX_BYTES);
+            let frames = frames_needed(
+                E2eSendVerb::PkMsg.frame_verb(),
+                payload.len(),
+                line_budget,
+                own_did,
+                body["to"].as_str().expect("to"),
+            );
+            assert!(frames.is_some_and(|n| n <= MAX_FRAGMENTS), "{frames:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pre_key_send_uses_one_request_when_the_frames_fit() {
+        for count in [1, 2, 4] {
+            let mut alice = alice_with_bob_devices(&format!("fit{count}"), count);
+            let (_, group) = probe_budgets(&alice);
+            // The group fits at exactly the frame limit.
+            alice.set_frame_budget_base(group as u64 + "bob".len() as u64);
+            let server = MockServer::start().await;
+            mount_send(&server, "msgid1").await;
+            let client = GrappaClient::new(server.uri());
+            alice
+                .send_text(&client, TOKEN, "bob", "hello", 100)
+                .await
+                .expect("send");
+            let groups = sent_groups(&server).await;
+            assert_eq!(groups.len(), 1, "{count} devices");
+            assert_eq!(groups[0].1.len(), count);
+            // One device: its id. Several devices: the wildcard.
+            if count == 1 {
+                assert_eq!(groups[0].0, groups[0].1[0]);
+            } else {
+                assert_eq!(groups[0].0, WILDCARD);
+            }
+            assert_requests_fit(&server, &alice.own_did, group).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pre_key_send_splits_when_the_group_is_above_the_frame_limit() {
+        for count in [2, 4] {
+            let mut alice = alice_with_bob_devices(&format!("split{count}"), count);
+            let (single, group) = probe_budgets(&alice);
+            assert!(group > single);
+            // One byte less than the group needs: the group splits.
+            alice.set_frame_budget_base(group as u64 - 1 + "bob".len() as u64);
+            let server = MockServer::start().await;
+            mount_send(&server, "msgid1").await;
+            let client = GrappaClient::new(server.uri());
+            alice
+                .send_text(&client, TOKEN, "bob", "hello", 100)
+                .await
+                .expect("send");
+            let groups = sent_groups(&server).await;
+            assert!(groups.len() > 1, "{count} devices");
+            let mut dids: Vec<String> = groups.iter().flat_map(|g| g.1.clone()).collect();
+            dids.sort();
+            dids.dedup();
+            // Every device got a body, each in one request only.
+            assert_eq!(dids.len(), count);
+            assert_eq!(groups.iter().map(|g| g.1.len()).sum::<usize>(), count);
+            for (to, ids) in &groups {
+                if ids.len() == 1 {
+                    assert_eq!(to, &ids[0]);
+                } else {
+                    assert_eq!(to, WILDCARD);
+                }
+            }
+            assert_requests_fit(&server, &alice.own_did, group - 1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_body_that_does_not_fit_alone_fails_before_any_request() {
+        let mut alice = alice_with_bob_devices("alone", 2);
+        let (single, _) = probe_budgets(&alice);
+        alice.set_frame_budget_base(single as u64 - 1 + "bob".len() as u64);
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+        let result = alice.send_text(&client, TOKEN, "bob", "hello", 100).await;
+        assert!(matches!(
+            result,
+            Err(EngineError::Wire(WireError::PayloadTooLarge))
+        ));
+        // Nothing went out, in clear or encrypted, and no row was written.
+        assert!(server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
+        assert!(alice
+            .history()
+            .messages(&conversation_id(NET, "bob"))
+            .is_empty());
+    }
+
+    fn synthetic_sealed(prekey: bool, body_len: usize) -> Sealed {
+        let me = Account::new();
+        let peer = fresh_device();
+        let curve = peer.identity_keys().curve25519;
+        let one_time = *peer.one_time_keys().values().next().expect("key");
+        let session = me
+            .create_outbound_session(SessionConfig::version_1(), curve, one_time)
+            .expect("session");
+        Sealed {
+            nick: "bob".to_string(),
+            did: did_from_key_text(&ed(&peer)).expect("did"),
+            prekey,
+            body: "A".repeat(body_len),
+            session,
+        }
+    }
+
+    #[test]
+    fn both_message_kinds_split_by_the_frame_limit() {
+        let p = pair();
+        let identity = p
+            .alice
+            .state
+            .olm_identity()
+            .expect("state")
+            .expect("identity");
+        let own = p.alice.own_wire(&identity).expect("own wire");
+        let from = p.alice.own_did.clone();
+        for prekey in [false, true] {
+            for count in [1, 2, 4] {
+                let sealed: Vec<Sealed> =
+                    (0..count).map(|_| synthetic_sealed(prekey, 3000)).collect();
+                let group: Vec<&Sealed> = sealed.iter().collect();
+                let (verb, payload) = chunk_payload(&group[..1], &own);
+                let single = min_line_budget(verb, payload.len(), &from, &group[0].did);
+                let (verb, payload) = chunk_payload(&group, &own);
+                let to = if count == 1 {
+                    group[0].did.as_str()
+                } else {
+                    WILDCARD
+                };
+                let whole = min_line_budget(verb, payload.len(), &from, to);
+                // No frame budget known: the byte limit alone decides.
+                let free = split_by_limits(&group, &own, &from, None);
+                assert_eq!(free.len(), 1);
+                // The whole group at the limit: one request.
+                let at_limit = split_by_limits(&group, &own, &from, Some(whole));
+                assert_eq!(at_limit.len(), 1);
+                assert!(request_fits(&at_limit[0], &own, &from, Some(whole)));
+                // A budget that holds one body only: the group splits to one
+                // request for each body, and each request fits.
+                let above = split_by_limits(&group, &own, &from, Some(single));
+                assert_eq!(above.len(), count, "{count} devices");
+                assert!(above
+                    .iter()
+                    .all(|chunk| request_fits(chunk, &own, &from, Some(single))));
+                // One byte less than a body needs: it does not fit alone.
+                assert!(!request_fits(&above[0], &own, &from, Some(single - 1)));
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_over_the_byte_limit_does_not_fit_alone() {
+        let p = pair();
+        let identity = p
+            .alice
+            .state
+            .olm_identity()
+            .expect("state")
+            .expect("identity");
+        let own = p.alice.own_wire(&identity).expect("own wire");
+        let big = synthetic_sealed(true, SEND_PAYLOAD_MAX_BYTES);
+        assert!(!request_fits(&[&big], &own, &p.alice.own_did, None));
     }
 
     #[test]

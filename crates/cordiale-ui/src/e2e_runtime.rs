@@ -337,6 +337,7 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
             // The ISUPPORT snapshot can come before the engine.
             if let Some(isupport) = state.networks.isupport_by_network.get(network) {
                 engine.set_casemapping(isupport.casemapping);
+                engine.set_frame_budget_base(isupport.frame_budget_base);
             }
             register_own_device(engine.own_did());
             for peer in engine.history_peers() {
