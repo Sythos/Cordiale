@@ -17,7 +17,8 @@ use std::collections::BTreeSet;
 
 use cordiale_core::e2e_device::E2eError;
 use cordiale_core::e2e_engine::{
-    conversation_id, route_for_window, E2eEngine, EngineError, RowOutcome, SendRoute, OWN_DEVICE,
+    conversation_id, history_peers_of, route_for_window, E2eEngine, EngineError, RowOutcome,
+    SendRoute, OWN_DEVICE,
 };
 use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing_flow::{
@@ -29,7 +30,7 @@ use cordiale_core::e2e_revoke::{
     finish_pending_revoke, reset_identity, resume_reset, revoke_device, OwnRoutes,
     ResetConfirmation,
 };
-use cordiale_core::e2e_store::E2eMessage;
+use cordiale_core::e2e_store::{E2eHistoryStore, E2eMessage};
 use cordiale_core::e2e_wire::did_from_key_text;
 use cordiale_core::phoenix::PhoenixMessage;
 use cordiale_core::session::{route_e2e_message, route_e2e_pairing};
@@ -47,6 +48,9 @@ pub(crate) const E2E_TICK: std::time::Duration = std::time::Duration::from_secs(
 #[derive(Default)]
 pub(crate) struct E2eRuntime {
     engines: HashMap<String, E2eEngine>,
+    /// The sealed history of a network whose identity is gone (after a
+    /// reset and a restart). It is read only: no engine work uses it.
+    histories: HashMap<String, E2eHistoryStore>,
     /// Networks that have no engine in this session: no identity on this
     /// device, a store that does not open, or a server without the E2E routes.
     unavailable: HashSet<String>,
@@ -111,6 +115,15 @@ impl E2eRuntime {
         }
     }
 
+    /// The sealed history of `network`, from its engine or, without an
+    /// identity, from the history-only store.
+    fn history_of(&self, network: &str) -> Option<&E2eHistoryStore> {
+        self.engines
+            .get(network)
+            .map(E2eEngine::history)
+            .or_else(|| self.histories.get(network))
+    }
+
     pub(crate) fn engine_mut(&mut self, network: &str) -> Option<&mut E2eEngine> {
         self.engines.get_mut(network)
     }
@@ -151,9 +164,8 @@ pub(crate) fn e2e_send_error_kind(error: &EngineError) -> &'static str {
 }
 
 /// How many rows of the locked entry of `nick` the peer sent.
-fn incoming_rows(engine: &E2eEngine, network: &str, nick: &str) -> usize {
-    engine
-        .history()
+fn incoming_rows(history: &E2eHistoryStore, network: &str, nick: &str) -> usize {
+    history
         .messages(&conversation_id(network, nick))
         .iter()
         .filter(|message| message.sender_device != OWN_DEVICE)
@@ -165,7 +177,7 @@ fn incoming_rows(engine: &E2eEngine, network: &str, nick: &str) -> usize {
 pub(crate) fn locked_unread_counts(state: &WorkerState) -> HashMap<(String, String), u64> {
     let mut counts = HashMap::new();
     for (network, nick) in &state.e2e.locked {
-        let Some(engine) = state.e2e.engines.get(network) else {
+        let Some(history) = state.e2e.history_of(network) else {
             continue;
         };
         let seen = state
@@ -174,7 +186,7 @@ pub(crate) fn locked_unread_counts(state: &WorkerState) -> HashMap<(String, Stri
             .get(&(network.clone(), nick.clone()))
             .copied()
             .unwrap_or(0);
-        let unread = incoming_rows(engine, network, nick).saturating_sub(seen);
+        let unread = incoming_rows(history, network, nick).saturating_sub(seen);
         if unread > 0 {
             let name = LocalQuery::new(network, QueryLane::Locked, nick).window_name();
             counts.insert(window_counts_key(network, &name), unread as u64);
@@ -187,9 +199,8 @@ pub(crate) fn locked_unread_counts(state: &WorkerState) -> HashMap<(String, Stri
 fn mark_locked_read(state: &mut WorkerState, network: &str, nick: &str) {
     let seen = state
         .e2e
-        .engines
-        .get(network)
-        .map(|engine| incoming_rows(engine, network, nick))
+        .history_of(network)
+        .map(|history| incoming_rows(history, network, nick))
         .unwrap_or(0);
     state
         .e2e
@@ -318,6 +329,9 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
     if state.conn.guest_session {
         return false;
     }
+    // The engine takes the one handle on the history file: let go of the
+    // history-only handle first.
+    state.e2e.histories.remove(network);
     match E2eEngine::open_for_network(client.base_url(), account, network) {
         Ok(mut engine) => {
             // The ISUPPORT snapshot can come before the engine.
@@ -327,7 +341,7 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
             register_own_device(engine.own_did());
             for peer in engine.history_peers() {
                 state.e2e.add_locked(network, &peer);
-                let seen = incoming_rows(&engine, network, &peer);
+                let seen = incoming_rows(engine.history(), network, &peer);
                 state
                     .e2e
                     .read_incoming
@@ -350,9 +364,37 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
                 persistence::log_line(&format!("e2e engine not opened for {network}: {error:?}"));
             }
             state.e2e.unavailable.insert(network.to_string());
+            open_history_only(state, network);
             false
         }
     }
+}
+
+/// Opens the sealed history of a network that has no engine, so the locked
+/// entries stay readable after a reset and a restart.
+fn open_history_only(state: &mut WorkerState, network: &str) {
+    let (Some(client), Some(account)) =
+        (state.conn.client.as_ref(), state.conn.identifier.as_ref())
+    else {
+        return;
+    };
+    let history = match E2eEngine::open_history_for_network(client.base_url(), account, network) {
+        Ok(Some(history)) => history,
+        Ok(None) => return,
+        Err(error) => {
+            persistence::log_line(&format!("e2e history not opened for {network}: {error:?}"));
+            return;
+        }
+    };
+    for peer in history_peers_of(&history, network) {
+        state.e2e.add_locked(network, &peer);
+        let seen = incoming_rows(&history, network, &peer);
+        state
+            .e2e
+            .read_incoming
+            .insert((network.to_string(), peer), seen);
+    }
+    state.e2e.histories.insert(network.to_string(), history);
 }
 
 /// Gives a first device its E2E identity: the master key, the state file and
@@ -1200,17 +1242,16 @@ fn load_locked_rows(state: &mut WorkerState, network: &str, nick: &str) {
         .get(network)
         .cloned()
         .unwrap_or_else(|| "me".to_string());
+    let engine = state.e2e.engines.get(network);
     let rows: Vec<RenderedMessage> = state
         .e2e
-        .engines
-        .get(network)
-        .map(|engine| {
-            engine
-                .history()
+        .history_of(network)
+        .map(|history| {
+            history
                 .messages(&conversation_id(network, nick))
                 .into_iter()
                 .map(|message| {
-                    let dropped = engine.dropped_reason(&message.id);
+                    let dropped = engine.and_then(|engine| engine.dropped_reason(&message.id));
                     locked_row_with_drop(message, &own_nick, nick, dropped)
                 })
                 .collect()
