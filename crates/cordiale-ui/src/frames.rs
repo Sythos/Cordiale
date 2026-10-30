@@ -6224,6 +6224,10 @@ fn handle_query_windows_list(
             {
                 let key = (query.network.clone(), query.target_nick.clone());
                 show_query_window(state, ui, &query, &key);
+            } else if open_locked_window(state).is_some() {
+                // A locked window is not in the snapshot. A reconnect cleared
+                // its readiness in the UI, so restore it here.
+                let _ = ui.upgrade_in_event_loop(|ui| ui.set_current_query_ready(true));
             }
         }
     } else if selected_closed {
