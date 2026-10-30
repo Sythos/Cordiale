@@ -1,4 +1,22 @@
 use super::*;
+use cordiale_core::admin::CredentialSessionOutcome;
+
+/// The status kind and hint for a saved credential edit, one kind for each
+/// session outcome. A saved edit never claims that the session is online.
+pub(crate) fn admin_credential_outcome_status(
+    outcome: &CredentialSessionOutcome,
+) -> (&'static str, String) {
+    match outcome {
+        CredentialSessionOutcome::LeftAlone => ("admin-credential-left-alone", String::new()),
+        CredentialSessionOutcome::Spawned => ("admin-credential-spawned", String::new()),
+        CredentialSessionOutcome::Stopped { session_error } => {
+            ("admin-credential-stopped", session_error.clone())
+        }
+        CredentialSessionOutcome::Unknown(_) | CredentialSessionOutcome::Missing => {
+            ("admin-credential-unknown", String::new())
+        }
+    }
+}
 
 /// The status line for a refused admin write. 403 is a session without the
 /// admin console (not an administrator, or a per-client token), and a
@@ -89,6 +107,7 @@ pub(crate) async fn handle_admin_write(
     let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
+    let mut credential_outcome = None;
     let (result, clears) = match &write {
         AdminWrite::CreateUser {
             name,
@@ -231,8 +250,10 @@ pub(crate) async fn handle_admin_write(
             .update_admin_credential(token, user_id, network_id, changes)
             .await
         {
-            Ok(true) => (Ok(()), "edit-credential-stopped"),
-            Ok(false) => (Ok(()), "edit-credential"),
+            Ok(outcome) => {
+                credential_outcome = Some(outcome);
+                (Ok(()), "edit-credential")
+            }
             Err(err) => (Err(err), ""),
         },
     };
@@ -262,18 +283,20 @@ pub(crate) async fn handle_admin_write(
                         ui.set_admin_new_featured_name("".into());
                         ui.set_admin_new_featured_description("".into());
                     }
-                    "edit-credential" | "edit-credential-stopped" => {
+                    "edit-credential" => {
                         ui.set_admin_edit_cred_user_id("".into());
                         ui.set_admin_edit_cred_password("".into());
                     }
                     _ => {}
                 }
-                let done = if clears == "edit-credential-stopped" {
-                    "admin-credential-stopped"
-                } else {
-                    "admin-action-done"
-                };
-                ui.set_status_kind(done.into());
+                match &credential_outcome {
+                    Some(outcome) => {
+                        let (kind, hint) = admin_credential_outcome_status(outcome);
+                        ui.set_status_command_hint(hint.into());
+                        ui.set_status_kind(kind.into());
+                    }
+                    None => ui.set_status_kind("admin-action-done".into()),
+                }
             });
         }
         Err(err) => {
