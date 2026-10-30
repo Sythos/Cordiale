@@ -1,5 +1,5 @@
 {
-  "fixture_revision": 2,
+  "fixture_revision": 3,
   "valid": [
     {
       "case": "keyreq with no priority",

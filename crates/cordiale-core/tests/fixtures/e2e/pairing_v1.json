@@ -1,0 +1,32 @@
+{
+  "fixture_revision": 1,
+  "source": "section 4g of the Grappa client protocol and pairingMessages.ts of Cicchetto",
+  "placeholders": {
+    "$KEY": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo (a canonical 43 character key)",
+    "$SIG": "86 characters A (a canonical 86 character signature text)"
+  },
+  "valid": [
+    {"case": "hello", "message": {"v": 1, "t": "hello"}},
+    {"case": "offer with one network", "message": {"v": 1, "t": "offer", "networks": [{"network": "azzurra", "master": "$KEY"}], "full": []}},
+    {"case": "offer with a full network", "message": {"v": 1, "t": "offer", "networks": [], "full": ["libera"]}},
+    {"case": "join with a skipped network", "message": {"v": 1, "t": "join", "devices": [{"network": "azzurra", "id": {"curve25519": "$KEY", "ed25519": "$KEY", "sig": "$SIG"}}], "skipped": [{"network": "libera", "reason": "full"}]}},
+    {"case": "signed with a certificate", "message": {"v": 1, "t": "signed", "devices": [{"network": "azzurra", "cert": "$SIG", "list": {"ver": 2, "devices": ["$KEY"], "sig": "$SIG"}}], "refused": []}},
+    {"case": "signed with a refusal", "message": {"v": 1, "t": "signed", "devices": [], "refused": [{"network": "azzurra", "reason": "list-changed"}]}},
+    {"case": "done", "message": {"v": 1, "t": "done", "paired": ["azzurra"]}},
+    {"case": "unknown extra field is ignored", "message": {"v": 1, "t": "done", "paired": ["azzurra"], "future": true}}
+  ],
+  "invalid": [
+    {"case": "version 2", "message": {"v": 2, "t": "hello"}},
+    {"case": "no version", "message": {"t": "hello"}},
+    {"case": "unknown kind", "message": {"v": 1, "t": "grant"}},
+    {"case": "old confirm message of an earlier draft", "message": {"v": 1, "t": "confirm", "ed25519": "$KEY", "curve25519": "$KEY"}},
+    {"case": "offer without the full list", "message": {"v": 1, "t": "offer", "networks": []}},
+    {"case": "offer with a short master key", "message": {"v": 1, "t": "offer", "networks": [{"network": "azzurra", "master": "short"}], "full": []}},
+    {"case": "join with a short signature", "message": {"v": 1, "t": "join", "devices": [{"network": "azzurra", "id": {"curve25519": "$KEY", "ed25519": "$KEY", "sig": "short"}}], "skipped": []}},
+    {"case": "join with an unknown reason", "message": {"v": 1, "t": "join", "devices": [], "skipped": [{"network": "azzurra", "reason": "expired"}]}},
+    {"case": "signed with a short certificate", "message": {"v": 1, "t": "signed", "devices": [{"network": "azzurra", "cert": "short", "list": {"ver": 2, "devices": ["$KEY"], "sig": "$SIG"}}], "refused": []}},
+    {"case": "signed with a list key that is not a key", "message": {"v": 1, "t": "signed", "devices": [{"network": "azzurra", "cert": "$SIG", "list": {"ver": 2, "devices": ["x"], "sig": "$SIG"}}], "refused": []}},
+    {"case": "done with an empty network name", "message": {"v": 1, "t": "done", "paired": [""]}},
+    {"case": "done with a text instead of a list", "message": {"v": 1, "t": "done", "paired": "azzurra"}}
+  ]
+}

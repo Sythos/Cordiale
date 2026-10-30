@@ -26,6 +26,7 @@
 //! same vectors. The list order is ascending by the plain key text.
 
 use cordiale_core::e2e_device_routes::{E2eMessageEvent, InboxRow};
+use cordiale_core::e2e_engine::{Inner, InnerKind};
 use cordiale_core::e2e_refusal::E2eRefusal;
 use cordiale_core::e2e_wire::{
     device_certificate_signed_text, did_from_key_text, format_frame, is_did_shape,
@@ -110,6 +111,34 @@ fn fixture_signed_lists_match() {
             "{}",
             text(case, "case")
         );
+    }
+}
+
+#[test]
+fn fixture_copy_inner_messages_read() {
+    let all = fixtures();
+    for case in all["copy_inner"]["valid"].as_array().expect("valid") {
+        let inner = Inner::parse(text(case, "plain").as_bytes())
+            .unwrap_or_else(|| panic!("{}", text(case, "case")));
+        assert_eq!(
+            inner.kind,
+            InnerKind::Copy {
+                peer: text(case, "peer").to_string(),
+                body: text(case, "body").to_string(),
+            },
+            "{}",
+            text(case, "case")
+        );
+        assert_eq!(inner.lv, Some(number(case, "lv")));
+    }
+    for case in all["copy_inner"]["invalid"].as_array().expect("invalid") {
+        let inner = Inner::parse(text(case, "plain").as_bytes())
+            .unwrap_or_else(|| panic!("{}", text(case, "case")));
+        assert_eq!(inner.kind, InnerKind::Other, "{}", text(case, "case"));
+    }
+    for plain in all["copy_inner"]["not_a_message"].as_array().expect("list") {
+        let plain = plain.as_str().expect("text");
+        assert!(Inner::parse(plain.as_bytes()).is_none(), "{plain}");
     }
 }
 

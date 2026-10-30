@@ -1,5 +1,5 @@
 {
-  "fixture_revision": 2,
+  "fixture_revision": 3,
   "valid": [
     {"case": "late", "event": {"kind": "e2e_send_dropped", "network": "libera", "target": "bob", "msgid": "s1", "reason": "late"}, "network": "libera", "target": "bob", "msgid": "s1", "reason": "late"},
     {"case": "send failed", "event": {"network": "libera", "target": "#room", "msgid": "s2", "reason": "send_failed"}, "network": "libera", "target": "#room", "msgid": "s2", "reason": "send_failed"},
