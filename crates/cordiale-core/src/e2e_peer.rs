@@ -113,14 +113,24 @@ pub fn apply_peer_list(
     if status == MasterStatus::Changed {
         return Err(E2eError::MasterChanged);
     }
-    let decision = next.accept_list(
+    let decision = match next.accept_list(
         network,
         nick,
         master,
         list_version,
         list_keys,
         list_signature,
-    )?;
+    ) {
+        Ok(decision) => decision,
+        Err(err) => {
+            // The refused legacy list leaves a migration marker on the
+            // known master. Keep it. Nothing else changed.
+            if status == MasterStatus::Same && err == E2eError::LegacyListOrder {
+                *trust = next;
+            }
+            return Err(err);
+        }
+    };
     if status == MasterStatus::Same && decision == ListDecision::Replace {
         *trust = next;
     }
@@ -145,14 +155,24 @@ pub fn verify_peer_device(
     if status == MasterStatus::Changed {
         return Err(E2eError::MasterChanged);
     }
-    let decision = next.accept_list(
+    let decision = match next.accept_list(
         network,
         nick,
         bundle.master,
         bundle.list_version,
         bundle.list_keys,
         bundle.list_signature,
-    )?;
+    ) {
+        Ok(decision) => decision,
+        Err(err) => {
+            // The refused legacy list leaves a migration marker on the
+            // known master. Keep it. Nothing else changed.
+            if status == MasterStatus::Same && err == E2eError::LegacyListOrder {
+                *trust = next;
+            }
+            return Err(err);
+        }
+    };
     match check_listed_device(&next, network, nick, server_keys, bundle) {
         Ok(did) => {
             next.record_curve(network, nick, bundle.device_ed25519, bundle.curve25519)?;
@@ -621,6 +641,43 @@ mod tests {
         // A cannot go back to list 1.
         let result = check(&mut trust, NICK, &peer_a, |_| {});
         assert_eq!(result.unwrap_err(), E2eError::RevokedDevice);
+    }
+
+    #[test]
+    fn a_refused_old_order_list_keeps_the_migration_marker() {
+        use crate::e2e_wire::{legacy_raw_order_list_signed_text, signed_list_signed_text};
+        let peer = peer();
+        let mut trust = PeerTrust::default();
+        check(&mut trust, NICK, &peer, |_| {}).unwrap();
+        let keys = loop {
+            let mut keys = vec![ed(&peer.device)];
+            keys.extend((0..3).map(|_| ed(&Account::new())));
+            if signed_list_signed_text(2, &keys).unwrap()
+                != legacy_raw_order_list_signed_text(2, &keys).unwrap()
+            {
+                break keys;
+            }
+        };
+        let text = legacy_raw_order_list_signed_text(2, &keys).unwrap();
+        let old = peer.master.sign(&text).to_base64();
+        let master = ed(&peer.master);
+        let before = trust.listed_devices(NET, NICK).to_vec();
+        assert!(!trust.needs_new_list(NET, NICK));
+
+        let mut list_only = trust.clone();
+        let result = apply_peer_list(&mut list_only, NET, NICK, &master, 2, &keys, &old);
+        assert_eq!(result.unwrap_err(), E2eError::LegacyListOrder);
+        assert!(list_only.needs_new_list(NET, NICK));
+        assert_eq!(list_only.listed_devices(NET, NICK), before.as_slice());
+
+        let result = check(&mut trust, NICK, &peer, |f| {
+            f.version = 2;
+            f.keys = keys.clone();
+            f.signature = old;
+        });
+        assert_eq!(result.unwrap_err(), E2eError::LegacyListOrder);
+        assert!(trust.needs_new_list(NET, NICK));
+        assert_eq!(trust.listed_devices(NET, NICK), before.as_slice());
     }
 
     #[test]
