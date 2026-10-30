@@ -10991,7 +10991,7 @@ fn alias_errors_map_to_distinct_status_kinds() {
     assert_eq!(AliasUpdateError::Write.status_kind(), "alias-save-failed");
 }
 
-fn history_row(id: i64) -> Value {
+fn query_history_row(id: i64) -> Value {
     serde_json::json!({
         "id": id,
         "server_time": id * 10,
@@ -11005,7 +11005,7 @@ fn history_row(id: i64) -> Value {
 /// `overlap` moves the start back, so a page repeats rows of the page before.
 fn history_page(total: i64, after: Option<i64>, limit: usize, overlap: i64) -> Vec<Value> {
     let start = (after.unwrap_or(0) - overlap).max(0) + 1;
-    (start..=total).take(limit).map(history_row).collect()
+    (start..=total).take(limit).map(query_history_row).collect()
 }
 
 fn catch_up_test(
@@ -11016,7 +11016,7 @@ fn catch_up_test(
 ) -> (bool, Vec<Option<i64>>, Vec<i64>) {
     let key = ("net".to_string(), "bob".to_string());
     let mut state = WorkerState::new();
-    let local_rows: Vec<Value> = (1..=local).map(history_row).collect();
+    let local_rows: Vec<Value> = (1..=local).map(query_history_row).collect();
     merge_query_history(&mut state, &key, &local_rows);
     let calls = std::cell::RefCell::new(Vec::new());
     let complete = upload_test_runtime().block_on(fetch_history_pages(
