@@ -88,6 +88,7 @@ use crate::e2e_peer::{
     apply_peer_list, verify_certified_device, verify_peer_device, CertifiedBundle, PeerBundle,
     ReplayState,
 };
+use crate::e2e_provision::{provision_device_at, ProvisionError, Provisioned};
 use crate::e2e_refusal::{E2eRefusal, E2eRouteError};
 use crate::e2e_selfcopy::{inbox_accepts, is_expired, DeliveryTracker};
 use crate::e2e_state::E2eStateStore;
@@ -699,6 +700,11 @@ impl E2eEngine {
     ) -> Result<Self, EngineError> {
         let own_ed25519 = state.device_key()?.ok_or(EngineError::NotReady)?;
         let own_did = did_from_key_text(&own_ed25519)?;
+        let dropped_rows = state
+            .dropped_rows()
+            .iter()
+            .filter_map(|(id, reason)| Some((id.clone(), DropReason::from_wire(reason)?)))
+            .collect();
         Ok(Self {
             network: network.to_string(),
             own_did,
@@ -718,7 +724,7 @@ impl E2eEngine {
             sent: HashMap::new(),
             rekey: IntervalLimiter::new(md3_pacing::REKEY_INTERVAL),
             row_ids: HashMap::new(),
-            dropped_rows: HashMap::new(),
+            dropped_rows,
             capability: Vec::new(),
             changed_peers: Vec::new(),
             local_sends: 0,
@@ -751,6 +757,31 @@ impl E2eEngine {
             &KeyringKeyProvider,
         )?;
         Self::new(network, state, history)
+    }
+
+    /// Makes the E2E identity of this device on first use, with the state
+    /// file in the data folder, and publishes its bundle. On a later run it
+    /// only completes what is missing. Call it before [`Self::open_for_network`]
+    /// so a first device gets its master key and its state file.
+    pub async fn provision_for_network(
+        client: &GrappaClient,
+        token: &str,
+        server: &str,
+        account: &str,
+        network: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<Provisioned, ProvisionError> {
+        let part = storage_part(server, account, network).ok_or(E2eStoreError::NoDataDir)?;
+        let dir = data_dir().ok_or(E2eStoreError::NoDataDir)?;
+        provision_device_at(
+            client,
+            token,
+            network,
+            server_protocol,
+            dir.join(format!("e2e_state_{part}.bin")),
+            &KeyringKeyProvider,
+        )
+        .await
     }
 
     /// Like [`Self::open_for_network`], but for a device that joins by X1
@@ -810,6 +841,11 @@ impl E2eEngine {
 
     pub fn own_did(&self) -> &str {
         &self.own_did
+    }
+
+    /// A copy of the trust state of the peers, for the views.
+    pub fn trust(&self) -> PeerTrust {
+        self.state.trust()
     }
 
     pub fn history(&self) -> &E2eHistoryStore {
@@ -932,6 +968,8 @@ impl E2eEngine {
     fn note_drops(&mut self, drops: &[SendDropped]) {
         for drop in drops {
             if let Some(row_id) = self.row_ids.get(&drop.key).cloned() {
+                // A failed save leaves the mark in memory for this run.
+                let _ = self.state.set_dropped_row(&row_id, drop.reason.wire_name());
                 self.dropped_rows.entry(row_id).or_insert(drop.reason);
             }
             self.note_changed(&drop.key.target);
