@@ -102,7 +102,7 @@ use crate::e2e_trust::PeerTrust;
 use crate::e2e_wire::{
     bundle_key_signed_text, device_id_signed_text, did_from_key_text, is_did_shape, parse_payload,
     recipient_binding, ListDecision, WireError, INBOX_PAGE_MAX, MAX_LIST_DEVICES, MAX_VERSION,
-    WILDCARD,
+    SEND_PAYLOAD_MAX_BYTES, WILDCARD,
 };
 use crate::isupport::CaseMapping;
 use crate::persistence::data_dir;
@@ -2556,8 +2556,8 @@ impl E2eEngine {
     }
 
     /// Sends sealed messages. A `msg` and a `pkmsg` never share a request; a
-    /// request holds at most [`MAX_LIST_DEVICES`] bodies. The first request
-    /// decides the result: when it fails, the call fails. A later failure
+    /// request holds at most [`MAX_LIST_DEVICES`] bodies and at most
+    /// `SEND_PAYLOAD_MAX_BYTES` bytes of payload. The first request decides the result: when it fails, the call fails. A later failure
     /// leaves that group without the message.
     async fn emit(
         &mut self,
@@ -2571,9 +2571,9 @@ impl E2eEngine {
         let mut emitted = Vec::new();
         for prekey in [false, true] {
             let group: Vec<&Sealed> = sealed.iter().filter(|s| s.prekey == prekey).collect();
-            for chunk in group.chunks(MAX_LIST_DEVICES) {
+            for chunk in split_by_payload_size(&group, own) {
                 match self
-                    .emit_group(client, token, nick, chunk, own, priority)
+                    .emit_group(client, token, nick, &chunk, own, priority)
                     .await
                 {
                     Ok(sent) => emitted.push(sent),
@@ -2595,32 +2595,7 @@ impl E2eEngine {
         own: &OwnWire,
         priority: E2eSendPriority,
     ) -> Result<Emitted, EngineError> {
-        let bodies: BTreeMap<String, String> = chunk
-            .iter()
-            .map(|sealed| (sealed.did.clone(), sealed.body.clone()))
-            .collect();
-        let (verb, payload) = if chunk.first().is_some_and(|sealed| sealed.prekey) {
-            (
-                E2eSendVerb::PkMsg,
-                MessagePayload::PreKey(PreKeyPayload {
-                    v: PAYLOAD_VERSION,
-                    id: own.id.clone(),
-                    master: own.master.clone(),
-                    bodies,
-                })
-                .to_json(),
-            )
-        } else {
-            (
-                E2eSendVerb::Msg,
-                MessagePayload::Normal(MsgPayload {
-                    v: PAYLOAD_VERSION,
-                    ck: own.id.curve25519.clone(),
-                    bodies,
-                })
-                .to_json(),
-            )
-        };
+        let (verb, payload) = chunk_payload(chunk, own);
         let to = match chunk {
             [only] => only.did.as_str(),
             _ => WILDCARD,
@@ -2799,6 +2774,60 @@ fn nack_reference(payload: &str) -> Option<String> {
     let value: Value = serde_json::from_str(payload).ok()?;
     let reference = value.get("ref")?.as_str()?;
     (!reference.is_empty()).then(|| reference.to_string())
+}
+
+/// Builds the verb and the JSON payload for a request that carries a body for
+/// each of `chunk`. All of `chunk` use the same Olm message type.
+fn chunk_payload(chunk: &[&Sealed], own: &OwnWire) -> (E2eSendVerb, String) {
+    let bodies: BTreeMap<String, String> = chunk
+        .iter()
+        .map(|sealed| (sealed.did.clone(), sealed.body.clone()))
+        .collect();
+    if chunk.first().is_some_and(|sealed| sealed.prekey) {
+        (
+            E2eSendVerb::PkMsg,
+            MessagePayload::PreKey(PreKeyPayload {
+                v: PAYLOAD_VERSION,
+                id: own.id.clone(),
+                master: own.master.clone(),
+                bodies,
+            })
+            .to_json(),
+        )
+    } else {
+        (
+            E2eSendVerb::Msg,
+            MessagePayload::Normal(MsgPayload {
+                v: PAYLOAD_VERSION,
+                ck: own.id.curve25519.clone(),
+                bodies,
+            })
+            .to_json(),
+        )
+    }
+}
+
+/// Splits `group` into requests of at most [`MAX_LIST_DEVICES`] bodies whose
+/// payload fits `SEND_PAYLOAD_MAX_BYTES`. A body that does not fit alone stays
+/// in a request of its own: the request builder refuses it.
+fn split_by_payload_size<'a>(group: &[&'a Sealed], own: &OwnWire) -> Vec<Vec<&'a Sealed>> {
+    let mut chunks: Vec<Vec<&'a Sealed>> = Vec::new();
+    let mut current: Vec<&'a Sealed> = Vec::new();
+    for &sealed in group {
+        current.push(sealed);
+        if current.len() > 1
+            && (current.len() > MAX_LIST_DEVICES
+                || chunk_payload(&current, own).1.len() > SEND_PAYLOAD_MAX_BYTES)
+        {
+            let last = current.pop();
+            chunks.push(std::mem::take(&mut current));
+            current.extend(last);
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 #[cfg(test)]
