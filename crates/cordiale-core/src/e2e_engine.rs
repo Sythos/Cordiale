@@ -510,9 +510,9 @@ pub enum RowOutcome {
     /// The write to the history or the state failed. Do not acknowledge the
     /// row: it stays in the inbox for the next drain.
     StoreFailed,
-    /// A copy comes from a sibling with a newer list than the own list. Do
-    /// not acknowledge it and stop the drain before it. Sync the own list,
-    /// then drain again.
+    /// A copy comes from a sender that the own list does not name, or from a
+    /// sibling with a newer list than the own list. Do not acknowledge it and
+    /// stop the drain before it. Sync the own list, then read the row again.
     StaleList,
 }
 
@@ -601,6 +601,8 @@ struct CopyJob {
     peer: String,
     text: String,
     created_at: i64,
+    /// The siblings at the time of the 202 answer. A later list never adds one.
+    recipients: HashSet<String>,
     /// Siblings that are final: queued, or dropped for good.
     done: HashSet<String>,
     tries: HashMap<String, u8>,
@@ -1107,7 +1109,13 @@ impl E2eEngine {
             .as_ref()
             .map_or(row.from.as_str(), |entry| entry.nick.as_str())
             .to_string();
-        if !listed
+        let revoked_key = self
+            .state
+            .own_revoked()
+            .iter()
+            .any(|key| did_from_key_text(key).is_ok_and(|did| did == row.from_did));
+        if revoked_key
+            || row.from_did == self.own_did
             || self.revoked_dids.contains(&row.from_did)
             || self
                 .state
@@ -1116,17 +1124,18 @@ impl E2eEngine {
         {
             return RowOutcome::Undecryptable;
         }
+        // An unknown sender may be a device paired while this device was
+        // away: the own list is behind. Read it again before a final refusal.
+        // No session or key changes before that.
+        if !listed {
+            return self.stale_or_refuse(row.id);
+        }
         let Some(decrypted) = self.decrypt_row(row, entry.as_ref(), &nick) else {
             return RowOutcome::Undecryptable;
         };
         // The sender knows a newer list: this device is behind.
         if decrypted.inner.lv.is_some_and(|lv| lv > list.version) {
-            let tries = self.stale_tries.entry(row.id).or_insert(0);
-            *tries += 1;
-            if *tries < md3_pacing::MAX_SENDS {
-                return RowOutcome::StaleList;
-            }
-            return RowOutcome::Undecryptable;
+            return self.stale_or_refuse(row.id);
         }
         match decrypted.inner.kind.clone() {
             InnerKind::Copy { peer, body } if valid_peer(&peer) => self.store_decrypted(
@@ -1144,6 +1153,18 @@ impl E2eEngine {
                 Err(_) => RowOutcome::StoreFailed,
             },
             _ => RowOutcome::Undecryptable,
+        }
+    }
+
+    /// A copy that waits for a newer own list gets `StaleList` for the first
+    /// tries of its row, then it is refused for good.
+    fn stale_or_refuse(&mut self, row_id: u64) -> RowOutcome {
+        let tries = self.stale_tries.entry(row_id).or_insert(0);
+        *tries += 1;
+        if *tries < md3_pacing::MAX_SENDS {
+            RowOutcome::StaleList
+        } else {
+            RowOutcome::Undecryptable
         }
     }
 
@@ -1516,7 +1537,12 @@ impl E2eEngine {
     }
 
     fn queue_copies(&mut self, peer: &str, text: &str, id: &str, now: i64) {
-        if self.sibling_dids().is_empty() {
+        let recipients: HashSet<String> = self
+            .sibling_dids()
+            .into_iter()
+            .map(|(did, _)| did)
+            .collect();
+        if recipients.is_empty() {
             return;
         }
         while self.copy_jobs.len() >= md3_pacing::OUTGOING_QUEUE_MAX {
@@ -1527,6 +1553,7 @@ impl E2eEngine {
             peer: peer.to_string(),
             text: text.to_string(),
             created_at: now,
+            recipients,
             done: HashSet::new(),
             tries: HashMap::new(),
         });
@@ -1580,16 +1607,17 @@ impl E2eEngine {
         now: i64,
     ) -> CopyReport {
         let mut report = CopyReport::default();
-        let mut jobs = std::mem::take(&mut self.copy_jobs).into_iter();
         let mut kept = Vec::new();
-        while let Some(mut job) = jobs.next() {
+        for mut job in std::mem::take(&mut self.copy_jobs) {
             let expired = u64::try_from(job.created_at)
                 .ok()
                 .zip(u64::try_from(now).ok())
                 .is_some_and(|(created, now)| is_expired(created, now));
             let mut open = false;
             for (did, ed25519) in self.sibling_dids() {
-                if job.done.contains(&did) {
+                // A device paired after the original was accepted gets no
+                // earlier text.
+                if job.done.contains(&did) || !job.recipients.contains(&did) {
                     continue;
                 }
                 if report.needs_sync {
@@ -1640,7 +1668,6 @@ impl E2eEngine {
                 kept.push(job);
             }
         }
-        kept.extend(jobs);
         self.copy_jobs = kept;
         report
     }
@@ -5048,10 +5075,59 @@ mod tests {
         let value = copy_inbox_row(&t, 9, &body_of(&server, 2).await);
         let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
         set_own_list(&mut t.second, &t.master, 1, &[&t.second_device]);
+        // The own list may be behind, so the row waits. After the last try
+        // the row is refused for good and acknowledged.
         let outcome = t.second.handle_row(&item, 150);
+        assert_eq!(outcome, RowOutcome::StaleList);
+        assert!(!outcome.acknowledge());
+        let outcome = t.second.handle_row(&item, 151);
         assert_eq!(outcome, RowOutcome::Undecryptable);
         assert!(outcome.acknowledge());
         assert!(t.second.history().conversation_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_copy_from_a_newly_paired_device_is_read_after_the_own_list_syncs() {
+        let mut t = twins("copy-paired");
+        let server = MockServer::start().await;
+        mount_copy_routes(&server, &t).await;
+        send_and_copy(&mut t, &server, 100).await;
+        let value = copy_inbox_row(&t, 9, &body_of(&server, 2).await);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        set_own_list(&mut t.second, &t.master, 1, &[&t.second_device]);
+        assert_eq!(t.second.handle_row(&item, 150), RowOutcome::StaleList);
+        set_own_list(
+            &mut t.second,
+            &t.master,
+            2,
+            &[&t.first_device, &t.second_device],
+        );
+        assert_eq!(t.second.handle_row(&item, 151), RowOutcome::Stored);
+    }
+
+    #[tokio::test]
+    async fn a_device_paired_after_the_original_gets_no_copy_of_it() {
+        let mut t = twins("copy-backfill");
+        let server = MockServer::start().await;
+        mount_copy_routes(&server, &t).await;
+        let client = GrappaClient::new(server.uri());
+        t.first
+            .send_text(&client, TOKEN, "carol", "hello carol", 100)
+            .await
+            .expect("send");
+        // A third device joins before the copies go out.
+        let all = [&t.first_device, &t.second_device, &t.third_device];
+        set_own_list(&mut t.first, &t.master, 1, &all);
+        let report = t
+            .first
+            .send_copies(&client, TOKEN, PROTOCOL, "bob", 100)
+            .await;
+        assert_eq!(report.queued, vec![t.second_did.clone()]);
+        let third_did = did_from_key_text(&ed(&t.third_device)).expect("did");
+        assert!(paths_of(&server)
+            .await
+            .iter()
+            .all(|route| !route.contains(&third_did)));
     }
 
     #[tokio::test]

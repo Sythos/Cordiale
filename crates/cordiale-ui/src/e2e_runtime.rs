@@ -807,11 +807,27 @@ pub(crate) async fn handle_e2e_message(
     let Some(mut engine) = state.e2e.engines.remove(&row.network) else {
         return;
     };
-    if let Err(error) = engine
-        .handle_event(&client, &token, protocol, &row, e2e_now())
-        .await
-    {
-        persistence::log_line(&format!("e2e item not read for {}: {error:?}", row.network));
+    // A copy from a device that the own list does not know yet waits: the
+    // own list is read again, then the row is read once more.
+    for _ in 0..2 {
+        match engine
+            .handle_event(&client, &token, protocol, &row, e2e_now())
+            .await
+        {
+            Ok(RowOutcome::StaleList) => {
+                if let Err(error) = engine.sync_own_list(&client, &token, protocol).await {
+                    persistence::log_line(&format!(
+                        "e2e own list not read for {}: {error:?}",
+                        row.network
+                    ));
+                }
+            }
+            Ok(_) => break,
+            Err(error) => {
+                persistence::log_line(&format!("e2e item not read for {}: {error:?}", row.network));
+                break;
+            }
+        }
     }
     settle_engine(state, ui, &row.network, engine).await;
 }
