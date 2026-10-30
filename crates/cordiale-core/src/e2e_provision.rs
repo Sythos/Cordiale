@@ -45,7 +45,9 @@
 //!    that holds the device) and save it.
 //! 5. Register the id block of the device, when the server does not hold it.
 //! 6. Put the own list, when it waits for publication or the server has none.
-//!    The mark goes only after a 2xx answer.
+//!    The mark goes only after a 2xx answer. A pending list that is not above
+//!    the server list is signed again above it. It keeps the own device and
+//!    drops every revoked key.
 //! 7. Top up the one-time keys so that the server holds 50, make a fallback
 //!    key when the server has none, save the account, and upload. The keys
 //!    are marked as published only after a 2xx answer. A failed upload keeps
@@ -252,9 +254,35 @@ pub async fn provision_device(
         let held = &held.list;
         let behind = list.as_ref().is_none_or(|own| own.version <= held.version);
         if behind && has_legacy_order(held.version, &held.keys, &master_key, &held.signature) {
-            let next = sign_list(master, held.version + 1, &held.keys)?;
+            // The new version must hold this device, or peers refuse it.
+            let keys = keys_above(&held.keys, store.own_revoked(), &ed25519);
+            let next = sign_list(master, held.version + 1, &keys)?;
             store.set_signed_list_pending(&next)?;
             list = Some(next);
+        }
+    }
+    // A pending list that is not above the server list would get `stale_list`
+    // at every run. Sign it again above the server list. The new list keeps
+    // this device and drops every revoked key, so a pending revoke stays.
+    if let Some(held) = &held {
+        let held = &held.list;
+        let stale = list.as_ref().is_some_and(|own| own.version <= held.version);
+        if store.list_pending() && stale {
+            verify_signed_list(held.version, &held.keys, &master_key, &held.signature)?;
+            let keys = keys_above(&held.keys, store.own_revoked(), &ed25519);
+            let mut wanted = keys.clone();
+            wanted.sort();
+            let mut current = held.keys.clone();
+            current.sort();
+            if wanted == current {
+                store.set_published_list(held)?;
+                list = Some(held.clone());
+            } else {
+                let master = master.as_ref().ok_or(ProvisionError::NeedsPairing)?;
+                let next = sign_list(master, held.version + 1, &keys)?;
+                store.set_signed_list_pending(&next)?;
+                list = Some(next);
+            }
         }
     }
     let list = match (list, &held) {
@@ -370,6 +398,20 @@ pub async fn provision_device(
 /// True when the store holds the certificate that `master` signed for this
 /// device key. Only a device that joined by X1 pairing has one without the
 /// master secret.
+/// The keys of the server list without the revoked keys, with this device
+/// added when it is missing.
+fn keys_above(held: &[String], revoked: &[String], ed25519: &str) -> Vec<String> {
+    let mut keys: Vec<String> = held
+        .iter()
+        .filter(|key| !revoked.contains(key))
+        .cloned()
+        .collect();
+    if !keys.iter().any(|key| key == ed25519) {
+        keys.push(ed25519.to_string());
+    }
+    keys
+}
+
 fn is_paired_under(store: &E2eStateStore, master: &str, device_ed25519: &str) -> bool {
     store
         .device_certificate()
@@ -405,6 +447,7 @@ fn signed_key(local: &LocalAccount, key: &str) -> Result<SignedKey, WireError> {
 mod tests {
     use super::*;
     use crate::e2e_device::verify_signature;
+    use crate::e2e_state::PendingRevoke;
     use crate::e2e_wire::{legacy_raw_order_list_signed_text, signed_list_signed_text};
     use serde_json::{json, Value};
     use std::fs;
@@ -878,6 +921,168 @@ mod tests {
         assert!(!store.list_pending());
         assert_eq!(state.lock().unwrap().list.as_ref().unwrap()["ver"], 3);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_pending_list_below_the_server_version_takes_the_server_list() {
+        let dir = scratch_dir("pending-stale");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        run(&server, &mut store, PROTOCOL).await.expect("first run");
+
+        // Another device of the same master published version 5.
+        let master = store.master_key().unwrap().unwrap();
+        let master_key = ed25519_of(&master);
+        let device_key = ed25519_of(&store.olm_identity().unwrap().unwrap());
+        let mut keys = vec![device_key, ed25519_of(&Account::new())];
+        keys.sort();
+        let newer = sign_list(&master, 5, &keys).expect("sign");
+        {
+            let mut fake = state.lock().unwrap();
+            fake.list = Some(json!({
+                "master": master_key, "ver": 5, "devices": keys, "sig": newer.signature
+            }));
+        }
+        let older = store.signed_list().expect("list");
+        store.set_signed_list_pending(&older).expect("pending");
+
+        let outcome = run(&server, &mut store, PROTOCOL).await.expect("run");
+
+        assert!(!outcome.list_published);
+        assert!(!store.list_pending());
+        assert_eq!(store.signed_list().expect("list").version, 5);
+        assert_eq!(state.lock().unwrap().list.as_ref().unwrap()["ver"], 5);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_pending_revoke_stays_when_the_server_list_is_newer() {
+        let dir = scratch_dir("pending-revoke");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        run(&server, &mut store, PROTOCOL).await.expect("first run");
+
+        // A revoke saved its list (version 1) but did not publish it. Then
+        // another device published version 2, which still holds the key.
+        let master = store.master_key().unwrap().unwrap();
+        let master_key = ed25519_of(&master);
+        let device_key = ed25519_of(&store.olm_identity().unwrap().unwrap());
+        let revoked = ed25519_of(&Account::new());
+        let mut keys = vec![device_key.clone(), revoked.clone()];
+        keys.sort();
+        let newer = sign_list(&master, 2, &keys).expect("sign");
+        {
+            let mut fake = state.lock().unwrap();
+            fake.list = Some(json!({
+                "master": master_key, "ver": 2, "devices": keys, "sig": newer.signature
+            }));
+        }
+        let own = store.signed_list().expect("list");
+        let pending = PendingRevoke {
+            ed25519: revoked.clone(),
+            did: "revoked-device".to_string(),
+        };
+        store.begin_revoke(&pending, &own).expect("revoke");
+
+        let outcome = run(&server, &mut store, PROTOCOL).await.expect("run");
+
+        assert!(outcome.list_published);
+        assert!(!store.list_pending());
+        let own = store.signed_list().expect("list");
+        assert_eq!(own.version, 3);
+        assert_eq!(own.keys, vec![device_key.clone()]);
+        let fake = state.lock().unwrap();
+        let held = fake.list.as_ref().unwrap();
+        assert_eq!(held["ver"], 3);
+        assert_eq!(held["devices"], json!([device_key]));
+        drop(fake);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_newer_server_list_with_a_bad_signature_keeps_the_pending_list() {
+        let dir = scratch_dir("pending-bad-sig");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        run(&server, &mut store, PROTOCOL).await.expect("first run");
+
+        // The server gives version 5 under the own master, but another key
+        // signed it.
+        let master_key = ed25519_of(&store.master_key().unwrap().unwrap());
+        let device_key = ed25519_of(&store.olm_identity().unwrap().unwrap());
+        let keys = vec![device_key];
+        let forged = sign_list(&Account::new(), 5, &keys).expect("sign");
+        {
+            let mut fake = state.lock().unwrap();
+            fake.list = Some(json!({
+                "master": master_key, "ver": 5, "devices": keys, "sig": forged.signature
+            }));
+        }
+        let older = store.signed_list().expect("list");
+        store.set_signed_list_pending(&older).expect("pending");
+
+        let result = run(&server, &mut store, PROTOCOL).await;
+
+        assert!(matches!(result, Err(ProvisionError::Crypto(_))));
+        assert!(store.list_pending());
+        assert_eq!(store.signed_list().expect("list").version, older.version);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_server_list_without_this_device_gets_the_device_added() {
+        let dir = scratch_dir("legacy-no-device");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        run(&server, &mut store, PROTOCOL).await.expect("first run");
+
+        // The server holds an old-order list without this device. The store
+        // has the master but no own list.
+        let master = store.master_key().unwrap().unwrap();
+        let master_key = ed25519_of(&master);
+        let device_key = ed25519_of(&store.olm_identity().unwrap().unwrap());
+        let keys = loop {
+            let keys = vec![ed25519_of(&Account::new()), ed25519_of(&Account::new())];
+            if legacy_raw_order_list_signed_text(2, &keys).unwrap()
+                != signed_list_signed_text(2, &keys).unwrap()
+            {
+                break keys;
+            }
+        };
+        let old = master
+            .sign(legacy_raw_order_list_signed_text(2, &keys).unwrap())
+            .to_base64();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        {
+            let mut fake = state.lock().unwrap();
+            fake.list = Some(json!({
+                "master": master_key, "ver": 2, "devices": sorted, "sig": old
+            }));
+        }
+        let other = scratch_dir("legacy-no-device-store");
+        let mut fresh = E2eStateStore::open(state_path(&other), &provider).expect("open");
+        fresh
+            .set_account(&store.olm_identity().unwrap().unwrap())
+            .expect("account");
+        fresh.set_master_key(&master).expect("master");
+
+        let outcome = run(&server, &mut fresh, PROTOCOL).await.expect("run");
+
+        assert!(outcome.list_published);
+        let own = fresh.signed_list().expect("list");
+        assert_eq!(own.version, 3);
+        assert!(own.keys.contains(&device_key));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&other);
     }
 
     #[tokio::test]
