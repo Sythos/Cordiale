@@ -1623,16 +1623,29 @@ commit e il motore di cicchetto (`cicchetto/src/lib/e2e/{wire,client,engine}.ts`
   la copia S1 è `{"t":"copy","peer","body"}`. `lv` è la versione della lista del mittente;
   nel corpo di un `pkmsg` c'è anche `fb`, e il ricevente lo confronta con
   `recipient_binding(mittente, proprio)` dopo la decifratura (altrimenti la sessione si
-  scarta). Gli altri tipi (`list`, `listreq`, `chal`, `ack`) tengono la sessione e non
-  salvano nulla (`RowOutcome::Ignored`).
+  scarta). `list` e `listreq` sono gestiti dal motore (vedi la issue 477 più
+  sotto). Gli altri tipi (`chal`, `ack`) tengono la sessione e non salvano nulla
+  (`RowOutcome::Ignored`).
 - Invio: il `pkmsg` richiede chiave master, lista firmata e certificato del dispositivo
   nello stato (`own_wire`); senza, l'invio dà `NotReady` e non parte nulla. `fb` è nel
   messaggio interno solo se la sessione non ha ancora ricevuto un messaggio.
 
-**Limiti noti del passo 4:** l'invio va a un solo dispositivo del peer (il `bodies` ha una
-voce), non a tutti; il motore non risponde a `listreq`, non applica `t:list` e non manda
-`listreq` quando vede un `lv` più alto; il motore non invia NACK; la `fallback` della chiave
-non è distinta dalla chiave monouso. Non provato contro un server o un bot reale.
+**Issue 477 (fetta 39): invio a tutti i dispositivi e liste nel motore.** Il testo va a
+tutti i dispositivi fidati del peer (non revocati, con sessione o chiave monouso; al massimo
+4): un `bodies` con una voce per dispositivo. `msg` e `pkmsg` non stanno nella stessa
+richiesta (come in irc-olm `_encrypt`): una richiesta per tipo; con più voci `to` è `*`. La
+prima richiesta decide l'esito; il `msgid` di ogni richiesta resta in `sent` per il NACK, con
+l'elenco dei dispositivi. Messaggi di lista dentro Olm: `{"t":"listreq","lv"}` e
+`{"t":"list","master":{"ed25519","list":{"ver","devices"},"sig"},"lv"}`. Un `listreq` mette in
+coda la lista propria per quel dispositivo (una volta al minuto per dispositivo); un `t:list`
+passa da `apply_peer_list` (firma, stesso master, versione più alta; un altro master è
+l'allarme di fiducia); un `lv` più alto della lista salvata mette in coda un `listreq` (una
+volta per `lv` e al minuto per nick). `E2eEngine::send_list_messages` invia la coda con
+priorità `control`; la UI lo chiama in `settle_engine`.
+
+**Limiti noti:** il motore non invia NACK; un dispositivo senza sessione e senza chiave monouso
+non riceve il testo (non c'è ancora la coda per dispositivo di irc-olm); la `fallback` della
+chiave non è distinta dalla chiave monouso. Non provato contro un server o un bot reale.
 
 **Issue 454, passi 1 e 2: pacing finale, coda, NACK e motivi di scarto.** Fonti lette il
 2026-10-29: `CLIENT_PROTOCOL.md` §4f su `main` di `vjt/grappa-irc`, e irc-olm al commit
