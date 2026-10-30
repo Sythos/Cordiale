@@ -441,6 +441,9 @@ pub struct Inner {
     pub kind: InnerKind,
     pub lv: Option<u32>,
     pub fb: Option<String>,
+    /// The stable identity of a copy. A retry of the same copy keeps it, so
+    /// the receiver stores the text once.
+    pub cid: Option<String>,
 }
 
 impl Inner {
@@ -473,6 +476,7 @@ impl Inner {
             kind,
             lv: map.get("lv").and_then(version_from_value),
             fb: field("fb").map(str::to_string),
+            cid: field("cid").map(str::to_string),
         })
     }
 }
@@ -490,6 +494,25 @@ struct InnerOut<'a> {
 }
 
 impl InnerOut<'_> {
+    fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+/// The inner message of a copy. The `cid` names the original text for the
+/// sibling and stays the same in every retry.
+#[derive(Serialize)]
+struct CopyOut<'a> {
+    t: &'a str,
+    peer: &'a str,
+    body: &'a str,
+    cid: &'a str,
+    lv: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fb: Option<&'a str>,
+}
+
+impl CopyOut<'_> {
     fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
@@ -1427,13 +1450,21 @@ impl E2eEngine {
         if decrypted.inner.lv.is_some_and(|lv| lv > list.version) {
             return self.stale_or_refuse(row.id);
         }
+        // A copy with a stable identity is stored once, also when a retry of
+        // the sender made a second inbox row.
+        let history_id = match decrypted.inner.cid.as_deref() {
+            Some(cid) if valid_peer(cid) => {
+                format!("{}:own:{}:{cid}", self.network, row.from_did)
+            }
+            _ => format!("{}:own:{}", self.network, row.id),
+        };
         match decrypted.inner.kind.clone() {
             InnerKind::Copy { peer, body } if valid_peer(&peer) => self.store_decrypted(
                 &nick,
                 row,
                 &decrypted,
                 peer,
-                format!("{}:own:{}", self.network, row.id),
+                history_id,
                 OWN_DEVICE.to_string(),
                 body,
                 now,
@@ -1459,6 +1490,14 @@ impl E2eEngine {
             RowOutcome::StaleList
         } else {
             RowOutcome::Undecryptable
+        }
+    }
+
+    /// Gives back the stale try of a row. Call it when the own list could
+    /// not be read: a failed read must not use up the tries of the copy.
+    pub fn release_stale_try(&mut self, row_id: u64) {
+        if let Some(tries) = self.stale_tries.get_mut(&row_id) {
+            *tries = tries.saturating_sub(1);
         }
     }
 
@@ -1727,6 +1766,7 @@ impl E2eEngine {
                     kind: InnerKind::Other,
                     lv: None,
                     fb: None,
+                    cid: None,
                 });
                 Some(Decrypted {
                     inner,
@@ -2040,10 +2080,11 @@ impl E2eEngine {
         };
         let fb = (!session.has_received_message())
             .then(|| recipient_binding(&self.own_ed25519, sibling_ed25519));
-        let inner = InnerOut {
+        let inner = CopyOut {
             t: "copy",
-            peer: Some(&job.peer),
+            peer: &job.peer,
             body: &job.text,
+            cid: &job.id,
             lv: own.lv,
             fb: fb.as_deref(),
         }
@@ -6124,6 +6165,40 @@ mod tests {
         assert_eq!(outcome, RowOutcome::Undecryptable);
         assert!(outcome.acknowledge());
         assert!(t.second.history().conversation_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_released_stale_try_keeps_the_copy_for_a_later_read() {
+        let mut t = twins("copy-release");
+        let server = MockServer::start().await;
+        mount_copy_routes(&server, &t).await;
+        send_and_copy(&mut t, &server, 100).await;
+        let value = copy_inbox_row(&t, 9, &body_of(&server, 2).await);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        set_own_list(&mut t.second, &t.master, 1, &[&t.second_device]);
+        for now in [150, 151, 152] {
+            assert_eq!(t.second.handle_row(&item, now), RowOutcome::StaleList);
+            t.second.release_stale_try(item.id);
+        }
+    }
+
+    #[test]
+    fn a_copy_inner_message_carries_a_stable_identity() {
+        let copy = CopyOut {
+            t: "copy",
+            peer: "carol",
+            body: "hi",
+            cid: "m1",
+            lv: 1,
+            fb: None,
+        }
+        .to_json();
+        assert_eq!(
+            copy,
+            r#"{"t":"copy","peer":"carol","body":"hi","cid":"m1","lv":1}"#
+        );
+        let inner = Inner::parse(copy.as_bytes()).expect("inner");
+        assert_eq!(inner.cid.as_deref(), Some("m1"));
     }
 
     #[tokio::test]
