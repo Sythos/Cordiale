@@ -73,8 +73,11 @@ use vodozemac::olm::{Account, Message, OlmMessage, PreKeyMessage, Session, Sessi
 use vodozemac::Curve25519PublicKey;
 
 use crate::client::{GrappaClient, GrappaClientError};
-use crate::e2e_device::{verify_signature, E2eError, PeerDevice};
-use crate::e2e_device_routes::{ClaimRequest, InboxAckRequest, InboxRow, InboxVerb};
+use crate::e2e_device::{verify_signature, verify_signed_list, E2eError, PeerDevice};
+use crate::e2e_device_routes::{
+    ClaimRequest, CopyRequest, CopyVerb, InboxAckRequest, InboxRow, InboxVerb,
+};
+use crate::e2e_manage::SignedList;
 use crate::e2e_pacing::{
     check_send_deadline, md3_pacing, DropReason, IntervalLimiter, KeyReqPacer, KeyReqRefusal,
     MonotonicClock, OutgoingQueue, QueuedSend, SendBook, SendDecision, SendDropped, SendFailure,
@@ -85,7 +88,8 @@ use crate::e2e_peer::{
     apply_peer_list, verify_certified_device, verify_peer_device, CertifiedBundle, PeerBundle,
     ReplayState,
 };
-use crate::e2e_refusal::E2eRouteError;
+use crate::e2e_refusal::{E2eRefusal, E2eRouteError};
+use crate::e2e_selfcopy::{inbox_accepts, is_expired, DeliveryTracker};
 use crate::e2e_state::E2eStateStore;
 use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError, KeyringKeyProvider};
 use crate::e2e_trust::PeerTrust;
@@ -506,12 +510,16 @@ pub enum RowOutcome {
     /// The write to the history or the state failed. Do not acknowledge the
     /// row: it stays in the inbox for the next drain.
     StoreFailed,
+    /// A copy comes from a sibling with a newer list than the own list. Do
+    /// not acknowledge it and stop the drain before it. Sync the own list,
+    /// then drain again.
+    StaleList,
 }
 
 impl RowOutcome {
     /// True when the caller acknowledges the row.
     pub fn acknowledge(self) -> bool {
-        self != RowOutcome::StoreFailed
+        !matches!(self, RowOutcome::StoreFailed | RowOutcome::StaleList)
     }
 }
 
@@ -547,6 +555,62 @@ struct SentRecord {
     sends: u8,
     row_id: String,
     at: Duration,
+}
+
+/// Why the copy for one sibling device was not queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyFailure {
+    /// The relay says the target is this device.
+    SameDevice,
+    /// The sibling holds no key. It is unreachable until it uploads more.
+    KeylessDevice,
+    /// The key went between the pick and the hand-out, also after a new ask.
+    KeyTaken,
+    /// The sibling was dropped meanwhile, or the server list removes it.
+    RemovedDevice,
+    /// The inbox of the sibling is full. The copy is missing there. No retry.
+    InboxFull,
+    /// The claim gave no usable key.
+    NoKey,
+    /// The copy is larger than an inbox takes.
+    TooLarge,
+    /// The text waited longer than the inbox lifetime.
+    Expired,
+    /// Any other failure, after the last try.
+    Failed,
+}
+
+/// What [`E2eEngine::send_copies`] did. A queued copy is an acceptance of the
+/// relay. It never proves that the peer got the original.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CopyReport {
+    /// The `did` of each sibling whose copy the relay accepted.
+    pub queued: Vec<String>,
+    /// The `did` of each sibling that gets no copy, with the reason.
+    pub failed: Vec<(String, CopyFailure)>,
+    /// The signed list of a sibling or of this device is behind. The call
+    /// stopped before that copy. Sync with [`E2eEngine::sync_own_list`], then
+    /// call again.
+    pub needs_sync: bool,
+}
+
+/// A text that waits for its copies.
+#[derive(Debug, Clone)]
+struct CopyJob {
+    id: String,
+    peer: String,
+    text: String,
+    created_at: i64,
+    /// Siblings that are final: queued, or dropped for good.
+    done: HashSet<String>,
+    tries: HashMap<String, u8>,
+}
+
+/// How one copy step ended when it did not queue the copy.
+enum CopyStep {
+    Drop(CopyFailure),
+    Retry,
+    Sync,
 }
 
 #[derive(Debug, Clone)]
@@ -613,6 +677,13 @@ pub struct E2eEngine {
     /// [`E2eEngine::take_changed_peers`].
     changed_peers: Vec<String>,
     local_sends: u64,
+    /// Texts whose original got a 202 answer and whose copies for the other
+    /// devices of the account are not all queued yet.
+    copy_jobs: Vec<CopyJob>,
+    /// The state of each queued copy. A queued copy is never a delivery.
+    copy_tracker: DeliveryTracker,
+    /// How often a copy row waited for a newer own list, by inbox id.
+    stale_tries: HashMap<u64, u8>,
 }
 
 impl E2eEngine {
@@ -649,6 +720,9 @@ impl E2eEngine {
             capability: Vec::new(),
             changed_peers: Vec::new(),
             local_sends: 0,
+            copy_jobs: Vec::new(),
+            copy_tracker: DeliveryTracker::default(),
+            stale_tries: HashMap::new(),
         })
     }
 
@@ -1017,7 +1091,66 @@ impl E2eEngine {
         outcome
     }
 
+    /// Reads a copy of a message that a sibling device sent. The own signed
+    /// list decides who is a sibling. The checks of a peer message do not
+    /// apply: a copy is never a message from a person.
+    fn receive_copy(&mut self, row: &InboxRow, now: i64) -> RowOutcome {
+        let Some((list, _)) = self.own_list() else {
+            return RowOutcome::Undecryptable;
+        };
+        let listed = self
+            .sibling_dids()
+            .iter()
+            .any(|(did, _)| *did == row.from_did);
+        let entry = self.peers.get(&row.from_did).cloned();
+        let nick = entry
+            .as_ref()
+            .map_or(row.from.as_str(), |entry| entry.nick.as_str())
+            .to_string();
+        if !listed
+            || self.revoked_dids.contains(&row.from_did)
+            || self
+                .state
+                .trust()
+                .is_did_revoked(&self.network, &nick, &row.from_did)
+        {
+            return RowOutcome::Undecryptable;
+        }
+        let Some(decrypted) = self.decrypt_row(row, entry.as_ref(), &nick) else {
+            return RowOutcome::Undecryptable;
+        };
+        // The sender knows a newer list: this device is behind.
+        if decrypted.inner.lv.is_some_and(|lv| lv > list.version) {
+            let tries = self.stale_tries.entry(row.id).or_insert(0);
+            *tries += 1;
+            if *tries < md3_pacing::MAX_SENDS {
+                return RowOutcome::StaleList;
+            }
+            return RowOutcome::Undecryptable;
+        }
+        match decrypted.inner.kind.clone() {
+            InnerKind::Copy { peer, body } if valid_peer(&peer) => self.store_decrypted(
+                &nick,
+                row,
+                &decrypted,
+                peer,
+                format!("{}:own:{}", self.network, row.id),
+                OWN_DEVICE.to_string(),
+                body,
+                now,
+            ),
+            InnerKind::Other => match self.save_state(&nick, &row.from_did, &decrypted) {
+                Ok(()) => RowOutcome::Ignored,
+                Err(_) => RowOutcome::StoreFailed,
+            },
+            _ => RowOutcome::Undecryptable,
+        }
+    }
+
     fn receive_message(&mut self, row: &InboxRow, now: i64) -> RowOutcome {
+        if row.own {
+            return self.receive_copy(row, now);
+        }
         let entry = self.peers.get(&row.from_did).cloned();
         let nick = entry
             .as_ref()
@@ -1041,35 +1174,45 @@ impl E2eEngine {
             return RowOutcome::Undecryptable;
         };
         // A message that the engine read is proof of E2E capability.
-        if !row.own {
-            self.set_peer_capability(&nick, true);
-        }
-        // Text from a person goes to the conversation of the sender. A copy of
-        // an own device names its peer. Both must come in the right kind of
-        // row: a copy is an `own` row. A message that does not fit is
-        // acknowledged and not stored. A kind that is no text only moves the
-        // session on.
-        let (peer, row_id, sender_device, text) = match (&decrypted.inner.kind, row.own) {
-            (InnerKind::Text { body }, false) => (
+        self.set_peer_capability(&nick, true);
+        // Text from a person goes to the conversation of the sender. A message
+        // that does not fit is acknowledged and not stored. A kind that is no
+        // text only moves the session on.
+        match &decrypted.inner.kind {
+            InnerKind::Text { body } => self.store_decrypted(
+                &nick,
+                row,
+                &decrypted,
                 nick.clone(),
                 format!("{}:in:{}", self.network, row.id),
                 row.from_did.clone(),
                 body.clone(),
+                now,
             ),
-            (InnerKind::Copy { peer, body }, true) if valid_peer(peer) => (
-                peer.clone(),
-                format!("{}:own:{}", self.network, row.id),
-                OWN_DEVICE.to_string(),
-                body.clone(),
-            ),
-            (InnerKind::Other, _) => {
-                return match self.save_state(&nick, &row.from_did, &decrypted) {
-                    Ok(()) => RowOutcome::Ignored,
-                    Err(_) => RowOutcome::StoreFailed,
-                };
-            }
-            _ => return RowOutcome::Undecryptable,
-        };
+            InnerKind::Other => match self.save_state(&nick, &row.from_did, &decrypted) {
+                Ok(()) => RowOutcome::Ignored,
+                Err(_) => RowOutcome::StoreFailed,
+            },
+            InnerKind::Copy { .. } => RowOutcome::Undecryptable,
+        }
+    }
+
+    /// Writes the text of a decrypted row to the conversation of `peer`, then
+    /// saves the state. A row that is in the history already adds no second
+    /// row. A failed history write leaves the old state, so the next drain
+    /// decrypts the item again.
+    #[allow(clippy::too_many_arguments)]
+    fn store_decrypted(
+        &mut self,
+        nick: &str,
+        row: &InboxRow,
+        decrypted: &Decrypted,
+        peer: String,
+        row_id: String,
+        sender_device: String,
+        text: String,
+        now: i64,
+    ) -> RowOutcome {
         let conversation = conversation_id(&self.network, &peer);
         let stored = self
             .history
@@ -1089,10 +1232,7 @@ impl E2eEngine {
                 return RowOutcome::StoreFailed;
             }
         }
-        // The state is saved after the history write. A failed history write
-        // leaves the old state, so the next drain decrypts the item again.
-        let saved = self.save_state(&nick, &row.from_did, &decrypted);
-        if saved.is_err() {
+        if self.save_state(nick, &row.from_did, decrypted).is_err() {
             return RowOutcome::StoreFailed;
         }
         self.note_changed(&peer);
@@ -1306,15 +1446,22 @@ impl E2eEngine {
                 break;
             };
             let mut acks = Vec::new();
+            let mut stale = false;
             for row in &page {
                 let outcome = self.handle_row(row, now);
                 if outcome.acknowledge() {
                     acks.push(row.id);
                 }
                 outcomes.push((row.id, outcome));
+                if outcome == RowOutcome::StaleList {
+                    // Stop before the copy: the caller syncs the own list and
+                    // drains again.
+                    stale = true;
+                    break;
+                }
             }
             self.ack(client, token, server_protocol, &acks).await?;
-            if page.len() < INBOX_PAGE_MAX || after == Some(last) {
+            if stale || page.len() < INBOX_PAGE_MAX || after == Some(last) {
                 break;
             }
             after = Some(last);
@@ -1337,6 +1484,316 @@ impl E2eEngine {
             .claim_e2e_device_key(token, &self.network, did, server_protocol, &request)
             .await?;
         self.accept_keys(nick, answer.keys())
+    }
+
+    /// The own signed list with its master key, when the list is valid. It is
+    /// the only authority for the sibling devices.
+    fn own_list(&self) -> Option<(SignedList, String)> {
+        let list = self.state.signed_list()?;
+        let master = self.state.device_certificate()?.master_ed25519;
+        verify_signed_list(list.version, &list.keys, &master, &list.signature).ok()?;
+        Some((list, master))
+    }
+
+    /// The other devices of the own account, as `(did, ed25519)`: the keys of
+    /// the own signed list except this device and the revoked ones.
+    fn sibling_dids(&self) -> Vec<(String, String)> {
+        let Some((list, _)) = self.own_list() else {
+            return Vec::new();
+        };
+        let revoked = self.state.own_revoked();
+        list.keys
+            .iter()
+            .filter(|key| **key != self.own_ed25519 && !revoked.contains(key))
+            .filter_map(|key| Some((did_from_key_text(key).ok()?, key.clone())))
+            .filter(|(did, _)| !self.revoked_dids.contains(did))
+            .collect()
+    }
+
+    /// True when a text waits for its copies.
+    pub fn has_pending_copies(&self) -> bool {
+        !self.copy_jobs.is_empty()
+    }
+
+    fn queue_copies(&mut self, peer: &str, text: &str, id: &str, now: i64) {
+        if self.sibling_dids().is_empty() {
+            return;
+        }
+        while self.copy_jobs.len() >= md3_pacing::OUTGOING_QUEUE_MAX {
+            self.copy_jobs.remove(0);
+        }
+        self.copy_jobs.push(CopyJob {
+            id: id.to_string(),
+            peer: peer.to_string(),
+            text: text.to_string(),
+            created_at: now,
+            done: HashSet::new(),
+            tries: HashMap::new(),
+        });
+    }
+
+    /// Reads the own list on the server. A newer valid list of the same
+    /// master that keeps this device replaces the stored one. Returns true
+    /// when the list changed.
+    pub async fn sync_own_list(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<bool, EngineError> {
+        let (list, master) = self.own_list().ok_or(EngineError::NotReady)?;
+        let held = client
+            .fetch_e2e_list(token, &self.network, server_protocol)
+            .await?;
+        if held.master != master {
+            return Err(EngineError::Wire(WireError::BadKey));
+        }
+        verify_signed_list(
+            held.list.version,
+            &held.list.keys,
+            &master,
+            &held.list.signature,
+        )?;
+        if held.list.version <= list.version || !held.list.keys.contains(&self.own_ed25519) {
+            return Ok(false);
+        }
+        self.state.set_signed_list(&held.list)?;
+        Ok(true)
+    }
+
+    /// Queues the waiting copies in the inbox of each sibling device. Each
+    /// copy is an Olm message for one sibling, sent through the copies route
+    /// and never over IRC. `own_nick` is the nick of the account.
+    ///
+    /// A sibling without a session gets one claimed key first. The own signed
+    /// list names the siblings. A server list can remove a sibling and never
+    /// adds one. When a list is behind, the call stops before that copy and
+    /// sets [`CopyReport::needs_sync`]. A copy gets two tries, then it is
+    /// dropped. A refusal of the relay is final, except `key_taken`, which
+    /// asks for a new key once.
+    pub async fn send_copies(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        server_protocol: Option<u32>,
+        own_nick: &str,
+        now: i64,
+    ) -> CopyReport {
+        let mut report = CopyReport::default();
+        let mut jobs = std::mem::take(&mut self.copy_jobs).into_iter();
+        let mut kept = Vec::new();
+        while let Some(mut job) = jobs.next() {
+            let expired = u64::try_from(job.created_at)
+                .ok()
+                .zip(u64::try_from(now).ok())
+                .is_some_and(|(created, now)| is_expired(created, now));
+            let mut open = false;
+            for (did, ed25519) in self.sibling_dids() {
+                if job.done.contains(&did) {
+                    continue;
+                }
+                if report.needs_sync {
+                    open = true;
+                    continue;
+                }
+                let step = if expired {
+                    Err(CopyStep::Drop(CopyFailure::Expired))
+                } else {
+                    self.copy_to(
+                        client,
+                        token,
+                        server_protocol,
+                        own_nick,
+                        &job,
+                        (did.as_str(), ed25519.as_str()),
+                    )
+                    .await
+                };
+                match step {
+                    Ok(()) => {
+                        job.done.insert(did.clone());
+                        let created = u64::try_from(now).unwrap_or(0);
+                        self.copy_tracker
+                            .queued(&format!("{}.{did}", job.id), &did, created);
+                        report.queued.push(did);
+                    }
+                    Err(CopyStep::Drop(failure)) => {
+                        job.done.insert(did.clone());
+                        report.failed.push((did, failure));
+                    }
+                    Err(step) => {
+                        let tries = job.tries.entry(did.clone()).or_insert(0);
+                        *tries += 1;
+                        if *tries >= md3_pacing::MAX_SENDS {
+                            job.done.insert(did.clone());
+                            report.failed.push((did, CopyFailure::Failed));
+                        } else {
+                            open = true;
+                        }
+                        if matches!(step, CopyStep::Sync) {
+                            report.needs_sync = true;
+                        }
+                    }
+                }
+            }
+            if open {
+                kept.push(job);
+            }
+        }
+        kept.extend(jobs);
+        self.copy_jobs = kept;
+        report
+    }
+
+    /// Makes and queues the copy of `job` for one sibling.
+    async fn copy_to(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        server_protocol: Option<u32>,
+        own_nick: &str,
+        job: &CopyJob,
+        (did, sibling_ed25519): (&str, &str),
+    ) -> Result<(), CopyStep> {
+        let failed = || CopyStep::Drop(CopyFailure::Failed);
+        let identity = self
+            .state
+            .olm_identity()
+            .ok()
+            .flatten()
+            .ok_or_else(failed)?;
+        let own = self.own_wire(&identity).map_err(|_| failed())?;
+        let existing = self
+            .state
+            .peer_session(&self.network, own_nick, did)
+            .map_err(|_| failed())?;
+        let mut session = match existing {
+            Some(session) => session,
+            None => {
+                let (curve, one_time) = self
+                    .claim_sibling_key(client, token, server_protocol, did, sibling_ed25519)
+                    .await?;
+                let curve = Curve25519PublicKey::from_base64(&curve).map_err(|_| failed())?;
+                let one_time = Curve25519PublicKey::from_base64(&one_time).map_err(|_| failed())?;
+                identity
+                    .create_outbound_session(SessionConfig::version_1(), curve, one_time)
+                    .map_err(|_| failed())?
+            }
+        };
+        let fb = (!session.has_received_message())
+            .then(|| recipient_binding(&self.own_ed25519, sibling_ed25519));
+        let inner = InnerOut {
+            t: "copy",
+            peer: Some(&job.peer),
+            body: &job.text,
+            lv: own.lv,
+            fb: fb.as_deref(),
+        }
+        .to_json();
+        let message = session.encrypt(inner.as_bytes()).map_err(|_| failed())?;
+        let (verb, payload) = match message {
+            OlmMessage::PreKey(message) => (
+                CopyVerb::PkMsg,
+                MessagePayload::PreKey(PreKeyPayload {
+                    v: PAYLOAD_VERSION,
+                    id: own.id,
+                    master: own.master,
+                    bodies: BTreeMap::from([(did.to_string(), message.to_base64())]),
+                })
+                .to_json(),
+            ),
+            OlmMessage::Normal(message) => (
+                CopyVerb::Msg,
+                MessagePayload::Normal(MsgPayload {
+                    v: PAYLOAD_VERSION,
+                    ck: own.id.curve25519,
+                    bodies: BTreeMap::from([(did.to_string(), message.to_base64())]),
+                })
+                .to_json(),
+            ),
+        };
+        let too_large = || CopyStep::Drop(CopyFailure::TooLarge);
+        if !inbox_accepts(0, 0, payload.len()) {
+            return Err(too_large());
+        }
+        let request = CopyRequest::new(&self.own_did, verb, &payload).map_err(|_| too_large())?;
+        // Save the session before the send: a skipped Olm message is
+        // harmless, a reused one is not.
+        self.state
+            .set_peer_session(&self.network, own_nick, did, &session)
+            .map_err(|_| failed())?;
+        client
+            .send_e2e_copy(token, &self.network, did, server_protocol, &request)
+            .await
+            .map(|_| ())
+            .map_err(copy_step)
+    }
+
+    /// Claims one key of the sibling `did` and checks the KEYS answer against
+    /// the own signed list. Returns the curve key and the one-time key. A
+    /// `key_taken` refusal asks again once.
+    async fn claim_sibling_key(
+        &self,
+        client: &GrappaClient,
+        token: &str,
+        server_protocol: Option<u32>,
+        did: &str,
+        sibling_ed25519: &str,
+    ) -> Result<(String, String), CopyStep> {
+        let request =
+            ClaimRequest::new(&self.own_did).map_err(|_| CopyStep::Drop(CopyFailure::Failed))?;
+        let mut answer = None;
+        for _ in 0..md3_pacing::MAX_SENDS {
+            match client
+                .claim_e2e_device_key(token, &self.network, did, server_protocol, &request)
+                .await
+            {
+                Ok(keys) => {
+                    answer = Some(keys);
+                    break;
+                }
+                Err(E2eRouteError::Refused {
+                    refusal: E2eRefusal::KeyTaken,
+                    ..
+                }) => continue,
+                Err(error) => return Err(copy_step(error)),
+            }
+        }
+        let answer = answer.ok_or(CopyStep::Drop(CopyFailure::KeyTaken))?;
+        let no_key = || CopyStep::Drop(CopyFailure::NoKey);
+        let (list, master) = self.own_list().ok_or_else(no_key)?;
+        let payload = KeysPayload::parse(answer.keys()).map_err(|_| no_key())?;
+        let block = &payload.master;
+        verify_signed_list(
+            block.list.ver,
+            &block.list.devices,
+            &block.ed25519,
+            &block.sig,
+        )
+        .map_err(|_| no_key())?;
+        if block.ed25519 != master {
+            return Err(no_key());
+        }
+        // The server list can remove the sibling. It never adds one: only the
+        // entry of the sibling in the own list is read.
+        let listed = block.list.devices.iter().any(|key| key == sibling_ed25519);
+        if block.list.ver >= list.version && !listed {
+            return Err(CopyStep::Drop(CopyFailure::RemovedDevice));
+        }
+        if block.list.ver != list.version {
+            return Err(CopyStep::Sync);
+        }
+        let entry = payload
+            .devices
+            .iter()
+            .find(|entry| entry.id.ed25519 == sibling_ed25519)
+            .ok_or_else(no_key)?;
+        let id_text = device_id_signed_text(&entry.id.curve25519, &master);
+        verify_signature(&entry.id.ed25519, &entry.id.sig, id_text.as_bytes())
+            .map_err(|_| no_key())?;
+        let otk_text = bundle_key_signed_text(&entry.otk.key).map_err(|_| no_key())?;
+        verify_signature(&entry.id.ed25519, &entry.otk.sig, &otk_text).map_err(|_| no_key())?;
+        Ok((entry.id.curve25519.clone(), entry.otk.key.clone()))
     }
 
     /// Sends a KEYREQ for `nick` through the send door. The pacer allows one
@@ -1734,6 +2191,11 @@ impl E2eEngine {
             self.row_ids.insert(key.clone(), row_id.clone());
             self.remember_sent(msgid, nick, &did, text, sends, &row_id);
         }
+        // The copies for the other devices of the account follow the 202
+        // answer. A re-send after a NACK makes no second copy.
+        if sends == 1 {
+            self.queue_copies(nick, text, &suffix, now);
+        }
         self.note_changed(nick);
         Ok(SentText {
             msgid: answer.msgid,
@@ -1846,6 +2308,23 @@ impl E2eEngine {
             },
         );
         self.want_keys(&record.nick);
+    }
+}
+
+/// Maps a failed call of a copy route to the next step. The tokens of the
+/// relay are final. A busy relay or a broken connection gets a new try.
+fn copy_step(error: E2eRouteError) -> CopyStep {
+    match error {
+        E2eRouteError::Refused { refusal, .. } => match refusal {
+            E2eRefusal::SameDevice => CopyStep::Drop(CopyFailure::SameDevice),
+            E2eRefusal::KeylessDevice => CopyStep::Drop(CopyFailure::KeylessDevice),
+            E2eRefusal::KeyTaken => CopyStep::Drop(CopyFailure::KeyTaken),
+            E2eRefusal::RemovedDevice => CopyStep::Drop(CopyFailure::RemovedDevice),
+            E2eRefusal::InboxFull => CopyStep::Drop(CopyFailure::InboxFull),
+            _ => CopyStep::Retry,
+        },
+        E2eRouteError::Client(_) | E2eRouteError::Wire(_) => CopyStep::Retry,
+        E2eRouteError::Unavailable => CopyStep::Drop(CopyFailure::Failed),
     }
 }
 
@@ -3174,6 +3653,22 @@ mod tests {
         second_did: String,
     }
 
+    /// Replaces the own signed list of `engine` with a list of `devices`.
+    fn set_own_list(engine: &mut E2eEngine, master: &Account, version: u32, devices: &[&Account]) {
+        let keys: Vec<String> = devices.iter().map(|device| ed(device)).collect();
+        let signature =
+            build_signed_list_signature(version, &keys, |text| master.sign(text).to_base64())
+                .expect("list");
+        engine
+            .state_mut()
+            .set_signed_list(&SignedList {
+                version,
+                keys,
+                signature,
+            })
+            .expect("own list");
+    }
+
     fn siblings() -> Siblings {
         let mut bob_id = Ident::new("bob-own");
         // Four keys: one for a first peer and one for each copy.
@@ -3188,6 +3683,7 @@ mod tests {
         );
         bob.accept_keys("bob", &keys)
             .expect("bob reads the second device");
+        set_own_list(&mut bob, &bob_id.master, 1, &[&bob_id.device, &second]);
         let second_did = did_from_key_text(&ed(&second)).expect("did");
         Siblings {
             bob,
@@ -4062,5 +4558,541 @@ mod tests {
     #[test]
     fn the_reassembly_timeout_is_the_final_value() {
         assert_eq!(KEYS_REASSEMBLY_TIMEOUT, secs(60));
+    }
+
+    // --- S1 copies between the devices of one account (protocol 50) ---------
+
+    /// The engine of one device of the account of `master`. The device holds
+    /// the list 1 of `listed` and its certificate N = 1.
+    fn engine_of(name: &str, master: &Account, device: &Account, listed: &[&Account]) -> E2eEngine {
+        let dir = scratch_dir(name);
+        let mut state =
+            E2eStateStore::open(dir.join("state.bin"), &FixedKey([7; 32])).expect("state");
+        state.set_account(device).expect("account");
+        state.set_master_key(master).expect("master");
+        let certificate = build_device_certificate(1, &ed(device), &ed(master), |text| {
+            master.sign(text).to_base64()
+        })
+        .expect("certificate");
+        state
+            .set_device_certificate(&certificate)
+            .expect("certificate");
+        let history =
+            E2eHistoryStore::open(dir.join("history.bin"), &FixedKey([9; 32])).expect("history");
+        let mut engine = E2eEngine::new(NET, state, history).expect("engine");
+        set_own_list(&mut engine, master, 1, listed);
+        engine
+    }
+
+    /// Two devices of one account and a third device that no list names.
+    /// `first` sends to carol, `second` is its sibling.
+    struct Twins {
+        master: Account,
+        first_device: Account,
+        second_device: Account,
+        third_device: Account,
+        first: E2eEngine,
+        second: E2eEngine,
+        first_did: String,
+        second_did: String,
+    }
+
+    fn twins(name: &str) -> Twins {
+        let master = Account::new();
+        let first_device = fresh_device();
+        let second_device = fresh_device();
+        let third_device = fresh_device();
+        let listed = [&first_device, &second_device];
+        let mut first = engine_of(&format!("{name}-1"), &master, &first_device, &listed);
+        let second = engine_of(&format!("{name}-2"), &master, &second_device, &listed);
+        let carol = Ident::new(&format!("{name}-carol"));
+        first
+            .accept_keys("carol", &carol.keys())
+            .expect("keys of carol");
+        let first_did = first.own_did().to_string();
+        let second_did = second.own_did().to_string();
+        Twins {
+            master,
+            first_device,
+            second_device,
+            third_device,
+            first,
+            second,
+            first_did,
+            second_did,
+        }
+    }
+
+    impl Twins {
+        /// The KEYS answer for the second device, with a list of `listed` at
+        /// `version`.
+        fn second_keys(&self, version: u32, listed: &[&Account]) -> Value {
+            let keys: Vec<String> = listed.iter().map(|device| ed(device)).collect();
+            json!({"keys": keys_payload(&self.master, &self.second_device, &keys, version)})
+        }
+
+        fn both(&self) -> [&Account; 2] {
+            [&self.first_device, &self.second_device]
+        }
+    }
+
+    fn device_route(did: &str, tail: &str) -> String {
+        format!("/networks/{NET}/e2e/devices/{did}/{tail}")
+    }
+
+    async fn mount_route(server: &MockServer, route: String, status: u16, body: Value) {
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    /// The first device sends "hello carol" and queues its copies.
+    async fn send_and_copy(t: &mut Twins, server: &MockServer, now: i64) -> CopyReport {
+        let client = GrappaClient::new(server.uri());
+        t.first
+            .send_text(&client, TOKEN, "carol", "hello carol", 100)
+            .await
+            .expect("send");
+        t.first
+            .send_copies(&client, TOKEN, PROTOCOL, "bob", now)
+            .await
+    }
+
+    async fn paths_of(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .expect("requests")
+            .iter()
+            .map(|request| request.url.path().to_string())
+            .collect()
+    }
+
+    /// The body of the `index`-th request that the server got.
+    async fn body_of(server: &MockServer, index: usize) -> Value {
+        let requests = server.received_requests().await.expect("requests");
+        serde_json::from_slice(&requests[index].body).expect("body")
+    }
+
+    /// The inbox row that the second device reads for a queued copy.
+    fn copy_inbox_row(t: &Twins, id: u64, copy: &Value) -> Value {
+        json!({
+            "kind": "e2e_message", "network": NET, "id": id, "from": "bob",
+            "from_did": t.first_did, "to_did": t.second_did, "verb": copy["verb"],
+            "msgid": "c1", "payload": copy["payload"], "own": true
+        })
+    }
+
+    async fn mount_copy_routes(server: &MockServer, t: &Twins) {
+        mount_send(server, "msgid1").await;
+        mount_route(
+            server,
+            device_route(&t.second_did, "claim"),
+            200,
+            t.second_keys(1, &t.both()),
+        )
+        .await;
+        mount_route(
+            server,
+            device_route(&t.second_did, "copies"),
+            202,
+            json!({"id": 5, "msgid": "c1"}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_claimed_key_gives_one_copy_per_sibling_and_none_goes_over_irc() {
+        let mut t = twins("copy-queue");
+        let server = MockServer::start().await;
+        mount_copy_routes(&server, &t).await;
+
+        let report = send_and_copy(&mut t, &server, 100).await;
+        assert_eq!(report.queued, vec![t.second_did.clone()]);
+        assert!(report.failed.is_empty() && !report.needs_sync);
+        assert!(!t.first.has_pending_copies());
+
+        // The original goes first. The copy follows the 202 answer, after one
+        // claim, and only through the copies route.
+        let messages = format!("/networks/{NET}/e2e/messages");
+        assert_eq!(
+            paths_of(&server).await,
+            vec![
+                messages.clone(),
+                device_route(&t.second_did, "claim"),
+                device_route(&t.second_did, "copies"),
+            ]
+        );
+        assert_eq!(
+            body_of(&server, 1).await,
+            json!({"from_did": t.first_did.as_str()})
+        );
+        let copy = body_of(&server, 2).await;
+        assert_eq!(copy["from_did"], t.first_did.as_str());
+        assert_eq!(copy["verb"], "pkmsg");
+        assert!(!copy.to_string().contains("hello carol"));
+        let to_irc = paths_of(&server)
+            .await
+            .iter()
+            .filter(|route| **route == messages)
+            .count();
+        assert_eq!(to_irc, 1, "only the original is a send to IRC");
+    }
+
+    #[tokio::test]
+    async fn a_server_list_that_adds_a_device_gives_that_device_no_copy() {
+        let mut t = twins("copy-added");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let listed = [&t.first_device, &t.second_device, &t.third_device];
+        mount_route(
+            &server,
+            device_route(&t.second_did, "claim"),
+            200,
+            t.second_keys(1, &listed),
+        )
+        .await;
+        mount_route(
+            &server,
+            device_route(&t.second_did, "copies"),
+            202,
+            json!({"id": 5, "msgid": "c1"}),
+        )
+        .await;
+
+        let report = send_and_copy(&mut t, &server, 100).await;
+        assert_eq!(report.queued, vec![t.second_did.clone()]);
+        let third_did = did_from_key_text(&ed(&t.third_device)).expect("did");
+        assert!(paths_of(&server)
+            .await
+            .iter()
+            .all(|route| !route.contains(&third_did)));
+    }
+
+    #[tokio::test]
+    async fn a_server_list_that_removes_the_sibling_gives_no_copy() {
+        let mut t = twins("copy-removed");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        mount_route(
+            &server,
+            device_route(&t.second_did, "claim"),
+            200,
+            t.second_keys(1, &[&t.first_device]),
+        )
+        .await;
+        let report = send_and_copy(&mut t, &server, 100).await;
+        assert!(report.queued.is_empty());
+        assert_eq!(
+            report.failed,
+            vec![(t.second_did.clone(), CopyFailure::RemovedDevice)]
+        );
+        assert!(!paths_of(&server)
+            .await
+            .contains(&device_route(&t.second_did, "copies")));
+    }
+
+    #[tokio::test]
+    async fn a_claim_without_a_key_of_the_sibling_gives_no_copy() {
+        let mut t = twins("copy-nokey");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let keys = keys_payload(
+            &t.master,
+            &t.third_device,
+            &[ed(&t.first_device), ed(&t.second_device)],
+            1,
+        );
+        mount_route(
+            &server,
+            device_route(&t.second_did, "claim"),
+            200,
+            json!({ "keys": keys }),
+        )
+        .await;
+        let report = send_and_copy(&mut t, &server, 100).await;
+        assert_eq!(
+            report.failed,
+            vec![(t.second_did.clone(), CopyFailure::NoKey)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_copy_shows_as_sent_in_the_locked_query_and_once_only() {
+        let mut t = twins("copy-receive");
+        let server = MockServer::start().await;
+        mount_copy_routes(&server, &t).await;
+        send_and_copy(&mut t, &server, 100).await;
+        let value = copy_inbox_row(&t, 9, &body_of(&server, 2).await);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+
+        // A repeated push gives one row.
+        assert_eq!(t.second.handle_row(&item, 150), RowOutcome::Stored);
+        assert_eq!(t.second.handle_row(&item, 151), RowOutcome::Duplicate);
+        // A repeated drain gives the same row again. It is acknowledged and
+        // not stored a second time.
+        let inbox = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(device_route(&t.second_did, "inbox")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"messages": [value]})))
+            .mount(&inbox)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(device_route(&t.second_did, "inbox/ack")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&inbox)
+            .await;
+        let outcomes = t
+            .second
+            .drain(&GrappaClient::new(inbox.uri()), TOKEN, PROTOCOL, 152)
+            .await
+            .expect("drain");
+        assert_eq!(outcomes, vec![(9, RowOutcome::Duplicate)]);
+
+        // The device never opened the query, and the row is in the locked
+        // conversation of carol as an own row. The plain query has no row.
+        assert_eq!(t.second.history_peers(), vec!["carol"]);
+        assert_eq!(t.second.take_changed_peers(), vec!["carol".to_string()]);
+        let rows = t.second.history().messages(&conversation_id(NET, "carol"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "hello carol");
+        assert_eq!(rows[0].sender_device, OWN_DEVICE);
+        assert!(rows[0].encrypted);
+        assert!(t
+            .second
+            .history()
+            .messages(&conversation_id(NET, "bob"))
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_accepted_original_that_is_dropped_leaves_a_sent_copy_and_a_failed_row() {
+        let mut t = twins("copy-accepted");
+        let server = MockServer::start().await;
+        mount_copy_routes(&server, &t).await;
+        send_and_copy(&mut t, &server, 100).await;
+        let value = copy_inbox_row(&t, 9, &body_of(&server, 2).await);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(t.second.handle_row(&item, 150), RowOutcome::Stored);
+
+        // Grappa accepted the original with 202, then dropped it unsent.
+        let dropped = t
+            .first
+            .apply_send_dropped(&json!({
+                "kind": "e2e_send_dropped", "network": NET, "target": "carol",
+                "msgid": "msgid1", "reason": "send_failed"
+            }))
+            .expect("dropped");
+        assert_eq!(dropped.reason, DropReason::SendFailed);
+
+        let conversation = conversation_id(NET, "carol");
+        let failed = t.first.history().messages(&conversation);
+        assert_eq!(failed.len(), 1);
+        assert_eq!(
+            t.first.dropped_reason(&failed[0].id),
+            Some(DropReason::SendFailed)
+        );
+        let sent = t.second.history().messages(&conversation);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(t.second.dropped_reason(&sent[0].id), None);
+        assert_eq!(sent[0].sender_device, OWN_DEVICE);
+    }
+
+    #[tokio::test]
+    async fn each_refusal_token_of_the_relay_ends_the_copy_for_that_sibling() {
+        let cases = [
+            ("same_device", 409, false, CopyFailure::SameDevice),
+            ("keyless_device", 409, true, CopyFailure::KeylessDevice),
+            ("key_taken", 409, true, CopyFailure::KeyTaken),
+            ("removed_device", 409, false, CopyFailure::RemovedDevice),
+            ("inbox_full", 413, false, CopyFailure::InboxFull),
+        ];
+        for (token, status, at_claim, failure) in cases {
+            let mut t = twins(&format!("copy-{token}"));
+            let server = MockServer::start().await;
+            mount_send(&server, "msgid1").await;
+            let refusal = json!({ "error": token });
+            if at_claim {
+                mount_route(
+                    &server,
+                    device_route(&t.second_did, "claim"),
+                    status,
+                    refusal,
+                )
+                .await;
+            } else {
+                mount_route(
+                    &server,
+                    device_route(&t.second_did, "claim"),
+                    200,
+                    t.second_keys(1, &t.both()),
+                )
+                .await;
+                mount_route(
+                    &server,
+                    device_route(&t.second_did, "copies"),
+                    status,
+                    refusal,
+                )
+                .await;
+            }
+            let report = send_and_copy(&mut t, &server, 100).await;
+            assert!(report.queued.is_empty(), "{token}");
+            assert_eq!(
+                report.failed,
+                vec![(t.second_did.clone(), failure)],
+                "{token}"
+            );
+            // The refusal is final: no retry stays in the queue.
+            assert!(!t.first.has_pending_copies(), "{token}");
+            let paths = paths_of(&server).await;
+            let claims = device_route(&t.second_did, "claim");
+            let expected_claims = if token == "key_taken" { 2 } else { 1 };
+            assert_eq!(
+                paths.iter().filter(|route| **route == claims).count(),
+                expected_claims,
+                "{token}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_copy_that_waited_longer_than_the_inbox_lifetime_is_dropped() {
+        let mut t = twins("copy-expired");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let late = 100 + i64::try_from(crate::e2e_wire::INBOX_EXPIRY_SECS).expect("seconds");
+        let report = send_and_copy(&mut t, &server, late).await;
+        assert_eq!(
+            report.failed,
+            vec![(t.second_did.clone(), CopyFailure::Expired)]
+        );
+        assert_eq!(paths_of(&server).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stale_list_stops_the_copies_and_the_last_try_drops_the_copy() {
+        let mut t = twins("copy-stale");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let listed = [&t.first_device, &t.second_device, &t.third_device];
+        mount_route(
+            &server,
+            device_route(&t.second_did, "claim"),
+            200,
+            t.second_keys(2, &listed),
+        )
+        .await;
+        let report = send_and_copy(&mut t, &server, 100).await;
+        assert!(report.needs_sync && report.queued.is_empty());
+        assert!(t.first.has_pending_copies());
+
+        let client = GrappaClient::new(server.uri());
+        let again = t
+            .first
+            .send_copies(&client, TOKEN, PROTOCOL, "bob", 101)
+            .await;
+        assert_eq!(
+            again.failed,
+            vec![(t.second_did.clone(), CopyFailure::Failed)]
+        );
+        assert!(!t.first.has_pending_copies());
+        assert!(!paths_of(&server)
+            .await
+            .contains(&device_route(&t.second_did, "copies")));
+    }
+
+    #[tokio::test]
+    async fn the_own_list_syncs_to_a_newer_valid_list_of_the_same_master() {
+        let mut t = twins("copy-sync");
+        let mut keys = vec![
+            ed(&t.first_device),
+            ed(&t.second_device),
+            ed(&t.third_device),
+        ];
+        keys.sort();
+        let signature =
+            build_signed_list_signature(2, &keys, |text| t.master.sign(text).to_base64())
+                .expect("list");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/networks/{NET}/e2e/list")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "master": ed(&t.master), "ver": 2, "devices": keys, "sig": signature
+            })))
+            .mount(&server)
+            .await;
+        let client = GrappaClient::new(server.uri());
+        assert!(t
+            .first
+            .sync_own_list(&client, TOKEN, PROTOCOL)
+            .await
+            .expect("sync"));
+        assert_eq!(t.first.state_mut().signed_list().expect("list").version, 2);
+        assert_eq!(t.first.sibling_dids().len(), 2);
+        assert!(!t
+            .first
+            .sync_own_list(&client, TOKEN, PROTOCOL)
+            .await
+            .expect("sync"));
+    }
+
+    #[tokio::test]
+    async fn a_copy_of_a_device_that_the_own_list_does_not_name_is_not_read() {
+        let mut t = twins("copy-unlisted");
+        let server = MockServer::start().await;
+        mount_copy_routes(&server, &t).await;
+        send_and_copy(&mut t, &server, 100).await;
+        let value = copy_inbox_row(&t, 9, &body_of(&server, 2).await);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        set_own_list(&mut t.second, &t.master, 1, &[&t.second_device]);
+        let outcome = t.second.handle_row(&item, 150);
+        assert_eq!(outcome, RowOutcome::Undecryptable);
+        assert!(outcome.acknowledge());
+        assert!(t.second.history().conversation_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_copy_from_a_newer_list_waits_until_the_own_list_syncs() {
+        let mut t = twins("copy-newer");
+        set_own_list(
+            &mut t.first,
+            &t.master,
+            2,
+            &[&t.first_device, &t.second_device],
+        );
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        mount_route(
+            &server,
+            device_route(&t.second_did, "claim"),
+            200,
+            t.second_keys(2, &t.both()),
+        )
+        .await;
+        mount_route(
+            &server,
+            device_route(&t.second_did, "copies"),
+            202,
+            json!({"id": 5, "msgid": "c1"}),
+        )
+        .await;
+        send_and_copy(&mut t, &server, 100).await;
+        let value = copy_inbox_row(&t, 9, &body_of(&server, 2).await);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+
+        let outcome = t.second.handle_row(&item, 150);
+        assert_eq!(outcome, RowOutcome::StaleList);
+        assert!(!outcome.acknowledge());
+        assert!(t.second.history().conversation_ids().is_empty());
+        set_own_list(
+            &mut t.second,
+            &t.master,
+            2,
+            &[&t.first_device, &t.second_device],
+        );
+        assert_eq!(t.second.handle_row(&item, 151), RowOutcome::Stored);
     }
 }

@@ -16,7 +16,8 @@ use super::*;
 use std::collections::BTreeSet;
 
 use cordiale_core::e2e_engine::{
-    conversation_id, locked_label, route_for_window, E2eEngine, EngineError, SendRoute, OWN_DEVICE,
+    conversation_id, locked_label, route_for_window, E2eEngine, EngineError, RowOutcome, SendRoute,
+    OWN_DEVICE,
 };
 use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing_flow::{
@@ -756,13 +757,32 @@ async fn drain_network(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, net
     let Some(mut engine) = state.e2e.engines.remove(network) else {
         return;
     };
-    match engine.drain(&client, &token, protocol, e2e_now()).await {
-        Ok(outcomes) => persistence::log_line(&format!(
-            "e2e inbox read for {network}: {} items",
-            outcomes.len()
-        )),
-        Err(error) => {
-            persistence::log_line(&format!("e2e inbox not read for {network}: {error:?}"))
+    // A copy from a device with a newer list stops the run. The own list is
+    // read again, then the inbox is drained once more.
+    for _ in 0..2 {
+        match engine.drain(&client, &token, protocol, e2e_now()).await {
+            Ok(outcomes) => {
+                persistence::log_line(&format!(
+                    "e2e inbox read for {network}: {} items",
+                    outcomes.len()
+                ));
+                if !outcomes
+                    .iter()
+                    .any(|(_, outcome)| *outcome == RowOutcome::StaleList)
+                {
+                    break;
+                }
+                if let Err(error) = engine.sync_own_list(&client, &token, protocol).await {
+                    persistence::log_line(&format!(
+                        "e2e own list not read for {network}: {error:?}"
+                    ));
+                    break;
+                }
+            }
+            Err(error) => {
+                persistence::log_line(&format!("e2e inbox not read for {network}: {error:?}"));
+                break;
+            }
         }
     }
     settle_engine(state, ui, network, engine).await;
@@ -813,6 +833,7 @@ async fn settle_engine(
         if !drops.is_empty() {
             set_e2e_status(ui, "e2e-send-failed");
         }
+        send_copies(state, network, &mut engine, &client, &token).await;
     }
     let wanted = engine.take_keys_wanted();
     if let (false, Some(client), Some(token)) = (
@@ -850,6 +871,46 @@ async fn settle_engine(
     }
     if sidebar_changed {
         refresh_network_groups(state, ui);
+    }
+}
+
+/// Queues the copies of the sent texts in the inboxes of the other devices
+/// of the account. A list that is behind stops the run: the own list is read
+/// again and the run goes on once. A copy never goes over IRC.
+async fn send_copies(
+    state: &WorkerState,
+    network: &str,
+    engine: &mut E2eEngine,
+    client: &GrappaClient,
+    token: &str,
+) {
+    if !engine.has_pending_copies() {
+        return;
+    }
+    let protocol = state.conn.server_protocol_version;
+    let own_nick = state
+        .networks
+        .own_nicks
+        .get(network)
+        .cloned()
+        .unwrap_or_default();
+    for _ in 0..2 {
+        let report = engine
+            .send_copies(client, token, protocol, &own_nick, e2e_now())
+            .await;
+        if !report.failed.is_empty() {
+            // The log gets the kinds of the failures, never the text.
+            persistence::log_line(&format!(
+                "e2e copies not queued for {network}: {:?}",
+                report.failed
+            ));
+        }
+        if !report.needs_sync {
+            return;
+        }
+        if let Err(error) = engine.sync_own_list(client, token, protocol).await {
+            persistence::log_line(&format!("e2e own list not read for {network}: {error:?}"));
+        }
     }
 }
 
@@ -1124,7 +1185,7 @@ pub(crate) async fn tick_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<A
             .e2e
             .engines
             .get(&network)
-            .is_some_and(E2eEngine::has_queued_text)
+            .is_some_and(|engine| engine.has_queued_text() || engine.has_pending_copies())
         {
             continue;
         }

@@ -20,18 +20,37 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! S1 self-copies: the pure rules for the per-device inbox (candidate).
+//! S1 copies between the devices of one account (protocol 50): the pure
+//! rules for the per-device inbox.
 //!
-//! After a message is sent, the client makes one Olm-encrypted copy for each
-//! other device of the same account. Each copy goes to the inbox of its
-//! device, never to IRC. This module holds the rules that do not depend on
-//! the open protocol 49 schemas: the copy plan, the inbox limits, the
-//! delivery states and the drain with its acknowledgements.
+//! The contract is the one of Grappa protocol 50. After Grappa answers 202
+//! for the original text, the sending device claims one key of each sibling
+//! device (`claim`, body `{"from_did"}`, answer `{"keys"}` in the KEYS wire
+//! shape). It encrypts one `copy` for each sibling and queues it through the
+//! `copies` route. A copy never goes over IRC. The own verified signed list
+//! names the siblings. A server KEYS list can remove a sibling and never adds
+//! one. The calls are in `E2eEngine::send_copies`.
 //!
-//! The Olm engine plugs in through [`CopyCipher`]. The REST calls, the
-//! pairing and the encrypted history are not in this module. Types carry
-//! ciphertext only: plaintext goes to the caller through a sink and never
-//! into a value that can be logged.
+//! A device reads the inbox rows with `own` set through a separate path,
+//! `E2eEngine::receive_copy`. It does not use the identity checks of peer
+//! messages. A copy shows as a sent row in the locked E2E query of its peer,
+//! also when the device never opened that query. The plain query gets no row.
+//! A repeated push or drain gives one row.
+//!
+//! Refusals of the relay: `same_device`, `keyless_device`, `key_taken`,
+//! `removed_device` and `inbox_full`. Each one ends the copy for that sibling.
+//! Only `key_taken` asks for a new key, once.
+//!
+//! Accepted case: Grappa accepts the original with 202 and Cordiale queues the
+//! copy. Then Grappa drops the original unsent. The sibling shows a sent row
+//! and the sender shows a failed row. A copy never proves delivery to the
+//! peer.
+//!
+//! This module holds the rules that do not depend on the routes: the copy
+//! plan, the inbox limits, the delivery states and the drain with its
+//! acknowledgements. The Olm engine plugs in through [`CopyCipher`]. Types
+//! carry ciphertext only: plaintext goes to the caller through a sink and
+//! never into a value that can be logged.
 
 use std::collections::{HashMap, HashSet};
 
