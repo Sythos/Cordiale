@@ -252,9 +252,25 @@ pub async fn provision_device(
         let held = &held.list;
         let behind = list.as_ref().is_none_or(|own| own.version <= held.version);
         if behind && has_legacy_order(held.version, &held.keys, &master_key, &held.signature) {
-            let next = sign_list(master, held.version + 1, &held.keys)?;
+            // The new version must hold this device, or peers refuse it.
+            let mut keys = held.keys.clone();
+            if !keys.contains(&ed25519) {
+                keys.push(ed25519.clone());
+            }
+            let next = sign_list(master, held.version + 1, &keys)?;
             store.set_signed_list_pending(&next)?;
             list = Some(next);
+        }
+    }
+    // A pending list that is not above the server list would get `stale_list`
+    // at every run. Drop it and use the list of the server below.
+    if let Some(held) = &held {
+        let stale = list
+            .as_ref()
+            .is_some_and(|own| own.version <= held.list.version);
+        if store.list_pending() && stale {
+            store.clear_list_pending()?;
+            list = None;
         }
     }
     let list = match (list, &held) {
@@ -878,6 +894,90 @@ mod tests {
         assert!(!store.list_pending());
         assert_eq!(state.lock().unwrap().list.as_ref().unwrap()["ver"], 3);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_pending_list_below_the_server_version_is_dropped_not_sent() {
+        let dir = scratch_dir("pending-stale");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        run(&server, &mut store, PROTOCOL).await.expect("first run");
+
+        // Another device of the same master published version 5.
+        let master = store.master_key().unwrap().unwrap();
+        let master_key = ed25519_of(&master);
+        let device_key = ed25519_of(&store.olm_identity().unwrap().unwrap());
+        let mut keys = vec![device_key, ed25519_of(&Account::new())];
+        keys.sort();
+        let newer = sign_list(&master, 5, &keys).expect("sign");
+        {
+            let mut fake = state.lock().unwrap();
+            fake.list = Some(json!({
+                "master": master_key, "ver": 5, "devices": keys, "sig": newer.signature
+            }));
+        }
+        let older = store.signed_list().expect("list");
+        store.set_signed_list_pending(&older).expect("pending");
+
+        let outcome = run(&server, &mut store, PROTOCOL).await.expect("run");
+
+        assert!(!outcome.list_published);
+        assert!(!store.list_pending());
+        assert_eq!(store.signed_list().expect("list").version, 5);
+        assert_eq!(state.lock().unwrap().list.as_ref().unwrap()["ver"], 5);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_server_list_without_this_device_gets_the_device_added() {
+        let dir = scratch_dir("legacy-no-device");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        run(&server, &mut store, PROTOCOL).await.expect("first run");
+
+        // The server holds an old-order list without this device. The store
+        // has the master but no own list.
+        let master = store.master_key().unwrap().unwrap();
+        let master_key = ed25519_of(&master);
+        let device_key = ed25519_of(&store.olm_identity().unwrap().unwrap());
+        let keys = loop {
+            let keys = vec![ed25519_of(&Account::new()), ed25519_of(&Account::new())];
+            if legacy_raw_order_list_signed_text(2, &keys).unwrap()
+                != signed_list_signed_text(2, &keys).unwrap()
+            {
+                break keys;
+            }
+        };
+        let old = master
+            .sign(legacy_raw_order_list_signed_text(2, &keys).unwrap())
+            .to_base64();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        {
+            let mut fake = state.lock().unwrap();
+            fake.list = Some(json!({
+                "master": master_key, "ver": 2, "devices": sorted, "sig": old
+            }));
+        }
+        let other = scratch_dir("legacy-no-device-store");
+        let mut fresh = E2eStateStore::open(state_path(&other), &provider).expect("open");
+        fresh
+            .set_account(&store.olm_identity().unwrap().unwrap())
+            .expect("account");
+        fresh.set_master_key(&master).expect("master");
+
+        let outcome = run(&server, &mut fresh, PROTOCOL).await.expect("run");
+
+        assert!(outcome.list_published);
+        let own = fresh.signed_list().expect("list");
+        assert_eq!(own.version, 3);
+        assert!(own.keys.contains(&device_key));
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&other);
     }
 
     #[tokio::test]
