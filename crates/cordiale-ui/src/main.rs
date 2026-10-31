@@ -2572,7 +2572,7 @@ async fn run_worker(
                         handle_member_ctcp(&state, &ui, nick, verb).await;
                     }
                     Some(WorkerCommand::MemberQuery(nick)) => {
-                        send_member_query(&state, &nick);
+                        send_member_query(&mut state, &ui, nick).await;
                     }
                     Some(WorkerCommand::MemberIgnore { nick, add }) => {
                         run_member_ignore(&mut state, &ui, nick, add).await;
@@ -7335,16 +7335,15 @@ fn send_member_whois(state: &WorkerState, nick: &str) {
 
 /// Asks Grappa to open a DM window with `nick`; the resulting
 /// `query_windows_list` snapshot drives Cordiale's query rows and topic
-/// subscriptions.
-fn send_member_query(state: &WorkerState, nick: &str) {
-    let Some((session, topic, network_id, _channel)) = user_topic_channel_network(state) else {
+/// subscriptions. The query is selected once the snapshot lists it.
+async fn send_member_query(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, nick: String) {
+    if state.windows.current_query {
+        return;
+    }
+    let Some(origin) = state.windows.current_channel.clone() else {
         return;
     };
-    session.send_command(
-        topic,
-        "open_query_window",
-        serde_json::json!({ "network_id": network_id, "target_nick": nick }),
-    );
+    open_query_and_focus(state, ui, origin.0.clone(), nick, origin).await;
 }
 
 /// The one action here that isn't a WS push: Cicchetto sends CTCP
