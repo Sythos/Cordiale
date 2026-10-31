@@ -3683,3 +3683,7 @@ msgstr "Estás ignorando a {}."
 msgctxt "AppWindow"
 msgid "No longer ignoring {}."
 msgstr "Ya no ignoras a {}."
+
+msgctxt "AppWindow"
+msgid "Could not refresh: {}. The last data stays on screen. Press Refresh to retry."
+msgstr "No se pudo actualizar: {}. Los últimos datos siguen en pantalla. Pulsa Actualizar para reintentar."

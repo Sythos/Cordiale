@@ -1657,6 +1657,8 @@ export component AppWindow inherits Window {
         }
     }
     in property <bool> admin-loading: false;
+    // Names of the admin sections whose last refresh request failed.
+    in property <string> admin-refresh-error: "";
 
     // `/links` network-topology view — see `cordiale_core::links` for the
     // tree reconstruction that feeds `links-rows`, and the radial layout
@@ -6580,6 +6582,12 @@ export component AppWindow inherits Window {
                 Text {
                     text: admin-loading ? @tr("Loading…") : admin-overview-text;
                     wrap: word-wrap;
+                }
+
+                if admin-refresh-error != "" : Text {
+                    text: @tr("Could not refresh: {}. The last data stays on screen. Press Refresh to retry.", admin-refresh-error);
+                    wrap: word-wrap;
+                    color: #d9534f;
                 }
 
                 if admin-section == "sessions" && admin-session-confirm-id != "" : HorizontalBox {
