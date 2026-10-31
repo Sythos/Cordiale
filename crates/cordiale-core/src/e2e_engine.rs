@@ -6099,6 +6099,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keyreq_uses_the_e2e_route_with_the_exact_fields() {
+        let p = pair();
+        let mut alice = p.alice;
+        let server = MockServer::start().await;
+        mount_send(&server, "k1").await;
+        let client = GrappaClient::new(server.uri());
+        alice
+            .request_keys(&client, TOKEN, "bob")
+            .await
+            .expect("keyreq");
+        let requests = server.received_requests().await.expect("requests");
+        // One request only: no plain-message route and no second path.
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.method.as_str(), "POST");
+        assert_eq!(request.url.path(), format!("/networks/{NET}/e2e/messages"));
+        let bearer = format!("Bearer {TOKEN}");
+        assert_eq!(
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some(bearer.as_str())
+        );
+        let body: Value = serde_json::from_slice(&request.body).expect("body");
+        assert_eq!(
+            body,
+            json!({
+                "target": "bob",
+                "verb": "keyreq",
+                "from": p.alice_did,
+                "to": "*",
+                "payload": format!(r#"{{"v":{PAYLOAD_VERSION}}}"#),
+                "priority": "control"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_keyreq_that_the_api_accepts_is_not_a_delivery_to_the_peer() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "k1").await;
+        let client = GrappaClient::new(server.uri());
+        // The result is only "submitted": the engine stores no delivered
+        // state and no key arrives until a KEYS frame comes back.
+        p.alice
+            .request_keys(&client, TOKEN, "bob")
+            .await
+            .expect("keyreq");
+        assert_eq!(p.alice.queue.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_keyreq_that_the_api_refuses_is_an_error() {
+        for (status, body) in [
+            (422, json!({"error": "too_late"})),
+            (500, json!({})),
+            (400, json!({"error": "bad_request"})),
+        ] {
+            let mut p = pair();
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(format!("/networks/{NET}/e2e/messages")))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            let client = GrappaClient::new(server.uri());
+            let result = p.alice.request_keys(&client, TOKEN, "bob").await;
+            assert!(
+                matches!(result, Err(EngineError::Rejected(_))),
+                "status {status} must be an error"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_message_that_the_engine_reads_sets_the_peer_capability() {
         let mut p = pair();
         let server = MockServer::start().await;
