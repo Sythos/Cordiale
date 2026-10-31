@@ -5961,6 +5961,13 @@ fn one_shot_server(status: u16) -> String {
     url
 }
 
+fn network_test_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime")
+}
+
 fn sound_edit_state(base_url: &str) -> WorkerState {
     let mut state = WorkerState::new();
     state.conn.client = Some(GrappaClient::new(base_url));
@@ -5975,7 +5982,7 @@ fn sound_edit_state(base_url: &str) -> WorkerState {
 fn sound_edit_reports_success_only_after_the_save() {
     let ui = slint::Weak::<AppWindow>::default();
     let mut state = sound_edit_state(&one_shot_server(204));
-    let saved = upload_test_runtime().block_on(handle_notification_edit(
+    let saved = network_test_runtime().block_on(handle_notification_edit(
         &mut state,
         &ui,
         NotificationEdit::Sound("chime".to_string()),
@@ -5991,7 +5998,7 @@ fn sound_edit_reports_success_only_after_the_save() {
 fn sound_edit_fails_and_keeps_the_stored_value_when_the_save_fails() {
     let ui = slint::Weak::<AppWindow>::default();
     let mut state = sound_edit_state(&one_shot_server(500));
-    let saved = upload_test_runtime().block_on(handle_notification_edit(
+    let saved = network_test_runtime().block_on(handle_notification_edit(
         &mut state,
         &ui,
         NotificationEdit::Sound("chime".to_string()),
@@ -6008,7 +6015,7 @@ fn sound_edit_fails_when_the_prefs_cannot_be_loaded() {
     let ui = slint::Weak::<AppWindow>::default();
     let mut state = sound_edit_state(&one_shot_server(500));
     state.prefs.notification_prefs = None;
-    let saved = upload_test_runtime().block_on(handle_notification_edit(
+    let saved = network_test_runtime().block_on(handle_notification_edit(
         &mut state,
         &ui,
         NotificationEdit::Sound("chime".to_string()),
