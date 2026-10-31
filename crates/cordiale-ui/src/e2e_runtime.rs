@@ -38,7 +38,7 @@ use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
 use crate::e2e_view::{
     locked_chat_state, pairing_error_key, pairing_status_key, register_own_device,
-    reset_status_key, revoke_status_key, ChatSignals, ChatState, LocalQuery, QueryLane,
+    reset_status_key, revoke_status_key, ChatSignals, ChatState, KeyRequest, LocalQuery, QueryLane,
 };
 
 /// How often the timers of the engines run: queued texts expire or go out.
@@ -56,6 +56,9 @@ pub(crate) struct E2eRuntime {
     unavailable: HashSet<String>,
     /// `(network, nick)` of each peer that has a locked entry.
     locked: BTreeSet<(String, String)>,
+    /// What this session observed about the key request of each peer:
+    /// `(network, nick)`. A peer without a record has no request.
+    key_requests: HashMap<(String, String), KeyRequest>,
     /// The one open X1 pairing of this session, if any.
     pairing: Option<ActivePairing>,
     /// Rendezvous that an earlier run left open. They are closed when the
@@ -104,6 +107,42 @@ impl E2eRuntime {
     /// Adds the locked entry of `nick`; true when it is new.
     pub(crate) fn add_locked(&mut self, network: &str, nick: &str) -> bool {
         self.locked.insert((network.to_string(), nick.to_string()))
+    }
+
+    /// The key request state of a peer.
+    pub(crate) fn key_request(&self, network: &str, nick: &str) -> KeyRequest {
+        self.key_requests
+            .get(&(network.to_string(), nick.to_string()))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Notes the result of a key request. A 202 answer means only that the API
+    /// accepted it. A request that the pacing holds back leaves an open request
+    /// waiting. A peer that cannot do E2E gets no request.
+    pub(crate) fn note_key_request(
+        &mut self,
+        network: &str,
+        nick: &str,
+        result: &Result<(), EngineError>,
+    ) {
+        let current = self.key_request(network, nick);
+        let next = match result {
+            Ok(()) => KeyRequest::Accepted,
+            Err(EngineError::Paced(_)) if current != KeyRequest::NotSent => {
+                if current == KeyRequest::Failed {
+                    KeyRequest::Failed
+                } else {
+                    KeyRequest::Waiting
+                }
+            }
+            Err(EngineError::Paced(_) | EngineError::PeerNotCapable) => current,
+            Err(_) => KeyRequest::Failed,
+        };
+        if next != KeyRequest::NotSent {
+            self.key_requests
+                .insert((network.to_string(), nick.to_string()), next);
+        }
     }
 
     /// Notes an engine failure of a peer. A changed master key is the trust
@@ -224,6 +263,7 @@ pub(crate) fn locked_entry_state(state: &WorkerState, network: &str, nick: &str)
             .pairing
             .as_ref()
             .is_some_and(|active| active.network == network),
+        key_request: state.e2e.key_request(network, nick),
         ..ChatSignals::default()
     };
     if let Some(engine) = engine {
@@ -1123,7 +1163,9 @@ async fn settle_engine(
         state.conn.token.clone(),
     ) {
         for nick in wanted {
-            if let Err(error) = engine.request_keys(&client, &token, &nick).await {
+            let result = engine.request_keys(&client, &token, &nick).await;
+            state.e2e.note_key_request(network, &nick, &result);
+            if let Err(error) = result {
                 state.e2e.note_engine_error(network, &nick, &error);
                 if !matches!(error, EngineError::Paced(_) | EngineError::PeerNotCapable) {
                     persistence::log_line(&format!("e2e key request failed: {error:?}"));
@@ -1396,7 +1438,9 @@ pub(crate) async fn offer_locked_query(
     };
     if !engine.is_ready(&peer) {
         if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
-            if let Err(error) = engine.request_keys(&client, &token, &peer).await {
+            let result = engine.request_keys(&client, &token, &peer).await;
+            state.e2e.note_key_request(network, &peer, &result);
+            if let Err(error) = result {
                 state.e2e.note_engine_error(network, &peer, &error);
                 if !matches!(error, EngineError::Paced(_)) {
                     persistence::log_line(&format!("e2e key request failed: {error:?}"));
@@ -1406,9 +1450,13 @@ pub(crate) async fn offer_locked_query(
     }
     let ready = engine.is_ready(&peer);
     state.e2e.engines.insert(network.to_string(), engine);
-    if ready && state.e2e.add_locked(network, &peer) {
+    // A peer with a key request gets its locked entry too: it shows the
+    // request state. The entry sends nothing in clear text.
+    let asked = state.e2e.key_request(network, &peer) != KeyRequest::NotSent;
+    if (ready || asked) && state.e2e.add_locked(network, &peer) {
         refresh_network_groups(state, ui);
     }
+    push_open_locked_state(state, ui);
 }
 
 /// Sends `body` from a locked window through the engine. The text goes out
@@ -1591,6 +1639,33 @@ mod tests {
             .e2e
             .trust_alarm
             .contains(&("net".to_string(), "bob".to_string())));
+    }
+
+    #[test]
+    fn the_key_request_state_follows_the_observed_results() {
+        let mut runtime = E2eRuntime::default();
+        let paced = || {
+            Err(EngineError::Paced(
+                cordiale_core::e2e_pacing::KeyReqRefusal::Interval,
+            ))
+        };
+        assert_eq!(runtime.key_request("net", "ada"), KeyRequest::NotSent);
+        // A paced call before any request, and a peer without E2E, send nothing.
+        runtime.note_key_request("net", "ada", &paced());
+        runtime.note_key_request("net", "ada", &Err(EngineError::PeerNotCapable));
+        assert_eq!(runtime.key_request("net", "ada"), KeyRequest::NotSent);
+        // A 202 answer means only that the API accepted the request.
+        runtime.note_key_request("net", "ada", &Ok(()));
+        assert_eq!(runtime.key_request("net", "ada"), KeyRequest::Accepted);
+        // Silence plus a held retry is a waiting state, not a failure.
+        runtime.note_key_request("net", "ada", &paced());
+        assert_eq!(runtime.key_request("net", "ada"), KeyRequest::Waiting);
+        // A refusal is a failure of the request only for that peer.
+        runtime.note_key_request("net", "bob", &Err(EngineError::NotReady));
+        assert_eq!(runtime.key_request("net", "bob"), KeyRequest::Failed);
+        runtime.note_key_request("net", "bob", &paced());
+        assert_eq!(runtime.key_request("net", "bob"), KeyRequest::Failed);
+        assert_eq!(runtime.key_request("net", "ada"), KeyRequest::Waiting);
     }
 
     #[test]
