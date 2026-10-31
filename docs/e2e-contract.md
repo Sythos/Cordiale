@@ -29,8 +29,19 @@ prevale il sorgente di Grappa.
    il dispositivo. Fonte: G-PROTO 4f e 4g (messaggio `signed`); CIC `wire.ts`;
    OLM-4 `devices.py`. Codice: `e2e_wire.rs`, `e2e_device.rs`, `e2e_trust.rs`.
    Prova: `fixture_certificates_match`, `fixture_signed_lists_match`.
-4. **Invio.** `POST .../e2e/send`: la risposta 202 è una **accettazione**, mai una
-   consegna. Lo stato `Accepted` può passare a "caduto" con `e2e_send_dropped`,
+4. **Invio.** `POST /networks/:id/e2e/messages`: la risposta 202 è una **accettazione**, mai una
+   consegna.
+   **KEYREQ: confine della prova.** `request_keys` passa solo da questa porta, con
+   `target` = nick del peer, `verb` = `keyreq`, `from` = id del dispositivo proprio,
+   `to` = `*`, `payload` = `{"v":2}` e `priority` = `control`. Non esiste un secondo
+   percorso IRC o CTCP grezzo. Cordiale prova solo l'invio della richiesta all'API e
+   la risposta dell'API (202 = accettata; ogni altra risposta = errore `Rejected`).
+   Non prova che il peer abbia ricevuto la richiesta CTCP, né che la sua policy
+   permetta di rispondere: servono prove lato server (`e2e_send_dropped`, log di
+   Grappa) o lato destinatario. Il solo segno che il peer ha risposto è un frame KEYS.
+   Prove: `e2e_engine.rs` `keyreq_uses_the_e2e_route_with_the_exact_fields`,
+   `a_keyreq_that_the_api_accepts_is_not_a_delivery_to_the_peer`,
+   `a_keyreq_that_the_api_refuses_is_an_error`. Lo stato `Accepted` può passare a "caduto" con `e2e_send_dropped`,
    mai a "consegnato". Fonte: G-PROTO 4f (porta di invio, `too_late`,
    `e2e_send_dropped`). Prove: `e2e_engine.rs`
    `a_202_answer_sets_the_accepted_state_only` e
