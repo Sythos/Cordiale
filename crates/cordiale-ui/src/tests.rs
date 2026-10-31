@@ -10781,10 +10781,13 @@ fn member_query_action_registers_the_focus_in_a_channel_only() {
     ));
 }
 
+/// The request line and the body of each request the test server saw.
+type RequestLog = Mutex<Vec<(String, String)>>;
+
 /// Serves every request on a local port, in its own thread, and records the
 /// request line and the body of each one. The E2E send door answers 202; any
 /// other path answers 404.
-fn recording_server() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
+fn recording_server() -> (String, Arc<RequestLog>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
@@ -10892,7 +10895,7 @@ fn listed_query(nick: &str) -> QueryWindow {
 }
 
 /// The bodies of the requests that went to the E2E send door.
-fn e2e_send_bodies(seen: &Mutex<Vec<(String, String)>>) -> Vec<Value> {
+fn e2e_send_bodies(seen: &RequestLog) -> Vec<Value> {
     seen.lock()
         .expect("log")
         .iter()
@@ -10902,7 +10905,7 @@ fn e2e_send_bodies(seen: &Mutex<Vec<(String, String)>>) -> Vec<Value> {
 }
 
 /// No request went out as a clear message: the only POST is the E2E door.
-fn assert_no_clear_text(seen: &Mutex<Vec<(String, String)>>) {
+fn assert_no_clear_text(seen: &RequestLog) {
     for (line, body) in seen.lock().expect("log").iter() {
         if line.starts_with("POST ") {
             assert!(line.contains("/e2e/messages"), "{line}");
