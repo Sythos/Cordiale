@@ -2965,6 +2965,10 @@ msgid "Please include these details when you open an issue:"
 msgstr "Incluye estos detalles cuando informes de un problema:"
 
 msgctxt "AppWindow"
+msgid "The server address is not valid. Remove any user name, password, query or fragment from it."
+msgstr "La dirección del servidor no es válida. Quita el nombre de usuario, la contraseña, la consulta o el fragmento."
+
+msgctxt "AppWindow"
 msgid "That isn't a share token or link Grappa accepts. Copy it again from the other device."
 msgstr "Eso no es un token ni un enlace para compartir que Grappa acepte. Vuelve a copiarlo desde el otro dispositivo."
 
@@ -3683,3 +3687,7 @@ msgstr "Estás ignorando a {}."
 msgctxt "AppWindow"
 msgid "No longer ignoring {}."
 msgstr "Ya no ignoras a {}."
+
+msgctxt "AppWindow"
+msgid "Could not refresh: {}. The last data stays on screen. Press Refresh to retry."
+msgstr "No se pudo actualizar: {}. Los últimos datos siguen en pantalla. Pulsa Actualizar para reintentar."

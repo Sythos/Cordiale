@@ -1657,6 +1657,8 @@ export component AppWindow inherits Window {
         }
     }
     in property <bool> admin-loading: false;
+    // Names of the admin sections whose last refresh request failed.
+    in property <string> admin-refresh-error: "";
 
     // `/links` network-topology view — see `cordiale_core::links` for the
     // tree reconstruction that feeds `links-rows`, and the radial layout
@@ -2760,6 +2762,8 @@ export component AppWindow inherits Window {
             return @tr("Grappa is busy right now. Try again in a moment.");
         } else if status-kind == "recovery-failed" {
             return @tr("Couldn't sign in with that recovery code. Try again.");
+        } else if status-kind == "server-url-unsafe" {
+            return @tr("The server address is not valid. Remove any user name, password, query or fragment from it.");
         } else if status-kind == "share-invalid" {
             return @tr("That isn't a share token or link Grappa accepts. Copy it again from the other device.");
         } else if status-kind == "share-expired" {
@@ -6580,6 +6584,12 @@ export component AppWindow inherits Window {
                 Text {
                     text: admin-loading ? @tr("Loading…") : admin-overview-text;
                     wrap: word-wrap;
+                }
+
+                if admin-refresh-error != "" : Text {
+                    text: @tr("Could not refresh: {}. The last data stays on screen. Press Refresh to retry.", admin-refresh-error);
+                    wrap: word-wrap;
+                    color: #d9534f;
                 }
 
                 if admin-section == "sessions" && admin-session-confirm-id != "" : HorizontalBox {

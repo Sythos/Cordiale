@@ -70,7 +70,9 @@ use cordiale_core::bootstrap::{
     bootstrap_with_share_token, bootstrap_with_totp, BootstrapError, BootstrapOutcome,
 };
 use cordiale_core::cleartext;
-use cordiale_core::client::{GrappaClient, GrappaClientError, LoginError};
+use cordiale_core::client::{
+    server_url_is_safe, strip_url_secrets, GrappaClient, GrappaClientError, LoginError,
+};
 use cordiale_core::credentials::{
     resolve_credential_store, CredentialStore, KeyringCredentialStore,
 };
@@ -4111,14 +4113,33 @@ fn realtime_identifier(me: &MeResponse, guest: bool, typed: &str) -> String {
     })
 }
 
-/// Whether `identifier` appears in `members` holding op or any role the
-/// network ranks above it — gates `MemberContextMenu`'s
-/// Op/Deop/Voice/Devoice/Kick/Ban items, as accurate as `members`
-/// (snapshots plus live MODE changes).
-fn is_own_nick_an_op(members: &[MemberEntry], identifier: &str, ranking: &MemberRanking) -> bool {
+/// Whether `nick` appears in `members` holding op or any role the network
+/// ranks above it, comparing nicks under the network's case mapping — gates
+/// `MemberContextMenu`'s Op/Deop/Voice/Devoice/Kick/Ban items, as accurate as
+/// `members` (snapshots plus live MODE changes). The server still checks
+/// every action.
+fn is_own_nick_an_op(
+    members: &[MemberEntry],
+    nick: &str,
+    casemapping: cordiale_core::isupport::CaseMapping,
+    ranking: &MemberRanking,
+) -> bool {
     members
         .iter()
-        .any(|(name, prefix)| name == identifier && ranking.is_op_or_above(prefix))
+        .any(|(name, prefix)| casemapping.nick_eq(name, nick) && ranking.is_op_or_above(prefix))
+}
+
+/// Whether the current nick of `network` holds op in `members`. A network
+/// with no known nick never gets moderation items.
+fn can_moderate_members(
+    state: &WorkerState,
+    network: &str,
+    members: &[MemberEntry],
+    ranking: &MemberRanking,
+) -> bool {
+    state.networks.own_nicks.get(network).is_some_and(|nick| {
+        is_own_nick_an_op(members, nick, network_casemapping(state, network), ranking)
+    })
 }
 
 /// What `$C` means in an alias: the channel of the open window, the peer of
@@ -7682,11 +7703,7 @@ fn push_members_update(state: &WorkerState, ui: &slint::Weak<AppWindow>, key: &(
         .cloned()
         .unwrap_or_default();
     let ranking = MemberRanking::new(state.networks.isupport_by_network.get(&key.0));
-    let can_moderate = state
-        .conn
-        .identifier
-        .as_deref()
-        .is_some_and(|identifier| is_own_nick_an_op(&members, identifier, &ranking));
+    let can_moderate = can_moderate_members(state, &key.0, &members, &ranking);
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let lines = state
@@ -8332,7 +8349,19 @@ fn own_nick_listener_topic(user: &str, network: &str, nick: &str) -> String {
 /// server URL the user typed, and defaults a missing scheme to
 /// `https://` (typing just `"irc.example.com"` is easy to do and would
 /// otherwise make `reqwest`/`Url::parse` reject every request outright).
+/// User information, query and fragment are dropped, so the result is safe
+/// to save, log and put in a link; `checked_server_url` refuses them first.
 fn normalize_server_url(url: &str) -> String {
+    let with_scheme = typed_server_url(url);
+    if server_url_is_safe(&with_scheme) {
+        with_scheme
+    } else {
+        strip_url_secrets(&with_scheme)
+    }
+}
+
+/// What the user typed, trimmed, with a scheme and without trailing slashes.
+fn typed_server_url(url: &str) -> String {
     let trimmed = url.trim().trim_end_matches('/');
     let with_scheme = if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
         trimmed.to_string()
@@ -8340,6 +8369,21 @@ fn normalize_server_url(url: &str) -> String {
         format!("https://{trimmed}")
     };
     with_scheme.trim_end_matches('/').to_string()
+}
+
+/// The normalized server URL a sign-in may use. An address that does not
+/// parse, or that holds user information, a query or a fragment, is
+/// refused: the status line says why and nothing is saved, logged or sent.
+fn checked_server_url(ui: &slint::Weak<AppWindow>, url: &str) -> Option<String> {
+    if server_url_is_safe(&typed_server_url(url)) {
+        return Some(normalize_server_url(url));
+    }
+    if let Some(ui) = ui.upgrade() {
+        ui.set_connecting(false);
+        ui.set_status_kind("server-url-unsafe".into());
+        ui.set_status_message("".into());
+    }
+    None
 }
 
 /// Turns an `https://`/`http://` base URL into the matching `wss://`/`ws://`
@@ -11853,6 +11897,7 @@ fn load_remembered_server_url() -> String {
             file.selected_server_base_url
                 .or_else(|| file.servers.first().map(|server| server.base_url.clone()))
         })
+        .map(|url| normalize_server_url(&url))
         .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
 }
 
@@ -11860,7 +11905,7 @@ fn load_remembered_server_url() -> String {
 /// connection attempt succeeds — so it's pre-filled again next launch.
 fn remember_server_url(server_url: &str) {
     let mut file = persistence::load_servers_file().unwrap_or_default();
-    file.selected_server_base_url = Some(server_url.to_string());
+    file.selected_server_base_url = Some(normalize_server_url(server_url));
     let _ = persistence::save_servers_file(&file);
 }
 

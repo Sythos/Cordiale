@@ -165,7 +165,9 @@ pub(crate) fn register_connect_callbacks(
     let tx_for_connect = worker_tx.clone();
     let weak_for_connect = ui.as_weak();
     ui.on_connect_requested(move |server_url, identifier, password| {
-        let server_url = normalize_server_url(&server_url);
+        let Some(server_url) = checked_server_url(&weak_for_connect, &server_url) else {
+            return;
+        };
         if let Some(ui) = weak_for_connect.upgrade() {
             save_passkey_origin_field(&ui, &server_url);
             ui.set_server_url(server_url.clone().into());
@@ -197,7 +199,9 @@ pub(crate) fn register_connect_callbacks(
     let tx_for_share = worker_tx.clone();
     let weak_for_share = ui.as_weak();
     ui.on_share_consume_requested(move |server_url, input| {
-        let server_url = normalize_server_url(&server_url);
+        let Some(server_url) = checked_server_url(&weak_for_share, &server_url) else {
+            return;
+        };
         if let Some(ui) = weak_for_share.upgrade() {
             ui.set_server_url(server_url.clone().into());
             ui.set_connecting(true);
@@ -225,7 +229,9 @@ pub(crate) fn register_connect_callbacks(
     let tx_for_recovery = worker_tx.clone();
     let weak_for_recovery = ui.as_weak();
     ui.on_recovery_sign_in_requested(move |server_url, identifier, code| {
-        let server_url = normalize_server_url(&server_url);
+        let Some(server_url) = checked_server_url(&weak_for_recovery, &server_url) else {
+            return;
+        };
         if let Some(ui) = weak_for_recovery.upgrade() {
             ui.set_server_url(server_url.clone().into());
             // The code is single use and a credential: it leaves the field
@@ -325,7 +331,9 @@ pub(crate) fn register_passkey_callbacks(
     let tx_for_passkey = worker_tx.clone();
     let weak_for_passkey = ui.as_weak();
     ui.on_passkey_login_requested(move |server_url, identifier| {
-        let server_url = normalize_server_url(&server_url);
+        let Some(server_url) = checked_server_url(&weak_for_passkey, &server_url) else {
+            return;
+        };
         if let Some(ui) = weak_for_passkey.upgrade() {
             save_passkey_origin_field(&ui, &server_url);
             ui.set_server_url(server_url.clone().into());
@@ -403,7 +411,9 @@ pub(crate) fn register_saved_profile_callbacks(
     let tx_for_saved_profile = worker_tx.clone();
     let weak_for_saved_profile = ui.as_weak();
     ui.on_saved_profile_connect_requested(move |server_url, identifier| {
-        let server_url = normalize_server_url(&server_url);
+        let Some(server_url) = checked_server_url(&weak_for_saved_profile, &server_url) else {
+            return;
+        };
         if let Some(ui) = weak_for_saved_profile.upgrade() {
             save_passkey_origin_field(&ui, &server_url);
             ui.set_server_url(server_url.clone().into());

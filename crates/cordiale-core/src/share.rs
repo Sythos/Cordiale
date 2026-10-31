@@ -32,7 +32,10 @@
 /// Grappa tokens are URL-safe already (base64url and dots), which is why
 /// the same text Cicchetto percent-encodes is used as it is.
 pub fn share_link(base_url: &str, token: &str) -> String {
-    format!("{}/share#{token}", base_url.trim_end_matches('/'))
+    format!(
+        "{}/share#{token}",
+        crate::client::strip_url_secrets(base_url)
+    )
 }
 
 /// Reads a share token from what the user pasted: the bare token, or a
@@ -84,6 +87,27 @@ mod tests {
             share_link("https://irc.example/", "SFMyNTY.a.b"),
             "https://irc.example/share#SFMyNTY.a.b"
         );
+    }
+
+    #[test]
+    fn the_link_never_carries_user_information_query_or_fragment() {
+        let secret = format!("pw{}", 7 * 6);
+        let expected = "https://irc.example:8443/share#tok";
+        // The messages name the case only: the URLs hold a password.
+        for (case, base) in [
+            "https://alice@irc.example:8443?x=1#frag".to_string(),
+            format!("https://alice:{secret}@irc.example:8443/"),
+            format!("https://:{secret}@irc.example:8443"),
+            "https://irc.example:8443/?a=b".to_string(),
+            "https://irc.example:8443/#frag".to_string(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let link = share_link(&base, "tok");
+            assert!(link == expected, "case {case}");
+            assert!(!link.contains(&secret));
+        }
     }
 
     #[test]

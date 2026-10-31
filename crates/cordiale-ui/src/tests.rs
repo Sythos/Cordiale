@@ -5408,7 +5408,12 @@ fn member_roles_on_a_full_prefix_ladder() {
         ("zed", false),
     ] {
         assert_eq!(
-            is_own_nick_an_op(&members, nick, &ranking),
+            is_own_nick_an_op(
+                &members,
+                nick,
+                cordiale_core::isupport::CaseMapping::Rfc1459,
+                &ranking
+            ),
             can_moderate,
             "{nick}"
         );
@@ -5437,9 +5442,122 @@ fn member_roles_on_an_ohv_network_drop_levels_it_lacks() {
         roster(&[("opy", "@"), ("hal", "%"), ("own", ""), ("qq", "")])
     );
     let ranking = MemberRanking::new(Some(&network));
-    assert!(is_own_nick_an_op(&members, "opy", &ranking));
-    assert!(!is_own_nick_an_op(&members, "hal", &ranking));
-    assert!(!is_own_nick_an_op(&members, "own", &ranking));
+    assert!(is_own_nick_an_op(
+        &members,
+        "opy",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(!is_own_nick_an_op(
+        &members,
+        "hal",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(!is_own_nick_an_op(
+        &members,
+        "own",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+}
+
+#[test]
+fn moderation_gate_uses_the_nick_of_the_selected_network() {
+    use cordiale_core::isupport::CaseMapping;
+    let mut rfc = network_with_prefix(&[("o", "@"), ("v", "+")]);
+    rfc.casemapping = CaseMapping::Rfc1459;
+    let mut ascii = rfc.clone();
+    ascii.casemapping = CaseMapping::Ascii;
+    let mut state = WorkerState::new();
+    state.conn.identifier = Some("account".to_string());
+    state
+        .networks
+        .isupport_by_network
+        .insert("a".to_string(), rfc.clone());
+    state
+        .networks
+        .isupport_by_network
+        .insert("b".to_string(), ascii);
+    state
+        .networks
+        .own_nicks
+        .insert("a".to_string(), "Boss[".to_string());
+    state
+        .networks
+        .own_nicks
+        .insert("b".to_string(), "Other".to_string());
+    let ranking = MemberRanking::new(Some(&rfc));
+
+    // The account identifier is a member, but only the network nick counts.
+    let members = roster(&[("account", "@"), ("boss{", "@"), ("other", "+")]);
+    // Rfc1459 folds `[` to `{` and case: "Boss[" is "boss{".
+    assert!(can_moderate_members(&state, "a", &members, &ranking));
+    // Same roster on network "b": "Other" is only voiced.
+    assert!(!can_moderate_members(&state, "b", &members, &ranking));
+    // Another channel where the nick has no role.
+    let elsewhere = roster(&[("account", "@"), ("boss{", "")]);
+    assert!(!can_moderate_members(&state, "a", &elsewhere, &ranking));
+    // Ascii mapping does not fold brackets.
+    state
+        .networks
+        .own_nicks
+        .insert("b".to_string(), "Boss[".to_string());
+    assert!(!can_moderate_members(&state, "b", &members, &ranking));
+    // A network without a known nick gets nothing.
+    assert!(!can_moderate_members(&state, "c", &members, &ranking));
+}
+
+#[test]
+fn moderation_gate_follows_an_own_nick_change() {
+    let isupport = network_with_prefix(&[("o", "@"), ("v", "+")]);
+    let ranking = MemberRanking::new(Some(&isupport));
+    let mut state = WorkerState::new();
+    state.conn.identifier = Some("account".to_string());
+    state
+        .networks
+        .own_nicks
+        .insert("libera".to_string(), "Old".to_string());
+    state
+        .networks
+        .own_nicks
+        .insert("azzurra".to_string(), "Old".to_string());
+    let key = ("libera".to_string(), "#c".to_string());
+    let other = ("azzurra".to_string(), "#c".to_string());
+    state
+        .transcript
+        .members
+        .insert(key.clone(), roster(&[("Old", "@")]));
+    state
+        .transcript
+        .members
+        .insert(other.clone(), roster(&[("Old", "@")]));
+    let change = serde_json::json!({
+        "kind": "nick_change",
+        "from": "Old",
+        "meta": {"new_nick": "New"},
+    });
+    assert!(update_members_from_frame(&mut state, &key, &change));
+    let members = state.transcript.members[&key].clone();
+    // The roster has the new nick before the own-nick frame arrives.
+    assert!(!can_moderate_members(&state, "libera", &members, &ranking));
+    let _ = apply_own_nick_change(&mut state, "account", "libera", "New");
+    assert!(can_moderate_members(&state, "libera", &members, &ranking));
+    // The other network keeps its own nick and roster.
+    let others = state.transcript.members[&other].clone();
+    assert!(can_moderate_members(&state, "azzurra", &others, &ranking));
+}
+
+#[test]
+fn members_refresh_key_is_scoped_to_the_selected_channel() {
+    let mut state = WorkerState::new();
+    assert_eq!(members_refresh_key(&state, "libera"), None);
+    let key = ("libera".to_string(), "#c".to_string());
+    state.windows.current_channel = Some(key.clone());
+    assert_eq!(members_refresh_key(&state, "libera"), Some(key));
+    assert_eq!(members_refresh_key(&state, "azzurra"), None);
+    state.windows.current_query = true;
+    assert_eq!(members_refresh_key(&state, "libera"), None);
 }
 
 #[test]
@@ -5455,8 +5573,18 @@ fn member_roles_on_an_ov_network() {
     );
     assert_eq!(members, roster(&[("bob", "@"), ("ann", "+"), ("cy", "")]));
     let ranking = MemberRanking::new(Some(&network));
-    assert!(is_own_nick_an_op(&members, "bob", &ranking));
-    assert!(!is_own_nick_an_op(&members, "ann", &ranking));
+    assert!(is_own_nick_an_op(
+        &members,
+        "bob",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(!is_own_nick_an_op(
+        &members,
+        "ann",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
     // `~` is not a role here, so it never reaches the moderation gate.
     assert!(!ranking.is_op_or_above("~"));
     let order = cordiale_core::isupport::prefix_symbol_order(Some(&network));
@@ -5502,10 +5630,30 @@ fn member_roles_on_a_network_with_an_extra_sigil() {
     );
     assert_eq!(highest_prefix(&members[0].1), "!");
     let ranking = MemberRanking::new(Some(&network));
-    assert!(is_own_nick_an_op(&members, "boss", &ranking));
-    assert!(is_own_nick_an_op(&members, "lord", &ranking));
-    assert!(is_own_nick_an_op(&members, "opy", &ranking));
-    assert!(!is_own_nick_an_op(&members, "vic", &ranking));
+    assert!(is_own_nick_an_op(
+        &members,
+        "boss",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(is_own_nick_an_op(
+        &members,
+        "lord",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(is_own_nick_an_op(
+        &members,
+        "opy",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
+    assert!(!is_own_nick_an_op(
+        &members,
+        "vic",
+        cordiale_core::isupport::CaseMapping::Rfc1459,
+        &ranking
+    ));
     assert!(!ranking.is_op_or_above("x"));
 
     let order = cordiale_core::isupport::prefix_symbol_order(Some(&network));
@@ -9422,6 +9570,53 @@ fn normalize_server_url_leaves_an_explicit_http_scheme_alone() {
 }
 
 #[test]
+fn normalize_server_url_drops_user_information_query_and_fragment() {
+    let secret = format!("pw{}", 6 * 7);
+    // The messages name the case only: the URLs hold a password.
+    for (case, typed) in [
+        "https://alice@irc.sythos.dev".to_string(),
+        format!("https://:{secret}@irc.sythos.dev"),
+        format!("https://alice:{secret}@irc.sythos.dev/"),
+        "https://irc.sythos.dev?token=abc".to_string(),
+        "irc.sythos.dev/#frag".to_string(),
+        format!("http://alice:{secret}@irc.sythos.dev?x=1#frag"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let normalized = normalize_server_url(&typed);
+        assert!(server_url_is_safe(&normalized), "case {case}");
+        assert!(!normalized.contains(&secret), "case {case}");
+        assert!(!normalized.contains("alice"), "case {case}");
+    }
+    assert_eq!(
+        normalize_server_url("https://alice@irc.sythos.dev/?a=b#c"),
+        "https://irc.sythos.dev"
+    );
+}
+
+#[test]
+fn only_a_clean_typed_address_passes_the_server_url_check() {
+    let secret = format!("pw{}", 6 * 7);
+    assert!(server_url_is_safe(&typed_server_url(" irc.sythos.dev/ ")));
+    assert!(server_url_is_safe(&typed_server_url(
+        "http://irc.sythos.dev:6680"
+    )));
+    assert!(!server_url_is_safe(&typed_server_url(
+        "https://alice@irc.sythos.dev"
+    )));
+    assert!(!server_url_is_safe(&typed_server_url(&format!(
+        "https://:{secret}@irc.sythos.dev"
+    ))));
+    assert!(!server_url_is_safe(&typed_server_url(
+        "https://irc.sythos.dev?x=1"
+    )));
+    assert!(!server_url_is_safe(&typed_server_url(
+        "https://irc.sythos.dev#frag"
+    )));
+}
+
+#[test]
 fn to_ws_url_upgrades_https_to_wss() {
     assert_eq!(
         to_ws_url("https://irc.sindro.me"),
@@ -11078,4 +11273,30 @@ fn query_catch_up_failure_is_incomplete_and_keeps_the_rows_read() {
     assert_eq!(calls.len(), 2);
     // The first page arrived: a retry resumes after its last row.
     assert_eq!(ids, (1..=210).collect::<Vec<_>>());
+}
+
+#[test]
+fn admin_fetch_keeps_a_failed_request_apart_from_an_empty_answer() {
+    let mut failed = Vec::new();
+    let empty: Result<Vec<u8>, &str> = Ok(Vec::new());
+    assert_eq!(
+        crate::admin_handlers::settle_admin_fetch("users", empty, &mut failed),
+        Some(Vec::new())
+    );
+    assert!(failed.is_empty());
+    let broken: Result<Vec<u8>, &str> = Err("network down");
+    assert_eq!(
+        crate::admin_handlers::settle_admin_fetch("sessions", broken, &mut failed),
+        None
+    );
+    assert_eq!(failed, vec!["sessions"]);
+}
+
+#[test]
+fn admin_refresh_error_text_names_each_failed_section() {
+    assert_eq!(crate::admin_handlers::admin_refresh_error_text(&[]), "");
+    assert_eq!(
+        crate::admin_handlers::admin_refresh_error_text(&["users", "networks"]),
+        "users, networks"
+    );
 }
