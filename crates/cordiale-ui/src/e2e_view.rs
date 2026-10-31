@@ -277,8 +277,14 @@ pub enum ChatState {
     Pairing,
     /// A device of the peer was revoked and no device is left to send to.
     Revoked,
-    /// The keys of the peer are missing.
+    /// The keys of the peer are missing and no key request was sent.
     MissingKeys,
+    /// The API accepted the key request. Nothing more is known.
+    KeyRequestAccepted,
+    /// The request is still open and no keys came.
+    KeyRequestWaiting,
+    /// The key request failed.
+    KeyRequestFailed,
     /// The last sent text was not sent.
     SendFailed,
     /// The last sent text waited too long for keys.
@@ -300,6 +306,9 @@ impl ChatState {
             ChatState::Pairing => "e2e-chat-pairing",
             ChatState::Revoked => "e2e-chat-revoked",
             ChatState::MissingKeys => "e2e-chat-keys",
+            ChatState::KeyRequestAccepted => "e2e-chat-keys-accepted",
+            ChatState::KeyRequestWaiting => "e2e-chat-keys-waiting",
+            ChatState::KeyRequestFailed => "e2e-chat-keys-failed",
             ChatState::SendFailed => "e2e-chat-send-failed",
             ChatState::Expired => "e2e-chat-expired",
             ChatState::SasPending => "e2e-chat-sas",
@@ -308,10 +317,26 @@ impl ChatState {
     }
 }
 
+/// What Cordiale observed about the key request of one peer. Silence from the
+/// peer is not an event: it keeps the request in a waiting state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum KeyRequest {
+    /// No request was sent.
+    #[default]
+    NotSent,
+    /// The API accepted the request (HTTP 202).
+    Accepted,
+    /// A request is open and a new one is held by the pacing rules.
+    Waiting,
+    /// The API or the engine refused the request.
+    Failed,
+}
+
 /// The facts about one locked entry. The worker reads them from the engine
 /// and the session; the state follows from them.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChatSignals {
+    pub key_request: KeyRequest,
     pub reset: bool,
     pub engine: bool,
     pub trust_alarm: bool,
@@ -336,7 +361,12 @@ pub fn locked_chat_state(signals: &ChatSignals) -> ChatState {
     } else if !signals.ready && signals.peer_revoked {
         ChatState::Revoked
     } else if !signals.ready {
-        ChatState::MissingKeys
+        match signals.key_request {
+            KeyRequest::NotSent => ChatState::MissingKeys,
+            KeyRequest::Accepted => ChatState::KeyRequestAccepted,
+            KeyRequest::Waiting => ChatState::KeyRequestWaiting,
+            KeyRequest::Failed => ChatState::KeyRequestFailed,
+        }
     } else if matches!(
         signals.last_drop,
         Some(DropReason::SendFailed | DropReason::SessionEnded)
@@ -620,6 +650,30 @@ mod tests {
             ),
             (
                 ChatSignals {
+                    ready: false,
+                    key_request: KeyRequest::Accepted,
+                    ..ready()
+                },
+                ChatState::KeyRequestAccepted,
+            ),
+            (
+                ChatSignals {
+                    ready: false,
+                    key_request: KeyRequest::Waiting,
+                    ..ready()
+                },
+                ChatState::KeyRequestWaiting,
+            ),
+            (
+                ChatSignals {
+                    ready: false,
+                    key_request: KeyRequest::Failed,
+                    ..ready()
+                },
+                ChatState::KeyRequestFailed,
+            ),
+            (
+                ChatSignals {
                     last_drop: Some(DropReason::SendFailed),
                     ..ready()
                 },
@@ -656,7 +710,21 @@ mod tests {
         }
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(keys.len(), 11);
+        assert_eq!(keys.len(), 14);
+    }
+
+    #[test]
+    fn a_ready_peer_ignores_the_key_request_and_never_skips_the_sas() {
+        let accepted = ChatSignals {
+            key_request: KeyRequest::Accepted,
+            ..ready()
+        };
+        assert_eq!(locked_chat_state(&accepted), ChatState::Active);
+        let unverified = ChatSignals {
+            sas_verified: false,
+            ..accepted
+        };
+        assert_eq!(locked_chat_state(&unverified), ChatState::SasPending);
     }
 
     #[test]

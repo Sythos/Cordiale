@@ -3581,8 +3581,20 @@ msgid "The master key of this contact changed. Do not trust this chat until you 
 msgstr "La clave maestra de este contacto cambió. No confíes en este chat hasta verificarlo."
 
 msgctxt "AppWindow"
-msgid "The keys of this contact are missing. Waiting for the keys."
-msgstr "Faltan las claves de este contacto. Esperando las claves."
+msgid "The keys of this contact are missing. No key request was sent."
+msgstr "Faltan las claves de este contacto. No se envió ninguna solicitud de claves."
+
+msgctxt "AppWindow"
+msgid "The API accepted the key request. Waiting for the keys of this contact."
+msgstr "La API aceptó la solicitud de claves. Esperando las claves de este contacto."
+
+msgctxt "AppWindow"
+msgid "Still waiting for the keys of this contact. A missing answer has no known cause."
+msgstr "Todavía esperando las claves de este contacto. Una respuesta ausente no tiene causa conocida."
+
+msgctxt "AppWindow"
+msgid "The key request failed. Nothing is sent as clear text."
+msgstr "La solicitud de claves falló. No se envía nada en texto claro."
 
 msgctxt "AppWindow"
 msgid "A device pairing is open. Finish it first."
