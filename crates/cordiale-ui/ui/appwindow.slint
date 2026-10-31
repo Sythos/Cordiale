@@ -1365,7 +1365,7 @@ export component AppWindow inherits Window {
     // empty value hides the banner. It is not a send-button or message mark.
     in property <string> current-query-e2e-state: "";
     // The SAS code of the open locked query while a check is open; empty
-    // when no check is open.
+    // when no check is open. A verified contact can show it again.
     in property <string> e2e-sas-code: "";
     // The SAS step of the user: "start", "confirm", "reject" or "cancel".
     callback e2e-sas-requested(string);
@@ -3963,12 +3963,12 @@ export component AppWindow inherits Window {
                             accessible-role: AccessibleRole.text;
                             accessible-live-region: AccessibleLiveness.polite;
                         }
-                        if current-query-e2e-state == "e2e-chat-sas" && e2e-sas-code == "" : CompactButton {
+                        if (current-query-e2e-state == "e2e-chat-sas" || current-query-e2e-state == "e2e-chat-active") && e2e-sas-code == "" : CompactButton {
                             text: @tr("Show SAS code");
                             clicked => { e2e-sas-requested("start"); }
                         }
                     }
-                    if current-query-e2e-state == "e2e-chat-sas" && e2e-sas-code != "" : HorizontalBox {
+                    if (current-query-e2e-state == "e2e-chat-sas" || current-query-e2e-state == "e2e-chat-active") && e2e-sas-code != "" : HorizontalBox {
                         spacing: 8px;
                         Text {
                             text: @tr("SAS code: {}", e2e-sas-code);
@@ -3976,11 +3976,13 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 1;
                             accessible-role: AccessibleRole.text;
                         }
-                        CompactButton {
+                        // A verified contact only closes the code: the
+                        // verification stays.
+                        if current-query-e2e-state == "e2e-chat-sas" : CompactButton {
                             text: @tr("They match");
                             clicked => { e2e-sas-requested("confirm"); }
                         }
-                        CompactButton {
+                        if current-query-e2e-state == "e2e-chat-sas" : CompactButton {
                             text: @tr("They do not match");
                             clicked => { e2e-sas-requested("reject"); }
                         }
