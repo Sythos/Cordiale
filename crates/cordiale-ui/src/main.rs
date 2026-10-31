@@ -324,7 +324,8 @@ enum WorkerCommand {
     AdminVisitorDelete(String),
     AdminUploadsRefresh,
     /// Shows the public E2E master key of a network in Admin > E2E Identity.
-    AdminE2eIdentity(String),
+    /// The network and the session id of the window at request time.
+    AdminE2eIdentity(String, String),
     /// Early delete of a live upload, by id (after its confirmation).
     AdminUploadDelete(String),
     AdminNetworkResetCircuit(String),
@@ -2107,8 +2108,8 @@ async fn run_worker(
                     Some(WorkerCommand::AdminRefresh) => {
                         run_admin_refresh(&mut state, &ui).await;
                     }
-                    Some(WorkerCommand::AdminE2eIdentity(network)) => {
-                        show_e2e_identity(&mut state, &ui, network);
+                    Some(WorkerCommand::AdminE2eIdentity(network, session)) => {
+                        show_e2e_identity(&mut state, &ui, network, session);
                     }
                     Some(WorkerCommand::AdminUploadsRefresh) => {
                         handle_admin_uploads_refresh(&mut state, &ui, None).await;
@@ -3109,6 +3110,11 @@ async fn finish_connect(
                 ));
             }
 
+            // A new session starts with an empty identity page.
+            let identity_session = current_identity_session(state);
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                reset_identity_view(&ui, &identity_session);
+            });
             sync_presence_pins(state).await;
             handle_load_notification_prefs(state, ui).await;
             // Before the first command can run, so the first Kickban uses

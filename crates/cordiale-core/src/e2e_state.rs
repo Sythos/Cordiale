@@ -301,6 +301,35 @@ impl E2eStateStore {
         })
     }
 
+    /// Forgets every Olm session of one network whose peer nick `is_peer`
+    /// accepts. Sessions of other networks and peers stay.
+    pub fn remove_peer_sessions(
+        &mut self,
+        network: &str,
+        is_peer: impl Fn(&str) -> bool,
+    ) -> Result<(), E2eStoreError> {
+        let prefix = format!("{network}\u{0}");
+        let stale: Vec<String> = self
+            .data
+            .sessions
+            .keys()
+            .filter(|key| {
+                key.strip_prefix(&prefix)
+                    .and_then(|rest| rest.split('\u{0}').next())
+                    .is_some_and(&is_peer)
+            })
+            .cloned()
+            .collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
+        self.commit(|data| {
+            for key in &stale {
+                data.sessions.remove(key);
+            }
+        })
+    }
+
     /// The replay state. It is empty when none was saved.
     pub fn replay(&self) -> ReplayState {
         self.data.replay.clone()

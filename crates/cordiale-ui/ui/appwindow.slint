@@ -1657,7 +1657,14 @@ export component AppWindow inherits Window {
     // The page shows an answer only when `admin-e2e-shown-network` is the
     // selected network. `admin-e2e-state` is `key` or `none`.
     in-out property <string> admin-e2e-network: "";
-    in property <string> admin-e2e-shown-network: "";
+    in-out property <string> admin-e2e-shown-network: "";
+    // The session id of the signed-in account and server. The worker sets it
+    // and clears it at a disconnect. An answer shows only for the same id.
+    in-out property <string> admin-e2e-session: "";
+    in property <string> admin-e2e-shown-session: "";
+    property <bool> admin-e2e-current: admin-e2e-session != ""
+        && admin-e2e-shown-session == admin-e2e-session
+        && admin-e2e-shown-network == admin-e2e-network;
     in property <string> admin-e2e-account: "";
     in property <string> admin-e2e-key: "";
     in property <string> admin-e2e-state: "";
@@ -6616,15 +6623,7 @@ export component AppWindow inherits Window {
                         icon: "🔐";
                         label: @tr("E2E Identity");
                         selected: admin-section == "e2e-identity";
-                        clicked => {
-                            admin-section = "e2e-identity";
-                            if admin-e2e-network == "" && known-networks.length > 0 {
-                                admin-e2e-network = known-networks[0];
-                            }
-                            if admin-e2e-network != "" {
-                                admin-e2e-identity-requested(admin-e2e-network);
-                            }
-                        }
+                        clicked => { admin-section = "e2e-identity"; }
                     }
                     NavButton {
                         icon: "🧰";
@@ -6668,6 +6667,18 @@ export component AppWindow inherits Window {
                     spacing: 6px;
                     vertical-stretch: 0;
 
+                    // Each time the page opens it asks for the identity of
+                    // the current session. The old answer is hidden first.
+                    init => {
+                        admin-e2e-shown-network = "";
+                        if admin-e2e-network == "" && known-networks.length > 0 {
+                            admin-e2e-network = known-networks[0];
+                        }
+                        if admin-e2e-network != "" {
+                            admin-e2e-identity-requested(admin-e2e-network);
+                        }
+                    }
+
                     HorizontalLayout {
                         spacing: 4px;
                         alignment: start;
@@ -6678,6 +6689,7 @@ export component AppWindow inherits Window {
                             selected: admin-e2e-network == network;
                             clicked => {
                                 admin-e2e-network = network;
+                                admin-e2e-shown-network = "";
                                 admin-e2e-identity-requested(network);
                             }
                         }
@@ -6686,10 +6698,10 @@ export component AppWindow inherits Window {
                         text: @tr("No network is available.");
                         wrap: word-wrap;
                     }
-                    if admin-e2e-network != "" && admin-e2e-shown-network != admin-e2e-network : Text {
+                    if admin-e2e-network != "" && !admin-e2e-current : Text {
                         text: @tr("Loading…");
                     }
-                    if admin-e2e-network != "" && admin-e2e-shown-network == admin-e2e-network : VerticalLayout {
+                    if admin-e2e-network != "" && admin-e2e-current : VerticalLayout {
                         spacing: 6px;
 
                         Text {
@@ -6713,6 +6725,7 @@ export component AppWindow inherits Window {
                         if admin-e2e-state == "key" : CompactButton {
                             text: "📋  " + @tr("Copy public key");
                             a11y-label: @tr("Copy public key");
+                            enabled: admin-e2e-current && admin-e2e-key != "";
                             clicked => { copy-text-requested(admin-e2e-key); }
                         }
                     }
