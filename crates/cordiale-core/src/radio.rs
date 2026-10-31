@@ -575,7 +575,12 @@ trait ChunkSource {
 
 impl ChunkSource for reqwest::Response {
     async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, RadioError> {
-        Ok(self.chunk().await?.map(|bytes| bytes.to_vec()))
+        match self.chunk().await {
+            Ok(chunk) => Ok(chunk.map(|bytes| bytes.to_vec())),
+            Err(_) => Err(RadioError::Refused(
+                "the playlist could not be read".to_string(),
+            )),
+        }
     }
 }
 
@@ -912,6 +917,27 @@ mod tests {
         assert!(
             matches!(&result, Err(RadioError::Refused(reason)) if reason == "the playlist took too long"),
             "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_playlist_failure_gives_a_readable_reason() {
+        struct Broken;
+        impl ChunkSource for Broken {
+            async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, RadioError> {
+                Err(RadioError::Refused(
+                    "the playlist could not be read".to_string(),
+                ))
+            }
+        }
+        let result = read_playlist_body(&mut Broken, 1024, LONG).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the playlist could not be read"
+        );
+        assert_eq!(
+            RadioError::EmptyPlaylist.to_string(),
+            "the playlist lists no stream"
         );
     }
 

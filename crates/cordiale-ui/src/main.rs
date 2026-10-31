@@ -5688,14 +5688,20 @@ fn handle_radio_event(
         player::PlayerEvent::Title(title) => tuned.stream_title = Some(title),
         player::PlayerEvent::Failed(error) => {
             persistence::log_line(&format!("radio stream failed: {error}"));
-            tuned.status = "failed";
-            tuned.error = error;
+            mark_radio_failed(tuned, error);
         }
         player::PlayerEvent::Ended => {
             tuned.status = if tuned.upload { "finished" } else { "ended" };
         }
     }
     push_radio_now(ui, radio_state);
+}
+
+/// Keeps the reason a stream or playlist failed, for the player bar. The
+/// client goes on running.
+fn mark_radio_failed(tuned: &mut TunedRadio, error: String) {
+    tuned.status = "failed";
+    tuned.error = error;
 }
 
 /// Mirrors the station on air into the player bar and `/np`.
