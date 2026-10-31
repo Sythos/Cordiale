@@ -1769,7 +1769,9 @@ slot e la pulizia. Cambia solo `e2e_pairing_flow.rs`.
   `mark_sas_verified` sulla master mostrata e salva la fiducia nel file di stato. Rifiuto, annullo,
   cambio di finestra o allarme di fiducia non verificano nulla. Il formato non è quello dei
   messaggi `chal`/`ack` di Cicchetto (non nei documenti di riferimento): se Cicchetto ne definisce
-  uno, i codici dei due client possono differire.
+  uno, i codici dei due client possono differire. Un contatto già verificato può mostrare di nuovo
+  il codice, perché l'altro utente può aver bisogno di un nuovo confronto: ha solo «Annulla» e la
+  verifica resta.
 
 ### Protocollo 51: riavvio della sessione dopo la modifica di una credenziale admin
 
