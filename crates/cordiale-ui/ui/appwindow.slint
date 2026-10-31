@@ -2558,7 +2558,13 @@ export component AppWindow inherits Window {
         } else if current-query-e2e-state == "e2e-chat-trust" {
             return @tr("The master key of this contact changed. Do not trust this chat until you verify it.");
         } else if current-query-e2e-state == "e2e-chat-keys" {
-            return @tr("The keys of this contact are missing. Waiting for the keys.");
+            return @tr("The keys of this contact are missing. No key request was sent.");
+        } else if current-query-e2e-state == "e2e-chat-keys-accepted" {
+            return @tr("The API accepted the key request. Waiting for the keys of this contact.");
+        } else if current-query-e2e-state == "e2e-chat-keys-waiting" {
+            return @tr("Still waiting for the keys of this contact. A missing answer has no known cause.");
+        } else if current-query-e2e-state == "e2e-chat-keys-failed" {
+            return @tr("The key request failed. Nothing is sent as clear text.");
         } else if current-query-e2e-state == "e2e-chat-pairing" {
             return @tr("A device pairing is open. Finish it first.");
         } else if current-query-e2e-state == "e2e-chat-sas" {
