@@ -1105,6 +1105,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-width 0.2.2",
+ "vodozemac",
  "windows",
  "winresource",
 ]
