@@ -11419,3 +11419,43 @@ fn a_failed_playlist_keeps_its_reason_for_the_player_bar() {
     assert_eq!(tuned.status, "failed");
     assert_eq!(tuned.error, "the playlist is too large");
 }
+
+#[test]
+fn the_identity_panel_shows_the_key_with_its_network_and_account() {
+    let panel = identity_panel("libera", "alice", Some("PublicKeyOne".to_string()));
+    assert_eq!(panel.state, "key");
+    assert_eq!(panel.network, "libera");
+    assert_eq!(panel.account, "alice");
+    // The copy action sends this text, so the copy is the key on screen.
+    assert_eq!(panel.key, "PublicKeyOne");
+}
+
+#[test]
+fn the_identity_panel_without_a_key_is_empty() {
+    let panel = identity_panel("libera", "alice", None);
+    assert_eq!(panel.state, "none");
+    assert!(panel.key.is_empty());
+    assert_eq!(panel.network, "libera");
+}
+
+#[test]
+fn each_network_has_its_own_identity_panel() {
+    let first = identity_panel("libera", "alice", Some("KeyOne".to_string()));
+    let second = identity_panel("oftc", "alice", Some("KeyTwo".to_string()));
+    let third = identity_panel("rizon", "alice", None);
+    assert_eq!(first.network, "libera");
+    assert_eq!(first.key, "KeyOne");
+    assert_eq!(second.network, "oftc");
+    assert_eq!(second.key, "KeyTwo");
+    assert_eq!(third.state, "none");
+}
+
+#[test]
+fn opening_the_identity_page_without_an_engine_makes_nothing() {
+    let mut state = peer_link_state(&[]);
+    let ui = slint::Weak::<AppWindow>::default();
+    show_e2e_identity(&mut state, &ui, "libera".to_string());
+    // No client and no account: the page has no engine to read and the call
+    // opens no engine, so no key or file is made.
+    assert!(state.e2e.engine_mut("libera").is_none());
+}

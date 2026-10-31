@@ -321,6 +321,8 @@ enum WorkerCommand {
     AdminUserDelete(String),
     AdminVisitorDelete(String),
     AdminUploadsRefresh,
+    /// Shows the public E2E master key of a network in Admin > E2E Identity.
+    AdminE2eIdentity(String),
     /// Early delete of a live upload, by id (after its confirmation).
     AdminUploadDelete(String),
     AdminNetworkResetCircuit(String),
@@ -2099,6 +2101,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::AdminRefresh) => {
                         run_admin_refresh(&mut state, &ui).await;
+                    }
+                    Some(WorkerCommand::AdminE2eIdentity(network)) => {
+                        show_e2e_identity(&mut state, &ui, network);
                     }
                     Some(WorkerCommand::AdminUploadsRefresh) => {
                         handle_admin_uploads_refresh(&mut state, &ui, None).await;

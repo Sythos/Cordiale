@@ -1648,6 +1648,15 @@ export component AppWindow inherits Window {
     in-out property <string> admin-upload-confirm-id: "";
     in-out property <string> admin-upload-confirm-name: "";
     in property <[string]> admin-session-log: [];
+    // Admin > E2E Identity: the public master key of `admin-e2e-network`.
+    // The page shows an answer only when `admin-e2e-shown-network` is the
+    // selected network. `admin-e2e-state` is `key` or `none`.
+    in-out property <string> admin-e2e-network: "";
+    in property <string> admin-e2e-shown-network: "";
+    in property <string> admin-e2e-account: "";
+    in property <string> admin-e2e-key: "";
+    in property <string> admin-e2e-state: "";
+    callback admin-e2e-identity-requested(string);
     // Live admin feed (`grappa:admin:events`), newest first.
     in property <[string]> admin-events: [];
     // Opening Settings > Admin loads the panel and starts the live feed.
@@ -6555,6 +6564,20 @@ export component AppWindow inherits Window {
                         clicked => { admin-section = "events"; }
                     }
                     NavButton {
+                        icon: "🔐";
+                        label: @tr("E2E Identity");
+                        selected: admin-section == "e2e-identity";
+                        clicked => {
+                            admin-section = "e2e-identity";
+                            if admin-e2e-network == "" && known-networks.length > 0 {
+                                admin-e2e-network = known-networks[0];
+                            }
+                            if admin-e2e-network != "" {
+                                admin-e2e-identity-requested(admin-e2e-network);
+                            }
+                        }
+                    }
+                    NavButton {
                         icon: "🧰";
                         label: @tr("Server");
                         selected: admin-section == "server";
@@ -6590,6 +6613,60 @@ export component AppWindow inherits Window {
                     text: @tr("Could not refresh: {}. The last data stays on screen. Press Refresh to retry.", admin-refresh-error);
                     wrap: word-wrap;
                     color: #d9534f;
+                }
+
+                if admin-section == "e2e-identity" : VerticalLayout {
+                    spacing: 6px;
+                    vertical-stretch: 0;
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: start;
+
+                        for network in known-networks : NavButton {
+                            icon: "🌐";
+                            label: network;
+                            selected: admin-e2e-network == network;
+                            clicked => {
+                                admin-e2e-network = network;
+                                admin-e2e-identity-requested(network);
+                            }
+                        }
+                    }
+                    if admin-e2e-network == "" : Text {
+                        text: @tr("No network is available.");
+                        wrap: word-wrap;
+                    }
+                    if admin-e2e-network != "" && admin-e2e-shown-network != admin-e2e-network : Text {
+                        text: @tr("Loading…");
+                    }
+                    if admin-e2e-network != "" && admin-e2e-shown-network == admin-e2e-network : VerticalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: @tr("Network: {}. Account: {}.", admin-e2e-network, admin-e2e-account);
+                            wrap: word-wrap;
+                        }
+                        if admin-e2e-state == "none" : Text {
+                            text: @tr("This device has no E2E master key on this network. Viewing this page makes no key.");
+                            wrap: word-wrap;
+                        }
+                        if admin-e2e-state == "key" : Text {
+                            text: @tr("Public master key (Ed25519):");
+                            wrap: word-wrap;
+                        }
+                        if admin-e2e-state == "key" : Text {
+                            text: admin-e2e-key;
+                            wrap: word-wrap;
+                            font-family: "monospace";
+                            accessible-label: @tr("Public master key (Ed25519):");
+                        }
+                        if admin-e2e-state == "key" : CompactButton {
+                            text: "📋  " + @tr("Copy public key");
+                            a11y-label: @tr("Copy public key");
+                            clicked => { copy-text-requested(admin-e2e-key); }
+                        }
+                    }
                 }
 
                 if admin-section == "sessions" && admin-session-confirm-id != "" : HorizontalBox {
