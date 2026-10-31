@@ -11211,3 +11211,20 @@ fn admin_refresh_error_text_names_each_failed_section() {
         "users, networks"
     );
 }
+
+#[test]
+fn a_failed_playlist_keeps_its_reason_for_the_player_bar() {
+    let mut tuned = TunedRadio {
+        key: String::new(),
+        title: "link".to_string(),
+        source: None,
+        track: None,
+        stream_title: None,
+        status: "connecting",
+        error: String::new(),
+        upload: true,
+    };
+    mark_radio_failed(&mut tuned, "the playlist is too large".to_string());
+    assert_eq!(tuned.status, "failed");
+    assert_eq!(tuned.error, "the playlist is too large");
+}
