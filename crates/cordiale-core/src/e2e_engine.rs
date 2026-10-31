@@ -1008,6 +1008,53 @@ impl E2eEngine {
         self.state.trust()
     }
 
+    /// The public master key of the own account: from the certificate of
+    /// this device, or from the master key when the device holds it.
+    fn own_master_key(&self) -> Option<String> {
+        if let Some(certificate) = self.state.device_certificate() {
+            return Some(certificate.master_ed25519);
+        }
+        let master = self.state.master_key().ok().flatten()?;
+        Some(master.identity_keys().ed25519.to_base64())
+    }
+
+    /// The stored master key of the peer, the one a SAS check is about.
+    /// `None` when the peer has no master or the master was released.
+    pub fn sas_master(&self, nick: &str) -> Option<String> {
+        self.state
+            .trust()
+            .master(&self.network, nick)
+            .map(str::to_string)
+    }
+
+    /// The SAS code of the own master and the stored master of the peer.
+    /// `None` when one of the two is missing. The code holds public keys
+    /// only.
+    pub fn sas_code(&self, nick: &str) -> Option<String> {
+        let peer = self.sas_master(nick)?;
+        crate::e2e_sas::sas_code(&self.own_master_key()?, &peer).ok()
+    }
+
+    /// Records the SAS check of the master the user compared. It fails with
+    /// `MasterChanged` when `master` is no longer the stored master of the
+    /// peer. The result is saved with the trust state.
+    pub fn confirm_sas(&mut self, nick: &str, master: &str) -> Result<(), EngineError> {
+        let mut trust = self.state.trust();
+        trust.mark_sas_verified(&self.network, nick, master)?;
+        self.state.set_trust(&trust)?;
+        Ok(())
+    }
+
+    /// Takes a new master for the peer after an explicit user action. The
+    /// old SAS check, the list and the devices go away, and the new master
+    /// starts unverified.
+    pub fn replace_peer_master(&mut self, nick: &str, master: &str) -> Result<(), EngineError> {
+        let mut trust = self.state.trust();
+        trust.replace_master_by_user(&self.network, nick, master)?;
+        self.state.set_trust(&trust)?;
+        Ok(())
+    }
+
     pub fn history(&self) -> &E2eHistoryStore {
         &self.history
     }
@@ -6777,5 +6824,80 @@ mod tests {
             &[&t.first_device, &t.second_device],
         );
         assert_eq!(t.second.handle_row(&item, 151), RowOutcome::Stored);
+    }
+
+    #[test]
+    fn both_users_see_the_same_sas_code_for_the_same_masters() {
+        let alice_id = Ident::new("alice");
+        let bob_id = Ident::new("bob");
+        let mut alice = alice_id.engine();
+        let mut bob = bob_id.engine();
+        assert_eq!(alice.sas_code("bob"), None);
+        alice.accept_keys("bob", &bob_id.keys()).expect("keys");
+        bob.accept_keys("alice", &alice_id.keys()).expect("keys");
+        let code = alice.sas_code("bob").expect("code");
+        assert_eq!(bob.sas_code("alice"), Some(code.clone()));
+        assert_eq!(alice.sas_master("bob"), Some(ed(&bob_id.master)));
+        // The code holds no key text.
+        assert!(!code.contains(&ed(&bob_id.master)));
+    }
+
+    #[test]
+    fn only_an_explicit_confirm_marks_the_master_and_a_restart_keeps_it() {
+        let alice_id = Ident::new("alice");
+        let bob_id = Ident::new("bob");
+        let mut alice = alice_id.engine();
+        alice.accept_keys("bob", &bob_id.keys()).expect("keys");
+        // Reading the keys and showing the code do not verify the peer. A
+        // mismatch or a cancel calls nothing in the engine.
+        assert!(!alice.trust().is_sas_verified(NET, "bob"));
+        let _ = alice.sas_code("bob");
+        assert!(!alice.trust().is_sas_verified(NET, "bob"));
+        // A confirm for another master is refused.
+        let other = ed(&Account::new());
+        assert!(matches!(
+            alice.confirm_sas("bob", &other),
+            Err(EngineError::Device(E2eError::MasterChanged))
+        ));
+        assert!(!alice.trust().is_sas_verified(NET, "bob"));
+        alice
+            .confirm_sas("bob", &ed(&bob_id.master))
+            .expect("confirm");
+        assert!(alice.trust().is_sas_verified(NET, "bob"));
+        // A restart reads the saved state.
+        drop(alice);
+        let alice = alice_id.engine();
+        assert!(alice.trust().is_sas_verified(NET, "bob"));
+        assert_eq!(alice.sas_master("bob"), Some(ed(&bob_id.master)));
+    }
+
+    #[test]
+    fn a_new_master_does_not_inherit_the_sas_check() {
+        let alice_id = Ident::new("alice");
+        let bob_id = Ident::new("bob");
+        let mut alice = alice_id.engine();
+        alice.accept_keys("bob", &bob_id.keys()).expect("keys");
+        alice
+            .confirm_sas("bob", &ed(&bob_id.master))
+            .expect("confirm");
+        // Keys from another master do not replace the stored one.
+        let other_id = Ident::new("other");
+        let _ = alice.accept_keys("bob", &other_id.keys());
+        assert_eq!(alice.sas_master("bob"), Some(ed(&bob_id.master)));
+        assert!(matches!(
+            alice.confirm_sas("bob", &ed(&other_id.master)),
+            Err(EngineError::Device(E2eError::MasterChanged))
+        ));
+        // After an explicit replace the new master starts unverified, and
+        // the code follows the new master.
+        let old_code = alice.sas_code("bob");
+        alice
+            .replace_peer_master("bob", &ed(&other_id.master))
+            .expect("replace");
+        assert!(!alice.trust().is_sas_verified(NET, "bob"));
+        assert_ne!(alice.sas_code("bob"), old_code);
+        drop(alice);
+        let alice = alice_id.engine();
+        assert!(!alice.trust().is_sas_verified(NET, "bob"));
     }
 }
