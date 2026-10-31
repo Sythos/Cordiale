@@ -121,12 +121,12 @@ pub(crate) async fn run_slash_command(
             post_message(&client, &token, &network, &channel, request).await
         }
         SlashCommand::Query(Some(nick)) => {
-            send_user_verb(
-                state,
-                &network,
-                "open_query_window",
-                serde_json::json!({ "target_nick": nick }),
-            );
+            let origin = state
+                .windows
+                .current_channel
+                .clone()
+                .unwrap_or_else(|| (network.clone(), anchor.clone()));
+            open_query_and_focus(state, ui, network.clone(), nick, origin).await;
             Ok(())
         }
         SlashCommand::Query(None) if state.windows.current_query => {

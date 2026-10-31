@@ -10668,6 +10668,118 @@ fn rename_action_waits_for_the_server_snapshot() {
 }
 
 #[test]
+fn query_open_waits_for_the_snapshot_then_focuses_once() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    let origin = ("libera".to_string(), "#chan".to_string());
+    state.windows.current_channel = Some(origin.clone());
+    upload_test_runtime().block_on(async {
+        open_query_and_focus(
+            &mut state,
+            &ui,
+            "libera".to_string(),
+            "Peer".to_string(),
+            origin.clone(),
+        )
+        .await;
+    });
+    assert!(matches!(
+        &state.transcript.pending_query_focus,
+        Some((network, nick, _, window))
+            if network == "libera" && nick == "Peer" && *window == origin
+    ));
+    // A snapshot without the peer keeps the request.
+    upload_test_runtime().block_on(async {
+        focus_pending_query(&mut state, &ui).await;
+    });
+    assert!(state.transcript.pending_query_focus.is_some());
+    // The snapshot with the peer ends the request: a second snapshot finds
+    // nothing to select, so no second key request can start from it.
+    state.transcript.query_windows = vec![QueryWindow {
+        network: "libera".to_string(),
+        target_nick: "Peer".to_string(),
+        opened_at: "2026-09-21T10:00:00Z".to_string(),
+        dm_conversation_id: None,
+    }];
+    upload_test_runtime().block_on(async {
+        focus_pending_query(&mut state, &ui).await;
+    });
+    assert!(state.transcript.pending_query_focus.is_none());
+    upload_test_runtime().block_on(async {
+        focus_pending_query(&mut state, &ui).await;
+    });
+    assert!(state.transcript.pending_query_focus.is_none());
+}
+
+#[test]
+fn query_open_of_a_listed_dm_selects_it_without_waiting() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    let origin = ("libera".to_string(), "#chan".to_string());
+    state.windows.current_channel = Some(origin.clone());
+    state.transcript.query_windows = vec![QueryWindow {
+        network: "libera".to_string(),
+        target_nick: "Peer".to_string(),
+        opened_at: "2026-09-21T10:00:00Z".to_string(),
+        dm_conversation_id: None,
+    }];
+    upload_test_runtime().block_on(async {
+        open_query_and_focus(
+            &mut state,
+            &ui,
+            "libera".to_string(),
+            "Peer".to_string(),
+            origin,
+        )
+        .await;
+    });
+    assert!(state.transcript.pending_query_focus.is_none());
+}
+
+#[test]
+fn query_open_ignores_targets_that_are_not_peer_nicks() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    let origin = ("libera".to_string(), "#chan".to_string());
+    state.windows.current_channel = Some(origin.clone());
+    for target in ["#other", "two words", "\u{1F512}Peer"] {
+        upload_test_runtime().block_on(async {
+            open_query_and_focus(
+                &mut state,
+                &ui,
+                "libera".to_string(),
+                target.to_string(),
+                origin.clone(),
+            )
+            .await;
+        });
+        assert!(state.transcript.pending_query_focus.is_none(), "{target}");
+    }
+}
+
+#[test]
+fn member_query_action_registers_the_focus_in_a_channel_only() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    let origin = ("libera".to_string(), "#chan".to_string());
+    state.windows.current_channel = Some(origin.clone());
+    state.windows.current_query = true;
+    upload_test_runtime().block_on(async {
+        send_member_query(&mut state, &ui, "Peer".to_string()).await;
+    });
+    assert!(state.transcript.pending_query_focus.is_none());
+    state.windows.current_query = false;
+    upload_test_runtime().block_on(async {
+        send_member_query(&mut state, &ui, "Peer".to_string()).await;
+    });
+    assert!(matches!(
+        &state.transcript.pending_query_focus,
+        Some((network, nick, _, window))
+            if network == "libera" && nick == "Peer" && *window == origin
+    ));
+}
+
+#[test]
 fn rename_focus_ends_after_later_navigation() {
     let mut state = WorkerState::new();
     let ui = slint::Weak::<AppWindow>::default();

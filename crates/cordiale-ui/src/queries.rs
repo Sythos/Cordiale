@@ -102,16 +102,34 @@ pub(crate) async fn handle_open_rename_target(
     {
         return;
     }
-    if find_query_window(&state.transcript.query_windows, &network, &nick).is_some() {
+    open_query_and_focus(state, ui, network, nick, origin).await;
+}
+
+/// Opens the plain query of `nick` and selects it, which asks the peer for
+/// its E2E keys. A query the server already lists is selected at once.
+/// Otherwise Grappa is asked to open it, and `focus_pending_query` selects it
+/// when the snapshot lists it. `origin` is the window the user acted in. A
+/// target that is not a peer nick is only sent to the server.
+pub(crate) async fn open_query_and_focus(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    nick: String,
+    origin: (String, String),
+) {
+    let focusable = valid_rename_target(&nick) && !is_locked_name(&nick);
+    if focusable && find_query_window(&state.transcript.query_windows, &network, &nick).is_some() {
         handle_select_query(state, ui, network, nick).await;
         return;
     }
-    state.transcript.pending_query_focus = Some((
-        network.clone(),
-        nick.clone(),
-        std::time::Instant::now(),
-        origin,
-    ));
+    if focusable {
+        state.transcript.pending_query_focus = Some((
+            network.clone(),
+            nick.clone(),
+            std::time::Instant::now(),
+            origin,
+        ));
+    }
     send_user_verb(
         state,
         &network,
