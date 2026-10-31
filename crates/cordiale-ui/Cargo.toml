@@ -80,8 +80,10 @@ ctap-hid = ["dep:ctap-hid-fido2"]
 video-shrink = ["cordiale-core/video-shrink"]
 
 # Random keys for the E2E history tests; the UI itself does no crypto.
+# vodozemac makes the test accounts of the SAS tests.
 [dev-dependencies]
 chacha20poly1305 = "0.11"
+vodozemac = "0.11.1"
 
 [build-dependencies]
 slint-build = "1"
