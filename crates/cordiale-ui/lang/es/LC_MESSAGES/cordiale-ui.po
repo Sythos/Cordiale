@@ -253,6 +253,38 @@ msgid "An encrypted chat takes plain text only. Nothing was sent."
 msgstr "Un chat cifrado solo acepta texto sin formato. No se envió nada."
 
 msgctxt "AppWindow"
+msgid "The SAS codes match. This contact is verified."
+msgstr "Los códigos SAS coinciden. Este contacto está verificado."
+
+msgctxt "AppWindow"
+msgid "The SAS codes do not match. This contact stays unverified. Do not trust this chat."
+msgstr "Los códigos SAS no coinciden. Este contacto sigue sin verificar. No confíes en este chat."
+
+msgctxt "AppWindow"
+msgid "The SAS code is not available now."
+msgstr "El código SAS no está disponible ahora."
+
+msgctxt "AppWindow"
+msgid "The master key of this contact changed. The check was not saved."
+msgstr "La clave maestra de este contacto cambió. La verificación no se guardó."
+
+msgctxt "AppWindow"
+msgid "Show SAS code"
+msgstr "Mostrar el código SAS"
+
+msgctxt "AppWindow"
+msgid "SAS code: {}"
+msgstr "Código SAS: {}"
+
+msgctxt "AppWindow"
+msgid "They match"
+msgstr "Coinciden"
+
+msgctxt "AppWindow"
+msgid "They do not match"
+msgstr "No coinciden"
+
+msgctxt "AppWindow"
 msgid "Pairing link: {}. On the new device, type /e2e join and this link."
 msgstr "Enlace de emparejamiento: {}. En el dispositivo nuevo escribe /e2e join y este enlace."
 

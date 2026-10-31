@@ -684,6 +684,13 @@ pub(crate) fn register_channel_callbacks(
         });
     });
 
+    let tx_for_e2e_sas = worker_tx.clone();
+    ui.on_e2e_sas_requested(move |step| {
+        if let Some(step) = SasStep::parse(&step) {
+            let _ = tx_for_e2e_sas.send(WorkerCommand::E2eSas(step));
+        }
+    });
+
     // The invitation banner deliberately does not auto-focus a window. Its
     // explicit Join action only opens the invited row; the server remains the
     // authority for the subsequent pending/joined transition.

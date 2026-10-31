@@ -1760,6 +1760,18 @@ slot e la pulizia. Cambia solo `e2e_pairing_flow.rs`.
 - **Grappa 2457 (decisione).** Non si applica: Cordiale non ha un messaggio SAS a più dispositivi
   da pulire. La conferma SAS è locale a questo dispositivo (`confirm_sas`) e non c'è un prompt SAS
   sugli altri dispositivi del peer.
+- **Verifica SAS della master del peer.** Il codice (`e2e_sas::sas_code`) è una funzione pura delle
+  due chiavi master pubbliche (la propria dal certificato del dispositivo, quella del peer da
+  `PeerTrust`): SHA-256 con dominio `cordiale-sas-v1` sulle due chiavi in ordine canonico, tre
+  gruppi da quattro cifre. Nessun messaggio sul filo: i due utenti confrontano il codice su un
+  canale fidato. Il banner della voce bloccata mostra «Mostra il codice SAS», poi «Coincidono»,
+  «Non coincidono», «Annulla». Solo «Coincidono» chiama `E2eEngine::confirm_sas`, che usa
+  `mark_sas_verified` sulla master mostrata e salva la fiducia nel file di stato. Rifiuto, annullo,
+  cambio di finestra o allarme di fiducia non verificano nulla. Il formato non è quello dei
+  messaggi `chal`/`ack` di Cicchetto (non nei documenti di riferimento): se Cicchetto ne definisce
+  uno, i codici dei due client possono differire. Un contatto già verificato può mostrare di nuovo
+  il codice, perché l'altro utente può aver bisogno di un nuovo confronto: ha solo «Annulla» e la
+  verifica resta.
 
 ### Protocollo 51: riavvio della sessione dopo la modifica di una credenziale admin
 
