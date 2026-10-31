@@ -1368,6 +1368,10 @@ pub(crate) fn register_admin_user_callbacks(
     ui.on_admin_uploads_requested(move || {
         let _ = tx_for_uploads.send(WorkerCommand::AdminUploadsRefresh);
     });
+    let tx_for_e2e_identity = worker_tx.clone();
+    ui.on_admin_e2e_identity_requested(move |network| {
+        let _ = tx_for_e2e_identity.send(WorkerCommand::AdminE2eIdentity(network.to_string()));
+    });
     let tx_for_upload_delete = worker_tx.clone();
     ui.on_admin_upload_delete(move |upload_id| {
         let _ = tx_for_upload_delete.send(WorkerCommand::AdminUploadDelete(upload_id.to_string()));

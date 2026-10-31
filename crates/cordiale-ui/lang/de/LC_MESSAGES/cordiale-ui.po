@@ -3703,3 +3703,27 @@ msgstr "Du ignorierst {} nicht mehr."
 msgctxt "AppWindow"
 msgid "Could not refresh: {}. The last data stays on screen. Press Refresh to retry."
 msgstr "Aktualisierung fehlgeschlagen: {}. Die letzten Daten bleiben sichtbar. Drücke Aktualisieren, um es erneut zu versuchen."
+
+msgctxt "AppWindow"
+msgid "E2E Identity"
+msgstr "E2E-Identität"
+
+msgctxt "AppWindow"
+msgid "No network is available."
+msgstr "Kein Netzwerk verfügbar."
+
+msgctxt "AppWindow"
+msgid "Network: {}. Account: {}."
+msgstr "Netzwerk: {}. Konto: {}."
+
+msgctxt "AppWindow"
+msgid "This device has no E2E master key on this network. Viewing this page makes no key."
+msgstr "Dieses Gerät hat in diesem Netzwerk keinen E2E-Hauptschlüssel. Das Öffnen dieser Seite erzeugt keinen Schlüssel."
+
+msgctxt "AppWindow"
+msgid "Public master key (Ed25519):"
+msgstr "Öffentlicher Hauptschlüssel (Ed25519):"
+
+msgctxt "AppWindow"
+msgid "Copy public key"
+msgstr "Öffentlichen Schlüssel kopieren"
