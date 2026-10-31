@@ -350,9 +350,14 @@ impl E2eStateStore {
     }
 
     /// The public Ed25519 master key as base64 text, or `None` when the
-    /// device holds no master key. It reads the public half only and makes
+    /// device has neither a certificate nor a master key. A device that joined
+    /// by pairing holds no master secret: it reads the key from its
+    /// certificate, as peers do. It reads the public half only and makes
     /// nothing.
     pub fn master_public_key(&self) -> Result<Option<String>, E2eStoreError> {
+        if let Some(certificate) = self.device_certificate() {
+            return Ok(Some(certificate.master_ed25519));
+        }
         Ok(self
             .master_key()?
             .map(|master| master.identity_keys().ed25519.to_base64()))
@@ -1191,6 +1196,27 @@ mod tests {
         assert_eq!(store.master_public_key().expect("read"), None);
         assert!(store.master_key().expect("master").is_none());
         store.set_master_key(&master).expect("master");
+        assert_eq!(
+            store.master_public_key().expect("read"),
+            Some(ed25519_of(&master))
+        );
+    }
+
+    #[test]
+    fn a_paired_device_reads_the_master_public_key_from_its_certificate() {
+        let dir = scratch_dir("master-public-paired");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let master = Account::new();
+        let device = ed25519_of(&Account::new());
+        let certificate =
+            crate::e2e_device::build_device_certificate(1, &device, &ed25519_of(&master), |text| {
+                master.sign(text).to_base64()
+            })
+            .expect("certificate");
+        let mut store = E2eStateStore::open(path, &provider).expect("open");
+        store.set_device_certificate(&certificate).expect("cert");
+        assert!(store.master_key().expect("master").is_none());
         assert_eq!(
             store.master_public_key().expect("read"),
             Some(ed25519_of(&master))
