@@ -83,7 +83,7 @@ pub(crate) async fn handle_select_channel(
             .get(&window_state_key(&network, &channel))
             == Some(&ChannelWindowState::Joined);
     let ranking = MemberRanking::new(state.networks.isupport_by_network.get(&network));
-    let can_moderate = is_own_nick_an_op(&members, &identifier, &ranking);
+    let can_moderate = can_moderate_members(state, &network, &members, &ranking);
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let casemapping = network_casemapping(state, &network);
