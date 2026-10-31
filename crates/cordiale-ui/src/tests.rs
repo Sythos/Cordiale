@@ -1,5 +1,7 @@
 use super::*;
 
+use cordiale_core::slash::SlashCommand;
+
 #[test]
 fn services_console_captures_only_fresh_notices_from_its_service() {
     let console = ServiceConsoleState {
@@ -10777,6 +10779,267 @@ fn member_query_action_registers_the_focus_in_a_channel_only() {
         Some((network, nick, _, window))
             if network == "libera" && nick == "Peer" && *window == origin
     ));
+}
+
+/// The request line and the body of each request the test server saw.
+type RequestLog = Mutex<Vec<(String, String)>>;
+
+/// Serves every request on a local port, in its own thread, and records the
+/// request line and the body of each one. The E2E send door answers 202; any
+/// other path answers 404.
+fn recording_server() -> (String, Arc<RequestLog>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                return;
+            };
+            let recorded = Arc::clone(&recorded);
+            std::thread::spawn(move || {
+                let mut data = Vec::new();
+                let mut chunk = [0u8; 1024];
+                let (head, body) = loop {
+                    let Ok(read) = stream.read(&mut chunk) else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    data.extend_from_slice(&chunk[..read]);
+                    let text = String::from_utf8_lossy(&data).to_string();
+                    let Some(split) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
+                    let length = text[..split]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if data.len() >= split + 4 + length {
+                        break (text[..split].to_string(), text[split + 4..].to_string());
+                    }
+                };
+                let line = head.lines().next().unwrap_or_default().to_string();
+                let (status, reply) = if line.starts_with("POST ") && line.contains("/e2e/messages")
+                {
+                    (202, r#"{"msgid":"m1"}"#)
+                } else {
+                    (404, "{}")
+                };
+                recorded.lock().expect("log").push((line, body));
+                let answer = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let _ = stream.write_all(answer.as_bytes());
+            });
+        }
+    });
+    (url, seen)
+}
+
+/// A state with a signed-in client against `base_url` and an E2E engine for
+/// `libera`, as the provisioning leaves it. The folder holds the engine files.
+fn key_request_state(base_url: &str) -> (WorkerState, tempfile::TempDir) {
+    use chacha20poly1305::aead::{Generate, Key};
+    use cordiale_core::e2e_engine::E2eEngine;
+    use cordiale_core::e2e_state::E2eStateStore;
+    use cordiale_core::e2e_store::{E2eHistoryStore, E2eKeyProvider, E2eStoreError};
+
+    struct FixedKey([u8; 32]);
+
+    impl E2eKeyProvider for FixedKey {
+        fn load_or_create_key(&self) -> Result<[u8; 32], E2eStoreError> {
+            Ok(self.0)
+        }
+    }
+
+    // A random key for each call; no key is written in the source.
+    fn fresh_key() -> FixedKey {
+        let key = Key::<chacha20poly1305::XChaCha20Poly1305>::generate();
+        FixedKey(<[u8; 32]>::try_from(key.as_slice()).expect("key length"))
+    }
+
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let mut store = E2eStateStore::open(dir.path().join("state.bin"), &fresh_key()).expect("state");
+    store
+        .set_account(&vodozemac::olm::Account::new())
+        .expect("account");
+    let history =
+        E2eHistoryStore::open(dir.path().join("history.bin"), &fresh_key()).expect("history");
+    let engine = E2eEngine::new("libera", store, history).expect("engine");
+
+    let mut state = WorkerState::new();
+    state.conn.client = Some(GrappaClient::new(base_url));
+    state.conn.token = Some("test-token".to_string());
+    state.conn.identifier = Some("alice".to_string());
+    state.e2e.engines.insert("libera".to_string(), engine);
+    state.windows.current_channel = Some(("libera".to_string(), "#chan".to_string()));
+    (state, dir)
+}
+
+fn listed_query(nick: &str) -> QueryWindow {
+    QueryWindow {
+        network: "libera".to_string(),
+        target_nick: nick.to_string(),
+        opened_at: "2026-09-21T10:00:00Z".to_string(),
+        dm_conversation_id: None,
+    }
+}
+
+/// The bodies of the requests that went to the E2E send door.
+fn e2e_send_bodies(seen: &RequestLog) -> Vec<Value> {
+    seen.lock()
+        .expect("log")
+        .iter()
+        .filter(|(line, _)| line.starts_with("POST ") && line.contains("/e2e/messages"))
+        .map(|(_, body)| serde_json::from_str(body).expect("json body"))
+        .collect()
+}
+
+/// No request went out as a clear message: the only POST is the E2E door.
+fn assert_no_clear_text(seen: &RequestLog) {
+    for (line, body) in seen.lock().expect("log").iter() {
+        if line.starts_with("POST ") {
+            assert!(line.contains("/e2e/messages"), "{line}");
+            assert!(!body.contains('\u{1F512}'), "{body}");
+        }
+    }
+}
+
+#[test]
+fn slash_query_of_a_new_dm_sends_one_key_request_after_the_snapshot() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server();
+    let (mut state, _dir) = key_request_state(&url);
+    let runtime = network_test_runtime();
+    runtime.block_on(run_slash_command(
+        &mut state,
+        &ui,
+        "libera".to_string(),
+        "#chan".to_string(),
+        SlashCommand::Query(Some("Peer".to_string())),
+        "/query".to_string(),
+    ));
+    // The query is not open yet: no request before the server lists it.
+    assert!(state.transcript.pending_query_focus.is_some());
+    assert!(e2e_send_bodies(&seen).is_empty());
+    // The snapshot lists the query, and the focus starts the request.
+    state.transcript.query_windows = vec![listed_query("Peer")];
+    runtime.block_on(focus_pending_query(&mut state, &ui));
+    assert!(state.windows.current_query);
+    let bodies = e2e_send_bodies(&seen);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["verb"], "keyreq");
+    assert_eq!(bodies[0]["target"], "Peer");
+    // Repeated snapshots and selections stay inside the pacing.
+    runtime.block_on(focus_pending_query(&mut state, &ui));
+    runtime.block_on(handle_select_query(
+        &mut state,
+        &ui,
+        "libera".to_string(),
+        "Peer".to_string(),
+    ));
+    runtime.block_on(handle_select_query(
+        &mut state,
+        &ui,
+        "libera".to_string(),
+        "Peer".to_string(),
+    ));
+    assert_eq!(e2e_send_bodies(&seen).len(), 1);
+    assert_no_clear_text(&seen);
+}
+
+#[test]
+fn slash_query_of_a_listed_dm_sends_one_key_request_at_once() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server();
+    let (mut state, _dir) = key_request_state(&url);
+    state.transcript.query_windows = vec![listed_query("Peer")];
+    let runtime = network_test_runtime();
+    for _ in 0..2 {
+        runtime.block_on(run_slash_command(
+            &mut state,
+            &ui,
+            "libera".to_string(),
+            "#chan".to_string(),
+            SlashCommand::Query(Some("Peer".to_string())),
+            "/query".to_string(),
+        ));
+    }
+    assert!(state.transcript.pending_query_focus.is_none());
+    let bodies = e2e_send_bodies(&seen);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["verb"], "keyreq");
+    assert_eq!(bodies[0]["target"], "Peer");
+    assert_no_clear_text(&seen);
+}
+
+#[test]
+fn slash_query_of_a_locked_name_sends_no_key_request() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server();
+    let (mut state, _dir) = key_request_state(&url);
+    state.transcript.query_windows = vec![listed_query("Peer")];
+    network_test_runtime().block_on(run_slash_command(
+        &mut state,
+        &ui,
+        "libera".to_string(),
+        "#chan".to_string(),
+        SlashCommand::Query(Some("\u{1F512}Peer".to_string())),
+        "/query".to_string(),
+    ));
+    assert!(state.transcript.pending_query_focus.is_none());
+    assert!(seen.lock().expect("log").is_empty());
+}
+
+#[test]
+fn member_query_action_sends_one_key_request_after_the_snapshot() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server();
+    let (mut state, _dir) = key_request_state(&url);
+    let runtime = network_test_runtime();
+    runtime.block_on(send_member_query(&mut state, &ui, "Peer".to_string()));
+    assert!(e2e_send_bodies(&seen).is_empty());
+    state.transcript.query_windows = vec![listed_query("Peer")];
+    runtime.block_on(focus_pending_query(&mut state, &ui));
+    runtime.block_on(focus_pending_query(&mut state, &ui));
+    let bodies = e2e_send_bodies(&seen);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["verb"], "keyreq");
+    assert_eq!(bodies[0]["target"], "Peer");
+    assert_no_clear_text(&seen);
+}
+
+#[test]
+fn selecting_a_listed_dm_sends_one_key_request_for_each_peer() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server();
+    let (mut state, _dir) = key_request_state(&url);
+    state.transcript.query_windows = vec![listed_query("Peer"), listed_query("Other")];
+    let runtime = network_test_runtime();
+    for nick in ["Peer", "Other", "Peer", "Other"] {
+        runtime.block_on(handle_select_query(
+            &mut state,
+            &ui,
+            "libera".to_string(),
+            nick.to_string(),
+        ));
+    }
+    let mut targets: Vec<String> = e2e_send_bodies(&seen)
+        .iter()
+        .map(|body| body["target"].as_str().unwrap_or_default().to_string())
+        .collect();
+    targets.sort();
+    assert_eq!(targets, ["Other", "Peer"]);
+    assert_no_clear_text(&seen);
 }
 
 #[test]
