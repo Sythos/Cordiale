@@ -47,7 +47,7 @@ pub(crate) const E2E_TICK: std::time::Duration = std::time::Duration::from_secs(
 /// The engines of the session and the locked entries of the sidebar.
 #[derive(Default)]
 pub(crate) struct E2eRuntime {
-    engines: HashMap<String, E2eEngine>,
+    pub(crate) engines: HashMap<String, E2eEngine>,
     /// The sealed history of a network whose identity is gone (after a
     /// reset and a restart). It is read only: no engine work uses it.
     histories: HashMap<String, E2eHistoryStore>,
