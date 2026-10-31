@@ -209,6 +209,8 @@ enum WorkerCommand {
         network: String,
         nick: String,
     },
+    /// A SAS step of the open locked query: show, confirm, reject, cancel.
+    E2eSas(SasStep),
     DismissKickedChannel {
         network: String,
         channel: String,
@@ -1841,6 +1843,9 @@ async fn run_worker(
                         if !close_locked_query(&mut state, &ui, &network, &nick) {
                             handle_close_query(&mut state, &network, &nick);
                         }
+                    }
+                    Some(WorkerCommand::E2eSas(step)) => {
+                        handle_e2e_sas(&mut state, &ui, step);
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
                         handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;

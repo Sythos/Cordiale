@@ -78,6 +78,44 @@ pub(crate) struct E2eRuntime {
     /// open engine is not proof: a run that failed after the Olm account was
     /// saved still opens one, so the next connect provisions again.
     provisioned: HashSet<String>,
+    /// The one open SAS check, if any. It holds the master key that the
+    /// shown code was made from. It is not saved.
+    sas_check: Option<SasCheck>,
+}
+
+/// An open SAS check of a locked entry: the peer and the exact master key
+/// that the user compares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SasCheck {
+    network: String,
+    nick: String,
+    master: String,
+}
+
+/// A step of the SAS check, chosen by the user in the banner of the locked
+/// entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SasStep {
+    /// Show the code of the stored master key.
+    Start,
+    /// The codes match: mark the master as verified.
+    Confirm,
+    /// The codes differ: the peer stays unverified.
+    Reject,
+    /// Close the check without a result.
+    Cancel,
+}
+
+impl SasStep {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "start" => Some(SasStep::Start),
+            "confirm" => Some(SasStep::Confirm),
+            "reject" => Some(SasStep::Reject),
+            "cancel" => Some(SasStep::Cancel),
+            _ => None,
+        }
+    }
 }
 
 /// An open pairing and the network whose identity it changes.
@@ -1222,6 +1260,72 @@ fn refresh_locked_view(
     }
 }
 
+fn push_sas_code(ui: &slint::Weak<AppWindow>, code: String) {
+    let _ = ui.upgrade_in_event_loop(move |ui| ui.set_e2e_sas_code(code.into()));
+}
+
+/// Runs one SAS step for the open locked entry. Only a confirm for the
+/// stored master key the code was made from marks the peer as verified. A
+/// reject, a cancel or a changed master leaves the peer unverified.
+pub(crate) fn handle_e2e_sas(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, step: SasStep) {
+    let Some((network, nick)) = open_locked_window(state) else {
+        return;
+    };
+    let alarm = state
+        .e2e
+        .trust_alarm
+        .contains(&(network.clone(), nick.clone()));
+    let kind = match step {
+        SasStep::Start => {
+            let shown = state
+                .e2e
+                .engines
+                .get(&network)
+                .filter(|_| !alarm)
+                .and_then(|engine| Some((engine.sas_master(&nick)?, engine.sas_code(&nick)?)));
+            match shown {
+                Some((master, code)) => {
+                    state.e2e.sas_check = Some(SasCheck {
+                        network,
+                        nick,
+                        master,
+                    });
+                    push_sas_code(ui, code);
+                    return;
+                }
+                None => "e2e-sas-unavailable",
+            }
+        }
+        SasStep::Confirm | SasStep::Reject | SasStep::Cancel => {
+            let check = state
+                .e2e
+                .sas_check
+                .take()
+                .filter(|check| check.network == network && check.nick == nick);
+            push_sas_code(ui, String::new());
+            match (step, check) {
+                (SasStep::Cancel, _) => return,
+                (SasStep::Reject, _) => "e2e-sas-rejected",
+                (_, None) => "e2e-sas-unavailable",
+                (_, Some(_)) if alarm => "e2e-sas-failed",
+                (_, Some(check)) => {
+                    let saved = state
+                        .e2e
+                        .engines
+                        .get_mut(&network)
+                        .map(|engine| engine.confirm_sas(&nick, &check.master));
+                    match saved {
+                        Some(Ok(())) => "e2e-sas-verified",
+                        _ => "e2e-sas-failed",
+                    }
+                }
+            }
+        }
+    };
+    set_e2e_status(ui, kind);
+    push_open_locked_state(state, ui);
+}
+
 /// Pushes the state banner of the open locked entry.
 fn push_open_locked_state(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let Some((network, nick)) = open_locked_window(state) else {
@@ -1343,6 +1447,9 @@ pub(crate) fn handle_select_locked_query(
     let key = (network.clone(), label.to_string());
     state.windows.current_query = true;
     state.windows.current_query_ready = true;
+    // A SAS check belongs to the window that opened it.
+    state.e2e.sas_check = None;
+    push_sas_code(ui, String::new());
     open_window(state, &key);
     mark_locked_read(state, &network, &nick);
     load_locked_rows(state, &network, &nick);
@@ -1598,5 +1705,39 @@ mod tests {
         let mut state = WorkerState::new();
         state.e2e.add_locked("net", "ada");
         assert!(locked_unread_counts(&state).is_empty());
+    }
+
+    #[test]
+    fn the_sas_steps_come_from_the_banner_names_only() {
+        assert_eq!(SasStep::parse("start"), Some(SasStep::Start));
+        assert_eq!(SasStep::parse("confirm"), Some(SasStep::Confirm));
+        assert_eq!(SasStep::parse("reject"), Some(SasStep::Reject));
+        assert_eq!(SasStep::parse("cancel"), Some(SasStep::Cancel));
+        assert_eq!(SasStep::parse("Confirm"), None);
+        assert_eq!(SasStep::parse(""), None);
+    }
+
+    #[test]
+    fn an_unverified_entry_stays_in_the_sas_state_without_a_confirm() {
+        // Without a confirm the peer stays unverified: the banner asks for
+        // the SAS check and never shows the active state.
+        let ready = ChatSignals {
+            engine: true,
+            ready: true,
+            sas_verified: false,
+            ..ChatSignals::default()
+        };
+        assert_eq!(locked_chat_state(&ready), ChatState::SasPending);
+        let verified = ChatSignals {
+            sas_verified: true,
+            ..ready
+        };
+        assert_eq!(locked_chat_state(&verified), ChatState::Active);
+        // A trust alarm wins over an old verification.
+        let alarm = ChatSignals {
+            trust_alarm: true,
+            ..verified
+        };
+        assert_eq!(locked_chat_state(&alarm), ChatState::TrustAlarm);
     }
 }
