@@ -1051,8 +1051,49 @@ impl E2eEngine {
     pub fn replace_peer_master(&mut self, nick: &str, master: &str) -> Result<(), EngineError> {
         let mut trust = self.state.trust();
         trust.replace_master_by_user(&self.network, nick, master)?;
+        // The cache goes first and the saved sessions next, so an error later
+        // never leaves a device of the old master ready.
+        self.forget_peer_devices(nick);
+        let cm = self.casemapping;
+        let folded = cm.fold(nick);
+        self.state
+            .remove_peer_sessions(&self.network, |session_nick| {
+                cm.fold(session_nick) == folded
+            })?;
         self.state.set_trust(&trust)?;
         Ok(())
+    }
+
+    /// Drops the cached devices and the one-time keys of `nick`, and stops
+    /// the pending sends that name one of these devices. A queued text with
+    /// no named device stays and waits for new devices. Other peers, the own
+    /// account and the history stay.
+    fn forget_peer_devices(&mut self, nick: &str) {
+        let cm = self.casemapping;
+        let folded = cm.fold(nick);
+        let old: Vec<String> = self
+            .peers
+            .iter()
+            .filter(|(_, entry)| cm.fold(&entry.nick) == folded)
+            .map(|(did, _)| did.clone())
+            .collect();
+        for did in &old {
+            self.peers.remove(did);
+        }
+        let stopped: Vec<SendKey> = self
+            .pending
+            .iter()
+            .filter(|(key, pending)| {
+                cm.fold(&key.target) == folded
+                    && pending.did.as_ref().is_some_and(|did| old.contains(did))
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stopped {
+            self.pending.remove(&key);
+            self.queue.remove(&key);
+            self.fail_send(&key, DropReason::SendFailed);
+        }
     }
 
     pub fn history(&self) -> &E2eHistoryStore {
@@ -6975,6 +7016,58 @@ mod tests {
         assert_ne!(alice.sas_code("bob"), old_code);
         drop(alice);
         let alice = alice_id.engine();
+        assert!(!alice.trust().is_sas_verified(NET, "bob"));
+    }
+
+    #[test]
+    fn a_master_change_drops_the_devices_of_the_old_master_only() {
+        let alice_id = Ident::new("alice");
+        let bob_id = Ident::new("bob");
+        let carol_id = Ident::new("carol");
+        let mut alice = alice_id.engine();
+        alice.accept_keys("bob", &bob_id.keys()).expect("bob");
+        alice.accept_keys("carol", &carol_id.keys()).expect("carol");
+        assert!(alice.is_ready("bob"));
+        assert!(!alice.pick_devices("bob").is_empty());
+        let bob_did = alice.pick_devices("bob")[0].device.did().to_string();
+        let carol_count = alice.pick_devices("carol").len();
+        // A saved session of the old device must go too.
+        let mut remote = Account::new();
+        remote.generate_one_time_keys(1);
+        let remote_key = *remote.one_time_keys().values().next().expect("key");
+        let identity = alice.state.olm_identity().expect("state").expect("account");
+        let session = identity
+            .create_outbound_session(
+                SessionConfig::version_1(),
+                Curve25519PublicKey::from_base64(&curve(&remote)).expect("curve"),
+                remote_key,
+            )
+            .expect("session");
+        alice
+            .state
+            .set_peer_session(NET, "bob", &bob_did, &session)
+            .expect("session");
+        let other_id = Ident::new("other");
+        alice
+            .replace_peer_master("bob", &ed(&other_id.master))
+            .expect("replace");
+        assert!(!alice.is_ready("bob"));
+        assert!(alice.pick_devices("bob").is_empty());
+        assert!(!alice.ready_peers().contains(&"bob".to_string()));
+        assert!(alice
+            .state
+            .peer_session(NET, "bob", &bob_did)
+            .expect("read")
+            .is_none());
+        // Another peer stays as it was.
+        assert!(alice.is_ready("carol"));
+        assert_eq!(alice.pick_devices("carol").len(), carol_count);
+        assert!(!alice.trust().is_sas_verified(NET, "bob"));
+        // Old keys stay refused. Fresh keys of the new master are accepted.
+        assert!(alice.accept_keys("bob", &bob_id.keys()).is_err());
+        assert!(!alice.is_ready("bob"));
+        alice.accept_keys("bob", &other_id.keys()).expect("fresh");
+        assert!(alice.is_ready("bob"));
         assert!(!alice.trust().is_sas_verified(NET, "bob"));
     }
 }
