@@ -658,17 +658,62 @@ pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<A
     let ui_for_loading = ui.clone();
     let _ = ui_for_loading.upgrade_in_event_loop(|ui| ui.set_admin_loading(true));
 
-    let overview = client.fetch_admin_overview(token).await.ok();
-    let sessions = client.fetch_admin_sessions(token).await.unwrap_or_default();
-    let users = client.fetch_admin_users(token).await.unwrap_or_default();
-    let networks = client.fetch_admin_networks(token).await.unwrap_or_default();
-    let visitors = client.fetch_admin_visitors(token).await.unwrap_or_default();
-    let credentials = client
-        .fetch_admin_credentials(token)
-        .await
-        .unwrap_or_default();
-    let vhost_view = client.fetch_admin_vhosts(token).await.unwrap_or_default();
-    let (vhost_rows, grant_rows) = admin_vhost_rows(&vhost_view);
+    // A failed request keeps the last good data of its section: only a
+    // successful answer (an empty list included) replaces the models.
+    let mut failed: Vec<&'static str> = Vec::new();
+    let overview = settle_admin_fetch(
+        "overview",
+        client.fetch_admin_overview(token).await,
+        &mut failed,
+    );
+    let sessions = settle_admin_fetch(
+        "sessions",
+        client.fetch_admin_sessions(token).await,
+        &mut failed,
+    );
+    let users = settle_admin_fetch("users", client.fetch_admin_users(token).await, &mut failed);
+    let networks = settle_admin_fetch(
+        "networks",
+        client.fetch_admin_networks(token).await,
+        &mut failed,
+    );
+    let visitors = settle_admin_fetch(
+        "visitors",
+        client.fetch_admin_visitors(token).await,
+        &mut failed,
+    );
+    let credentials = settle_admin_fetch(
+        "credentials",
+        client.fetch_admin_credentials(token).await,
+        &mut failed,
+    );
+    let vhost_view = settle_admin_fetch(
+        "virtual hosts",
+        client.fetch_admin_vhosts(token).await,
+        &mut failed,
+    );
+    let session_log = settle_admin_fetch(
+        "session log",
+        client.fetch_admin_session_log(token, 50).await,
+        &mut failed,
+    );
+    let (sessions_ok, users_ok, networks_ok, visitors_ok, credentials_ok, vhosts_ok, log_ok) = (
+        sessions.is_some(),
+        users.is_some(),
+        networks.is_some(),
+        visitors.is_some(),
+        credentials.is_some(),
+        vhost_view.is_some(),
+        session_log.is_some(),
+    );
+    let sessions = sessions.unwrap_or_default();
+    let users = users.unwrap_or_default();
+    let networks = networks.unwrap_or_default();
+    let visitors = visitors.unwrap_or_default();
+    let credentials = credentials.unwrap_or_default();
+    let session_log = session_log.unwrap_or_default();
+    let refresh_error = admin_refresh_error_text(&failed);
+    let (vhost_rows, grant_rows) = admin_vhost_rows(&vhost_view.unwrap_or_default());
     let credential_rows: Vec<AdminCredentialRow> = credentials
         .iter()
         .map(|entry| {
@@ -694,11 +739,6 @@ pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<A
             }
         })
         .collect();
-    let session_log = client
-        .fetch_admin_session_log(token, 50)
-        .await
-        .unwrap_or_default();
-
     let overview_text = overview.as_ref().map(admin_overview_text);
 
     let session_rows: Vec<AdminSessionRow> = sessions
@@ -775,46 +815,88 @@ pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<A
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_admin_loading(false);
-        ui.set_admin_overview_text(overview_text.unwrap_or_default().into());
-        ui.set_admin_sessions(Rc::new(slint::VecModel::from(session_rows)).into());
-        let user_names: Vec<slint::SharedString> =
-            user_rows.iter().map(|row| row.label.clone()).collect();
-        let network_names: Vec<slint::SharedString> =
-            network_rows.iter().map(|row| row.slug.clone()).collect();
-        ui.set_admin_user_names(Rc::new(slint::VecModel::from(user_names)).into());
-        ui.set_admin_network_names(Rc::new(slint::VecModel::from(network_names)).into());
-        ui.set_admin_users(Rc::new(slint::VecModel::from(user_rows)).into());
-        ui.set_admin_networks(Rc::new(slint::VecModel::from(network_rows)).into());
-        ui.set_admin_credentials(Rc::new(slint::VecModel::from(credential_rows)).into());
-        let vhost_names: Vec<slint::SharedString> = vhost_rows
-            .iter()
-            .map(|(label, _, _, _)| label.clone().into())
-            .collect();
-        ui.set_admin_vhost_names(Rc::new(slint::VecModel::from(vhost_names)).into());
-        let vhost_rows: Vec<AdminVhostRow> = vhost_rows
-            .into_iter()
-            .map(
-                |(label, vhost_id, in_pool, generally_available)| AdminVhostRow {
+        ui.set_admin_refresh_error(refresh_error.into());
+        if let Some(text) = overview_text {
+            ui.set_admin_overview_text(text.into());
+        }
+        if sessions_ok {
+            ui.set_admin_sessions(Rc::new(slint::VecModel::from(session_rows)).into());
+        }
+        if users_ok {
+            let user_names: Vec<slint::SharedString> =
+                user_rows.iter().map(|row| row.label.clone()).collect();
+            ui.set_admin_user_names(Rc::new(slint::VecModel::from(user_names)).into());
+            ui.set_admin_users(Rc::new(slint::VecModel::from(user_rows)).into());
+        }
+        if networks_ok {
+            let network_names: Vec<slint::SharedString> =
+                network_rows.iter().map(|row| row.slug.clone()).collect();
+            ui.set_admin_network_names(Rc::new(slint::VecModel::from(network_names)).into());
+            ui.set_admin_networks(Rc::new(slint::VecModel::from(network_rows)).into());
+        }
+        if credentials_ok {
+            ui.set_admin_credentials(Rc::new(slint::VecModel::from(credential_rows)).into());
+        }
+        if vhosts_ok {
+            let vhost_names: Vec<slint::SharedString> = vhost_rows
+                .iter()
+                .map(|(label, _, _, _)| label.clone().into())
+                .collect();
+            ui.set_admin_vhost_names(Rc::new(slint::VecModel::from(vhost_names)).into());
+            let vhost_rows: Vec<AdminVhostRow> = vhost_rows
+                .into_iter()
+                .map(
+                    |(label, vhost_id, in_pool, generally_available)| AdminVhostRow {
+                        label: label.into(),
+                        vhost_id: vhost_id.into(),
+                        in_pool,
+                        generally_available,
+                    },
+                )
+                .collect();
+            ui.set_admin_vhosts(Rc::new(slint::VecModel::from(vhost_rows)).into());
+            let grant_rows: Vec<AdminGrantRow> = grant_rows
+                .into_iter()
+                .map(|(label, grant_id)| AdminGrantRow {
                     label: label.into(),
-                    vhost_id: vhost_id.into(),
-                    in_pool,
-                    generally_available,
-                },
-            )
-            .collect();
-        ui.set_admin_vhosts(Rc::new(slint::VecModel::from(vhost_rows)).into());
-        let grant_rows: Vec<AdminGrantRow> = grant_rows
-            .into_iter()
-            .map(|(label, grant_id)| AdminGrantRow {
-                label: label.into(),
-                grant_id: grant_id.into(),
-            })
-            .collect();
-        ui.set_admin_grants(Rc::new(slint::VecModel::from(grant_rows)).into());
-        ui.set_admin_visitors(Rc::new(slint::VecModel::from(visitor_rows)).into());
-        ui.set_admin_visitor_sessions(Rc::new(slint::VecModel::from(visitor_session_rows)).into());
-        ui.set_admin_session_log(Rc::new(slint::VecModel::from(session_log_lines)).into());
+                    grant_id: grant_id.into(),
+                })
+                .collect();
+            ui.set_admin_grants(Rc::new(slint::VecModel::from(grant_rows)).into());
+        }
+        if visitors_ok {
+            ui.set_admin_visitors(Rc::new(slint::VecModel::from(visitor_rows)).into());
+            ui.set_admin_visitor_sessions(
+                Rc::new(slint::VecModel::from(visitor_session_rows)).into(),
+            );
+        }
+        if log_ok {
+            ui.set_admin_session_log(Rc::new(slint::VecModel::from(session_log_lines)).into());
+        }
     });
+}
+
+/// Keeps a failed request apart from an empty answer: `None` means the
+/// request failed and the section name goes into `failed`.
+pub(crate) fn settle_admin_fetch<T, E: std::fmt::Debug>(
+    section: &'static str,
+    result: Result<T, E>,
+    failed: &mut Vec<&'static str>,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(err) => {
+            persistence::log_line(&format!("admin {section} refresh failed: {err:?}"));
+            failed.push(section);
+            None
+        }
+    }
+}
+
+/// Names of the sections whose refresh failed; empty when every request
+/// worked. The window wraps it in a translated sentence.
+pub(crate) fn admin_refresh_error_text(failed: &[&str]) -> String {
+    failed.join(", ")
 }
 
 /// Loads Admin > Uploads. `error` is shown instead of the load's own
