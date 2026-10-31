@@ -314,6 +314,31 @@ impl From<reqwest::Error> for LoginError {
     }
 }
 
+/// True when `url` parses and holds no user name, password, query or
+/// fragment. Only such an address is safe to save, log and put in a link.
+pub fn server_url_is_safe(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| {
+        url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
+}
+
+/// `url` without user information, query and fragment, and without a
+/// trailing slash. An address that does not parse keeps its text, except
+/// for the trailing slash.
+pub fn strip_url_secrets(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return url.trim_end_matches('/').to_string();
+    };
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.as_str().trim_end_matches('/').to_string()
+}
+
 /// Longest time to establish a connection to the server.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest time for a whole request, so a server that stops answering
@@ -3978,6 +4003,33 @@ mod tests {
         query_param,
     };
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn a_server_url_is_safe_only_without_user_information_query_or_fragment() {
+        let secret = format!("pw{}", 6 * 7);
+        assert!(server_url_is_safe("https://irc.example:8443/grappa"));
+        assert!(!server_url_is_safe("https://alice@irc.example"));
+        assert!(!server_url_is_safe(&format!(
+            "https://:{secret}@irc.example"
+        )));
+        assert!(!server_url_is_safe(&format!(
+            "https://alice:{secret}@irc.example"
+        )));
+        assert!(!server_url_is_safe("https://irc.example?x=1"));
+        assert!(!server_url_is_safe("https://irc.example/#frag"));
+        assert!(!server_url_is_safe("not a url"));
+    }
+
+    #[test]
+    fn strip_url_secrets_keeps_only_scheme_host_port_and_path() {
+        let secret = format!("pw{}", 6 * 7);
+        let url = format!("https://alice:{secret}@irc.example:8443/grappa/?x=1#frag");
+        assert_eq!(strip_url_secrets(&url), "https://irc.example:8443/grappa");
+        assert_eq!(
+            strip_url_secrets("https://irc.example/"),
+            "https://irc.example"
+        );
+    }
 
     #[test]
     fn display_destination_preserves_the_endpoint_without_url_secrets() {

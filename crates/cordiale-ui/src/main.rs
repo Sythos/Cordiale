@@ -70,7 +70,9 @@ use cordiale_core::bootstrap::{
     bootstrap_with_share_token, bootstrap_with_totp, BootstrapError, BootstrapOutcome,
 };
 use cordiale_core::cleartext;
-use cordiale_core::client::{GrappaClient, GrappaClientError, LoginError};
+use cordiale_core::client::{
+    server_url_is_safe, strip_url_secrets, GrappaClient, GrappaClientError, LoginError,
+};
 use cordiale_core::credentials::{
     resolve_credential_store, CredentialStore, KeyringCredentialStore,
 };
@@ -8342,7 +8344,19 @@ fn own_nick_listener_topic(user: &str, network: &str, nick: &str) -> String {
 /// server URL the user typed, and defaults a missing scheme to
 /// `https://` (typing just `"irc.example.com"` is easy to do and would
 /// otherwise make `reqwest`/`Url::parse` reject every request outright).
+/// User information, query and fragment are dropped, so the result is safe
+/// to save, log and put in a link; `checked_server_url` refuses them first.
 fn normalize_server_url(url: &str) -> String {
+    let with_scheme = typed_server_url(url);
+    if server_url_is_safe(&with_scheme) {
+        with_scheme
+    } else {
+        strip_url_secrets(&with_scheme)
+    }
+}
+
+/// What the user typed, trimmed, with a scheme and without trailing slashes.
+fn typed_server_url(url: &str) -> String {
     let trimmed = url.trim().trim_end_matches('/');
     let with_scheme = if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
         trimmed.to_string()
@@ -8350,6 +8364,21 @@ fn normalize_server_url(url: &str) -> String {
         format!("https://{trimmed}")
     };
     with_scheme.trim_end_matches('/').to_string()
+}
+
+/// The normalized server URL a sign-in may use. An address that does not
+/// parse, or that holds user information, a query or a fragment, is
+/// refused: the status line says why and nothing is saved, logged or sent.
+fn checked_server_url(ui: &slint::Weak<AppWindow>, url: &str) -> Option<String> {
+    if server_url_is_safe(&typed_server_url(url)) {
+        return Some(normalize_server_url(url));
+    }
+    if let Some(ui) = ui.upgrade() {
+        ui.set_connecting(false);
+        ui.set_status_kind("server-url-unsafe".into());
+        ui.set_status_message("".into());
+    }
+    None
 }
 
 /// Turns an `https://`/`http://` base URL into the matching `wss://`/`ws://`
@@ -11863,6 +11892,7 @@ fn load_remembered_server_url() -> String {
             file.selected_server_base_url
                 .or_else(|| file.servers.first().map(|server| server.base_url.clone()))
         })
+        .map(|url| normalize_server_url(&url))
         .unwrap_or_else(|| DEFAULT_SERVER_URL.to_string())
 }
 
@@ -11870,7 +11900,7 @@ fn load_remembered_server_url() -> String {
 /// connection attempt succeeds — so it's pre-filled again next launch.
 fn remember_server_url(server_url: &str) {
     let mut file = persistence::load_servers_file().unwrap_or_default();
-    file.selected_server_base_url = Some(server_url.to_string());
+    file.selected_server_base_url = Some(normalize_server_url(server_url));
     let _ = persistence::save_servers_file(&file);
 }
 
