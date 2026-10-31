@@ -5785,10 +5785,7 @@ fn one_shot_server(status: u16) -> String {
         };
         let mut data = Vec::new();
         let mut chunk = [0u8; 1024];
-        loop {
-            let Ok(read) = stream.read(&mut chunk) else {
-                break;
-            };
+        while let Ok(read) = stream.read(&mut chunk) {
             if read == 0 {
                 break;
             }
