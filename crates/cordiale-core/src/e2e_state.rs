@@ -349,6 +349,15 @@ impl E2eStateStore {
         Ok(Some(Account::from_pickle(pickle)))
     }
 
+    /// The public Ed25519 master key as base64 text, or `None` when the
+    /// device holds no master key. It reads the public half only and makes
+    /// nothing.
+    pub fn master_public_key(&self) -> Result<Option<String>, E2eStoreError> {
+        Ok(self
+            .master_key()?
+            .map(|master| master.identity_keys().ed25519.to_base64()))
+    }
+
     /// Saves the master key as an encrypted pickle.
     pub fn set_master_key(&mut self, master: &Account) -> Result<(), E2eStoreError> {
         let text = master.pickle().encrypt(&self.key);
@@ -1170,6 +1179,22 @@ mod tests {
         }
         assert!(trust.is_revoked("net", "alice", dropped, None));
         trust
+    }
+
+    #[test]
+    fn master_public_key_is_the_public_half_and_makes_nothing() {
+        let dir = scratch_dir("master-public");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let master = Account::new();
+        let mut store = E2eStateStore::open(path, &provider).expect("open");
+        assert_eq!(store.master_public_key().expect("read"), None);
+        assert!(store.master_key().expect("master").is_none());
+        store.set_master_key(&master).expect("master");
+        assert_eq!(
+            store.master_public_key().expect("read"),
+            Some(ed25519_of(&master))
+        );
     }
 
     #[test]
