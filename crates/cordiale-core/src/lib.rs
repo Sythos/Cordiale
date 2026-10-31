@@ -73,6 +73,7 @@ pub mod e2e_protocol;
 pub mod e2e_provision;
 pub mod e2e_refusal;
 pub mod e2e_revoke;
+pub mod e2e_sas;
 pub mod e2e_selfcopy;
 pub mod e2e_state;
 pub mod e2e_store;

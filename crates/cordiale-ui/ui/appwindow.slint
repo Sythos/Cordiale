@@ -1364,6 +1364,11 @@ export component AppWindow inherits Window {
     // The encryption state of the open query as a key (`e2e-chat-*`); an
     // empty value hides the banner. It is not a send-button or message mark.
     in property <string> current-query-e2e-state: "";
+    // The SAS code of the open locked query while a check is open; empty
+    // when no check is open. A verified contact can show it again.
+    in property <string> e2e-sas-code: "";
+    // The SAS step of the user: "start", "confirm", "reject" or "cancel".
+    callback e2e-sas-requested(string);
     // The pairing QR code of `/e2e pair`, drawn from the pairing link URL.
     in property <image> e2e-pair-qr;
     in property <string> e2e-pair-qr-code: "";
@@ -2600,6 +2605,14 @@ export component AppWindow inherits Window {
             return @tr("The message was not encrypted or not sent. Nothing was sent as clear text.");
         } else if status-kind == "e2e-text-only" {
             return @tr("An encrypted chat takes plain text only. Nothing was sent.");
+        } else if status-kind == "e2e-sas-verified" {
+            return @tr("The SAS codes match. This contact is verified.");
+        } else if status-kind == "e2e-sas-rejected" {
+            return @tr("The SAS codes do not match. This contact stays unverified. Do not trust this chat.");
+        } else if status-kind == "e2e-sas-unavailable" {
+            return @tr("The SAS code is not available now.");
+        } else if status-kind == "e2e-sas-failed" {
+            return @tr("The master key of this contact changed. The check was not saved.");
         } else if status-kind == "e2e-pair-link" {
             return @tr("Pairing link: {}. On the new device, type /e2e join and this link.", status-command-hint);
         } else if status-kind == "e2e-pair-waiting" {
@@ -3955,13 +3968,43 @@ export component AppWindow inherits Window {
                 background: theme == "dark" ? #1f2f3a : #e3f1fb;
                 border-width: 1px;
                 border-color: theme == "dark" ? #3d7ea6 : #2b7bb9;
-                HorizontalBox {
-                    Text {
-                        text: e2e-chat-state-text();
-                        wrap: word-wrap;
-                        horizontal-stretch: 1;
-                        accessible-role: AccessibleRole.text;
-                        accessible-live-region: AccessibleLiveness.polite;
+                VerticalBox {
+                    spacing: 6px;
+                    HorizontalBox {
+                        Text {
+                            text: e2e-chat-state-text();
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            accessible-role: AccessibleRole.text;
+                            accessible-live-region: AccessibleLiveness.polite;
+                        }
+                        if (current-query-e2e-state == "e2e-chat-sas" || current-query-e2e-state == "e2e-chat-active") && e2e-sas-code == "" : CompactButton {
+                            text: @tr("Show SAS code");
+                            clicked => { e2e-sas-requested("start"); }
+                        }
+                    }
+                    if (current-query-e2e-state == "e2e-chat-sas" || current-query-e2e-state == "e2e-chat-active") && e2e-sas-code != "" : HorizontalBox {
+                        spacing: 8px;
+                        Text {
+                            text: @tr("SAS code: {}", e2e-sas-code);
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                            accessible-role: AccessibleRole.text;
+                        }
+                        // A verified contact only closes the code: the
+                        // verification stays.
+                        if current-query-e2e-state == "e2e-chat-sas" : CompactButton {
+                            text: @tr("They match");
+                            clicked => { e2e-sas-requested("confirm"); }
+                        }
+                        if current-query-e2e-state == "e2e-chat-sas" : CompactButton {
+                            text: @tr("They do not match");
+                            clicked => { e2e-sas-requested("reject"); }
+                        }
+                        CompactButton {
+                            text: @tr("Cancel");
+                            clicked => { e2e-sas-requested("cancel"); }
+                        }
                     }
                 }
             }
