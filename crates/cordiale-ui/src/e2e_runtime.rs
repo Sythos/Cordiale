@@ -737,6 +737,61 @@ fn show_manage_kind(
     });
 }
 
+/// What Settings > Admin > E2E Identity shows for one network: the state
+/// (`key` or `none`), the network, the account and the public master key.
+/// The key is empty unless the state is `key`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IdentityPanel {
+    pub state: &'static str,
+    pub network: String,
+    pub account: String,
+    pub key: String,
+}
+
+/// Builds the panel from the public master key of `network`. A missing key
+/// gives the empty state.
+pub(crate) fn identity_panel(network: &str, account: &str, key: Option<String>) -> IdentityPanel {
+    IdentityPanel {
+        state: if key.is_some() { "key" } else { "none" },
+        network: network.to_string(),
+        account: account.to_string(),
+        key: key.unwrap_or_default(),
+    }
+}
+
+/// Fills the E2E Identity page for `network`. It reads the public master key
+/// of the open engine and nothing else. It makes no key, no file and no log
+/// line with the key.
+pub(crate) fn show_e2e_identity(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+) {
+    let account = state.conn.identifier.clone().unwrap_or_default();
+    let key = if ensure_engine(state, &network) {
+        state.e2e.engines.get_mut(&network).and_then(|engine| {
+            match engine.state_mut().master_public_key() {
+                Ok(key) => key,
+                Err(error) => {
+                    persistence::log_line(&format!(
+                        "e2e master key not read for {network}: {error:?}"
+                    ));
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+    let panel = identity_panel(&network, &account, key);
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_admin_e2e_shown_network(panel.network.into());
+        ui.set_admin_e2e_account(panel.account.into());
+        ui.set_admin_e2e_key(panel.key.into());
+        ui.set_admin_e2e_state(panel.state.into());
+    });
+}
+
 /// Runs one `/e2e devices`, `revoke` or `reset` step on `network`. A reset
 /// runs only after the question and the answer `/e2e reset yes` for the same
 /// network.
