@@ -79,8 +79,8 @@ ctap-hid = ["dep:ctap-hid-fido2"]
 # Shrinking videos before an upload: links FFmpeg through the core crate.
 video-shrink = ["cordiale-core/video-shrink"]
 
-# Random keys for the E2E history tests and a device identity for the
-# key-request tests; the UI itself does no crypto.
+# Random keys for the E2E history tests. vodozemac makes the test accounts
+# of the key-request and SAS tests; the UI itself does no crypto.
 [dev-dependencies]
 chacha20poly1305 = "0.11"
 vodozemac = "0.11.1"

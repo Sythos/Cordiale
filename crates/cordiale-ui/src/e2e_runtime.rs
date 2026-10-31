@@ -1870,4 +1870,166 @@ mod tests {
         };
         assert_eq!(locked_chat_state(&alarm), ChatState::TrustAlarm);
     }
+
+    use chacha20poly1305::aead::{Generate, Key};
+    use chacha20poly1305::XChaCha20Poly1305;
+    use cordiale_core::e2e_state::E2eStateStore;
+    use cordiale_core::e2e_store::{E2eKeyProvider, E2eStoreError};
+    use vodozemac::olm::Account;
+
+    struct FixedKey([u8; 32]);
+
+    impl E2eKeyProvider for FixedKey {
+        fn load_or_create_key(&self) -> Result<[u8; 32], E2eStoreError> {
+            Ok(self.0)
+        }
+    }
+
+    /// A random key for one test; no key is written in the source.
+    fn fresh_key() -> FixedKey {
+        let key = Key::<XChaCha20Poly1305>::generate();
+        FixedKey(<[u8; 32]>::try_from(key.as_slice()).expect("key length"))
+    }
+
+    fn master_text(master: &Account) -> String {
+        master.identity_keys().ed25519.to_base64()
+    }
+
+    /// A worker state whose open window is the locked entry of `ada` on
+    /// `net`. The engine holds the own master and the stored master of the
+    /// peer, with no SAS check. Returns the master text of the peer.
+    fn sas_state(dir: &tempfile::TempDir) -> (WorkerState, String) {
+        let peer = master_text(&Account::new());
+        let mut store =
+            E2eStateStore::open(dir.path().join("state.bin"), &fresh_key()).expect("state");
+        store.set_account(&Account::new()).expect("account");
+        store.set_master_key(&Account::new()).expect("master");
+        let mut trust = store.trust();
+        trust.observe_master("net", "ada", &peer).expect("peer");
+        store.set_trust(&trust).expect("trust");
+        let history =
+            E2eHistoryStore::open(dir.path().join("history.bin"), &fresh_key()).expect("history");
+        let engine = E2eEngine::new("net", store, history).expect("engine");
+        let mut state = WorkerState::new();
+        state.e2e.engines.insert("net".to_string(), engine);
+        state.e2e.add_locked("net", "ada");
+        state.windows.current_query = true;
+        state.windows.current_channel =
+            Some(LocalQuery::new("net", QueryLane::Locked, "ada").key());
+        (state, peer)
+    }
+
+    fn sas_verified(state: &WorkerState) -> bool {
+        state.e2e.engines["net"]
+            .trust()
+            .is_sas_verified("net", "ada")
+    }
+
+    #[test]
+    fn a_reject_or_a_cancel_leaves_the_peer_unverified() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, peer) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        for step in [SasStep::Reject, SasStep::Cancel] {
+            handle_e2e_sas(&mut state, &ui, SasStep::Start);
+            // The check holds the exact master that the code was made from.
+            assert_eq!(
+                state.e2e.sas_check,
+                Some(SasCheck {
+                    network: "net".to_string(),
+                    nick: "ada".to_string(),
+                    master: peer.clone(),
+                })
+            );
+            handle_e2e_sas(&mut state, &ui, step);
+            assert_eq!(state.e2e.sas_check, None, "{step:?}");
+            assert!(!sas_verified(&state), "{step:?}");
+            assert_ne!(locked_entry_state(&state, "net", "ada"), ChatState::Active);
+            // A confirm after the close has no check to confirm.
+            handle_e2e_sas(&mut state, &ui, SasStep::Confirm);
+            assert!(!sas_verified(&state), "{step:?}");
+        }
+        // Only a confirm after a start marks the stored master.
+        handle_e2e_sas(&mut state, &ui, SasStep::Start);
+        handle_e2e_sas(&mut state, &ui, SasStep::Confirm);
+        assert!(sas_verified(&state));
+        assert_eq!(state.e2e.sas_check, None);
+    }
+
+    #[test]
+    fn a_confirm_does_not_carry_to_a_new_master() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, _) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        handle_e2e_sas(&mut state, &ui, SasStep::Start);
+        // The user replaces the master while the code is on screen.
+        let other = master_text(&Account::new());
+        state
+            .e2e
+            .engine_mut("net")
+            .expect("engine")
+            .replace_peer_master("ada", &other)
+            .expect("replace");
+        handle_e2e_sas(&mut state, &ui, SasStep::Confirm);
+        assert!(!sas_verified(&state));
+        // A trust alarm shows no code at all.
+        state
+            .e2e
+            .note_engine_error("net", "ada", &EngineError::Device(E2eError::MasterChanged));
+        handle_e2e_sas(&mut state, &ui, SasStep::Start);
+        assert_eq!(state.e2e.sas_check, None);
+    }
+
+    #[test]
+    fn a_sas_check_keeps_the_two_query_lanes_apart() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, _) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        let plain = LocalQuery::new("net", QueryLane::Plain, "ada");
+        let locked = LocalQuery::new("net", QueryLane::Locked, "ada");
+        let rendered = |text: &str, encrypted: bool| RenderedMessage {
+            timestamp: String::new(),
+            nick: Some("ada".to_string()),
+            text: text.to_string(),
+            italic: false,
+            message_id: None,
+            server_time: None,
+            presence_noise: false,
+            rename_to: None,
+            encrypted,
+        };
+        state
+            .transcript
+            .messages
+            .insert(plain.key(), vec![rendered("plain text", false)]);
+        state
+            .transcript
+            .messages
+            .insert(locked.key(), vec![rendered("locked text", true)]);
+        for step in [
+            SasStep::Start,
+            SasStep::Reject,
+            SasStep::Start,
+            SasStep::Cancel,
+            SasStep::Start,
+            SasStep::Confirm,
+        ] {
+            handle_e2e_sas(&mut state, &ui, step);
+            let plain_rows = &state.transcript.messages[&plain.key()];
+            assert_eq!(plain_rows.len(), 1, "{step:?}");
+            assert_eq!(plain_rows[0].text, "plain text");
+            assert!(!plain_rows[0].encrypted);
+            let locked_rows = &state.transcript.messages[&locked.key()];
+            assert_eq!(locked_rows.len(), 1, "{step:?}");
+            assert_eq!(locked_rows[0].text, "locked text");
+            assert!(locked_rows[0].encrypted);
+            // The open window and the entry list stay the locked ones.
+            assert_eq!(state.windows.current_channel, Some(locked.key()));
+            let windows = state.e2e.locked_windows();
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].target_nick, locked.window_name());
+            assert_ne!(windows[0].target_nick, plain.window_name());
+        }
+        assert!(sas_verified(&state));
+    }
 }
