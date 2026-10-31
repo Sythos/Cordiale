@@ -440,6 +440,7 @@ pub(crate) fn register_navigation_callbacks(
         let _ = tx_for_disconnect.send(WorkerCommand::Disconnect);
         if let Some(ui) = weak_for_disconnect.upgrade() {
             clear_share_link(&ui);
+            reset_identity_view(&ui, "");
             ui.set_screen("connect".into());
             ui.set_connection_destination("".into());
             ui.set_status_kind("".into());
@@ -1376,8 +1377,16 @@ pub(crate) fn register_admin_user_callbacks(
         let _ = tx_for_uploads.send(WorkerCommand::AdminUploadsRefresh);
     });
     let tx_for_e2e_identity = worker_tx.clone();
+    let weak_for_e2e_identity = ui.as_weak();
     ui.on_admin_e2e_identity_requested(move |network| {
-        let _ = tx_for_e2e_identity.send(WorkerCommand::AdminE2eIdentity(network.to_string()));
+        let session = weak_for_e2e_identity
+            .upgrade()
+            .map(|ui| ui.get_admin_e2e_session().to_string())
+            .unwrap_or_default();
+        let _ = tx_for_e2e_identity.send(WorkerCommand::AdminE2eIdentity(
+            network.to_string(),
+            session,
+        ));
     });
     let tx_for_upload_delete = worker_tx.clone();
     ui.on_admin_upload_delete(move |upload_id| {

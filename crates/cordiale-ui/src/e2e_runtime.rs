@@ -797,14 +797,54 @@ pub(crate) fn identity_panel(network: &str, account: &str, key: Option<String>) 
     }
 }
 
+/// The id of a signed-in session: the server and the account. A new account
+/// or a new server gives a new id. No session gives an empty id.
+pub(crate) fn identity_session_id(server: Option<&str>, account: Option<&str>) -> String {
+    match (server, account) {
+        (Some(server), Some(account)) => format!("{server}\u{0}{account}"),
+        _ => String::new(),
+    }
+}
+
+/// True when an identity request made in `requested` still belongs to the
+/// `current` session. An empty id never matches.
+pub(crate) fn identity_reply_applies(requested: &str, current: &str) -> bool {
+    !current.is_empty() && requested == current
+}
+
+/// The id of the session that the worker holds now.
+pub(crate) fn current_identity_session(state: &WorkerState) -> String {
+    identity_session_id(
+        state.conn.client.as_ref().map(|client| client.base_url()),
+        state.conn.identifier.as_deref(),
+    )
+}
+
+/// Sets the session id of the identity page and hides the old answer. Call it
+/// when a session starts and when it ends. An empty id means no session.
+pub(crate) fn reset_identity_view(ui: &AppWindow, session: &str) {
+    ui.set_admin_e2e_session(session.into());
+    ui.set_admin_e2e_network("".into());
+    ui.set_admin_e2e_shown_network("".into());
+    ui.set_admin_e2e_shown_session("".into());
+    ui.set_admin_e2e_account("".into());
+    ui.set_admin_e2e_key("".into());
+    ui.set_admin_e2e_state("".into());
+}
+
 /// Fills the E2E Identity page for `network`. It reads the public master key
 /// of the open engine and nothing else. It makes no key, no file and no log
-/// line with the key.
+/// line with the key. A request from an old session changes nothing.
 pub(crate) fn show_e2e_identity(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     network: String,
+    requested_session: String,
 ) {
+    let session = current_identity_session(state);
+    if !identity_reply_applies(&requested_session, &session) {
+        return;
+    }
     let account = state.conn.identifier.clone().unwrap_or_default();
     let key = if ensure_engine(state, &network) {
         state.e2e.engines.get_mut(&network).and_then(|engine| {
@@ -823,6 +863,11 @@ pub(crate) fn show_e2e_identity(
     };
     let panel = identity_panel(&network, &account, key);
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        // The window may have a newer session by now: drop a late answer.
+        if !identity_reply_applies(&session, ui.get_admin_e2e_session().as_str()) {
+            return;
+        }
+        ui.set_admin_e2e_shown_session(session.into());
         ui.set_admin_e2e_shown_network(panel.network.into());
         ui.set_admin_e2e_account(panel.account.into());
         ui.set_admin_e2e_key(panel.key.into());

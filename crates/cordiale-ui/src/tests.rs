@@ -11829,8 +11829,64 @@ fn each_network_has_its_own_identity_panel() {
 fn opening_the_identity_page_without_an_engine_makes_nothing() {
     let mut state = peer_link_state(&[]);
     let ui = slint::Weak::<AppWindow>::default();
-    show_e2e_identity(&mut state, &ui, "libera".to_string());
+    show_e2e_identity(&mut state, &ui, "libera".to_string(), String::new());
     // No client and no account: the page has no engine to read and the call
     // opens no engine, so no key or file is made.
     assert!(state.e2e.engine_mut("libera").is_none());
+}
+
+#[test]
+fn the_session_id_changes_with_the_account_and_the_server() {
+    let first = identity_session_id(Some("https://one.example"), Some("alice"));
+    let other_account = identity_session_id(Some("https://one.example"), Some("bob"));
+    let other_server = identity_session_id(Some("https://two.example"), Some("alice"));
+    assert_ne!(first, other_account);
+    assert_ne!(first, other_server);
+    assert_eq!(
+        first,
+        identity_session_id(Some("https://one.example"), Some("alice"))
+    );
+}
+
+#[test]
+fn no_session_gives_an_empty_id_that_matches_nothing() {
+    // After a disconnect there is no client or account.
+    assert!(identity_session_id(None, Some("alice")).is_empty());
+    assert!(identity_session_id(Some("https://one.example"), None).is_empty());
+    assert!(!identity_reply_applies("", ""));
+    let old = identity_session_id(Some("https://one.example"), Some("alice"));
+    assert!(!identity_reply_applies(&old, ""));
+}
+
+#[test]
+fn a_late_identity_reply_from_an_old_session_is_refused() {
+    let old = identity_session_id(Some("https://one.example"), Some("alice"));
+    let new_account = identity_session_id(Some("https://one.example"), Some("bob"));
+    let new_server = identity_session_id(Some("https://two.example"), Some("alice"));
+    assert!(identity_reply_applies(&old, &old));
+    assert!(!identity_reply_applies(&old, &new_account));
+    assert!(!identity_reply_applies(&old, &new_server));
+}
+
+#[test]
+fn the_worker_session_id_follows_the_connection_state() {
+    let mut state = peer_link_state(&[]);
+    assert!(current_identity_session(&state).is_empty());
+    state.conn.client = Some(GrappaClient::new("https://one.example".to_string()));
+    state.conn.identifier = Some("alice".to_string());
+    let first = current_identity_session(&state);
+    assert!(!first.is_empty());
+    // A request made in the first session does not apply to another account.
+    state.conn.identifier = Some("bob".to_string());
+    assert!(!identity_reply_applies(
+        &first,
+        &current_identity_session(&state)
+    ));
+    // A disconnect clears the connection: nothing applies.
+    state.conn.client = None;
+    state.conn.identifier = None;
+    assert!(!identity_reply_applies(
+        &first,
+        &current_identity_session(&state)
+    ));
 }
