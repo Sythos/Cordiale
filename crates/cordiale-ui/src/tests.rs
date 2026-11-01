@@ -6611,6 +6611,40 @@ fn render_message_formats_a_ctcp_action_as_a_sentence() {
 }
 
 #[test]
+fn render_message_unwraps_ctcp_actions_in_live_and_history_rows() {
+    for (body, text) in [
+        (Some("\u{1}ACTION glompa\u{1}"), "glompa"),
+        (Some("\u{1}ACTION glompa"), "glompa"),
+        (Some("glompa"), "glompa"),
+        (Some("ACTION glompa"), "ACTION glompa"),
+        (Some("\u{1}ACTION  caffè 🙂 \u{1}"), " caffè 🙂 "),
+        (
+            Some("\u{1}ACTION \u{03}4ciao\u{03}\u{1}"),
+            "\u{03}4ciao\u{03}",
+        ),
+        (Some("\u{1}ACTION \u{1}"), ""),
+        (Some("\u{1}ACTION "), ""),
+        (Some(""), ""),
+        (None, ""),
+    ] {
+        let payload = serde_json::json!({
+            "kind": "action", "sender": "vash909", "body": body,
+            "id": 42, "server_time": 1790000000000_i64,
+        });
+        for rendered in [
+            render_message(&payload, None),
+            render_history_entry(&payload),
+        ] {
+            assert_eq!(rendered.text, format!("* vash909 {text}"), "{body:?}");
+            assert_eq!(rendered.nick, None);
+            assert!(rendered.italic);
+            assert_eq!(rendered.message_id, Some(42));
+            assert_eq!(rendered.server_time, Some(1790000000000));
+        }
+    }
+}
+
+#[test]
 fn only_message_envelopes_render_as_chat_lines() {
     assert!(renders_as_chat_line("message"));
     // Every other kind has its own handler or explicit no-op; none may
@@ -8174,16 +8208,21 @@ fn parse_mentions_bundle_keeps_order_and_null_bodies() {
         "away_started_at": "2026-09-23T08:00:00Z",
         "away_ended_at": "2026-09-23T09:00:00Z",
         "away_reason": null,
-        "messages": [message("privmsg", serde_json::json!("vjt: ping")), message("action", Value::Null)]
+        "messages": [
+            message("privmsg", serde_json::json!("vjt: ping")),
+            message("action", Value::Null),
+            message("action", serde_json::json!("\u{1}ACTION saluta vjt\u{1}"))
+        ]
     });
     let view = parse_mentions_bundle(&payload, topic, "vjt").expect("valid bundle");
     assert_eq!(view.kind, "mentions_bundle");
     assert_eq!(view.network, "libera");
-    // Away period, then the two messages in order; no reason row for null.
-    assert_eq!(view.rows.len(), 3);
+    // Away period, then the messages in order; no reason row for null.
+    assert_eq!(view.rows.len(), 4);
     assert_eq!(view.rows[0].0, "mentions-away-period");
     assert!(view.rows[1].1.ends_with("#rust <alice> vjt: ping"));
     assert!(view.rows[2].1.ends_with("#rust * alice "));
+    assert!(view.rows[3].1.ends_with("#rust * alice saluta vjt"));
 
     let mut with_reason = payload.clone();
     with_reason["away_reason"] = serde_json::json!("lunch");
