@@ -5187,19 +5187,21 @@ fn chat_links_become_markdown_links() {
 
 #[test]
 fn topic_links_are_clickable_with_normalized_targets() {
-    let topic = "Caffè 🙂 https://example.org/a_b. www.rust-lang.org!";
-    let runs = topic_runs(topic);
-    assert_eq!(
-        runs.iter().map(|run| run.text.as_str()).collect::<String>(),
-        topic
-    );
-    assert_eq!(
-        runs.iter()
-            .filter(|run| !run.href.is_empty())
-            .map(|run| run.href.as_str())
-            .collect::<Vec<_>>(),
-        ["https://example.org/a_b", "https://www.rust-lang.org/"]
-    );
+    for prefix in ["", "    ", "\t"] {
+        let topic = format!("{prefix}https://example.org/a_b. Caffè 🙂 www.rust-lang.org!");
+        let runs = topic_runs(&topic);
+        assert_eq!(
+            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            topic
+        );
+        assert_eq!(
+            runs.iter()
+                .filter(|run| !run.href.is_empty())
+                .map(|run| run.href.as_str())
+                .collect::<Vec<_>>(),
+            ["https://example.org/a_b", "https://www.rust-lang.org/"]
+        );
+    }
 }
 
 #[test]
@@ -5236,18 +5238,7 @@ fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
     row.set_has_selected_channel(true);
     row.set_directory_network("test".into());
     let topic = "plain https://example.org/a https://example.org/b tail";
-    row.set_current_topic(topic.into());
     row.on_format_topic(|topic| Rc::new(slint::VecModel::from(topic_runs(&topic))).into());
-    row.set_directory_rows(
-        Rc::new(slint::VecModel::from(vec![DirectoryRow {
-            name: "#test".into(),
-            topic: topic.into(),
-            users: "2".into(),
-            featured: false,
-            joined: false,
-        }]))
-        .into(),
-    );
     let opened = Rc::new(RefCell::new(Vec::new()));
     let activated = Rc::new(std::cell::Cell::new(0));
     let record = opened.clone();
@@ -5263,7 +5254,26 @@ fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
         row.window()
             .dispatch_event(WindowEvent::PointerReleased { position, button });
     };
-    for (directory, width) in [(true, 1200), (false, 1200), (true, 800), (false, 800)] {
+    for (directory, width, prefix) in [
+        (true, 1200, ""),
+        (false, 1200, ""),
+        (true, 800, "    "),
+        (false, 800, "    "),
+        (true, 800, "\t"),
+        (false, 800, "\t"),
+    ] {
+        let topic = format!("{prefix}{topic}");
+        row.set_current_topic(topic.as_str().into());
+        row.set_directory_rows(
+            Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                name: "#test".into(),
+                topic: topic.into(),
+                users: "2".into(),
+                featured: false,
+                joined: false,
+            }]))
+            .into(),
+        );
         row.window()
             .set_size(slint::LogicalSize::new(width as f32, 800.));
         row.set_directory_open(directory);
