@@ -812,6 +812,9 @@ pub(crate) fn register_link_callbacks(
     ui: &AppWindow,
     worker_tx: &mpsc::UnboundedSender<WorkerCommand>,
 ) {
+    ui.on_format_topic(|topic| topic_text(&topic));
+    ui.on_topic_link_clicked(|href| open_in_browser(&href));
+
     let tx_for_link = worker_tx.clone();
     ui.on_chat_link_clicked(move |href| {
         let _ = tx_for_link.send(WorkerCommand::OpenLink(href.to_string()));

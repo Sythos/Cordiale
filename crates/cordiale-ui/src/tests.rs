@@ -5186,6 +5186,27 @@ fn chat_links_become_markdown_links() {
 }
 
 #[test]
+fn topic_links_are_clickable_with_normalized_targets() {
+    let topic = "Caffè 🙂 https://example.org/a_b. www.rust-lang.org!";
+    let expected = slint::StyledText::from_markdown(
+        "Caffè 🙂 [https://example.org/a\\_b](<https://example.org/a_b>)\\. [www\\.rust\\-lang\\.org](<https://www.rust-lang.org>)\\!",
+    )
+    .unwrap();
+    assert_eq!(topic_text(topic), expected);
+}
+
+#[test]
+fn topic_text_keeps_markup_and_non_web_schemes_literal() {
+    for topic in [
+        "No topic set",
+        "*literal* <b>text</b> [title](target)",
+        "file:///tmp/test javascript:alert(1) mailto:me@example.org",
+    ] {
+        assert_eq!(topic_text(topic), slint::StyledText::from_plain_text(topic));
+    }
+}
+
+#[test]
 fn theme_backgrounds_resolve_like_cicchetto() {
     use cordiale_core::rest::ThemeBackgroundWire;
     let builtin = ThemeBackgroundWire {

@@ -9235,6 +9235,12 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
     markdown
 }
 
+/// The channel topic's text, kept separate from the message/media routing.
+fn topic_text(topic: &str) -> slint::StyledText {
+    slint::StyledText::from_markdown(&linked_markdown(topic))
+        .unwrap_or_else(|_| slint::StyledText::from_plain_text(topic))
+}
+
 /// Escaped text with its links as markdown links, which the chat's
 /// `StyledText` draws in the link color and reports when clicked.
 fn linked_markdown(text: &str) -> String {

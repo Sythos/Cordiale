@@ -1324,6 +1324,7 @@ export component AppWindow inherits Window {
     // list; empty when the server hasn't sent one (falls back to the
     // channel label in the markup below).
     in property <string> current-topic: "";
+    pure callback format-topic(string) -> styled-text;
     // Compact `+nt` snapshot for the selected channel; empty when unknown or
     // when the server confirms there are no channel modes.
     // One-line status above the topic: network + user modes, then the
@@ -1882,6 +1883,8 @@ export component AppWindow inherits Window {
     callback archive-closed();
     // A link in the Credits page, opened in the browser.
     callback credits-link-clicked(string);
+    // Channel-topic links always open in the browser.
+    callback topic-link-clicked(string);
     // Chat links and the media viewer (images and text uploads, https
     // images elsewhere). `media-kind` is "loading", "image", "text",
     // "gone" or "failed".
@@ -3874,13 +3877,16 @@ export component AppWindow inherits Window {
 
                 VerticalLayout {
                     padding: 6px;
-                    Text {
-                        text: current-topic == "" ? @tr("No topic set") : current-topic;
-                        font-size: 14px * FontScale.percent / 100;
-                        wrap: word-wrap;
+                    StyledText {
+                        text: format-topic(current-topic == "" ? @tr("No topic set") : current-topic);
+                        default-font-size: 14px * FontScale.percent / 100;
+                        default-color: Palette.foreground;
+                        link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
                         horizontal-alignment: left;
                         vertical-alignment: top;
                         horizontal-stretch: 1;
+                        min-width: 0px;
+                        link-clicked(href) => { topic-link-clicked(href); }
                     }
                 }
             }
