@@ -812,7 +812,7 @@ pub(crate) fn register_link_callbacks(
     ui: &AppWindow,
     worker_tx: &mpsc::UnboundedSender<WorkerCommand>,
 ) {
-    ui.on_format_topic(|topic| topic_text(&topic));
+    ui.on_format_topic(|topic| Rc::new(slint::VecModel::from(topic_runs(&topic))).into());
     ui.on_topic_link_clicked(|href| open_in_browser(&href));
 
     let tx_for_link = worker_tx.clone();

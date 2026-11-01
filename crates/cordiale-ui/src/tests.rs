@@ -5188,21 +5188,147 @@ fn chat_links_become_markdown_links() {
 #[test]
 fn topic_links_are_clickable_with_normalized_targets() {
     let topic = "Caffè 🙂 https://example.org/a_b. www.rust-lang.org!";
-    let expected = slint::StyledText::from_markdown(
-        "Caffè 🙂 [https://example.org/a\\_b](<https://example.org/a_b>)\\. [www\\.rust\\-lang\\.org](<https://www.rust-lang.org>)\\!",
-    )
-    .unwrap();
-    assert_eq!(topic_text(topic), expected);
+    let runs = topic_runs(topic);
+    assert_eq!(
+        runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+        topic
+    );
+    assert_eq!(
+        runs.iter()
+            .filter(|run| !run.href.is_empty())
+            .map(|run| run.href.as_str())
+            .collect::<Vec<_>>(),
+        ["https://example.org/a_b", "https://www.rust-lang.org/"]
+    );
 }
 
 #[test]
 fn topic_text_keeps_markup_and_non_web_schemes_literal() {
     for topic in [
+        "",
+        "  plain   text 🙂 ",
         "No topic set",
         "*literal* <b>text</b> [title](target)",
         "file:///tmp/test javascript:alert(1) mailto:me@example.org",
+        "https://user:password@example.org/",
     ] {
-        assert_eq!(topic_text(topic), slint::StyledText::from_plain_text(topic));
+        let runs = topic_runs(topic);
+        assert_eq!(
+            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+            topic
+        );
+        assert!(runs.iter().all(|run| run.href.is_empty()));
+    }
+}
+
+#[test]
+fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
+    use slint::platform::{software_renderer::*, Platform, WindowAdapter, WindowEvent};
+    struct Headless;
+    impl Platform for Headless {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+        }
+    }
+    slint::platform::set_platform(Box::new(Headless)).unwrap();
+    let row = AppWindow::new().unwrap();
+    row.set_screen("connected".into());
+    row.set_has_selected_channel(true);
+    row.set_directory_network("test".into());
+    let topic = "plain https://example.org/a https://example.org/b tail";
+    row.set_current_topic(topic.into());
+    row.on_format_topic(|topic| Rc::new(slint::VecModel::from(topic_runs(&topic))).into());
+    row.set_directory_rows(
+        Rc::new(slint::VecModel::from(vec![DirectoryRow {
+            name: "#test".into(),
+            topic: topic.into(),
+            users: "2".into(),
+            featured: false,
+            joined: false,
+        }]))
+        .into(),
+    );
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let activated = Rc::new(std::cell::Cell::new(0));
+    let record = opened.clone();
+    row.on_topic_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
+    let count = activated.clone();
+    row.on_directory_channel_activated(move |_| count.set(count.get() + 1));
+    row.show().unwrap();
+    let click = |x, y| {
+        let position = slint::LogicalPosition::new(x, y);
+        let button = slint::platform::PointerEventButton::Left;
+        row.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        row.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    for (directory, width) in [(true, 1200), (false, 1200), (true, 800), (false, 800)] {
+        row.window()
+            .set_size(slint::LogicalSize::new(width as f32, 800.));
+        row.set_directory_open(directory);
+        opened.borrow_mut().clear();
+        let mut first_link = None;
+        let mut plain_x: Option<f32> = None;
+        let start_y = if directory { 150 } else { 16 };
+        for y in (start_y..400).step_by(8) {
+            for x in (180..width - 16).step_by(8) {
+                let before = opened.borrow().len();
+                let row_before = activated.get();
+                click(x as f32, y as f32);
+                assert_eq!(row.get_directory_open(), directory);
+                if opened.borrow().len() > before {
+                    assert_eq!(activated.get(), row_before, "link click activated the row");
+                    first_link.get_or_insert((x as f32, y as f32));
+                } else if activated.get() > row_before {
+                    plain_x = Some(plain_x.map_or(x as f32, |left| left.min(x as f32)));
+                }
+            }
+            if first_link.is_some_and(|(_, link_y)| y as f32 > link_y + 24.) {
+                break;
+            }
+        }
+        assert!(
+            opened
+                .borrow()
+                .iter()
+                .any(|href| href == "https://example.org/a"),
+            "directory={directory}"
+        );
+        assert!(opened
+            .borrow()
+            .iter()
+            .any(|href| href == "https://example.org/b"));
+        let (x, y) = first_link.unwrap();
+        click(x, y);
+        let before = activated.get();
+        let links_before = opened.borrow().len();
+        for text in [
+            slint::platform::Key::Return.into(),
+            " ".into(),
+            slint::platform::Key::Tab.into(),
+            slint::platform::Key::Return.into(),
+        ] {
+            row.window()
+                .dispatch_event(WindowEvent::KeyPressed { text });
+        }
+        assert_eq!(opened.borrow().len(), links_before + 3);
+        assert_eq!(opened.borrow().last().unwrap(), "https://example.org/b");
+        assert_eq!(activated.get(), before);
+        if directory {
+            let links_before = opened.borrow().len();
+            click(plain_x.unwrap() + 12., y);
+            assert_eq!(
+                activated.get(),
+                before + 1,
+                "ordinary topic text must activate the row"
+            );
+            row.window().dispatch_event(WindowEvent::KeyPressed {
+                text: slint::platform::Key::Return.into(),
+            });
+            assert_eq!(activated.get(), before + 2);
+            assert_eq!(opened.borrow().len(), links_before);
+        }
     }
 }
 

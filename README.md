@@ -228,7 +228,9 @@ Cordiale also covers:
   image and text uploads on Grappa, and https images elsewhere, open in the
   media viewer, a popup over the chat that Escape or Close dismisses (fit or actual size; text read-only, with Copy), MP3, Ogg and
   FLAC links play in the radio's player, and the rest opens in the browser.
-  Channel-topic links use the same link detection and open in the browser.
+  Channel-topic links above the chat and in the Channels list open in the
+  browser, with keyboard access too. Only the link activates the browser;
+  clicking other text in a Channels row still joins or opens that channel.
   Like Cicchetto, Cordiale shows no inline previews. Only http, https and
   ftp links open (not `file:`, `javascript:`, `mailto:` or links with a user
   name or password), and the browser gets the normalised URL. A download for the
