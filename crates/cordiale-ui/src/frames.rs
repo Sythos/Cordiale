@@ -4862,7 +4862,7 @@ pub(crate) fn parse_mentions_bundle(
             return None;
         }
         let text = if kind == "action" {
-            format!("* {sender} {body}")
+            format!("* {sender} {}", strip_ctcp_action(&body))
         } else {
             format!("<{sender}> {body}")
         };

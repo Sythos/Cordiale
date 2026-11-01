@@ -7850,6 +7850,15 @@ fn reason_suffix(reason: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+/// Grappa preserves the CTCP ACTION wire body. Remove only its framing,
+/// keeping plain bodies and any mIRC formatting or whitespace intact.
+fn strip_ctcp_action(body: &str) -> &str {
+    match body.strip_prefix("\u{1}ACTION ") {
+        Some(text) => text.strip_suffix('\u{1}').unwrap_or(text),
+        None => body,
+    }
+}
+
 /// Shared `from`/`nick`/`sender` + `body`/`message` extraction for both
 /// live frames (called from `handle_frame`, after unwrapping the
 /// `kind: "message"` envelope a chat row arrives under) and REST history
@@ -7961,16 +7970,11 @@ fn render_message(payload: &Value, event_fallback: Option<&str>) -> RenderedMess
             ),
             None => format!("* {} cleared the topic", nick.unwrap_or("someone")),
         }),
-        // CTCP ACTION (`/me`) — the inner kind riding under a `message`
-        // envelope, confirmed real by auditing `scrollback/message.ex`
-        // directly. The body is the plain action text,
-        // not the raw `\x01ACTION ... \x01` wire form (that framing is
-        // stripped server-side, matching how `notice` is already a clean
-        // kind rather than needing CTCP unwrapping itself).
+        // CTCP ACTION (`/me`) keeps its wire framing in live and history rows.
         Some("action") => Some(format!(
             "* {} {}",
             nick.unwrap_or("someone"),
-            body.unwrap_or("")
+            strip_ctcp_action(body.unwrap_or(""))
         )),
         _ => None,
     };
