@@ -9241,10 +9241,26 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
 fn topic_markdown(topic: &str) -> String {
     let mut markdown = String::new();
     let mut last = 0;
+    // Markdown treats four leading spaces or a tab as an unsupported code
+    // block. Character references keep the same visible whitespace while
+    // making the paragraph safe for Slint's inline Markdown parser.
+    for (index, ch) in topic.char_indices() {
+        let entity = match ch {
+            ' ' => "&#32;",
+            '\t' => "&#9;",
+            '\r' | '\n' => "&#32;",
+            _ => break,
+        };
+        markdown.push_str(entity);
+        last = index + ch.len_utf8();
+    }
     for link in cordiale_core::media::find_links(topic) {
         let Ok(url) = cordiale_core::media::validated_url(&link.href) else {
             continue;
         };
+        if link.range.start < last {
+            continue;
+        }
         markdown.push_str(&escape_markdown(&topic[last..link.range.start]));
         markdown.push('[');
         markdown.push_str(&escape_markdown(&topic[link.range.clone()]));

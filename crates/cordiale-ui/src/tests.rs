@@ -5190,7 +5190,13 @@ fn topic_links_are_clickable_with_normalized_targets() {
     for prefix in ["", "    ", "\t"] {
         let topic = format!("{prefix}https://example.org/a_b. Caffè 🙂 www.rust-lang.org!");
         let markdown = topic_markdown(&topic);
-        assert!(markdown.starts_with(prefix));
+        let markdown_prefix = match prefix {
+            "" => "",
+            "    " => "&#32;&#32;&#32;&#32;",
+            "\t" => "&#9;",
+            _ => unreachable!(),
+        };
+        assert!(markdown.starts_with(markdown_prefix));
         assert!(markdown.contains("](<https://example.org/a_b>)"));
         assert!(markdown.contains("](<https://www.rust-lang.org/>)"));
         assert!(slint::StyledText::from_markdown(&markdown).is_ok());
@@ -5337,7 +5343,9 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
         assert_eq!(activated.get(), before);
         if directory && width == 1200 {
             let mut channel_name = None;
-            for row_y in (0..400).step_by(8) {
+            // Search the list area only. Scanning from the top can click the
+            // directory's Close button and hide the row before we reach it.
+            for row_y in (120..240).step_by(8) {
                 for row_x in (180..width - 16).step_by(8) {
                     let row_before = activated.get();
                     click(row_x as f32, row_y as f32);
