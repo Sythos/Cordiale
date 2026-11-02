@@ -45,6 +45,11 @@ saved per network and channel, synced with Grappa's `presence_filter`
 preference, and a channel with 200 or more members starts denoised until you
 pick, as in Cicchetto.
 
+To select and copy chat text, open **Actions → Copy text**. This read-only
+snapshot contains the currently loaded messages with timestamps and nicknames.
+Select with the mouse or keyboard and use **Copy** or Ctrl+C (Cmd+C on macOS).
+**Back** or Escape returns to the chat; its formatted messages and links stay intact.
+
 Right-click a sender in the chat and **Reply** drops a Cicchetto-style quote
 into that window's draft, ready to edit before sending; the same nick menu in
 the member list stays message-free. Settings > Display now has a live

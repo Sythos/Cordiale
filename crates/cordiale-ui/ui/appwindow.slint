@@ -1227,12 +1227,15 @@ export component AppWindow inherits Window {
     // Slint has no `else`/`else if`: mutually exclusive `if` blocks are
     // the documented pattern for multi-screen navigation.
     in-out property <string> screen: "splash";
+    in-out property <string> chat-copy-text;
+    pure callback format-chat-copy([ChatLine]) -> string;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
     // disconnect) start it afresh, and so does coming back with no window
     // selected.
     changed screen => {
+        if screen != "copy-text" { chat-copy-text = ""; }
         // The side columns are fitted to the window when the connected
         // screen opens.
         fit-columns();
@@ -1243,7 +1246,7 @@ export component AppWindow inherits Window {
         } else {
             media-open = false;
             radio-open = false;
-            chat-resume = screen == "settings" || screen == "links" || screen == "archive" || screen == "reply" || screen == "umodes" || screen == "debug";
+            chat-resume = screen == "copy-text" || screen == "settings" || screen == "links" || screen == "archive" || screen == "reply" || screen == "umodes" || screen == "debug";
         }
         chat-read-state-changed(
             screen == "connected" && has-selected-channel && !directory-open,
@@ -4963,6 +4966,13 @@ export component AppWindow inherits Window {
                             }
                         }
                         MenuItem { title: "📻  " + @tr("Radio"); activated => { radio-open = true; } }
+                        if has-selected-channel : MenuItem {
+                            title: @tr("Copy text");
+                            activated => {
+                                chat-copy-text = format-chat-copy(chat-lines);
+                                screen = "copy-text";
+                            }
+                        }
                         if is-admin : MenuItem {
                             title: "🛡  " + @tr("Admin");
                             activated => {
@@ -8376,6 +8386,35 @@ export component AppWindow inherits Window {
             }
         }
     }
+            }
+        }
+    }
+
+    if screen == "copy-text" : VerticalBox {
+        padding: 16px;
+        spacing: 8px;
+        Text { text: @tr("Copy text — {}", current-channel-label); font-size: 20px; }
+        Text { text: @tr("Select text from the loaded messages, then copy it. This view is read-only."); wrap: word-wrap; }
+        HorizontalLayout {
+            alignment: start;
+            spacing: 8px;
+            CompactButton {
+                text: @tr("Select all");
+                clicked => { chat-copy-view.select-all(); chat-copy-view.focus(); }
+            }
+            CompactButton { text: @tr("Copy"); clicked => { chat-copy-view.copy(); } }
+            CompactButton { text: @tr("Back"); clicked => { screen = "connected"; } }
+        }
+        chat-copy-view := TextEdit {
+            text: chat-copy-text;
+            read-only: true;
+            wrap: word-wrap;
+            vertical-stretch: 1;
+            accessible-label: @tr("Loaded chat messages");
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape { screen = "connected"; return accept; }
+                return reject;
             }
         }
     }

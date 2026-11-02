@@ -5523,6 +5523,78 @@ fn sidebar_selection_keeps_scrolled_channel_in_place() {
     );
 }
 
+#[test]
+fn copy_text_view_preserves_text_and_supports_read_only_copy() {
+    std::thread::spawn(|| {
+        use slint::platform::{
+            software_renderer::*, Clipboard, Platform, WindowAdapter, WindowEvent,
+        };
+        struct Headless(Rc<RefCell<String>>);
+        impl Platform for Headless {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+            }
+            fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
+                if clipboard == Clipboard::DefaultClipboard {
+                    *self.0.borrow_mut() = text.to_owned();
+                }
+            }
+            fn clipboard_text(&self, _: Clipboard) -> Option<String> {
+                Some(self.0.borrow().clone())
+            }
+        }
+        let clipboard = Rc::new(RefCell::new(String::new()));
+        slint::platform::set_platform(Box::new(Headless(clipboard.clone()))).unwrap();
+        let lines: slint::ModelRc<ChatLine> = Rc::new(slint::VecModel::from(vec![
+            ChatLine {
+                timestamp: "12:00".into(),
+                nick: "Alice".into(),
+                reply_body: "\x02Caffè 🙂\x02  https://example.org/a_b".into(),
+                ..Default::default()
+            },
+            ChatLine {
+                timestamp: "12:01".into(),
+                reply_body: "*literal* <text>".into(),
+                ..Default::default()
+            },
+        ]))
+        .into();
+        let expected =
+            "[12:00] <Alice> Caffè 🙂  https://example.org/a_b\n[12:01] *literal* <text>";
+        assert_eq!(chat_copy_text(&lines), expected);
+        assert!(chat_copy_text(&Default::default()).is_empty());
+        let ui = AppWindow::new().unwrap();
+        ui.set_chat_copy_text(chat_copy_text(&lines).into());
+        ui.set_screen("copy-text".into());
+        ui.show().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(900., 600.));
+        ui.window().take_snapshot().unwrap();
+        let key = |text: slint::SharedString| {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        key("X".into()); // Typing must not modify a read-only snapshot.
+        ui.window().dispatch_event(WindowEvent::KeyPressed {
+            text: slint::platform::Key::Control.into(),
+        });
+        key("a".into());
+        key("c".into());
+        ui.window().dispatch_event(WindowEvent::KeyReleased {
+            text: slint::platform::Key::Control.into(),
+        });
+        assert_eq!(clipboard.borrow().as_str(), expected);
+        key(slint::platform::Key::Escape.into());
+        assert_eq!(ui.get_screen(), "connected");
+        slint::platform::update_timers_and_animations();
+        ui.window().take_snapshot().unwrap();
+        assert!(ui.get_chat_copy_text().is_empty());
+    })
+    .join()
+    .unwrap();
+}
+
 fn set_headless_software_platform() {
     std::thread_local! {
         static SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
