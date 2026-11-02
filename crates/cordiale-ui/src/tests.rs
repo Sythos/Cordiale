@@ -5443,6 +5443,86 @@ fn topic_text_keeps_markup_and_non_web_schemes_literal() {
     }
 }
 
+#[test]
+fn sidebar_selection_keeps_scrolled_channel_in_place() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.set_screen("connected".into());
+    let groups = |selected: &str| {
+        vec![
+            NetworkGroup {
+                network: "first".into(),
+                ..Default::default()
+            },
+            NetworkGroup {
+                network: "test".into(),
+                expanded: true,
+                channels: Rc::new(slint::VecModel::from(
+                    (0..50)
+                        .map(|i| {
+                            let name = format!("#channel-{i:02}");
+                            ChannelEntry {
+                                network: "test".into(),
+                                channel: name.as_str().into(),
+                                label: name.as_str().into(),
+                                selected: name == selected,
+                                joined: true,
+                                ..Default::default()
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                ))
+                .into(),
+                ..Default::default()
+            },
+        ]
+    };
+    ui.set_sidebar_widest_label(widest_sidebar_label(&groups("")).into());
+    show_network_groups(&ui, groups(""));
+    let selected = Rc::new(RefCell::new(String::new()));
+    let record = selected.clone();
+    ui.on_channel_selected(move |_, channel| *record.borrow_mut() = channel.to_string());
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1200., 800.));
+    let click = |y| {
+        let position = slint::LogicalPosition::new(80., y);
+        let button = PointerEventButton::Left;
+        ui.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        ui.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    ui.window().take_snapshot().unwrap();
+    let mut last_y = None;
+    for _ in 0..3 {
+        ui.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(80., 400.),
+            delta_x: 0.,
+            delta_y: -10000.,
+        });
+        ui.window().take_snapshot().unwrap();
+        last_y = (100..790).step_by(4).find(|y| {
+            click(*y as f32);
+            *selected.borrow() == "#channel-49"
+        });
+        if last_y.is_some() {
+            break;
+        }
+    }
+    let y = last_y.unwrap_or_else(|| panic!("last channel unreachable: {}", selected.borrow()));
+    // Selecting a channel rebuilds the sidebar model in refresh_network_groups.
+    show_network_groups(&ui, groups("#channel-49"));
+    ui.window().take_snapshot().unwrap();
+    selected.borrow_mut().clear();
+    click(y as f32);
+    assert_eq!(
+        *selected.borrow(),
+        "#channel-49",
+        "selection moved the sidebar viewport"
+    );
+}
+
 fn set_headless_software_platform() {
     std::thread_local! {
         static SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
