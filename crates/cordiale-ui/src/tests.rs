@@ -5667,6 +5667,7 @@ fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
             "media buttons must keep their compact hit area in {kind}: {close_hits:?}"
         );
     }
+    row.set_media_open(false);
 
     // Check actual layout, not just the strings retained by topic_runs:
     // Slint can exclude trailing spaces from each word's preferred width.
