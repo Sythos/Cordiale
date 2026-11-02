@@ -449,6 +449,49 @@ component ResizeHandle {
     }
 }
 
+// The peer name is the only part of a chat or roster row that opens a query.
+// The surrounding ContextMenuArea still owns right-click actions.
+component NickQueryButton inherits Rectangle {
+    in property <string> text;
+    in property <color> text-color;
+    in property <bool> text-bold: false;
+    in property <bool> text-italic: false;
+    callback activated();
+
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { activated(); }
+
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.activated();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            focus.focus();
+            root.activated();
+        }
+    }
+
+    HorizontalLayout {
+        Text {
+            text: root.text;
+            wrap: no-wrap;
+            font-weight: root.text-bold ? 700 : 400;
+            font-italic: root.text-italic;
+            color: root.text-color;
+        }
+    }
+}
+
 // Right-click menu for a nick, usable both in the chat body and the
 // member list — the instantiator supplies the label text/styling as
 // plain properties rather than nested content (`@children` inside
@@ -467,6 +510,8 @@ component ResizeHandle {
 // an ancestor's callbacks by name).
 component MemberContextMenu {
     in property <string> target-nick;
+    in property <string> source-network;
+    in property <string> source-window;
     in property <bool> is-chat-message: false;
     in property <string> reply-body: "";
     in property <string> reply-id: "";
@@ -475,6 +520,7 @@ component MemberContextMenu {
     // Unignore instead of Ignore.
     in property <bool> is-ignored: false;
     in property <string> display-text;
+    in property <string> suffix-text: "";
     in property <color> text-color;
     // An optional role marker drawn before the text in its own color.
     in property <string> prefix-text: "";
@@ -489,6 +535,7 @@ component MemberContextMenu {
     callback whois(string);
     callback ctcp(string, string); // nick, verb
     callback query(string);
+    callback nickname-clicked(string, string, string); // nick, network, source window
     callback ignore(string, bool); // nick, true to ignore
     callback reply(string, string, string); // nick, raw message body, message id
 
@@ -578,8 +625,17 @@ component MemberContextMenu {
                 font-italic: text-italic;
                 color: prefix-color;
             }
-            Text {
+            NickQueryButton {
                 text: display-text;
+                text-color: text-color;
+                text-bold: text-bold;
+                text-italic: text-italic;
+                activated => {
+                    nickname-clicked(target-nick, source-network, source-window);
+                }
+            }
+            if suffix-text != "" : Text {
+                text: suffix-text;
                 wrap: no-wrap;
                 font-weight: text-bold ? 700 : 400;
                 font-italic: text-italic;
@@ -1393,6 +1449,11 @@ export component AppWindow inherits Window {
     // repeated replies to the same message from the scrollback's scope.
     in-out property <int> compose-focus-request: 0;
     in property <string> current-channel-label: "";
+    // Source identity for clickable peer names in the visible chat and
+    // roster. The worker uses this snapshot if selection changes before it
+    // handles the click.
+    in property <string> window-source-network: "";
+    in property <string> window-source-target: "";
     in property <bool> current-server-window: false;
     // RPL_TOPIC-equivalent for the selected channel, shown above the chat
     // list; empty when the server hasn't sent one (falls back to the
@@ -1876,6 +1937,7 @@ export component AppWindow inherits Window {
     callback member-whois-requested(string);
     callback member-ctcp-requested(string, string); // nick, verb
     callback member-query-requested(string);
+    callback member-nickname-clicked(string, string, string); // nick, network, source window
     callback member-ignore-requested(string, bool); // nick, true to ignore
     // The masks of the plain (no text pattern) ignore rules of the open
     // window's network, and the test the nick menus run against them.
@@ -4522,12 +4584,17 @@ export component AppWindow inherits Window {
 
                         if line.nick != "" : MemberContextMenu {
                             target-nick: line.nick;
+                            source-network: window-source-network;
+                            source-window: window-source-target;
                             is-chat-message: true;
                             reply-body: line.reply-body;
                             reply-id: line.reply-id;
                             can-moderate: can-moderate-members;
                             is-ignored: nick-ignored(line.nick, window-ignore-masks);
-                            display-text: "<" + line.nick-prefix + line.nick + "> ";
+                            prefix-text: "<" + line.nick-prefix;
+                            prefix-color: line.nick-color;
+                            display-text: line.nick;
+                            suffix-text: "> ";
                             text-color: line.nick-color;
                             text-bold: true;
                             text-italic: line.italic;
@@ -4539,6 +4606,9 @@ export component AppWindow inherits Window {
                             whois(nick) => { member-whois-requested(nick); }
                             ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                             query(nick) => { member-query-requested(nick); }
+                            nickname-clicked(nick, network, source) => {
+                                member-nickname-clicked(nick, network, source);
+                            }
                             ignore(nick, add) => { member-ignore-requested(nick, add); }
                             // The worker bumps `compose-focus-request` once the
                             // quote is in the compose field.
@@ -4784,6 +4854,8 @@ export component AppWindow inherits Window {
 
                 for member in channel-members : MemberContextMenu {
                     target-nick: member.name;
+                    source-network: window-source-network;
+                    source-window: window-source-target;
                     can-moderate: can-moderate-members;
                     is-ignored: nick-ignored(member.name, window-ignore-masks);
                     prefix-text: member.prefix == "" ? "" : "[" + member.prefix + "] ";
@@ -4798,6 +4870,9 @@ export component AppWindow inherits Window {
                     whois(nick) => { member-whois-requested(nick); }
                     ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                     query(nick) => { member-query-requested(nick); }
+                    nickname-clicked(nick, network, source) => {
+                        member-nickname-clicked(nick, network, source);
+                    }
                     ignore(nick, add) => { member-ignore-requested(nick, add); }
                 }
             }

@@ -107,6 +107,34 @@ pub(crate) async fn handle_open_rename_target(
     open_query_and_focus(state, ui, network, nick, origin).await;
 }
 
+/// Opens or focuses a peer query after a nickname click in the transcript or
+/// member list. The network and source window are snapshots from the visible
+/// row, so a delayed worker command cannot redirect the click to another
+/// selected network. `open_query_and_focus` keeps the existing focus and E2E
+/// request flow.
+pub(crate) async fn handle_open_nickname_query(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    nick: String,
+    network: String,
+    source_window: String,
+) {
+    if network.is_empty() || source_window.is_empty() || !valid_rename_target(&nick) {
+        return;
+    }
+    let casemapping = network_casemapping(state, &network);
+    if state
+        .networks
+        .own_nicks
+        .get(&network)
+        .is_some_and(|own| casemapping.nick_eq(own, &nick))
+    {
+        return;
+    }
+    let origin = (network.clone(), source_window);
+    open_query_and_focus(state, ui, network, nick, origin).await;
+}
+
 /// Opens the plain query of `nick` and selects it, which asks the peer for
 /// its E2E keys. A query the server already lists is selected at once.
 /// Otherwise Grappa is asked to open it, and `focus_pending_query` selects it
@@ -232,11 +260,15 @@ pub(crate) fn show_query_window(
     let (label, peer_nick) = query_label(state, query);
     let window_status = window_status_for(state);
     let chat_state = crate::e2e_runtime::plain_entry_state_key(state, &query.network);
+    let source_network = query.network.clone();
+    let source_target = query.target_nick.clone();
     push_peer_away_banner(state, ui);
     push_shared_channels(state, ui, &query.network, &peer_nick);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
+        ui.set_window_source_network(source_network.into());
+        ui.set_window_source_target(source_target.into());
         ui.set_current_topic("".into());
         ui.set_window_status(window_status.into());
         ui.set_current_window_is_joined(false);

@@ -2706,6 +2706,8 @@ fn return_home_if_network_selected(
         ui.set_screen("connected".into());
         ui.set_has_selected_channel(false);
         ui.set_current_channel_label("".into());
+        ui.set_window_source_network("".into());
+        ui.set_window_source_target("".into());
         ui.set_current_topic("".into());
         ui.set_window_status("".into());
         ui.set_current_window_is_joined(false);
@@ -6274,6 +6276,8 @@ pub(crate) fn clear_closed_query_view(ui: &slint::Weak<AppWindow>) {
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
         ui.set_current_channel_label("".into());
+        ui.set_window_source_network("".into());
+        ui.set_window_source_target("".into());
         ui.set_current_topic("".into());
         ui.set_window_status("".into());
         ui.set_current_window_is_joined(false);

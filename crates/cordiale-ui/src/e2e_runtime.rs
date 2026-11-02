@@ -1542,12 +1542,16 @@ fn show_locked_window(state: &WorkerState, ui: &slint::Weak<AppWindow>, network:
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let label = format!("{network} — {}", key.1);
+    let source_network = network.to_string();
+    let source_target = key.1.clone();
     let window_status = window_status_for(state);
     let peer_nick = nick.to_string();
     crate::queries::push_shared_channels(state, ui, network, nick);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
+        ui.set_window_source_network(source_network.into());
+        ui.set_window_source_target(source_target.into());
         ui.set_current_topic("".into());
         ui.set_window_status(window_status.into());
         ui.set_current_window_is_joined(false);

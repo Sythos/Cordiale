@@ -11363,6 +11363,110 @@ fn member_query_action_registers_the_focus_in_a_channel_only() {
     ));
 }
 
+#[test]
+fn clicked_nickname_uses_the_visible_rows_network_and_source_window() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    let selected_elsewhere = ("other".to_string(), "#selected".to_string());
+    state.windows.current_channel = Some(selected_elsewhere.clone());
+
+    upload_test_runtime().block_on(async {
+        handle_open_nickname_query(
+            &mut state,
+            &ui,
+            "Peer".to_string(),
+            "libera".to_string(),
+            "#source".to_string(),
+        )
+        .await;
+    });
+
+    assert!(matches!(
+        &state.transcript.pending_query_focus,
+        Some((network, nick, _, origin))
+            if network == "libera"
+                && nick == "Peer"
+                && origin == &("libera".to_string(), "#source".to_string())
+    ));
+    // A delayed click keeps the query request on its source network and does
+    // not take focus away from a window the user selected after the click.
+    assert_eq!(state.windows.current_channel, Some(selected_elsewhere));
+}
+
+#[test]
+fn clicked_nickname_reuses_the_plain_query_and_keeps_the_locked_lane_separate() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    state.conn.identifier = Some("alice".to_string());
+    state.windows.current_channel = Some(("other".to_string(), "#selected".to_string()));
+    state.transcript.query_windows = vec![listed_query("Peer")];
+    assert!(state.e2e.add_locked("libera", "Peer"));
+    let plain_key =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Plain, "Peer").key();
+    let locked_key =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Locked, "Peer")
+            .key();
+    state
+        .transcript
+        .drafts
+        .insert(plain_key.clone(), "plain draft".to_string());
+    state
+        .transcript
+        .drafts
+        .insert(locked_key.clone(), "locked draft".to_string());
+
+    upload_test_runtime().block_on(async {
+        handle_open_nickname_query(
+            &mut state,
+            &ui,
+            "Peer".to_string(),
+            "libera".to_string(),
+            "#source".to_string(),
+        )
+        .await;
+    });
+
+    assert_eq!(state.windows.current_channel, Some(plain_key.clone()));
+    assert!(state.windows.current_query);
+    assert!(state.transcript.pending_query_focus.is_none());
+    assert_eq!(state.transcript.query_windows.len(), 1);
+    assert_eq!(
+        state.transcript.drafts.get(&plain_key).map(String::as_str),
+        Some("plain draft")
+    );
+    assert_eq!(
+        state.transcript.drafts.get(&locked_key).map(String::as_str),
+        Some("locked draft")
+    );
+    let rows = sidebar_query_windows(&state);
+    assert!(rows.iter().any(|row| row.target_nick == "Peer"));
+    assert!(rows.iter().any(|row| row.target_nick == "🔒Peer"));
+}
+
+#[test]
+fn clicked_nickname_does_not_open_a_query_for_self_or_an_invalid_row() {
+    let mut state = WorkerState::new();
+    let ui = slint::Weak::<AppWindow>::default();
+    let origin = ("libera".to_string(), "#chan".to_string());
+    state.windows.current_channel = Some(origin.clone());
+    state
+        .networks
+        .own_nicks
+        .insert("libera".to_string(), "Me".to_string());
+
+    let runtime = upload_test_runtime();
+    for nick in ["Me", "#system", "bad nick", ""] {
+        runtime.block_on(handle_open_nickname_query(
+            &mut state,
+            &ui,
+            nick.to_string(),
+            "libera".to_string(),
+            origin.1.clone(),
+        ));
+        assert!(state.transcript.pending_query_focus.is_none(), "{nick:?}");
+    }
+}
+
 /// The request line and the body of each request the test server saw.
 type RequestLog = Mutex<Vec<(String, String)>>;
 
@@ -11597,6 +11701,36 @@ fn member_query_action_sends_one_key_request_after_the_snapshot() {
     assert_eq!(bodies.len(), 1);
     assert_eq!(bodies[0]["verb"], "keyreq");
     assert_eq!(bodies[0]["target"], "Peer");
+    assert_no_clear_text(&seen);
+}
+
+#[test]
+fn nickname_click_opens_plain_query_and_uses_the_existing_e2e_waiting_flow() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server();
+    let (mut state, _dir) = key_request_state(&url);
+    let runtime = network_test_runtime();
+
+    runtime.block_on(handle_open_nickname_query(
+        &mut state,
+        &ui,
+        "Peer".to_string(),
+        "libera".to_string(),
+        "#chan".to_string(),
+    ));
+    assert!(state.transcript.pending_query_focus.is_some());
+    assert!(e2e_send_bodies(&seen).is_empty());
+
+    state.transcript.query_windows = vec![listed_query("Peer")];
+    runtime.block_on(focus_pending_query(&mut state, &ui));
+
+    let bodies = e2e_send_bodies(&seen);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["verb"], "keyreq");
+    assert_eq!(bodies[0]["target"], "Peer");
+    assert!(sidebar_query_windows(&state)
+        .iter()
+        .any(|row| row.target_nick == "🔒Peer"));
     assert_no_clear_text(&seen);
 }
 
