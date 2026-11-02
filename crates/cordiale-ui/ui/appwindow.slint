@@ -133,6 +133,8 @@ struct UploadLimitsRow {
     audio: string,
 }
 
+struct TopicRun { text: string, href: string }
+
 // One channel of the directory pane (`/list`), as sent by the server;
 // `joined` when that channel's window is joined, so activating the row
 // opens it instead of joining again.
@@ -769,6 +771,59 @@ component RenameTarget inherits Rectangle {
     }
 }
 
+// Plain words pass pointer events through; only URL spans are actions.
+component TopicText inherits Rectangle {
+    in property <[TopicRun]> runs;
+    in property <color> text-color;
+    in property <color> link-color;
+    in property <length> font-size;
+    callback link-clicked(string);
+    min-width: 0px;
+
+    FlexboxLayout {
+        flex-wrap: wrap;
+        alignment: start;
+        cross-axis-alignment: start;
+        cross-axis-line-alignment: start;
+        for run in root.runs : Rectangle {
+            horizontal-stretch: 0;
+            min-width: 0px;
+            border-width: focus.has-focus ? 1px : 0px;
+            border-color: root.link-color;
+
+            focus := FocusScope {
+                visible: run.href != "";
+                enabled: run.href != "";
+                focus-on-click: false;
+                accessible-role: button;
+                accessible-label: run.text;
+                accessible-description: run.href;
+                accessible-action-default => { root.link-clicked(run.href); }
+                key-pressed(event) => {
+                    if event.text == Key.Return || event.text == " " {
+                        root.link-clicked(run.href);
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+            if run.href != "" : TouchArea {
+                mouse-cursor: pointer;
+                clicked => { focus.focus(); root.link-clicked(run.href); }
+            }
+            VerticalLayout {
+                Text {
+                    text: run.text;
+                    font-size: root.font-size;
+                    color: run.href == "" ? root.text-color : root.link-color;
+                    wrap: word-wrap;
+                    min-width: 0px;
+                }
+            }
+        }
+    }
+}
+
 // One row of the channel directory: name with its featured/joined labels,
 // topic under it, user count at the right edge. Click, Enter or Space
 // activates it (join, or open when already joined), like Cicchetto.
@@ -781,13 +836,17 @@ component DirectoryEntry inherits Rectangle {
     in property <bool> dark;
     // Secondary-text color, the window's `palette-muted`.
     in property <color> muted;
+    in property <color> link-color;
+    pure callback format-topic(string) -> [TopicRun];
     callback activated();
+    callback topic-link-clicked(string);
 
     border-radius: 5px;
     border-width: focus.has-focus ? 1px : 0px;
     border-color: #8080807f;
     background: touch.has-hover || focus.has-focus ? #80808022 : transparent;
-    accessible-role: button;
+    // Expose the row action and its individual URL actions separately.
+    accessible-role: list-item;
     accessible-label: joined ? @tr("Open {}", name) : @tr("Join {}", name);
     accessible-description: topic == ""
         ? @tr("{} users", users)
@@ -858,11 +917,12 @@ component DirectoryEntry inherits Rectangle {
                 }
             }
 
-            if root.topic != "" : Text {
-                text: root.topic;
+            if root.topic != "" : TopicText {
+                runs: root.format-topic(root.topic);
                 font-size: 12px * FontScale.percent / 100;
-                color: root.muted;
-                wrap: word-wrap;
+                text-color: root.muted;
+                link-color: root.link-color;
+                link-clicked(href) => { root.topic-link-clicked(href); }
             }
         }
 
@@ -1324,6 +1384,7 @@ export component AppWindow inherits Window {
     // list; empty when the server hasn't sent one (falls back to the
     // channel label in the markup below).
     in property <string> current-topic: "";
+    pure callback format-topic(string) -> [TopicRun];
     // Compact `+nt` snapshot for the selected channel; empty when unknown or
     // when the server confirms there are no channel modes.
     // One-line status above the topic: network + user modes, then the
@@ -1882,6 +1943,8 @@ export component AppWindow inherits Window {
     callback archive-closed();
     // A link in the Credits page, opened in the browser.
     callback credits-link-clicked(string);
+    // Channel-topic links always open in the browser.
+    callback topic-link-clicked(string);
     // Chat links and the media viewer (images and text uploads, https
     // images elsewhere). `media-kind` is "loading", "image", "text",
     // "gone" or "failed".
@@ -3838,6 +3901,9 @@ export component AppWindow inherits Window {
                     joined: row.joined;
                     dark: theme == "dark";
                     muted: palette-muted;
+                    link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
+                    format-topic(text) => { return root.format-topic(text); }
+                    topic-link-clicked(href) => { root.topic-link-clicked(href); }
                     activated => { directory-channel-activated(row.name); }
                 }
             }
@@ -3874,13 +3940,13 @@ export component AppWindow inherits Window {
 
                 VerticalLayout {
                     padding: 6px;
-                    Text {
-                        text: current-topic == "" ? @tr("No topic set") : current-topic;
+                    TopicText {
+                        runs: format-topic(current-topic == "" ? @tr("No topic set") : current-topic);
                         font-size: 14px * FontScale.percent / 100;
-                        wrap: word-wrap;
-                        horizontal-alignment: left;
-                        vertical-alignment: top;
+                        text-color: Palette.foreground;
+                        link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
                         horizontal-stretch: 1;
+                        link-clicked(href) => { topic-link-clicked(href); }
                     }
                 }
             }

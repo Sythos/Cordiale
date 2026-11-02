@@ -9235,6 +9235,34 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
     markdown
 }
 
+/// Words wrap independently; only validated URL spans become focusable actions.
+fn topic_runs(topic: &str) -> Vec<TopicRun> {
+    fn plain(runs: &mut Vec<TopicRun>, text: &str) {
+        runs.extend(
+            text.split_inclusive(char::is_whitespace)
+                .map(|word| TopicRun {
+                    text: word.into(),
+                    href: "".into(),
+                }),
+        );
+    }
+    let mut runs = Vec::new();
+    let mut last = 0;
+    for link in cordiale_core::media::find_links(topic) {
+        let Ok(url) = cordiale_core::media::validated_url(&link.href) else {
+            continue;
+        };
+        plain(&mut runs, &topic[last..link.range.start]);
+        runs.push(TopicRun {
+            text: topic[link.range.clone()].into(),
+            href: url.as_str().into(),
+        });
+        last = link.range.end;
+    }
+    plain(&mut runs, &topic[last..]);
+    runs
+}
+
 /// Escaped text with its links as markdown links, which the chat's
 /// `StyledText` draws in the link color and reports when clicked.
 fn linked_markdown(text: &str) -> String {
