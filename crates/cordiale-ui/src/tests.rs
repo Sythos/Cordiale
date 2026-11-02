@@ -5576,7 +5576,6 @@ fn copy_text_view_preserves_text_and_supports_read_only_copy() {
                 .dispatch_event(WindowEvent::KeyReleased { text });
         };
         key("X".into()); // Typing must not modify a read-only snapshot.
-        // Slint maps the Control modifier to Command for standard shortcuts on macOS.
         let copy_modifier = slint::platform::Key::Control;
         ui.window().dispatch_event(WindowEvent::KeyPressed {
             text: copy_modifier.into(),
