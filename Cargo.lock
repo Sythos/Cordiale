@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "cordiale-core"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "base64 0.23.1",
  "caseless",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "cordiale-ui"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "arboard",
  "base64 0.23.1",
