@@ -9391,6 +9391,7 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
 /// Escape a whole topic as one paragraph and link only validated web URLs.
 /// Keeping the paragraph in one StyledText item lets the renderer apply the
 /// Unicode bidirectional algorithm across words, spaces, punctuation and URLs.
+#[cfg(test)]
 fn topic_markdown(topic: &str) -> String {
     topic_markdown_with_state(topic, -1, None, false)
 }
@@ -9440,12 +9441,6 @@ fn topic_markdown_with_state(
     }
     append_topic_text(&mut markdown, &topic[last..], row_action_text_color);
     markdown
-}
-
-fn topic_styled_text(topic: &str) -> slint::StyledText {
-    let markdown = topic_markdown(topic);
-    slint::StyledText::from_markdown(&markdown)
-        .unwrap_or_else(|_| slint::StyledText::from_plain_text(topic))
 }
 
 fn topic_styled_text_with_state(

@@ -5444,8 +5444,13 @@ fn topic_text_keeps_markup_and_non_web_schemes_literal() {
 }
 
 fn set_headless_software_platform() {
-    static SETUP: std::sync::Once = std::sync::Once::new();
-    SETUP.call_once(|| {
+    std::thread_local! {
+        static SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    SETUP.with(|setup| {
+        if setup.get() {
+            return;
+        }
         use slint::platform::{software_renderer::*, Platform, WindowAdapter};
         struct Headless;
         impl Platform for Headless {
@@ -5456,6 +5461,7 @@ fn set_headless_software_platform() {
             }
         }
         slint::platform::set_platform(Box::new(Headless)).unwrap();
+        setup.set(true);
     });
 }
 #[test]
@@ -5489,7 +5495,7 @@ fn directory_topic_plain_text_activates_row_and_focused_link_is_distinct() {
 
 #[test]
 fn topic_links_preserve_visual_order_and_keyboard_actions() {
-    use slint::platform::{software_renderer::*, WindowEvent};
+    use slint::platform::WindowEvent;
     set_headless_software_platform();
     let row = AppWindow::new().unwrap();
     row.set_screen("connected".into());
@@ -5544,7 +5550,7 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
         row.set_directory_rows(
             Rc::new(slint::VecModel::from(vec![DirectoryRow {
                 name: "#test".into(),
-                topic: topic.into(),
+                topic: topic.as_str().into(),
                 users: "2".into(),
                 featured: false,
                 joined: false,
@@ -5644,7 +5650,7 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
             row.set_directory_rows(
                 Rc::new(slint::VecModel::from(vec![DirectoryRow {
                     name: "#test".into(),
-                    topic: topic.into(),
+                    topic: topic.as_str().into(),
                     users: "2".into(),
                     featured: false,
                     joined: false,
@@ -5936,7 +5942,7 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
 
 #[test]
 fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
-    use slint::platform::{software_renderer::*, WindowEvent};
+    use slint::platform::WindowEvent;
     set_headless_software_platform();
     let row = AppWindow::new().unwrap();
     row.set_screen("connected".into());
