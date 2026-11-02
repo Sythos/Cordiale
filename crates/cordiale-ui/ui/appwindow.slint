@@ -1154,7 +1154,10 @@ export component AppWindow inherits Window {
             radio-open = false;
             chat-resume = screen == "settings" || screen == "links" || screen == "archive" || screen == "reply" || screen == "umodes" || screen == "debug";
         }
-        chat-read-state-changed(screen == "connected" && has-selected-channel, chat-follow-bottom);
+        chat-read-state-changed(
+            screen == "connected" && has-selected-channel && !directory-open,
+            chat-follow-bottom
+        );
     }
     // Set once by Rust before the window is shown: where the splash
     // screen hands off to once its animation finishes ("language" on
@@ -1357,7 +1360,10 @@ export component AppWindow inherits Window {
     out property <length> chat-content-height: 0px;
     in-out property <bool> chat-follow-bottom: true;
     changed chat-follow-bottom => {
-        chat-read-state-changed(screen == "connected" && has-selected-channel, chat-follow-bottom);
+        chat-read-state-changed(
+            screen == "connected" && has-selected-channel && !directory-open,
+            chat-follow-bottom
+        );
     }
     // The row a mention jump landed on, tinted for a moment; -1 for none.
     in-out property <int> chat-highlight-row: -1;
@@ -1403,7 +1409,10 @@ export component AppWindow inherits Window {
         window-status);
     in property <bool> has-selected-channel: false;
     changed has-selected-channel => {
-        chat-read-state-changed(screen == "connected" && has-selected-channel, chat-follow-bottom);
+        chat-read-state-changed(
+            screen == "connected" && has-selected-channel && !directory-open,
+            chat-follow-bottom
+        );
     }
     in property <bool> current-query: false;
     // The peer's nick for the open private window — set together with
@@ -1500,6 +1509,12 @@ export component AppWindow inherits Window {
     in property <string> directory-failed-reason: "";
     // The directory pane replaces the chat while open; the sidebar stays.
     in-out property <bool> directory-open: false;
+    changed directory-open => {
+        chat-read-state-changed(
+            screen == "connected" && has-selected-channel && !directory-open,
+            chat-follow-bottom
+        );
+    }
     // Unix seconds of the listing's capture ("" when none), and its age in
     // seconds (-1 when none), re-derived by `directory-age-tick` so the
     // "N ago" label keeps moving while the pane is open.
