@@ -2353,6 +2353,197 @@ fn window_counts_updates_messages_and_mentions_for_each_known_window() {
 }
 
 #[test]
+fn active_window_counts_clear_only_when_the_latest_row_is_visible() {
+    let mut state = WorkerState::new();
+    state.conn.identifier = Some("sythos".to_string());
+    let channel = ("libera".to_string(), "#Cordiale".to_string());
+    state.windows.channel_entries = vec![
+        (
+            "libera".to_string(),
+            "#Cordiale".to_string(),
+            "#Cordiale".to_string(),
+        ),
+        (
+            "libera".to_string(),
+            "#other".to_string(),
+            "#other".to_string(),
+        ),
+        (
+            "oftc".to_string(),
+            "#other".to_string(),
+            "#other".to_string(),
+        ),
+    ];
+    state.transcript.query_windows = vec![QueryWindow {
+        network: "libera".to_string(),
+        target_nick: "Peer".to_string(),
+        opened_at: "2026-09-21T10:00:00Z".to_string(),
+        dm_conversation_id: None,
+    }];
+    let line = |id| RenderedMessage {
+        timestamp: "10:00".to_string(),
+        nick: Some("Peer".to_string()),
+        text: "hello".to_string(),
+        italic: false,
+        message_id: Some(id),
+        server_time: Some(id),
+        presence_noise: false,
+        rename_to: None,
+        encrypted: false,
+    };
+    state.windows.current_channel = Some(channel.clone());
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = true;
+
+    let active_snapshot = serde_json::json!({
+        "kind": "window_counts",
+        "channel": "#CORDIALE",
+        "messages": 6,
+        "mentions": 2,
+        "events": 1,
+        "severity": "mention"
+    });
+    assert!(apply_window_counts(
+        &mut state,
+        &channel_topic("sythos", "libera", "#Cordiale"),
+        &serde_json::json!({
+            "kind": "window_counts",
+            "channel": "#Cordiale",
+            "messages": 8,
+            "mentions": 1,
+            "events": 1,
+            "severity": "message"
+        })
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "#Cordiale")),
+        Some(&8)
+    );
+
+    state
+        .transcript
+        .messages
+        .insert(channel.clone(), vec![line(12)]);
+    assert!(apply_window_counts(
+        &mut state,
+        &channel_topic("sythos", "libera", "#Cordiale"),
+        &active_snapshot
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "#Cordiale")),
+        Some(&0)
+    );
+    assert_eq!(
+        state
+            .windows
+            .window_mentions
+            .get(&window_counts_key("libera", "#Cordiale")),
+        Some(&2)
+    );
+
+    let other_snapshot = serde_json::json!({
+        "kind": "window_counts",
+        "channel": "#other",
+        "messages": 3,
+        "mentions": 0,
+        "events": 1,
+        "severity": "message"
+    });
+    assert!(apply_window_counts(
+        &mut state,
+        &channel_topic("sythos", "oftc", "#other"),
+        &other_snapshot
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("oftc", "#other")),
+        Some(&3)
+    );
+
+    state.windows.chat_follow_bottom = false;
+    let scrolled_snapshot = serde_json::json!({
+        "kind": "window_counts",
+        "channel": "#cordiale",
+        "messages": 2,
+        "mentions": 1,
+        "events": 1,
+        "severity": "mention"
+    });
+    assert!(apply_window_counts(
+        &mut state,
+        &channel_topic("sythos", "libera", "#cordiale"),
+        &scrolled_snapshot
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "#Cordiale")),
+        Some(&2)
+    );
+
+    let plain =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Plain, "Peer").key();
+    let locked =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Locked, "Peer")
+            .key();
+    state.windows.current_channel = Some(plain.clone());
+    state.windows.current_query = true;
+    state.windows.chat_follow_bottom = true;
+    state.transcript.messages.insert(plain, vec![line(20)]);
+    let query_snapshot = serde_json::json!({
+        "kind": "window_counts",
+        "channel": "Peer",
+        "messages": 4,
+        "mentions": 0,
+        "events": 1,
+        "severity": "message"
+    });
+    assert!(apply_window_counts(
+        &mut state,
+        &query_topic("sythos", "libera", "Peer"),
+        &query_snapshot
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "Peer")),
+        Some(&0)
+    );
+
+    state.windows.current_channel = Some(locked);
+    state.e2e.add_locked("libera", "Peer");
+    assert!(apply_window_counts(
+        &mut state,
+        &query_topic("sythos", "libera", "Peer"),
+        &serde_json::json!({
+            "kind": "window_counts",
+            "channel": "Peer",
+            "messages": 5,
+            "mentions": 0,
+            "events": 1,
+            "severity": "message"
+        })
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "Peer")),
+        Some(&5)
+    );
+}
+
+#[test]
 fn window_counts_from_me_seeds_channel_and_query_counts() {
     let unread_counts = serde_json::json!({
         "libera": {
@@ -5476,6 +5667,60 @@ fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
             "media buttons must keep their compact hit area in {kind}: {close_hits:?}"
         );
     }
+
+    // Check actual layout, not just the strings retained by topic_runs:
+    // Slint can exclude trailing spaces from each word's preferred width.
+    for directory in [false, true] {
+        row.set_directory_open(directory);
+        row.window().set_size(slint::LogicalSize::new(1200., 800.));
+        let mut positions = Vec::new();
+        for spaces in [0, 1, 3] {
+            let topic = format!("word{}https://example.org/a", " ".repeat(spaces));
+            // Use the real tokenizer, but remove its separator for the
+            // zero-space baseline so the same URL remains a distinct run.
+            row.on_format_topic(move |_| {
+                let mut runs = topic_runs(&format!(
+                    "word{}https://example.org/a",
+                    " ".repeat(spaces.max(1))
+                ));
+                if spaces == 0 {
+                    runs[0].text = "word".into();
+                }
+                Rc::new(slint::VecModel::from(runs)).into()
+            });
+            row.set_current_topic(topic.as_str().into());
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#test".into(),
+                    topic: topic.into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            let mut first = None;
+            'scan: for y in (if directory { 150 } else { 16 }..400).step_by(4) {
+                for x in 180..1184 {
+                    opened.borrow_mut().clear();
+                    click(x as f32, y as f32);
+                    if !opened.borrow().is_empty() {
+                        first = Some(x);
+                        break 'scan;
+                    }
+                }
+            }
+            positions.push(first.expect("topic link must remain clickable"));
+        }
+        assert!(
+            positions[1] > positions[0],
+            "one space lost: {positions:?}, directory={directory}"
+        );
+        assert!(
+            positions[2] > positions[1],
+            "repeated spaces lost: {positions:?}, directory={directory}"
+        );
+    }
 }
 
 #[test]
@@ -6219,6 +6464,10 @@ fn notification_edits_change_only_their_field() {
 
 /// Serves one request on a local port with `status` and returns the base URL.
 fn one_shot_server(status: u16) -> String {
+    one_shot_server_with_body(status, "")
+}
+
+fn one_shot_server_with_body(status: u16, body: &'static str) -> String {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
@@ -6249,8 +6498,10 @@ fn one_shot_server(status: u16) -> String {
                 break;
             }
         }
-        let reply =
-            format!("HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let reply = format!(
+            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
         let _ = stream.write_all(reply.as_bytes());
     });
     url
@@ -9647,6 +9898,8 @@ fn read_cursor_write_back_is_forward_only() {
         encrypted: false,
     };
     assert_eq!(read_cursor_to_write(&mut state), None);
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = true;
     state.windows.current_channel = Some(key.clone());
     state
         .transcript
@@ -9673,6 +9926,139 @@ fn read_cursor_write_back_is_forward_only() {
     assert_eq!(
         read_cursor_to_write(&mut state),
         Some(("libera".to_string(), "#Rust".to_string(), 12))
+    );
+}
+
+#[test]
+fn read_cursor_waits_until_the_newest_row_is_visible() {
+    let mut state = WorkerState::new();
+    let key = ("libera".to_string(), "#Rust".to_string());
+    let line = RenderedMessage {
+        timestamp: "10:00".to_string(),
+        nick: Some("foo".to_string()),
+        text: "hi".to_string(),
+        italic: false,
+        message_id: Some(9),
+        server_time: Some(9),
+        presence_noise: false,
+        rename_to: None,
+        encrypted: false,
+    };
+    state.windows.current_channel = Some(key.clone());
+    state
+        .transcript
+        .messages
+        .insert(key.clone(), vec![line.clone()]);
+    state.windows.chat_visible = false;
+    state.windows.chat_follow_bottom = true;
+    assert_eq!(read_cursor_to_write(&mut state), None);
+    assert!(state.windows.read_cursors.is_empty());
+
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = false;
+    assert_eq!(read_cursor_to_write(&mut state), None);
+    assert!(state.windows.read_cursors.is_empty());
+
+    state.windows.chat_follow_bottom = true;
+    assert_eq!(
+        read_cursor_to_write(&mut state),
+        Some(("libera".to_string(), "#Rust".to_string(), 9))
+    );
+}
+
+#[test]
+fn visible_bottom_read_clears_only_the_active_window() {
+    let mut state = WorkerState::new();
+    let active = ("libera".to_string(), "#Rust".to_string());
+    let other = ("oftc".to_string(), "#rust".to_string());
+    let line = RenderedMessage {
+        timestamp: "10:00".to_string(),
+        nick: Some("foo".to_string()),
+        text: "hi".to_string(),
+        italic: false,
+        message_id: Some(9),
+        server_time: Some(9),
+        presence_noise: false,
+        rename_to: None,
+        encrypted: false,
+    };
+    state.windows.current_channel = Some(active.clone());
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = false;
+    state.transcript.messages.insert(active.clone(), vec![line]);
+    let active_count = window_counts_key(&active.0, &active.1);
+    let other_count = window_counts_key(&other.0, &other.1);
+    state
+        .windows
+        .window_messages
+        .insert(active_count.clone(), 4);
+    state.windows.window_messages.insert(other_count.clone(), 6);
+    let ui = slint::Weak::<AppWindow>::default();
+
+    assert!(!mark_active_window_read(&mut state, &ui));
+    assert_eq!(state.windows.window_messages.get(&active_count), Some(&4));
+
+    set_chat_follow_bottom(&mut state, &ui);
+    assert!(mark_active_window_read(&mut state, &ui));
+    assert_eq!(state.windows.window_messages.get(&active_count), Some(&0));
+    assert_eq!(state.windows.window_messages.get(&other_count), Some(&6));
+}
+
+#[test]
+fn window_selection_preserves_scroll_only_for_the_same_lane() {
+    let mut state = WorkerState::new();
+    let plain = ("libera".to_string(), "Peer".to_string());
+    state.windows.current_channel = Some(plain.clone());
+    state.windows.current_query = true;
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = false;
+
+    prepare_window_selection(&mut state, &plain, true);
+    assert!(!state.windows.chat_follow_bottom);
+
+    let locked =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Locked, "Peer")
+            .key();
+    prepare_window_selection(&mut state, &locked, true);
+    assert!(state.windows.chat_follow_bottom);
+    assert!(state.windows.chat_visible);
+}
+
+#[test]
+fn locked_query_read_state_does_not_write_the_plain_query_cursor() {
+    let mut state = WorkerState::new();
+    let locked =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Locked, "Peer")
+            .key();
+    let plain =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Plain, "Peer").key();
+    let line = |id| RenderedMessage {
+        timestamp: "10:00".to_string(),
+        nick: Some("Peer".to_string()),
+        text: "hello".to_string(),
+        italic: false,
+        message_id: Some(id),
+        server_time: Some(id),
+        presence_noise: false,
+        rename_to: None,
+        encrypted: true,
+    };
+    state.windows.current_query = true;
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = true;
+    state.windows.current_channel = Some(locked.clone());
+    state
+        .transcript
+        .messages
+        .insert(locked.clone(), vec![line(30)]);
+    assert_eq!(read_cursor_to_write(&mut state), None);
+    assert!(state.windows.read_cursors.is_empty());
+
+    state.windows.current_channel = Some(plain.clone());
+    state.transcript.messages.insert(plain, vec![line(27)]);
+    assert_eq!(
+        read_cursor_to_write(&mut state),
+        Some(("libera".to_string(), "Peer".to_string(), 27))
     );
 }
 
@@ -11673,6 +12059,27 @@ fn a_locked_window_without_an_engine_sends_nothing() {
     // No client and no engine: the text went nowhere, and no plain row
     // appeared for it.
     assert!(state.transcript.messages.is_empty());
+}
+
+#[test]
+fn successful_channel_and_plain_query_sends_follow_the_newest_row() {
+    for (target, is_query) in [("#rust", false), ("Peer", true)] {
+        let mut state = WorkerState::new();
+        state.conn.client = Some(GrappaClient::new(one_shot_server_with_body(
+            200,
+            r#"{"kind":"privmsg"}"#,
+        )));
+        state.conn.token = Some("test-token".to_string());
+        state.windows.current_channel = Some(("libera".to_string(), target.to_string()));
+        state.windows.current_query = is_query;
+        state.windows.current_query_ready = true;
+        state.windows.chat_visible = true;
+        state.windows.chat_follow_bottom = false;
+
+        let ui = slint::Weak::<AppWindow>::default();
+        network_test_runtime().block_on(handle_send_message(&mut state, &ui, "hello".to_string()));
+        assert!(state.windows.chat_follow_bottom, "target {target}");
+    }
 }
 
 #[test]

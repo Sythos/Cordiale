@@ -434,6 +434,14 @@ pub(crate) fn register_navigation_callbacks(
     ui: &AppWindow,
     worker_tx: &mpsc::UnboundedSender<WorkerCommand>,
 ) {
+    let tx_for_chat_read_state = worker_tx.clone();
+    ui.on_chat_read_state_changed(move |visible, follow_bottom| {
+        let _ = tx_for_chat_read_state.send(WorkerCommand::ChatReadStateChanged {
+            visible,
+            follow_bottom,
+        });
+    });
+
     let tx_for_disconnect = worker_tx.clone();
     let weak_for_disconnect = ui.as_weak();
     ui.on_disconnect_requested(move || {

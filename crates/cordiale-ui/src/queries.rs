@@ -38,6 +38,7 @@ pub(crate) async fn handle_select_query(
 
     let key = (query.network.clone(), query.target_nick.clone());
     let identity = query_window_key(&query.network, &query.target_nick);
+    prepare_window_selection(state, &key, true);
     state.windows.current_query = true;
     state.windows.current_query_ready = state.transcript.query_ready.contains(&identity);
     open_window(state, &key);
@@ -69,6 +70,7 @@ pub(crate) async fn handle_select_query(
             fetch_query_history(state, &followed, None, None).await;
         }
         show_query_window(state, ui, &query, &key);
+        mark_active_window_read(state, ui);
     }
     // The plain query stays as it is. A peer with a verified device also gets
     // a locked entry; a peer without one is asked for its keys.
