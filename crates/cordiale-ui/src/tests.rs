@@ -5242,6 +5242,35 @@ fn topic_text_keeps_markup_and_non_web_schemes_literal() {
 }
 
 #[test]
+fn directory_topic_plain_text_activates_row_and_focused_link_is_distinct() {
+    let topic = "before https://example.org/a middle https://example.org/b after";
+    let text_color = slint::Color::from_rgb_u8(64, 96, 128);
+    let markdown = topic_markdown_with_state(topic, 1, Some(text_color), true);
+
+    assert_eq!(markdown.matches(DIRECTORY_ROW_ACTION_HREF).count(), 3);
+    assert!(markdown.contains(
+        "<font color=\"#406080\">[before&#32;](<cordiale-internal:activate-directory-row>)</font>"
+    ));
+    assert!(markdown.contains("](<https://example.org/a>)"));
+    let focused_link_start = markdown.find("<u>**[").expect("focused link marker");
+    assert!(markdown[focused_link_start..].contains("](<https://example.org/b>)**</u>"));
+    assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+
+    let no_link_topic = "plain topic text";
+    let no_link_markdown = topic_markdown_with_state(no_link_topic, -1, Some(text_color), true);
+    assert_eq!(
+        no_link_markdown.matches(DIRECTORY_ROW_ACTION_HREF).count(),
+        1
+    );
+    assert!(slint::StyledText::from_markdown(&no_link_markdown).is_ok());
+
+    let normal_chat_markdown = topic_markdown_with_state(topic, 1, Some(text_color), false);
+    assert!(!normal_chat_markdown.contains(DIRECTORY_ROW_ACTION_HREF));
+    assert!(normal_chat_markdown.contains("<u>**["));
+    assert!(normal_chat_markdown.contains("](<https://example.org/b>)**</u>"));
+}
+
+#[test]
 fn topic_links_preserve_visual_order_and_keyboard_actions() {
     use slint::platform::{software_renderer::*, Platform, WindowAdapter, WindowEvent};
     struct Headless;
@@ -5256,7 +5285,16 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
     row.set_has_selected_channel(true);
     row.set_directory_network("test".into());
     let topic = "plain https://example.org/a https://example.org/b tail";
-    row.on_format_topic(|topic| topic_styled_text(&topic));
+    row.on_format_topic(
+        |topic, focused_link_index, text_color, activate_row_on_plain_click| {
+            topic_styled_text_with_state(
+                &topic,
+                focused_link_index,
+                text_color,
+                activate_row_on_plain_click,
+            )
+        },
+    );
     row.on_format_topic_links(|topic| {
         Rc::new(slint::VecModel::from(topic_link_targets(&topic))).into()
     });
@@ -5345,6 +5383,62 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
             assert!(
                 first.1 < second.0,
                 "LTR link order changed in directory={directory}: {first:?}, {second:?}"
+            );
+        }
+        if directory && width == 1200 && prefix.is_empty() {
+            let first_url_x = link_ranges
+                .get("https://example.org/a")
+                .expect("first link bounds")
+                .0;
+            let topic_line_y = first_link.expect("first link position").1;
+            let activation_before = activated.get();
+            let opened_before = opened.borrow().len();
+            let search_start = (first_url_x - 72.0).max(180.0) as i32;
+            let search_end = (first_url_x - 8.0).max(search_start as f32) as i32;
+            for x in (search_start..search_end).step_by(4) {
+                click(x as f32, topic_line_y);
+                if activated.get() > activation_before {
+                    break;
+                }
+            }
+            assert_eq!(
+                activated.get(),
+                activation_before + 1,
+                "plain topic text did not activate directory={directory}"
+            );
+            assert_eq!(opened.borrow().len(), opened_before);
+
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#plain".into(),
+                    topic: "plain topic text without links".into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            let activation_before = activated.get();
+            for x in 180..width - 16 {
+                click(x as f32, topic_line_y);
+                if activated.get() > activation_before {
+                    break;
+                }
+            }
+            assert_eq!(
+                activated.get(),
+                activation_before + 1,
+                "plain topic without URLs did not activate the directory row"
+            );
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#test".into(),
+                    topic: topic.into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
             );
         }
         let (x, y) = first_link.unwrap();
@@ -5586,7 +5680,7 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
             "<font color=\"#ff00ff\">{first_word}</font> <font color=\"#00ffff\">{second_word}</font>"
         ))
         .expect("test marker text");
-        row.on_format_topic(move |_| styled.clone());
+        row.on_format_topic(move |_, _, _, _| styled.clone());
 
         for directory in [true, false] {
             row.set_current_topic(topic.as_str().into());

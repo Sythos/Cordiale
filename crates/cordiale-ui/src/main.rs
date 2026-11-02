@@ -9239,37 +9239,53 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
 /// Keeping the paragraph in one StyledText item lets the renderer apply the
 /// Unicode bidirectional algorithm across words, spaces, punctuation and URLs.
 fn topic_markdown(topic: &str) -> String {
+    topic_markdown_with_state(topic, -1, None, false)
+}
+
+const DIRECTORY_ROW_ACTION_HREF: &str = "cordiale-internal:activate-directory-row";
+
+fn topic_markdown_with_state(
+    topic: &str,
+    focused_link_index: i32,
+    row_action_text_color: Option<slint::Color>,
+    activate_row_on_plain_click: bool,
+) -> String {
     let mut markdown = String::new();
     let mut last = 0;
-    // Markdown treats four leading spaces or a tab as an unsupported code
-    // block. Character references keep the same visible whitespace while
-    // making the paragraph safe for Slint's inline Markdown parser.
-    for (index, ch) in topic.char_indices() {
-        let entity = match ch {
-            ' ' => "&#32;",
-            '\t' => "&#9;",
-            '\r' | '\n' => "&#32;",
-            _ => break,
-        };
-        markdown.push_str(entity);
-        last = index + ch.len_utf8();
-    }
+    let row_action_text_color = if activate_row_on_plain_click {
+        row_action_text_color
+    } else {
+        None
+    };
+    let mut focused_index = 0;
     for link in cordiale_core::media::find_links(topic) {
         let Ok(url) = cordiale_core::media::validated_url(&link.href) else {
             continue;
         };
-        if link.range.start < last {
+        if link.range.start < last || link.range.end > topic.len() {
             continue;
         }
-        markdown.push_str(&escape_markdown(&topic[last..link.range.start]));
+        append_topic_text(
+            &mut markdown,
+            &topic[last..link.range.start],
+            row_action_text_color,
+        );
+        let focused = focused_index == focused_link_index;
+        if focused {
+            markdown.push_str("<u>**");
+        }
         markdown.push('[');
-        markdown.push_str(&escape_markdown(&topic[link.range.clone()]));
+        markdown.push_str(&escape_topic_text(&topic[link.range.clone()]));
         markdown.push_str("](<");
         markdown.push_str(&escape_markdown_destination(url.as_str()));
         markdown.push_str(">)");
+        if focused {
+            markdown.push_str("**</u>");
+        }
+        focused_index += 1;
         last = link.range.end;
     }
-    markdown.push_str(&escape_markdown(&topic[last..]));
+    append_topic_text(&mut markdown, &topic[last..], row_action_text_color);
     markdown
 }
 
@@ -9277,6 +9293,63 @@ fn topic_styled_text(topic: &str) -> slint::StyledText {
     let markdown = topic_markdown(topic);
     slint::StyledText::from_markdown(&markdown)
         .unwrap_or_else(|_| slint::StyledText::from_plain_text(topic))
+}
+
+fn topic_styled_text_with_state(
+    topic: &str,
+    focused_link_index: i32,
+    row_action_text_color: slint::Color,
+    activate_row_on_plain_click: bool,
+) -> slint::StyledText {
+    let markdown = topic_markdown_with_state(
+        topic,
+        focused_link_index,
+        Some(row_action_text_color),
+        activate_row_on_plain_click,
+    );
+    slint::StyledText::from_markdown(&markdown)
+        .unwrap_or_else(|_| slint::StyledText::from_plain_text(topic))
+}
+
+fn append_topic_text(
+    markdown: &mut String,
+    text: &str,
+    row_action_text_color: Option<slint::Color>,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    if let Some(color) = row_action_text_color {
+        markdown.push_str(&format!(
+            "<font color=\"#{:02x}{:02x}{:02x}\">[",
+            color.red(),
+            color.green(),
+            color.blue()
+        ));
+    }
+    markdown.push_str(&escape_topic_text(text));
+    if row_action_text_color.is_some() {
+        markdown.push_str("](<");
+        markdown.push_str(DIRECTORY_ROW_ACTION_HREF);
+        markdown.push_str(">)</font>");
+    }
+}
+
+fn escape_topic_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            // Character references preserve whitespace without allowing a
+            // leading indent to become a Markdown code block or trimming it
+            // from the start or end of a link label.
+            ' ' => escaped.push_str("&#32;"),
+            '\t' => escaped.push_str("&#9;"),
+            '\r' | '\n' => escaped.push_str("&#32;"),
+            _ => escaped.push_str(&escape_markdown(&ch.to_string())),
+        }
+    }
+    escaped
 }
 
 fn topic_link_targets(topic: &str) -> Vec<slint::SharedString> {

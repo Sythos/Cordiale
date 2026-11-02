@@ -771,23 +771,27 @@ component RenameTarget inherits Rectangle {
 
 // Render one paragraph so the text engine can order RTL and LTR runs.
 component TopicText inherits Rectangle {
-    in property <styled-text> text;
+    in property <string> topic;
     in property <[string]> links;
     in property <color> text-color;
     in property <color> link-color;
     in property <length> font-size;
+    in property <bool> activate-row-on-plain-click: false;
+    pure callback format-topic(string, int, color, bool) -> styled-text;
     callback link-clicked(string);
     callback link-focus-changed(int);
     private property <int> focused-link-index: -1;
-    border-width: focused-link-index < 0 ? 0px : 1px;
-    border-color: root.link-color;
     min-width: 0px;
     horizontal-stretch: 1;
     changed links => { root.focused-link-index = -1; }
 
     VerticalLayout {
         StyledText {
-            text: root.text;
+            text: root.format-topic(
+                root.topic,
+                root.focused-link-index,
+                root.text-color,
+                root.activate-row-on-plain-click);
             default-color: root.text-color;
             default-font-size: root.font-size;
             link-color: root.link-color;
@@ -849,7 +853,7 @@ component DirectoryEntry inherits Rectangle {
     // Secondary-text color, the window's `palette-muted`.
     in property <color> muted;
     in property <color> link-color;
-    pure callback format-topic(string) -> styled-text;
+    pure callback format-topic(string, int, color, bool) -> styled-text;
     pure callback format-topic-links(string) -> [string];
     callback activated();
     callback topic-link-clicked(string);
@@ -932,12 +936,23 @@ component DirectoryEntry inherits Rectangle {
             }
 
             if root.topic != "" : TopicText {
-                text: root.format-topic(root.topic);
+                topic: root.topic;
                 links: root.format-topic-links(root.topic);
                 font-size: 12px * FontScale.percent / 100;
                 text-color: root.muted;
                 link-color: root.link-color;
-                link-clicked(href) => { root.topic-link-clicked(href); }
+                activate-row-on-plain-click: true;
+                format-topic(text, focused-link, color, activate-row) => {
+                    return root.format-topic(text, focused-link, color, activate-row);
+                }
+                link-clicked(href) => {
+                    if href == "cordiale-internal:activate-directory-row" {
+                        focus.focus();
+                        root.activated();
+                    } else {
+                        root.topic-link-clicked(href);
+                    }
+                }
                 link-focus-changed(index) => { root.topic-link-focus-changed(index); }
             }
         }
@@ -1400,7 +1415,7 @@ export component AppWindow inherits Window {
     // list; empty when the server hasn't sent one (falls back to the
     // channel label in the markup below).
     in property <string> current-topic: "";
-    pure callback format-topic(string) -> styled-text;
+    pure callback format-topic(string, int, color, bool) -> styled-text;
     pure callback format-topic-links(string) -> [string];
     callback topic-link-focus-changed(int);
     // Compact `+nt` snapshot for the selected channel; empty when unknown or
@@ -3920,7 +3935,9 @@ export component AppWindow inherits Window {
                     dark: theme == "dark";
                     muted: palette-muted;
                     link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
-                    format-topic(text) => { return root.format-topic(text); }
+                    format-topic(text, focused-link, color, activate-row) => {
+                        return root.format-topic(text, focused-link, color, activate-row);
+                    }
                     format-topic-links(text) => { return root.format-topic-links(text); }
                     topic-link-clicked(href) => { root.topic-link-clicked(href); }
                     topic-link-focus-changed(index) => { root.topic-link-focus-changed(index); }
@@ -3961,12 +3978,15 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     padding: 6px;
                     TopicText {
-                        text: format-topic(current-topic == "" ? @tr("No topic set") : current-topic);
+                        topic: current-topic == "" ? @tr("No topic set") : current-topic;
                         links: format-topic-links(current-topic == "" ? @tr("No topic set") : current-topic);
                         font-size: 14px * FontScale.percent / 100;
                         text-color: Palette.foreground;
                         link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
                         horizontal-stretch: 1;
+                        format-topic(text, focused-link, color, activate-row) => {
+                            return root.format-topic(text, focused-link, color, activate-row);
+                        }
                         link-clicked(href) => { topic-link-clicked(href); }
                         link-focus-changed(index) => { topic-link-focus-changed(index); }
                     }
