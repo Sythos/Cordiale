@@ -8903,6 +8903,21 @@ fn push_window_note(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     });
 }
 
+/// Keep the sidebar's model identity so ListView retains its scroll anchor
+/// and height estimates across selection and unread-count updates.
+fn show_network_groups(ui: &AppWindow, groups: Vec<NetworkGroup>) {
+    use slint::Model as _;
+    if let Some(model) = ui
+        .get_network_groups()
+        .as_any()
+        .downcast_ref::<slint::VecModel<NetworkGroup>>()
+    {
+        model.set_vec(groups);
+    } else {
+        ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
+    }
+}
+
 fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let unread_badge = i32::try_from(state.windows.badge_count).unwrap_or(i32::MAX);
     {
@@ -8934,7 +8949,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
             selected,
         );
         ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
-        ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
+        show_network_groups(&ui, groups);
     });
     push_home(state, &ui);
 }
