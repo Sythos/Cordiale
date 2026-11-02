@@ -945,6 +945,7 @@ component NavButton inherits Rectangle {
     callback clicked();
 
     min-height: 30px;
+    vertical-stretch: 0;
     border-radius: 5px;
     border-width: selected ? 1px : 0px;
     border-color: #8080807f;
@@ -978,8 +979,8 @@ component NavButton inherits Rectangle {
     }
 }
 
-// A button only as wide as its label, so a row or column never stretches
-// it across the screen.
+// A button stays compact in both directions, even inside a row or card that
+// uses extra space for its content.
 component CompactButton {
     in property <string> text;
     in property <bool> enabled: true;
@@ -987,13 +988,16 @@ component CompactButton {
     callback clicked();
 
     horizontal-stretch: 0;
+    vertical-stretch: 0;
 
     HorizontalLayout {
         alignment: start;
+        vertical-stretch: 0;
 
         Button {
             text: root.text;
             enabled: root.enabled;
+            vertical-stretch: 0;
             accessible-label: root.a11y-label == "" ? root.text : root.a11y-label;
             clicked => { root.clicked(); }
         }
@@ -6184,6 +6188,7 @@ export component AppWindow inherits Window {
                 }
                 for station[index] in radio-custom-stations : HorizontalLayout {
                     spacing: 6px;
+                    vertical-stretch: 0;
 
                     Text {
                         text: station.name + "  (" + station.codec-label + ")\n" + station.url;
@@ -6224,6 +6229,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 6px;
                     alignment: start;
+                    vertical-stretch: 0;
 
                     ComboBox {
                         model: ["MP3", "Ogg Vorbis", "FLAC"];
@@ -6627,6 +6633,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 4px;
                     alignment: start;
+                    vertical-stretch: 0;
 
                     NavButton {
                         icon: "🔌";
@@ -6705,6 +6712,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 6px;
                     alignment: start;
+                    vertical-stretch: 0;
 
                     CompactButton {
                         text: "⟳  " + @tr("Refresh");
@@ -8102,6 +8110,7 @@ export component AppWindow inherits Window {
 
         HorizontalLayout {
             spacing: 6px;
+            vertical-stretch: 0;
 
             Text {
                 text: media-title;

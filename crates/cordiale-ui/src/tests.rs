@@ -5224,7 +5224,7 @@ fn topic_text_keeps_markup_and_non_web_schemes_literal() {
 }
 
 #[test]
-fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
+fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
     use slint::platform::{software_renderer::*, Platform, WindowAdapter, WindowEvent};
     struct Headless;
     impl Platform for Headless {
@@ -5339,6 +5339,142 @@ fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
             assert_eq!(activated.get(), before + 2);
             assert_eq!(opened.borrow().len(), links_before);
         }
+    }
+
+    // A tall Settings card must not stretch its Admin navigation or actions.
+    row.set_screen("settings".into());
+    row.set_is_admin(true);
+    row.set_settings_section("admin".into());
+    row.set_admin_section("sessions".into());
+    row.window().set_size(slint::LogicalSize::new(1200., 1200.));
+    let mut users_x = None;
+    'find_users: for y in (0..220).step_by(4) {
+        for x in (250..800).step_by(4) {
+            row.set_admin_section("sessions".into());
+            click(x as f32, y as f32);
+            if row.get_admin_section() == "users" {
+                users_x = Some(x);
+                break 'find_users;
+            }
+        }
+    }
+    let users_x = users_x.expect("the Admin Users button is clickable");
+    let mut user_hits = Vec::new();
+    for y in (0..1200).step_by(4) {
+        row.set_admin_section("sessions".into());
+        click(users_x as f32, y as f32);
+        if row.get_admin_section() == "users" {
+            user_hits.push(y);
+        }
+    }
+    assert!(!user_hits.is_empty(), "Admin Users remains clickable");
+    assert!(
+        user_hits.last().unwrap() - user_hits.first().unwrap() <= 48,
+        "the Admin navigation button must keep its compact hit area: {user_hits:?}"
+    );
+
+    let refreshes = Rc::new(std::cell::Cell::new(0));
+    let refresh_count = refreshes.clone();
+    row.on_admin_refresh_requested(move || refresh_count.set(refresh_count.get() + 1));
+    let mut refresh_x = None;
+    'find_refresh: for y in (0..400).step_by(4) {
+        for x in (250..800).step_by(4) {
+            let before = refreshes.get();
+            click(x as f32, y as f32);
+            if refreshes.get() > before {
+                refresh_x = Some(x);
+                break 'find_refresh;
+            }
+        }
+    }
+    let refresh_x = refresh_x.expect("the Admin Refresh button is clickable");
+    let mut refresh_hits = Vec::new();
+    for y in (0..1200).step_by(4) {
+        let before = refreshes.get();
+        click(refresh_x as f32, y as f32);
+        if refreshes.get() > before {
+            refresh_hits.push(y);
+        }
+    }
+    assert!(!refresh_hits.is_empty(), "Admin Refresh remains clickable");
+    assert!(
+        refresh_hits.last().unwrap() - refresh_hits.first().unwrap() <= 48,
+        "the Admin action button must keep its compact hit area: {refresh_hits:?}"
+    );
+
+    // A long station name makes the Radio row tall, but its Delete button stays compact.
+    row.set_settings_section("radio".into());
+    row.set_radio_custom_stations(
+        Rc::new(slint::VecModel::from(vec![CustomRadioRow {
+            name: "Long station details ".repeat(40).into(),
+            url: "https://radio.example/live".into(),
+            codec_index: 0,
+            codec_label: "MP3".into(),
+        }]))
+        .into(),
+    );
+    let deletes = Rc::new(std::cell::Cell::new(0));
+    let delete_count = deletes.clone();
+    row.on_radio_station_delete(move |_| delete_count.set(delete_count.get() + 1));
+    let mut delete_x = None;
+    'find_delete: for y in (0..600).step_by(8) {
+        for x in (400..1200).step_by(8) {
+            let before = deletes.get();
+            click(x as f32, y as f32);
+            if deletes.get() > before {
+                delete_x = Some(x);
+                break 'find_delete;
+            }
+        }
+    }
+    let delete_x = delete_x.expect("the Radio Delete button is clickable");
+    let mut delete_hits = Vec::new();
+    for y in (0..1200).step_by(4) {
+        let before = deletes.get();
+        click(delete_x as f32, y as f32);
+        if deletes.get() > before {
+            delete_hits.push(y);
+        }
+    }
+    assert!(!delete_hits.is_empty(), "Radio Delete remains clickable");
+    assert!(
+        delete_hits.last().unwrap() - delete_hits.first().unwrap() <= 48,
+        "a wrapped Radio detail must not stretch its action button: {delete_hits:?}"
+    );
+
+    // The media header keeps its compact height in every loading and error state.
+    row.set_screen("connected".into());
+    row.set_media_error("A detailed media failure message ".repeat(40).into());
+    row.set_media_text("Media text line ".repeat(100).into());
+    row.window().set_size(slint::LogicalSize::new(1200., 1200.));
+    for kind in ["loading", "image", "text", "gone", "failed"] {
+        row.set_media_kind(kind.into());
+        let mut close_x = None;
+        for x in (100..1100).step_by(4) {
+            row.set_media_open(true);
+            click(x as f32, 48.);
+            if !row.get_media_open() {
+                close_x = Some(x);
+                break;
+            }
+        }
+        let close_x = close_x.expect("the media Close button is clickable");
+        let mut close_hits = Vec::new();
+        for y in (0..1200).step_by(4) {
+            row.set_media_open(true);
+            click(close_x as f32, y as f32);
+            if !row.get_media_open() {
+                close_hits.push(y);
+            }
+        }
+        assert!(
+            !close_hits.is_empty(),
+            "media Close remains clickable in {kind}"
+        );
+        assert!(
+            close_hits.last().unwrap() - close_hits.first().unwrap() <= 48,
+            "media buttons must keep their compact hit area in {kind}: {close_hits:?}"
+        );
     }
 }
 
