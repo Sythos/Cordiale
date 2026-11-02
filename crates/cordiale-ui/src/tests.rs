@@ -5531,6 +5531,60 @@ fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
             assert_eq!(opened.borrow().len(), links_before);
         }
     }
+
+    // Check actual layout, not just the strings retained by topic_runs:
+    // Slint can exclude trailing spaces from each word's preferred width.
+    for directory in [false, true] {
+        row.set_directory_open(directory);
+        row.window().set_size(slint::LogicalSize::new(1200., 800.));
+        let mut positions = Vec::new();
+        for spaces in [0, 1, 3] {
+            let topic = format!("word{}https://example.org/a", " ".repeat(spaces));
+            // Use the real tokenizer, but remove its separator for the
+            // zero-space baseline so the same URL remains a distinct run.
+            row.on_format_topic(move |_| {
+                let mut runs = topic_runs(&format!(
+                    "word{}https://example.org/a",
+                    " ".repeat(spaces.max(1))
+                ));
+                if spaces == 0 {
+                    runs[0].text = "word".into();
+                }
+                Rc::new(slint::VecModel::from(runs)).into()
+            });
+            row.set_current_topic(topic.as_str().into());
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#test".into(),
+                    topic: topic.into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            let mut first = None;
+            'scan: for y in (if directory { 150 } else { 16 }..400).step_by(4) {
+                for x in 180..1184 {
+                    opened.borrow_mut().clear();
+                    click(x as f32, y as f32);
+                    if !opened.borrow().is_empty() {
+                        first = Some(x);
+                        break 'scan;
+                    }
+                }
+            }
+            positions.push(first.expect("topic link must remain clickable"));
+        }
+        assert!(
+            positions[1] > positions[0],
+            "one space lost: {positions:?}, directory={directory}"
+        );
+        assert!(
+            positions[2] > positions[1],
+            "repeated spaces lost: {positions:?}, directory={directory}"
+        );
+    }
 }
 
 #[test]
