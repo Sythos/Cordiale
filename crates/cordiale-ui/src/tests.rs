@@ -5183,6 +5183,9 @@ fn chat_links_become_markdown_links() {
     assert!(bold.contains("**["));
     assert!(bold.contains("](<https://www.rust-lang.org>)"));
     assert!(slint::StyledText::from_markdown(&bold).is_ok());
+    let entity_query = linked_markdown("https://x.io/?a=1&copy;=2");
+    assert!(entity_query.contains("](<https://x.io/?a=1&amp;copy;=2>)"));
+    assert!(slint::StyledText::from_markdown(&entity_query).is_ok());
 }
 
 #[test]
@@ -5208,6 +5211,18 @@ fn topic_links_are_clickable_with_normalized_targets() {
             ["https://example.org/a_b", "https://www.rust-lang.org/"]
         );
     }
+
+    let topic = "https://example.org/?a=1&copy;=2";
+    let markdown = topic_markdown(topic);
+    assert!(markdown.contains("](<https://example.org/?a=1&amp;copy;=2>)"));
+    assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+    assert_eq!(
+        topic_link_targets(topic)
+            .iter()
+            .map(|href| href.as_str())
+            .collect::<Vec<_>>(),
+        [topic]
+    );
 }
 
 #[test]
@@ -5247,10 +5262,17 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
     });
     let opened = Rc::new(RefCell::new(Vec::new()));
     let activated = Rc::new(std::cell::Cell::new(0));
+    let focused_links = Rc::new(RefCell::new(Vec::new()));
     let record = opened.clone();
     row.on_topic_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
     let count = activated.clone();
     row.on_directory_channel_activated(move |_| count.set(count.get() + 1));
+    let focus_record = focused_links.clone();
+    row.on_topic_link_focus_changed(move |index| {
+        if index >= 0 {
+            focus_record.borrow_mut().push(index as usize);
+        }
+    });
     row.show().unwrap();
     let click = |x, y| {
         let position = slint::LogicalPosition::new(x, y);
@@ -5326,21 +5348,11 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
             );
         }
         let (x, y) = first_link.unwrap();
-        click(x, y);
-        let before = activated.get();
+        let activation_before = activated.get();
         let links_before = opened.borrow().len();
-        for text in [
-            slint::platform::Key::Return.into(),
-            " ".into(),
-            slint::platform::Key::Tab.into(),
-            slint::platform::Key::Return.into(),
-        ] {
-            row.window()
-                .dispatch_event(WindowEvent::KeyPressed { text });
-        }
-        assert_eq!(opened.borrow().len(), links_before + 3);
-        assert_eq!(opened.borrow().last().unwrap(), "https://example.org/b");
-        assert_eq!(activated.get(), before);
+        click(x, y);
+        assert_eq!(opened.borrow().len(), links_before + 1);
+        assert_eq!(activated.get(), activation_before);
         if directory && width == 1200 {
             let mut channel_name = None;
             // Search the list area only. Scanning from the top can click the
@@ -5370,6 +5382,116 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
             assert_eq!(opened.borrow().len(), links_before);
         }
     }
+
+    // The Markdown parser must not decode an entity-like query as part of the
+    // URL. Mouse clicks in both topic views must open the validated target.
+    let entity_topic = "https://example.org/?a=1&copy;=2";
+    let entity_target = topic_link_targets(entity_topic)
+        .first()
+        .expect("validated URL target")
+        .to_string();
+    assert_eq!(entity_target, entity_topic);
+    for directory in [true, false] {
+        row.set_current_topic(entity_topic.into());
+        row.set_directory_rows(
+            Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                name: "#entity".into(),
+                topic: entity_topic.into(),
+                users: "2".into(),
+                featured: false,
+                joined: false,
+            }]))
+            .into(),
+        );
+        row.window().set_size(slint::LogicalSize::new(1200., 800.));
+        row.set_directory_open(directory);
+        opened.borrow_mut().clear();
+        let start_y = if directory { 150 } else { 16 };
+        let mut clicked = false;
+        for y in (start_y..320).step_by(8) {
+            for x in (180..1184).step_by(8) {
+                let before = opened.borrow().len();
+                let row_before = activated.get();
+                click(x as f32, y as f32);
+                if opened.borrow().len() > before {
+                    assert_eq!(activated.get(), row_before);
+                    assert_eq!(opened.borrow().last().unwrap(), &entity_target);
+                    clicked = true;
+                    break;
+                }
+            }
+            if clicked {
+                break;
+            }
+        }
+        assert!(
+            clicked,
+            "entity-like URL was not clickable; directory={directory}"
+        );
+    }
+
+    // Repeated URLs still create separate keyboard stops. The sequence A/B/A
+    // must reach indices 0, 1 and 2 in order, even though A occurs twice.
+    let repeated_topic = "https://example.org/a https://example.org/b https://example.org/a";
+    let repeated_targets = topic_link_targets(repeated_topic)
+        .iter()
+        .map(|href| href.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        repeated_targets,
+        vec![
+            "https://example.org/a".to_string(),
+            "https://example.org/b".to_string(),
+            "https://example.org/a".to_string()
+        ]
+    );
+    row.set_current_topic(repeated_topic.into());
+    row.set_directory_rows(
+        Rc::new(slint::VecModel::from(vec![DirectoryRow {
+            name: "#duplicates".into(),
+            topic: repeated_topic.into(),
+            users: "2".into(),
+            featured: false,
+            joined: false,
+        }]))
+        .into(),
+    );
+    row.set_directory_open(false);
+    focused_links.borrow_mut().clear();
+    opened.borrow_mut().clear();
+    for _ in 0..256 {
+        let focus_count = focused_links.borrow().len();
+        row.window().dispatch_event(WindowEvent::KeyPressed {
+            text: slint::platform::Key::Tab.into(),
+        });
+        let focused_index = focused_links.borrow().get(focus_count).copied();
+        if let Some(index) = focused_index {
+            let key = if index == 1 {
+                " ".into()
+            } else {
+                slint::platform::Key::Return.into()
+            };
+            row.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: key });
+            if focused_links
+                .borrow()
+                .windows(3)
+                .any(|indices| indices == [0, 1, 2])
+            {
+                break;
+            }
+        }
+    }
+    assert!(focused_links
+        .borrow()
+        .windows(3)
+        .any(|indices| indices == [0, 1, 2]));
+    let observed_links = focused_links
+        .borrow()
+        .iter()
+        .map(|index| repeated_targets[*index].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(opened.borrow().as_slice(), observed_links.as_slice());
 
     // These positions come from clicks against the rendered anchors. The
     // first URL in each RTL paragraph must appear to the right of the second

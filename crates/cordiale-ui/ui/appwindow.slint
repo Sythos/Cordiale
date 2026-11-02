@@ -777,11 +777,13 @@ component TopicText inherits Rectangle {
     in property <color> link-color;
     in property <length> font-size;
     callback link-clicked(string);
-    private property <string> focused-link: "";
-    border-width: focused-link == "" ? 0px : 1px;
+    callback link-focus-changed(int);
+    private property <int> focused-link-index: -1;
+    border-width: focused-link-index < 0 ? 0px : 1px;
     border-color: root.link-color;
     min-width: 0px;
     horizontal-stretch: 1;
+    changed links => { root.focused-link-index = -1; }
 
     VerticalLayout {
         StyledText {
@@ -792,15 +794,15 @@ component TopicText inherits Rectangle {
             horizontal-stretch: 1;
             min-width: 0px;
             link-clicked(href) => {
-                root.focused-link = href;
                 root.link-clicked(href);
             }
         }
     }
 
-    // StyledText handles mouse clicks. These focus scopes keep one tab stop
-    // per URL and support Enter, Space and accessibility activation.
-    for link in root.links : focus := FocusScope {
+    // StyledText handles mouse clicks. These scopes keep one tab stop per
+    // occurrence. Its mouse callback only has the URL, so it cannot select
+    // one occurrence when the same URL appears more than once.
+    for link[index] in root.links : focus := FocusScope {
         x: 0px;
         y: 0px;
         width: 1px;
@@ -810,13 +812,19 @@ component TopicText inherits Rectangle {
         accessible-label: link;
         accessible-description: @tr("Open this link");
         accessible-action-default => { root.link-clicked(link); }
-        private property <bool> selected: root.focused-link == link;
+        private property <bool> selected: root.focused-link-index == index;
         changed selected => {
             if selected { focus.focus(); }
         }
-        focus-gained(reason) => { root.focused-link = link; }
+        focus-gained(reason) => {
+            root.focused-link-index = index;
+            root.link-focus-changed(index);
+        }
         focus-lost(reason) => {
-            if root.focused-link == link { root.focused-link = ""; }
+            if root.focused-link-index == index {
+                root.focused-link-index = -1;
+                root.link-focus-changed(-1);
+            }
         }
         key-pressed(event) => {
             if event.text == Key.Return || event.text == " " {
@@ -845,6 +853,7 @@ component DirectoryEntry inherits Rectangle {
     pure callback format-topic-links(string) -> [string];
     callback activated();
     callback topic-link-clicked(string);
+    callback topic-link-focus-changed(int);
 
     border-radius: 5px;
     border-width: focus.has-focus ? 1px : 0px;
@@ -929,6 +938,7 @@ component DirectoryEntry inherits Rectangle {
                 text-color: root.muted;
                 link-color: root.link-color;
                 link-clicked(href) => { root.topic-link-clicked(href); }
+                link-focus-changed(index) => { root.topic-link-focus-changed(index); }
             }
         }
 
@@ -1392,6 +1402,7 @@ export component AppWindow inherits Window {
     in property <string> current-topic: "";
     pure callback format-topic(string) -> styled-text;
     pure callback format-topic-links(string) -> [string];
+    callback topic-link-focus-changed(int);
     // Compact `+nt` snapshot for the selected channel; empty when unknown or
     // when the server confirms there are no channel modes.
     // One-line status above the topic: network + user modes, then the
@@ -3912,6 +3923,7 @@ export component AppWindow inherits Window {
                     format-topic(text) => { return root.format-topic(text); }
                     format-topic-links(text) => { return root.format-topic-links(text); }
                     topic-link-clicked(href) => { root.topic-link-clicked(href); }
+                    topic-link-focus-changed(index) => { root.topic-link-focus-changed(index); }
                     activated => { directory-channel-activated(row.name); }
                 }
             }
@@ -3956,6 +3968,7 @@ export component AppWindow inherits Window {
                         link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
                         horizontal-stretch: 1;
                         link-clicked(href) => { topic-link-clicked(href); }
+                        link-focus-changed(index) => { topic-link-focus-changed(index); }
                     }
                 }
             }

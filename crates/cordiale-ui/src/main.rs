@@ -9265,7 +9265,7 @@ fn topic_markdown(topic: &str) -> String {
         markdown.push('[');
         markdown.push_str(&escape_markdown(&topic[link.range.clone()]));
         markdown.push_str("](<");
-        markdown.push_str(url.as_str());
+        markdown.push_str(&escape_markdown_destination(url.as_str()));
         markdown.push_str(">)");
         last = link.range.end;
     }
@@ -9287,6 +9287,12 @@ fn topic_link_targets(topic: &str) -> Vec<slint::SharedString> {
         .collect()
 }
 
+// Markdown decodes character references in link destinations. Escape `&` so
+// a URL such as `...?a=1&copy;=2` keeps its validated query unchanged.
+fn escape_markdown_destination(destination: &str) -> String {
+    destination.replace('&', "&amp;")
+}
+
 /// Escaped text with its links as markdown links, which the chat's
 /// `StyledText` draws in the link color and reports when clicked.
 fn linked_markdown(text: &str) -> String {
@@ -9297,7 +9303,7 @@ fn linked_markdown(text: &str) -> String {
         markdown.push('[');
         markdown.push_str(&escape_markdown(&text[link.range.clone()]));
         markdown.push_str("](<");
-        markdown.push_str(&link.href);
+        markdown.push_str(&escape_markdown_destination(&link.href));
         markdown.push_str(">)");
         last = link.range.end;
     }
