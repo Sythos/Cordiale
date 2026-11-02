@@ -5364,59 +5364,134 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
     }
 
     // These positions come from clicks against the rendered anchors. The
-    // first URL in a Hebrew paragraph must appear to the right of the second
+    // first URL in each RTL paragraph must appear to the right of the second
     // URL, in both topic views; a joined-string check cannot detect this bug.
-    let rtl_topic = "שלום,  https://example.org/a! עולם:  https://example.org/b? סוף.";
-    for directory in [true, false] {
-        row.set_current_topic(rtl_topic.into());
-        row.set_directory_rows(
-            Rc::new(slint::VecModel::from(vec![DirectoryRow {
-                name: "#rtl".into(),
-                topic: rtl_topic.into(),
-                users: "2".into(),
-                featured: false,
-                joined: false,
-            }]))
-            .into(),
-        );
-        row.window().set_size(slint::LogicalSize::new(1200., 800.));
-        row.set_directory_open(directory);
-        opened.borrow_mut().clear();
-        let mut link_ranges = std::collections::HashMap::<String, (f32, f32)>::new();
-        let mut first_link = None;
-        let row_y = if directory { 150 } else { 16 };
-        for y in (row_y..400).step_by(8) {
-            for x in (180..1184).step_by(8) {
-                let before = opened.borrow().len();
-                let row_before = activated.get();
-                click(x as f32, y as f32);
-                if opened.borrow().len() > before {
-                    assert_eq!(
-                        activated.get(),
-                        row_before,
-                        "RTL link click activated the row"
-                    );
-                    first_link.get_or_insert((x as f32, y as f32));
-                    let href = opened.borrow().last().unwrap().clone();
-                    let range = link_ranges.entry(href).or_insert((x as f32, x as f32));
-                    range.0 = range.0.min(x as f32);
-                    range.1 = range.1.max(x as f32);
+    for (script, rtl_topic) in [
+        (
+            "Hebrew",
+            "שלום,  https://example.org/a! עולם:  https://example.org/b? סוף.",
+        ),
+        (
+            "Arabic",
+            "مرحبا،  https://example.org/a! عالم:  https://example.org/b? نهاية.",
+        ),
+    ] {
+        for directory in [true, false] {
+            row.set_current_topic(rtl_topic.into());
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#rtl".into(),
+                    topic: rtl_topic.into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            row.window().set_size(slint::LogicalSize::new(1200., 800.));
+            row.set_directory_open(directory);
+            opened.borrow_mut().clear();
+            let mut link_ranges = std::collections::HashMap::<String, (f32, f32)>::new();
+            let mut first_link = None;
+            let row_y = if directory { 150 } else { 16 };
+            for y in (row_y..400).step_by(8) {
+                for x in (180..1184).step_by(8) {
+                    let before = opened.borrow().len();
+                    let row_before = activated.get();
+                    click(x as f32, y as f32);
+                    if opened.borrow().len() > before {
+                        assert_eq!(
+                            activated.get(),
+                            row_before,
+                            "{script} RTL link click activated the row"
+                        );
+                        first_link.get_or_insert((x as f32, y as f32));
+                        let href = opened.borrow().last().unwrap().clone();
+                        let range = link_ranges.entry(href).or_insert((x as f32, x as f32));
+                        range.0 = range.0.min(x as f32);
+                        range.1 = range.1.max(x as f32);
+                    }
+                }
+                if first_link.is_some_and(|(_, link_y)| y as f32 > link_y + 24.) {
+                    break;
                 }
             }
-            if first_link.is_some_and(|(_, link_y)| y as f32 > link_y + 24.) {
-                break;
+            let first = link_ranges.get("https://example.org/a").unwrap_or_else(|| {
+                panic!("first {script} RTL link was not rendered; directory={directory}")
+            });
+            let second = link_ranges.get("https://example.org/b").unwrap_or_else(|| {
+                panic!("second {script} RTL link was not rendered; directory={directory}")
+            });
+            assert!(
+                first.0 > second.1,
+                "{script} RTL link order is wrong in directory={directory}: {first:?}, {second:?}"
+            );
+        }
+    }
+
+    fn marker_x_bounds(
+        pixels: &[u8],
+        width: usize,
+        matches: fn(u8, u8, u8) -> bool,
+    ) -> Option<(usize, usize)> {
+        let mut bounds: Option<(usize, usize)> = None;
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            if matches(pixel[0], pixel[1], pixel[2]) {
+                let x = index % width;
+                let span = bounds.get_or_insert((x, x));
+                span.0 = span.0.min(x);
+                span.1 = span.1.max(x);
             }
         }
-        let first = link_ranges
-            .get("https://example.org/a")
-            .unwrap_or_else(|| panic!("first RTL link was not rendered; directory={directory}"));
-        let second = link_ranges
-            .get("https://example.org/b")
-            .unwrap_or_else(|| panic!("second RTL link was not rendered; directory={directory}"));
-        assert!(
-            first.0 > second.1,
-            "RTL link order is wrong in directory={directory}: {first:?}, {second:?}"
-        );
+        bounds
+    }
+
+    // Use color only as a test marker. The topic has no URL, so this checks
+    // the rendered word order of plain Hebrew and Arabic text directly.
+    for (script, first_word, second_word) in [("Hebrew", "אבגד", "שלום"), ("Arabic", "سلام", "عالم")]
+    {
+        let topic = format!("{first_word} {second_word}");
+        assert!(topic_link_targets(&topic).is_empty());
+        let styled = slint::StyledText::from_markdown(&format!(
+            "<font color=\"#ff00ff\">{first_word}</font> <font color=\"#00ffff\">{second_word}</font>"
+        ))
+        .expect("test marker text");
+        row.on_format_topic(move |_| styled.clone());
+
+        for directory in [true, false] {
+            row.set_current_topic(topic.as_str().into());
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#rtl-plain".into(),
+                    topic: topic.as_str().into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            row.window().set_size(slint::LogicalSize::new(1200., 800.));
+            row.set_directory_open(directory);
+
+            let snapshot = row
+                .window()
+                .take_snapshot()
+                .expect("rendered topic snapshot");
+            let width = snapshot.width() as usize;
+            let pixels = snapshot.as_bytes();
+            let first_word_bounds = marker_x_bounds(pixels, width, |r, g, b| {
+                r > 96 && b > 96 && g < r / 2 && g < b / 2
+            })
+            .unwrap_or_else(|| panic!("first {script} word was not rendered"));
+            let second_word_bounds = marker_x_bounds(pixels, width, |r, g, b| {
+                g > 96 && b > 96 && r < g / 2 && r < b / 2
+            })
+            .unwrap_or_else(|| panic!("second {script} word was not rendered"));
+            assert!(
+                first_word_bounds.0 > second_word_bounds.1,
+                "plain {script} word order is wrong in directory={directory}: {first_word_bounds:?}, {second_word_bounds:?}"
+            );
+        }
     }
 }
 
