@@ -133,8 +133,6 @@ struct UploadLimitsRow {
     audio: string,
 }
 
-struct TopicRun { text: string, href: string }
-
 // One channel of the directory pane (`/list`), as sent by the server;
 // `joined` when that channel's window is joined, so activating the row
 // opens it instead of joining again.
@@ -771,58 +769,73 @@ component RenameTarget inherits Rectangle {
     }
 }
 
-// Plain words pass pointer events through; only URL spans are actions.
+// Render one paragraph so the text engine can order RTL and LTR runs.
 component TopicText inherits Rectangle {
-    in property <[TopicRun]> runs;
+    in property <string> topic;
+    in property <[string]> links;
     in property <color> text-color;
     in property <color> link-color;
     in property <length> font-size;
+    in property <bool> activate-row-on-plain-click: false;
+    pure callback format-topic(string, int, color, bool) -> styled-text;
     callback link-clicked(string);
+    callback link-focus-changed(int);
+    private property <int> focused-link-index: -1;
     min-width: 0px;
+    horizontal-stretch: 1;
+    changed links => { root.focused-link-index = -1; }
 
-    FlexboxLayout {
-        flex-wrap: wrap;
-        alignment: start;
-        cross-axis-alignment: start;
-        cross-axis-line-alignment: start;
-        for run in root.runs : Rectangle {
-            horizontal-stretch: 0;
+    VerticalLayout {
+        StyledText {
+            text: root.format-topic(
+                root.topic,
+                root.focused-link-index,
+                root.text-color,
+                root.activate-row-on-plain-click);
+            default-color: root.text-color;
+            default-font-size: root.font-size;
+            link-color: root.link-color;
+            horizontal-stretch: 1;
             min-width: 0px;
-            border-width: focus.has-focus ? 1px : 0px;
-            border-color: root.link-color;
+            link-clicked(href) => {
+                root.link-clicked(href);
+            }
+        }
+    }
 
-            focus := FocusScope {
-                visible: run.href != "";
-                enabled: run.href != "";
-                focus-on-click: false;
-                accessible-role: button;
-                accessible-label: run.text;
-                accessible-description: run.href;
-                accessible-action-default => { root.link-clicked(run.href); }
-                key-pressed(event) => {
-                    if event.text == Key.Return || event.text == " " {
-                        root.link-clicked(run.href);
-                        return accept;
-                    }
-                    return reject;
-                }
+    // StyledText handles mouse clicks. These scopes keep one tab stop per
+    // occurrence. Its mouse callback only has the URL, so it cannot select
+    // one occurrence when the same URL appears more than once.
+    for link[index] in root.links : focus := FocusScope {
+        x: 0px;
+        y: 0px;
+        width: 1px;
+        height: 1px;
+        focus-on-click: false;
+        accessible-role: button;
+        accessible-label: link;
+        accessible-description: @tr("Open this link");
+        accessible-action-default => { root.link-clicked(link); }
+        private property <bool> selected: root.focused-link-index == index;
+        changed selected => {
+            if selected { focus.focus(); }
+        }
+        focus-gained(reason) => {
+            root.focused-link-index = index;
+            root.link-focus-changed(index);
+        }
+        focus-lost(reason) => {
+            if root.focused-link-index == index {
+                root.focused-link-index = -1;
+                root.link-focus-changed(-1);
             }
-            if run.href != "" : TouchArea {
-                mouse-cursor: pointer;
-                clicked => { focus.focus(); root.link-clicked(run.href); }
+        }
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.link-clicked(link);
+                return accept;
             }
-            VerticalLayout {
-                Text {
-                    // Keep trailing spaces in Slint's measured width. The
-                    // invisible word joiner affects display only, not links
-                    // or accessibility labels, which retain the original text.
-                    text: run.text + "\u{2060}";
-                    font-size: root.font-size;
-                    color: run.href == "" ? root.text-color : root.link-color;
-                    wrap: word-wrap;
-                    min-width: 0px;
-                }
-            }
+            return reject;
         }
     }
 }
@@ -840,9 +853,11 @@ component DirectoryEntry inherits Rectangle {
     // Secondary-text color, the window's `palette-muted`.
     in property <color> muted;
     in property <color> link-color;
-    pure callback format-topic(string) -> [TopicRun];
+    pure callback format-topic(string, int, color, bool) -> styled-text;
+    pure callback format-topic-links(string) -> [string];
     callback activated();
     callback topic-link-clicked(string);
+    callback topic-link-focus-changed(int);
 
     border-radius: 5px;
     border-width: focus.has-focus ? 1px : 0px;
@@ -921,11 +936,24 @@ component DirectoryEntry inherits Rectangle {
             }
 
             if root.topic != "" : TopicText {
-                runs: root.format-topic(root.topic);
+                topic: root.topic;
+                links: root.format-topic-links(root.topic);
                 font-size: 12px * FontScale.percent / 100;
                 text-color: root.muted;
                 link-color: root.link-color;
-                link-clicked(href) => { root.topic-link-clicked(href); }
+                activate-row-on-plain-click: true;
+                format-topic(text, focused-link, color, activate-row) => {
+                    return root.format-topic(text, focused-link, color, activate-row);
+                }
+                link-clicked(href) => {
+                    if href == "cordiale-internal:activate-directory-row" {
+                        focus.focus();
+                        root.activated();
+                    } else {
+                        root.topic-link-clicked(href);
+                    }
+                }
+                link-focus-changed(index) => { root.topic-link-focus-changed(index); }
             }
         }
 
@@ -1402,7 +1430,9 @@ export component AppWindow inherits Window {
     // list; empty when the server hasn't sent one (falls back to the
     // channel label in the markup below).
     in property <string> current-topic: "";
-    pure callback format-topic(string) -> [TopicRun];
+    pure callback format-topic(string, int, color, bool) -> styled-text;
+    pure callback format-topic-links(string) -> [string];
+    callback topic-link-focus-changed(int);
     // Compact `+nt` snapshot for the selected channel; empty when unknown or
     // when the server confirms there are no channel modes.
     // One-line status above the topic: network + user modes, then the
@@ -3932,8 +3962,12 @@ export component AppWindow inherits Window {
                     dark: theme == "dark";
                     muted: palette-muted;
                     link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
-                    format-topic(text) => { return root.format-topic(text); }
+                    format-topic(text, focused-link, color, activate-row) => {
+                        return root.format-topic(text, focused-link, color, activate-row);
+                    }
+                    format-topic-links(text) => { return root.format-topic-links(text); }
                     topic-link-clicked(href) => { root.topic-link-clicked(href); }
+                    topic-link-focus-changed(index) => { root.topic-link-focus-changed(index); }
                     activated => { directory-channel-activated(row.name); }
                 }
             }
@@ -3971,12 +4005,17 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     padding: 6px;
                     TopicText {
-                        runs: format-topic(current-topic == "" ? @tr("No topic set") : current-topic);
+                        topic: current-topic == "" ? @tr("No topic set") : current-topic;
+                        links: format-topic-links(current-topic == "" ? @tr("No topic set") : current-topic);
                         font-size: 14px * FontScale.percent / 100;
                         text-color: Palette.foreground;
                         link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
                         horizontal-stretch: 1;
+                        format-topic(text, focused-link, color, activate-row) => {
+                            return root.format-topic(text, focused-link, color, activate-row);
+                        }
                         link-clicked(href) => { topic-link-clicked(href); }
+                        link-focus-changed(index) => { topic-link-focus-changed(index); }
                     }
                 }
             }

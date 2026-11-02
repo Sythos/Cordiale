@@ -5374,25 +5374,57 @@ fn chat_links_become_markdown_links() {
     assert!(bold.contains("**["));
     assert!(bold.contains("](<https://www.rust-lang.org>)"));
     assert!(slint::StyledText::from_markdown(&bold).is_ok());
+    let entity_query = linked_markdown("https://x.io/?a=1&copy;=2");
+    assert!(entity_query.contains("](<https://x.io/?a=1&amp;copy;=2>)"));
+    assert!(slint::StyledText::from_markdown(&entity_query).is_ok());
 }
 
 #[test]
 fn topic_links_are_clickable_with_normalized_targets() {
     for prefix in ["", "    ", "\t"] {
         let topic = format!("{prefix}https://example.org/a_b. Caffè 🙂 www.rust-lang.org!");
-        let runs = topic_runs(&topic);
+        let markdown = topic_markdown(&topic);
+        let markdown_prefix = match prefix {
+            "" => "",
+            "    " => "&#32;&#32;&#32;&#32;",
+            "\t" => "&#9;",
+            _ => unreachable!(),
+        };
+        assert!(markdown.starts_with(markdown_prefix));
+        assert!(markdown.contains("](<https://example.org/a_b>)"));
+        assert!(markdown.contains("](<https://www.rust-lang.org/>)"));
+        assert!(slint::StyledText::from_markdown(&markdown).is_ok());
         assert_eq!(
-            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
-            topic
-        );
-        assert_eq!(
-            runs.iter()
-                .filter(|run| !run.href.is_empty())
-                .map(|run| run.href.as_str())
+            topic_link_targets(&topic)
+                .iter()
+                .map(|href| href.as_str())
                 .collect::<Vec<_>>(),
             ["https://example.org/a_b", "https://www.rust-lang.org/"]
         );
     }
+
+    let topic = "https://example.org/?a=1&copy;=2";
+    let markdown = topic_markdown(topic);
+    assert!(markdown.contains("](<https://example.org/?a=1&amp;copy;=2>)"));
+    assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+    assert_eq!(
+        topic_link_targets(topic)
+            .iter()
+            .map(|href| href.as_str())
+            .collect::<Vec<_>>(),
+        [topic]
+    );
+
+    let backslash_topic = r"https://example.org/?q=\*";
+    assert_eq!(
+        topic_link_targets(backslash_topic)
+            .first()
+            .expect("validated URL target")
+            .as_str(),
+        backslash_topic
+    );
+    let backslash_markdown = topic_markdown(backslash_topic);
+    assert!(backslash_markdown.contains(r"](<https://example.org/?q=\\*>)"));
 }
 
 #[test]
@@ -5405,31 +5437,525 @@ fn topic_text_keeps_markup_and_non_web_schemes_literal() {
         "file:///tmp/test javascript:alert(1) mailto:me@example.org",
         "https://user:password@example.org/",
     ] {
-        let runs = topic_runs(topic);
-        assert_eq!(
-            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
-            topic
-        );
-        assert!(runs.iter().all(|run| run.href.is_empty()));
+        let markdown = topic_markdown(topic);
+        assert!(!markdown.contains("](<"));
+        assert!(slint::StyledText::from_markdown(&markdown).is_ok());
     }
 }
 
-#[test]
-fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
-    use slint::platform::{software_renderer::*, Platform, WindowAdapter, WindowEvent};
-    struct Headless;
-    impl Platform for Headless {
-        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-            Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+fn set_headless_software_platform() {
+    static SETUP: std::sync::Once = std::sync::Once::new();
+    SETUP.call_once(|| {
+        use slint::platform::{software_renderer::*, Platform, WindowAdapter};
+        struct Headless;
+        impl Platform for Headless {
+            fn create_window_adapter(
+                &self,
+            ) -> Result<std::rc::Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+            }
         }
-    }
-    slint::platform::set_platform(Box::new(Headless)).unwrap();
+        slint::platform::set_platform(Box::new(Headless)).unwrap();
+    });
+}
+#[test]
+fn directory_topic_plain_text_activates_row_and_focused_link_is_distinct() {
+    let topic = "before https://example.org/a middle https://example.org/b after";
+    let text_color = slint::Color::from_rgb_u8(64, 96, 128);
+    let markdown = topic_markdown_with_state(topic, 1, Some(text_color), true);
+
+    assert_eq!(markdown.matches(DIRECTORY_ROW_ACTION_HREF).count(), 3);
+    assert!(markdown.contains(
+        "<font color=\"#406080\">[before&#32;\u{2060}](<cordiale-internal:activate-directory-row>)</font>"
+    ));
+    assert!(markdown.contains("](<https://example.org/a>)"));
+    let focused_link_start = markdown.find("<u>**[").expect("focused link marker");
+    assert!(markdown[focused_link_start..].contains("](<https://example.org/b>)**</u>"));
+    assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+
+    let no_link_topic = "plain topic text";
+    let no_link_markdown = topic_markdown_with_state(no_link_topic, -1, Some(text_color), true);
+    assert_eq!(
+        no_link_markdown.matches(DIRECTORY_ROW_ACTION_HREF).count(),
+        1
+    );
+    assert!(slint::StyledText::from_markdown(&no_link_markdown).is_ok());
+
+    let normal_chat_markdown = topic_markdown_with_state(topic, 1, Some(text_color), false);
+    assert!(!normal_chat_markdown.contains(DIRECTORY_ROW_ACTION_HREF));
+    assert!(normal_chat_markdown.contains("<u>**["));
+    assert!(normal_chat_markdown.contains("](<https://example.org/b>)**</u>"));
+}
+
+#[test]
+fn topic_links_preserve_visual_order_and_keyboard_actions() {
+    use slint::platform::{software_renderer::*, WindowEvent};
+    set_headless_software_platform();
     let row = AppWindow::new().unwrap();
     row.set_screen("connected".into());
     row.set_has_selected_channel(true);
     row.set_directory_network("test".into());
     let topic = "plain https://example.org/a https://example.org/b tail";
-    row.on_format_topic(|topic| Rc::new(slint::VecModel::from(topic_runs(&topic))).into());
+    row.on_format_topic(
+        |topic, focused_link_index, text_color, activate_row_on_plain_click| {
+            topic_styled_text_with_state(
+                &topic,
+                focused_link_index,
+                text_color,
+                activate_row_on_plain_click,
+            )
+        },
+    );
+    row.on_format_topic_links(|topic| {
+        Rc::new(slint::VecModel::from(topic_link_targets(&topic))).into()
+    });
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let activated = Rc::new(std::cell::Cell::new(0));
+    let focused_links = Rc::new(RefCell::new(Vec::new()));
+    let record = opened.clone();
+    row.on_topic_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
+    let count = activated.clone();
+    row.on_directory_channel_activated(move |_| count.set(count.get() + 1));
+    let focus_record = focused_links.clone();
+    row.on_topic_link_focus_changed(move |index| {
+        if index >= 0 {
+            focus_record.borrow_mut().push(index as usize);
+        }
+    });
+    row.show().unwrap();
+    let click = |x, y| {
+        let position = slint::LogicalPosition::new(x, y);
+        let button = slint::platform::PointerEventButton::Left;
+        row.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        row.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    for (directory, width, prefix) in [
+        (true, 1200, ""),
+        (false, 1200, ""),
+        (true, 800, "    "),
+        (false, 800, "    "),
+        (true, 800, "\t"),
+        (false, 800, "\t"),
+    ] {
+        let topic = format!("{prefix}{topic}");
+        row.set_current_topic(topic.as_str().into());
+        row.set_directory_rows(
+            Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                name: "#test".into(),
+                topic: topic.into(),
+                users: "2".into(),
+                featured: false,
+                joined: false,
+            }]))
+            .into(),
+        );
+        row.window()
+            .set_size(slint::LogicalSize::new(width as f32, 800.));
+        row.set_directory_open(directory);
+        opened.borrow_mut().clear();
+        let mut first_link = None;
+        let mut link_ranges = std::collections::HashMap::<String, (f32, f32)>::new();
+        let start_y = if directory { 150 } else { 16 };
+        for y in (start_y..400).step_by(8) {
+            for x in (180..width - 16).step_by(8) {
+                let before = opened.borrow().len();
+                let row_before = activated.get();
+                click(x as f32, y as f32);
+                assert_eq!(row.get_directory_open(), directory);
+                if opened.borrow().len() > before {
+                    assert_eq!(activated.get(), row_before, "link click activated the row");
+                    first_link.get_or_insert((x as f32, y as f32));
+                    let href = opened.borrow().last().unwrap().clone();
+                    let range = link_ranges.entry(href).or_insert((x as f32, x as f32));
+                    range.0 = range.0.min(x as f32);
+                    range.1 = range.1.max(x as f32);
+                }
+            }
+            if first_link.is_some_and(|(_, link_y)| y as f32 > link_y + 24.) {
+                break;
+            }
+        }
+        assert!(
+            opened
+                .borrow()
+                .iter()
+                .any(|href| href == "https://example.org/a"),
+            "directory={directory}"
+        );
+        assert!(opened
+            .borrow()
+            .iter()
+            .any(|href| href == "https://example.org/b"));
+        if width == 1200 && prefix.is_empty() {
+            let first = link_ranges.get("https://example.org/a").unwrap();
+            let second = link_ranges.get("https://example.org/b").unwrap();
+            assert!(
+                first.1 < second.0,
+                "LTR link order changed in directory={directory}: {first:?}, {second:?}"
+            );
+        }
+        if directory && width == 1200 && prefix.is_empty() {
+            let first_url_x = link_ranges
+                .get("https://example.org/a")
+                .expect("first link bounds")
+                .0;
+            let topic_line_y = first_link.expect("first link position").1;
+            let activation_before = activated.get();
+            let opened_before = opened.borrow().len();
+            let search_start = (first_url_x - 72.0).max(180.0) as i32;
+            let search_end = (first_url_x - 8.0).max(search_start as f32) as i32;
+            for x in (search_start..search_end).step_by(4) {
+                click(x as f32, topic_line_y);
+                if activated.get() > activation_before {
+                    break;
+                }
+            }
+            assert_eq!(
+                activated.get(),
+                activation_before + 1,
+                "plain topic text did not activate directory={directory}"
+            );
+            assert_eq!(opened.borrow().len(), opened_before);
+
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#plain".into(),
+                    topic: "plain topic text without links".into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            let activation_before = activated.get();
+            for x in 180..width - 16 {
+                click(x as f32, topic_line_y);
+                if activated.get() > activation_before {
+                    break;
+                }
+            }
+            assert_eq!(
+                activated.get(),
+                activation_before + 1,
+                "plain topic without URLs did not activate the directory row"
+            );
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#test".into(),
+                    topic: topic.into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+        }
+        let (x, y) = first_link.unwrap();
+        let activation_before = activated.get();
+        let links_before = opened.borrow().len();
+        click(x, y);
+        assert_eq!(opened.borrow().len(), links_before + 1);
+        assert_eq!(activated.get(), activation_before);
+        if directory && width == 1200 {
+            let mut channel_name = None;
+            // Search the list area only. Scanning from the top can click the
+            // directory's Close button and hide the row before we reach it.
+            for row_y in (120..240).step_by(8) {
+                for row_x in (180..width - 16).step_by(8) {
+                    let row_before = activated.get();
+                    click(row_x as f32, row_y as f32);
+                    if activated.get() > row_before {
+                        channel_name = Some((row_x as f32, row_y as f32));
+                        break;
+                    }
+                }
+                if channel_name.is_some() {
+                    break;
+                }
+            }
+            let (name_x, name_y) = channel_name.expect("channel row action remains clickable");
+            let activation_before = activated.get();
+            let links_before = opened.borrow().len();
+            click(name_x, name_y);
+            assert_eq!(activated.get(), activation_before + 1);
+            row.window().dispatch_event(WindowEvent::KeyPressed {
+                text: slint::platform::Key::Return.into(),
+            });
+            assert_eq!(activated.get(), activation_before + 2);
+            assert_eq!(opened.borrow().len(), links_before);
+        }
+    }
+
+    // Markdown must preserve entity-like ampersands and literal backslashes
+    // in validated URLs. Mouse clicks in both topic views must open that URL.
+    for topic in [
+        "https://example.org/?a=1&copy;=2",
+        r"https://example.org/?q=\*",
+    ] {
+        let target = topic_link_targets(topic)
+            .first()
+            .expect("validated URL target")
+            .to_string();
+        assert_eq!(target, topic);
+        for directory in [true, false] {
+            row.set_current_topic(topic.into());
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#encoded-url".into(),
+                    topic: topic.into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            row.window().set_size(slint::LogicalSize::new(1200., 800.));
+            row.set_directory_open(directory);
+            opened.borrow_mut().clear();
+            let start_y = if directory { 150 } else { 16 };
+            let mut clicked = false;
+            for y in (start_y..320).step_by(8) {
+                for x in (180..1184).step_by(8) {
+                    let before = opened.borrow().len();
+                    let row_before = activated.get();
+                    click(x as f32, y as f32);
+                    if opened.borrow().len() > before {
+                        assert_eq!(activated.get(), row_before);
+                        assert_eq!(opened.borrow().last().unwrap(), &target);
+                        clicked = true;
+                        break;
+                    }
+                }
+                if clicked {
+                    break;
+                }
+            }
+            assert!(
+                clicked,
+                "URL with Markdown-sensitive query was not clickable; directory={directory}"
+            );
+        }
+    }
+
+    // Repeated URLs still create separate keyboard stops. The sequence A/B/A
+    // must reach indices 0, 1 and 2 in order, even though A occurs twice.
+    let repeated_topic = "https://example.org/a https://example.org/b https://example.org/a";
+    let repeated_targets = topic_link_targets(repeated_topic)
+        .iter()
+        .map(|href| href.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        repeated_targets,
+        vec![
+            "https://example.org/a".to_string(),
+            "https://example.org/b".to_string(),
+            "https://example.org/a".to_string()
+        ]
+    );
+    row.set_current_topic(repeated_topic.into());
+    row.set_directory_rows(
+        Rc::new(slint::VecModel::from(vec![DirectoryRow {
+            name: "#duplicates".into(),
+            topic: repeated_topic.into(),
+            users: "2".into(),
+            featured: false,
+            joined: false,
+        }]))
+        .into(),
+    );
+    row.set_directory_open(false);
+    focused_links.borrow_mut().clear();
+    opened.borrow_mut().clear();
+    for _ in 0..256 {
+        let focus_count = focused_links.borrow().len();
+        row.window().dispatch_event(WindowEvent::KeyPressed {
+            text: slint::platform::Key::Tab.into(),
+        });
+        let focused_index = focused_links.borrow().get(focus_count).copied();
+        if let Some(index) = focused_index {
+            let key = if index == 1 {
+                " ".into()
+            } else {
+                slint::platform::Key::Return.into()
+            };
+            row.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: key });
+            if focused_links
+                .borrow()
+                .windows(3)
+                .any(|indices| indices == [0, 1, 2])
+            {
+                break;
+            }
+        }
+    }
+    assert!(focused_links
+        .borrow()
+        .windows(3)
+        .any(|indices| indices == [0, 1, 2]));
+    let observed_links = focused_links
+        .borrow()
+        .iter()
+        .map(|index| repeated_targets[*index].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(opened.borrow().as_slice(), observed_links.as_slice());
+
+    // These positions come from clicks against the rendered anchors. The
+    // first URL in each RTL paragraph must appear to the right of the second
+    // URL, in both topic views; a joined-string check cannot detect this bug.
+    for (script, rtl_topic) in [
+        (
+            "Hebrew",
+            "שלום,  https://example.org/a! עולם:  https://example.org/b? סוף.",
+        ),
+        (
+            "Arabic",
+            "مرحبا،  https://example.org/a! عالم:  https://example.org/b? نهاية.",
+        ),
+    ] {
+        for directory in [true, false] {
+            row.set_current_topic(rtl_topic.into());
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#rtl".into(),
+                    topic: rtl_topic.into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            row.window().set_size(slint::LogicalSize::new(1200., 800.));
+            row.set_directory_open(directory);
+            opened.borrow_mut().clear();
+            let mut link_ranges = std::collections::HashMap::<String, (f32, f32)>::new();
+            let mut first_link = None;
+            let row_y = if directory { 150 } else { 16 };
+            for y in (row_y..400).step_by(8) {
+                for x in (180..1184).step_by(8) {
+                    let before = opened.borrow().len();
+                    let row_before = activated.get();
+                    click(x as f32, y as f32);
+                    if opened.borrow().len() > before {
+                        assert_eq!(
+                            activated.get(),
+                            row_before,
+                            "{script} RTL link click activated the row"
+                        );
+                        first_link.get_or_insert((x as f32, y as f32));
+                        let href = opened.borrow().last().unwrap().clone();
+                        let range = link_ranges.entry(href).or_insert((x as f32, x as f32));
+                        range.0 = range.0.min(x as f32);
+                        range.1 = range.1.max(x as f32);
+                    }
+                }
+                if first_link.is_some_and(|(_, link_y)| y as f32 > link_y + 24.) {
+                    break;
+                }
+            }
+            let first = link_ranges.get("https://example.org/a").unwrap_or_else(|| {
+                panic!("first {script} RTL link was not rendered; directory={directory}")
+            });
+            let second = link_ranges.get("https://example.org/b").unwrap_or_else(|| {
+                panic!("second {script} RTL link was not rendered; directory={directory}")
+            });
+            assert!(
+                first.0 > second.1,
+                "{script} RTL link order is wrong in directory={directory}: {first:?}, {second:?}"
+            );
+        }
+    }
+
+    fn marker_x_bounds(
+        pixels: &[u8],
+        width: usize,
+        matches: fn(u8, u8, u8) -> bool,
+    ) -> Option<(usize, usize)> {
+        let mut bounds: Option<(usize, usize)> = None;
+        for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
+            if matches(pixel[0], pixel[1], pixel[2]) {
+                let x = index % width;
+                let span = bounds.get_or_insert((x, x));
+                span.0 = span.0.min(x);
+                span.1 = span.1.max(x);
+            }
+        }
+        bounds
+    }
+
+    // Use color only as a test marker. The topic has no URL, so this checks
+    // the rendered word order of plain Hebrew and Arabic text directly.
+    for (script, first_word, second_word) in [("Hebrew", "אבגד", "שלום"), ("Arabic", "سلام", "عالم")]
+    {
+        let topic = format!("{first_word} {second_word}");
+        assert!(topic_link_targets(&topic).is_empty());
+        let styled = slint::StyledText::from_markdown(&format!(
+            "<font color=\"#ff00ff\">{first_word}</font> <font color=\"#00ffff\">{second_word}</font>"
+        ))
+        .expect("test marker text");
+        row.on_format_topic(move |_, _, _, _| styled.clone());
+
+        for directory in [true, false] {
+            row.set_current_topic(topic.as_str().into());
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#rtl-plain".into(),
+                    topic: topic.as_str().into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            row.window().set_size(slint::LogicalSize::new(1200., 800.));
+            row.set_directory_open(directory);
+
+            let snapshot = row
+                .window()
+                .take_snapshot()
+                .expect("rendered topic snapshot");
+            let width = snapshot.width() as usize;
+            let pixels = snapshot.as_bytes();
+            let first_word_bounds = marker_x_bounds(pixels, width, |r, g, b| {
+                r > 96 && b > 96 && g < r / 2 && g < b / 2
+            })
+            .unwrap_or_else(|| panic!("first {script} word was not rendered"));
+            let second_word_bounds = marker_x_bounds(pixels, width, |r, g, b| {
+                g > 96 && b > 96 && r < g / 2 && r < b / 2
+            })
+            .unwrap_or_else(|| panic!("second {script} word was not rendered"));
+            assert!(
+                first_word_bounds.0 > second_word_bounds.1,
+                "plain {script} word order is wrong in directory={directory}: {first_word_bounds:?}, {second_word_bounds:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
+    use slint::platform::{software_renderer::*, WindowEvent};
+    set_headless_software_platform();
+    let row = AppWindow::new().unwrap();
+    row.set_screen("connected".into());
+    row.set_has_selected_channel(true);
+    row.set_directory_network("test".into());
+    let topic = "plain https://example.org/a https://example.org/b tail";
+    row.on_format_topic(
+        |topic, focused_link_index, text_color, activate_row_on_plain_click| {
+            topic_styled_text_with_state(
+                &topic,
+                focused_link_index,
+                text_color,
+                activate_row_on_plain_click,
+            )
+        },
+    );
+    row.on_format_topic_links(|topic| {
+        Rc::new(slint::VecModel::from(topic_link_targets(&topic))).into()
+    });
     let opened = Rc::new(RefCell::new(Vec::new()));
     let activated = Rc::new(std::cell::Cell::new(0));
     let record = opened.clone();
@@ -5669,26 +6195,15 @@ fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
     }
     row.set_media_open(false);
 
-    // Check actual layout, not just the strings retained by topic_runs:
-    // Slint can exclude trailing spaces from each word's preferred width.
+    // Check actual layout from the rendered links:
+    // Slint can exclude trailing spaces from a text span before a link.
     for directory in [false, true] {
         row.set_directory_open(directory);
         row.window().set_size(slint::LogicalSize::new(1200., 800.));
         let mut positions = Vec::new();
-        for spaces in [0, 1, 3] {
+        for spaces in [1, 2, 4] {
             let topic = format!("word{}https://example.org/a", " ".repeat(spaces));
-            // Use the real tokenizer, but remove its separator for the
-            // zero-space baseline so the same URL remains a distinct run.
-            row.on_format_topic(move |_| {
-                let mut runs = topic_runs(&format!(
-                    "word{}https://example.org/a",
-                    " ".repeat(spaces.max(1))
-                ));
-                if spaces == 0 {
-                    runs[0].text = "word".into();
-                }
-                Rc::new(slint::VecModel::from(runs)).into()
-            });
+
             row.set_current_topic(topic.as_str().into());
             row.set_directory_rows(
                 Rc::new(slint::VecModel::from(vec![DirectoryRow {
