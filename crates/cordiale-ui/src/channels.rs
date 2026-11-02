@@ -30,6 +30,7 @@ pub(crate) async fn handle_select_channel(
     }
 
     let key = (network.clone(), channel.clone());
+    prepare_window_selection(state, &key, false);
     state
         .windows
         .recent_channels
@@ -40,10 +41,6 @@ pub(crate) async fn handle_select_channel(
     state.windows.current_query = false;
     state.windows.current_query_ready = false;
     open_window(state, &key);
-    state
-        .windows
-        .window_messages
-        .insert(window_counts_key(&network, &channel), 0);
     refresh_network_groups(state, ui);
     push_mute_bar(state, ui);
 
@@ -117,6 +114,7 @@ pub(crate) async fn handle_select_channel(
         ui.set_members_average_nick(members_average_probe(&member_rows).into());
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
+    mark_active_window_read(state, ui);
     sync_window_ignores(state, ui).await;
 }
 

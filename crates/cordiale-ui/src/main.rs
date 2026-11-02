@@ -183,6 +183,11 @@ enum WorkerCommand {
         network: String,
         channel: String,
     },
+    /// The chat pane changed visibility or whether it follows the newest row.
+    ChatReadStateChanged {
+        visible: bool,
+        follow_bottom: bool,
+    },
     SelectNetwork(String),
     /// Home page: parks a connected network (after its confirmation).
     HomeDisconnect(String),
@@ -1460,6 +1465,10 @@ struct WindowState {
     current_query: bool,
     current_query_ready: bool,
     current_channel: Option<(String, String)>,
+    /// Whether the connected chat pane is currently shown, and whether its
+    /// ListView follows the newest row. Read state advances only in this case.
+    chat_visible: bool,
+    chat_follow_bottom: bool,
     /// Query windows whose E2E send path the client confirmed as active.
     /// A missing entry means legacy, clear text, lost or unknown, so the
     /// send button shows no lock.
@@ -1598,6 +1607,8 @@ impl WorkerState {
                 current_query: false,
                 current_query_ready: false,
                 current_channel: None,
+                chat_visible: false,
+                chat_follow_bottom: true,
                 e2e_send_confirmed: std::collections::HashSet::new(),
             },
             networks: NetworkState {
@@ -1831,6 +1842,21 @@ async fn run_worker(
                     Some(WorkerCommand::SelectChannel { network, channel }) => {
                         write_back_read_cursor(&mut state);
                         handle_select_channel(&mut state, &ui, network, channel).await;
+                    }
+                    Some(WorkerCommand::ChatReadStateChanged {
+                        visible,
+                        follow_bottom,
+                    }) => {
+                        let was_visible_at_bottom =
+                            state.windows.chat_visible && state.windows.chat_follow_bottom;
+                        if was_visible_at_bottom && (!visible || !follow_bottom) {
+                            mark_active_window_read(&mut state, &ui);
+                        }
+                        state.windows.chat_visible = visible;
+                        state.windows.chat_follow_bottom = follow_bottom;
+                        if visible && follow_bottom {
+                            mark_active_window_read(&mut state, &ui);
+                        }
                     }
                     Some(WorkerCommand::SelectNetwork(network)) => {
                         run_select_network(&mut state, &ui, network).await;
@@ -4289,8 +4315,9 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     } else {
         channel.clone()
     };
-    if let Err(err) = client.send_message(token, network, &target, &request).await {
-        set_send_failed_status(ui, &err);
+    match client.send_message(token, network, &target, &request).await {
+        Ok(_) => set_chat_follow_bottom(state, ui),
+        Err(err) => set_send_failed_status(ui, &err),
     }
 }
 
@@ -7582,10 +7609,16 @@ fn normalize_badge_count(value: Option<&Value>) -> u64 {
     count.floor().min(99.0) as u64
 }
 
-/// The read cursor to send when leaving the open window: its newest message,
-/// if that is past the known cursor. The local cursor advances at once
+/// The read cursor to send for a visible window that follows its newest row,
+/// if that row is past the known cursor. The local cursor advances at once
 /// (forward-only), as in Cicchetto; the `read_cursor_set` push confirms it.
 fn read_cursor_to_write(state: &mut WorkerState) -> Option<(String, String, i64)> {
+    if !state.windows.chat_visible
+        || !state.windows.chat_follow_bottom
+        || open_locked_window(state).is_some()
+    {
+        return None;
+    }
     let (network, target) = state.windows.current_channel.clone()?;
     let newest = query_high_water_id(state, &(network.clone(), target.clone()))?;
     let key = window_state_key(&network, &target);
@@ -7601,9 +7634,8 @@ fn read_cursor_to_write(state: &mut WorkerState) -> Option<(String, String, i64)
     Some((network, target, newest))
 }
 
-/// Marks the window being left as read on the server (Cicchetto does it on
-/// focus-leave). Fire-and-forget: a failure only leaves the unread count as
-/// the server has it.
+/// Advances the visible window's server cursor. Fire-and-forget: a failure
+/// only leaves the unread count as the server has it.
 fn write_back_read_cursor(state: &mut WorkerState) {
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
@@ -7641,6 +7673,103 @@ fn write_back_read_cursor(state: &mut WorkerState) {
             }
         }
     });
+}
+
+/// Makes a newly selected window start at its newest row, while preserving
+/// the reader's position when they select the same window again.
+pub(crate) fn prepare_window_selection(
+    state: &mut WorkerState,
+    key: &(String, String),
+    is_query: bool,
+) {
+    let same_window = state.windows.current_query == is_query
+        && state.windows.current_channel.as_ref() == Some(key);
+    state.windows.chat_visible = true;
+    if !same_window {
+        state.windows.chat_follow_bottom = true;
+    }
+}
+
+/// Sets the follow state in both the worker and Slint. The existing ListView
+/// re-snaps after it measures wrapped rows, so the sent row remains visible.
+pub(crate) fn set_chat_follow_bottom(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    state.windows.chat_follow_bottom = true;
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(|ui| ui.set_chat_follow_bottom(true));
+}
+
+/// Marks only the visible active window as read. Plain windows use Grappa's
+/// forward-only cursor; locked queries keep their separate local read state.
+pub(crate) fn mark_active_window_read(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+) -> bool {
+    if !state.windows.chat_visible || !state.windows.chat_follow_bottom {
+        return false;
+    }
+    if let Some((network, nick)) = open_locked_window(state) {
+        let changed = e2e_runtime::mark_locked_read(state, &network, &nick);
+        if changed {
+            refresh_network_groups(state, ui);
+        }
+        return changed;
+    }
+    let Some((network, target)) = state.windows.current_channel.clone() else {
+        return false;
+    };
+    if query_high_water_id(state, &(network.clone(), target.clone())).is_none() {
+        return false;
+    }
+    let mut targets = vec![(network.clone(), target.clone())];
+    if state.windows.current_query {
+        if let Some(anchor) = find_query_window(&state.transcript.query_windows, &network, &target)
+        {
+            targets.extend(
+                followed_query_windows(state, anchor)
+                    .into_iter()
+                    .map(|query| (query.network, query.target_nick)),
+            );
+        }
+    }
+    let mut changed = false;
+    for (network, target) in targets {
+        let key = window_counts_key(&network, &target);
+        changed |= state.windows.window_messages.get(&key) != Some(&0);
+        state.windows.window_messages.insert(key, 0);
+    }
+    write_back_read_cursor(state);
+    if changed {
+        refresh_network_groups(state, ui);
+    }
+    true
+}
+
+/// Whether a server count belongs to the visible plain window or to a query
+/// folded into its visible anchor. Locked entries are always handled locally.
+pub(crate) fn active_window_is_visible(state: &WorkerState, key: &WindowCountsKey) -> bool {
+    if !state.windows.chat_visible
+        || !state.windows.chat_follow_bottom
+        || open_locked_window(state).is_some()
+    {
+        return false;
+    }
+    let Some((network, target)) = state.windows.current_channel.as_ref() else {
+        return false;
+    };
+    if query_high_water_id(state, &(network.clone(), target.clone())).is_none() {
+        return false;
+    }
+    if window_counts_key(network, target).eq(key) {
+        return true;
+    }
+    if !state.windows.current_query {
+        return false;
+    }
+    find_query_window(&state.transcript.query_windows, network, target).is_some_and(|anchor| {
+        followed_query_windows(state, anchor)
+            .iter()
+            .any(|query| window_counts_key(&query.network, &query.target_nick).eq(key))
+    })
 }
 
 /// Cicchetto's `channelKey` uses `asciiFold` (`A-Z` only) for the channel
@@ -9329,6 +9458,12 @@ fn append_topic_text(
         ));
     }
     markdown.push_str(&escape_topic_text(text));
+    if text.chars().last().is_some_and(char::is_whitespace) {
+        // Keep the width of spaces before the next Markdown span. The word
+        // joiner is invisible but prevents the text renderer from trimming
+        // trailing spaces from this span.
+        markdown.push('\u{2060}');
+    }
     if row_action_text_color.is_some() {
         markdown.push_str("](<");
         markdown.push_str(DIRECTORY_ROW_ACTION_HREF);

@@ -2353,6 +2353,197 @@ fn window_counts_updates_messages_and_mentions_for_each_known_window() {
 }
 
 #[test]
+fn active_window_counts_clear_only_when_the_latest_row_is_visible() {
+    let mut state = WorkerState::new();
+    state.conn.identifier = Some("sythos".to_string());
+    let channel = ("libera".to_string(), "#Cordiale".to_string());
+    state.windows.channel_entries = vec![
+        (
+            "libera".to_string(),
+            "#Cordiale".to_string(),
+            "#Cordiale".to_string(),
+        ),
+        (
+            "libera".to_string(),
+            "#other".to_string(),
+            "#other".to_string(),
+        ),
+        (
+            "oftc".to_string(),
+            "#other".to_string(),
+            "#other".to_string(),
+        ),
+    ];
+    state.transcript.query_windows = vec![QueryWindow {
+        network: "libera".to_string(),
+        target_nick: "Peer".to_string(),
+        opened_at: "2026-09-21T10:00:00Z".to_string(),
+        dm_conversation_id: None,
+    }];
+    let line = |id| RenderedMessage {
+        timestamp: "10:00".to_string(),
+        nick: Some("Peer".to_string()),
+        text: "hello".to_string(),
+        italic: false,
+        message_id: Some(id),
+        server_time: Some(id),
+        presence_noise: false,
+        rename_to: None,
+        encrypted: false,
+    };
+    state.windows.current_channel = Some(channel.clone());
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = true;
+
+    let active_snapshot = serde_json::json!({
+        "kind": "window_counts",
+        "channel": "#CORDIALE",
+        "messages": 6,
+        "mentions": 2,
+        "events": 1,
+        "severity": "mention"
+    });
+    assert!(apply_window_counts(
+        &mut state,
+        &channel_topic("sythos", "libera", "#Cordiale"),
+        &serde_json::json!({
+            "kind": "window_counts",
+            "channel": "#Cordiale",
+            "messages": 8,
+            "mentions": 1,
+            "events": 1,
+            "severity": "message"
+        })
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "#Cordiale")),
+        Some(&8)
+    );
+
+    state
+        .transcript
+        .messages
+        .insert(channel.clone(), vec![line(12)]);
+    assert!(apply_window_counts(
+        &mut state,
+        &channel_topic("sythos", "libera", "#Cordiale"),
+        &active_snapshot
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "#Cordiale")),
+        Some(&0)
+    );
+    assert_eq!(
+        state
+            .windows
+            .window_mentions
+            .get(&window_counts_key("libera", "#Cordiale")),
+        Some(&2)
+    );
+
+    let other_snapshot = serde_json::json!({
+        "kind": "window_counts",
+        "channel": "#other",
+        "messages": 3,
+        "mentions": 0,
+        "events": 1,
+        "severity": "message"
+    });
+    assert!(apply_window_counts(
+        &mut state,
+        &channel_topic("sythos", "oftc", "#other"),
+        &other_snapshot
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("oftc", "#other")),
+        Some(&3)
+    );
+
+    state.windows.chat_follow_bottom = false;
+    let scrolled_snapshot = serde_json::json!({
+        "kind": "window_counts",
+        "channel": "#cordiale",
+        "messages": 2,
+        "mentions": 1,
+        "events": 1,
+        "severity": "mention"
+    });
+    assert!(apply_window_counts(
+        &mut state,
+        &channel_topic("sythos", "libera", "#cordiale"),
+        &scrolled_snapshot
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "#Cordiale")),
+        Some(&2)
+    );
+
+    let plain =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Plain, "Peer").key();
+    let locked =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Locked, "Peer")
+            .key();
+    state.windows.current_channel = Some(plain.clone());
+    state.windows.current_query = true;
+    state.windows.chat_follow_bottom = true;
+    state.transcript.messages.insert(plain, vec![line(20)]);
+    let query_snapshot = serde_json::json!({
+        "kind": "window_counts",
+        "channel": "Peer",
+        "messages": 4,
+        "mentions": 0,
+        "events": 1,
+        "severity": "message"
+    });
+    assert!(apply_window_counts(
+        &mut state,
+        &query_topic("sythos", "libera", "Peer"),
+        &query_snapshot
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "Peer")),
+        Some(&0)
+    );
+
+    state.windows.current_channel = Some(locked);
+    state.e2e.add_locked("libera", "Peer");
+    assert!(apply_window_counts(
+        &mut state,
+        &query_topic("sythos", "libera", "Peer"),
+        &serde_json::json!({
+            "kind": "window_counts",
+            "channel": "Peer",
+            "messages": 5,
+            "mentions": 0,
+            "events": 1,
+            "severity": "message"
+        })
+    ));
+    assert_eq!(
+        state
+            .windows
+            .window_messages
+            .get(&window_counts_key("libera", "Peer")),
+        Some(&5)
+    );
+}
+
+#[test]
 fn window_counts_from_me_seeds_channel_and_query_counts() {
     let unread_counts = serde_json::json!({
         "libera": {
@@ -5252,6 +5443,21 @@ fn topic_text_keeps_markup_and_non_web_schemes_literal() {
     }
 }
 
+fn set_headless_software_platform() {
+    static SETUP: std::sync::Once = std::sync::Once::new();
+    SETUP.call_once(|| {
+        use slint::platform::{software_renderer::*, Platform, WindowAdapter};
+        struct Headless;
+        impl Platform for Headless {
+            fn create_window_adapter(
+                &self,
+            ) -> Result<std::rc::Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+            }
+        }
+        slint::platform::set_platform(Box::new(Headless)).unwrap();
+    });
+}
 #[test]
 fn directory_topic_plain_text_activates_row_and_focused_link_is_distinct() {
     let topic = "before https://example.org/a middle https://example.org/b after";
@@ -5260,7 +5466,7 @@ fn directory_topic_plain_text_activates_row_and_focused_link_is_distinct() {
 
     assert_eq!(markdown.matches(DIRECTORY_ROW_ACTION_HREF).count(), 3);
     assert!(markdown.contains(
-        "<font color=\"#406080\">[before&#32;](<cordiale-internal:activate-directory-row>)</font>"
+        "<font color=\"#406080\">[before&#32;\u{2060}](<cordiale-internal:activate-directory-row>)</font>"
     ));
     assert!(markdown.contains("](<https://example.org/a>)"));
     let focused_link_start = markdown.find("<u>**[").expect("focused link marker");
@@ -5283,14 +5489,8 @@ fn directory_topic_plain_text_activates_row_and_focused_link_is_distinct() {
 
 #[test]
 fn topic_links_preserve_visual_order_and_keyboard_actions() {
-    use slint::platform::{software_renderer::*, Platform, WindowAdapter, WindowEvent};
-    struct Headless;
-    impl Platform for Headless {
-        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
-            Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
-        }
-    }
-    slint::platform::set_platform(Box::new(Headless)).unwrap();
+    use slint::platform::{software_renderer::*, WindowEvent};
+    set_headless_software_platform();
     let row = AppWindow::new().unwrap();
     row.set_screen("connected".into());
     row.set_has_selected_channel(true);
@@ -5731,6 +5931,311 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
                 "plain {script} word order is wrong in directory={directory}: {first_word_bounds:?}, {second_word_bounds:?}"
             );
         }
+    }
+}
+
+#[test]
+fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
+    use slint::platform::{software_renderer::*, WindowEvent};
+    set_headless_software_platform();
+    let row = AppWindow::new().unwrap();
+    row.set_screen("connected".into());
+    row.set_has_selected_channel(true);
+    row.set_directory_network("test".into());
+    let topic = "plain https://example.org/a https://example.org/b tail";
+    row.on_format_topic(
+        |topic, focused_link_index, text_color, activate_row_on_plain_click| {
+            topic_styled_text_with_state(
+                &topic,
+                focused_link_index,
+                text_color,
+                activate_row_on_plain_click,
+            )
+        },
+    );
+    row.on_format_topic_links(|topic| {
+        Rc::new(slint::VecModel::from(topic_link_targets(&topic))).into()
+    });
+    let opened = Rc::new(RefCell::new(Vec::new()));
+    let activated = Rc::new(std::cell::Cell::new(0));
+    let record = opened.clone();
+    row.on_topic_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
+    let count = activated.clone();
+    row.on_directory_channel_activated(move |_| count.set(count.get() + 1));
+    row.show().unwrap();
+    let click = |x, y| {
+        let position = slint::LogicalPosition::new(x, y);
+        let button = slint::platform::PointerEventButton::Left;
+        row.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        row.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    for (directory, width, prefix) in [
+        (true, 1200, ""),
+        (false, 1200, ""),
+        (true, 800, "    "),
+        (false, 800, "    "),
+        (true, 800, "\t"),
+        (false, 800, "\t"),
+    ] {
+        let topic = format!("{prefix}{topic}");
+        row.set_current_topic(topic.as_str().into());
+        row.set_directory_rows(
+            Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                name: "#test".into(),
+                topic: topic.into(),
+                users: "2".into(),
+                featured: false,
+                joined: false,
+            }]))
+            .into(),
+        );
+        row.window()
+            .set_size(slint::LogicalSize::new(width as f32, 800.));
+        row.set_directory_open(directory);
+        opened.borrow_mut().clear();
+        let mut first_link = None;
+        let mut plain_x: Option<f32> = None;
+        let start_y = if directory { 150 } else { 16 };
+        for y in (start_y..400).step_by(8) {
+            for x in (180..width - 16).step_by(8) {
+                let before = opened.borrow().len();
+                let row_before = activated.get();
+                click(x as f32, y as f32);
+                assert_eq!(row.get_directory_open(), directory);
+                if opened.borrow().len() > before {
+                    assert_eq!(activated.get(), row_before, "link click activated the row");
+                    first_link.get_or_insert((x as f32, y as f32));
+                } else if activated.get() > row_before {
+                    plain_x = Some(plain_x.map_or(x as f32, |left| left.min(x as f32)));
+                }
+            }
+            if first_link.is_some_and(|(_, link_y)| y as f32 > link_y + 24.) {
+                break;
+            }
+        }
+        assert!(
+            opened
+                .borrow()
+                .iter()
+                .any(|href| href == "https://example.org/a"),
+            "directory={directory}"
+        );
+        assert!(opened
+            .borrow()
+            .iter()
+            .any(|href| href == "https://example.org/b"));
+        let (x, y) = first_link.unwrap();
+        click(x, y);
+        let before = activated.get();
+        let links_before = opened.borrow().len();
+        for text in [
+            slint::platform::Key::Return.into(),
+            " ".into(),
+            slint::platform::Key::Tab.into(),
+            slint::platform::Key::Return.into(),
+        ] {
+            row.window()
+                .dispatch_event(WindowEvent::KeyPressed { text });
+        }
+        assert_eq!(opened.borrow().len(), links_before + 3);
+        assert_eq!(opened.borrow().last().unwrap(), "https://example.org/b");
+        assert_eq!(activated.get(), before);
+        if directory {
+            let links_before = opened.borrow().len();
+            click(plain_x.unwrap() + 12., y);
+            assert_eq!(
+                activated.get(),
+                before + 1,
+                "ordinary topic text must activate the row"
+            );
+            row.window().dispatch_event(WindowEvent::KeyPressed {
+                text: slint::platform::Key::Return.into(),
+            });
+            assert_eq!(activated.get(), before + 2);
+            assert_eq!(opened.borrow().len(), links_before);
+        }
+    }
+
+    // A tall Settings card must not stretch its Admin navigation or actions.
+    row.set_screen("settings".into());
+    row.set_is_admin(true);
+    row.set_settings_section("admin".into());
+    row.set_admin_section("sessions".into());
+    row.window().set_size(slint::LogicalSize::new(1200., 1200.));
+    let mut users_x = None;
+    'find_users: for y in (0..220).step_by(4) {
+        for x in (250..800).step_by(4) {
+            row.set_admin_section("sessions".into());
+            click(x as f32, y as f32);
+            if row.get_admin_section() == "users" {
+                users_x = Some(x);
+                break 'find_users;
+            }
+        }
+    }
+    let users_x = users_x.expect("the Admin Users button is clickable");
+    let mut user_hits = Vec::new();
+    for y in (0..1200).step_by(4) {
+        row.set_admin_section("sessions".into());
+        click(users_x as f32, y as f32);
+        if row.get_admin_section() == "users" {
+            user_hits.push(y);
+        }
+    }
+    assert!(!user_hits.is_empty(), "Admin Users remains clickable");
+    assert!(
+        user_hits.last().unwrap() - user_hits.first().unwrap() <= 48,
+        "the Admin navigation button must keep its compact hit area: {user_hits:?}"
+    );
+
+    let refreshes = Rc::new(std::cell::Cell::new(0));
+    let refresh_count = refreshes.clone();
+    row.on_admin_refresh_requested(move || refresh_count.set(refresh_count.get() + 1));
+    let mut refresh_x = None;
+    'find_refresh: for y in (0..400).step_by(4) {
+        for x in (250..800).step_by(4) {
+            let before = refreshes.get();
+            click(x as f32, y as f32);
+            if refreshes.get() > before {
+                refresh_x = Some(x);
+                break 'find_refresh;
+            }
+        }
+    }
+    let refresh_x = refresh_x.expect("the Admin Refresh button is clickable");
+    let mut refresh_hits = Vec::new();
+    for y in (0..1200).step_by(4) {
+        let before = refreshes.get();
+        click(refresh_x as f32, y as f32);
+        if refreshes.get() > before {
+            refresh_hits.push(y);
+        }
+    }
+    assert!(!refresh_hits.is_empty(), "Admin Refresh remains clickable");
+    assert!(
+        refresh_hits.last().unwrap() - refresh_hits.first().unwrap() <= 48,
+        "the Admin action button must keep its compact hit area: {refresh_hits:?}"
+    );
+
+    // A long station name makes the Radio row tall, but its Delete button stays compact.
+    row.set_settings_section("radio".into());
+    row.set_radio_custom_stations(
+        Rc::new(slint::VecModel::from(vec![CustomRadioRow {
+            name: "Long station details ".repeat(40).into(),
+            url: "https://radio.example/live".into(),
+            codec_index: 0,
+            codec_label: "MP3".into(),
+        }]))
+        .into(),
+    );
+    let deletes = Rc::new(std::cell::Cell::new(0));
+    let delete_count = deletes.clone();
+    row.on_radio_station_delete(move |_| delete_count.set(delete_count.get() + 1));
+    let mut delete_x = None;
+    'find_delete: for y in (0..600).step_by(8) {
+        for x in (400..1200).step_by(8) {
+            let before = deletes.get();
+            click(x as f32, y as f32);
+            if deletes.get() > before {
+                delete_x = Some(x);
+                break 'find_delete;
+            }
+        }
+    }
+    let delete_x = delete_x.expect("the Radio Delete button is clickable");
+    let mut delete_hits = Vec::new();
+    for y in (0..1200).step_by(4) {
+        let before = deletes.get();
+        click(delete_x as f32, y as f32);
+        if deletes.get() > before {
+            delete_hits.push(y);
+        }
+    }
+    assert!(!delete_hits.is_empty(), "Radio Delete remains clickable");
+    assert!(
+        delete_hits.last().unwrap() - delete_hits.first().unwrap() <= 48,
+        "a wrapped Radio detail must not stretch its action button: {delete_hits:?}"
+    );
+
+    // The media header keeps its compact height in every loading and error state.
+    row.set_screen("connected".into());
+    row.set_media_error("A detailed media failure message ".repeat(40).into());
+    row.set_media_text("Media text line ".repeat(100).into());
+    row.window().set_size(slint::LogicalSize::new(1200., 1200.));
+    for kind in ["loading", "image", "text", "gone", "failed"] {
+        row.set_media_kind(kind.into());
+        let mut close_x = None;
+        for x in (100..1100).step_by(4) {
+            row.set_media_open(true);
+            click(x as f32, 48.);
+            if !row.get_media_open() {
+                close_x = Some(x);
+                break;
+            }
+        }
+        let close_x = close_x.expect("the media Close button is clickable");
+        let mut close_hits = Vec::new();
+        for y in (0..1200).step_by(4) {
+            row.set_media_open(true);
+            click(close_x as f32, y as f32);
+            if !row.get_media_open() {
+                close_hits.push(y);
+            }
+        }
+        assert!(
+            !close_hits.is_empty(),
+            "media Close remains clickable in {kind}"
+        );
+        assert!(
+            close_hits.last().unwrap() - close_hits.first().unwrap() <= 48,
+            "media buttons must keep their compact hit area in {kind}: {close_hits:?}"
+        );
+    }
+    row.set_media_open(false);
+
+    // Check actual layout from the rendered links:
+    // Slint can exclude trailing spaces from a text span before a link.
+    for directory in [false, true] {
+        row.set_directory_open(directory);
+        row.window().set_size(slint::LogicalSize::new(1200., 800.));
+        let mut positions = Vec::new();
+        for spaces in [1, 2, 4] {
+            let topic = format!("word{}https://example.org/a", " ".repeat(spaces));
+
+            row.set_current_topic(topic.as_str().into());
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#test".into(),
+                    topic: topic.into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            let mut first = None;
+            'scan: for y in (if directory { 150 } else { 16 }..400).step_by(4) {
+                for x in 180..1184 {
+                    opened.borrow_mut().clear();
+                    click(x as f32, y as f32);
+                    if !opened.borrow().is_empty() {
+                        first = Some(x);
+                        break 'scan;
+                    }
+                }
+            }
+            positions.push(first.expect("topic link must remain clickable"));
+        }
+        assert!(
+            positions[1] > positions[0],
+            "one space lost: {positions:?}, directory={directory}"
+        );
+        assert!(
+            positions[2] > positions[1],
+            "repeated spaces lost: {positions:?}, directory={directory}"
+        );
     }
 }
 
@@ -6475,6 +6980,10 @@ fn notification_edits_change_only_their_field() {
 
 /// Serves one request on a local port with `status` and returns the base URL.
 fn one_shot_server(status: u16) -> String {
+    one_shot_server_with_body(status, "")
+}
+
+fn one_shot_server_with_body(status: u16, body: &'static str) -> String {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
@@ -6505,8 +7014,10 @@ fn one_shot_server(status: u16) -> String {
                 break;
             }
         }
-        let reply =
-            format!("HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let reply = format!(
+            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
         let _ = stream.write_all(reply.as_bytes());
     });
     url
@@ -9903,6 +10414,8 @@ fn read_cursor_write_back_is_forward_only() {
         encrypted: false,
     };
     assert_eq!(read_cursor_to_write(&mut state), None);
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = true;
     state.windows.current_channel = Some(key.clone());
     state
         .transcript
@@ -9929,6 +10442,139 @@ fn read_cursor_write_back_is_forward_only() {
     assert_eq!(
         read_cursor_to_write(&mut state),
         Some(("libera".to_string(), "#Rust".to_string(), 12))
+    );
+}
+
+#[test]
+fn read_cursor_waits_until_the_newest_row_is_visible() {
+    let mut state = WorkerState::new();
+    let key = ("libera".to_string(), "#Rust".to_string());
+    let line = RenderedMessage {
+        timestamp: "10:00".to_string(),
+        nick: Some("foo".to_string()),
+        text: "hi".to_string(),
+        italic: false,
+        message_id: Some(9),
+        server_time: Some(9),
+        presence_noise: false,
+        rename_to: None,
+        encrypted: false,
+    };
+    state.windows.current_channel = Some(key.clone());
+    state
+        .transcript
+        .messages
+        .insert(key.clone(), vec![line.clone()]);
+    state.windows.chat_visible = false;
+    state.windows.chat_follow_bottom = true;
+    assert_eq!(read_cursor_to_write(&mut state), None);
+    assert!(state.windows.read_cursors.is_empty());
+
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = false;
+    assert_eq!(read_cursor_to_write(&mut state), None);
+    assert!(state.windows.read_cursors.is_empty());
+
+    state.windows.chat_follow_bottom = true;
+    assert_eq!(
+        read_cursor_to_write(&mut state),
+        Some(("libera".to_string(), "#Rust".to_string(), 9))
+    );
+}
+
+#[test]
+fn visible_bottom_read_clears_only_the_active_window() {
+    let mut state = WorkerState::new();
+    let active = ("libera".to_string(), "#Rust".to_string());
+    let other = ("oftc".to_string(), "#rust".to_string());
+    let line = RenderedMessage {
+        timestamp: "10:00".to_string(),
+        nick: Some("foo".to_string()),
+        text: "hi".to_string(),
+        italic: false,
+        message_id: Some(9),
+        server_time: Some(9),
+        presence_noise: false,
+        rename_to: None,
+        encrypted: false,
+    };
+    state.windows.current_channel = Some(active.clone());
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = false;
+    state.transcript.messages.insert(active.clone(), vec![line]);
+    let active_count = window_counts_key(&active.0, &active.1);
+    let other_count = window_counts_key(&other.0, &other.1);
+    state
+        .windows
+        .window_messages
+        .insert(active_count.clone(), 4);
+    state.windows.window_messages.insert(other_count.clone(), 6);
+    let ui = slint::Weak::<AppWindow>::default();
+
+    assert!(!mark_active_window_read(&mut state, &ui));
+    assert_eq!(state.windows.window_messages.get(&active_count), Some(&4));
+
+    set_chat_follow_bottom(&mut state, &ui);
+    assert!(mark_active_window_read(&mut state, &ui));
+    assert_eq!(state.windows.window_messages.get(&active_count), Some(&0));
+    assert_eq!(state.windows.window_messages.get(&other_count), Some(&6));
+}
+
+#[test]
+fn window_selection_preserves_scroll_only_for_the_same_lane() {
+    let mut state = WorkerState::new();
+    let plain = ("libera".to_string(), "Peer".to_string());
+    state.windows.current_channel = Some(plain.clone());
+    state.windows.current_query = true;
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = false;
+
+    prepare_window_selection(&mut state, &plain, true);
+    assert!(!state.windows.chat_follow_bottom);
+
+    let locked =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Locked, "Peer")
+            .key();
+    prepare_window_selection(&mut state, &locked, true);
+    assert!(state.windows.chat_follow_bottom);
+    assert!(state.windows.chat_visible);
+}
+
+#[test]
+fn locked_query_read_state_does_not_write_the_plain_query_cursor() {
+    let mut state = WorkerState::new();
+    let locked =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Locked, "Peer")
+            .key();
+    let plain =
+        crate::e2e_view::LocalQuery::new("libera", crate::e2e_view::QueryLane::Plain, "Peer").key();
+    let line = |id| RenderedMessage {
+        timestamp: "10:00".to_string(),
+        nick: Some("Peer".to_string()),
+        text: "hello".to_string(),
+        italic: false,
+        message_id: Some(id),
+        server_time: Some(id),
+        presence_noise: false,
+        rename_to: None,
+        encrypted: true,
+    };
+    state.windows.current_query = true;
+    state.windows.chat_visible = true;
+    state.windows.chat_follow_bottom = true;
+    state.windows.current_channel = Some(locked.clone());
+    state
+        .transcript
+        .messages
+        .insert(locked.clone(), vec![line(30)]);
+    assert_eq!(read_cursor_to_write(&mut state), None);
+    assert!(state.windows.read_cursors.is_empty());
+
+    state.windows.current_channel = Some(plain.clone());
+    state.transcript.messages.insert(plain, vec![line(27)]);
+    assert_eq!(
+        read_cursor_to_write(&mut state),
+        Some(("libera".to_string(), "Peer".to_string(), 27))
     );
 }
 
@@ -11929,6 +12575,27 @@ fn a_locked_window_without_an_engine_sends_nothing() {
     // No client and no engine: the text went nowhere, and no plain row
     // appeared for it.
     assert!(state.transcript.messages.is_empty());
+}
+
+#[test]
+fn successful_channel_and_plain_query_sends_follow_the_newest_row() {
+    for (target, is_query) in [("#rust", false), ("Peer", true)] {
+        let mut state = WorkerState::new();
+        state.conn.client = Some(GrappaClient::new(one_shot_server_with_body(
+            200,
+            r#"{"kind":"privmsg"}"#,
+        )));
+        state.conn.token = Some("test-token".to_string());
+        state.windows.current_channel = Some(("libera".to_string(), target.to_string()));
+        state.windows.current_query = is_query;
+        state.windows.current_query_ready = true;
+        state.windows.chat_visible = true;
+        state.windows.chat_follow_bottom = false;
+
+        let ui = slint::Weak::<AppWindow>::default();
+        network_test_runtime().block_on(handle_send_message(&mut state, &ui, "hello".to_string()));
+        assert!(state.windows.chat_follow_bottom, "target {target}");
+    }
 }
 
 #[test]
