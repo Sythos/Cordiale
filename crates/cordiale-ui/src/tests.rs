@@ -5189,15 +5189,15 @@ fn chat_links_become_markdown_links() {
 fn topic_links_are_clickable_with_normalized_targets() {
     for prefix in ["", "    ", "\t"] {
         let topic = format!("{prefix}https://example.org/a_b. Caffè 🙂 www.rust-lang.org!");
-        let runs = topic_runs(&topic);
+        let markdown = topic_markdown(&topic);
+        assert!(markdown.starts_with(prefix));
+        assert!(markdown.contains("](<https://example.org/a_b>)"));
+        assert!(markdown.contains("](<https://www.rust-lang.org/>)"));
+        assert!(slint::StyledText::from_markdown(&markdown).is_ok());
         assert_eq!(
-            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
-            topic
-        );
-        assert_eq!(
-            runs.iter()
-                .filter(|run| !run.href.is_empty())
-                .map(|run| run.href.as_str())
+            topic_link_targets(&topic)
+                .iter()
+                .map(|href| href.as_str())
                 .collect::<Vec<_>>(),
             ["https://example.org/a_b", "https://www.rust-lang.org/"]
         );
@@ -5214,17 +5214,14 @@ fn topic_text_keeps_markup_and_non_web_schemes_literal() {
         "file:///tmp/test javascript:alert(1) mailto:me@example.org",
         "https://user:password@example.org/",
     ] {
-        let runs = topic_runs(topic);
-        assert_eq!(
-            runs.iter().map(|run| run.text.as_str()).collect::<String>(),
-            topic
-        );
-        assert!(runs.iter().all(|run| run.href.is_empty()));
+        let markdown = topic_markdown(topic);
+        assert!(!markdown.contains("](<"));
+        assert!(slint::StyledText::from_markdown(&markdown).is_ok());
     }
 }
 
 #[test]
-fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
+fn topic_links_preserve_visual_order_and_keyboard_actions() {
     use slint::platform::{software_renderer::*, Platform, WindowAdapter, WindowEvent};
     struct Headless;
     impl Platform for Headless {
@@ -5238,7 +5235,10 @@ fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
     row.set_has_selected_channel(true);
     row.set_directory_network("test".into());
     let topic = "plain https://example.org/a https://example.org/b tail";
-    row.on_format_topic(|topic| Rc::new(slint::VecModel::from(topic_runs(&topic))).into());
+    row.on_format_topic(|topic| topic_styled_text(&topic));
+    row.on_format_topic_links(|topic| {
+        Rc::new(slint::VecModel::from(topic_link_targets(&topic))).into()
+    });
     let opened = Rc::new(RefCell::new(Vec::new()));
     let activated = Rc::new(std::cell::Cell::new(0));
     let record = opened.clone();
@@ -5279,7 +5279,7 @@ fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
         row.set_directory_open(directory);
         opened.borrow_mut().clear();
         let mut first_link = None;
-        let mut plain_x: Option<f32> = None;
+        let mut link_ranges = std::collections::HashMap::<String, (f32, f32)>::new();
         let start_y = if directory { 150 } else { 16 };
         for y in (start_y..400).step_by(8) {
             for x in (180..width - 16).step_by(8) {
@@ -5290,8 +5290,10 @@ fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
                 if opened.borrow().len() > before {
                     assert_eq!(activated.get(), row_before, "link click activated the row");
                     first_link.get_or_insert((x as f32, y as f32));
-                } else if activated.get() > row_before {
-                    plain_x = Some(plain_x.map_or(x as f32, |left| left.min(x as f32)));
+                    let href = opened.borrow().last().unwrap().clone();
+                    let range = link_ranges.entry(href).or_insert((x as f32, x as f32));
+                    range.0 = range.0.min(x as f32);
+                    range.1 = range.1.max(x as f32);
                 }
             }
             if first_link.is_some_and(|(_, link_y)| y as f32 > link_y + 24.) {
@@ -5309,6 +5311,14 @@ fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
             .borrow()
             .iter()
             .any(|href| href == "https://example.org/b"));
+        if width == 1200 && prefix.is_empty() {
+            let first = link_ranges.get("https://example.org/a").unwrap();
+            let second = link_ranges.get("https://example.org/b").unwrap();
+            assert!(
+                first.1 < second.0,
+                "LTR link order changed in directory={directory}: {first:?}, {second:?}"
+            );
+        }
         let (x, y) = first_link.unwrap();
         click(x, y);
         let before = activated.get();
@@ -5325,20 +5335,88 @@ fn topic_links_handle_pointer_and_keyboard_without_channel_activation() {
         assert_eq!(opened.borrow().len(), links_before + 3);
         assert_eq!(opened.borrow().last().unwrap(), "https://example.org/b");
         assert_eq!(activated.get(), before);
-        if directory {
+        if directory && width == 1200 {
+            let mut channel_name = None;
+            for row_y in (0..400).step_by(8) {
+                for row_x in (180..width - 16).step_by(8) {
+                    let row_before = activated.get();
+                    click(row_x as f32, row_y as f32);
+                    if activated.get() > row_before {
+                        channel_name = Some((row_x as f32, row_y as f32));
+                        break;
+                    }
+                }
+                if channel_name.is_some() {
+                    break;
+                }
+            }
+            let (name_x, name_y) = channel_name.expect("channel row action remains clickable");
+            let activation_before = activated.get();
             let links_before = opened.borrow().len();
-            click(plain_x.unwrap() + 12., y);
-            assert_eq!(
-                activated.get(),
-                before + 1,
-                "ordinary topic text must activate the row"
-            );
+            click(name_x, name_y);
+            assert_eq!(activated.get(), activation_before + 1);
             row.window().dispatch_event(WindowEvent::KeyPressed {
                 text: slint::platform::Key::Return.into(),
             });
-            assert_eq!(activated.get(), before + 2);
+            assert_eq!(activated.get(), activation_before + 2);
             assert_eq!(opened.borrow().len(), links_before);
         }
+    }
+
+    // These positions come from clicks against the rendered anchors. The
+    // first URL in a Hebrew paragraph must appear to the right of the second
+    // URL, in both topic views; a joined-string check cannot detect this bug.
+    let rtl_topic = "שלום,  https://example.org/a! עולם:  https://example.org/b? סוף.";
+    for directory in [true, false] {
+        row.set_current_topic(rtl_topic.into());
+        row.set_directory_rows(
+            Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                name: "#rtl".into(),
+                topic: rtl_topic.into(),
+                users: "2".into(),
+                featured: false,
+                joined: false,
+            }]))
+            .into(),
+        );
+        row.window().set_size(slint::LogicalSize::new(1200., 800.));
+        row.set_directory_open(directory);
+        opened.borrow_mut().clear();
+        let mut link_ranges = std::collections::HashMap::<String, (f32, f32)>::new();
+        let mut first_link = None;
+        let row_y = if directory { 150 } else { 16 };
+        for y in (row_y..400).step_by(8) {
+            for x in (180..1184).step_by(8) {
+                let before = opened.borrow().len();
+                let row_before = activated.get();
+                click(x as f32, y as f32);
+                if opened.borrow().len() > before {
+                    assert_eq!(
+                        activated.get(),
+                        row_before,
+                        "RTL link click activated the row"
+                    );
+                    first_link.get_or_insert((x as f32, y as f32));
+                    let href = opened.borrow().last().unwrap().clone();
+                    let range = link_ranges.entry(href).or_insert((x as f32, x as f32));
+                    range.0 = range.0.min(x as f32);
+                    range.1 = range.1.max(x as f32);
+                }
+            }
+            if first_link.is_some_and(|(_, link_y)| y as f32 > link_y + 24.) {
+                break;
+            }
+        }
+        let first = link_ranges
+            .get("https://example.org/a")
+            .unwrap_or_else(|| panic!("first RTL link was not rendered; directory={directory}"));
+        let second = link_ranges
+            .get("https://example.org/b")
+            .unwrap_or_else(|| panic!("second RTL link was not rendered; directory={directory}"));
+        assert!(
+            first.0 > second.1,
+            "RTL link order is wrong in directory={directory}: {first:?}, {second:?}"
+        );
     }
 }
 

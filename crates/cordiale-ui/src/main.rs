@@ -9235,32 +9235,40 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
     markdown
 }
 
-/// Words wrap independently; only validated URL spans become focusable actions.
-fn topic_runs(topic: &str) -> Vec<TopicRun> {
-    fn plain(runs: &mut Vec<TopicRun>, text: &str) {
-        runs.extend(
-            text.split_inclusive(char::is_whitespace)
-                .map(|word| TopicRun {
-                    text: word.into(),
-                    href: "".into(),
-                }),
-        );
-    }
-    let mut runs = Vec::new();
+/// Escape a whole topic as one paragraph and link only validated web URLs.
+/// Keeping the paragraph in one StyledText item lets the renderer apply the
+/// Unicode bidirectional algorithm across words, spaces, punctuation and URLs.
+fn topic_markdown(topic: &str) -> String {
+    let mut markdown = String::new();
     let mut last = 0;
     for link in cordiale_core::media::find_links(topic) {
         let Ok(url) = cordiale_core::media::validated_url(&link.href) else {
             continue;
         };
-        plain(&mut runs, &topic[last..link.range.start]);
-        runs.push(TopicRun {
-            text: topic[link.range.clone()].into(),
-            href: url.as_str().into(),
-        });
+        markdown.push_str(&escape_markdown(&topic[last..link.range.start]));
+        markdown.push('[');
+        markdown.push_str(&escape_markdown(&topic[link.range.clone()]));
+        markdown.push_str("](<");
+        markdown.push_str(url.as_str());
+        markdown.push_str(">)");
         last = link.range.end;
     }
-    plain(&mut runs, &topic[last..]);
-    runs
+    markdown.push_str(&escape_markdown(&topic[last..]));
+    markdown
+}
+
+fn topic_styled_text(topic: &str) -> slint::StyledText {
+    let markdown = topic_markdown(topic);
+    slint::StyledText::from_markdown(&markdown)
+        .unwrap_or_else(|_| slint::StyledText::from_plain_text(topic))
+}
+
+fn topic_link_targets(topic: &str) -> Vec<slint::SharedString> {
+    cordiale_core::media::find_links(topic)
+        .into_iter()
+        .filter_map(|link| cordiale_core::media::validated_url(&link.href).ok())
+        .map(|url| url.as_str().into())
+        .collect()
 }
 
 /// Escaped text with its links as markdown links, which the chat's
