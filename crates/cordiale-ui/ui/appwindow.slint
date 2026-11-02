@@ -455,6 +455,7 @@ component NickQueryButton inherits Rectangle {
     in property <bool> text-bold: false;
     in property <bool> text-italic: false;
     callback activated();
+    callback context-menu-requested(Point);
 
     accessible-role: button;
     accessible-label: root.text;
@@ -473,6 +474,12 @@ component NickQueryButton inherits Rectangle {
 
     touch := TouchArea {
         mouse-cursor: pointer;
+        // Slint 1.18 consumes right presses here before the parent menu.
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                root.context-menu-requested({ x: self.mouse-x, y: self.mouse-y });
+            }
+        }
         clicked => {
             focus.focus();
             root.activated();
@@ -537,7 +544,7 @@ component MemberContextMenu {
     callback ignore(string, bool); // nick, true to ignore
     callback reply(string, string, string); // nick, raw message body, message id
 
-    ContextMenuArea {
+    nick-menu := ContextMenuArea {
         Menu {
             if is-chat-message : MenuItem {
                 title: "↩  " + @tr("Reply");
@@ -624,6 +631,9 @@ component MemberContextMenu {
                 color: prefix-color;
             }
             NickQueryButton {
+                context-menu-requested(position) => {
+                    nick-menu.show({ x: self.x + position.x, y: self.y + position.y });
+                }
                 text: display-text;
                 text-color: text-color;
                 text-bold: text-bold;
