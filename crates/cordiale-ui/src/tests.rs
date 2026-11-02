@@ -9796,8 +9796,8 @@ fn visible_bottom_read_clears_only_the_active_window() {
     state.windows.chat_visible = true;
     state.windows.chat_follow_bottom = false;
     state.transcript.messages.insert(active.clone(), vec![line]);
-    let active_count = window_counts_key("libera", "#rust");
-    let other_count = window_counts_key("oftc", "#rust");
+    let active_count = window_counts_key(&active.0, &active.1);
+    let other_count = window_counts_key(&other.0, &other.1);
     state
         .windows
         .window_messages
