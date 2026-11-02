@@ -5523,6 +5523,68 @@ fn sidebar_selection_keeps_scrolled_channel_in_place() {
     );
 }
 
+#[test]
+fn nick_right_click_opens_menu_without_opening_query() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    set_headless_software_platform();
+    for roster in [false, true] {
+        let ui = AppWindow::new().unwrap();
+        ui.set_screen("connected".into());
+        ui.set_has_selected_channel(true);
+        ui.set_current_window_is_joined(true);
+        if roster {
+            ui.set_channel_members(
+                Rc::new(slint::VecModel::from(vec![MemberRow {
+                    name: "Alice".into(),
+                    ..Default::default()
+                }]))
+                .into(),
+            );
+        } else {
+            show_chat_lines(
+                &ui,
+                chat_lines_model(&[e2e_row(1, Some("Alice"), false, false)], true),
+            );
+        }
+        let queries = Rc::new(std::cell::Cell::new(0));
+        let record = queries.clone();
+        ui.on_member_nickname_clicked(move |_, _, _| record.set(record.get() + 1));
+        ui.show().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1200., 800.));
+        ui.window().take_snapshot().unwrap();
+        let click = |position, button| {
+            ui.window()
+                .dispatch_event(WindowEvent::PointerPressed { position, button });
+            ui.window()
+                .dispatch_event(WindowEvent::PointerReleased { position, button });
+        };
+        let mut nick = None;
+        'scan: for y in (16..760).step_by(8) {
+            for x in (180..1180).step_by(8) {
+                let position = slint::LogicalPosition::new(x as f32, y as f32);
+                click(position, PointerEventButton::Left);
+                if queries.get() > 0 {
+                    nick = Some(position);
+                    break 'scan;
+                }
+            }
+        }
+        let nick =
+            nick.unwrap_or_else(|| panic!("nickname must accept a left click: roster={roster}"));
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: nick });
+        let before = ui.window().take_snapshot().unwrap();
+        let count = queries.get();
+        click(nick, PointerEventButton::Right);
+        let after = ui.window().take_snapshot().unwrap();
+        assert_eq!(queries.get(), count, "right click opened a query");
+        assert!(
+            before.as_bytes() != after.as_bytes(),
+            "right click did not show the menu: roster={roster}"
+        );
+    }
+}
+
 fn set_headless_software_platform() {
     std::thread_local! {
         static SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
