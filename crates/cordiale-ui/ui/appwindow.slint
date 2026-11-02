@@ -8127,29 +8127,49 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 overflow: elide;
             }
-            if media-kind == "image" : CompactButton {
-                text: media-zoom ? @tr("Fit") : "1:1";
-                a11y-label: media-zoom ? @tr("Fit to the window") : @tr("Actual size");
-                clicked => { media-zoom = !media-zoom; }
+            if media-kind == "image" : VerticalLayout {
+                alignment: center;
+
+                CompactButton {
+                    text: media-zoom ? @tr("Fit") : "1:1";
+                    a11y-label: media-zoom ? @tr("Fit to the window") : @tr("Actual size");
+                    clicked => { media-zoom = !media-zoom; }
+                }
             }
-            CompactButton {
-                text: "💾  " + @tr("Download");
-                enabled: media-kind == "image";
-                clicked => { media-download(); }
+            VerticalLayout {
+                alignment: center;
+
+                CompactButton {
+                    text: "💾  " + @tr("Download");
+                    enabled: media-kind == "image";
+                    clicked => { media-download(); }
+                }
             }
-            CompactButton {
-                text: "🔗  " + @tr("Share");
-                a11y-label: @tr("Copy the image link");
-                enabled: media-kind == "image";
-                clicked => { media-share(); }
+            VerticalLayout {
+                alignment: center;
+
+                CompactButton {
+                    text: "🔗  " + @tr("Share");
+                    a11y-label: @tr("Copy the image link");
+                    enabled: media-kind == "image";
+                    clicked => { media-share(); }
+                }
             }
-            if media-kind != "gone" : CompactButton {
-                text: "🌐  " + @tr("Open in browser");
-                clicked => { media-open-in-browser(); }
+            if media-kind != "gone" : VerticalLayout {
+                alignment: center;
+
+                CompactButton {
+                    text: "🌐  " + @tr("Open in browser");
+                    clicked => { media-open-in-browser(); }
+                }
             }
-            CompactButton {
-                text: "✕  " + @tr("Close");
-                clicked => { media-open = false; }
+            VerticalLayout {
+                alignment: center;
+
+                CompactButton {
+                    text: "✕  " + @tr("Close");
+                    clicked => { media-open = false; }
+                }
             }
         }
 
