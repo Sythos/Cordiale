@@ -5435,7 +5435,7 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
         matches: fn(u8, u8, u8) -> bool,
     ) -> Option<(usize, usize)> {
         let mut bounds: Option<(usize, usize)> = None;
-        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+        for (index, pixel) in pixels.as_chunks::<4>().0.iter().enumerate() {
             if matches(pixel[0], pixel[1], pixel[2]) {
                 let x = index % width;
                 let span = bounds.get_or_insert((x, x));
