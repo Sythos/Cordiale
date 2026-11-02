@@ -5223,6 +5223,17 @@ fn topic_links_are_clickable_with_normalized_targets() {
             .collect::<Vec<_>>(),
         [topic]
     );
+
+    let backslash_topic = r"https://example.org/?q=\*";
+    assert_eq!(
+        topic_link_targets(backslash_topic)
+            .first()
+            .expect("validated URL target")
+            .as_str(),
+        backslash_topic
+    );
+    let backslash_markdown = topic_markdown(backslash_topic);
+    assert!(backslash_markdown.contains(r"](<https://example.org/?q=\\*>)"));
 }
 
 #[test]
@@ -5477,51 +5488,55 @@ fn topic_links_preserve_visual_order_and_keyboard_actions() {
         }
     }
 
-    // The Markdown parser must not decode an entity-like query as part of the
-    // URL. Mouse clicks in both topic views must open the validated target.
-    let entity_topic = "https://example.org/?a=1&copy;=2";
-    let entity_target = topic_link_targets(entity_topic)
-        .first()
-        .expect("validated URL target")
-        .to_string();
-    assert_eq!(entity_target, entity_topic);
-    for directory in [true, false] {
-        row.set_current_topic(entity_topic.into());
-        row.set_directory_rows(
-            Rc::new(slint::VecModel::from(vec![DirectoryRow {
-                name: "#entity".into(),
-                topic: entity_topic.into(),
-                users: "2".into(),
-                featured: false,
-                joined: false,
-            }]))
-            .into(),
-        );
-        row.window().set_size(slint::LogicalSize::new(1200., 800.));
-        row.set_directory_open(directory);
-        opened.borrow_mut().clear();
-        let start_y = if directory { 150 } else { 16 };
-        let mut clicked = false;
-        for y in (start_y..320).step_by(8) {
-            for x in (180..1184).step_by(8) {
-                let before = opened.borrow().len();
-                let row_before = activated.get();
-                click(x as f32, y as f32);
-                if opened.borrow().len() > before {
-                    assert_eq!(activated.get(), row_before);
-                    assert_eq!(opened.borrow().last().unwrap(), &entity_target);
-                    clicked = true;
+    // Markdown must preserve entity-like ampersands and literal backslashes
+    // in validated URLs. Mouse clicks in both topic views must open that URL.
+    for topic in [
+        "https://example.org/?a=1&copy;=2",
+        r"https://example.org/?q=\*",
+    ] {
+        let target = topic_link_targets(topic)
+            .first()
+            .expect("validated URL target")
+            .to_string();
+        assert_eq!(target, topic);
+        for directory in [true, false] {
+            row.set_current_topic(topic.into());
+            row.set_directory_rows(
+                Rc::new(slint::VecModel::from(vec![DirectoryRow {
+                    name: "#encoded-url".into(),
+                    topic: topic.into(),
+                    users: "2".into(),
+                    featured: false,
+                    joined: false,
+                }]))
+                .into(),
+            );
+            row.window().set_size(slint::LogicalSize::new(1200., 800.));
+            row.set_directory_open(directory);
+            opened.borrow_mut().clear();
+            let start_y = if directory { 150 } else { 16 };
+            let mut clicked = false;
+            for y in (start_y..320).step_by(8) {
+                for x in (180..1184).step_by(8) {
+                    let before = opened.borrow().len();
+                    let row_before = activated.get();
+                    click(x as f32, y as f32);
+                    if opened.borrow().len() > before {
+                        assert_eq!(activated.get(), row_before);
+                        assert_eq!(opened.borrow().last().unwrap(), &target);
+                        clicked = true;
+                        break;
+                    }
+                }
+                if clicked {
                     break;
                 }
             }
-            if clicked {
-                break;
-            }
+            assert!(
+                clicked,
+                "URL with Markdown-sensitive query was not clickable; directory={directory}"
+            );
         }
-        assert!(
-            clicked,
-            "entity-like URL was not clickable; directory={directory}"
-        );
     }
 
     // Repeated URLs still create separate keyboard stops. The sequence A/B/A

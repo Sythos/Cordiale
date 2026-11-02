@@ -9360,10 +9360,10 @@ fn topic_link_targets(topic: &str) -> Vec<slint::SharedString> {
         .collect()
 }
 
-// Markdown decodes character references in link destinations. Escape `&` so
-// a URL such as `...?a=1&copy;=2` keeps its validated query unchanged.
+// Markdown decodes character references and backslash escapes in link
+// destinations. Escape both characters so the parsed href stays unchanged.
 fn escape_markdown_destination(destination: &str) -> String {
-    destination.replace('&', "&amp;")
+    destination.replace('\\', "\\\\").replace('&', "&amp;")
 }
 
 /// Escaped text with its links as markdown links, which the chat's
