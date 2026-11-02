@@ -994,6 +994,9 @@ pub(crate) async fn handle_frame(
     }
     let rows = messages.len();
     let open = state.windows.current_channel.as_ref() == Some(&key);
+    if open && !state.windows.current_query {
+        mark_active_window_read(state, ui);
+    }
     // A window nobody has open is trimmed at once; the open one only when
     // its pane asks for it (below), as only the pane knows whether the
     // reader is following the newest line.
@@ -1301,8 +1304,10 @@ fn apply_window_count_snapshot(
     key: WindowCountsKey,
     mut counts: WindowCountSnapshot,
 ) -> bool {
-    // Whatever arrives in the window being read is read already.
-    if selected_window(state) == Some((key.clone(), false)) {
+    // A selected row is read only when its newest known message can be shown
+    // at the bottom of the visible chat pane. Locked queries have their own
+    // local read state and never use the server's window cursor.
+    if active_window_is_visible(state, &key) {
         counts.messages = 0;
     }
     let mentions_changed = apply_window_mention_count(state, key.clone(), counts.mentions);
@@ -2418,6 +2423,7 @@ fn show_live_query_message(
     if !open {
         return;
     }
+    mark_active_window_read(state, ui);
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
     let ui = ui.clone();

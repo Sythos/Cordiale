@@ -273,7 +273,7 @@ pub(crate) fn locked_unread_counts(state: &WorkerState) -> HashMap<(String, Stri
 }
 
 /// Marks every incoming row of the locked entry as seen.
-fn mark_locked_read(state: &mut WorkerState, network: &str, nick: &str) {
+pub(crate) fn mark_locked_read(state: &mut WorkerState, network: &str, nick: &str) -> bool {
     let seen = state
         .e2e
         .history_of(network)
@@ -282,7 +282,8 @@ fn mark_locked_read(state: &mut WorkerState, network: &str, nick: &str) {
     state
         .e2e
         .read_incoming
-        .insert((network.to_string(), nick.to_string()), seen);
+        .insert((network.to_string(), nick.to_string()), seen)
+        != Some(seen)
 }
 
 /// The state of the locked entry of `nick`, read from the engine and the
@@ -1396,7 +1397,7 @@ fn refresh_locked_view(
     let is_open = open_locked_window(state)
         .is_some_and(|(open_network, open_nick)| open_network == network && open_nick == nick);
     if is_open {
-        mark_locked_read(state, network, nick);
+        mark_active_window_read(state, ui);
         load_locked_rows(state, network, nick);
         show_locked_rows(state, ui, network, nick);
     }
@@ -1587,16 +1588,17 @@ pub(crate) fn handle_select_locked_query(
     }
     close_directory(state, ui);
     let key = (network.clone(), label.to_string());
+    prepare_window_selection(state, &key, true);
     state.windows.current_query = true;
     state.windows.current_query_ready = true;
     // A SAS check belongs to the window that opened it.
     state.e2e.sas_check = None;
     push_sas_code(ui, String::new());
     open_window(state, &key);
-    mark_locked_read(state, &network, &nick);
     load_locked_rows(state, &network, &nick);
     refresh_network_groups(state, ui);
     show_locked_window(state, ui, &network, &nick);
+    mark_active_window_read(state, ui);
 }
 
 /// Closes a locked entry. False when `label` is not a locked entry, so the
@@ -1700,6 +1702,9 @@ pub(crate) async fn handle_send_locked(
     let result = engine
         .send_or_queue(&client, &token, &nick, &body, e2e_now())
         .await;
+    if result.is_ok() {
+        set_chat_follow_bottom(state, ui);
+    }
     if let Err(error) = &result {
         // The log gets the kind of the failure, never the text.
         persistence::log_line(&format!("e2e send failed for {network}: {error:?}"));
@@ -1707,6 +1712,9 @@ pub(crate) async fn handle_send_locked(
         state.e2e.note_engine_error(&network, &nick, error);
     }
     settle_engine(state, ui, &network, engine).await;
+    if result.is_ok() {
+        mark_active_window_read(state, ui);
+    }
 }
 
 /// The session stopped (a disconnect or a reconnect): every open send of
