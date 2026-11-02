@@ -8129,6 +8129,7 @@ export component AppWindow inherits Window {
             }
             if media-kind == "image" : VerticalLayout {
                 alignment: center;
+                vertical-stretch: 0;
 
                 CompactButton {
                     text: media-zoom ? @tr("Fit") : "1:1";
@@ -8138,6 +8139,7 @@ export component AppWindow inherits Window {
             }
             VerticalLayout {
                 alignment: center;
+                vertical-stretch: 0;
 
                 CompactButton {
                     text: "💾  " + @tr("Download");
@@ -8147,6 +8149,7 @@ export component AppWindow inherits Window {
             }
             VerticalLayout {
                 alignment: center;
+                vertical-stretch: 0;
 
                 CompactButton {
                     text: "🔗  " + @tr("Share");
@@ -8157,6 +8160,7 @@ export component AppWindow inherits Window {
             }
             if media-kind != "gone" : VerticalLayout {
                 alignment: center;
+                vertical-stretch: 0;
 
                 CompactButton {
                     text: "🌐  " + @tr("Open in browser");
@@ -8165,6 +8169,7 @@ export component AppWindow inherits Window {
             }
             VerticalLayout {
                 alignment: center;
+                vertical-stretch: 0;
 
                 CompactButton {
                     text: "✕  " + @tr("Close");
