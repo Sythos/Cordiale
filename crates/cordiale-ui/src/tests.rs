@@ -5964,10 +5964,17 @@ fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
     });
     let opened = Rc::new(RefCell::new(Vec::new()));
     let activated = Rc::new(std::cell::Cell::new(0));
+    let focused_links = Rc::new(RefCell::new(Vec::new()));
     let record = opened.clone();
     row.on_topic_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
     let count = activated.clone();
     row.on_directory_channel_activated(move |_| count.set(count.get() + 1));
+    let focus_record = focused_links.clone();
+    row.on_topic_link_focus_changed(move |index| {
+        if index >= 0 {
+            focus_record.borrow_mut().push(index as usize);
+        }
+    });
     row.show().unwrap();
     let click = |x, y| {
         let position = slint::LogicalPosition::new(x, y);
@@ -5976,6 +5983,18 @@ fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
             .dispatch_event(WindowEvent::PointerPressed { position, button });
         row.window()
             .dispatch_event(WindowEvent::PointerReleased { position, button });
+    };
+    let focus_link = |expected: usize| {
+        for _ in 0..256 {
+            let focus_count = focused_links.borrow().len();
+            row.window().dispatch_event(WindowEvent::KeyPressed {
+                text: slint::platform::Key::Tab.into(),
+            });
+            if focused_links.borrow().get(focus_count).copied() == Some(expected) {
+                return;
+            }
+        }
+        panic!("topic link {expected} did not receive keyboard focus");
     };
     for (directory, width, prefix) in [
         (true, 1200, ""),
@@ -6036,15 +6055,17 @@ fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
         click(x, y);
         let before = activated.get();
         let links_before = opened.borrow().len();
-        for text in [
-            slint::platform::Key::Return.into(),
-            " ".into(),
-            slint::platform::Key::Tab.into(),
-            slint::platform::Key::Return.into(),
-        ] {
+        focus_link(0);
+        for text in [slint::platform::Key::Return.into(), " ".into()] {
             row.window()
                 .dispatch_event(WindowEvent::KeyPressed { text });
+            assert_eq!(opened.borrow().last().unwrap(), "https://example.org/a");
         }
+        assert_eq!(opened.borrow().len(), links_before + 2);
+        focus_link(1);
+        row.window().dispatch_event(WindowEvent::KeyPressed {
+            text: slint::platform::Key::Return.into(),
+        });
         assert_eq!(opened.borrow().len(), links_before + 3);
         assert_eq!(opened.borrow().last().unwrap(), "https://example.org/b");
         assert_eq!(activated.get(), before);
