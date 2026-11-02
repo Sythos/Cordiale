@@ -813,7 +813,10 @@ component TopicText inherits Rectangle {
             }
             VerticalLayout {
                 Text {
-                    text: run.text;
+                    // Keep trailing spaces in Slint's measured width. The
+                    // invisible word joiner affects display only, not links
+                    // or accessibility labels, which retain the original text.
+                    text: run.text + "\u{2060}";
                     font-size: root.font-size;
                     color: run.href == "" ? root.text-color : root.link-color;
                     wrap: word-wrap;
