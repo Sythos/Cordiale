@@ -3315,6 +3315,26 @@ async fn finish_connect(
     }
 }
 
+/// Plain snapshot of the displayed, loaded rows; preserve literal text and URLs.
+fn chat_copy_text(lines: &slint::ModelRc<ChatLine>) -> String {
+    use slint::Model as _;
+    lines
+        .iter()
+        .map(|line| {
+            let body: String = cordiale_core::formatting::parse_mirc_text(&line.reply_body)
+                .into_iter()
+                .map(|run| run.text)
+                .collect();
+            if line.nick.is_empty() {
+                format!("[{}] {}", line.timestamp, body)
+            } else {
+                format!("[{}] <{}> {}", line.timestamp, line.nick, body)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Puts `text` on the system clipboard (a TOTP key, link or recovery
 /// codes); a clipboard that can't be opened is only logged.
 fn copy_text(text: &str) {
