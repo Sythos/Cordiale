@@ -1136,6 +1136,7 @@ export component AppWindow inherits Window {
     // Slint has no `else`/`else if`: mutually exclusive `if` blocks are
     // the documented pattern for multi-screen navigation.
     in-out property <string> screen: "splash";
+    callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
     // disconnect) start it afresh, and so does coming back with no window
@@ -1153,6 +1154,10 @@ export component AppWindow inherits Window {
             radio-open = false;
             chat-resume = screen == "settings" || screen == "links" || screen == "archive" || screen == "reply" || screen == "umodes" || screen == "debug";
         }
+        chat-read-state-changed(
+            screen == "connected" && has-selected-channel && !directory-open,
+            chat-follow-bottom
+        );
     }
     // Set once by Rust before the window is shown: where the splash
     // screen hands off to once its animation finishes ("language" on
@@ -1354,6 +1359,12 @@ export component AppWindow inherits Window {
     in-out property <length> chat-scroll-y: 0px;
     out property <length> chat-content-height: 0px;
     in-out property <bool> chat-follow-bottom: true;
+    changed chat-follow-bottom => {
+        chat-read-state-changed(
+            screen == "connected" && has-selected-channel && !directory-open,
+            chat-follow-bottom
+        );
+    }
     // The row a mention jump landed on, tinted for a moment; -1 for none.
     in-out property <int> chat-highlight-row: -1;
     // What lets a chat pane that is torn down and rebuilt (the reader went
@@ -1397,6 +1408,12 @@ export component AppWindow inherits Window {
         connection-destination == "" ? "" : @tr("Connected to: {}", connection-destination),
         window-status);
     in property <bool> has-selected-channel: false;
+    changed has-selected-channel => {
+        chat-read-state-changed(
+            screen == "connected" && has-selected-channel && !directory-open,
+            chat-follow-bottom
+        );
+    }
     in property <bool> current-query: false;
     // The peer's nick for the open private window — set together with
     // `current-query`, so it's always valid whenever `current-query` is
@@ -1492,6 +1509,12 @@ export component AppWindow inherits Window {
     in property <string> directory-failed-reason: "";
     // The directory pane replaces the chat while open; the sidebar stays.
     in-out property <bool> directory-open: false;
+    changed directory-open => {
+        chat-read-state-changed(
+            screen == "connected" && has-selected-channel && !directory-open,
+            chat-follow-bottom
+        );
+    }
     // Unix seconds of the listing's capture ("" when none), and its age in
     // seconds (-1 when none), re-derived by `directory-age-tick` so the
     // "N ago" label keeps moving while the pane is open.
