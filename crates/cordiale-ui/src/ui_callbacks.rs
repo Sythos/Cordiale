@@ -460,6 +460,9 @@ pub(crate) fn register_navigation_callbacks(
             ui.set_channel_members(empty_members.into());
             ui.set_current_topic("".into());
             ui.set_window_status("".into());
+            ui.set_current_channel_label("".into());
+            ui.set_window_source_network("".into());
+            ui.set_window_source_target("".into());
             ui.set_current_window_is_joined(false);
             ui.set_current_server_window(false);
             ui.set_has_selected_channel(false);
@@ -542,6 +545,8 @@ pub(crate) fn register_navigation_callbacks(
             ui.set_current_topic("".into());
             ui.set_window_status("".into());
             ui.set_current_channel_label("".into());
+            ui.set_window_source_network("".into());
+            ui.set_window_source_target("".into());
             ui.set_current_window_is_joined(false);
             ui.set_current_server_window(false);
             ui.set_has_selected_channel(false);
@@ -601,6 +606,15 @@ pub(crate) fn register_member_callbacks(
     let tx_for_query = worker_tx.clone();
     ui.on_member_query_requested(move |nick| {
         let _ = tx_for_query.send(WorkerCommand::MemberQuery(nick.to_string()));
+    });
+
+    let tx_for_nickname = worker_tx.clone();
+    ui.on_member_nickname_clicked(move |nick, network, source_window| {
+        let _ = tx_for_nickname.send(WorkerCommand::OpenNicknameQuery {
+            nick: nick.to_string(),
+            network: network.to_string(),
+            source_window: source_window.to_string(),
+        });
     });
 
     let tx_for_ignore = worker_tx.clone();

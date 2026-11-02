@@ -498,6 +498,14 @@ enum WorkerCommand {
         verb: String,
     },
     MemberQuery(String),
+    /// A peer nickname was clicked in a chat row or channel roster. Keep the
+    /// source identity from the visible row so a queued click cannot use a
+    /// different selected network.
+    OpenNicknameQuery {
+        nick: String,
+        network: String,
+        source_window: String,
+    },
     /// Ignore (`add`) or unignore the plain nick rule of a menu nick on
     /// the open window's network.
     MemberIgnore {
@@ -2611,6 +2619,20 @@ async fn run_worker(
                     Some(WorkerCommand::MemberQuery(nick)) => {
                         send_member_query(&mut state, &ui, nick).await;
                     }
+                    Some(WorkerCommand::OpenNicknameQuery {
+                        nick,
+                        network,
+                        source_window,
+                    }) => {
+                        handle_open_nickname_query(
+                            &mut state,
+                            &ui,
+                            nick,
+                            network,
+                            source_window,
+                        )
+                        .await;
+                    }
                     Some(WorkerCommand::MemberIgnore { nick, add }) => {
                         run_member_ignore(&mut state, &ui, nick, add).await;
                     }
@@ -3216,6 +3238,8 @@ async fn finish_connect(
                 ui.set_current_query(false);
                 ui.set_current_server_window(false);
                 ui.set_current_query_ready(false);
+                ui.set_window_source_network("".into());
+                ui.set_window_source_target("".into());
                 let networks: Vec<slint::SharedString> =
                     distinct_networks.into_iter().map(Into::into).collect();
                 ui.set_known_networks(Rc::new(slint::VecModel::from(networks)).into());

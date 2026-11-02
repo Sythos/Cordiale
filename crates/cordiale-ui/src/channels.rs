@@ -90,9 +90,13 @@ pub(crate) async fn handle_select_channel(
 
     push_window_note(state, ui);
     let label = format!("{network} — {channel}");
+    let source_network = network.clone();
+    let source_target = channel.clone();
     let ui_weak = ui.clone();
     let _ = ui_weak.upgrade_in_event_loop(move |ui| {
         ui.set_current_channel_label(label.into());
+        ui.set_window_source_network(source_network.into());
+        ui.set_window_source_target(source_target.into());
         ui.set_current_topic(irc_topic.into());
         ui.set_window_status(window_status.into());
         ui.set_current_window_is_joined(window_is_joined);
@@ -300,6 +304,8 @@ pub(crate) async fn handle_dismiss_kicked_channel(
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
         ui.set_has_selected_channel(false);
         ui.set_current_channel_label("".into());
+        ui.set_window_source_network("".into());
+        ui.set_window_source_target("".into());
         ui.set_current_topic("".into());
         ui.set_window_status("".into());
         ui.set_current_window_is_joined(false);
