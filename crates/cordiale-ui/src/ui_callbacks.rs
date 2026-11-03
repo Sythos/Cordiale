@@ -715,6 +715,16 @@ pub(crate) fn register_channel_callbacks(
         }
     });
 
+    let tx_for_e2e_request = worker_tx.clone();
+    ui.on_e2e_request_action(move |action, network, peer, request_id| {
+        let _ = tx_for_e2e_request.send(WorkerCommand::E2eRequestAction {
+            action: action.to_string(),
+            network: network.to_string(),
+            peer: peer.to_string(),
+            request_id: request_id.to_string(),
+        });
+    });
+
     // The invitation banner deliberately does not auto-focus a window. Its
     // explicit Join action only opens the invited row; the server remains the
     // authority for the subsequent pending/joined transition.

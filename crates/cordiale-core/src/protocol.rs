@@ -59,12 +59,11 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// 38 to 41 add the ban mask form, the auto-away site default, the time
 /// cursors and the `truncated` mark of the away bundle; 42 to 50 add the
 /// end-to-end encrypted queries (relay, offline queue, key bundle, pacer and
-/// `expires_at`, network name, pairing, devices, copies to other devices);
-/// 51 is an admin change, not an E2E one: an admin credential edit restarts
-/// the live session. The full text of the client protocol document was read
-/// again for 50, and the server source for 51; `docs/e2e-contract.md` lists
-/// the sources of the E2E part.
-pub const CLIENT_PROTOCOL_VERSION: u32 = 51;
+/// `expires_at`, network name, pairing, devices, copies to other devices),
+/// explicit encrypted-chat consent (53), and `no_such_nick` (54). Protocol 51
+/// also restarts the live session after an admin credential edit. This client
+/// uses the highest Grappa protocol version it implements.
+pub const CLIENT_PROTOCOL_VERSION: u32 = 54;
 
 /// The first Grappa `protocol_version` that reads the `before_time`,
 /// `after_time` and `around_time` history cursors. An older server ignores

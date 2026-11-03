@@ -67,6 +67,10 @@ pub enum E2eRefusal {
     PairingNotJoined,
     PairingFull,
     PairingNotAParty,
+    /// An accept or refuse action does not match the request state.
+    RequestState,
+    /// The incoming or saved request limit is full.
+    RequestsFull,
     /// A token that the table does not list, no token, or a known token with
     /// a status that the document does not give it.
     Unknown {
@@ -76,7 +80,7 @@ pub enum E2eRefusal {
 }
 
 /// Every known refusal with its token and status.
-static KNOWN: [(E2eRefusal, &str, u16); 24] = [
+static KNOWN: [(E2eRefusal, &str, u16); 26] = [
     (E2eRefusal::BadRequest, "bad_request", 400),
     (E2eRefusal::InvalidLine, "invalid_line", 400),
     (E2eRefusal::UnknownDevice, "unknown_device", 422),
@@ -109,6 +113,8 @@ static KNOWN: [(E2eRefusal, &str, u16); 24] = [
     (E2eRefusal::PairingNotJoined, "pairing_not_joined", 409),
     (E2eRefusal::PairingFull, "pairing_full", 413),
     (E2eRefusal::PairingNotAParty, "pairing_not_a_party", 403),
+    (E2eRefusal::RequestState, "request_state", 409),
+    (E2eRefusal::RequestsFull, "requests_full", 422),
 ];
 
 impl E2eRefusal {

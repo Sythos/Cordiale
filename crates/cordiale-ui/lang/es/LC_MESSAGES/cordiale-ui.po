@@ -3759,3 +3759,67 @@ msgstr "Clave maestra pública (Ed25519):"
 msgctxt "AppWindow"
 msgid "Copy public key"
 msgstr "Copiar la clave pública"
+
+msgctxt "AppWindow"
+msgid "{} wants to start an encrypted chat."
+msgstr "{} quiere iniciar un chat cifrado."
+
+msgctxt "AppWindow"
+msgid "Waiting for {} to accept the encrypted chat request."
+msgstr "Esperando a que {} acepte la solicitud de chat cifrado."
+
+msgctxt "AppWindow"
+msgid "{} refused the encrypted chat request."
+msgstr "{} rechazó la solicitud de chat cifrado."
+
+msgctxt "AppWindow"
+msgid "The encrypted chat request expired."
+msgstr "La solicitud de chat cifrado caducó."
+
+msgctxt "AppWindow"
+msgid "The encrypted chat request was accepted."
+msgstr "Se aceptó la solicitud de chat cifrado."
+
+msgctxt "AppWindow"
+msgid "Ask for keys again"
+msgstr "Volver a solicitar las claves"
+
+msgctxt "AppWindow"
+msgid "Cancel request"
+msgstr "Cancelar solicitud"
+
+msgctxt "AppWindow"
+msgid "Open encrypted chat"
+msgstr "Abrir chat cifrado"
+
+msgctxt "AppWindow"
+msgid "Start encrypted chat"
+msgstr "Iniciar chat cifrado"
+
+msgctxt "AppWindow"
+msgid "The peer could not read the last message. Ask for keys again before you send more text."
+msgstr "La otra persona no pudo leer el último mensaje. Solicita las claves de nuevo antes de enviar más texto."
+
+msgctxt "AppWindow"
+msgid "The peer nick is not online. Texts that waited for keys were not sent."
+msgstr "El nick de la otra persona no está conectado. No se enviaron los mensajes que esperaban las claves."
+
+msgctxt "AppWindow"
+msgid "The encrypted chat request failed."
+msgstr "No se pudo enviar la solicitud de chat cifrado."
+
+msgctxt "AppWindow"
+msgid "This server does not support encrypted chat requests."
+msgstr "Este servidor no admite solicitudes de chat cifrado."
+
+msgctxt "AppWindow"
+msgid "This device has no E2E identity for this network."
+msgstr "Este dispositivo no tiene una identidad E2E para esta red."
+
+msgctxt "AppWindow"
+msgid "Ask {} to start an encrypted chat? They need a compatible client. The request expires after 24 hours."
+msgstr "¿Quieres pedir a {} que inicie un chat cifrado? Necesita un cliente compatible. La solicitud caduca en 24 horas."
+
+msgctxt "AppWindow"
+msgid "Ask"
+msgstr "Preguntar"

@@ -3759,3 +3759,67 @@ msgstr "Clé maître publique (Ed25519) :"
 msgctxt "AppWindow"
 msgid "Copy public key"
 msgstr "Copier la clé publique"
+
+msgctxt "AppWindow"
+msgid "{} wants to start an encrypted chat."
+msgstr "{} veut démarrer une discussion chiffrée."
+
+msgctxt "AppWindow"
+msgid "Waiting for {} to accept the encrypted chat request."
+msgstr "En attente de l'acceptation de la demande de discussion chiffrée par {}."
+
+msgctxt "AppWindow"
+msgid "{} refused the encrypted chat request."
+msgstr "{} a refusé la demande de discussion chiffrée."
+
+msgctxt "AppWindow"
+msgid "The encrypted chat request expired."
+msgstr "La demande de discussion chiffrée a expiré."
+
+msgctxt "AppWindow"
+msgid "The encrypted chat request was accepted."
+msgstr "La demande de discussion chiffrée a été acceptée."
+
+msgctxt "AppWindow"
+msgid "Ask for keys again"
+msgstr "Demander à nouveau les clés"
+
+msgctxt "AppWindow"
+msgid "Cancel request"
+msgstr "Annuler la demande"
+
+msgctxt "AppWindow"
+msgid "Open encrypted chat"
+msgstr "Ouvrir la discussion chiffrée"
+
+msgctxt "AppWindow"
+msgid "Start encrypted chat"
+msgstr "Démarrer une discussion chiffrée"
+
+msgctxt "AppWindow"
+msgid "The peer could not read the last message. Ask for keys again before you send more text."
+msgstr "Votre correspondant n’a pas pu lire le dernier message. Demandez à nouveau les clés avant d’envoyer du texte."
+
+msgctxt "AppWindow"
+msgid "The peer nick is not online. Texts that waited for keys were not sent."
+msgstr "Le pseudonyme du correspondant n’est pas en ligne. Les messages en attente des clés n’ont pas été envoyés."
+
+msgctxt "AppWindow"
+msgid "The encrypted chat request failed."
+msgstr "La demande de discussion chiffrée a échoué."
+
+msgctxt "AppWindow"
+msgid "This server does not support encrypted chat requests."
+msgstr "Ce serveur ne prend pas en charge les demandes de discussion chiffrée."
+
+msgctxt "AppWindow"
+msgid "This device has no E2E identity for this network."
+msgstr "Cet appareil n’a pas d’identité E2E pour ce réseau."
+
+msgctxt "AppWindow"
+msgid "Ask {} to start an encrypted chat? They need a compatible client. The request expires after 24 hours."
+msgstr "Demander à {} de démarrer une discussion chiffrée ? Cette personne a besoin d’un client compatible. La demande expire après 24 heures."
+
+msgctxt "AppWindow"
+msgid "Ask"
+msgstr "Demander"

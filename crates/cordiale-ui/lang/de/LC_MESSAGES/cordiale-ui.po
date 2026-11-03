@@ -3759,3 +3759,67 @@ msgstr "Öffentlicher Hauptschlüssel (Ed25519):"
 msgctxt "AppWindow"
 msgid "Copy public key"
 msgstr "Öffentlichen Schlüssel kopieren"
+
+msgctxt "AppWindow"
+msgid "{} wants to start an encrypted chat."
+msgstr "{} möchte einen verschlüsselten Chat starten."
+
+msgctxt "AppWindow"
+msgid "Waiting for {} to accept the encrypted chat request."
+msgstr "Warte darauf, dass {} die Anfrage für einen verschlüsselten Chat annimmt."
+
+msgctxt "AppWindow"
+msgid "{} refused the encrypted chat request."
+msgstr "{} hat die Anfrage für einen verschlüsselten Chat abgelehnt."
+
+msgctxt "AppWindow"
+msgid "The encrypted chat request expired."
+msgstr "Die Anfrage für einen verschlüsselten Chat ist abgelaufen."
+
+msgctxt "AppWindow"
+msgid "The encrypted chat request was accepted."
+msgstr "Die Anfrage für einen verschlüsselten Chat wurde angenommen."
+
+msgctxt "AppWindow"
+msgid "Ask for keys again"
+msgstr "Schlüssel erneut anfordern"
+
+msgctxt "AppWindow"
+msgid "Cancel request"
+msgstr "Anfrage abbrechen"
+
+msgctxt "AppWindow"
+msgid "Open encrypted chat"
+msgstr "Verschlüsselten Chat öffnen"
+
+msgctxt "AppWindow"
+msgid "Start encrypted chat"
+msgstr "Verschlüsselten Chat starten"
+
+msgctxt "AppWindow"
+msgid "The peer could not read the last message. Ask for keys again before you send more text."
+msgstr "Der Gesprächspartner konnte die letzte Nachricht nicht lesen. Fordere die Schlüssel erneut an, bevor du weitere Nachrichten sendest."
+
+msgctxt "AppWindow"
+msgid "The peer nick is not online. Texts that waited for keys were not sent."
+msgstr "Der Nick des Gesprächspartners ist nicht online. Nachrichten, die auf Schlüssel warteten, wurden nicht gesendet."
+
+msgctxt "AppWindow"
+msgid "The encrypted chat request failed."
+msgstr "Die Anfrage für einen verschlüsselten Chat ist fehlgeschlagen."
+
+msgctxt "AppWindow"
+msgid "This server does not support encrypted chat requests."
+msgstr "Dieser Server unterstützt keine Anfragen für verschlüsselte Chats."
+
+msgctxt "AppWindow"
+msgid "This device has no E2E identity for this network."
+msgstr "Dieses Gerät hat keine E2E-Identität für dieses Netzwerk."
+
+msgctxt "AppWindow"
+msgid "Ask {} to start an encrypted chat? They need a compatible client. The request expires after 24 hours."
+msgstr "Soll {} einen verschlüsselten Chat starten? Die Person braucht einen kompatiblen Client. Die Anfrage läuft nach 24 Stunden ab."
+
+msgctxt "AppWindow"
+msgid "Ask"
+msgstr "Fragen"

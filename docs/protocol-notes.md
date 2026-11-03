@@ -1229,14 +1229,13 @@ letto in una spec:
 
 ## 8. Protocolli 38–46: stato in Cordiale (2026-10-22)
 
-Fonte: `docs/CLIENT_PROTOCOL.md` e `lib/grappa/protocol.ex` di
-`vjt/grappa-irc` al commit `f88df4fa` (`@protocol_version` 46,
-`@min_protocol_version` 1). `CLIENT_PROTOCOL_VERSION` non misura le singole
-funzioni: dichiara l'ultima revisione riletta per intero sul sorgente. Era 37 al
-momento di questa tabella; è 50 dalla fetta 37 dell'ombrello 416 (vedi
-`docs/e2e-contract.md`, che resta al protocollo 50) e 51 dal cambio admin descritto
-sotto. Il floor interno `MIN_SUPPORTED_PROTOCOL_VERSION` resta 1: nessuna
-voce qui sotto lo richiede.
+Source: Grappa `docs/CLIENT_PROTOCOL.md` and `lib/grappa/protocol.ex` on
+`main`, checked on 2026-11-03 (`@protocol_version` 54,
+`@min_protocol_version` 1). `CLIENT_PROTOCOL_VERSION` does not list each
+feature. It declares the highest protocol revision that Cordiale has reviewed
+in full. It was 37 when this table started, 50 after slice 37 of umbrella 416,
+51 after the admin change below, and 54 after consent v53 and `no_such_nick`
+v54. The internal `MIN_SUPPORTED_PROTOCOL_VERSION` stays at 1.
 
 | Versione | Contenuto | Stato in Cordiale |
 |---|---|---|
@@ -1244,11 +1243,44 @@ voce qui sotto lo richiede.
 | 39 | Default server dell'auto-away: `auto_away.default_debounce_seconds` in `server_settings_changed` (snapshot dopo il join e push) | Supportato. Il valore risolto (secondi, `0` = spento) si legge a ogni `server_settings_changed`, resta separato dall'override dell'utente (`auto_away_debounce_changed`) e compare sotto il campo del ritardo in Settings. Se il sottoalbero manca (server < 39) o il valore non è un intero non negativo, non si mostra nessun numero. |
 | 40 | Cursori a tempo `before_time`, `after_time`, `around_time` (millisecondi epoch) sulla cronologia | Livello REST pronto: `GrappaClient::fetch_messages_by_time` con `HistoryTimeCursor`. Un solo cursore per chiamata, quindi mai insieme a un cursore a id (il server risponde 400 a due qualsiasi dei sei). Rifiutato prima dell'invio sotto la 40 o con versione ignota, perché un server vecchio ignora il parametro e risponde con l'ultima pagina. Nessun chiamante nella UI: serve solo alla parità di protocollo e non blocca l'E2E. La cronologia in uso resta a id. |
 | 41 | `truncated` in `mentions_bundle` | Già supportato (`frames.rs`, riga `mentions-truncated`). |
-| 42 | Relay E2E: `POST /networks/:id/e2e/messages`, evento `e2e_message` | In attesa del contratto per dispositivo (vedi sotto). Tipizzato solo il corpo della richiesta di invio (`E2eSendRequest`, issue 358); risposta, evento `e2e_message` e chiamata del client non sono implementati. |
-| 43 | Coda offline: `GET /networks/:id/e2e/inbox`, `POST …/inbox/ack`, `id` in `e2e_message` | In attesa del contratto per dispositivo. Le regole pure di S1 (issue 388) stanno in `e2e_selfcopy.rs`: una copia per ogni altro dispositivo, limiti dell'inbox, scadenza, deduplica, `ack` per ogni elemento gestito (nessun `ack` se la scrittura nella cronologia cifrata fallisce), stato «consegnato» solo con `ack` del dispositivo, nessuna storia ai dispositivi nuovi. Mancano le chiamate REST, il motore Olm (`CopyCipher`) e la cronologia cifrata: dipendono da #387 e dal contratto 49. |
+| 42 | E2E relay: `POST /networks/:id/e2e/messages` and `e2e_message` | Implemented in `client.rs`, `e2e_engine.rs`, and `e2e_runtime.rs`. Cordiale sends typed encrypted frames and routes received frames to the Olm engine. It does not send clear text as a fallback. |
+| 43 | Offline queue: device inbox, inbox acknowledgements, and `id` in `e2e_message` | Implemented in `e2e_device_routes.rs`, `e2e_engine.rs`, and `e2e_runtime.rs`. Cordiale drains each device inbox, deduplicates queue IDs, stores handled messages in sealed history, and acknowledges processed rows. |
 | 44 | Bundle di chiavi: `POST`/`GET`/`DELETE /networks/:id/e2e/keys` | Dal 49 le chiavi sono per dispositivo (`/e2e/devices/:did/keys`) e `DELETE /e2e/keys` butta l'intera identità: chiamate e pubblicazione del bundle in `e2e_provision.rs` (issue 451, vedi sotto). |
 | 45 | Buste di inbox e 202 dell'invio dichiarate nello schema generato | Nessun nuovo byte sul filo e nessun endpoint nuovo: non richiede codice. |
 | 46 | Pacing, `expires_at`, `e2e_send_dropped` | Richiesta di invio tipizzata (issue 358): `E2eSendRequest` in `rest.rs`, fixture in `crates/cordiale-core/tests/fixtures/e2e/send_request.json`. Issue 384: `GrappaClient::send_e2e_message` (`POST /networks/:id/e2e/messages`) classifica 202, 422 `too_late` e 400 con `classify_send_response`; `SendBook` e `route_e2e_send_dropped` (`session.rs`) applicano una volta sola l'evento `e2e_send_dropped`, per chiave rete, destinatario e id messaggio. I campi dell'evento sono `network`, `target`, `msgid` e `reason` (issue 450); il `msgid` del corpo del 202 si legge in `SendAnswer`. Il pacing a runtime è dell'issue 359. |
+| 52 | NACK `from_did: "*"` when no peer device can read a message | The inbox parser accepts `*` for `keys`, and for `nack` from protocol 52. The engine checks the message ID, nick, and signed device list from send time. It marks the row as unreadable. It does not retry or ask for keys without a user action. |
+| 53 | Consent to start an E2E chat: `/e2e/requests`, `e2e_request`, and `e2e_request_gone` | Typed API routes are in `client.rs` and `rest.rs`. The worker reads the request list on connect and reconnect. A new chat starts only after a user action. After acceptance, Cordiale opens `🔒<user>` and asks for keys. Refusal does not need an E2E identity. |
+| 54 | `no_such_nick` event after a 401 for a missing nick | The event router accepts the kind. The engine fails only text that waits for keys, stops key requests, and clears the nick's pacing state. Text that Grappa accepted stays in its original state. |
+
+The event inventory has 64 kinds. Cordiale must include
+`e2e_pairing_message` and `e2e_pairing_closed`. Otherwise the first filter in
+`frames.rs` drops them before the pairing handler can read them.
+
+## E2E protocol update: v52-v54
+
+Sources: Grappa `docs/CLIENT_PROTOCOL.md`, sections 4f, 4i, 4j, and 9;
+Cicchetto `cicchetto/src/lib/e2e/engine.ts`, `e2eRequests.ts`, and
+`StartEncryptedChat.tsx`.
+
+- **No automatic start.** Opening or selecting a plain query sends no
+  `KEYREQ`. The **Start encrypted chat** button sends a consent request. After
+  acceptance, Cordiale opens the separate locked entry and asks for keys.
+  Refusal works when the device has no E2E identity.
+- **Reconnect.** Grappa does not replay pushes. Each session reads
+  `GET /networks/:id/e2e/requests` and applies the current states. An accepted
+  request opens the locked entry and starts the key exchange. The client then
+  dismisses the request.
+- **Unreadable NACK.** For `from_did: "*"`, or an unknown DID missing from the
+  signed device list at send time, Cordiale checks the nick and message ID.
+  It marks the row as unreadable. It does not resend the text or ask for keys
+  without a user action.
+- **Missing nick.** A 401 does not identify one message. Cordiale fails only
+  text that still waits for keys, clears the nick's key pacing, and stops new
+  automatic key requests. Text that Grappa accepted stays in its original
+  state.
+- **Pairing events.** The typed event inventory must include both pairing
+  kinds. Otherwise the forward-compatible filter in `frames.rs` drops them
+  before the pairing code can read them.
 
 `E2eSendRequest` (fonte: CLIENT_PROTOCOL §4f, PR 2446 di Grappa) è rigorosa:
 campo mancante, sconosciuto o di tipo sbagliato è un errore tipizzato

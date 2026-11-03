@@ -107,6 +107,7 @@ use crate::e2e_wire::{
 };
 use crate::isupport::CaseMapping;
 use crate::persistence::data_dir;
+use crate::rest::E2eConsentLine;
 use crate::rest::{E2eSendPriority, E2eSendRequest, E2eSendVerb, QUERY_LOCK_LABEL};
 
 /// Version number in the payloads that the engine writes.
@@ -618,6 +619,10 @@ struct SentRecord {
     nick: String,
     /// The devices the message was for. Only these devices may NACK it.
     dids: Vec<String>,
+    /// The peer's signed device IDs when the send was accepted. A NACK from
+    /// an unknown device of another identity can mean that no peer device
+    /// could read the message.
+    known_peer_dids: HashSet<String>,
     text: String,
     sends: u8,
     row_id: String,
@@ -1001,6 +1006,14 @@ impl E2eEngine {
 
     pub fn own_did(&self) -> &str {
         &self.own_did
+    }
+
+    /// Builds the identity hint for a user action that starts an encrypted
+    /// chat. The public master key is a hint only; it does not prove trust.
+    pub fn own_consent_line(&self) -> Result<E2eConsentLine, EngineError> {
+        let master = self.own_master_key().ok_or(EngineError::NotReady)?;
+        let payload = serde_json::json!({"v": 2, "master": master}).to_string();
+        Ok(E2eConsentLine::new(&self.own_did, &payload)?)
     }
 
     /// A copy of the trust state of the peers, for the views.
@@ -2370,6 +2383,31 @@ impl E2eEngine {
         }
     }
 
+    /// A 401 says that `nick` is not on the network. Fail only texts that
+    /// still wait for keys. Messages already accepted by Grappa stay intact.
+    pub fn no_such_nick(&mut self, nick: &str) -> Vec<SendDropped> {
+        let cm = self.casemapping;
+        let key = cm.fold(nick);
+        self.keyreq.forget(nick, cm);
+        self.rekey.forget(nick, cm);
+        self.keys_wanted.retain(|wanted| cm.fold(wanted) != key);
+        let waiting: Vec<SendKey> = self
+            .pending
+            .keys()
+            .filter(|send| cm.fold(&send.target) == key)
+            .cloned()
+            .collect();
+        let mut drops = Vec::new();
+        for send in waiting {
+            self.queue.remove(&send);
+            self.pending.remove(&send);
+            if let Some(drop) = self.fail_send(&send, DropReason::NoSuchNick) {
+                drops.push(drop);
+            }
+        }
+        drops
+    }
+
     /// The id block, the master block and the list version that this device
     /// writes in its messages. They come from the provisioning: a device
     /// without a certificate or a signed list is not ready. A device that
@@ -2852,9 +2890,16 @@ impl E2eEngine {
         sends: u8,
         row_id: &str,
     ) {
+        let trust = self.state.trust();
+        let known_peer_dids = trust
+            .listed_devices(&self.network, nick)
+            .iter()
+            .filter_map(|ed25519| did_from_key_text(ed25519).ok())
+            .collect();
         let record = SentRecord {
             nick: nick.to_string(),
             dids: dids.to_vec(),
+            known_peer_dids,
             text: text.to_string(),
             sends,
             row_id: row_id.to_string(),
@@ -2894,11 +2939,25 @@ impl E2eEngine {
         let Some(reference) = nack_reference(&row.payload) else {
             return;
         };
-        if self
-            .sent
-            .get(&reference)
-            .is_none_or(|record| !record.dids.contains(&row.from_did))
-        {
+        let Some(record) = self.sent.get(&reference) else {
+            return;
+        };
+        let cm = self.casemapping;
+        if cm.fold(&record.nick) != cm.fold(&row.from) {
+            return;
+        }
+        let unreadable = row.from_did == WILDCARD
+            || (!record.dids.contains(&row.from_did)
+                && !record.known_peer_dids.contains(&row.from_did));
+        if unreadable {
+            let Some(record) = self.sent.remove(&reference) else {
+                return;
+            };
+            let key = SendKey::new(&self.network, &record.nick, &reference);
+            self.fail_send(&key, DropReason::Unreadable);
+            return;
+        }
+        if !record.dids.contains(&row.from_did) {
             return;
         }
         let Some(mut record) = self.sent.remove(&reference) else {
@@ -6103,7 +6162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_nack_that_is_not_ours_changes_nothing() {
+    async fn an_unknown_device_nack_marks_only_a_matching_send_unreadable() {
         let mut p = pair();
         let server = MockServer::start().await;
         mount_send(&server, "msgid1").await;
@@ -6113,10 +6172,19 @@ mod tests {
         // An unknown reference.
         let unknown = nack_row(11, &p.alice, &other, "nope");
         assert_eq!(p.alice.handle_row(&unknown, 1), RowOutcome::Ignored);
-        // A known reference from a device that did not get the message.
-        let wrong_device = nack_row(12, &p.alice, &other, "msgid1");
-        assert_eq!(p.alice.handle_row(&wrong_device, 1), RowOutcome::Ignored);
         assert_eq!(p.alice.send_status(&key), Some(SendStatus::Accepted));
+        // A known reference from another nick does not affect the send.
+        let mut wrong_nick = nack_row(12, &p.alice, &other, "msgid1");
+        wrong_nick.from = "carol".to_string();
+        assert_eq!(p.alice.handle_row(&wrong_nick, 1), RowOutcome::Ignored);
+        assert_eq!(p.alice.send_status(&key), Some(SendStatus::Accepted));
+        // An unknown device of the target makes the message unreadable.
+        let wrong_device = nack_row(13, &p.alice, &other, "msgid1");
+        assert_eq!(p.alice.handle_row(&wrong_device, 1), RowOutcome::Ignored);
+        assert_eq!(
+            p.alice.send_status(&key),
+            Some(SendStatus::Dropped(DropReason::Unreadable))
+        );
         assert!(p.alice.queue.is_empty());
         assert!(p.alice.take_keys_wanted().is_empty());
     }

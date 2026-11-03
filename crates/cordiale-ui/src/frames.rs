@@ -595,6 +595,18 @@ pub(crate) async fn handle_frame(
         handle_e2e_message(state, ui, &frame).await;
         return;
     }
+    if payload_kind == "e2e_request" {
+        handle_e2e_request_push(state, ui, &frame.payload).await;
+        return;
+    }
+    if payload_kind == "e2e_request_gone" {
+        handle_e2e_request_gone_push(state, ui, &frame.payload);
+        return;
+    }
+    if payload_kind == "no_such_nick" {
+        handle_no_such_nick_push(state, ui, &frame.payload);
+        return;
+    }
     if payload_kind == "e2e_pairing_message" || payload_kind == "e2e_pairing_closed" {
         // Pairing control state: the status bar shows it. It is never a chat
         // line, and nothing of it reaches the plain `<user>` query.

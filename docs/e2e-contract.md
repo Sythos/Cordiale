@@ -1,4 +1,4 @@
-# Contratto E2E di Cordiale (protocolli 46-50)
+# Cordiale E2E contract (protocols 46-54)
 
 Questo documento è il contratto finale del client per l'E2E (ombrello 416, fetta
 37). Ogni punto cita una fonte e una prova nel codice. In caso di divergenza
@@ -7,8 +7,8 @@ prevale il sorgente di Grappa.
 ## Fonti
 
 - **G-2430**: discussione della issue 2430 di Grappa (formato wire v2).
-- **G-PROTO**: `docs/CLIENT_PROTOCOL.md` di Grappa, sezioni 4f (relay) e 4g
-  (accoppiamento), ramo `main`.
+- **G-PROTO**: Grappa `docs/CLIENT_PROTOCOL.md`, sections 4f (relay), 4g
+  (pairing), 4i (consent), and 4j (missing nick), branch `main`.
 - **G-PR**: PR 2446, 2448, 2451, 2452, 2459 e 2460 di Grappa (modifiche dei
   protocolli 46-50, confluite in G-PROTO).
 - **OLM-4**: PR 4 di irc-olm (merge `1606c85`), motore e README.
@@ -99,13 +99,16 @@ prevale il sorgente di Grappa.
    (`the_fixture_messages_read_and_the_invalid_ones_do_not`) e i test di
    sessione nello stesso file (ordine dei messaggi, codice errato, firma id
    errata, rifiuti, ripetizione, payload troppo grande, scadenza).
-8. **Due voci per peer.** `<user>` resta la query legacy in chiaro. `🔒<user>` è
-   una voce locale, aperta quando ci sono capacità E2E e un canale cifrato. Il
-   lucchetto è solo UI: non entra mai in una chiave di fiducia, sessione o
-   replay. Le due cronologie non si mescolano. Le righe in chiaro vanno solo alla
-   voce legacy; le righe decifrate e le copie S1 solo alla voce bloccata; dalla
-   voce bloccata non c'è ripiego in chiaro. Fonte: G-2430 (decisione sulle due
-   voci). Prove: `cordiale-ui/src/e2e_view.rs`
+8. **Two entries per peer.** `<user>` stays the plain legacy query.
+   `🔒<user>` is a local entry for the E2E chat. The lock is UI only. It is
+   never part of a trust key, session, or replay. The two histories stay
+   separate. Plain rows go to the legacy entry. Decrypted rows and S1 copies
+   go to the locked entry. The locked entry never sends clear text.
+   Opening or selecting `<user>` sends no `KEYREQ` and creates no locked entry.
+   The user starts a new E2E chat with **Start encrypted chat**. The peer must
+   accept first. If the locked entry already exists, the same control opens it
+   and sends no new request. Sources: G-2430 and G-PROTO section 4i. Evidence:
+   `cordiale-ui/src/e2e_view.rs`
    `the_two_lanes_of_one_peer_have_two_keys_and_one_real_nick`,
    `cordiale-ui/src/e2e_runtime.rs` `one_peer_has_two_entries_with_separate_keys`,
    `e2e_engine.rs` `a_copy_shows_as_sent_in_the_locked_query_and_once_only`.
@@ -122,6 +125,27 @@ prevale il sorgente di Grappa.
      dispositivi.
    Dettagli: `docs/protocol-notes.md`, issue 453 e 458.
 
+10. **Explicit consent (protocol 53).** The `/e2e/requests` routes and the
+    `e2e_request` and `e2e_request_gone` events carry requests, not keys.
+    The payload `{ "v": 2, "master": "…" }` is a public hint. It is not proof
+    of trust. The user accepts or refuses the request. After acceptance, the
+    client opens `🔒<user>`, asks for keys, and uses the normal trust and SAS
+    checks. The client reads the request list on connect and reconnect because
+    Grappa does not replay pushes. Refusing does not need an E2E identity.
+    Sources: G-PROTO section 4i and Cicchetto `lib/e2eRequests.ts`.
+11. **NACK v52.** `from_did: "*"` means that no known peer device can read the
+    message. A NACK from an unknown device also means unreadable only when its
+    nick matches the target and its DID was not in the peer's signed list at
+    send time. Cordiale marks the row as unreadable. It does not resend the
+    text or ask for keys by itself. The user can select **Ask for keys again**.
+    Sources: G-PROTO section 4f, v52; Cicchetto `engine.ts` (`onNack`,
+    `unreadableBy`).
+12. **Missing nick (protocol 54).** `no_such_nick` does not identify the row
+    that caused the 401. Cordiale fails only text that still waits for keys and
+    stops key requests for that nick. Text that the relay accepted stays in its
+    original state. Cordiale never sends text that waits for keys as clear text.
+    Sources: G-PROTO section 4j; Cicchetto `engine.ts` (`absent`).
+
 ## Regola di replay
 
 La finestra di 256 id per dispositivo in `e2e_peer.rs` è una scelta del client.
@@ -130,12 +154,12 @@ Il controllo "sessione già vista" segue il motore di irc-olm (OLM-4,
 
 ## Versione del protocollo
 
-`CLIENT_PROTOCOL_VERSION` è 50. Il testo completo di G-PROTO (sezioni 1-9, dal
-`protocol_version` 37 al 50) è stato riletto per intero nel secondo passaggio
-della fetta 37. Le funzioni dei protocolli 38-41 erano già nel client (vedi
-`docs/feature-matrix.md`); le funzioni 42-50 sono quelle di questo contratto.
-Il numero resta un intero semplice sull'URL del WebSocket. Un server sotto il 49
-non parla il formato per dispositivo: il client non fa E2E con quel server.
+`CLIENT_PROTOCOL_VERSION` is 54. The client supports the per-device E2E
+format from protocol 49, inbox row flags from 50, explicit consent from 53,
+and `no_such_nick` from 54. The client sends this integer in the WebSocket
+URL. A server below 49 does not speak the per-device format, so Cordiale does
+not use E2E with that server. Consent routes and the v52/v54 events use their
+own protocol gates.
 
 ## Fixture
 
@@ -184,10 +208,10 @@ un altro dispositivo: `wire_v2.json` (frame, liste, certificati, righe),
 
 ## Prove con un server
 
-Nessun server di test o di staging con protocollo 50 è raggiungibile da questo
-ambiente. Le prove con server simulato (`wiremock`) non sono interoperabilità
-reale. Vedi `docs/e2e-interop-report.md` per il blocco esterno. Il file
-`tests/e2e_live_server.rs` ha due prove in sola lettura, `#[ignore]`, per un server
+No test or staging server with protocol 54 is reachable from this environment.
+Mock server checks (`wiremock`) do not prove live interoperability. See
+`docs/e2e-interop-report.md` for the external block. The file
+`tests/e2e_live_server.rs` has two read-only checks with `#[ignore]` for a server
 reale (variabili `CORDIALE_LIVE_*`); il rapporto spiega come eseguirle e come
 provare a mano lo scambio con irc-olm.
 
@@ -204,7 +228,12 @@ il corpo della PR riporta la stessa tabella.
 | due voci per peer, senza righe né cronologia incrociate | punto 8 del contratto; `plain_and_locked_sends_stay_in_their_own_entries`, `a_copy_shows_as_sent_in_the_locked_query_and_once_only` |
 | il 202 non è una consegna; le copie S1 seguono il caso accettato | punti 4 e 5 del contratto; `a_202_answer_sets_the_accepted_state_only`, `the_accepted_original_that_is_dropped_leaves_a_sent_copy_and_a_failed_row` |
 | prove in due direzioni con irc-olm | sezione «Interoperabilità con irc-olm» (forma sul filo) |
-| prove con un server protocollo 50 | **non eseguite**: blocco esterno in `docs/e2e-interop-report.md` |
+| live server checks for protocol 54 | **not run**: external block in `docs/e2e-interop-report.md` |
 | decisioni su Grappa 2453, 2454, 2456 e 2457 | punto 9 del contratto |
 | `CLIENT_PROTOCOL_VERSION` dopo la rilettura completa | sezione «Versione del protocollo»; `protocol.rs` |
-| CI e controlli di sicurezza sul commit finale | verdi sullo SHA della PR (controllo del merge) |
+| query nuova senza `KEYREQ` automatico | punto 8; test query esistenti aggiornati |
+| consenso v53, richieste al reconnect e lane cifrata dopo l'accettazione | punto 10; API e dispatcher UI |
+| NACK illeggibile senza retry o re-key automatico | punto 11; motore e riga locale persistente |
+| `no_such_nick` fallisce solo i testi in coda | punto 12; motore e dispatcher eventi |
+| pairing E2E e nuovi eventi passano il filtro iniziale | `wire_event.rs` e `frames.rs` |
+| CI and security checks on the final commit | green for the PR SHA (merge check) |

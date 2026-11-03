@@ -289,6 +289,10 @@ pub enum ChatState {
     SendFailed,
     /// The last sent text waited too long for keys.
     Expired,
+    /// No peer device could read the last encrypted text.
+    Unreadable,
+    /// The server said that the peer nick is not present.
+    NoSuchNick,
     /// The master key of the peer has no SAS check.
     SasPending,
     /// Encryption is active.
@@ -311,6 +315,8 @@ impl ChatState {
             ChatState::KeyRequestFailed => "e2e-chat-keys-failed",
             ChatState::SendFailed => "e2e-chat-send-failed",
             ChatState::Expired => "e2e-chat-expired",
+            ChatState::Unreadable => "e2e-chat-unreadable",
+            ChatState::NoSuchNick => "e2e-chat-no-such-nick",
             ChatState::SasPending => "e2e-chat-sas",
             ChatState::Active => "e2e-chat-active",
         }
@@ -360,6 +366,10 @@ pub fn locked_chat_state(signals: &ChatSignals) -> ChatState {
         ChatState::Pairing
     } else if !signals.ready && signals.peer_revoked {
         ChatState::Revoked
+    } else if signals.last_drop == Some(DropReason::Unreadable) {
+        ChatState::Unreadable
+    } else if signals.last_drop == Some(DropReason::NoSuchNick) {
+        ChatState::NoSuchNick
     } else if !signals.ready {
         match signals.key_request {
             KeyRequest::NotSent => ChatState::MissingKeys,

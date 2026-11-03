@@ -12502,7 +12502,7 @@ fn assert_no_clear_text(seen: &RequestLog) {
 }
 
 #[test]
-fn slash_query_of_a_new_dm_sends_one_key_request_after_the_snapshot() {
+fn slash_query_of_a_new_dm_does_not_start_encryption_after_the_snapshot() {
     let ui = slint::Weak::<AppWindow>::default();
     let (url, seen) = recording_server();
     let (mut state, _dir) = key_request_state(&url);
@@ -12518,15 +12518,12 @@ fn slash_query_of_a_new_dm_sends_one_key_request_after_the_snapshot() {
     // The query is not open yet: no request before the server lists it.
     assert!(state.transcript.pending_query_focus.is_some());
     assert!(e2e_send_bodies(&seen).is_empty());
-    // The snapshot lists the query, and the focus starts the request.
+    // The snapshot lists the query. Encryption starts only after consent.
     state.transcript.query_windows = vec![listed_query("Peer")];
     runtime.block_on(focus_pending_query(&mut state, &ui));
     assert!(state.windows.current_query);
-    let bodies = e2e_send_bodies(&seen);
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0]["verb"], "keyreq");
-    assert_eq!(bodies[0]["target"], "Peer");
-    // Repeated snapshots and selections stay inside the pacing.
+    assert!(e2e_send_bodies(&seen).is_empty());
+    // Repeated snapshots and selections also send no key request.
     runtime.block_on(focus_pending_query(&mut state, &ui));
     runtime.block_on(handle_select_query(
         &mut state,
@@ -12540,12 +12537,12 @@ fn slash_query_of_a_new_dm_sends_one_key_request_after_the_snapshot() {
         "libera".to_string(),
         "Peer".to_string(),
     ));
-    assert_eq!(e2e_send_bodies(&seen).len(), 1);
+    assert!(e2e_send_bodies(&seen).is_empty());
     assert_no_clear_text(&seen);
 }
 
 #[test]
-fn slash_query_of_a_listed_dm_sends_one_key_request_at_once() {
+fn slash_query_of_a_listed_dm_does_not_start_encryption() {
     let ui = slint::Weak::<AppWindow>::default();
     let (url, seen) = recording_server();
     let (mut state, _dir) = key_request_state(&url);
@@ -12562,10 +12559,7 @@ fn slash_query_of_a_listed_dm_sends_one_key_request_at_once() {
         ));
     }
     assert!(state.transcript.pending_query_focus.is_none());
-    let bodies = e2e_send_bodies(&seen);
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0]["verb"], "keyreq");
-    assert_eq!(bodies[0]["target"], "Peer");
+    assert!(e2e_send_bodies(&seen).is_empty());
     assert_no_clear_text(&seen);
 }
 
@@ -12588,7 +12582,7 @@ fn slash_query_of_a_locked_name_sends_no_key_request() {
 }
 
 #[test]
-fn member_query_action_sends_one_key_request_after_the_snapshot() {
+fn member_query_action_does_not_start_encryption_after_the_snapshot() {
     let ui = slint::Weak::<AppWindow>::default();
     let (url, seen) = recording_server();
     let (mut state, _dir) = key_request_state(&url);
@@ -12598,15 +12592,12 @@ fn member_query_action_sends_one_key_request_after_the_snapshot() {
     state.transcript.query_windows = vec![listed_query("Peer")];
     runtime.block_on(focus_pending_query(&mut state, &ui));
     runtime.block_on(focus_pending_query(&mut state, &ui));
-    let bodies = e2e_send_bodies(&seen);
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0]["verb"], "keyreq");
-    assert_eq!(bodies[0]["target"], "Peer");
+    assert!(e2e_send_bodies(&seen).is_empty());
     assert_no_clear_text(&seen);
 }
 
 #[test]
-fn nickname_click_opens_plain_query_and_uses_the_existing_e2e_waiting_flow() {
+fn nickname_click_opens_plain_query_without_starting_encryption() {
     let ui = slint::Weak::<AppWindow>::default();
     let (url, seen) = recording_server();
     let (mut state, _dir) = key_request_state(&url);
@@ -12625,18 +12616,15 @@ fn nickname_click_opens_plain_query_and_uses_the_existing_e2e_waiting_flow() {
     state.transcript.query_windows = vec![listed_query("Peer")];
     runtime.block_on(focus_pending_query(&mut state, &ui));
 
-    let bodies = e2e_send_bodies(&seen);
-    assert_eq!(bodies.len(), 1);
-    assert_eq!(bodies[0]["verb"], "keyreq");
-    assert_eq!(bodies[0]["target"], "Peer");
-    assert!(sidebar_query_windows(&state)
+    assert!(e2e_send_bodies(&seen).is_empty());
+    assert!(!sidebar_query_windows(&state)
         .iter()
         .any(|row| row.target_nick == "🔒Peer"));
     assert_no_clear_text(&seen);
 }
 
 #[test]
-fn selecting_a_listed_dm_sends_one_key_request_for_each_peer() {
+fn selecting_a_listed_dm_does_not_send_key_requests() {
     let ui = slint::Weak::<AppWindow>::default();
     let (url, seen) = recording_server();
     let (mut state, _dir) = key_request_state(&url);
@@ -12650,12 +12638,7 @@ fn selecting_a_listed_dm_sends_one_key_request_for_each_peer() {
             nick.to_string(),
         ));
     }
-    let mut targets: Vec<String> = e2e_send_bodies(&seen)
-        .iter()
-        .map(|body| body["target"].as_str().unwrap_or_default().to_string())
-        .collect();
-    targets.sort();
-    assert_eq!(targets, ["Other", "Peer"]);
+    assert!(e2e_send_bodies(&seen).is_empty());
     assert_no_clear_text(&seen);
 }
 

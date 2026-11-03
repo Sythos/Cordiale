@@ -256,8 +256,9 @@ impl InboxVerb {
 /// with the same type: see [`E2eMessageEvent`].
 ///
 /// `from` is a routing hint only. Pin a peer on its key, never on its nick.
-/// `from_did` is a device id, or `*` on a `keys` row. `own` is true on a copy
-/// of a message that one of your other devices sent.
+/// `from_did` is a device id, or `*` on a `keys` row and (from protocol 52) a
+/// NACK that says no peer device could read the message. `own` is true on a
+/// copy of a message that one of your other devices sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxRow {
     pub id: u64,
@@ -294,7 +295,11 @@ impl InboxRow {
         };
         let verb = InboxVerb::parse(required_str(map, "verb")?)?;
         let from_did = required_str(map, "from_did")?;
-        if !is_did_shape(from_did) && !(verb == InboxVerb::Keys && from_did == WILDCARD) {
+        let wildcard_sender = from_did == WILDCARD
+            && (verb == InboxVerb::Keys
+                || (verb == InboxVerb::Nack
+                    && server_protocol.is_some_and(|version| version >= 52)));
+        if !is_did_shape(from_did) && !wildcard_sender {
             return Err(WireError::BadDid);
         }
         let to_did = required_str(map, "to_did")?;

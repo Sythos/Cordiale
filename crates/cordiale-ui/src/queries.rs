@@ -72,9 +72,8 @@ pub(crate) async fn handle_select_query(
         show_query_window(state, ui, &query, &key);
         mark_active_window_read(state, ui);
     }
-    // The plain query stays as it is. A peer with a verified device also gets
-    // a locked entry; a peer without one is asked for its keys.
-    offer_locked_query(state, ui, &network, &nick).await;
+    // Selecting a plain query never starts an E2E exchange. The explicit
+    // consent controls are part of the query banner.
 }
 
 /// The new nick of a rename row was clicked in the open window. A query the
@@ -278,6 +277,7 @@ pub(crate) fn show_query_window(
         ui.set_current_query_ready(query_ready);
         ui.set_current_query_e2e(query_e2e);
         ui.set_current_query_e2e_state(chat_state.into());
+        ui.set_current_query_e2e_start_confirm_open(false);
         ui.set_current_query_peer_nick(peer_nick.into());
         ui.set_compose_text(draft.into());
         ui.set_reply_target_left(false);
@@ -290,6 +290,7 @@ pub(crate) fn show_query_window(
         let empty_members = Rc::new(slint::VecModel::from(Vec::<MemberRow>::new()));
         ui.set_channel_members(empty_members.into());
     });
+    crate::e2e_runtime::push_open_query_consent(state, &ui);
 }
 
 pub(crate) async fn fetch_query_history(

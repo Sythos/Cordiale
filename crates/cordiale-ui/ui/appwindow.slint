@@ -1553,11 +1553,19 @@ export component AppWindow inherits Window {
     // The encryption state of the open query as a key (`e2e-chat-*`); an
     // empty value hides the banner. It is not a send-button or message mark.
     in property <string> current-query-e2e-state: "";
+    // The explicit E2E consent request for the open plain query.
+    in property <string> current-query-e2e-request-state: "";
+    in property <string> current-query-e2e-request-id: "";
+    in property <bool> current-query-e2e-can-start: false;
+    in property <bool> current-query-e2e-can-accept: false;
+    in property <bool> current-query-e2e-has-locked: false;
+    in-out property <bool> current-query-e2e-start-confirm-open: false;
     // The SAS code of the open locked query while a check is open; empty
     // when no check is open. A verified contact can show it again.
     in property <string> e2e-sas-code: "";
     // The SAS step of the user: "start", "confirm", "reject" or "cancel".
     callback e2e-sas-requested(string);
+    callback e2e-request-action(string, string, string, string);
     // The pairing QR code of `/e2e pair`, drawn from the pairing link URL.
     in property <image> e2e-pair-qr;
     in property <string> e2e-pair-qr-code: "";
@@ -2794,6 +2802,10 @@ export component AppWindow inherits Window {
             return @tr("The E2E identity of this device was reset. This chat cannot send.");
         } else if current-query-e2e-state == "e2e-chat-expired" {
             return @tr("The last message expired before the keys came. It was not sent.");
+        } else if current-query-e2e-state == "e2e-chat-unreadable" {
+            return @tr("The peer could not read the last message. Ask for keys again before you send more text.");
+        } else if current-query-e2e-state == "e2e-chat-no-such-nick" {
+            return @tr("The peer nick is not online. Texts that waited for keys were not sent.");
         } else if current-query-e2e-state == "e2e-chat-send-failed" {
             return @tr("The last message was not sent.");
         } else if current-query-e2e-state == "e2e-chat-unavailable" {
@@ -2802,10 +2814,33 @@ export component AppWindow inherits Window {
         return "";
     }
 
+    function e2e-request-state-text() -> string {
+        if current-query-e2e-request-state == "incoming" {
+            return @tr("{} wants to start an encrypted chat.", current-query-peer-nick);
+        } else if current-query-e2e-request-state == "outgoing" {
+            return @tr("Waiting for {} to accept the encrypted chat request.", current-query-peer-nick);
+        } else if current-query-e2e-request-state == "refused" {
+            return @tr("{} refused the encrypted chat request.", current-query-peer-nick);
+        } else if current-query-e2e-request-state == "expired" {
+            return @tr("The encrypted chat request expired.");
+        } else if current-query-e2e-request-state == "accepted" {
+            return @tr("The encrypted chat request was accepted.");
+        }
+        return "";
+    }
+
     // The status text of the E2E kinds (`e2e-*`).
     function e2e-status-text() -> string {
         if status-kind == "e2e-not-ready" {
             return @tr("This chat is not ready for encryption. Nothing was sent.");
+        } else if status-kind == "e2e-no-such-nick" {
+            return @tr("The peer nick is not online. Texts that waited for keys were not sent.");
+        } else if status-kind == "e2e-request-failed" {
+            return @tr("The encrypted chat request failed.");
+        } else if status-kind == "e2e-request-unsupported" {
+            return @tr("This server does not support encrypted chat requests.");
+        } else if status-kind == "e2e-request-no-identity" {
+            return @tr("This device has no E2E identity for this network.");
         } else if status-kind == "e2e-send-failed" {
             return @tr("The message was not encrypted or not sent. Nothing was sent as clear text.");
         } else if status-kind == "e2e-text-only" {
@@ -4221,6 +4256,114 @@ export component AppWindow inherits Window {
                         CompactButton {
                             text: @tr("Cancel");
                             clicked => { e2e-sas-requested("cancel"); }
+                        }
+                    }
+                    if current-query-e2e : HorizontalBox {
+                        if current-query-e2e-state == "e2e-chat-unreadable"
+                            || current-query-e2e-state == "e2e-chat-keys"
+                            || current-query-e2e-state == "e2e-chat-keys-failed"
+                            || current-query-e2e-state == "e2e-chat-no-such-nick" : CompactButton {
+                            text: @tr("Ask for keys again");
+                            clicked => {
+                                e2e-request-action("rekey", window-source-network, current-query-peer-nick, "");
+                            }
+                        }
+                    }
+                    if !current-query-e2e && current-query-e2e-request-state == "" : HorizontalBox {
+                        if current-query-e2e-has-locked : CompactButton {
+                            text: @tr("Open encrypted chat");
+                            clicked => {
+                                e2e-request-action("open", window-source-network, current-query-peer-nick, "");
+                            }
+                        }
+                        if !current-query-e2e-has-locked && current-query-e2e-can-start && !current-query-e2e-start-confirm-open : CompactButton {
+                            text: @tr("Start encrypted chat");
+                            clicked => {
+                                current-query-e2e-start-confirm-open = true;
+                            }
+                        }
+                    }
+                    if !current-query-e2e && current-query-e2e-request-state == "" && current-query-e2e-start-confirm-open : VerticalBox {
+                        spacing: 6px;
+                        Text {
+                            text: @tr("Ask {} to start an encrypted chat? They need a compatible client. The request expires after 24 hours.", current-query-peer-nick);
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            accessible-role: AccessibleRole.text;
+                        }
+                        HorizontalBox {
+                            spacing: 6px;
+                            Rectangle { horizontal-stretch: 1; }
+                            CompactButton {
+                                text: @tr("Cancel");
+                                clicked => { current-query-e2e-start-confirm-open = false; }
+                            }
+                            CompactButton {
+                                text: @tr("Ask");
+                                clicked => {
+                                    current-query-e2e-start-confirm-open = false;
+                                    if current-query-e2e-has-locked {
+                                        e2e-request-action("open", window-source-network, current-query-peer-nick, "");
+                                    } else {
+                                        e2e-request-action("start", window-source-network, current-query-peer-nick, "");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Consent requests also work when this device has no E2E engine.
+            if current-query && !current-query-e2e && current-query-e2e-request-state != "" : Rectangle {
+                background: theme == "dark" ? #1f2f3a : #e3f1fb;
+                border-width: 1px;
+                border-color: theme == "dark" ? #3d7ea6 : #2b7bb9;
+                HorizontalBox {
+                    spacing: 6px;
+                    Text {
+                        text: e2e-request-state-text();
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    if current-query-e2e-request-state == "incoming" : CompactButton {
+                        text: @tr("Accept");
+                        enabled: current-query-e2e-can-accept;
+                        clicked => {
+                            e2e-request-action("accept", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "incoming" : CompactButton {
+                        text: @tr("Decline");
+                        clicked => {
+                            e2e-request-action("refuse", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "outgoing" : CompactButton {
+                        text: @tr("Cancel request");
+                        clicked => {
+                            e2e-request-action("cancel", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "expired" || current-query-e2e-request-state == "refused" : CompactButton {
+                        text: @tr("Try again");
+                        enabled: current-query-e2e-can-start;
+                        clicked => {
+                            e2e-request-action("retry", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "expired" || current-query-e2e-request-state == "refused" : CompactButton {
+                        text: @tr("Dismiss");
+                        clicked => {
+                            e2e-request-action("dismiss", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "accepted" : CompactButton {
+                        text: @tr("Open encrypted chat");
+                        clicked => {
+                            e2e-request-action("open", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
                         }
                     }
                 }
