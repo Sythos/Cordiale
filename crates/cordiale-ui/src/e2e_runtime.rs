@@ -17,8 +17,8 @@ use std::collections::BTreeSet;
 
 use cordiale_core::e2e_device::E2eError;
 use cordiale_core::e2e_engine::{
-    conversation_id, history_peers_of, route_for_window, E2eEngine, EngineError, RowOutcome,
-    SendRoute, OWN_DEVICE,
+    conversation_id, history_peers_of, locked_label, route_for_window, E2eEngine, EngineError,
+    RowOutcome, SendRoute, OWN_DEVICE,
 };
 use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing_flow::{
@@ -468,7 +468,7 @@ pub(crate) fn push_open_query_consent(state: &WorkerState, ui: &slint::Weak<AppW
         query_consent_view(state, network, &nick);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        ui.set_current_query_e2e_request_state(request_state.into());
+        ui.set_current_query_e2e_request_state(request_state.clone().into());
         ui.set_current_query_e2e_request_id(request_id.into());
         ui.set_current_query_e2e_can_start(can_start);
         ui.set_current_query_e2e_can_accept(can_accept);
