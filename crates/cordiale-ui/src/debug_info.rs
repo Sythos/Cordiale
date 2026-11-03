@@ -137,12 +137,12 @@ pub(crate) fn report(window: &slint::Window, app_language: Option<&str>) -> Stri
 /// "Linux (Ubuntu 24.04)"; the plain name and version when there's no
 /// long form.
 fn os_description() -> Option<String> {
-    System::long_os_version()
-        .ok()
-        .or_else(|| match (System::name().ok(), System::os_version().ok()) {
+    System::long_os_version().ok().or_else(|| {
+        match (System::name().ok(), System::os_version().ok()) {
             (Some(name), Some(version)) => Some(format!("{name} {version}")),
             (name, version) => name.or(version),
-        })
+        }
+    })
 }
 
 /// Size in physical pixels of the monitor the window is on.
