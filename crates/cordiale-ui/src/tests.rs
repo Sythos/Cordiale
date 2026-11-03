@@ -5807,6 +5807,7 @@ fn plain_query_e2e_actions_are_available_in_the_right_pane() {
             }
         },
     );
+    ui.set_theme("dark".into());
     ui.set_screen("connected".into());
     ui.set_has_selected_channel(true);
     ui.set_current_query(true);
