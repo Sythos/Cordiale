@@ -24,9 +24,7 @@ use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
 };
-use cordiale_core::e2e_protocol::{
-    E2eOperation, CONSENT_MIN_PROTOCOL, NO_SUCH_NICK_MIN_PROTOCOL,
-};
+use cordiale_core::e2e_protocol::{E2eOperation, CONSENT_MIN_PROTOCOL, NO_SUCH_NICK_MIN_PROTOCOL};
 use cordiale_core::e2e_provision::provision_device;
 use cordiale_core::e2e_revoke::{
     finish_pending_revoke, reset_identity, resume_reset, revoke_device, OwnRoutes,
@@ -34,8 +32,8 @@ use cordiale_core::e2e_revoke::{
 };
 use cordiale_core::e2e_store::{E2eHistoryStore, E2eMessage};
 use cordiale_core::e2e_wire::did_from_key_text;
-use cordiale_core::rest::{E2eConsentLine, E2eRequest, E2eRequestCreate, E2eRequestState};
 use cordiale_core::phoenix::PhoenixMessage;
+use cordiale_core::rest::{E2eConsentLine, E2eRequest, E2eRequestCreate, E2eRequestState};
 use cordiale_core::session::{route_e2e_message, route_e2e_pairing};
 use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
@@ -201,7 +199,8 @@ impl E2eRuntime {
     }
 
     fn replace_requests(&mut self, network: &str, requests: Vec<E2eRequest>) {
-        self.requests.retain(|(known_network, _), _| known_network != network);
+        self.requests
+            .retain(|(known_network, _), _| known_network != network);
         self.activated_requests
             .retain(|(known_network, _)| known_network != network);
         for request in requests {
@@ -225,9 +224,7 @@ impl E2eRuntime {
     }
 
     fn request_was_activated(&mut self, network: &str, id: u64) -> bool {
-        !self
-            .activated_requests
-            .insert((network.to_string(), id))
+        !self.activated_requests.insert((network.to_string(), id))
     }
 
     fn remove_outgoing_request_for_peer(
@@ -449,9 +446,10 @@ fn query_consent_view(
         .server_protocol_version
         .is_some_and(|version| version >= CONSENT_MIN_PROTOCOL)
         && can_accept;
-    let has_locked = state.e2e.locked.iter().any(|(known_network, nick)| {
-        known_network == network && casemapping.nick_eq(nick, peer)
-    });
+    let has_locked =
+        state.e2e.locked.iter().any(|(known_network, nick)| {
+            known_network == network && casemapping.nick_eq(nick, peer)
+        });
     (request_state, request_id, can_start, can_accept, has_locked)
 }
 
@@ -704,11 +702,7 @@ pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<
 
 /// Reads the consent mirror on every session connect. Grappa does not replay
 /// request pushes, so this is required after both first connect and reconnect.
-async fn sync_e2e_requests(
-    state: &mut WorkerState,
-    ui: &slint::Weak<AppWindow>,
-    network: &str,
-) {
+async fn sync_e2e_requests(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, network: &str) {
     let Some(protocol) = state.conn.server_protocol_version else {
         return;
     };
@@ -725,7 +719,10 @@ async fn sync_e2e_requests(
     {
         Ok(requests) => requests,
         Err(error) => {
-            if !matches!(error, cordiale_core::e2e_refusal::E2eRouteError::Unavailable) {
+            if !matches!(
+                error,
+                cordiale_core::e2e_refusal::E2eRouteError::Unavailable
+            ) {
                 persistence::log_line(&format!("e2e request sync failed for {network}: {error:?}"));
             }
             return;
@@ -904,16 +901,14 @@ pub(crate) async fn handle_e2e_request_action(
             };
             if action == "retry" {
                 let Some(id) = request_id else { return };
-                let retryable = state
-                    .e2e
-                    .requests
-                    .get(&(network.clone(), id))
-                    .is_some_and(|request| {
-                        matches!(
-                            request_view_state(request),
-                            "expired" | "refused"
-                        )
-                    });
+                let retryable =
+                    state
+                        .e2e
+                        .requests
+                        .get(&(network.clone(), id))
+                        .is_some_and(|request| {
+                            matches!(request_view_state(request), "expired" | "refused")
+                        });
                 if !retryable {
                     return;
                 }
@@ -979,11 +974,16 @@ pub(crate) async fn handle_e2e_request_action(
                 state.conn.client.clone(),
                 state.conn.token.clone(),
                 state.conn.server_protocol_version,
-            ) else { return };
+            ) else {
+                return;
+            };
             if protocol < CONSENT_MIN_PROTOCOL {
                 return;
             }
-            match client.refuse_e2e_request(&token, &network, id, Some(protocol)).await {
+            match client
+                .refuse_e2e_request(&token, &network, id, Some(protocol))
+                .await
+            {
                 Ok(()) => {
                     state.e2e.remove_request(&network, id);
                     push_open_query_consent(state, ui);
@@ -1000,7 +1000,9 @@ pub(crate) async fn handle_e2e_request_action(
                 state.conn.client.clone(),
                 state.conn.token.clone(),
                 state.conn.server_protocol_version,
-            ) else { return };
+            ) else {
+                return;
+            };
             let line = if action == "cancel" && request.state == E2eRequestState::Outgoing {
                 match state
                     .e2e
@@ -1077,7 +1079,11 @@ pub(crate) async fn handle_e2e_request_push(
     ui: &slint::Weak<AppWindow>,
     payload: &Value,
 ) {
-    if state.conn.server_protocol_version.is_none_or(|version| version < CONSENT_MIN_PROTOCOL) {
+    if state
+        .conn
+        .server_protocol_version
+        .is_none_or(|version| version < CONSENT_MIN_PROTOCOL)
+    {
         return;
     }
     let Some(network) = payload.get("network").and_then(Value::as_str) else {
@@ -1104,8 +1110,12 @@ pub(crate) fn handle_e2e_request_gone_push(
     ui: &slint::Weak<AppWindow>,
     payload: &Value,
 ) {
-    let Some(network) = payload.get("network").and_then(Value::as_str) else { return };
-    let Some(id) = payload.get("id").and_then(Value::as_u64) else { return };
+    let Some(network) = payload.get("network").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(id) = payload.get("id").and_then(Value::as_u64) else {
+        return;
+    };
     state.e2e.remove_request(network, id);
     push_open_query_consent(state, ui);
 }
@@ -1124,8 +1134,12 @@ pub(crate) fn handle_no_such_nick_push(
     {
         return;
     }
-    let Some(network) = payload.get("network").and_then(Value::as_str) else { return };
-    let Some(nick) = payload.get("nick").and_then(Value::as_str) else { return };
+    let Some(network) = payload.get("network").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(nick) = payload.get("nick").and_then(Value::as_str) else {
+        return;
+    };
     if let Some(engine) = state.e2e.engines.get_mut(network) {
         let drops = engine.no_such_nick(nick);
         if !drops.is_empty() {

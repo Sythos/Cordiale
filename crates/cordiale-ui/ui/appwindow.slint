@@ -4323,7 +4323,8 @@ export component AppWindow inherits Window {
                             clicked => {
                                 e2e-request-action("open", window-source-network, current-query-peer-nick, "");
                             }
-                        } else if current-query-e2e-can-start && !current-query-e2e-start-confirm-open : CompactButton {
+                        }
+                        if !current-query-e2e-has-locked && current-query-e2e-can-start && !current-query-e2e-start-confirm-open : CompactButton {
                             text: @tr("Start encrypted chat");
                             clicked => {
                                 current-query-e2e-start-confirm-open = true;

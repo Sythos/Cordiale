@@ -98,7 +98,6 @@ use crate::e2e_refusal::{E2eRefusal, E2eRouteError};
 use crate::e2e_selfcopy::{inbox_accepts, is_expired, DeliveryTracker};
 use crate::e2e_state::E2eStateStore;
 use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError, KeyringKeyProvider};
-use crate::rest::E2eConsentLine;
 use crate::e2e_trust::PeerTrust;
 use crate::e2e_wire::{
     bundle_key_signed_text, device_id_signed_text, did_from_key_text, frame_line_budget,
@@ -108,6 +107,7 @@ use crate::e2e_wire::{
 };
 use crate::isupport::CaseMapping;
 use crate::persistence::data_dir;
+use crate::rest::E2eConsentLine;
 use crate::rest::{E2eSendPriority, E2eSendRequest, E2eSendVerb, QUERY_LOCK_LABEL};
 
 /// Version number in the payloads that the engine writes.
@@ -6162,7 +6162,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_nack_that_is_not_ours_changes_nothing() {
+    async fn an_unknown_device_nack_marks_only_a_matching_send_unreadable() {
         let mut p = pair();
         let server = MockServer::start().await;
         mount_send(&server, "msgid1").await;
@@ -6172,10 +6172,19 @@ mod tests {
         // An unknown reference.
         let unknown = nack_row(11, &p.alice, &other, "nope");
         assert_eq!(p.alice.handle_row(&unknown, 1), RowOutcome::Ignored);
-        // A known reference from a device that did not get the message.
-        let wrong_device = nack_row(12, &p.alice, &other, "msgid1");
-        assert_eq!(p.alice.handle_row(&wrong_device, 1), RowOutcome::Ignored);
         assert_eq!(p.alice.send_status(&key), Some(SendStatus::Accepted));
+        // A known reference from another nick does not affect the send.
+        let mut wrong_nick = nack_row(12, &p.alice, &other, "msgid1");
+        wrong_nick.from = "carol".to_string();
+        assert_eq!(p.alice.handle_row(&wrong_nick, 1), RowOutcome::Ignored);
+        assert_eq!(p.alice.send_status(&key), Some(SendStatus::Accepted));
+        // An unknown device of the target makes the message unreadable.
+        let wrong_device = nack_row(13, &p.alice, &other, "msgid1");
+        assert_eq!(p.alice.handle_row(&wrong_device, 1), RowOutcome::Ignored);
+        assert_eq!(
+            p.alice.send_status(&key),
+            Some(SendStatus::Dropped(DropReason::Unreadable))
+        );
         assert!(p.alice.queue.is_empty());
         assert!(p.alice.take_keys_wanted().is_empty());
     }

@@ -911,12 +911,8 @@ impl GrappaClient {
         network_id: &str,
         server_protocol: Option<u32>,
     ) -> Result<Vec<E2eRequest>, E2eRouteError> {
-        let url = self.e2e_request_url(
-            E2eRequestOperation::List,
-            network_id,
-            None,
-            server_protocol,
-        )?;
+        let url =
+            self.e2e_request_url(E2eRequestOperation::List, network_id, None, server_protocol)?;
         let value = self
             .send_e2e_device_request(self.http.get(url).bearer_auth(token))
             .await?
