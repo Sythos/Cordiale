@@ -6066,16 +6066,6 @@ mod tests {
     async fn the_deadline_is_checked_again_before_each_queued_send() {
         let (mut alice, bob) = alice_without_keys("deadline");
         let server = MockServer::start().await;
-        // The answer takes longer than the time that is left to the texts.
-        Mock::given(method("POST"))
-            .and(path(format!("/networks/{NET}/e2e/messages")))
-            .respond_with(
-                ResponseTemplate::new(202)
-                    .set_body_json(json!({"msgid": "m1"}))
-                    .set_delay(Duration::from_millis(800)),
-            )
-            .mount(&server)
-            .await;
         let client = GrappaClient::new(server.uri());
         alice
             .send_or_queue(&client, TOKEN, "bob", "first", 100)
@@ -6086,11 +6076,31 @@ mod tests {
             .await
             .expect("second");
         let second_row = row_of(&alice, &second.key.expect("key"));
+
+        let (queued, late) = alice.queue.take_ready(alice.clock.now());
+        assert!(late.is_empty());
+        assert_eq!(queued.len(), 2);
+        let first_cutoff = queued[0].deadline - crate::e2e_pacing::SEND_SAFETY_MARGIN;
+        let second_cutoff = queued[1].deadline - crate::e2e_pacing::SEND_SAFETY_MARGIN;
+        for item in queued.into_iter().rev() {
+            alice.queue.restore(item);
+        }
+        // The first answer arrives after the second text's send cutoff.
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/{NET}/e2e/messages")))
+            .respond_with(
+                ResponseTemplate::new(202)
+                    .set_body_json(json!({"msgid": "m1"}))
+                    .set_delay(second_cutoff.saturating_sub(first_cutoff) + secs(2)),
+            )
+            .mount(&server)
+            .await;
         alice.accept_keys("bob", &bob.keys()).expect("keys");
-        // Both texts are live now: 87.5 s plus the 2 s margin is before 90 s.
-        alice.clock.advance(Duration::from_millis(87_500));
+        // Start one second before the first cutoff, regardless of setup time.
+        let advance = (first_cutoff - secs(1)).saturating_sub(alice.clock.now());
+        alice.clock.advance(advance);
         let drops = alice.flush_queue(&client, TOKEN, 101).await;
-        // The first send took 0.8 s, so the second text is too late.
+        // The first send took at least two seconds, so the second is too late.
         assert_eq!(drops.len(), 1);
         assert_eq!(drops[0].reason, DropReason::Late);
         assert_eq!(alice.dropped_reason(&second_row), Some(DropReason::Late));
