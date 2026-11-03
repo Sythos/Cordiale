@@ -76,14 +76,19 @@ pub(crate) fn watch_renderer(window: &slint::Window) {
 /// The report text for the Debug page. `app_language` is the code of the
 /// language picked in Cordiale, if any.
 pub(crate) fn report(window: &slint::Window, app_language: Option<&str>) -> String {
-    let mut system = System::new();
-    system.refresh_cpu_list(CpuRefreshKind::nothing());
-    system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+    let system = System::new().ok().map(|mut system| {
+        system.refresh_cpu_list(CpuRefreshKind::nothing());
+        system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        system
+    });
     let cpu_model = system
-        .cpus()
-        .first()
+        .as_ref()
+        .and_then(|system| system.cpus().first())
         .map(|cpu| cpu.brand().trim().to_string());
-    let cpu_cores = Some(system.cpus().len()).filter(|cores| *cores > 0);
+    let cpu_cores = system
+        .as_ref()
+        .map(|system| system.cpus().len())
+        .filter(|cores| *cores > 0);
 
     let (display_size, windowing_system) = window
         .with_winit_window(|winit| (monitor_size(winit), windowing_system_of(winit)))
@@ -96,12 +101,18 @@ pub(crate) fn report(window: &slint::Window, app_language: Option<&str>) -> Stri
         executable: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
         graphics: describe_graphics(backend, RENDERER.get().copied()),
         os: os_description(),
-        kernel: System::kernel_version(),
+        kernel: System::kernel_version().ok(),
         cpu_arch: Some(System::cpu_arch()),
         cpu_model,
         cpu_cores,
-        memory_total: Some(system.total_memory()).filter(|bytes| *bytes > 0),
-        memory_available: Some(system.available_memory()).filter(|bytes| *bytes > 0),
+        memory_total: system
+            .as_ref()
+            .map(|system| system.total_memory())
+            .filter(|bytes| *bytes > 0),
+        memory_available: system
+            .as_ref()
+            .map(|system| system.available_memory())
+            .filter(|bytes| *bytes > 0),
         chat_rows_total: reported(&CHAT_ROWS_TOTAL),
         chat_rows_largest: reported(&CHAT_ROWS_LARGEST),
         display_size,
@@ -126,9 +137,11 @@ pub(crate) fn report(window: &slint::Window, app_language: Option<&str>) -> Stri
 /// "Linux (Ubuntu 24.04)"; the plain name and version when there's no
 /// long form.
 fn os_description() -> Option<String> {
-    System::long_os_version().or_else(|| match (System::name(), System::os_version()) {
-        (Some(name), Some(version)) => Some(format!("{name} {version}")),
-        (name, version) => name.or(version),
+    System::long_os_version().ok().or_else(|| {
+        match (System::name().ok(), System::os_version().ok()) {
+            (Some(name), Some(version)) => Some(format!("{name} {version}")),
+            (name, version) => name.or(version),
+        }
     })
 }
 

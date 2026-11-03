@@ -22,7 +22,7 @@ arboard = "3"
 dark-light = { version = "3", default-features = false }
 # Host details for the Debug page (OS version, CPU model, RAM). Only the
 # `system` feature: no process, disk, network or user data.
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 # The system locale and the IANA time zone name, for the Debug page; Slint
 # and chrono already bring both crates in.
 sys-locale = "0.3"
