@@ -1144,11 +1144,17 @@ pub(crate) fn handle_no_such_nick_push(
     let Some(nick) = payload.get("nick").and_then(Value::as_str) else {
         return;
     };
-    if let Some(engine) = state.e2e.engines.get_mut(network) {
+    let changed = if let Some(engine) = state.e2e.engines.get_mut(network) {
         let drops = engine.no_such_nick(nick);
         if !drops.is_empty() {
             set_e2e_status(ui, "e2e-no-such-nick");
         }
+        engine.take_changed_peers()
+    } else {
+        Vec::new()
+    };
+    for peer in changed {
+        refresh_locked_view(state, ui, network, &peer);
     }
     let casemapping = network_casemapping(state, network);
     state
