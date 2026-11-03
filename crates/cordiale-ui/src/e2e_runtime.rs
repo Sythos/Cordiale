@@ -948,7 +948,10 @@ pub(crate) async fn handle_e2e_request_action(
                 return;
             };
             let incoming = state.e2e.requests.get(&(network.clone(), id)).cloned();
-            if !incoming.is_some_and(|request| request.state == E2eRequestState::Incoming) {
+            if !incoming
+                .as_ref()
+                .is_some_and(|request| request.state == E2eRequestState::Incoming)
+            {
                 return;
             }
             match client
