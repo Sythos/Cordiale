@@ -1705,8 +1705,8 @@ export component AppWindow inherits Window {
     // two cells, their spacing, the row indent, the scrollbar gutter and the
     // box padding) nor than the top row of icon buttons; it never gets wider
     // than `sidebar-hard-max-width` unless the icons need more. The member
-    // column is never narrower than the average member label or its
-    // Actions button.
+    // column is never narrower than the average member label, its Actions
+    // button, or the E2E action of the selected plain query.
     property <length> sidebar-icons-min-width:
         top-icon-size * top-icon-count + top-icon-spacing * (top-icon-count - 1) + 2 * sidebar-padding;
     property <length> sidebar-rows-min-width:
@@ -1715,9 +1715,15 @@ export component AppWindow inherits Window {
     property <length> sidebar-min-width: max(
         max(120px, sidebar-icons-min-width),
         min(sidebar-rows-min-width, sidebar-hard-max-width));
+    property <length> members-e2e-action-min-width:
+        current-query && !current-query-e2e
+            && (current-query-e2e-can-start || current-query-e2e-has-locked
+                || current-query-e2e-request-state == "accepted")
+            ? max(e2e-start-probe.preferred-width, e2e-open-probe.preferred-width) + 16px
+            : 0px;
     property <length> members-min-width: max(
-        actions-probe.preferred-width + 16px,
-        members-nick-probe.preferred-width + 40px);
+        max(actions-probe.preferred-width + 16px, members-nick-probe.preferred-width + 40px),
+        members-e2e-action-min-width);
     // The chat column keeps at least this width; the side columns give way.
     property <length> chat-min-width: 240px;
     // Window width taken by the layout padding (2 x 16px), the four 8px
@@ -3214,6 +3220,16 @@ export component AppWindow inherits Window {
         visible: false;
         enabled: false;
     }
+    e2e-start-probe := Button {
+        text: @tr("Start encrypted chat");
+        visible: false;
+        enabled: false;
+    }
+    e2e-open-probe := Button {
+        text: @tr("Open encrypted chat");
+        visible: false;
+        enabled: false;
+    }
 
     if palette-active && palette-background-set : Image {
         x: 0;
@@ -4273,22 +4289,6 @@ export component AppWindow inherits Window {
                         // A fixed-width or empty action row must not cap the whole chat.
                         Rectangle { horizontal-stretch: 1; }
                     }
-                    if !current-query-e2e && current-query-e2e-request-state == "" : HorizontalBox {
-                        if current-query-e2e-has-locked : CompactButton {
-                            text: @tr("Open encrypted chat");
-                            clicked => {
-                                e2e-request-action("open", window-source-network, current-query-peer-nick, "");
-                            }
-                        }
-                        if !current-query-e2e-has-locked && current-query-e2e-can-start && !current-query-e2e-start-confirm-open : CompactButton {
-                            text: @tr("Start encrypted chat");
-                            clicked => {
-                                current-query-e2e-start-confirm-open = true;
-                            }
-                        }
-                        // A fixed-width or empty action row must not cap the whole chat.
-                        Rectangle { horizontal-stretch: 1; }
-                    }
                     if !current-query-e2e && current-query-e2e-request-state == "" && current-query-e2e-start-confirm-open : VerticalBox {
                         spacing: 6px;
                         Text {
@@ -4364,12 +4364,6 @@ export component AppWindow inherits Window {
                         text: @tr("Dismiss");
                         clicked => {
                             e2e-request-action("dismiss", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
-                        }
-                    }
-                    if current-query-e2e-request-state == "accepted" : CompactButton {
-                        text: @tr("Open encrypted chat");
-                        clicked => {
-                            e2e-request-action("open", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
                         }
                     }
                 }
@@ -5048,6 +5042,29 @@ export component AppWindow inherits Window {
         VerticalBox {
             width: max(members-width, members-min-width);
             spacing: 4px;
+
+            if current-query && !current-query-e2e
+                && (current-query-e2e-has-locked
+                    || current-query-e2e-request-state == "accepted"
+                    || (current-query-e2e-request-state == ""
+                        && current-query-e2e-can-start
+                        && !current-query-e2e-start-confirm-open)) : CompactButton {
+                text: current-query-e2e-has-locked || current-query-e2e-request-state == "accepted"
+                    ? @tr("Open encrypted chat")
+                    : @tr("Start encrypted chat");
+                horizontal-stretch: 1;
+                clicked => {
+                    if current-query-e2e-has-locked || current-query-e2e-request-state == "accepted" {
+                        e2e-request-action(
+                            "open",
+                            window-source-network,
+                            current-query-peer-nick,
+                            current-query-e2e-request-state == "accepted" ? current-query-e2e-request-id : "");
+                    } else {
+                        current-query-e2e-start-confirm-open = true;
+                    }
+                }
+            }
 
             if current-window-is-joined && !current-query : Text {
                 text: @tr("Members ({})", channel-members.length);

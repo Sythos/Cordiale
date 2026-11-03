@@ -5785,6 +5785,150 @@ fn query_layout_fills_window_and_separator_can_be_dragged() {
     }
 }
 
+#[test]
+fn plain_query_e2e_actions_are_available_in_the_right_pane() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.on_fit_column_widths(
+        |window, sidebar, members, sidebar_min, members_min, reserved, sidebar_max| {
+            let fitted = fit_columns(
+                window,
+                sidebar,
+                members,
+                sidebar_min,
+                members_min,
+                reserved,
+                sidebar_max,
+            );
+            ColumnWidths {
+                sidebar: fitted.sidebar,
+                members: fitted.members,
+            }
+        },
+    );
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_query(true);
+    ui.set_current_query_ready(true);
+    ui.set_current_query_peer_nick("Alice".into());
+    ui.set_window_source_network("test-network".into());
+    ui.set_current_query_e2e_state("e2e-chat-clear".into());
+    ui.set_current_query_e2e_can_start(true);
+
+    let actions = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorded = actions.clone();
+    ui.on_e2e_request_action(move |action, network, peer, request_id| {
+        recorded.borrow_mut().push((
+            action.to_string(),
+            network.to_string(),
+            peer.to_string(),
+            request_id.to_string(),
+        ));
+    });
+
+    ui.show().unwrap();
+    for width in [900, 1920] {
+        ui.set_current_query_e2e_has_locked(false);
+        ui.set_current_query_e2e_request_state("".into());
+        ui.set_current_query_e2e_request_id("".into());
+        ui.set_current_query_e2e_can_start(true);
+        ui.set_current_query_e2e_start_confirm_open(false);
+        ui.window()
+            .set_size(slint::LogicalSize::new(width as f32, 1000.));
+        let snapshot = ui.window().take_snapshot().unwrap();
+        let mut right = None;
+        for (i, pixel) in snapshot.as_bytes().as_chunks::<4>().0.iter().enumerate() {
+            if pixel[..3] == [0x1f, 0x2f, 0x3a] {
+                let x = i as u32 % snapshot.width();
+                right = Some(right.map_or(x, |edge: u32| edge.max(x)));
+            }
+        }
+        let right = right.expect("plain query E2E status banner must be visible");
+        let pixels = snapshot.as_bytes();
+        let divider = (right + 1..snapshot.width())
+            .find(|&x| {
+                let offset = (700 * snapshot.width() + x) as usize * 4;
+                pixels[offset..offset + 3] == [128, 128, 128]
+            })
+            .expect("query side-pane divider must be visible");
+        let click = || {
+            let position = slint::LogicalPosition::new((divider + 28) as f32, 32.);
+            for event in [
+                WindowEvent::PointerPressed {
+                    position,
+                    button: PointerEventButton::Left,
+                },
+                WindowEvent::PointerReleased {
+                    position,
+                    button: PointerEventButton::Left,
+                },
+            ] {
+                ui.window().dispatch_event(event);
+            }
+        };
+
+        ui.set_current_query_e2e_has_locked(false);
+        ui.set_current_query_e2e_request_state("".into());
+        ui.set_current_query_e2e_can_start(true);
+        ui.set_current_query_e2e_start_confirm_open(false);
+        ui.window().take_snapshot().unwrap();
+        click();
+        assert!(
+            ui.get_current_query_e2e_start_confirm_open(),
+            "Start encrypted chat must open its existing confirmation in a {width}px window"
+        );
+
+        ui.set_current_query_e2e_start_confirm_open(false);
+        ui.set_current_query_e2e_can_start(false);
+        ui.set_current_query_e2e_has_locked(true);
+        ui.window().take_snapshot().unwrap();
+        click();
+        assert_eq!(
+            actions.borrow().last(),
+            Some(&(
+                "open".into(),
+                "test-network".into(),
+                "Alice".into(),
+                "".into()
+            )),
+            "Open encrypted chat must use the selected peer and network"
+        );
+
+        ui.set_current_query_e2e_has_locked(false);
+        ui.set_current_query_e2e_request_state("accepted".into());
+        ui.set_current_query_e2e_request_id("42".into());
+        ui.window().take_snapshot().unwrap();
+        click();
+        assert_eq!(
+            actions.borrow().last(),
+            Some(&(
+                "open".into(),
+                "test-network".into(),
+                "Alice".into(),
+                "42".into()
+            )),
+            "An accepted request must open its encrypted query"
+        );
+
+        let action_count = actions.borrow().len();
+        ui.set_current_query_e2e_request_state("outgoing".into());
+        ui.set_current_query_e2e_can_start(true);
+        ui.set_current_query_e2e_start_confirm_open(false);
+        ui.window().take_snapshot().unwrap();
+        click();
+        assert_eq!(
+            actions.borrow().len(),
+            action_count,
+            "A pending request must not create another E2E action"
+        );
+        assert!(
+            !ui.get_current_query_e2e_start_confirm_open(),
+            "A pending request must not open the start confirmation"
+        );
+    }
+}
+
 fn set_headless_software_platform() {
     std::thread_local! {
         static SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
