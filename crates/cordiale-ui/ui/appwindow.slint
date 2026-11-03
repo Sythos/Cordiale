@@ -4269,54 +4269,6 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    if !current-query-e2e && current-query-e2e-request-state != "" : HorizontalBox {
-                        spacing: 6px;
-                        Text {
-                            text: e2e-request-state-text();
-                            wrap: word-wrap;
-                            horizontal-stretch: 1;
-                            accessible-role: AccessibleRole.text;
-                            accessible-live-region: AccessibleLiveness.polite;
-                        }
-                        if current-query-e2e-request-state == "incoming" : CompactButton {
-                            text: @tr("Accept");
-                            enabled: current-query-e2e-can-accept;
-                            clicked => {
-                                e2e-request-action("accept", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
-                            }
-                        }
-                        if current-query-e2e-request-state == "incoming" : CompactButton {
-                            text: @tr("Decline");
-                            clicked => {
-                                e2e-request-action("refuse", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
-                            }
-                        }
-                        if current-query-e2e-request-state == "outgoing" : CompactButton {
-                            text: @tr("Cancel request");
-                            clicked => {
-                                e2e-request-action("cancel", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
-                            }
-                        }
-                        if current-query-e2e-request-state == "expired" || current-query-e2e-request-state == "refused" : CompactButton {
-                            text: @tr("Try again");
-                            enabled: current-query-e2e-can-start;
-                            clicked => {
-                                e2e-request-action("retry", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
-                            }
-                        }
-                        if current-query-e2e-request-state == "expired" || current-query-e2e-request-state == "refused" : CompactButton {
-                            text: @tr("Dismiss");
-                            clicked => {
-                                e2e-request-action("dismiss", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
-                            }
-                        }
-                        if current-query-e2e-request-state == "accepted" : CompactButton {
-                            text: @tr("Open encrypted chat");
-                            clicked => {
-                                e2e-request-action("open", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
-                            }
-                        }
-                    }
                     if !current-query-e2e && current-query-e2e-request-state == "" : HorizontalBox {
                         if current-query-e2e-has-locked : CompactButton {
                             text: @tr("Open encrypted chat");
@@ -4357,6 +4309,61 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // Consent requests also work when this device has no E2E engine.
+            if current-query && !current-query-e2e && current-query-e2e-request-state != "" : Rectangle {
+                background: theme == "dark" ? #1f2f3a : #e3f1fb;
+                border-width: 1px;
+                border-color: theme == "dark" ? #3d7ea6 : #2b7bb9;
+                HorizontalBox {
+                    spacing: 6px;
+                    Text {
+                        text: e2e-request-state-text();
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                        accessible-role: AccessibleRole.text;
+                        accessible-live-region: AccessibleLiveness.polite;
+                    }
+                    if current-query-e2e-request-state == "incoming" : CompactButton {
+                        text: @tr("Accept");
+                        enabled: current-query-e2e-can-accept;
+                        clicked => {
+                            e2e-request-action("accept", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "incoming" : CompactButton {
+                        text: @tr("Decline");
+                        clicked => {
+                            e2e-request-action("refuse", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "outgoing" : CompactButton {
+                        text: @tr("Cancel request");
+                        clicked => {
+                            e2e-request-action("cancel", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "expired" || current-query-e2e-request-state == "refused" : CompactButton {
+                        text: @tr("Try again");
+                        enabled: current-query-e2e-can-start;
+                        clicked => {
+                            e2e-request-action("retry", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "expired" || current-query-e2e-request-state == "refused" : CompactButton {
+                        text: @tr("Dismiss");
+                        clicked => {
+                            e2e-request-action("dismiss", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
+                        }
+                    }
+                    if current-query-e2e-request-state == "accepted" : CompactButton {
+                        text: @tr("Open encrypted chat");
+                        clicked => {
+                            e2e-request-action("open", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
                         }
                     }
                 }

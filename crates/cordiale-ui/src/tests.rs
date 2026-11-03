@@ -12523,7 +12523,7 @@ fn slash_query_of_a_new_dm_does_not_start_encryption_after_the_snapshot() {
     runtime.block_on(focus_pending_query(&mut state, &ui));
     assert!(state.windows.current_query);
     assert!(e2e_send_bodies(&seen).is_empty());
-    // Repeated snapshots and selections stay inside the pacing.
+    // Repeated snapshots and selections also send no key request.
     runtime.block_on(focus_pending_query(&mut state, &ui));
     runtime.block_on(handle_select_query(
         &mut state,
@@ -12537,7 +12537,7 @@ fn slash_query_of_a_new_dm_does_not_start_encryption_after_the_snapshot() {
         "libera".to_string(),
         "Peer".to_string(),
     ));
-    assert_eq!(e2e_send_bodies(&seen).len(), 1);
+    assert!(e2e_send_bodies(&seen).is_empty());
     assert_no_clear_text(&seen);
 }
 

@@ -464,8 +464,9 @@ pub(crate) fn push_open_query_consent(state: &WorkerState, ui: &slint::Weak<AppW
     let SendRoute::Plain { nick } = route_for_window(window) else {
         return;
     };
+    let peer = crate::queries::query_send_target(state, network, &nick);
     let (request_state, request_id, can_start, can_accept, has_locked) =
-        query_consent_view(state, network, &nick);
+        query_consent_view(state, network, &peer);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         ui.set_current_query_e2e_request_state(request_state.clone().into());
