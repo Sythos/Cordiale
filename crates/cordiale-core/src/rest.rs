@@ -36,7 +36,7 @@ use serde_json::Value;
 
 use crate::e2e_device_routes::check_compact_json;
 use crate::e2e_wire::{
-    as_object, check_addresses, reject_unknown_fields, required_str, Verb, WireError,
+    as_object, check_addresses, is_did_shape, reject_unknown_fields, required_str, Verb, WireError,
     SEND_PAYLOAD_MAX_BYTES, SEND_PAYLOAD_MAX_LINES,
 };
 use crate::slash::{is_channel, is_statusmsg_target};
@@ -695,6 +695,186 @@ pub struct E2eSendRequest {
     priority: Option<E2eSendPriority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expires_at: Option<u64>,
+}
+
+/// Maximum opaque consent payload accepted by protocol 53.
+pub const E2E_CONSENT_PAYLOAD_MAX_BYTES: usize = 1024;
+
+/// State of one encrypted-chat consent request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum E2eRequestState {
+    Incoming,
+    Outgoing,
+    Accepted,
+    Refused,
+    Expired,
+}
+
+impl E2eRequestState {
+    fn parse(text: &str) -> Result<Self, WireError> {
+        match text {
+            "incoming" => Ok(Self::Incoming),
+            "outgoing" => Ok(Self::Outgoing),
+            "accepted" => Ok(Self::Accepted),
+            "refused" => Ok(Self::Refused),
+            "expired" => Ok(Self::Expired),
+            _ => Err(WireError::BadFieldType),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Incoming => "incoming",
+            Self::Outgoing => "outgoing",
+            Self::Accepted => "accepted",
+            Self::Refused => "refused",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+/// One consent request returned by Grappa or pushed on the user topic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct E2eRequest {
+    pub id: u64,
+    pub peer: String,
+    pub state: E2eRequestState,
+    pub payload: Option<String>,
+    pub at: String,
+    pub expires_at: Option<String>,
+}
+
+impl E2eRequest {
+    const FIELDS: [&'static str; 6] = ["id", "peer", "state", "payload", "at", "expires_at"];
+
+    pub fn from_value(value: &Value) -> Result<Self, WireError> {
+        let map = as_object(value)?;
+        reject_unknown_fields(map, &Self::FIELDS)?;
+        let id = map
+            .get("id")
+            .and_then(Value::as_u64)
+            .filter(|id| *id > 0)
+            .ok_or(WireError::MissingField)?;
+        let peer = required_str(map, "peer")?;
+        if !valid_e2e_peer_target(peer) {
+            return Err(WireError::BadTarget);
+        }
+        let state = E2eRequestState::parse(required_str(map, "state")?)?;
+        let payload = optional_payload(map, "payload")?;
+        let at = required_str(map, "at")?;
+        if at.is_empty() {
+            return Err(WireError::MissingField);
+        }
+        let expires_at = optional_string(map, "expires_at")?;
+        Ok(Self {
+            id,
+            peer: peer.to_string(),
+            state,
+            payload,
+            at: at.to_string(),
+            expires_at,
+        })
+    }
+}
+
+/// A validated list response. Requests are oldest first on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct E2eRequestList {
+    pub requests: Vec<E2eRequest>,
+}
+
+impl E2eRequestList {
+    pub fn from_value(value: &Value) -> Result<Self, WireError> {
+        let map = as_object(value)?;
+        reject_unknown_fields(map, &["requests"])?;
+        let values = map
+            .get("requests")
+            .and_then(Value::as_array)
+            .ok_or(WireError::MissingField)?;
+        let requests = values
+            .iter()
+            .map(E2eRequest::from_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { requests })
+    }
+}
+
+/// The public identity hint that accompanies a consent action. The hint is
+/// not proof of identity; the normal Olm and SAS trust checks still apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct E2eConsentLine {
+    pub from: String,
+    pub payload: String,
+}
+
+impl E2eConsentLine {
+    pub fn new(from: &str, payload: &str) -> Result<Self, WireError> {
+        if !is_did_shape(from) {
+            return Err(WireError::BadDid);
+        }
+        if payload.len() > E2E_CONSENT_PAYLOAD_MAX_BYTES {
+            return Err(WireError::PayloadTooLarge);
+        }
+        check_compact_json(payload)?;
+        Ok(Self {
+            from: from.to_string(),
+            payload: payload.to_string(),
+        })
+    }
+}
+
+/// Body of `POST /networks/:id/e2e/requests`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct E2eRequestCreate {
+    pub target: String,
+    pub from: String,
+    pub payload: String,
+}
+
+impl E2eRequestCreate {
+    pub fn new(target: &str, line: &E2eConsentLine) -> Result<Self, WireError> {
+        if !valid_e2e_peer_target(target) {
+            return Err(WireError::BadTarget);
+        }
+        Ok(Self {
+            target: target.to_string(),
+            from: line.from.clone(),
+            payload: line.payload.clone(),
+        })
+    }
+}
+
+fn valid_e2e_peer_target(target: &str) -> bool {
+    !target.is_empty()
+        && !target.contains(QUERY_LOCK_LABEL)
+        && !is_channel(target)
+        && !is_statusmsg_target(target)
+        && !target.contains(['\r', '\n', '\0', ' '])
+}
+
+fn optional_payload(
+    map: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<String>, WireError> {
+    match map.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(payload)) if payload.len() <= E2E_CONSENT_PAYLOAD_MAX_BYTES => {
+            Ok(Some(payload.clone()))
+        }
+        Some(Value::String(_)) => Err(WireError::PayloadTooLarge),
+        Some(_) => Err(WireError::BadFieldType),
+    }
+}
+
+fn optional_string(
+    map: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<String>, WireError> {
+    match map.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(WireError::BadFieldType),
+    }
 }
 
 impl E2eSendRequest {

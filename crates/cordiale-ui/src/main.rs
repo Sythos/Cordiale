@@ -216,6 +216,13 @@ enum WorkerCommand {
     },
     /// A SAS step of the open locked query: show, confirm, reject, cancel.
     E2eSas(SasStep),
+    /// A consent action on a plain query, including a manual key re-request.
+    E2eRequestAction {
+        action: String,
+        network: String,
+        peer: String,
+        request_id: String,
+    },
     DismissKickedChannel {
         network: String,
         channel: String,
@@ -1883,6 +1890,22 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::E2eSas(step)) => {
                         handle_e2e_sas(&mut state, &ui, step);
+                    }
+                    Some(WorkerCommand::E2eRequestAction {
+                        action,
+                        network,
+                        peer,
+                        request_id,
+                    }) => {
+                        handle_e2e_request_action(
+                            &mut state,
+                            &ui,
+                            action,
+                            network,
+                            peer,
+                            request_id,
+                        )
+                        .await;
                     }
                     Some(WorkerCommand::DismissKickedChannel { network, channel }) => {
                         handle_dismiss_kicked_channel(&mut state, &ui, network, channel).await;

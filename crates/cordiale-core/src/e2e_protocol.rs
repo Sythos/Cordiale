@@ -22,12 +22,14 @@
 
 //! Map of the E2E operations to the protocol version that has them.
 //!
-//! The routes are the ones of section 4f of the client protocol document.
+//! The routes are the ones of sections 4f and 4i of the client protocol document.
 //! The claim and copy routes are below `/networks/:id` like the others.
 //! Cordiale speaks the per-device shape of protocol 49. A server between 42
 //! and 48 speaks the single-bundle shape, which no release ever carried, so
 //! every operation here needs 49 at least, and the claim and copy doors need
-//! 50. A server with an unknown version never allows an operation.
+//! 50. A server with an unknown version never allows an operation. Consent
+//! routes first appear in protocol 53 and use a separate operation enum because
+//! they are not per-device routes.
 //!
 //! The pairing relay of protocol 48 (`/e2e/pairings`) is not below
 //! `/networks/:id`. [`PairingOperation`] holds its routes and its version
@@ -85,10 +87,55 @@ pub enum E2eMethod {
 /// section 4f, "`own` (v50)".
 pub const OWN_FLAG_MIN_PROTOCOL: u32 = 50;
 
+/// First protocol version with explicit encrypted-chat consent routes.
+pub const CONSENT_MIN_PROTOCOL: u32 = 53;
+
+/// First protocol version with a `no_such_nick` event.
+pub const NO_SUCH_NICK_MIN_PROTOCOL: u32 = 54;
+
 /// Whether a server with this protocol version may send the `own` flag. An
 /// unknown version never may.
 pub fn own_flag_allowed(server_protocol: Option<u32>) -> bool {
     server_protocol.is_some_and(|version| version >= OWN_FLAG_MIN_PROTOCOL)
+}
+
+/// Consent route used to ask for, accept, refuse, or dismiss an E2E chat
+/// request. It is separate from per-device operations and needs protocol 53.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum E2eRequestOperation {
+    List,
+    Create,
+    Accept,
+    Refuse,
+    Dismiss,
+}
+
+impl E2eRequestOperation {
+    pub fn available(self, server_protocol: Option<u32>) -> bool {
+        server_protocol.is_some_and(|version| version >= CONSENT_MIN_PROTOCOL)
+    }
+
+    pub fn method(self) -> E2eMethod {
+        match self {
+            Self::List => E2eMethod::Get,
+            Self::Create | Self::Accept | Self::Refuse => E2eMethod::Post,
+            Self::Dismiss => E2eMethod::Delete,
+        }
+    }
+
+    /// Path suffix after `/networks/:id/e2e/requests`. A request ID is a
+    /// separate path segment and must be supplied for the final three routes.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::List | Self::Create | Self::Dismiss => "",
+            Self::Accept => "accept",
+            Self::Refuse => "refuse",
+        }
+    }
+
+    pub fn needs_id(self) -> bool {
+        matches!(self, Self::Accept | Self::Refuse | Self::Dismiss)
+    }
 }
 
 /// The place of the device id in a route.

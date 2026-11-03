@@ -24,7 +24,9 @@ use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
 };
-use cordiale_core::e2e_protocol::E2eOperation;
+use cordiale_core::e2e_protocol::{
+    E2eOperation, CONSENT_MIN_PROTOCOL, NO_SUCH_NICK_MIN_PROTOCOL,
+};
 use cordiale_core::e2e_provision::provision_device;
 use cordiale_core::e2e_revoke::{
     finish_pending_revoke, reset_identity, resume_reset, revoke_device, OwnRoutes,
@@ -32,6 +34,7 @@ use cordiale_core::e2e_revoke::{
 };
 use cordiale_core::e2e_store::{E2eHistoryStore, E2eMessage};
 use cordiale_core::e2e_wire::did_from_key_text;
+use cordiale_core::rest::{E2eConsentLine, E2eRequest, E2eRequestCreate, E2eRequestState};
 use cordiale_core::phoenix::PhoenixMessage;
 use cordiale_core::session::{route_e2e_message, route_e2e_pairing};
 use cordiale_core::slash::{E2eManageAction, E2ePairAction};
@@ -59,6 +62,10 @@ pub(crate) struct E2eRuntime {
     /// What this session observed about the key request of each peer:
     /// `(network, nick)`. A peer without a record has no request.
     key_requests: HashMap<(String, String), KeyRequest>,
+    /// Current server consent requests, keyed by network and request id.
+    requests: HashMap<(String, u64), E2eRequest>,
+    /// Accepted request IDs already used to start an E2E lane this session.
+    activated_requests: HashSet<(String, u64)>,
     /// The one open X1 pairing of this session, if any.
     pairing: Option<ActivePairing>,
     /// Rendezvous that an earlier run left open. They are closed when the
@@ -180,6 +187,83 @@ impl E2eRuntime {
         if next != KeyRequest::NotSent {
             self.key_requests
                 .insert((network.to_string(), nick.to_string()), next);
+        }
+    }
+
+    fn put_request(&mut self, network: &str, request: E2eRequest) {
+        self.requests
+            .insert((network.to_string(), request.id), request);
+    }
+
+    fn remove_request(&mut self, network: &str, id: u64) {
+        self.requests.remove(&(network.to_string(), id));
+        self.activated_requests.remove(&(network.to_string(), id));
+    }
+
+    fn replace_requests(&mut self, network: &str, requests: Vec<E2eRequest>) {
+        self.requests.retain(|(known_network, _), _| known_network != network);
+        self.activated_requests
+            .retain(|(known_network, _)| known_network != network);
+        for request in requests {
+            self.put_request(network, request);
+        }
+    }
+
+    fn request_for_peer(
+        &self,
+        network: &str,
+        peer: &str,
+        casemapping: cordiale_core::isupport::CaseMapping,
+    ) -> Option<&E2eRequest> {
+        self.requests
+            .iter()
+            .filter(|((known_network, _), request)| {
+                known_network == network && casemapping.nick_eq(&request.peer, peer)
+            })
+            .max_by_key(|((_, id), _)| *id)
+            .map(|(_, request)| request)
+    }
+
+    fn request_was_activated(&mut self, network: &str, id: u64) -> bool {
+        !self
+            .activated_requests
+            .insert((network.to_string(), id))
+    }
+
+    fn remove_outgoing_request_for_peer(
+        &mut self,
+        network: &str,
+        peer: &str,
+        casemapping: cordiale_core::isupport::CaseMapping,
+    ) {
+        let ids: Vec<u64> = self
+            .requests
+            .iter()
+            .filter(|((known_network, _), request)| {
+                known_network == network
+                    && request.state == E2eRequestState::Outgoing
+                    && casemapping.nick_eq(&request.peer, peer)
+            })
+            .map(|((_, id), _)| *id)
+            .collect();
+        for id in ids {
+            self.remove_request(network, id);
+        }
+    }
+
+    fn mark_key_request_failed_for_peer(
+        &mut self,
+        network: &str,
+        nick: &str,
+        casemapping: cordiale_core::isupport::CaseMapping,
+    ) {
+        for ((known_network, known_nick), status) in &mut self.key_requests {
+            if known_network == network
+                && casemapping.nick_eq(known_nick, nick)
+                && *status != KeyRequest::NotSent
+            {
+                *status = KeyRequest::Failed;
+            }
         }
     }
 
@@ -329,6 +413,72 @@ pub(crate) fn plain_entry_state_key(state: &WorkerState, network: &str) -> &'sta
     } else {
         ""
     }
+}
+
+fn request_view_state(request: &E2eRequest) -> &'static str {
+    let expired = request
+        .expires_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|expires| expires.timestamp_millis() <= chrono::Utc::now().timestamp_millis());
+    match (request.state, expired) {
+        (E2eRequestState::Incoming, true) => "gone",
+        (E2eRequestState::Outgoing, true) => "expired",
+        _ => request.state.as_str(),
+    }
+}
+
+fn query_consent_view(
+    state: &WorkerState,
+    network: &str,
+    peer: &str,
+) -> (String, String, bool, bool, bool) {
+    let casemapping = network_casemapping(state, network);
+    let request = state
+        .e2e
+        .request_for_peer(network, peer, casemapping)
+        .filter(|request| request_view_state(request) != "gone");
+    let request_state = request
+        .map_or("", |request| request_view_state(request))
+        .to_string();
+    let request_id = request.map_or(String::new(), |request| request.id.to_string());
+    let engine = state.e2e.engines.get(network);
+    let can_accept = engine.is_some_and(|engine| engine.own_consent_line().is_ok());
+    let can_start = state
+        .conn
+        .server_protocol_version
+        .is_some_and(|version| version >= CONSENT_MIN_PROTOCOL)
+        && can_accept;
+    let has_locked = state.e2e.locked.iter().any(|(known_network, nick)| {
+        known_network == network && casemapping.nick_eq(nick, peer)
+    });
+    (request_state, request_id, can_start, can_accept, has_locked)
+}
+
+/// Updates the consent controls when the currently open plain query changes.
+pub(crate) fn push_open_query_consent(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    if !state.windows.current_query {
+        return;
+    }
+    let Some((network, window)) = state.windows.current_channel.as_ref() else {
+        return;
+    };
+    let SendRoute::Plain { nick } = route_for_window(window) else {
+        return;
+    };
+    let (request_state, request_id, can_start, can_accept, has_locked) =
+        query_consent_view(state, network, &nick);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_current_query_e2e_request_state(request_state.into());
+        ui.set_current_query_e2e_request_id(request_id.into());
+        ui.set_current_query_e2e_can_start(can_start);
+        ui.set_current_query_e2e_can_accept(can_accept);
+        ui.set_current_query_e2e_has_locked(has_locked);
+        if !request_state.is_empty() {
+            ui.set_current_query_e2e_start_confirm_open(false);
+        }
+    });
 }
 
 fn set_e2e_status(ui: &slint::Weak<AppWindow>, kind: &'static str) {
@@ -545,10 +695,452 @@ pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<
             resume_pending_manage(state, ui, &network).await;
             drain_network(state, ui, &network).await;
         }
+        sync_e2e_requests(state, ui, &network).await;
     }
     close_stale_pairings(state).await;
     pump_pairing(state, ui).await;
     refresh_network_groups(state, ui);
+}
+
+/// Reads the consent mirror on every session connect. Grappa does not replay
+/// request pushes, so this is required after both first connect and reconnect.
+async fn sync_e2e_requests(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+) {
+    let Some(protocol) = state.conn.server_protocol_version else {
+        return;
+    };
+    if protocol < CONSENT_MIN_PROTOCOL {
+        state.e2e.replace_requests(network, Vec::new());
+        return;
+    }
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
+    let requests = match client
+        .fetch_e2e_requests(&token, network, Some(protocol))
+        .await
+    {
+        Ok(requests) => requests,
+        Err(error) => {
+            if !matches!(error, cordiale_core::e2e_refusal::E2eRouteError::Unavailable) {
+                persistence::log_line(&format!("e2e request sync failed for {network}: {error:?}"));
+            }
+            return;
+        }
+    };
+    state.e2e.replace_requests(network, requests.clone());
+    for request in requests {
+        if request.state == E2eRequestState::Accepted {
+            activate_accepted_request(state, ui, network, request).await;
+        } else {
+            ensure_plain_query_for_request(state, network, &request.peer);
+        }
+    }
+    push_open_query_consent(state, ui);
+}
+
+fn ensure_plain_query_for_request(state: &WorkerState, network: &str, peer: &str) {
+    if find_query_window(&state.transcript.query_windows, network, peer).is_none() {
+        send_user_verb(
+            state,
+            network,
+            "open_query_window",
+            serde_json::json!({"target_nick": peer}),
+        );
+    }
+}
+
+async fn activate_accepted_request(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    request: E2eRequest,
+) {
+    if state
+        .e2e
+        .activated_requests
+        .contains(&(network.to_string(), request.id))
+    {
+        return;
+    }
+    if !ensure_engine(state, network) {
+        set_e2e_status(ui, "e2e-request-no-identity");
+        return;
+    }
+    if state.e2e.request_was_activated(network, request.id) {
+        return;
+    }
+    let peer = request.peer.clone();
+    if state.e2e.add_locked(network, &peer) {
+        refresh_network_groups(state, ui);
+    }
+    let casemapping = network_casemapping(state, network);
+    let focus_locked = state.windows.current_query
+        && state
+            .windows
+            .current_channel
+            .as_ref()
+            .is_some_and(|(current_network, window)| {
+                if current_network != network {
+                    return false;
+                }
+                match route_for_window(window) {
+                    SendRoute::Plain { nick } => casemapping.nick_eq(&nick, &peer),
+                    _ => false,
+                }
+            });
+    if focus_locked {
+        handle_select_locked_query(state, ui, network.to_string(), &locked_label(&peer));
+    }
+
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        push_open_query_consent(state, ui);
+        return;
+    };
+    let result = match state.e2e.engines.get_mut(network) {
+        Some(engine) => engine.request_keys(&client, &token, &peer).await,
+        None => Err(EngineError::NotReady),
+    };
+    state.e2e.note_key_request(network, &peer, &result);
+    if let Err(error) = result {
+        state.e2e.note_engine_error(network, &peer, &error);
+        if !matches!(error, EngineError::Paced(_)) {
+            persistence::log_line(&format!("e2e keys after consent failed: {error:?}"));
+        }
+        push_open_locked_state(state, ui);
+        push_open_query_consent(state, ui);
+        return;
+    }
+
+    let protocol = state.conn.server_protocol_version;
+    match client
+        .dismiss_e2e_request(&token, network, request.id, protocol, None)
+        .await
+    {
+        Ok(()) => state.e2e.remove_request(network, request.id),
+        Err(error) => persistence::log_line(&format!(
+            "accepted e2e request {} was not dismissed: {error:?}",
+            request.id
+        )),
+    }
+    push_open_locked_state(state, ui);
+    push_open_query_consent(state, ui);
+}
+
+/// Applies one consent request action from the current plain query. The
+/// callback carries the network, peer and request ID so a delayed click cannot
+/// affect a different query.
+pub(crate) async fn handle_e2e_request_action(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    action: String,
+    network: String,
+    peer: String,
+    request_id: String,
+) {
+    let consent_action = matches!(
+        action.as_str(),
+        "start" | "retry" | "accept" | "refuse" | "cancel" | "dismiss"
+    );
+    if consent_action
+        && state
+            .conn
+            .server_protocol_version
+            .is_none_or(|version| version < CONSENT_MIN_PROTOCOL)
+    {
+        set_e2e_status(ui, "e2e-request-unsupported");
+        return;
+    }
+    let request_id = request_id.parse::<u64>().ok().filter(|id| *id > 0);
+    if action != "start" && action != "open" && action != "rekey" && request_id.is_none() {
+        return;
+    }
+    if action != "rekey" && action != "open" {
+        let casemapping = network_casemapping(state, &network);
+        if state
+            .e2e
+            .request_for_peer(&network, &peer, casemapping)
+            .is_some_and(|request| request.id != request_id.unwrap_or_default())
+        {
+            return;
+        }
+    }
+    match action.as_str() {
+        "open" => {
+            let accepted = request_id.and_then(|id| {
+                state
+                    .e2e
+                    .requests
+                    .get(&(network.clone(), id))
+                    .filter(|request| request.state == E2eRequestState::Accepted)
+                    .cloned()
+            });
+            if let Some(request) = accepted {
+                state
+                    .e2e
+                    .activated_requests
+                    .remove(&(network.clone(), request.id));
+                activate_accepted_request(state, ui, &network, request).await;
+            } else {
+                let label = locked_label(&peer);
+                handle_select_locked_query(state, ui, network, &label);
+            }
+        }
+        "rekey" => handle_e2e_rekey(state, ui, &network, &peer).await,
+        "start" | "retry" => {
+            let casemapping = network_casemapping(state, &network);
+            if state.e2e.locked.iter().any(|(known_network, nick)| {
+                known_network == &network && casemapping.nick_eq(nick, &peer)
+            }) {
+                handle_select_locked_query(state, ui, network.clone(), &locked_label(&peer));
+                return;
+            }
+            let Some((client, token, protocol, line)) = consent_context(state, &network) else {
+                set_e2e_status(ui, "e2e-request-no-identity");
+                return;
+            };
+            if action == "retry" {
+                let Some(id) = request_id else { return };
+                let retryable = state
+                    .e2e
+                    .requests
+                    .get(&(network.clone(), id))
+                    .is_some_and(|request| {
+                        matches!(
+                            request_view_state(request),
+                            "expired" | "refused"
+                        )
+                    });
+                if !retryable {
+                    return;
+                }
+            }
+            let request = match E2eRequestCreate::new(&peer, &line) {
+                Ok(request) => request,
+                Err(error) => {
+                    persistence::log_line(&format!("e2e request refused locally: {error:?}"));
+                    set_e2e_status(ui, "e2e-request-failed");
+                    return;
+                }
+            };
+            match client
+                .create_e2e_request(&token, &network, Some(protocol), &request)
+                .await
+            {
+                Ok(request) => {
+                    let accepted = request.state == E2eRequestState::Accepted;
+                    state.e2e.put_request(&network, request.clone());
+                    ensure_plain_query_for_request(state, &network, &request.peer);
+                    if accepted {
+                        activate_accepted_request(state, ui, &network, request).await;
+                    } else {
+                        push_open_query_consent(state, ui);
+                    }
+                }
+                Err(error) => {
+                    persistence::log_line(&format!("e2e consent request failed: {error:?}"));
+                    set_e2e_status(ui, "e2e-request-failed");
+                }
+            }
+        }
+        "accept" => {
+            let Some(id) = request_id else { return };
+            let Some((client, token, protocol, line)) = consent_context(state, &network) else {
+                set_e2e_status(ui, "e2e-request-no-identity");
+                return;
+            };
+            let incoming = state.e2e.requests.get(&(network.clone(), id)).cloned();
+            if !incoming.is_some_and(|request| request.state == E2eRequestState::Incoming) {
+                return;
+            }
+            match client
+                .accept_e2e_request(&token, &network, id, Some(protocol), &line)
+                .await
+            {
+                Ok(()) => {
+                    if let Some(mut request) = incoming {
+                        request.state = E2eRequestState::Accepted;
+                        state.e2e.put_request(&network, request.clone());
+                        activate_accepted_request(state, ui, &network, request).await;
+                    }
+                }
+                Err(error) => {
+                    persistence::log_line(&format!("e2e consent accept failed: {error:?}"));
+                    set_e2e_status(ui, "e2e-request-failed");
+                }
+            }
+        }
+        "refuse" => {
+            let Some(id) = request_id else { return };
+            let (Some(client), Some(token), Some(protocol)) = (
+                state.conn.client.clone(),
+                state.conn.token.clone(),
+                state.conn.server_protocol_version,
+            ) else { return };
+            if protocol < CONSENT_MIN_PROTOCOL {
+                return;
+            }
+            match client.refuse_e2e_request(&token, &network, id, Some(protocol)).await {
+                Ok(()) => {
+                    state.e2e.remove_request(&network, id);
+                    push_open_query_consent(state, ui);
+                }
+                Err(error) => persistence::log_line(&format!("e2e refusal failed: {error:?}")),
+            }
+        }
+        "cancel" | "dismiss" => {
+            let Some(id) = request_id else { return };
+            let Some(request) = state.e2e.requests.get(&(network.clone(), id)).cloned() else {
+                return;
+            };
+            let (Some(client), Some(token), Some(protocol)) = (
+                state.conn.client.clone(),
+                state.conn.token.clone(),
+                state.conn.server_protocol_version,
+            ) else { return };
+            let line = if action == "cancel" && request.state == E2eRequestState::Outgoing {
+                match state
+                    .e2e
+                    .engines
+                    .get(&network)
+                    .and_then(|engine| engine.own_consent_line().ok())
+                {
+                    Some(line) => Some(line),
+                    None => {
+                        set_e2e_status(ui, "e2e-request-no-identity");
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            match client
+                .dismiss_e2e_request(&token, &network, id, Some(protocol), line.as_ref())
+                .await
+            {
+                Ok(()) => {
+                    state.e2e.remove_request(&network, id);
+                    push_open_query_consent(state, ui);
+                }
+                Err(error) => {
+                    persistence::log_line(&format!("e2e request dismiss failed: {error:?}"));
+                    set_e2e_status(ui, "e2e-request-failed");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn consent_context(
+    state: &WorkerState,
+    network: &str,
+) -> Option<(GrappaClient, String, u32, E2eConsentLine)> {
+    let protocol = state.conn.server_protocol_version?;
+    if protocol < CONSENT_MIN_PROTOCOL {
+        return None;
+    }
+    let (client, token) = (state.conn.client.clone()?, state.conn.token.clone()?);
+    let line = state.e2e.engines.get(network)?.own_consent_line().ok()?;
+    Some((client, token, protocol, line))
+}
+
+async fn handle_e2e_rekey(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    peer: &str,
+) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        set_e2e_status(ui, "e2e-not-ready");
+        return;
+    };
+    let result = match state.e2e.engines.get_mut(network) {
+        Some(engine) => engine.request_keys(&client, &token, peer).await,
+        None => Err(EngineError::NotReady),
+    };
+    state.e2e.note_key_request(network, peer, &result);
+    if let Err(error) = result {
+        state.e2e.note_engine_error(network, peer, &error);
+        persistence::log_line(&format!("manual e2e re-key failed: {error:?}"));
+        set_e2e_status(ui, "e2e-request-failed");
+    }
+    push_open_locked_state(state, ui);
+}
+
+/// Applies an E2E consent push. Unknown or malformed events are ignored.
+pub(crate) async fn handle_e2e_request_push(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    payload: &Value,
+) {
+    if state.conn.server_protocol_version.is_none_or(|version| version < CONSENT_MIN_PROTOCOL) {
+        return;
+    }
+    let Some(network) = payload.get("network").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(request) = payload
+        .get("request")
+        .and_then(|value| cordiale_core::rest::E2eRequest::from_value(value).ok())
+    else {
+        return;
+    };
+    state.e2e.put_request(network, request.clone());
+    if request.state == E2eRequestState::Accepted {
+        activate_accepted_request(state, ui, network, request).await;
+        push_open_query_consent(state, ui);
+    } else {
+        ensure_plain_query_for_request(state, network, &request.peer);
+        push_open_query_consent(state, ui);
+    }
+}
+
+pub(crate) fn handle_e2e_request_gone_push(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    payload: &Value,
+) {
+    let Some(network) = payload.get("network").and_then(Value::as_str) else { return };
+    let Some(id) = payload.get("id").and_then(Value::as_u64) else { return };
+    state.e2e.remove_request(network, id);
+    push_open_query_consent(state, ui);
+}
+
+/// Handles the protocol 54 401 event without touching messages Grappa already
+/// accepted for delivery.
+pub(crate) fn handle_no_such_nick_push(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    payload: &Value,
+) {
+    if state
+        .conn
+        .server_protocol_version
+        .is_none_or(|version| version < NO_SUCH_NICK_MIN_PROTOCOL)
+    {
+        return;
+    }
+    let Some(network) = payload.get("network").and_then(Value::as_str) else { return };
+    let Some(nick) = payload.get("nick").and_then(Value::as_str) else { return };
+    if let Some(engine) = state.e2e.engines.get_mut(network) {
+        let drops = engine.no_such_nick(nick);
+        if !drops.is_empty() {
+            set_e2e_status(ui, "e2e-no-such-nick");
+        }
+    }
+    let casemapping = network_casemapping(state, network);
+    state
+        .e2e
+        .remove_outgoing_request_for_peer(network, nick, casemapping);
+    state
+        .e2e
+        .mark_key_request_failed_for_peer(network, nick, casemapping);
+    push_open_locked_state(state, ui);
+    push_open_query_consent(state, ui);
 }
 
 /// Closes the rendezvous that an earlier run left open. A failure is
@@ -1343,6 +1935,7 @@ async fn settle_engine(
         refresh_network_groups(state, ui);
     }
     push_open_locked_state(state, ui);
+    push_open_query_consent(state, ui);
 }
 
 /// Queues the copies of the sent texts in the inboxes of the other devices
@@ -1561,6 +2154,12 @@ fn show_locked_window(state: &WorkerState, ui: &slint::Weak<AppWindow>, network:
         ui.set_current_query_ready(true);
         ui.set_current_query_e2e(true);
         ui.set_current_query_e2e_state(chat_state.into());
+        ui.set_current_query_e2e_start_confirm_open(false);
+        ui.set_current_query_e2e_request_state("".into());
+        ui.set_current_query_e2e_request_id("".into());
+        ui.set_current_query_e2e_can_start(false);
+        ui.set_current_query_e2e_can_accept(false);
+        ui.set_current_query_e2e_has_locked(false);
         ui.set_current_query_peer_nick(peer_nick.into());
         ui.set_compose_text(draft.into());
         ui.set_reply_target_left(false);
@@ -1630,46 +2229,8 @@ pub(crate) fn close_locked_query(
         clear_closed_query_view(ui);
     }
     refresh_network_groups(state, ui);
+    push_open_query_consent(state, ui);
     true
-}
-
-/// After the user opens the plain query of `nick`: shows the locked entry
-/// when the peer has a verified device, and asks for its keys otherwise. The
-/// plain query stays as it is.
-pub(crate) async fn offer_locked_query(
-    state: &mut WorkerState,
-    ui: &slint::Weak<AppWindow>,
-    network: &str,
-    nick: &str,
-) {
-    if !ensure_engine(state, network) {
-        return;
-    }
-    let peer = query_send_target(state, network, nick);
-    let Some(mut engine) = state.e2e.engines.remove(network) else {
-        return;
-    };
-    if !engine.is_ready(&peer) {
-        if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
-            let result = engine.request_keys(&client, &token, &peer).await;
-            state.e2e.note_key_request(network, &peer, &result);
-            if let Err(error) = result {
-                state.e2e.note_engine_error(network, &peer, &error);
-                if !matches!(error, EngineError::Paced(_)) {
-                    persistence::log_line(&format!("e2e key request failed: {error:?}"));
-                }
-            }
-        }
-    }
-    let ready = engine.is_ready(&peer);
-    state.e2e.engines.insert(network.to_string(), engine);
-    // A peer with a key request gets its locked entry too: it shows the
-    // request state. The entry sends nothing in clear text.
-    let asked = state.e2e.key_request(network, &peer) != KeyRequest::NotSent;
-    if (ready || asked) && state.e2e.add_locked(network, &peer) {
-        refresh_network_groups(state, ui);
-    }
-    push_open_locked_state(state, ui);
 }
 
 /// Sends `body` from a locked window through the engine. The text goes out

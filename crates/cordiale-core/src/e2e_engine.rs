@@ -98,6 +98,7 @@ use crate::e2e_refusal::{E2eRefusal, E2eRouteError};
 use crate::e2e_selfcopy::{inbox_accepts, is_expired, DeliveryTracker};
 use crate::e2e_state::E2eStateStore;
 use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError, KeyringKeyProvider};
+use crate::rest::E2eConsentLine;
 use crate::e2e_trust::PeerTrust;
 use crate::e2e_wire::{
     bundle_key_signed_text, device_id_signed_text, did_from_key_text, frame_line_budget,
@@ -618,6 +619,10 @@ struct SentRecord {
     nick: String,
     /// The devices the message was for. Only these devices may NACK it.
     dids: Vec<String>,
+    /// The peer's signed device IDs when the send was accepted. A NACK from
+    /// an unknown device of another identity can mean that no peer device
+    /// could read the message.
+    known_peer_dids: HashSet<String>,
     text: String,
     sends: u8,
     row_id: String,
@@ -1001,6 +1006,14 @@ impl E2eEngine {
 
     pub fn own_did(&self) -> &str {
         &self.own_did
+    }
+
+    /// Builds the identity hint for a user action that starts an encrypted
+    /// chat. The public master key is a hint only; it does not prove trust.
+    pub fn own_consent_line(&self) -> Result<E2eConsentLine, EngineError> {
+        let master = self.own_master_key().ok_or(EngineError::NotReady)?;
+        let payload = serde_json::json!({"v": 2, "master": master}).to_string();
+        Ok(E2eConsentLine::new(&self.own_did, &payload)?)
     }
 
     /// A copy of the trust state of the peers, for the views.
@@ -2370,6 +2383,31 @@ impl E2eEngine {
         }
     }
 
+    /// A 401 says that `nick` is not on the network. Fail only texts that
+    /// still wait for keys. Messages already accepted by Grappa stay intact.
+    pub fn no_such_nick(&mut self, nick: &str) -> Vec<SendDropped> {
+        let cm = self.casemapping;
+        let key = cm.fold(nick);
+        self.keyreq.forget(nick, cm);
+        self.rekey.forget(nick, cm);
+        self.keys_wanted.retain(|wanted| cm.fold(wanted) != key);
+        let waiting: Vec<SendKey> = self
+            .pending
+            .keys()
+            .filter(|send| cm.fold(&send.target) == key)
+            .cloned()
+            .collect();
+        let mut drops = Vec::new();
+        for send in waiting {
+            self.queue.remove(&send);
+            self.pending.remove(&send);
+            if let Some(drop) = self.fail_send(&send, DropReason::NoSuchNick) {
+                drops.push(drop);
+            }
+        }
+        drops
+    }
+
     /// The id block, the master block and the list version that this device
     /// writes in its messages. They come from the provisioning: a device
     /// without a certificate or a signed list is not ready. A device that
@@ -2852,9 +2890,16 @@ impl E2eEngine {
         sends: u8,
         row_id: &str,
     ) {
+        let trust = self.state.trust();
+        let known_peer_dids = trust
+            .listed_devices(&self.network, nick)
+            .iter()
+            .filter_map(|ed25519| did_from_key_text(ed25519).ok())
+            .collect();
         let record = SentRecord {
             nick: nick.to_string(),
             dids: dids.to_vec(),
+            known_peer_dids,
             text: text.to_string(),
             sends,
             row_id: row_id.to_string(),
@@ -2894,11 +2939,25 @@ impl E2eEngine {
         let Some(reference) = nack_reference(&row.payload) else {
             return;
         };
-        if self
-            .sent
-            .get(&reference)
-            .is_none_or(|record| !record.dids.contains(&row.from_did))
-        {
+        let Some(record) = self.sent.get(&reference) else {
+            return;
+        };
+        let cm = self.casemapping;
+        if cm.fold(&record.nick) != cm.fold(&row.from) {
+            return;
+        }
+        let unreadable = row.from_did == WILDCARD
+            || (!record.dids.contains(&row.from_did)
+                && !record.known_peer_dids.contains(&row.from_did));
+        if unreadable {
+            let Some(record) = self.sent.remove(&reference) else {
+                return;
+            };
+            let key = SendKey::new(&self.network, &record.nick, &reference);
+            self.fail_send(&key, DropReason::Unreadable);
+            return;
+        }
+        if !record.dids.contains(&row.from_did) {
             return;
         }
         let Some(mut record) = self.sent.remove(&reference) else {

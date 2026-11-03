@@ -38,7 +38,7 @@ pub enum EventCarrier {
     Requester,
 }
 
-/// The complete set of 59 client event kinds documented by Grappa.
+/// The complete set of 64 client event kinds documented by Grappa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientEventKind {
     ArchiveChanged,
@@ -60,6 +60,10 @@ pub enum ClientEventKind {
     DirectoryFailed,
     DirectoryProgress,
     E2eMessage,
+    E2ePairingClosed,
+    E2ePairingMessage,
+    E2eRequest,
+    E2eRequestGone,
     E2eSendDropped,
     InviteAck,
     IsupportChanged,
@@ -72,6 +76,7 @@ pub enum ClientEventKind {
     MentionsBundle,
     Message,
     NamesReply,
+    NoSuchNick,
     NetworkAttached,
     NetworkDetached,
     NotifyList,
@@ -131,6 +136,10 @@ impl ClientEventKind {
             "directory_failed" => Self::DirectoryFailed,
             "directory_progress" => Self::DirectoryProgress,
             "e2e_message" => Self::E2eMessage,
+            "e2e_pairing_closed" => Self::E2ePairingClosed,
+            "e2e_pairing_message" => Self::E2ePairingMessage,
+            "e2e_request" => Self::E2eRequest,
+            "e2e_request_gone" => Self::E2eRequestGone,
             "e2e_send_dropped" => Self::E2eSendDropped,
             "invite_ack" => Self::InviteAck,
             "isupport_changed" => Self::IsupportChanged,
@@ -143,6 +152,7 @@ impl ClientEventKind {
             "mentions_bundle" => Self::MentionsBundle,
             "message" => Self::Message,
             "names_reply" => Self::NamesReply,
+            "no_such_nick" => Self::NoSuchNick,
             "network_attached" => Self::NetworkAttached,
             "network_detached" => Self::NetworkDetached,
             "notify_list" => Self::NotifyList,
@@ -196,6 +206,10 @@ impl ClientEventKind {
             Self::DirectoryFailed => "directory_failed",
             Self::DirectoryProgress => "directory_progress",
             Self::E2eMessage => "e2e_message",
+            Self::E2ePairingClosed => "e2e_pairing_closed",
+            Self::E2ePairingMessage => "e2e_pairing_message",
+            Self::E2eRequest => "e2e_request",
+            Self::E2eRequestGone => "e2e_request_gone",
             Self::E2eSendDropped => "e2e_send_dropped",
             Self::InviteAck => "invite_ack",
             Self::IsupportChanged => "isupport_changed",
@@ -208,6 +222,7 @@ impl ClientEventKind {
             Self::MentionsBundle => "mentions_bundle",
             Self::Message => "message",
             Self::NamesReply => "names_reply",
+            Self::NoSuchNick => "no_such_nick",
             Self::NetworkAttached => "network_attached",
             Self::NetworkDetached => "network_detached",
             Self::NotifyList => "notify_list",
@@ -266,7 +281,7 @@ mod tests {
     use std::collections::HashSet;
 
     /// Every kind, to check the wire-name table end to end.
-    const ALL_CLIENT_EVENT_KINDS: [ClientEventKind; 59] = [
+    const ALL_CLIENT_EVENT_KINDS: [ClientEventKind; 64] = [
         ClientEventKind::ArchiveChanged,
         ClientEventKind::ArchivePurged,
         ClientEventKind::AutoAwayDebounceChanged,
@@ -286,6 +301,10 @@ mod tests {
         ClientEventKind::DirectoryFailed,
         ClientEventKind::DirectoryProgress,
         ClientEventKind::E2eMessage,
+        ClientEventKind::E2ePairingClosed,
+        ClientEventKind::E2ePairingMessage,
+        ClientEventKind::E2eRequest,
+        ClientEventKind::E2eRequestGone,
         ClientEventKind::E2eSendDropped,
         ClientEventKind::InviteAck,
         ClientEventKind::IsupportChanged,
@@ -298,6 +317,7 @@ mod tests {
         ClientEventKind::MentionsBundle,
         ClientEventKind::Message,
         ClientEventKind::NamesReply,
+        ClientEventKind::NoSuchNick,
         ClientEventKind::NetworkAttached,
         ClientEventKind::NetworkDetached,
         ClientEventKind::NotifyList,
@@ -329,13 +349,13 @@ mod tests {
     ];
 
     #[test]
-    fn inventory_has_59_unique_wire_names_and_round_trips() {
+    fn inventory_has_64_unique_wire_names_and_round_trips() {
         let names: HashSet<_> = ALL_CLIENT_EVENT_KINDS
             .iter()
             .map(|kind| kind.as_wire_name())
             .collect();
-        assert_eq!(ALL_CLIENT_EVENT_KINDS.len(), 59);
-        assert_eq!(names.len(), 59);
+        assert_eq!(ALL_CLIENT_EVENT_KINDS.len(), 64);
+        assert_eq!(names.len(), 64);
         for kind in ALL_CLIENT_EVENT_KINDS {
             assert_eq!(
                 ClientEventKind::from_wire_name(kind.as_wire_name()),

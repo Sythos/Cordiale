@@ -363,6 +363,13 @@ impl ReassemblyGate {
         }
     }
 
+    /// Forgets every fragment of a peer after the server says that the nick
+    /// is not present on the network.
+    pub fn forget(&mut self, nick: &str, casemapping: CaseMapping) {
+        self.sync_casemapping(casemapping);
+        self.last_fragment.remove(&nick_key(nick, casemapping));
+    }
+
     /// A reassembly is active until `timeout` has passed since its last
     /// fragment. At exactly `timeout` it is no longer active. A different
     /// casemapping clears the state of the old one.
@@ -452,6 +459,14 @@ impl KeyReqPacer {
             Err(KeyReqRefusal::Interval)
         }
     }
+
+    /// Clears both the per-nick interval and any KEYS reassembly gate. The
+    /// next user action can ask again after a 401 no-such-nick event.
+    pub fn forget(&mut self, nick: &str, casemapping: CaseMapping) {
+        self.sync_casemapping(casemapping);
+        self.limiter.forget(nick, casemapping);
+        self.gate.forget(nick, casemapping);
+    }
 }
 
 /// Result of the deadline check before a send.
@@ -523,10 +538,26 @@ pub enum DropReason {
     Late,
     SendFailed,
     SessionEnded,
+    /// Grappa said that no peer device could read the encrypted message.
+    Unreadable,
+    /// The network reported that the target nick is not present.
+    NoSuchNick,
 }
 
 impl DropReason {
     pub fn from_wire(text: &str) -> Option<Self> {
+        match text {
+            "late" => Some(Self::Late),
+            "send_failed" => Some(Self::SendFailed),
+            "session_ended" => Some(Self::SessionEnded),
+            "unreadable" => Some(Self::Unreadable),
+            "no_such_nick" => Some(Self::NoSuchNick),
+            _ => None,
+        }
+    }
+
+    /// Reasons that Grappa may send in an `e2e_send_dropped` push.
+    pub fn from_server_wire(text: &str) -> Option<Self> {
         match text {
             "late" => Some(Self::Late),
             "send_failed" => Some(Self::SendFailed),
@@ -541,6 +572,8 @@ impl DropReason {
             Self::Late => "late",
             Self::SendFailed => "send_failed",
             Self::SessionEnded => "session_ended",
+            Self::Unreadable => "unreadable",
+            Self::NoSuchNick => "no_such_nick",
         }
     }
 }
@@ -656,8 +689,8 @@ impl SendDropped {
         if msgid.is_empty() {
             return Err(WireError::MissingField);
         }
-        let reason =
-            DropReason::from_wire(required_str(map, "reason")?).ok_or(WireError::BadFieldType)?;
+        let reason = DropReason::from_server_wire(required_str(map, "reason")?)
+            .ok_or(WireError::BadFieldType)?;
         Ok(Self {
             key: SendKey::new(network, target, msgid),
             reason,

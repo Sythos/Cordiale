@@ -52,7 +52,7 @@ use crate::e2e_pairing::{
     MessageEnvelope, MessagesEnvelope, PairingCallError, PostPayload, RelayMessage, Rendezvous,
     RendezvousEnvelope,
 };
-use crate::e2e_protocol::{E2eOperation, PairingOperation};
+use crate::e2e_protocol::{E2eOperation, E2eRequestOperation, PairingOperation};
 use crate::e2e_refusal::E2eRouteError;
 use crate::e2e_wire::{pairing_message_fits, WireError};
 use crate::presence::{PresencePins, PresencePref};
@@ -63,11 +63,11 @@ use crate::profile::{
 };
 use crate::rest::{
     ActiveThemePair, ArchiveEntry, ArchiveResponse, BootResponse, ConfigResponse, DirectoryPage,
-    DisplayPrefs, E2eSendRequest, FeaturedChannel, FeaturedChannelsResponse, LoginRequest,
-    LoginResponse, MeResponse, MessageCountResponse, PasskeyAssertion, PasskeyCreationOptions,
-    PasskeyCredential, PasskeyMode, PasskeyOptions, PasskeyRequestOptions, PasskeyStatus,
-    PasskeySummary, PasswordlessRecovery, SendMessageRequest, ShareTokenMint, ThemeIndex,
-    ThemeWire, UploadResponse,
+    DisplayPrefs, E2eConsentLine, E2eRequest, E2eRequestCreate, E2eRequestList, E2eSendRequest,
+    FeaturedChannel, FeaturedChannelsResponse, LoginRequest, LoginResponse, MeResponse,
+    MessageCountResponse, PasskeyAssertion, PasskeyCreationOptions, PasskeyCredential, PasskeyMode,
+    PasskeyOptions, PasskeyRequestOptions, PasskeyStatus, PasskeySummary, PasswordlessRecovery,
+    SendMessageRequest, ShareTokenMint, ThemeIndex, ThemeWire, UploadResponse,
 };
 
 /// Refuses a history target that is only a channel prefix: the server
@@ -900,6 +900,151 @@ impl GrappaClient {
             }),
             Err(err) => Err(err),
         }
+    }
+
+    /// `GET /networks/:network_id/e2e/requests` — reads the current consent
+    /// mirror. The route needs protocol 53; callers should run this on every
+    /// session connect because pushes are not replayed.
+    pub async fn fetch_e2e_requests(
+        &self,
+        token: &str,
+        network_id: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<Vec<E2eRequest>, E2eRouteError> {
+        let url = self.e2e_request_url(
+            E2eRequestOperation::List,
+            network_id,
+            None,
+            server_protocol,
+        )?;
+        let value = self
+            .send_e2e_device_request(self.http.get(url).bearer_auth(token))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        Ok(E2eRequestList::from_value(&value)?.requests)
+    }
+
+    /// `POST /networks/:network_id/e2e/requests` — asks a peer to start an
+    /// encrypted chat, or accepts a request that crosses this one.
+    pub async fn create_e2e_request(
+        &self,
+        token: &str,
+        network_id: &str,
+        server_protocol: Option<u32>,
+        request: &E2eRequestCreate,
+    ) -> Result<E2eRequest, E2eRouteError> {
+        let url = self.e2e_request_url(
+            E2eRequestOperation::Create,
+            network_id,
+            None,
+            server_protocol,
+        )?;
+        let value = self
+            .send_e2e_device_request(self.http.post(url).bearer_auth(token).json(request))
+            .await?
+            .ok_or(WireError::MissingField)?;
+        let request = value.get("request").ok_or(WireError::MissingField)?;
+        Ok(E2eRequest::from_value(request)?)
+    }
+
+    /// `POST /networks/:network_id/e2e/requests/:id/accept` — accepts an
+    /// incoming request and sends the local device's consent line.
+    pub async fn accept_e2e_request(
+        &self,
+        token: &str,
+        network_id: &str,
+        request_id: u64,
+        server_protocol: Option<u32>,
+        line: &E2eConsentLine,
+    ) -> Result<(), E2eRouteError> {
+        let url = self.e2e_request_url(
+            E2eRequestOperation::Accept,
+            network_id,
+            Some(request_id),
+            server_protocol,
+        )?;
+        self.send_e2e_device_request(self.http.post(url).bearer_auth(token).json(line))
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /networks/:network_id/e2e/requests/:id/refuse` — refusal does
+    /// not need a local identity. Grappa sends it from `*` when no body is
+    /// supplied.
+    pub async fn refuse_e2e_request(
+        &self,
+        token: &str,
+        network_id: &str,
+        request_id: u64,
+        server_protocol: Option<u32>,
+    ) -> Result<(), E2eRouteError> {
+        let url = self.e2e_request_url(
+            E2eRequestOperation::Refuse,
+            network_id,
+            Some(request_id),
+            server_protocol,
+        )?;
+        self.send_e2e_device_request(self.http.post(url).bearer_auth(token))
+            .await?;
+        Ok(())
+    }
+
+    /// `DELETE /networks/:network_id/e2e/requests/:id` — an outgoing live
+    /// request needs the consent line for CANCEL. Dismissing any other state
+    /// needs no body.
+    pub async fn dismiss_e2e_request(
+        &self,
+        token: &str,
+        network_id: &str,
+        request_id: u64,
+        server_protocol: Option<u32>,
+        line: Option<&E2eConsentLine>,
+    ) -> Result<(), E2eRouteError> {
+        let url = self.e2e_request_url(
+            E2eRequestOperation::Dismiss,
+            network_id,
+            Some(request_id),
+            server_protocol,
+        )?;
+        let builder = self.http.delete(url).bearer_auth(token);
+        let builder = match line {
+            Some(line) => builder.json(line),
+            None => builder,
+        };
+        self.send_e2e_device_request(builder).await?;
+        Ok(())
+    }
+
+    /// Builds a protocol-gated URL for one consent route. Request IDs are
+    /// numeric and appended as a separate path segment.
+    fn e2e_request_url(
+        &self,
+        operation: E2eRequestOperation,
+        network_id: &str,
+        request_id: Option<u64>,
+        server_protocol: Option<u32>,
+    ) -> Result<reqwest::Url, E2eRouteError> {
+        if !operation.available(server_protocol)
+            || operation.needs_id() != request_id.is_some()
+            || request_id.is_some_and(|id| id == 0)
+        {
+            return Err(E2eRouteError::Unavailable);
+        }
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|err| GrappaClientError::InvalidUrl(err.to_string()))?;
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|()| GrappaClientError::InvalidUrl(self.base_url.clone()))?;
+        segments.extend(["networks", network_id, "e2e", "requests"]);
+        if let Some(id) = request_id {
+            segments.push(&id.to_string());
+        }
+        let suffix = operation.suffix();
+        if !suffix.is_empty() {
+            segments.push(suffix);
+        }
+        drop(segments);
+        Ok(url)
     }
 
     /// `POST /networks/:network_id/e2e/devices/:did/claim` — takes one key of
