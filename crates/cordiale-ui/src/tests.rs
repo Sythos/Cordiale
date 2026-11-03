@@ -5665,6 +5665,126 @@ fn nick_right_click_opens_menu_without_opening_query() {
     }
 }
 
+#[test]
+fn query_layout_fills_window_and_separator_can_be_dragged() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.on_fit_column_widths(
+        |window, sidebar, members, sidebar_min, members_min, reserved, sidebar_max| {
+            let fitted = fit_columns(
+                window,
+                sidebar,
+                members,
+                sidebar_min,
+                members_min,
+                reserved,
+                sidebar_max,
+            );
+            ColumnWidths {
+                sidebar: fitted.sidebar,
+                members: fitted.members,
+            }
+        },
+    );
+    ui.set_theme("dark".into());
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_query(true);
+    ui.set_current_query_ready(true);
+    ui.set_current_query_e2e_state("e2e-chat-clear".into());
+    ui.set_shared_channels(
+        Rc::new(slint::VecModel::from(vec!["#one".into(), "#two".into()])).into(),
+    );
+    ui.show().unwrap();
+    let bounds = || {
+        let snapshot = ui.window().take_snapshot().unwrap();
+        let mut bounds = (u32::MAX, 0, u32::MAX, 0);
+        for (i, pixel) in snapshot.as_bytes().as_chunks::<4>().0.iter().enumerate() {
+            if pixel[..3] == [0x1f, 0x2f, 0x3a] {
+                let (x, y) = (i as u32 % snapshot.width(), i as u32 / snapshot.width());
+                bounds = (
+                    bounds.0.min(x),
+                    bounds.1.max(x),
+                    bounds.2.min(y),
+                    bounds.3.max(y),
+                );
+            }
+        }
+        assert_ne!(bounds.0, u32::MAX, "query banner must be visible");
+        bounds
+    };
+    for width in [900, 1920] {
+        ui.window()
+            .set_size(slint::LogicalSize::new(width as f32, 1000.));
+        let (left, right, top, bottom) = bounds();
+        assert!(
+            right - left > width - 756,
+            "query did not fill the available width"
+        );
+        assert!(
+            bottom - top < 160,
+            "query banner consumed the transcript height"
+        );
+        let drag = |x: f32, delta: f32| {
+            let position = slint::LogicalPosition::new(x, 700.);
+            let button = PointerEventButton::Left;
+            ui.window()
+                .dispatch_event(WindowEvent::PointerPressed { position, button });
+            let position = slint::LogicalPosition::new(x + delta, 700.);
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            ui.window().take_snapshot().unwrap();
+            ui.window()
+                .dispatch_event(WindowEvent::PointerReleased { position, button });
+        };
+        let separator = |edge: u32, left_side: bool| {
+            let snapshot = ui.window().take_snapshot().unwrap();
+            let pixels = snapshot.as_bytes();
+            let mut xs: Box<dyn Iterator<Item = u32>> = if left_side {
+                Box::new((0..edge).rev())
+            } else {
+                Box::new(edge + 1..snapshot.width())
+            };
+            xs.find(|x| {
+                let offset = (700 * snapshot.width() + x) as usize * 4;
+                pixels[offset..offset + 3] == [128, 128, 128]
+            })
+            .expect("rendered separator") as f32
+        };
+        drag(separator(left, true), 60.);
+        let after_sidebar = bounds();
+        assert!(
+            after_sidebar.0 > left + 40,
+            "sidebar separator did not move"
+        );
+        drag(separator(after_sidebar.1, false), -60.);
+        let after_members = bounds();
+        assert!(
+            after_members.1 + 40 < after_sidebar.1,
+            "member separator did not move"
+        );
+    }
+    for (encrypted, state) in [
+        (false, "e2e-chat-clear"),
+        (true, "e2e-chat-active"),
+        (true, "e2e-chat-keys"),
+    ] {
+        ui.set_current_query_e2e(encrypted);
+        ui.set_current_query_e2e_can_start(true);
+        ui.set_current_query_e2e_state(state.into());
+        let (left, right, top, bottom) = bounds();
+        assert!(
+            right - left > 1100,
+            "action row constrained query width: {state}"
+        );
+        assert!(
+            bottom - top < 160,
+            "action row expanded the notice: {state}"
+        );
+    }
+}
+
 fn set_headless_software_platform() {
     std::thread_local! {
         static SETUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
