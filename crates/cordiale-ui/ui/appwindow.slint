@@ -4217,6 +4217,8 @@ export component AppWindow inherits Window {
             }
 
             if current-query && current-query-e2e-state != "" : Rectangle {
+                // Keep the notice compact so the transcript gets the remaining height.
+                vertical-stretch: 0;
                 background: theme == "dark" ? #1f2f3a : #e3f1fb;
                 border-width: 1px;
                 border-color: theme == "dark" ? #3d7ea6 : #2b7bb9;
@@ -4268,6 +4270,8 @@ export component AppWindow inherits Window {
                                 e2e-request-action("rekey", window-source-network, current-query-peer-nick, "");
                             }
                         }
+                        // A fixed-width or empty action row must not cap the whole chat.
+                        Rectangle { horizontal-stretch: 1; }
                     }
                     if !current-query-e2e && current-query-e2e-request-state == "" : HorizontalBox {
                         if current-query-e2e-has-locked : CompactButton {
@@ -4282,6 +4286,8 @@ export component AppWindow inherits Window {
                                 current-query-e2e-start-confirm-open = true;
                             }
                         }
+                        // A fixed-width or empty action row must not cap the whole chat.
+                        Rectangle { horizontal-stretch: 1; }
                     }
                     if !current-query-e2e && current-query-e2e-request-state == "" && current-query-e2e-start-confirm-open : VerticalBox {
                         spacing: 6px;
