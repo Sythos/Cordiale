@@ -1580,6 +1580,10 @@ export component AppWindow inherits Window {
     // The pairing QR code of `/e2e pair`, drawn from the pairing link URL.
     in property <image> e2e-pair-qr;
     in property <string> e2e-pair-qr-code: "";
+    // The link behind the QR code, held only while the pairing is open, and
+    // the result of the last copy ("", "ok" or "failed").
+    in-out property <string> e2e-pair-link: "";
+    in-out property <string> e2e-pair-copy-result: "";
     in-out property <bool> e2e-pair-qr-visible: false;
     // Only show the roster after Grappa confirms this window is joined.
     // Autojoin entries in `/boot` can be known but not currently connected.
@@ -1989,6 +1993,8 @@ export component AppWindow inherits Window {
     callback security-passwordless-cancel();
     callback security-copy-passwordless-codes();
     callback copy-text-requested(string);
+    // Copies the pairing link and tells whether the clipboard took it.
+    callback copy-pair-link(string) -> bool;
     callback security-copy-recovery-codes();
     callback saved-profile-connect-requested(string, string);
     callback server-selected(string);
@@ -9142,6 +9148,8 @@ export component AppWindow inherits Window {
             key-pressed(event) => {
                 if event.text == Key.Escape {
                     e2e-pair-qr-visible = false;
+                    e2e-pair-link = "";
+                    e2e-pair-copy-result = "";
                     return accept;
                 }
                 return reject;
@@ -9149,7 +9157,7 @@ export component AppWindow inherits Window {
 
             Rectangle {
                 width: min(420px, parent.width - 32px);
-                height: min(460px, parent.height - 32px);
+                height: min(520px, parent.height - 32px);
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 border-width: 1px;
@@ -9173,7 +9181,11 @@ export component AppWindow inherits Window {
                         Button {
                             text: "✕";
                             accessible-label: @tr("Close the pairing code");
-                            clicked => { e2e-pair-qr-visible = false; }
+                            clicked => {
+                                e2e-pair-qr-visible = false;
+                                e2e-pair-link = "";
+                                e2e-pair-copy-result = "";
+                            }
                         }
                     }
 
@@ -9193,10 +9205,32 @@ export component AppWindow inherits Window {
                             accessible-label: @tr("QR code of the pairing link");
                         }
                     }
-                    LineEdit {
-                        text: e2e-pair-qr-code;
-                        read-only: true;
-                        accessible-label: @tr("Pairing code");
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        LineEdit {
+                            text: e2e-pair-qr-code;
+                            read-only: true;
+                            accessible-label: @tr("Pairing code");
+                            horizontal-stretch: 1;
+                        }
+                        CompactButton {
+                            text: "📋  " + @tr("Copy link");
+                            enabled: e2e-pair-link != "";
+                            clicked => {
+                                e2e-pair-copy-result = copy-pair-link(e2e-pair-link) ? "ok" : "failed";
+                            }
+                        }
+                    }
+                    if e2e-pair-copy-result == "ok" : Text {
+                        text: @tr("The link is copied.");
+                        wrap: word-wrap;
+                        color: palette-muted;
+                    }
+                    if e2e-pair-copy-result == "failed" : Text {
+                        text: @tr("The link was not copied. The pairing stays open.");
+                        wrap: word-wrap;
+                        color: #d04040;
                     }
                 }
             }
