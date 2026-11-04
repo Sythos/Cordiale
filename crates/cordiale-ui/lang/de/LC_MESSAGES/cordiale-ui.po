@@ -3823,3 +3823,11 @@ msgstr "Soll {} einen verschlüsselten Chat starten? Die Person braucht einen ko
 msgctxt "AppWindow"
 msgid "Ask"
 msgstr "Fragen"
+
+msgctxt "AppWindow"
+msgid "Show ciphertext"
+msgstr "Geheimtext anzeigen"
+
+msgctxt "AppWindow"
+msgid "Show plaintext"
+msgstr "Klartext anzeigen"

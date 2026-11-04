@@ -3823,3 +3823,11 @@ msgstr "Demander à {} de démarrer une discussion chiffrée ? Cette personne a 
 msgctxt "AppWindow"
 msgid "Ask"
 msgstr "Demander"
+
+msgctxt "AppWindow"
+msgid "Show ciphertext"
+msgstr "Afficher le texte chiffré"
+
+msgctxt "AppWindow"
+msgid "Show plaintext"
+msgstr "Afficher le texte en clair"

@@ -3823,3 +3823,11 @@ msgstr "¿Quieres pedir a {} que inicie un chat cifrado? Necesita un cliente com
 msgctxt "AppWindow"
 msgid "Ask"
 msgstr "Preguntar"
+
+msgctxt "AppWindow"
+msgid "Show ciphertext"
+msgstr "Mostrar el texto cifrado"
+
+msgctxt "AppWindow"
+msgid "Show plaintext"
+msgstr "Mostrar el texto en claro"
