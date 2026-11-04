@@ -82,6 +82,11 @@ pub(crate) struct E2eRuntime {
     /// above it are unread. It is not saved: after a restart every entry
     /// starts read.
     read_incoming: HashMap<(String, String), usize>,
+    /// Locked entries `(network, nick)` that show the captured ciphertext
+    /// and not the text. It is a display choice of this session only: it is
+    /// never saved, and a close of the entry or a change of the identity
+    /// clears it.
+    cipher_view: HashSet<(String, String)>,
     /// Networks whose provisioning ended with success in this session. An
     /// open engine is not proof: a run that failed after the Olm account was
     /// saved still opens one, so the next connect provisions again.
@@ -150,6 +155,30 @@ impl E2eRuntime {
     /// Adds the locked entry of `nick`; true when it is new.
     pub(crate) fn add_locked(&mut self, network: &str, nick: &str) -> bool {
         self.locked.insert((network.to_string(), nick.to_string()))
+    }
+
+    /// True when the locked entry shows the captured ciphertext.
+    pub(crate) fn shows_ciphertext(&self, network: &str, nick: &str) -> bool {
+        self.cipher_view
+            .contains(&(network.to_string(), nick.to_string()))
+    }
+
+    /// Switches the view of one locked entry; returns the new value
+    /// (true is ciphertext).
+    pub(crate) fn toggle_ciphertext(&mut self, network: &str, nick: &str) -> bool {
+        let key = (network.to_string(), nick.to_string());
+        if self.cipher_view.remove(&key) {
+            false
+        } else {
+            self.cipher_view.insert(key);
+            true
+        }
+    }
+
+    /// Resets the view of every locked entry of `network`.
+    pub(crate) fn clear_ciphertext_views(&mut self, network: &str) {
+        self.cipher_view
+            .retain(|(known_network, _)| known_network != network);
     }
 
     /// The key request state of a peer.
@@ -522,6 +551,56 @@ pub(crate) fn locked_row_with_drop(
         rename_to: None,
         encrypted: true,
     }
+}
+
+/// The text of a row in the ciphertext view that has no captured payload.
+pub(crate) const NO_CIPHERTEXT_TEXT: &str = "[No ciphertext on this device]";
+
+/// The rows of one history message for the view that is active. The plain
+/// view gives the one row of [`locked_row_with_drop`]. The ciphertext view
+/// gives one row for each captured payload, in the form
+/// `E2E <VERB> <MESSAGE_ID> <PAYLOAD>`, and never the text: a message with no
+/// payload gets a placeholder row. A dropped send shows no payload, because
+/// the payload did not reach the peer. The rows keep the time and the sender
+/// of the message.
+pub(crate) fn locked_rows_for_view(
+    message: &E2eMessage,
+    own_nick: &str,
+    peer: &str,
+    dropped: Option<DropReason>,
+    ciphertext: bool,
+) -> Vec<RenderedMessage> {
+    let plain = locked_row_with_drop(message, own_nick, peer, dropped);
+    if !ciphertext {
+        return vec![plain];
+    }
+    let mark = if dropped.is_some() { "\u{26A0} " } else { "" };
+    let lines: Vec<String> = if message.captures.is_empty() {
+        vec![format!("{mark}{NO_CIPHERTEXT_TEXT}")]
+    } else {
+        message
+            .captures
+            .iter()
+            .map(|capture| {
+                let msgid = capture.msgid.as_deref().unwrap_or("-");
+                let verb = capture.verb.to_uppercase();
+                match dropped {
+                    Some(reason) => format!(
+                        "{mark}E2E {verb} {msgid} [dropped: {}; not sent]",
+                        reason.wire_name()
+                    ),
+                    None => format!("E2E {verb} {msgid} {}", capture.payload),
+                }
+            })
+            .collect()
+    };
+    lines
+        .into_iter()
+        .map(|text| RenderedMessage {
+            text,
+            ..plain.clone()
+        })
+        .collect()
 }
 
 /// Opens the engine of `network` once for the session. False when the
@@ -1657,6 +1736,7 @@ fn settle_reset(
     let changed = engine.take_changed_peers();
     state.e2e.engines.insert(network.to_string(), engine);
     state.e2e.reset.insert(network.to_string());
+    state.e2e.clear_ciphertext_views(network);
     for nick in changed {
         refresh_locked_view(state, ui, network, &nick);
     }
@@ -1730,6 +1810,7 @@ fn finish_pairing_step(
     // A finished join gave the device a new identity after a reset.
     if matches!(active.session.status(), PairingStatus::Done) {
         state.e2e.reset.remove(&active.network);
+        state.e2e.clear_ciphertext_views(&active.network);
     }
     if active.session.is_active() {
         state.e2e.pairing = Some(active);
@@ -2119,6 +2200,7 @@ fn load_locked_rows(state: &mut WorkerState, network: &str, nick: &str) {
         .cloned()
         .unwrap_or_else(|| "me".to_string());
     let engine = state.e2e.engines.get(network);
+    let ciphertext = state.e2e.shows_ciphertext(network, nick);
     let rows: Vec<RenderedMessage> = state
         .e2e
         .history_of(network)
@@ -2126,9 +2208,9 @@ fn load_locked_rows(state: &mut WorkerState, network: &str, nick: &str) {
             history
                 .messages(&conversation_id(network, nick))
                 .into_iter()
-                .map(|message| {
+                .flat_map(|message| {
                     let dropped = engine.and_then(|engine| engine.dropped_reason(&message.id));
-                    locked_row_with_drop(message, &own_nick, nick, dropped)
+                    locked_rows_for_view(message, &own_nick, nick, dropped, ciphertext)
                 })
                 .collect()
         })
@@ -2228,6 +2310,48 @@ pub(crate) fn handle_select_locked_query(
     mark_active_window_read(state, ui);
 }
 
+/// The locked entries that show ciphertext, as `(network, window label)`.
+/// The sidebar menu reads it to name its switch.
+pub(crate) fn ciphertext_view_windows(state: &WorkerState) -> HashSet<(String, String)> {
+    state
+        .e2e
+        .cipher_view
+        .iter()
+        .map(|(network, nick)| {
+            (
+                network.clone(),
+                LocalQuery::new(network, QueryLane::Locked, nick).window_name(),
+            )
+        })
+        .collect()
+}
+
+/// Switches the view of one locked entry between plaintext and ciphertext.
+/// The switch changes the display only: the history, the keys and the send
+/// path stay as they are. False when `label` is not a locked entry.
+pub(crate) fn toggle_ciphertext_view(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    label: &str,
+) -> bool {
+    let SendRoute::Encrypted { nick } = route_for_window(label) else {
+        return false;
+    };
+    if !state
+        .e2e
+        .locked
+        .contains(&(network.to_string(), nick.clone()))
+    {
+        return false;
+    }
+    state.e2e.toggle_ciphertext(network, &nick);
+    // An entry that is not open loads its rows when the user opens it.
+    refresh_locked_view(state, ui, network, &nick);
+    refresh_network_groups(state, ui);
+    true
+}
+
 /// Closes a locked entry. False when `label` is not a locked entry, so the
 /// caller closes the plain query as before. The sealed history stays.
 pub(crate) fn close_locked_query(
@@ -2241,6 +2365,10 @@ pub(crate) fn close_locked_query(
     };
     let was_open = open_locked_window(state)
         .is_some_and(|(open_network, open_nick)| open_network == network && open_nick == nick);
+    state
+        .e2e
+        .cipher_view
+        .remove(&(network.to_string(), nick.clone()));
     state.e2e.locked.remove(&(network.to_string(), nick));
     state
         .transcript
@@ -2365,6 +2493,55 @@ mod tests {
         // With no client the new engine of a join does not open.
         assert!(take_pairing_engine(&mut state, "net", true).is_none());
         assert!(state.e2e.reset.contains("net"));
+    }
+
+    #[test]
+    fn the_ciphertext_view_names_the_locked_window_and_keeps_the_unread_count() {
+        use cordiale_core::e2e_store::{
+            CaptureDirection, E2eCapture, E2eKeyProvider, E2eStoreError,
+        };
+        struct Key;
+        impl E2eKeyProvider for Key {
+            fn load_or_create_key(&self) -> Result<[u8; 32], E2eStoreError> {
+                Ok([7; 32])
+            }
+        }
+        let dir = tempfile::tempdir().expect("dir");
+        let mut history =
+            E2eHistoryStore::open(dir.path().join("history.bin"), &Key).expect("open");
+        // One incoming message with two payloads is one unread row.
+        history
+            .append(E2eMessage {
+                id: "net:in:1".to_string(),
+                conversation_id: conversation_id("net", "bob"),
+                sender_device: "AAAAAAAAAAA".to_string(),
+                sent_at: 10,
+                text: "hi".to_string(),
+                encrypted: true,
+                captures: vec![
+                    E2eCapture {
+                        verb: "pkmsg".to_string(),
+                        msgid: None,
+                        payload: "P1".to_string(),
+                        direction: CaptureDirection::In,
+                    },
+                    E2eCapture {
+                        verb: "msg".to_string(),
+                        msgid: None,
+                        payload: "P2".to_string(),
+                        direction: CaptureDirection::In,
+                    },
+                ],
+            })
+            .expect("append");
+        assert_eq!(incoming_rows(&history, "net", "bob"), 1);
+
+        let mut state = WorkerState::new();
+        assert!(ciphertext_view_windows(&state).is_empty());
+        state.e2e.toggle_ciphertext("net", "bob");
+        let windows = ciphertext_view_windows(&state);
+        let label = LocalQuery::new("net", QueryLane::Locked, "bob").window_name();
+        assert!(windows.contains(&("net".to_string(), label)));
     }
 
     #[test]
