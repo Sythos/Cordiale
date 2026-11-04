@@ -119,6 +119,24 @@ const PAYLOAD_VERSION: u32 = 2;
 /// from the final source and is recorded in [`md3_pacing`].
 const KEYS_REASSEMBLY_TIMEOUT: Duration = md3_pacing::REASSEMBLY_TIMEOUT;
 
+/// The stored form of an action (`/me`) row: the text between a CTCP ACTION
+/// frame. The frame stays inside the sealed history and inside the Olm
+/// plaintext, which carries it as `{"t":"action","body":…}`. It never leaves
+/// the program as a clear CTCP message.
+const ACTION_OPEN: &str = "\u{1}ACTION ";
+const ACTION_CLOSE: char = '\u{1}';
+
+/// The stored text of an action row with the words `text`.
+pub fn action_text(text: &str) -> String {
+    format!("{ACTION_OPEN}{text}{ACTION_CLOSE}")
+}
+
+/// The words of an action row, or `None` when `stored` is a normal text.
+pub fn action_body(stored: &str) -> Option<&str> {
+    let rest = stored.strip_prefix(ACTION_OPEN)?;
+    Some(rest.strip_suffix(ACTION_CLOSE).unwrap_or(rest))
+}
+
 /// `sender_device` of own rows; this history is local to one device.
 pub const OWN_DEVICE: &str = "own";
 
@@ -436,7 +454,9 @@ impl MessagePayload {
 /// What an inner message says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InnerKind {
-    /// Chat text from a person: `{"t":"text","body":…}`.
+    /// Chat text from a person: `{"t":"text","body":…}`. An action
+    /// `{"t":"action","body":…}` reads as the stored form of
+    /// [`action_text`].
     Text { body: String },
     /// A copy of the text that another device of the account sent to `peer`:
     /// `{"t":"copy","peer":…,"body":…}`.
@@ -473,6 +493,9 @@ impl Inner {
         let kind = match map.get("t")?.as_str()? {
             "text" => field("body").map_or(InnerKind::Other, |body| InnerKind::Text {
                 body: body.to_string(),
+            }),
+            "action" => field("body").map_or(InnerKind::Other, |body| InnerKind::Text {
+                body: action_text(body),
             }),
             "copy" => match (field("peer"), field("body")) {
                 (Some(peer), Some(body)) => InnerKind::Copy {
@@ -716,15 +739,19 @@ enum Outgoing<'a> {
 impl Outgoing<'_> {
     fn to_json(&self, lv: u32, fb: Option<&str>) -> String {
         let (t, master) = match self {
-            Outgoing::Text(body) => {
+            Outgoing::Text(stored) => {
+                let (t, body) = match action_body(stored) {
+                    Some(words) => ("action", words),
+                    None => ("text", *stored),
+                };
                 return InnerOut {
-                    t: "text",
+                    t,
                     peer: None,
                     body,
                     lv,
                     fb,
                 }
-                .to_json()
+                .to_json();
             }
             Outgoing::List(master) => ("list", Some(*master)),
             Outgoing::ListReq => ("listreq", None),
@@ -7008,6 +7035,24 @@ mod tests {
         let second = fresh_local_id();
         assert_ne!(first, second);
         assert!(valid_peer(&first));
+    }
+
+    #[test]
+    fn an_action_inner_message_has_the_wire_form_of_the_other_clients() {
+        let stored = action_text("waves");
+        assert_eq!(action_body(&stored), Some("waves"));
+        assert_eq!(action_body("waves"), None);
+        let json = Outgoing::Text(&stored).to_json(1, None);
+        assert_eq!(json, r#"{"t":"action","body":"waves","lv":1}"#);
+        assert!(!json.contains('\u{1}'));
+        let inner = Inner::parse(json.as_bytes()).expect("inner");
+        assert_eq!(inner.kind, InnerKind::Text { body: stored });
+    }
+
+    #[test]
+    fn a_text_inner_message_stays_a_text() {
+        let json = Outgoing::Text("waves").to_json(1, None);
+        assert_eq!(json, r#"{"t":"text","body":"waves","lv":1}"#);
     }
 
     #[test]
