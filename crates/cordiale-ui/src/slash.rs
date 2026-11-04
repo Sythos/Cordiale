@@ -719,7 +719,7 @@ fn send_user_topic_verb(state: &WorkerState, verb: &str, payload: Value) {
     }
 }
 
-fn radio_now_playing() -> RadioNowPlaying {
+pub(crate) fn radio_now_playing() -> RadioNowPlaying {
     RADIO_NOW_PLAYING
         .lock()
         .ok()

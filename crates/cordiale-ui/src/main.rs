@@ -4263,6 +4263,9 @@ fn can_moderate_members(
 /// What `$C` means in an alias: the channel of the open window, the peer of
 /// an open query, nothing in the status window or with no window open.
 fn alias_target(state: &WorkerState) -> Option<String> {
+    if let Some((network, nick)) = open_locked_window(state) {
+        return Some(query_send_target(state, &network, &nick));
+    }
     let (network, channel) = state.windows.current_channel.as_ref()?;
     if state.windows.current_query {
         Some(query_send_target(state, network, channel))
@@ -4274,12 +4277,15 @@ fn alias_target(state: &WorkerState) -> Option<String> {
 }
 
 async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, body: String) {
-    // A locked window sends through the E2E engine only, never as plain text.
-    if let Some((network, nick)) = open_locked_window(state) {
-        handle_send_locked(state, ui, network, nick, body).await;
-        return;
-    }
-    if state.windows.current_query && !state.windows.current_query_ready {
+    // A locked window sends text through the E2E engine only, never as plain
+    // text. A line with a slash goes on as a command of the real peer.
+    let locked = open_locked_window(state);
+    if let Some((network, nick)) = &locked {
+        if !body.trim_start().starts_with('/') {
+            handle_send_locked(state, ui, network.clone(), nick.clone(), body).await;
+            return;
+        }
+    } else if state.windows.current_query && !state.windows.current_query_ready {
         return;
     }
     let body = if body.trim_start().starts_with('/') {
@@ -4299,7 +4305,7 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     } else {
         body
     };
-    let (Some(client), Some(token), Some((network, channel))) = (
+    let (Some(client), Some(token), Some((network, window))) = (
         &state.conn.client,
         &state.conn.token,
         &state.windows.current_channel,
@@ -4307,6 +4313,36 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
         let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("no-active-network".into()));
         return;
     };
+    // The command context of a locked window is the real peer, never the
+    // display name with the lock label.
+    let channel = locked.as_ref().map_or(window, |(_, nick)| nick);
+    if let Some((locked_network, nick)) = &locked {
+        let (locked_network, nick) = (locked_network.clone(), nick.clone());
+        match classify_locked_input(&body) {
+            LockedInput::Text(text) => {
+                handle_send_locked(state, ui, locked_network, nick, text).await;
+                return;
+            }
+            LockedInput::Action(words) => {
+                handle_send_locked_action(state, ui, locked_network, nick, words).await;
+                return;
+            }
+            LockedInput::NowPlaying => {
+                match now_playing_text(&radio_now_playing(), std::time::Instant::now()) {
+                    Ok(line) => {
+                        handle_send_locked_action(state, ui, locked_network, nick, line).await;
+                    }
+                    Err((kind, station)) => set_command_status(ui, kind, station),
+                }
+                return;
+            }
+            LockedInput::Reject => {
+                let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("e2e-text-only".into()));
+                return;
+            }
+            LockedInput::Command => {}
+        }
+    }
     if channel == SERVER_WINDOW_NAME && !body.trim_start().starts_with('/') {
         let _ = ui.upgrade_in_event_loop(|ui| {
             ui.set_status_kind("server-window-commands-only".into());
@@ -4385,6 +4421,11 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
         return;
     }
 
+    // A locked window never sends plain text.
+    if locked.is_some() {
+        let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("e2e-text-only".into()));
+        return;
+    }
     let request = SendMessageRequest::plain(body);
     let target = if state.windows.current_query {
         query_send_target(state, network, channel)
