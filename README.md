@@ -311,7 +311,8 @@ cargo build --release --package cordiale-ui
   macOS, plus the `ctap-hid` feature) and the release packaging;
 - `docs/` — technical documentation: Grappa protocol contract
   (`protocol-notes.md`), feature matrix (`feature-matrix.md`), packaging
-  notes, and how to [install a release](docs/installation.md).
+  notes, how to [install a release](docs/installation.md), and a
+  [user guide for encrypted queries](docs/e2e-user-guide.md).
 
 ## References
 
