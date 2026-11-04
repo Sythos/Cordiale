@@ -180,6 +180,34 @@ pub struct E2eMessage {
     /// this store never held a plain row.
     #[serde(default = "encrypted_default")]
     pub encrypted: bool,
+    /// The exact E2E payloads that this device sent or received for the row,
+    /// in order. A row written before captures existed, a copy from another
+    /// device and a queued text that was not sent have none. The payloads are
+    /// sealed with the row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captures: Vec<E2eCapture>,
+}
+
+/// Which way a captured payload went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureDirection {
+    /// This device received the payload.
+    In,
+    /// This device made the payload for a send request.
+    Out,
+}
+
+/// One E2E payload exactly as this device made it or got it. An accepted send
+/// is not proof of delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct E2eCapture {
+    /// The wire verb: `pkmsg` or `msg`.
+    pub verb: String,
+    /// The message id of the wire, when the server gave one.
+    pub msgid: Option<String>,
+    pub payload: String,
+    pub direction: CaptureDirection,
 }
 
 fn encrypted_default() -> bool {
@@ -266,6 +294,46 @@ impl E2eHistoryStore {
             .partition_point(|row| row.sent_at <= message.sent_at);
         self.messages.insert(at, message);
         Ok(())
+    }
+
+    /// Adds a captured payload to the row `id`. A row that is not in the
+    /// history gives `Ok(false)`. The file is written again; on a failure the
+    /// row stays as it was.
+    pub fn add_capture(&mut self, id: &str, capture: E2eCapture) -> Result<bool, E2eStoreError> {
+        let Some(position) = self.messages.iter().position(|row| row.id == id) else {
+            return Ok(false);
+        };
+        let mut rows = self.messages.clone();
+        rows[position].captures.push(capture);
+        if let Err(err) = self.rewrite_file(&rows) {
+            wipe(rows);
+            return Err(err);
+        }
+        wipe(std::mem::replace(&mut self.messages, rows));
+        Ok(true)
+    }
+
+    /// Case-insensitive search over the captured payloads, oldest first.
+    /// It never reads the text of a row, so a ciphertext view that uses it
+    /// shows no plaintext.
+    pub fn search_captures(&self, conversation_id: Option<&str>, needle: &str) -> Vec<&E2eMessage> {
+        let needle = fold_case(needle);
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        self.messages
+            .iter()
+            .filter(|message| conversation_id.is_none_or(|id| message.conversation_id == id))
+            .filter(|message| {
+                message.captures.iter().any(|capture| {
+                    fold_case(&capture.payload).contains(&needle)
+                        || capture
+                            .msgid
+                            .as_deref()
+                            .is_some_and(|msgid| fold_case(msgid).contains(&needle))
+                })
+            })
+            .collect()
     }
 
     /// The rows of one conversation, oldest first.
@@ -517,6 +585,7 @@ mod tests {
             sent_at,
             text: text.to_string(),
             encrypted: true,
+            captures: Vec::new(),
         }
     }
 
@@ -798,6 +867,94 @@ mod tests {
         assert!(!path.exists());
         assert!(store.conversation_ids().is_empty());
         store.delete_all().expect("delete again");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn capture(verb: &str, msgid: &str, payload: &str, direction: CaptureDirection) -> E2eCapture {
+        E2eCapture {
+            verb: verb.to_string(),
+            msgid: Some(msgid.to_string()),
+            payload: payload.to_string(),
+            direction,
+        }
+    }
+
+    #[test]
+    fn a_row_written_before_captures_existed_opens_without_payloads() {
+        let old =
+            r#"{"id":"r1","conversation_id":"c","sender_device":"d","sent_at":5,"text":"old"}"#;
+        let row: E2eMessage = serde_json::from_str(old).expect("old row");
+        assert!(row.captures.is_empty());
+        assert!(row.encrypted);
+        // A row with no payload writes the old shape: no new field.
+        let written = serde_json::to_string(&row).expect("json");
+        assert!(!written.contains("captures"));
+    }
+
+    #[test]
+    fn captures_keep_their_order_and_survive_a_reopen() {
+        let dir = scratch_dir("captures");
+        let path = dir.join("history.bin");
+        let provider = fresh_key();
+        let mut store = E2eHistoryStore::open(path.clone(), &provider).expect("open");
+        let mut row = message("1", "a", "secret words");
+        row.captures
+            .push(capture("pkmsg", "m1", "PAYLOAD-ONE", CaptureDirection::Out));
+        store.append(row).expect("append");
+        store
+            .append(message("2", "a", "plain two"))
+            .expect("second");
+        assert!(store
+            .add_capture(
+                "1",
+                capture("msg", "m2", "PAYLOAD-TWO", CaptureDirection::Out)
+            )
+            .expect("add"));
+        assert!(!store
+            .add_capture("none", capture("msg", "m3", "x", CaptureDirection::In))
+            .expect("missing row"));
+        store.close();
+
+        // The sealed file shows neither the text nor a payload.
+        let raw = fs::read(&path).expect("file");
+        for needle in ["secret words", "PAYLOAD-ONE", "PAYLOAD-TWO"] {
+            assert!(!raw
+                .windows(needle.len())
+                .any(|part| part == needle.as_bytes()));
+        }
+
+        let store = E2eHistoryStore::open(path, &provider).expect("reopen");
+        let rows = store.messages("a");
+        assert_eq!(rows.len(), 2);
+        let payloads: Vec<&str> = rows[0]
+            .captures
+            .iter()
+            .map(|capture| capture.payload.as_str())
+            .collect();
+        assert_eq!(payloads, ["PAYLOAD-ONE", "PAYLOAD-TWO"]);
+        assert_eq!(rows[0].captures[0].verb, "pkmsg");
+        assert_eq!(rows[0].captures[1].direction, CaptureDirection::Out);
+        assert!(rows[1].captures.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capture_search_reads_payloads_and_never_the_text() {
+        let dir = scratch_dir("capture-search");
+        let mut store = E2eHistoryStore::open(dir.join("history.bin"), &fresh_key()).expect("open");
+        let mut row = message("1", "a", "hello world");
+        row.captures
+            .push(capture("msg", "id-9", "AbCdEf", CaptureDirection::In));
+        store.append(row).expect("append");
+        store
+            .append(message("2", "a", "abcdef in text"))
+            .expect("second");
+        let by_payload = store.search_captures(Some("a"), "abcdef");
+        assert_eq!(by_payload.len(), 1);
+        assert_eq!(by_payload[0].id, "1");
+        assert_eq!(store.search_captures(None, "id-9").len(), 1);
+        assert!(store.search_captures(None, "hello").is_empty());
+        assert!(store.search_captures(None, "").is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -97,7 +97,9 @@ use crate::e2e_provision::{provision_device_at, ProvisionError, Provisioned};
 use crate::e2e_refusal::{E2eRefusal, E2eRouteError};
 use crate::e2e_selfcopy::{inbox_accepts, is_expired, DeliveryTracker};
 use crate::e2e_state::E2eStateStore;
-use crate::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError, KeyringKeyProvider};
+use crate::e2e_store::{
+    CaptureDirection, E2eCapture, E2eHistoryStore, E2eMessage, E2eStoreError, KeyringKeyProvider,
+};
 use crate::e2e_trust::PeerTrust;
 use crate::e2e_wire::{
     bundle_key_signed_text, device_id_signed_text, did_from_key_text, frame_line_budget,
@@ -757,6 +759,8 @@ struct Sealed {
 struct Emitted {
     dids: Vec<String>,
     msgid: Option<String>,
+    /// The request as the engine made it, kept for the ciphertext view.
+    capture: E2eCapture,
 }
 
 /// A list message that waits to go to one device of a peer.
@@ -1766,6 +1770,19 @@ impl E2eEngine {
             .iter()
             .any(|message| message.id == row_id);
         if !stored {
+            // The payload is kept as it came, before any decrypt. A copy from
+            // another device of this account is no message of the peer: it
+            // keeps no payload.
+            let captures = if row.own {
+                Vec::new()
+            } else {
+                vec![E2eCapture {
+                    verb: inbox_verb_name(row.verb).to_string(),
+                    msgid: Some(row.msgid.clone()).filter(|msgid| !msgid.is_empty()),
+                    payload: row.payload.clone(),
+                    direction: CaptureDirection::In,
+                }]
+            };
             let message = E2eMessage {
                 id: row_id,
                 conversation_id: conversation,
@@ -1773,6 +1790,7 @@ impl E2eEngine {
                 sent_at: now,
                 text,
                 encrypted: true,
+                captures,
             };
             if self.history.append(message).is_err() {
                 return RowOutcome::StoreFailed;
@@ -2544,6 +2562,7 @@ impl E2eEngine {
             sent_at: now,
             text: text.to_string(),
             encrypted: true,
+            captures: Vec::new(),
         };
         if let Err(error) = self.history.append(message) {
             self.queue.remove(&key);
@@ -2689,8 +2708,17 @@ impl E2eEngine {
             .as_deref()
             .map(|msgid| SendKey::new(&self.network, nick, msgid));
         let suffix = first_msgid.clone().unwrap_or_else(fresh_local_id);
+        let captures: Vec<E2eCapture> = emitted.iter().map(|sent| sent.capture.clone()).collect();
         let row_id = match row_id {
-            Some(row_id) => row_id,
+            Some(row_id) => {
+                // A send from the queue or a re-send adds its payloads to the
+                // row. A failed write must not change the send: the row
+                // keeps the payloads it has.
+                for capture in captures {
+                    let _ = self.history.add_capture(&row_id, capture);
+                }
+                row_id
+            }
             None => {
                 let row_id = format!("{}:out:{suffix}", self.network);
                 let message = E2eMessage {
@@ -2700,6 +2728,7 @@ impl E2eEngine {
                     sent_at: now,
                     text: text.to_string(),
                     encrypted: true,
+                    captures,
                 };
                 self.history.append(message)?;
                 row_id
@@ -2875,6 +2904,12 @@ impl E2eEngine {
         }
         Ok(Emitted {
             dids: chunk.iter().map(|sealed| sealed.did.clone()).collect(),
+            capture: E2eCapture {
+                verb: send_verb_name(verb).to_string(),
+                msgid: answer.msgid.clone(),
+                payload,
+                direction: CaptureDirection::Out,
+            },
             msgid: answer.msgid,
         })
     }
@@ -3048,6 +3083,26 @@ fn nack_reference(payload: &str) -> Option<String> {
     let value: Value = serde_json::from_str(payload).ok()?;
     let reference = value.get("ref")?.as_str()?;
     (!reference.is_empty()).then(|| reference.to_string())
+}
+
+/// The wire name of an inbox verb, as kept in a capture.
+fn inbox_verb_name(verb: InboxVerb) -> &'static str {
+    match verb {
+        InboxVerb::Keys => "keys",
+        InboxVerb::PkMsg => "pkmsg",
+        InboxVerb::Msg => "msg",
+        InboxVerb::Nack => "nack",
+    }
+}
+
+/// The wire name of a send verb, as kept in a capture.
+fn send_verb_name(verb: E2eSendVerb) -> &'static str {
+    match verb {
+        E2eSendVerb::KeyReq => "keyreq",
+        E2eSendVerb::PkMsg => "pkmsg",
+        E2eSendVerb::Msg => "msg",
+        E2eSendVerb::Nack => "nack",
+    }
 }
 
 /// Builds the verb and the JSON payload for a request that carries a body for
@@ -3490,6 +3545,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_send_keeps_the_exact_payload_of_its_request() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, first) = alice_sends(&mut p.alice, &server, "hello bob").await;
+        let rows = p.alice.history().messages(&conversation_id(NET, "bob"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].captures.len(), 1);
+        let capture = &rows[0].captures[0];
+        assert_eq!(capture.verb, first["verb"].as_str().expect("verb"));
+        assert_eq!(capture.payload, first["payload"].as_str().expect("payload"));
+        assert_eq!(capture.msgid.as_deref(), Some("msgid1"));
+        assert_eq!(capture.direction, CaptureDirection::Out);
+        // The payload has no text of the message.
+        assert!(!capture.payload.contains("hello bob"));
+    }
+
+    #[tokio::test]
     async fn a_repeated_event_or_inbox_item_gives_one_row() {
         let mut p = pair();
         let server = MockServer::start().await;
@@ -3535,6 +3608,14 @@ mod tests {
                 .len(),
             1
         );
+        // The row keeps the payload exactly as it came, once.
+        let rows = p.bob.history().messages(&conversation_id(NET, "alice"));
+        assert_eq!(rows[0].captures.len(), 1);
+        let capture = &rows[0].captures[0];
+        assert_eq!(capture.verb, "pkmsg");
+        assert_eq!(capture.msgid.as_deref(), Some("msgid1"));
+        assert_eq!(capture.payload, payload);
+        assert_eq!(capture.direction, CaptureDirection::In);
     }
 
     /// The checks that `_on_pkmsg`, `_on_msg` and `_own_body` of irc-olm make
@@ -5434,6 +5515,8 @@ mod tests {
         assert_eq!(rows[0].text, "sent from the other device");
         assert_eq!(rows[0].sender_device, OWN_DEVICE);
         assert!(rows[0].encrypted);
+        // A device copy is no message of the peer: it keeps no payload.
+        assert!(rows[0].captures.is_empty());
         assert!(s
             .bob
             .history()
@@ -5793,6 +5876,10 @@ mod tests {
         let rows = alice.history().messages(&conversation_id(NET, "bob"));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "hi bob");
+        // The payload of the late send is added to the row.
+        assert_eq!(rows[0].captures.len(), 1);
+        assert_eq!(rows[0].captures[0].msgid.as_deref(), Some("m1"));
+        assert_eq!(rows[0].captures[0].verb, "pkmsg");
         assert!(alice.queue.is_empty());
     }
 
@@ -6049,11 +6136,17 @@ mod tests {
         assert_eq!(requests.len(), 2);
         let second: Value = serde_json::from_slice(&requests[1].body).expect("body");
         assert_eq!(second["verb"], "pkmsg");
-        // The history keeps one row for the text.
-        assert_eq!(
-            alice.history().messages(&conversation_id(NET, "bob")).len(),
-            1
-        );
+        // The history keeps one row for the text, with the payload of each
+        // send in order.
+        let rows = alice.history().messages(&conversation_id(NET, "bob"));
+        assert_eq!(rows.len(), 1);
+        let msgids: Vec<Option<&str>> = rows[0]
+            .captures
+            .iter()
+            .map(|capture| capture.msgid.as_deref())
+            .collect();
+        assert_eq!(msgids, [Some("msgid1"), Some("msgid2")]);
+        assert_ne!(rows[0].captures[0].payload, rows[0].captures[1].payload);
 
         // The second NACK is the last: a message goes out twice at most.
         let again = nack_row(10, &alice, &bob, "msgid2");
