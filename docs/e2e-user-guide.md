@@ -138,6 +138,21 @@ A pairing that takes too long expires. Start again.
 > **Note:** The current build has no screen that reads the QR code with
 > a camera. Use the link or the code that Cordiale shows.
 
+You can copy the pairing link with the **Copy link** button in the
+**Pair a new device** window.
+
+### Accept an invite from another device
+
+When the server sends a pairing invite, Cordiale shows it in the status bar.
+Cordiale shows an invite only if this device does not have the identity of
+that network yet.
+
+1. To join, type `/e2e accept`.
+2. To refuse, type `/e2e decline`.
+3. Compare the check code on both devices, as in "Add a device".
+
+An invite that expired, closed or was seen before is ignored.
+
 ### When Cordiale sends a copy to your other devices
 
 When you send an encrypted message from one device, Cordiale also

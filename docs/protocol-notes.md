@@ -1766,7 +1766,7 @@ slot e la pulizia. Cambia solo `e2e_pairing_flow.rs`.
 - **Slot e pulizia.** Lo slot di `E2eStateStore` tiene un record senza chiavi (ruolo, id,
   inizio). Si svuota a successo, annullamento, scadenza (300 s), errore e riavvio
   (`take_stale_pairing`: il record trovato all'avvio è sempre vecchio; il rendezvous si chiude).
-- **UI.** Comandi `/e2e pair | join <link> | code <nn> | cancel`. Il link si mostra come testo
+- **UI.** Comandi `/e2e pair | join <link> | accept | decline | code <nn> | cancel`. Il link si mostra come testo
   nella barra di stato e come immagine QR in una finestra (dato: `PairingLink::url`, disegno con
   `qrcode`). All'avvio della sessione `E2eEngine::provision_for_network` crea l'identità di un
   primo dispositivo (master, file di stato, bundle pubblicato); un server senza le rotte E2E o una
@@ -1845,9 +1845,26 @@ confermati o sostituiti dal testo di Grappa §4f e §4g e da Cicchetto:
   da cui nasce il QR (`show_pairing_qr`), senza costruire un secondo link. Il link vive solo nella proprietà
   `e2e-pair-link` e si cancella (`clear_pairing_link`) quando l abbinamento finisce, scade, viene sostituito
   o annullato. Il link e il codice non vanno nei log.
-- **Invito ad altre sessioni (non fatto).** Nessun evento di account per l invito esiste: `route_e2e_pairing`
-  legge solo `e2e_pairing_message` e `e2e_pairing_closed`. Contratto richiesto a Grappa: un evento
-  `e2e_pairing_invite` sul canale utente, inviato solo alle sessioni attive dello stesso account autenticato,
-  con `network_id`, `rendezvous_id`, chiave pubblica temporanea del creatore e scadenza. Il client ignora
-  invito doppio, scaduto, chiuso, sostituito, di altra rete o con identità già presente, e non salta il
-  confronto del codice. Mai su IRC.
+- **Invito ad altre sessioni (lato ricevente fatto, mittente in attesa di Grappa).** Il protocollo
+  documentato non ha l evento: `route_e2e_pairing` legge solo `e2e_pairing_message` e
+  `e2e_pairing_closed`. Contratto richiesto a Grappa: un evento `e2e_pairing_invite` sul canale utente
+  (`grappa:user:<account>`), inviato solo alle sessioni attive dello stesso account autenticato, con
+  - `network_id`: lo slug della rete, come nelle rotte `/networks/:network_id/e2e/...`;
+  - `rendezvous_id`: l id del rendezvous (22 caratteri);
+  - `ephemeral_key`: la chiave pubblica temporanea del creatore (43 caratteri), la stessa del QR;
+  - `expires_at`: testo ISO-8601 in UTC (`Z` o `+00:00`), non oltre 300 s da ora.
+
+  Resta da definire a Grappa la richiesta con cui il creatore chiede l invito (la chiave temporanea è
+  solo sul client, quindi il server non può farlo da solo). Cordiale non manda nessun invito finché
+  questa rotta non esiste, e non usa mai IRC.
+- **Ricezione in Cordiale (`handle_e2e_pairing_invite`).** L invito vale solo sul canale utente
+  dell account. Il client lo ignora, senza prompt né pairing, se è scaduto o oltre 300 s, doppio (stesso
+  `rendezvous_id` già visto), chiuso (`e2e_pairing_closed` per quel rendezvous), di una rete che la
+  sessione non ha, di una rete dove il dispositivo ha già l identità, o se un pairing è già aperto. Un
+  invito più nuovo sostituisce quello in attesa. Un invito in attesa cade a scadenza, alla chiusura del
+  rendezvous e a ogni disconnessione o riconnessione. Un dispositivo può accettare solo se il
+  provisioning ha dato `NeedsPairing` in questa sessione o se l identità è stata azzerata: un invito
+  arrivato prima di quel controllo è ignorato. Il prompt è nella barra di stato; `/e2e accept` apre il
+  passo di join con lo stesso link del QR (`E2ePairAction::Join`), `/e2e decline` lo scarta. Il confronto
+  del codice a due cifre e i controlli di fiducia restano obbligatori. Il log riporta solo la decisione,
+  mai i valori dell invito.
