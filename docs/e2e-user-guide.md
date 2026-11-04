@@ -152,8 +152,17 @@ that are in your own device list.
 
 ### Lose a device
 
-1. Type `/e2e revoke <id>` on a device you still have. Use the id of the lost device.
+Only a device that holds the master key can remove another device.
+A device that you added with pairing does not hold the master key.
+
+If a device that holds the master key is still with you:
+
+1. Type `/e2e revoke <id>` on that device. Use the id of the lost device.
 2. Verify your peers again if they ask.
+
+If you lost the only device that holds the master key, you cannot remove
+the lost device. The lost device stays authorized.
+Use the identity reset procedure in the next section.
 
 ### Lose all devices with the identity key
 
