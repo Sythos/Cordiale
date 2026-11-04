@@ -4,6 +4,8 @@ Questo documento è il contratto finale del client per l'E2E (ombrello 416, fett
 37). Ogni punto cita una fonte e una prova nel codice. In caso di divergenza
 prevale il sorgente di Grappa.
 
+User guide (plain English, no protocol details): [e2e-user-guide.md](e2e-user-guide.md).
+
 ## Fonti
 
 - **G-2430**: discussione della issue 2430 di Grappa (formato wire v2).
