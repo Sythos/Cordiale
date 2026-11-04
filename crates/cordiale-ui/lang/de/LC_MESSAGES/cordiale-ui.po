@@ -329,6 +329,14 @@ msgid "No pairing is open. Type /e2e pair on the first device."
 msgstr "Keine Kopplung offen. Gib auf dem ersten Gerät /e2e pair ein."
 
 msgctxt "AppWindow"
+msgid "Another device of your account invites this device to pair on {}. Type /e2e accept to join, or /e2e decline."
+msgstr "Ein anderes Gerät deines Kontos lädt dieses Gerät zur Kopplung auf {} ein. Gib /e2e accept ein, um beizutreten, oder /e2e decline."
+
+msgctxt "AppWindow"
+msgid "No pairing invite is open."
+msgstr "Keine Kopplungseinladung offen."
+
+msgctxt "AppWindow"
 msgid "Device {} was revoked."
 msgstr "Das Gerät {} wurde widerrufen."
 

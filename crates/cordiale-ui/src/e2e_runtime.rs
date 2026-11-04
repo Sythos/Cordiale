@@ -13,7 +13,7 @@
 
 use super::*;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use cordiale_core::e2e_device::E2eError;
 use cordiale_core::e2e_engine::{
@@ -21,11 +21,12 @@ use cordiale_core::e2e_engine::{
     RowOutcome, SendRoute, OWN_DEVICE,
 };
 use cordiale_core::e2e_pacing::DropReason;
+use cordiale_core::e2e_pairing::{PairingInvite, PairingPush};
 use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
 };
 use cordiale_core::e2e_protocol::{E2eOperation, CONSENT_MIN_PROTOCOL, NO_SUCH_NICK_MIN_PROTOCOL};
-use cordiale_core::e2e_provision::provision_device;
+use cordiale_core::e2e_provision::{provision_device, ProvisionError};
 use cordiale_core::e2e_revoke::{
     finish_pending_revoke, reset_identity, resume_reset, revoke_device, OwnRoutes,
     ResetConfirmation,
@@ -34,7 +35,7 @@ use cordiale_core::e2e_store::{E2eHistoryStore, E2eMessage};
 use cordiale_core::e2e_wire::did_from_key_text;
 use cordiale_core::phoenix::PhoenixMessage;
 use cordiale_core::rest::{E2eConsentLine, E2eRequest, E2eRequestCreate, E2eRequestState};
-use cordiale_core::session::{route_e2e_message, route_e2e_pairing};
+use cordiale_core::session::{route_e2e_message, route_e2e_pairing, route_e2e_pairing_invite};
 use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
 use crate::e2e_view::{
@@ -94,6 +95,34 @@ pub(crate) struct E2eRuntime {
     /// The one open SAS check, if any. It holds the master key that the
     /// shown code was made from. It is not saved.
     sas_check: Option<SasCheck>,
+    /// Networks where this session saw that the account has an identity this
+    /// device does not hold. Only such a network can take a pairing invite.
+    needs_pairing: HashSet<String>,
+    /// The one pairing invite that waits for `/e2e accept`. It is not saved.
+    invite: Option<PairingInvite>,
+    /// Rendezvous ids of the invites this session already took, newest last.
+    /// An invite seen again is a duplicate.
+    seen_invites: VecDeque<String>,
+}
+
+/// How many rendezvous ids of earlier invites a session remembers.
+const SEEN_INVITES_MAX: usize = 32;
+
+/// What the session does with a pairing invite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InviteDecision {
+    /// The invite waits for the user.
+    Show,
+    /// The end time is past, or too far ahead.
+    Expired,
+    /// The invite was seen before.
+    Duplicate,
+    /// The network is not one of this session.
+    WrongNetwork,
+    /// This device already has the identity of the network.
+    AlreadyPaired,
+    /// A pairing of this session is open.
+    Busy,
 }
 
 /// An open SAS check of a locked entry: the peer and the exact master key
@@ -138,6 +167,84 @@ struct ActivePairing {
 }
 
 impl E2eRuntime {
+    /// Decides on a pairing invite. Only `Show` keeps it: it waits in the
+    /// invite slot and replaces an older one. Nothing is sent to the server,
+    /// and the code check of the pairing still follows an accept.
+    pub(crate) fn admit_invite(
+        &mut self,
+        invite: PairingInvite,
+        network_known: bool,
+        now: i64,
+    ) -> InviteDecision {
+        let id = invite.rendezvous_id();
+        if !invite.is_current(now) {
+            return InviteDecision::Expired;
+        }
+        if self.seen_invites.iter().any(|seen| seen == id) {
+            return InviteDecision::Duplicate;
+        }
+        if !network_known {
+            return InviteDecision::WrongNetwork;
+        }
+        if !self.can_take_invite(invite.network_id()) {
+            return InviteDecision::AlreadyPaired;
+        }
+        if self.pairing.is_some() {
+            return InviteDecision::Busy;
+        }
+        self.remember_invite(invite.rendezvous_id());
+        self.invite = Some(invite);
+        InviteDecision::Show
+    }
+
+    fn remember_invite(&mut self, id: &str) {
+        if self.seen_invites.iter().any(|seen| seen == id) {
+            return;
+        }
+        self.seen_invites.push_back(id.to_string());
+        while self.seen_invites.len() > SEEN_INVITES_MAX {
+            self.seen_invites.pop_front();
+        }
+    }
+
+    /// True when this device lacks the identity of `network` and can join.
+    fn can_take_invite(&self, network: &str) -> bool {
+        !self.provisioned.contains(network)
+            && (self.needs_pairing.contains(network) || self.reset.contains(network))
+    }
+
+    /// Takes the waiting invite for an accept. An invite that ended, or whose
+    /// network no longer needs a pairing, gives `None`.
+    fn take_invite(&mut self, now: i64) -> Option<PairingInvite> {
+        let invite = self.invite.take()?;
+        (invite.is_current(now) && self.can_take_invite(invite.network_id())).then_some(invite)
+    }
+
+    /// Drops the waiting invite when its end time passed. True when it did.
+    pub(crate) fn expire_invite(&mut self, now: i64) -> bool {
+        if self.invite.as_ref().is_some_and(|i| !i.is_current(now)) {
+            self.invite = None;
+            return true;
+        }
+        false
+    }
+
+    /// The rendezvous `id` is closed, expired or replaced. A later invite
+    /// for it is a duplicate, and a waiting invite for it is dropped. True
+    /// when it dropped one.
+    fn close_invite_of(&mut self, id: &str) -> bool {
+        self.remember_invite(id);
+        if self
+            .invite
+            .as_ref()
+            .is_some_and(|i| i.rendezvous_id() == id)
+        {
+            self.invite = None;
+            return true;
+        }
+        false
+    }
+
     /// The locked entries as query windows for the sidebar. The target is the
     /// display label; no request uses it.
     pub(crate) fn locked_windows(&self) -> Vec<QueryWindow> {
@@ -749,12 +856,16 @@ async fn provision_network(state: &mut WorkerState, network: &str) {
     };
     match result {
         Ok(_) => {
+            state.e2e.needs_pairing.remove(network);
             state.e2e.provisioned.insert(network.to_string());
             // A network without a state file before this run can open its
             // engine now.
             state.e2e.unavailable.remove(network);
         }
         Err(error) => {
+            if matches!(error, ProvisionError::NeedsPairing) {
+                state.e2e.needs_pairing.insert(network.to_string());
+            }
             persistence::log_line(&format!("e2e identity not made for {network}: {error:?}"));
         }
     }
@@ -763,6 +874,7 @@ async fn provision_network(state: &mut WorkerState, network: &str) {
 /// Opens the engines of the signed-in networks and reads their inboxes. Call
 /// it when the session connects, also after a reconnect.
 pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    retire_expired_invite(state, ui);
     let mut networks: Vec<String> = state.networks.own_nicks.keys().cloned().collect();
     networks.sort();
     for network in networks {
@@ -1387,6 +1499,23 @@ pub(crate) async fn run_e2e_pair(
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
+    let now = e2e_now();
+    // An accept joins with the link of the invite, on the network of the
+    // invite. The join path below keeps the code check.
+    let (network, action) = match action {
+        E2ePairAction::Accept => match state.e2e.take_invite(now) {
+            Some(invite) => (
+                invite.network_id().to_string(),
+                E2ePairAction::Join(invite.link().code()),
+            ),
+            None => return show_pairing_kind(ui, "e2e-pair-invite-none", String::new()),
+        },
+        E2ePairAction::Decline => {
+            state.e2e.invite = None;
+            return show_pairing_kind(ui, "e2e-pair-invite-none", String::new());
+        }
+        other => (network, other),
+    };
     let protocol = state.conn.server_protocol_version;
     let ctx = PairingContext {
         client: &client,
@@ -1394,7 +1523,6 @@ pub(crate) async fn run_e2e_pair(
         protocol,
         network_id: &network,
     };
-    let now = e2e_now();
     // A new start replaces the open pairing: the old one is cancelled first.
     if matches!(action, E2ePairAction::Start | E2ePairAction::Join(_)) {
         clear_pairing_link(ui);
@@ -1469,6 +1597,7 @@ pub(crate) async fn run_e2e_pair(
             state.e2e.engines.insert(pairing_network.clone(), engine);
             finish_pairing_step(state, ui, active, result.err());
         }
+        E2ePairAction::Accept | E2ePairAction::Decline => {}
         E2ePairAction::Cancel => {
             if state.e2e.pairing.is_none() {
                 return show_pairing_kind(ui, "e2e-pair-none", String::new());
@@ -1835,6 +1964,7 @@ fn finish_pairing_step(
     }
     // A finished join gave the device a new identity after a reset.
     if matches!(active.session.status(), PairingStatus::Done) {
+        state.e2e.needs_pairing.remove(&active.network);
         state.e2e.reset.remove(&active.network);
         state.e2e.clear_ciphertext_views(&active.network);
     }
@@ -1857,6 +1987,12 @@ pub(crate) async fn handle_e2e_pairing(
     let Some(push) = route_e2e_pairing(frame) else {
         return;
     };
+    // A closed rendezvous ends a waiting invite for it.
+    if let PairingPush::Closed { rendezvous_id, .. } = &push {
+        if state.e2e.close_invite_of(rendezvous_id) {
+            show_pairing_kind(ui, "e2e-pair-invite-none", String::new());
+        }
+    }
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
@@ -1879,8 +2015,44 @@ pub(crate) async fn handle_e2e_pairing(
     finish_pairing_step(state, ui, active, result.err());
 }
 
+/// Drops the waiting pairing invite when its end time passed, and tells the
+/// user that it ended.
+fn retire_expired_invite(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    if state.e2e.expire_invite(e2e_now()) {
+        show_pairing_kind(ui, "e2e-pair-invite-none", String::new());
+    }
+}
+
+/// Reads one `e2e_pairing_invite` frame. Only the own user topic carries a
+/// valid invite. An invite that is not valid or not for this device shows
+/// nothing and starts nothing. The log names the decision only, never a
+/// value of the invite. The frame is never a chat line, and Cordiale sends
+/// no invite over IRC.
+pub(crate) fn handle_e2e_pairing_invite(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    frame: &PhoenixMessage,
+) {
+    let Some(user) = state.conn.identifier.as_deref() else {
+        return;
+    };
+    if frame.topic != format!("grappa:user:{user}") || state.conn.guest_session {
+        return;
+    }
+    let Some(invite) = route_e2e_pairing_invite(frame) else {
+        return;
+    };
+    let network = invite.network_id().to_string();
+    let known = state.networks.own_nicks.contains_key(&network);
+    match state.e2e.admit_invite(invite, known, e2e_now()) {
+        InviteDecision::Show => show_pairing_kind(ui, "e2e-pair-invite", network),
+        other => persistence::log_line(&format!("e2e pairing invite ignored: {other:?}")),
+    }
+}
+
 /// Ends a pairing whose lifetime is over. Call it for every E2E tick.
 pub(crate) async fn tick_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    retire_expired_invite(state, ui);
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
@@ -2467,6 +2639,10 @@ pub(crate) async fn handle_send_locked(
 /// every engine becomes a `session_ended` drop, and every queue is emptied.
 /// The locked window shows the dropped rows.
 pub(crate) fn end_e2e_sessions(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    // An invite of the ended session is stale after a reconnect.
+    if state.e2e.invite.take().is_some() {
+        show_pairing_kind(ui, "e2e-pair-invite-none", String::new());
+    }
     let mut networks: Vec<String> = state.e2e.engines.keys().cloned().collect();
     networks.sort();
     let mut any = false;
@@ -2602,6 +2778,244 @@ mod tests {
         });
         assert!(!copied);
         assert!(!called);
+    }
+
+    const INVITE_ID: &str = "AbCdEfGhIjKlMnOpQrStUv";
+    const INVITE_KEY: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo";
+    /// `2026-10-23T10:00:00Z`.
+    const INVITE_END: i64 = 1_792_749_600;
+
+    fn invite_payload(network: &str, id: &str) -> Value {
+        serde_json::json!({
+            "kind": "e2e_pairing_invite",
+            "network_id": network,
+            "rendezvous_id": id,
+            "ephemeral_key": INVITE_KEY,
+            "expires_at": "2026-10-23T10:00:00Z",
+        })
+    }
+
+    fn invite(network: &str, id: &str) -> PairingInvite {
+        PairingInvite::from_value(&invite_payload(network, id)).unwrap()
+    }
+
+    /// A runtime whose device lacks the identity of `libera`.
+    fn runtime_needing_pairing() -> E2eRuntime {
+        let mut runtime = E2eRuntime::default();
+        runtime.needs_pairing.insert("libera".to_string());
+        runtime
+    }
+
+    #[test]
+    fn an_invite_for_an_unpaired_device_waits_and_keeps_the_qr_link() {
+        let mut runtime = runtime_needing_pairing();
+        let decision = runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 60);
+        assert_eq!(decision, InviteDecision::Show);
+        // An accept takes the one link of the creator: the join step gets it,
+        // and it runs the same code check as a typed link.
+        let taken = runtime.take_invite(INVITE_END - 30).expect("invite");
+        let expected = cordiale_core::e2e_pairing::PairingLink::new(INVITE_ID, INVITE_KEY).unwrap();
+        assert_eq!(taken.link(), &expected);
+        assert_eq!(taken.link().code(), expected.code());
+        assert_eq!(taken.network_id(), "libera");
+        assert!(runtime.invite.is_none());
+    }
+
+    #[test]
+    fn a_reset_device_can_take_an_invite() {
+        let mut runtime = E2eRuntime::default();
+        runtime.reset.insert("libera".to_string());
+        let decision = runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 60);
+        assert_eq!(decision, InviteDecision::Show);
+    }
+
+    #[test]
+    fn an_invalid_invite_starts_no_prompt() {
+        let now = INVITE_END - 60;
+        // An expired invite.
+        let mut runtime = runtime_needing_pairing();
+        assert_eq!(
+            runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END + 1),
+            InviteDecision::Expired
+        );
+        // An end time that is later than one rendezvous lifetime.
+        assert_eq!(
+            runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 3_600),
+            InviteDecision::Expired
+        );
+        // A network that is not one of this session.
+        assert_eq!(
+            runtime.admit_invite(invite("other", INVITE_ID), false, now),
+            InviteDecision::WrongNetwork
+        );
+        assert!(runtime.invite.is_none());
+        // A device that already has the identity.
+        let mut paired = E2eRuntime::default();
+        paired.provisioned.insert("libera".to_string());
+        assert_eq!(
+            paired.admit_invite(invite("libera", INVITE_ID), true, now),
+            InviteDecision::AlreadyPaired
+        );
+        paired.needs_pairing.insert("libera".to_string());
+        assert_eq!(
+            paired.admit_invite(invite("libera", INVITE_ID), true, now),
+            InviteDecision::AlreadyPaired
+        );
+        // A network where the device is not known to need a pairing.
+        let mut unknown = E2eRuntime::default();
+        assert_eq!(
+            unknown.admit_invite(invite("libera", INVITE_ID), true, now),
+            InviteDecision::AlreadyPaired
+        );
+        assert!(paired.invite.is_none() && unknown.invite.is_none());
+    }
+
+    #[test]
+    fn an_invite_is_ignored_while_a_pairing_is_open() {
+        use cordiale_core::e2e_pairing::{PairingRole, Rendezvous};
+        let mut runtime = runtime_needing_pairing();
+        let rendezvous = Rendezvous {
+            id: "ZyXwVuTsRqPoNmLkJiHgFe".to_string(),
+            role: PairingRole::Creator,
+            expires_at: "later".to_string(),
+        };
+        let (session, _link) = PairingSession::create(&rendezvous, "libera", 0).unwrap();
+        runtime.pairing = Some(ActivePairing {
+            network: "libera".to_string(),
+            session,
+        });
+        assert_eq!(
+            runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 60),
+            InviteDecision::Busy
+        );
+        assert!(runtime.invite.is_none());
+    }
+
+    #[test]
+    fn a_duplicate_or_closed_invite_is_ignored() {
+        let now = INVITE_END - 60;
+        let mut runtime = runtime_needing_pairing();
+        assert_eq!(
+            runtime.admit_invite(invite("libera", INVITE_ID), true, now),
+            InviteDecision::Show
+        );
+        assert_eq!(
+            runtime.admit_invite(invite("libera", INVITE_ID), true, now),
+            InviteDecision::Duplicate
+        );
+        // The rendezvous closes: the prompt goes, and a replay is a duplicate.
+        assert!(runtime.close_invite_of(INVITE_ID));
+        assert!(runtime.invite.is_none());
+        assert_eq!(
+            runtime.admit_invite(invite("libera", INVITE_ID), true, now),
+            InviteDecision::Duplicate
+        );
+        // A close with no waiting invite still blocks a later invite.
+        let other = "ZyXwVuTsRqPoNmLkJiHgFe";
+        assert!(!runtime.close_invite_of(other));
+        assert_eq!(
+            runtime.admit_invite(invite("libera", other), true, now),
+            InviteDecision::Duplicate
+        );
+    }
+
+    #[test]
+    fn a_newer_invite_replaces_the_waiting_one() {
+        let now = INVITE_END - 60;
+        let newer = "ZyXwVuTsRqPoNmLkJiHgFe";
+        let mut runtime = runtime_needing_pairing();
+        runtime.admit_invite(invite("libera", INVITE_ID), true, now);
+        assert_eq!(
+            runtime.admit_invite(invite("libera", newer), true, now),
+            InviteDecision::Show
+        );
+        let taken = runtime.take_invite(now).expect("invite");
+        assert_eq!(taken.rendezvous_id(), newer);
+    }
+
+    #[test]
+    fn an_invite_ends_with_its_time_and_a_reconnect_does_not_reopen_it() {
+        let now = INVITE_END - 60;
+        let mut runtime = runtime_needing_pairing();
+        runtime.admit_invite(invite("libera", INVITE_ID), true, now);
+        assert!(!runtime.expire_invite(now));
+        assert!(runtime.expire_invite(INVITE_END));
+        assert!(runtime.invite.is_none());
+        assert!(runtime.take_invite(now).is_none());
+        // The same invite replayed after a reconnect is not shown again.
+        assert_eq!(
+            runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END),
+            InviteDecision::Expired
+        );
+        assert_eq!(
+            runtime.admit_invite(invite("libera", INVITE_ID), true, now),
+            InviteDecision::Duplicate
+        );
+    }
+
+    #[test]
+    fn an_accept_after_the_end_or_after_a_pairing_gives_nothing() {
+        let now = INVITE_END - 60;
+        let mut late = runtime_needing_pairing();
+        late.admit_invite(invite("libera", INVITE_ID), true, now);
+        assert!(late.take_invite(INVITE_END).is_none());
+        let mut paired = runtime_needing_pairing();
+        paired.admit_invite(invite("libera", INVITE_ID), true, now);
+        paired.needs_pairing.remove("libera");
+        assert!(paired.take_invite(now).is_none());
+    }
+
+    fn invite_frame(topic: &str, payload: Value) -> PhoenixMessage {
+        PhoenixMessage {
+            join_ref: None,
+            message_ref: None,
+            topic: topic.to_string(),
+            event: "event".to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn only_the_own_user_topic_gives_an_invite() {
+        let ui = slint::Weak::<AppWindow>::default();
+        let now = e2e_now();
+        let soon = chrono::DateTime::from_timestamp(now + 120, 0)
+            .unwrap()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let mut payload = invite_payload("libera", INVITE_ID);
+        payload["expires_at"] = soon.into();
+        let mut state = WorkerState::new();
+        state.conn.identifier = Some("vjt".to_string());
+        state
+            .networks
+            .own_nicks
+            .insert("libera".to_string(), "vjt".to_string());
+        state.e2e.needs_pairing.insert("libera".to_string());
+        // Another account topic, a channel topic and a guest session.
+        for topic in [
+            "grappa:user:other",
+            "grappa:user:vjt/network:libera/channel:#a",
+        ] {
+            handle_e2e_pairing_invite(&mut state, &ui, &invite_frame(topic, payload.clone()));
+            assert!(state.e2e.invite.is_none(), "{topic}");
+        }
+        state.conn.guest_session = true;
+        handle_e2e_pairing_invite(
+            &mut state,
+            &ui,
+            &invite_frame("grappa:user:vjt", payload.clone()),
+        );
+        assert!(state.e2e.invite.is_none());
+        state.conn.guest_session = false;
+        // A wrong network of the frame.
+        let mut wrong = payload.clone();
+        wrong["network_id"] = "other".into();
+        handle_e2e_pairing_invite(&mut state, &ui, &invite_frame("grappa:user:vjt", wrong));
+        assert!(state.e2e.invite.is_none());
+        // The own topic with a valid invite keeps it.
+        handle_e2e_pairing_invite(&mut state, &ui, &invite_frame("grappa:user:vjt", payload));
+        assert!(state.e2e.invite.is_some());
     }
 
     #[test]
