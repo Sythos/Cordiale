@@ -58,6 +58,9 @@ struct QueryEntry {
     unread-count: string,
     unread-description: string,
     selected: bool,
+    // An encrypted (locked) query, and whether it shows the ciphertext.
+    locked: bool,
+    cipher-view: bool,
 }
 
 // One row of a server reply screen (WHO/WHOIS/WHOWAS/MOTD/ban list/LUSERS).
@@ -740,6 +743,7 @@ component SidebarRowButton inherits Rectangle {
     in property <string> a11y-label;
     in property <bool> selected: false;
     callback activated();
+    callback context-menu-requested(Point);
 
     min-width: 0px;
     min-height: 32px;
@@ -766,6 +770,13 @@ component SidebarRowButton inherits Rectangle {
 
     touch := TouchArea {
         mouse-cursor: pointer;
+        // This area consumes right presses before a parent menu, so it
+        // reports them.
+        pointer-event(event) => {
+            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                root.context-menu-requested({ x: self.mouse-x, y: self.mouse-y });
+            }
+        }
         clicked => {
             focus.focus();
             root.activated();
@@ -2008,6 +2019,8 @@ export component AppWindow inherits Window {
     callback channel-selected(string, string);
     callback channel-part-requested(string, string);
     callback query-selected(string, string);
+    // Switch an encrypted query between plaintext and ciphertext.
+    callback query-ciphertext-toggle-requested(string, string);
     callback query-close-requested(string, string);
     callback window-invite-join-requested(string, string);
     callback window-invite-decline-requested(string, string);
@@ -3914,14 +3927,34 @@ export component AppWindow inherits Window {
                         for query in group.queries : HorizontalLayout {
                             spacing: sidebar-row-spacing;
 
-                            SidebarRowButton {
+                            query-menu := ContextMenuArea {
                                 horizontal-stretch: 1;
-                                text: (query.selected ? "● " : "") + "↳ " + query.label + query.mention-badge;
-                                selected: query.selected;
-                                a11y-label: @tr("Private conversation with {} on {}", query.nick, query.network)
-                                    + query.mentions-description
-                                    + (query.selected ? " — current" : "");
-                                activated => { query-selected(query.network, query.nick); }
+
+                                Menu {
+                                    if query.locked : MenuItem {
+                                        title: query.cipher-view ? @tr("Show plaintext") : @tr("Show ciphertext");
+                                        activated => {
+                                            query-ciphertext-toggle-requested(query.network, query.nick);
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    SidebarRowButton {
+                                        horizontal-stretch: 1;
+                                        text: (query.selected ? "● " : "") + "↳ " + query.label + query.mention-badge;
+                                        selected: query.selected;
+                                        a11y-label: @tr("Private conversation with {} on {}", query.nick, query.network)
+                                            + query.mentions-description
+                                            + (query.selected ? " — current" : "");
+                                        activated => { query-selected(query.network, query.nick); }
+                                        context-menu-requested(position) => {
+                                            if query.locked {
+                                                query-menu.show({ x: self.x + position.x, y: self.y + position.y });
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             HorizontalLayout {

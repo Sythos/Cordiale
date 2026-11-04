@@ -214,6 +214,11 @@ enum WorkerCommand {
         network: String,
         nick: String,
     },
+    /// Switch a locked query between the plaintext and the ciphertext view.
+    ToggleCiphertextView {
+        network: String,
+        nick: String,
+    },
     /// A SAS step of the open locked query: show, confirm, reject, cancel.
     E2eSas(SasStep),
     /// A consent action on a plain query, including a manual key re-request.
@@ -1888,6 +1893,9 @@ async fn run_worker(
                             handle_close_query(&mut state, &network, &nick);
                         }
                     }
+                    Some(WorkerCommand::ToggleCiphertextView { network, nick }) => {
+                        e2e_runtime::toggle_ciphertext_view(&mut state, &ui, &network, &nick);
+                    }
                     Some(WorkerCommand::E2eSas(step)) => {
                         handle_e2e_sas(&mut state, &ui, step);
                     }
@@ -3272,6 +3280,7 @@ async fn finish_connect(
                     window_mentions,
                     window_messages,
                     None,
+                    HashSet::new(),
                 );
                 ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
                 ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
@@ -8817,6 +8826,7 @@ fn network_groups_model(
     window_mentions: HashMap<WindowCountsKey, u64>,
     window_messages: HashMap<WindowCountsKey, u64>,
     selected: Option<(WindowCountsKey, bool)>,
+    cipher_views: HashSet<(String, String)>,
 ) -> Vec<NetworkGroup> {
     data.into_iter()
         .enumerate()
@@ -8876,6 +8886,8 @@ fn network_groups_model(
                         let selected = selected.as_ref().is_some_and(|(key, query)| {
                             *query && *key == window_counts_key(&network, &nick)
                         });
+                        let locked = nick.contains(cordiale_core::rest::QUERY_LOCK_LABEL);
+                        let cipher_view = cipher_views.contains(&(network.clone(), nick.clone()));
                         QueryEntry {
                             network: network.clone().into(),
                             nick: nick.into(),
@@ -8885,6 +8897,8 @@ fn network_groups_model(
                             unread_count: unread_count.into(),
                             unread_description: unread_description.into(),
                             selected,
+                            locked,
+                            cipher_view,
                         }
                     })
                     .collect();
@@ -8982,6 +8996,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let mut window_messages = merge_followed_query_counts(state, &state.windows.window_messages);
     window_messages.extend(e2e_runtime::locked_unread_counts(state));
     let selected = selected_window(state);
+    let cipher_views = e2e_runtime::ciphertext_view_windows(state);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let groups = network_groups_model(
@@ -8990,6 +9005,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
             window_mentions,
             window_messages,
             selected,
+            cipher_views,
         );
         ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
         show_network_groups(&ui, groups);

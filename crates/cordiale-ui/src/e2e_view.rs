@@ -143,6 +143,22 @@ pub fn search_history<'a>(
     store.search(conversation_id, needle)
 }
 
+/// Local search that follows the active view. The ciphertext view searches
+/// the captured payloads only and never reads a text, so a search in that
+/// view cannot show plaintext.
+pub fn search_history_in_view<'a>(
+    store: &'a E2eHistoryStore,
+    conversation_id: Option<&str>,
+    needle: &str,
+    ciphertext: bool,
+) -> Vec<&'a E2eMessage> {
+    if ciphertext {
+        store.search_captures(conversation_id, needle)
+    } else {
+        store.search(conversation_id, needle)
+    }
+}
+
 /// The `status-kind` key and the hint text of a pairing state. Pairing is
 /// E2E control state shown in the status bar: no pairing text is ever a chat
 /// line of a query. The hint is the two-digit code or empty.
@@ -465,6 +481,7 @@ mod tests {
             sent_at: at,
             text: text.into(),
             encrypted: true,
+            captures: Vec::new(),
         }
     }
 
@@ -788,5 +805,32 @@ mod tests {
         assert_eq!(search_history(&store, None, "hello").len(), 1);
         assert!(search_history(&store, Some("b"), "hello").is_empty());
         assert!(search_history(&store, None, "").is_empty());
+    }
+
+    #[test]
+    fn search_follows_the_active_view() {
+        use cordiale_core::e2e_store::{CaptureDirection, E2eCapture};
+        let dir = tempfile::tempdir().expect("dir");
+        let mut store = open(&dir);
+        let mut sent = row("1", "a", 1, "secret plan");
+        sent.captures.push(E2eCapture {
+            verb: "msg".into(),
+            msgid: Some("m1".into()),
+            payload: "ZmFrZS1jaXBoZXI".into(),
+            direction: CaptureDirection::Out,
+        });
+        store.append(sent).expect("append");
+        // The plaintext view finds the text and not the payload.
+        assert_eq!(
+            search_history_in_view(&store, None, "secret", false).len(),
+            1
+        );
+        assert!(search_history_in_view(&store, None, "ZmFrZS1", false).is_empty());
+        // The ciphertext view finds the payload and never the text.
+        assert_eq!(
+            search_history_in_view(&store, None, "ZmFrZS1", true).len(),
+            1
+        );
+        assert!(search_history_in_view(&store, None, "secret", true).is_empty());
     }
 }

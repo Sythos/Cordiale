@@ -13137,6 +13137,7 @@ fn a_locked_row_keeps_the_encrypted_mark_and_the_real_nick() {
         sent_at: 1_700_000_000,
         text: "hello".to_string(),
         encrypted: true,
+        captures: Vec::new(),
     };
     let incoming = locked_row_with_drop(&message, "me", "bob", None);
     assert!(incoming.encrypted);
@@ -13160,6 +13161,7 @@ fn a_dropped_send_is_marked_in_the_locked_row_only() {
         sent_at: 1_700_000_000,
         text: "hello".to_string(),
         encrypted: true,
+        captures: Vec::new(),
     };
     let sent = locked_row_with_drop(&message, "me", "bob", None);
     assert_eq!(sent.text, "hello");
@@ -13273,11 +13275,103 @@ fn a_plain_history_row_never_carries_the_encrypted_mark() {
         sent_at: 1_700_000_000,
         text: "secret".to_string(),
         encrypted: true,
+        captures: Vec::new(),
     };
     // Each reload builds the locked row again with its own mark.
     for _ in 0..2 {
         assert!(locked_row_with_drop(&message, "me", "ada", None).encrypted);
     }
+}
+
+fn captured_row(
+    sender: &str,
+    captures: Vec<(&str, &str, &str)>,
+) -> cordiale_core::e2e_store::E2eMessage {
+    use cordiale_core::e2e_store::{CaptureDirection, E2eCapture, E2eMessage};
+    E2eMessage {
+        id: "net:out:m1".to_string(),
+        conversation_id: "net\u{0}bob".to_string(),
+        sender_device: sender.to_string(),
+        sent_at: 1_700_000_000,
+        text: "private words".to_string(),
+        encrypted: true,
+        captures: captures
+            .into_iter()
+            .map(|(verb, msgid, payload)| E2eCapture {
+                verb: verb.to_string(),
+                msgid: Some(msgid.to_string()),
+                payload: payload.to_string(),
+                direction: CaptureDirection::Out,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn the_plaintext_view_gives_one_row_with_the_text() {
+    let message = captured_row("AAAAAAAAAAA", vec![("msg", "m1", "PAY1")]);
+    let rows = e2e_runtime::locked_rows_for_view(&message, "me", "bob", None, false);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, "private words");
+}
+
+#[test]
+fn the_ciphertext_view_shows_each_captured_payload_and_no_text() {
+    let message = captured_row(
+        cordiale_core::e2e_engine::OWN_DEVICE,
+        vec![("pkmsg", "m1", "PAY1"), ("msg", "m2", "PAY2")],
+    );
+    let rows = e2e_runtime::locked_rows_for_view(&message, "me", "bob", None, true);
+    let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+    assert_eq!(texts, ["E2E PKMSG m1 PAY1", "E2E MSG m2 PAY2"]);
+    for row in &rows {
+        assert!(!row.text.contains("private words"));
+        // Time, sender and the encrypted mark stay as in the plaintext view.
+        assert_eq!(row.nick.as_deref(), Some("me"));
+        assert_eq!(row.server_time, Some(1_700_000_000_000));
+        assert!(row.encrypted);
+        assert!(!row.italic);
+    }
+}
+
+#[test]
+fn a_dropped_send_shows_no_payload_in_the_ciphertext_view() {
+    use cordiale_core::e2e_pacing::DropReason;
+    let message = captured_row("own", vec![("msg", "m1", "PAY1")]);
+    let rows =
+        e2e_runtime::locked_rows_for_view(&message, "me", "bob", Some(DropReason::Late), true);
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].text.contains("PAY1"));
+    assert!(!rows[0].text.contains("private words"));
+    assert!(rows[0].text.contains("dropped: late"));
+    assert!(rows[0].text.contains("not sent"));
+    assert!(rows[0].italic);
+}
+
+#[test]
+fn a_row_with_no_payload_gets_a_placeholder_in_the_ciphertext_view() {
+    // An old row, a device copy and an unsent text have no payload here.
+    let message = captured_row(cordiale_core::e2e_engine::OWN_DEVICE, Vec::new());
+    let rows = e2e_runtime::locked_rows_for_view(&message, "me", "bob", None, true);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].text, e2e_runtime::NO_CIPHERTEXT_TEXT);
+    assert!(!rows[0].text.contains("private words"));
+    assert_eq!(rows[0].nick.as_deref(), Some("me"));
+}
+
+#[test]
+fn the_ciphertext_view_choice_is_per_entry_and_resets() {
+    let mut runtime = e2e_runtime::E2eRuntime::default();
+    assert!(!runtime.shows_ciphertext("net", "bob"));
+    assert!(runtime.toggle_ciphertext("net", "bob"));
+    assert!(runtime.shows_ciphertext("net", "bob"));
+    assert!(!runtime.shows_ciphertext("net", "carol"));
+    assert!(!runtime.shows_ciphertext("other", "bob"));
+    // A change of the identity of the network resets the view.
+    runtime.clear_ciphertext_views("net");
+    assert!(!runtime.shows_ciphertext("net", "bob"));
+    assert!(runtime.toggle_ciphertext("net", "bob"));
+    assert!(!runtime.toggle_ciphertext("net", "bob"));
 }
 
 fn shared_state(joined: &[&str]) -> WorkerState {

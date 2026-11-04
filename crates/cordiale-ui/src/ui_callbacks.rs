@@ -708,6 +708,14 @@ pub(crate) fn register_channel_callbacks(
         });
     });
 
+    let tx_for_cipher_view = worker_tx.clone();
+    ui.on_query_ciphertext_toggle_requested(move |network, nick| {
+        let _ = tx_for_cipher_view.send(WorkerCommand::ToggleCiphertextView {
+            network: network.to_string(),
+            nick: nick.to_string(),
+        });
+    });
+
     let tx_for_e2e_sas = worker_tx.clone();
     ui.on_e2e_sas_requested(move |step| {
         if let Some(step) = SasStep::parse(&step) {
