@@ -197,9 +197,12 @@ In the current build:
 - A message waits at most 90 seconds for the keys.
 - At most 16 messages wait for one peer.
 - If the keys do not come in time, the message is not sent.
-  The banner says that the last message expired.
+  The banner says that the last message expired. Send the message again.
 
-Select **Ask for keys again** to ask again.
+When the banner shows **Ask for keys again**, select it to ask again.
+The banner shows this button when the keys are missing, when the key request
+failed, when the peer could not read the last message, or when the peer nick
+is not online.
 Cordiale asks for keys at most once a minute for each peer.
 
 ### Expiry of a stored message
@@ -215,6 +218,8 @@ If the message matters, ask the peer if they got it.
 - The server and the IRC network can still see who talks to whom.
   They can see when you talk and how large the messages are.
 - Cordiale sends a long message in parts, with pauses. A long paste takes time.
+  Encryption makes a message larger. A very long message can be too large
+  to send. Cordiale then sends nothing. Divide a very long text into shorter messages.
 - Encrypted queries take plain text only. Files and media are not available
   in an encrypted query. Cordiale shows "An encrypted chat takes plain text
   only" and sends nothing.
@@ -239,7 +244,8 @@ If the message matters, ask the peer if they got it.
 
 - Read the banner. It says if Cordiale waits for the keys or for the peer.
 - Wait. A request expires after 24 hours.
-- Select **Ask for keys again**. Wait one minute between tries.
+- If the banner shows **Ask for keys again**, select it. Wait one minute between tries.
+- If the banner says that the last message expired, send the message again.
 - Check that the peer nick is online. The banner says when it is not.
 - Ask the peer on another channel if they use a compatible client.
 - Select **Cancel request** or **Try again** if needed.
