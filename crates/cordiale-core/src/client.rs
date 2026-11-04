@@ -344,10 +344,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest time for a whole request, so a server that stops answering
 /// can't stall the app's single worker indefinitely.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Longest time for one file upload. The server sets the size cap, so this
-/// limit is fixed and does not depend on it. A longer time does not change
-/// an HTTP 413 answer.
+/// Shortest time limit for one file upload. The server sets the size cap
+/// and the client does not know it, so a larger file gets more time from
+/// [`upload_timeout`]. A longer time does not change an HTTP 413 answer.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// Slowest upload speed that [`upload_timeout`] accepts, in bytes per
+/// second (512 KiB/s). A file of 500 MiB gets 1000 seconds at this speed.
+const UPLOAD_MIN_BYTES_PER_SECOND: u64 = 512 * 1024;
+
+/// Time limit for an upload of `len` bytes: [`UPLOAD_TIMEOUT`], or more
+/// when the file needs more time at [`UPLOAD_MIN_BYTES_PER_SECOND`].
+fn upload_timeout(len: usize) -> Duration {
+    let by_size = Duration::from_secs((len as u64).div_ceil(UPLOAD_MIN_BYTES_PER_SECOND));
+    UPLOAD_TIMEOUT.max(by_size)
+}
 
 impl GrappaClient {
     pub fn new(base_url: impl Into<String>) -> Self {
@@ -3813,7 +3823,8 @@ impl GrappaClient {
     /// cap by category gives 413. A 507 means either the instance is out of
     /// space or the subject hit its own upload cap (protocol v26): the two
     /// are indistinguishable on the wire. Large files get a longer timeout
-    /// than the client default.
+    /// than the client default. A 413 is final: this method never sends the
+    /// file again.
     pub async fn upload_file(
         &self,
         token: &str,
@@ -3823,6 +3834,7 @@ impl GrappaClient {
         expire: Option<i64>,
     ) -> Result<UploadResponse, GrappaClientError> {
         let url = format!("{}/api/uploads", self.base_url);
+        let timeout = upload_timeout(bytes.len());
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(filename.to_string())
             .mime_str(mime)?;
@@ -3834,7 +3846,7 @@ impl GrappaClient {
             .http
             .post(url)
             .bearer_auth(token)
-            .timeout(UPLOAD_TIMEOUT)
+            .timeout(timeout)
             .multipart(form)
             .send()
             .await?
@@ -8126,6 +8138,34 @@ mod tests {
             .await
             .expect_err("413");
         assert_eq!(err.status(), Some(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+
+    #[tokio::test]
+    async fn upload_file_sends_a_rejected_file_only_once() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uploads"))
+            .respond_with(ResponseTemplate::new(413))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let err = client
+            .upload_file("t", "clip.mp4", "video/mp4", vec![0; 16], None)
+            .await
+            .expect_err("413");
+        assert_eq!(err.status(), Some(StatusCode::PAYLOAD_TOO_LARGE));
+        // The mock server checks on drop that it got exactly one request.
+    }
+
+    #[test]
+    fn upload_timeout_grows_with_the_file_size() {
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(upload_timeout(0), UPLOAD_TIMEOUT);
+        assert_eq!(upload_timeout(128 * MIB), UPLOAD_TIMEOUT);
+        assert_eq!(upload_timeout(500 * MIB), Duration::from_secs(1000));
+        assert!(upload_timeout(2048 * MIB) > upload_timeout(500 * MIB));
     }
 
     #[tokio::test]
