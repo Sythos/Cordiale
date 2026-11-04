@@ -3835,3 +3835,11 @@ msgstr "Geheimtext anzeigen"
 msgctxt "AppWindow"
 msgid "Show plaintext"
 msgstr "Klartext anzeigen"
+
+msgctxt "AppWindow"
+msgid "The link is copied."
+msgstr "Der Link wurde kopiert."
+
+msgctxt "AppWindow"
+msgid "The link was not copied. The pairing stays open."
+msgstr "Der Link wurde nicht kopiert. Die Kopplung bleibt offen."

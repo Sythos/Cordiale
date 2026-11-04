@@ -1838,3 +1838,16 @@ confermati o sostituiti dal testo di Grappa §4f e §4g e da Cicchetto:
   dell'id (S1); il detentore firma e manda `signed`; il nuovo dispositivo manda `done` e il
   detentore chiude il rendezvous. Cordiale accoppia una rete per volta.
 - **Scelta del client:** la finestra di replay di 256 id per dispositivo (`e2e_peer.rs`).
+
+## Link di abbinamento e invito (issue 598)
+
+- **Copia link (fatto).** La finestra «Pair a new device» ha il pulsante «Copy link». Copia la stessa stringa
+  da cui nasce il QR (`show_pairing_qr`), senza costruire un secondo link. Il link vive solo nella proprietà
+  `e2e-pair-link` e si cancella (`clear_pairing_link`) quando l abbinamento finisce, scade, viene sostituito
+  o annullato. Il link e il codice non vanno nei log.
+- **Invito ad altre sessioni (non fatto).** Nessun evento di account per l invito esiste: `route_e2e_pairing`
+  legge solo `e2e_pairing_message` e `e2e_pairing_closed`. Contratto richiesto a Grappa: un evento
+  `e2e_pairing_invite` sul canale utente, inviato solo alle sessioni attive dello stesso account autenticato,
+  con `network_id`, `rendezvous_id`, chiave pubblica temporanea del creatore e scadenza. Il client ignora
+  invito doppio, scaduto, chiuso, sostituito, di altra rete o con identità già presente, e non salta il
+  confronto del codice. Mai su IRC.

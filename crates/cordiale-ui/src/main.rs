@@ -3370,9 +3370,18 @@ fn chat_copy_text(lines: &slint::ModelRc<ChatLine>) -> String {
 /// Puts `text` on the system clipboard (a TOTP key, link or recovery
 /// codes); a clipboard that can't be opened is only logged.
 fn copy_text(text: &str) {
+    try_copy_text(text);
+}
+
+/// Like `copy_text`, and tells if the clipboard took the text. The text is
+/// never logged, only the error of the clipboard.
+fn try_copy_text(text: &str) -> bool {
     match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text.to_string())) {
-        Ok(()) => {}
-        Err(err) => persistence::log_line(&format!("clipboard copy failed: {err}")),
+        Ok(()) => true,
+        Err(err) => {
+            persistence::log_line(&format!("clipboard copy failed: {err}"));
+            false
+        }
     }
 }
 
