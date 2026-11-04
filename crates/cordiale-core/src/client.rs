@@ -344,7 +344,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Longest time for a whole request, so a server that stops answering
 /// can't stall the app's single worker indefinitely.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Longest time for a file upload (up to the server's 50 MiB video cap).
+/// Longest time for one file upload. The server sets the size cap, so this
+/// limit is fixed and does not depend on it. A longer time does not change
+/// an HTTP 413 answer.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
 impl GrappaClient {
