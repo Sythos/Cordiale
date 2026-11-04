@@ -1332,7 +1332,11 @@ pub(crate) fn pairing_host(base_url: &str) -> String {
 /// are never logged.
 fn show_pairing_qr(ui: &slint::Weak<AppWindow>, url: &str, code: String) {
     let qr = crate::totp::qr_rgb(url);
+    // The same string feeds the QR code and the copy button.
+    let link = url.to_string();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_e2e_pair_link(link.into());
+        ui.set_e2e_pair_copy_result("".into());
         let image = qr
             .map(|(side, rgb)| {
                 slint::Image::from_rgb8(slint::SharedPixelBuffer::clone_from_slice(
@@ -1344,6 +1348,25 @@ fn show_pairing_qr(ui: &slint::Weak<AppWindow>, url: &str, code: String) {
         ui.set_e2e_pair_qr_code(code.into());
         ui.set_e2e_pair_qr_visible(true);
     });
+}
+
+/// Closes the pairing dialog and drops the link, the QR code and the code
+/// from memory. Call it when the pairing ends, expires, is replaced or is
+/// cancelled.
+fn clear_pairing_link(ui: &slint::Weak<AppWindow>) {
+    let _ = ui.upgrade_in_event_loop(|ui| {
+        ui.set_e2e_pair_qr_visible(false);
+        ui.set_e2e_pair_link("".into());
+        ui.set_e2e_pair_copy_result("".into());
+        ui.set_e2e_pair_qr_code("".into());
+        ui.set_e2e_pair_qr(slint::Image::default());
+    });
+}
+
+/// Copies the pairing link with `copier`. An empty link is not copied. The
+/// result tells if the copy worked; a failed copy never ends the pairing.
+pub(crate) fn copy_pairing_link(link: &str, copier: impl FnOnce(&str) -> bool) -> bool {
+    !link.is_empty() && copier(link)
 }
 
 fn show_pairing_kind(ui: &slint::Weak<AppWindow>, kind: &'static str, hint: String) {
@@ -1374,6 +1397,7 @@ pub(crate) async fn run_e2e_pair(
     let now = e2e_now();
     // A new start replaces the open pairing: the old one is cancelled first.
     if matches!(action, E2ePairAction::Start | E2ePairAction::Join(_)) {
+        clear_pairing_link(ui);
         end_active_pairing(state).await;
     }
     match action {
@@ -1449,6 +1473,7 @@ pub(crate) async fn run_e2e_pair(
             if state.e2e.pairing.is_none() {
                 return show_pairing_kind(ui, "e2e-pair-none", String::new());
             }
+            clear_pairing_link(ui);
             end_active_pairing(state).await;
             push_open_locked_state(state, ui);
             show_pairing(ui, &PairingStatus::Ended(pairing::EndReason::Cancelled));
@@ -1777,6 +1802,7 @@ async fn pump_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
         return;
     };
     if !active.session.is_active() {
+        clear_pairing_link(ui);
         return;
     }
     let Some(mut engine) = take_pairing_engine(state, &active.network, false) else {
@@ -1814,6 +1840,8 @@ fn finish_pairing_step(
     }
     if active.session.is_active() {
         state.e2e.pairing = Some(active);
+    } else {
+        clear_pairing_link(ui);
     }
     push_open_locked_state(state, ui);
 }
@@ -1874,6 +1902,7 @@ pub(crate) async fn tick_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWi
     let ended = pairing::tick(&ctx, engine.state_mut(), &mut active.session, e2e_now()).await;
     state.e2e.engines.insert(network, engine);
     if ended {
+        clear_pairing_link(ui);
         show_pairing(ui, &active.session.status());
     } else {
         state.e2e.pairing = Some(active);
@@ -2542,6 +2571,37 @@ mod tests {
         let windows = ciphertext_view_windows(&state);
         let label = LocalQuery::new("net", QueryLane::Locked, "bob").window_name();
         assert!(windows.contains(&("net".to_string(), label)));
+    }
+
+    #[test]
+    fn copy_pairing_link_passes_the_exact_link_to_the_clipboard() {
+        let link = "https://grappa.example/pair#abc";
+        let mut seen = String::new();
+        let copied = copy_pairing_link(link, |text| {
+            seen = text.to_string();
+            true
+        });
+        assert!(copied);
+        assert_eq!(seen, link);
+    }
+
+    #[test]
+    fn copy_pairing_link_reports_a_failed_copy() {
+        assert!(!copy_pairing_link(
+            "https://grappa.example/pair#abc",
+            |_| { false }
+        ));
+    }
+
+    #[test]
+    fn copy_pairing_link_skips_an_empty_link() {
+        let mut called = false;
+        let copied = copy_pairing_link("", |_| {
+            called = true;
+            true
+        });
+        assert!(!copied);
+        assert!(!called);
     }
 
     #[test]

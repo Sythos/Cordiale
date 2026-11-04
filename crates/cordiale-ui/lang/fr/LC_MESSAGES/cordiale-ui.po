@@ -3835,3 +3835,11 @@ msgstr "Afficher le texte chiffré"
 msgctxt "AppWindow"
 msgid "Show plaintext"
 msgstr "Afficher le texte en clair"
+
+msgctxt "AppWindow"
+msgid "The link is copied."
+msgstr "Le lien est copié."
+
+msgctxt "AppWindow"
+msgid "The link was not copied. The pairing stays open."
+msgstr "Le lien n’a pas été copié. L’association reste ouverte."
