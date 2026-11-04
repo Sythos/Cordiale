@@ -3187,6 +3187,8 @@ export component AppWindow inherits Window {
             return @tr("The server doesn't accept this type of file: {}", status-attach-name);
         } else if status-kind == "attach-too-large" {
             return @tr("{} is larger than the server allows for this type of file.", status-attach-name);
+        } else if status-kind == "attach-rejected-size" {
+            return @tr("The upload path rejected the size of {}. Its limit can be lower than the limit the server reports.", status-attach-name);
         } else if status-kind == "ignore-invalid-text-pattern" {
             return @tr("The text pattern can't be blank or span more than one line.");
         } else if status-kind == "ignore-added" {

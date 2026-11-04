@@ -1117,6 +1117,10 @@ msgid "{} is larger than the server allows for this type of file."
 msgstr "{} supera el tamaño que el servidor permite para este tipo de archivo."
 
 msgctxt "AppWindow"
+msgid "The upload path rejected the size of {}. Its limit can be lower than the limit the server reports."
+msgstr "La ruta de subida rechazó el tamaño de {}. Su límite puede ser inferior al que indica el servidor."
+
+msgctxt "AppWindow"
 msgid "The upload of {} was refused for lack of space."
 msgstr "La subida de {} fue rechazada por falta de espacio."
 

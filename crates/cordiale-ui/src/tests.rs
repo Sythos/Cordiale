@@ -7752,7 +7752,7 @@ fn attachment_caps_and_errors_follow_the_category() {
     assert_eq!(upload_cap(&limits, UploadCategory::Video), 50);
     assert_eq!(upload_cap(&limits, UploadCategory::Document), 20);
     assert_eq!(upload_cap(&limits, UploadCategory::Audio), 25);
-    assert_eq!(attachment_error_status(Some(413)), "attach-too-large");
+    assert_eq!(attachment_error_status(Some(413)), "attach-rejected-size");
     assert_eq!(
         attachment_error_status(Some(415)),
         "attach-unsupported-type"
