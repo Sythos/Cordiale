@@ -5241,7 +5241,9 @@ fn upload_cap(limits: &UploadLimits, category: UploadCategory) -> u64 {
 /// `attach-no-space` carries neutral copy that doesn't blame either.
 fn attachment_error_status(status: Option<u16>) -> &'static str {
     match status {
-        Some(413) => "attach-too-large",
+        // The upload path refused the size. A local size check gives
+        // `attach-too-large`, so the two results stay distinct.
+        Some(413) => "attach-rejected-size",
         Some(415) => "attach-unsupported-type",
         Some(507) => "attach-no-space",
         _ => "attach-failed",
