@@ -4313,8 +4313,9 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
         let _ = ui.upgrade_in_event_loop(|ui| ui.set_status_kind("no-active-network".into()));
         return;
     };
-    // The command context of a locked window is the real peer, never the
-    // display name with the lock label.
+    // The network context of a command in a locked window is the real peer,
+    // never the display name with the lock label. A command for the window
+    // itself, such as `/query` with no nick, reads the open window.
     let channel = locked.as_ref().map_or(window, |(_, nick)| nick);
     if let Some((locked_network, nick)) = &locked {
         let (locked_network, nick) = (locked_network.clone(), nick.clone());

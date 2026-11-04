@@ -13211,6 +13211,25 @@ fn a_locked_window_without_an_engine_sends_nothing() {
 }
 
 #[test]
+fn query_without_a_nick_closes_the_locked_window() {
+    for command in ["/query", "/q"] {
+        let mut state = peer_link_state(&[("libera", "bob")]);
+        state.conn.client = Some(GrappaClient::new(one_shot_server_with_body(200, "{}")));
+        state.conn.token = Some("test-token".to_string());
+        state.windows.current_query = true;
+        state.windows.current_channel = Some(("libera".to_string(), "\u{1F512}bob".to_string()));
+        state
+            .e2e
+            .locked
+            .insert(("libera".to_string(), "bob".to_string()));
+        let ui = slint::Weak::<AppWindow>::default();
+        network_test_runtime().block_on(handle_send_message(&mut state, &ui, command.to_string()));
+        assert!(state.e2e.locked.is_empty(), "command {command}");
+        assert!(state.windows.current_channel.is_none(), "command {command}");
+    }
+}
+
+#[test]
 fn successful_channel_and_plain_query_sends_follow_the_newest_row() {
     for (target, is_query) in [("#rust", false), ("Peer", true)] {
         let mut state = WorkerState::new();

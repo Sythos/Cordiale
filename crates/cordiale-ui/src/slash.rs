@@ -129,6 +129,14 @@ pub(crate) async fn run_slash_command(
             open_query_and_focus(state, ui, network.clone(), nick, origin).await;
             Ok(())
         }
+        // The locked entry exists on this device only: close it by its label,
+        // never the plain query of the same peer.
+        SlashCommand::Query(None) if open_locked_window(state).is_some() => {
+            if let Some((open_network, label)) = state.windows.current_channel.clone() {
+                close_locked_query(state, ui, &open_network, &label);
+            }
+            return;
+        }
         SlashCommand::Query(None) if state.windows.current_query => {
             send_user_verb(
                 state,
