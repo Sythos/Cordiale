@@ -101,8 +101,12 @@ of the peer is different from the one you knew.
 1. Stop sending private data in the locked query.
 2. Contact the peer on a different channel.
 3. Ask if the peer reset the identity or changed the device.
-4. Compare the SAS code with the peer.
-5. Trust the contact only if the codes match.
+
+The current build cannot show the SAS code while this warning is active.
+The current build has no action that accepts a changed key.
+This feature is unavailable.
+Do not send private data in this locked query.
+Use a different channel to talk to the peer.
 
 ## 3. Use more than one device
 
@@ -158,11 +162,14 @@ Do not ask another person for a key or a recovery secret.
 
 1. Type `/e2e reset`. Cordiale asks you to confirm.
 2. To confirm, type `/e2e reset yes`.
-3. Cordiale makes a new identity.
-4. Your peers see a changed key. Tell them that you reset the identity.
-5. Compare the SAS code with each peer.
 
-A reset device cannot send in the locked query until it has a new identity.
+Cordiale deletes the identity of this device on the server and on the device.
+The locked query cannot send now.
+
+3. Close Cordiale and open it again, or sign out and sign in again.
+   Cordiale then makes a new identity.
+4. Your peers see a key warning. They cannot accept the new key in the current build.
+   Tell them on a different channel that you reset the identity.
 
 ## 4. Offline delivery
 
@@ -226,7 +233,7 @@ If the message matters, ask the peer if they got it.
 - Check that this device has an E2E identity for the network.
   The message "This device has no E2E identity for this network" says it has not.
 - Check that the peer is online and uses a compatible client.
-- If you reset the identity, make a new one before you send.
+- If you reset the identity, close Cordiale and open it again. Cordiale makes a new identity.
 
 ### The peer does not answer
 
