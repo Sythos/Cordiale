@@ -45,7 +45,7 @@ use tokio::time::{interval, sleep, MissedTickBehavior};
 use crate::backoff::{random_unit, Backoff};
 use crate::e2e_device_routes::InboxRow;
 use crate::e2e_pacing::{SendBook, SendDropped};
-use crate::e2e_pairing::PairingPush;
+use crate::e2e_pairing::{PairingInvite, PairingPush};
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
 use crate::websocket::{PhoenixSocket, PhoenixSocketError};
 
@@ -271,6 +271,14 @@ pub fn route_e2e_message(frame: &PhoenixMessage, server_protocol: Option<u32>) -
 /// frame is never a chat line.
 pub fn route_e2e_pairing(frame: &PhoenixMessage) -> Option<PairingPush> {
     PairingPush::from_value(&frame.payload)
+}
+
+/// Read one session frame as a pairing invite (`e2e_pairing_invite`) from
+/// another active session of the account. The caller checks that the frame
+/// came on the own user topic. Any other frame, and a frame of the wrong
+/// shape, return `None`. An invite is never a chat line.
+pub fn route_e2e_pairing_invite(frame: &PhoenixMessage) -> Option<PairingInvite> {
+    PairingInvite::from_value(&frame.payload)
 }
 
 /// Starts a session: connects, joins `grappa:user:{user}`, and spawns the
@@ -791,6 +799,25 @@ mod tests {
         );
         let other = reply("3", serde_json::json!({"kind": "message"}));
         assert!(route_e2e_pairing(&other).is_none());
+    }
+
+    #[test]
+    fn invite_frames_are_routed_apart_from_the_pairing_pushes() {
+        let invite = reply(
+            "1",
+            serde_json::json!({
+                "kind": "e2e_pairing_invite",
+                "network_id": "libera",
+                "rendezvous_id": "AbCdEfGhIjKlMnOpQrStUv",
+                "ephemeral_key": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+                "expires_at": "2026-10-23T10:00:00Z"
+            }),
+        );
+        let routed = route_e2e_pairing_invite(&invite).expect("routed");
+        assert_eq!(routed.network_id(), "libera");
+        assert!(route_e2e_pairing(&invite).is_none());
+        let other = reply("2", serde_json::json!({"kind": "message"}));
+        assert!(route_e2e_pairing_invite(&other).is_none());
     }
 
     #[test]
