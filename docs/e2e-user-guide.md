@@ -218,7 +218,8 @@ If the message matters, ask the peer if they got it.
 - The server and the IRC network can still see who talks to whom.
   They can see when you talk and how large the messages are.
 - Cordiale sends a long message in parts, with pauses. A long paste takes time.
-  An encrypted message can have at most 64 lines and 32 KiB of text.
+  Encryption makes a message larger. A very long message can be too large
+  to send. Cordiale then sends nothing. Divide a very long text into shorter messages.
 - Encrypted queries take plain text only. Files and media are not available
   in an encrypted query. Cordiale shows "An encrypted chat takes plain text
   only" and sends nothing.
