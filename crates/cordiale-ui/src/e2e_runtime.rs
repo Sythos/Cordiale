@@ -3868,6 +3868,77 @@ mod tests {
     }
 
     #[test]
+    fn a_sas_check_and_a_key_check_do_not_change_each_other() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, peer) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        // A SAS check does not verify the key.
+        handle_e2e_sas(&mut state, &ui, SasStep::Start);
+        handle_e2e_sas(&mut state, &ui, SasStep::Confirm);
+        assert!(sas_verified(&state));
+        assert!(!key_verified(&state));
+        // A key check on the SAS-verified peer works and keeps the SAS check.
+        handle_e2e_peer_key(
+            &mut state,
+            &ui,
+            PeerKeyStep::Verify,
+            "net".into(),
+            "ada".into(),
+            peer,
+        );
+        assert!(sas_verified(&state));
+        assert!(key_verified(&state));
+        // A new SAS code after the key check stays available and keeps both.
+        handle_e2e_sas(&mut state, &ui, SasStep::Start);
+        assert!(state.e2e.sas_check.is_some());
+        handle_e2e_sas(&mut state, &ui, SasStep::Cancel);
+        assert!(sas_verified(&state));
+        assert!(key_verified(&state));
+    }
+
+    #[test]
+    fn a_trust_alarm_refuses_a_key_check_until_the_explicit_key_change() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, peer) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        state
+            .e2e
+            .note_engine_error("net", "ada", &EngineError::Device(E2eError::MasterChanged));
+        assert_eq!(
+            locked_entry_state(&state, "net", "ada"),
+            ChatState::TrustAlarm
+        );
+        // The view shows no key and a verify changes nothing.
+        assert_eq!(peer_key_facts(&state, "net", "ada"), None);
+        handle_e2e_peer_key(
+            &mut state,
+            &ui,
+            PeerKeyStep::Verify,
+            "net".into(),
+            "ada".into(),
+            peer.clone(),
+        );
+        assert!(!key_verified(&state));
+        assert_eq!(
+            locked_entry_state(&state, "net", "ada"),
+            ChatState::TrustAlarm
+        );
+        // A SAS check stays refused with the alarm.
+        handle_e2e_sas(&mut state, &ui, SasStep::Start);
+        assert_eq!(state.e2e.sas_check, None);
+        // A key check of the old master is no proof for the new master.
+        let other = master_text(&Account::new());
+        state
+            .e2e
+            .engine_mut("net")
+            .expect("engine")
+            .replace_peer_master("ada", &other)
+            .expect("replace");
+        assert!(!verify_peer_key(&mut state, "net", "ada", &peer));
+        assert!(!key_verified(&state));
+    }
+
+    #[test]
     fn a_key_check_never_counts_with_a_trust_alarm() {
         let signals = ChatSignals {
             engine: true,
