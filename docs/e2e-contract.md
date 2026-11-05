@@ -156,9 +156,9 @@ Il controllo "sessione già vista" segue il motore di irc-olm (OLM-4,
 
 ## Versione del protocollo
 
-`CLIENT_PROTOCOL_VERSION` is 54. The client supports the per-device E2E
+`CLIENT_PROTOCOL_VERSION` is 55. The client supports the per-device E2E
 format from protocol 49, inbox row flags from 50, explicit consent from 53,
-and `no_such_nick` from 54. The client sends this integer in the WebSocket
+`no_such_nick` from 54, and the pairing offer from 55. The client sends this integer in the WebSocket
 URL. A server below 49 does not speak the per-device format, so Cordiale does
 not use E2E with that server. Consent routes and the v52/v54 events use their
 own protocol gates.
