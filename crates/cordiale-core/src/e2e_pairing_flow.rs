@@ -45,7 +45,7 @@
 //! the final text of section 4g of the Grappa client protocol, and match
 //! `pairingMessages.ts` of Cicchetto. This device pairs one network for each
 //! pairing. An `offer` that names more networks is read for that network only,
-//! and the others go in `skipped`. A joiner of an offer has a list of candidate
+//! and the others go in `skipped`. A joiner of an offer has a list of eligible
 //! networks and takes the network that the sealed `offer` names. A change of
 //! the contract touches this module only.
 //!
@@ -399,7 +399,7 @@ pub struct PairingSession {
     /// The joiner of an offer: the networks that it can pair. The network of
     /// the pairing is the one that the sealed `offer` of the holder names.
     /// Empty for a joiner that pairs one fixed network.
-    candidates: Vec<String>,
+    eligible: Vec<String>,
     started_at: i64,
     stage: Stage,
     waiting: Option<Ecies>,
@@ -442,7 +442,7 @@ impl PairingSession {
             role,
             rendezvous_id: rendezvous_id.to_string(),
             network: network.to_string(),
-            candidates: Vec::new(),
+            eligible: Vec::new(),
             started_at: now,
             stage: Stage::Open,
             waiting: None,
@@ -503,15 +503,16 @@ impl PairingSession {
     }
 
     /// The joiner side of an offer. The holder names the network in its
-    /// sealed `offer`, so the joiner takes the network from `candidates` then.
-    /// Until then `network` (one of the candidates) and `device` are provisional:
-    /// `network()` tells the network that the offer chose, and `bind_device`
-    /// gives the device of that network. With no candidates it is `join`.
+    /// sealed `offer`, so the joiner takes the network from `eligible` then.
+    /// Until then `network` (one of the eligible networks) and `device` are
+    /// provisional: `network()` tells the network that the offer chose, and
+    /// `bind_device` gives the device of that network. With no eligible
+    /// networks it is `join`.
     pub fn join_any(
         link: &PairingLink,
         rendezvous: &Rendezvous,
         network: &str,
-        candidates: &[String],
+        eligible: &[String],
         device: JoinerDevice,
         now: i64,
     ) -> Result<(Self, Outgoing), FlowError> {
@@ -533,7 +534,7 @@ impl PairingSession {
             return Err(FlowError::TooLarge);
         }
         let mut session = Self::new(PairingRole::Joiner, &rendezvous.id, network, now);
-        session.candidates = candidates.to_vec();
+        session.eligible = eligible.to_vec();
         session.code = Some(code_of(&ecies));
         session.channel = Some(ecies);
         session.own_device = Some(device);
@@ -724,9 +725,9 @@ impl PairingSession {
     }
 
     /// The joiner keeps the master key offered for its network. The other
-    /// offered networks go in `skipped`. A joiner with candidates takes the
-    /// network of the offer: its own network first, else the first offered
-    /// network that is a candidate.
+    /// offered networks go in `skipped`. A joiner with eligible networks takes
+    /// the network of the offer: its own network first, else the first offered
+    /// network that is eligible.
     fn take_offer(&mut self, networks: Vec<WireNetwork>) -> Result<Option<FlowEvent>, FlowError> {
         if self.master.is_some() {
             return Err(self.fail(EndReason::BadMessage, FlowError::BadMessage));
@@ -737,7 +738,7 @@ impl PairingSession {
             .or_else(|| {
                 networks
                     .iter()
-                    .find(|item| self.candidates.contains(&item.network))
+                    .find(|item| self.eligible.contains(&item.network))
             })
             .map(|item| item.network.clone());
         if let Some(chosen) = chosen {
@@ -1279,14 +1280,14 @@ pub async fn start_joiner(
 
 /// Like `start_joiner`, for the accept of an offer. The offer names no
 /// network, so the network of the pairing is the one that the sealed `offer`
-/// of the holder names, if it is in `candidates`. `ctx` and `store` are those
-/// of the first candidate. When `network()` of the session changes after a
+/// of the holder names, if it is in `eligible`. `ctx` and `store` are those
+/// of the first eligible network. When `network()` of the session changes after a
 /// step, call `bind_joiner` with the context and store of the new network.
 pub async fn start_joiner_any(
     ctx: &PairingContext<'_>,
     store: &mut E2eStateStore,
     text: &mut String,
-    candidates: &[String],
+    eligible: &[String],
     now: i64,
 ) -> Result<PairingSession, DriveError> {
     let link = take_pairing_link(text).map_err(FlowError::Link)?;
@@ -1296,7 +1297,7 @@ pub async fn start_joiner_any(
         .join_pairing(ctx.token, link.rendezvous_id(), ctx.protocol)
         .await?;
     let (mut session, hello) =
-        PairingSession::join_any(&link, &rendezvous, ctx.network_id, candidates, device, now)?;
+        PairingSession::join_any(&link, &rendezvous, ctx.network_id, eligible, device, now)?;
     if let Err(error) = save_pending(store, &session) {
         session.end(EndReason::Failed);
         cleanup(ctx, store, &session, true).await;
@@ -2060,19 +2061,19 @@ mod tests {
     }
 
     #[test]
-    fn a_joiner_with_candidates_takes_the_network_of_the_offer() {
+    fn a_joiner_with_eligible_networks_takes_the_network_of_the_offer() {
         let master = Account::new();
         let account = Account::new();
         let (mut creator, link) =
             PairingSession::create(&rendezvous(PairingRole::Creator), "oftc", 100).expect("create");
         creator.set_master(&key_of(&master)).expect("master");
-        // The first candidate is not the network of the holder.
-        let candidates = vec![NET.to_string(), "oftc".to_string()];
+        // The first eligible network is not the network of the holder.
+        let eligible = vec![NET.to_string(), "oftc".to_string()];
         let (mut joiner, hello) = PairingSession::join_any(
             &link,
             &rendezvous(PairingRole::Joiner),
             NET,
-            &candidates,
+            &eligible,
             device_of(&account),
             100,
         )
@@ -2094,18 +2095,18 @@ mod tests {
     }
 
     #[test]
-    fn a_joiner_with_candidates_joins_the_network_of_the_offer() {
+    fn a_joiner_with_eligible_networks_joins_the_network_of_the_offer() {
         let master = Account::new();
         let account = Account::new();
         let (mut creator, link) =
             PairingSession::create(&rendezvous(PairingRole::Creator), "oftc", 100).expect("create");
         creator.set_master(&key_of(&master)).expect("master");
-        let candidates = vec![NET.to_string(), "oftc".to_string()];
+        let eligible = vec![NET.to_string(), "oftc".to_string()];
         let (mut joiner, hello) = PairingSession::join_any(
             &link,
             &rendezvous(PairingRole::Joiner),
             NET,
-            &candidates,
+            &eligible,
             device_of(&account),
             100,
         )
@@ -2133,19 +2134,19 @@ mod tests {
     }
 
     #[test]
-    fn an_offer_for_a_network_outside_the_candidates_ends_the_joiner() {
+    fn an_offer_for_a_network_outside_the_eligible_networks_ends_the_joiner() {
         let master = Account::new();
         let account = Account::new();
         let (mut creator, link) =
             PairingSession::create(&rendezvous(PairingRole::Creator), "other-net", 100)
                 .expect("create");
         creator.set_master(&key_of(&master)).expect("master");
-        let candidates = vec![NET.to_string(), "oftc".to_string()];
+        let eligible = vec![NET.to_string(), "oftc".to_string()];
         let (mut joiner, hello) = PairingSession::join_any(
             &link,
             &rendezvous(PairingRole::Joiner),
             NET,
-            &candidates,
+            &eligible,
             device_of(&account),
             100,
         )
