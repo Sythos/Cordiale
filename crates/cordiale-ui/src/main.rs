@@ -224,6 +224,14 @@ enum WorkerCommand {
     /// The user accepts (`true`) or dismisses (`false`) the waiting pairing
     /// offer. Only an accept starts the join step.
     E2ePairOffer(bool),
+    /// A step of the peer key view. A verify carries the key that the view
+    /// shows.
+    E2ePeerKey {
+        step: e2e_runtime::PeerKeyStep,
+        network: String,
+        nick: String,
+        key: String,
+    },
     /// A consent action on a plain query, including a manual key re-request.
     E2eRequestAction {
         action: String,
@@ -1904,6 +1912,17 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::E2ePairOffer(accept)) => {
                         e2e_runtime::answer_pairing_offer(&mut state, &ui, accept).await;
+                    }
+                    Some(WorkerCommand::E2ePairOffer(accept)) => {
+                        e2e_runtime::answer_pairing_offer(&mut state, &ui, accept).await;
+                    }
+                    Some(WorkerCommand::E2ePeerKey {
+                        step,
+                        network,
+                        nick,
+                        key,
+                    }) => {
+                        e2e_runtime::handle_e2e_peer_key(&mut state, &ui, step, network, nick, key);
                     }
                     Some(WorkerCommand::E2eRequestAction {
                         action,

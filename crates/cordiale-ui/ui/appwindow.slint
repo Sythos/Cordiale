@@ -1576,6 +1576,15 @@ export component AppWindow inherits Window {
     in property <string> e2e-sas-code: "";
     // The SAS step of the user: "start", "confirm", "reject" or "cancel".
     callback e2e-sas-requested(string);
+    // The peer key view of the open locked query. It holds public keys only.
+    // The step is "open", "close" or "verify". The other values are the
+    // network, the peer nick and the key that the view shows.
+    in property <bool> e2e-peer-key-open: false;
+    in property <string> e2e-peer-key-network: "";
+    in property <string> e2e-peer-key-nick: "";
+    in property <string> e2e-peer-key: "";
+    in property <bool> e2e-peer-key-verified: false;
+    callback e2e-peer-key-requested(string, string, string, string);
     callback e2e-request-action(string, string, string, string);
     // The pairing window of `/e2e pair`. It holds no link and no QR code.
     // `e2e-pair-offered` is true when the server offers the pairing to the
@@ -2905,6 +2914,10 @@ export component AppWindow inherits Window {
             return @tr("The pairing is offered to your other devices. Accept it on the new device, then compare the code.");
         } else if status-kind == "e2e-pair-offer-none" {
             return @tr("No pairing offer is open.");
+        } else if status-kind == "e2e-key-verified" {
+            return @tr("You verified this key. This contact is verified.");
+        } else if status-kind == "e2e-key-failed" {
+            return @tr("The key of this contact changed. The key was not verified.");
         } else if status-kind == "e2e-pair-waiting" {
             return @tr("Waiting for the new device to join.");
         } else if status-kind == "e2e-pair-code" {
@@ -4379,6 +4392,56 @@ export component AppWindow inherits Window {
                             clicked => { e2e-sas-requested("cancel"); }
                         }
                     }
+                    if current-query-e2e && current-query-e2e-state != "e2e-chat-trust" && !e2e-peer-key-open : HorizontalBox {
+                        CompactButton {
+                            text: @tr("Show peer key");
+                            clicked => {
+                                e2e-peer-key-requested("open", window-source-network, current-query-peer-nick, "");
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    if current-query-e2e && current-query-e2e-state != "e2e-chat-trust" && e2e-peer-key-open : VerticalBox {
+                        spacing: 4px;
+                        Text {
+                            text: @tr("Network: {}. Contact: {}.", e2e-peer-key-network, e2e-peer-key-nick);
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            accessible-role: AccessibleRole.text;
+                        }
+                        Text {
+                            text: e2e-peer-key;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            accessible-role: AccessibleRole.text;
+                        }
+                        Text {
+                            text: e2e-peer-key-verified
+                                ? @tr("This key is verified.")
+                                : @tr("This key is not verified. Compare it with the contact in a trusted channel.");
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            accessible-role: AccessibleRole.text;
+                            accessible-live-region: AccessibleLiveness.polite;
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            if !e2e-peer-key-verified : CompactButton {
+                                text: @tr("Verify this key");
+                                clicked => {
+                                    e2e-peer-key-requested("verify", e2e-peer-key-network, e2e-peer-key-nick, e2e-peer-key);
+                                }
+                            }
+                            CompactButton {
+                                text: @tr("Close peer key");
+                                clicked => {
+                                    e2e-peer-key-requested("close", "", "", "");
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
                     if current-query-e2e : HorizontalBox {
                         if current-query-e2e-state == "e2e-chat-unreadable"
                             || current-query-e2e-state == "e2e-chat-keys"
@@ -5166,6 +5229,14 @@ export component AppWindow inherits Window {
                     } else {
                         current-query-e2e-start-confirm-open = true;
                     }
+                }
+            }
+
+            if current-query && current-query-e2e && current-query-e2e-state != "" && current-query-e2e-state != "e2e-chat-trust" && !e2e-peer-key-open : CompactButton {
+                text: @tr("Show peer key");
+                horizontal-stretch: 1;
+                clicked => {
+                    e2e-peer-key-requested("open", window-source-network, current-query-peer-nick, "");
                 }
             }
 

@@ -731,6 +731,18 @@ pub(crate) fn register_channel_callbacks(
         }
     });
 
+    let tx_for_e2e_peer_key = worker_tx.clone();
+    ui.on_e2e_peer_key_requested(move |step, network, nick, key| {
+        if let Some(step) = e2e_runtime::PeerKeyStep::parse(&step) {
+            let _ = tx_for_e2e_peer_key.send(WorkerCommand::E2ePeerKey {
+                step,
+                network: network.to_string(),
+                nick: nick.to_string(),
+                key: key.to_string(),
+            });
+        }
+    });
+
     let tx_for_e2e_request = worker_tx.clone();
     ui.on_e2e_request_action(move |action, network, peer, request_id| {
         let _ = tx_for_e2e_request.send(WorkerCommand::E2eRequestAction {
