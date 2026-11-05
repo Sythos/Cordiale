@@ -242,15 +242,19 @@ pub enum PairingOperation {
     Fetch,
     /// `DELETE /e2e/pairings/:id`: close the rendezvous.
     Close,
+    /// `POST /e2e/pairings/:id/invite`: ask the server to send an
+    /// `e2e_pairing_invite` event to the other sessions of the account.
+    Invite,
 }
 
 impl PairingOperation {
-    pub const ALL: [PairingOperation; 5] = [
+    pub const ALL: [PairingOperation; 6] = [
         Self::Create,
         Self::Join,
         Self::Post,
         Self::Fetch,
         Self::Close,
+        Self::Invite,
     ];
 
     /// Method and path template. `:id` is the rendezvous id.
@@ -261,6 +265,7 @@ impl PairingOperation {
             Self::Post => (E2eMethod::Post, "/e2e/pairings/:id/messages"),
             Self::Fetch => (E2eMethod::Get, "/e2e/pairings/:id/messages"),
             Self::Close => (E2eMethod::Delete, "/e2e/pairings/:id"),
+            Self::Invite => (E2eMethod::Post, "/e2e/pairings/:id/invite"),
         }
     }
 
@@ -411,6 +416,7 @@ mod tests {
             "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv/messages",
             "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv/messages",
             "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv",
+            "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv/invite",
         ];
         for (operation, path) in PairingOperation::ALL.into_iter().zip(paths) {
             assert_eq!(operation.path(Some(id)).unwrap(), path, "{operation:?}");

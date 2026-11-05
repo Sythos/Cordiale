@@ -49,8 +49,8 @@ use crate::e2e_identity_routes::{
 };
 use crate::e2e_pacing::{classify_send_response, parse_send_accepted, SendAnswer, SendResponse};
 use crate::e2e_pairing::{
-    MessageEnvelope, MessagesEnvelope, PairingCallError, PostPayload, RelayMessage, Rendezvous,
-    RendezvousEnvelope,
+    InviteRequest, MessageEnvelope, MessagesEnvelope, PairingCallError, PostPayload, RelayMessage,
+    Rendezvous, RendezvousEnvelope,
 };
 use crate::e2e_protocol::{E2eOperation, E2eRequestOperation, PairingOperation};
 use crate::e2e_refusal::E2eRouteError;
@@ -1396,6 +1396,32 @@ impl GrappaClient {
         )?;
         self.send_pairing_request(self.http.delete(url).bearer_auth(token))
             .await?;
+        Ok(())
+    }
+
+    /// `POST /e2e/pairings/:id/invite` — asks the server to send the pairing
+    /// invite of this rendezvous to the other sessions of the account. The
+    /// body holds the network and the public key of the QR link. The
+    /// answer is 204. Nothing goes to IRC. The caller is the creator.
+    pub async fn invite_pairing(
+        &self,
+        token: &str,
+        rendezvous_id: &str,
+        network_id: &str,
+        ephemeral_key: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<(), PairingCallError> {
+        let url = self.pairing_url(
+            PairingOperation::Invite,
+            Some(rendezvous_id),
+            server_protocol,
+            None,
+        )?;
+        self.send_pairing_request(self.http.post(url).bearer_auth(token).json(&InviteRequest {
+            network_id,
+            ephemeral_key,
+        }))
+        .await?;
         Ok(())
     }
 
@@ -5683,6 +5709,72 @@ mod tests {
             .await
             .expect("keys");
         assert_eq!((left.one_time_keys, left.fallback), (50, false));
+    }
+
+    const INVITE_ID: &str = "AbCdEfGhIjKlMnOpQrStUv";
+    const INVITE_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    #[tokio::test]
+    async fn invite_pairing_posts_the_network_and_the_public_key_only() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/e2e/pairings/{INVITE_ID}/invite")))
+            .and(header("authorization", "Bearer abc123"))
+            .and(body_json(serde_json::json!({
+                "network_id": "libera",
+                "ephemeral_key": INVITE_KEY,
+            })))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .invite_pairing("abc123", INVITE_ID, "libera", INVITE_KEY, Some(48))
+            .await
+            .expect("invite");
+    }
+
+    #[tokio::test]
+    async fn invite_pairing_reports_a_server_without_the_route() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let client = GrappaClient::new(mock_server.uri());
+        let result = client
+            .invite_pairing("abc123", INVITE_ID, "libera", INVITE_KEY, Some(48))
+            .await;
+        assert!(matches!(
+            result,
+            Err(PairingCallError::Relay(
+                crate::e2e_pairing::PairingError::NotFound
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn invite_pairing_refuses_before_the_request() {
+        let mock_server = MockServer::start().await;
+        let client = GrappaClient::new(mock_server.uri());
+        for protocol in [None, Some(47)] {
+            assert!(matches!(
+                client
+                    .invite_pairing("abc123", INVITE_ID, "libera", INVITE_KEY, protocol)
+                    .await,
+                Err(PairingCallError::Unavailable)
+            ));
+        }
+        assert!(matches!(
+            client
+                .invite_pairing("abc123", "../x", "libera", INVITE_KEY, Some(48))
+                .await,
+            Err(PairingCallError::Bad(_))
+        ));
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -97,6 +97,15 @@ pub struct PostPayload<'a> {
     pub payload: &'a str,
 }
 
+/// Request body of `POST /e2e/pairings/:id/invite`. It holds the public
+/// ephemeral key of the creator, the same key as in the QR link. The server
+/// sends the invite to the other sessions of the account only.
+#[derive(Serialize)]
+pub struct InviteRequest<'a> {
+    pub network_id: &'a str,
+    pub ephemeral_key: &'a str,
+}
+
 /// Why a rendezvous ended, as the relay names it in `e2e_pairing_closed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClosedReason {
