@@ -7904,6 +7904,53 @@ fn recovery_advice_names_the_pairing_roles_in_every_catalog() {
     }
 }
 
+/// The replaced-identity advice starts with `/e2e forget`, and the forget
+/// texts exist in every catalog with the command they name.
+#[test]
+fn forget_recovery_texts_exist_in_every_catalog() {
+    const MSGIDS: [(&str, &str); 5] = [
+        (
+            "{} Devices: {}. This device holds the old keys, so a pairing cannot work yet. Type /e2e forget on this device: it asks for a confirmation and removes only the keys of this device. Then type /e2e pair on a listed device that holds the identity of the server. Then type /e2e join and the link on this device, or type /e2e accept for its invite.",
+            "/e2e forget",
+        ),
+        (
+            "This removes the old E2E keys of this device. The identity on the server stays. To confirm, type /e2e forget yes.",
+            "/e2e forget yes",
+        ),
+        (
+            "The old E2E keys were removed. Type /e2e pair on a listed device, then /e2e join and the link on this device.",
+            "/e2e pair",
+        ),
+        ("The old E2E keys were not removed.", ""),
+        (
+            "This device has no replaced E2E identity. Nothing was removed.",
+            "",
+        ),
+    ];
+    let slint = include_str!("../ui/appwindow.slint");
+    for (msgid, _) in MSGIDS {
+        assert!(slint.contains(&format!("@tr(\"{msgid}\"")), "{msgid}");
+    }
+    for (lang, catalog) in [
+        ("it", include_str!("../lang/it/LC_MESSAGES/cordiale-ui.po")),
+        ("fr", include_str!("../lang/fr/LC_MESSAGES/cordiale-ui.po")),
+        ("de", include_str!("../lang/de/LC_MESSAGES/cordiale-ui.po")),
+        ("es", include_str!("../lang/es/LC_MESSAGES/cordiale-ui.po")),
+    ] {
+        for (msgid, command) in MSGIDS {
+            let line = format!("msgid \"{msgid}\"");
+            let msgstr = catalog
+                .lines()
+                .skip_while(|l| *l != line)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{lang}: missing msgid"));
+            assert!(msgstr.len() > "msgstr \"\"".len(), "{lang}: {msgstr}");
+            assert!(msgstr.contains(command), "{lang}: {command}");
+            assert_eq!(msgstr.matches("{}").count(), msgid.matches("{}").count());
+        }
+    }
+}
+
 /// The example masks in the ban-type picker and the ignore-mask hint are
 /// IRC syntax, not prose: every catalog must keep them as in the source.
 #[test]

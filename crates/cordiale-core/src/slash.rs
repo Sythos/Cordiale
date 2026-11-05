@@ -185,6 +185,13 @@ pub enum E2eManageAction {
     Reset,
     /// `/e2e reset yes`: the answer to the question. It resets the identity.
     ResetConfirm,
+    /// `/e2e forget`: ask the user to confirm that this device drops its keys
+    /// of a replaced identity. The server keeps its identity.
+    Forget,
+    /// `/e2e forget yes`: the answer to the question. It removes only the
+    /// keys on this device, so a pairing can give the device the identity of
+    /// the server.
+    ForgetConfirm,
 }
 
 /// Whether `name` is a channel rather than a nick.
@@ -537,8 +544,12 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             [step, answer] if step == "reset" && answer == "yes" => {
                 E2eManage(E2eManageAction::ResetConfirm)
             }
+            [step] if step == "forget" => E2eManage(E2eManageAction::Forget),
+            [step, answer] if step == "forget" && answer == "yes" => {
+                E2eManage(E2eManageAction::ForgetConfirm)
+            }
             _ => Usage(
-                "/e2e pair | join <link> | accept | decline | code <nn> | cancel | devices | revoke <id> | reset",
+                "/e2e pair | join <link> | accept | decline | code <nn> | cancel | devices | revoke <id> | reset | forget",
             ),
         },
         "hilight" | "highlight" | "dehilight" => match non_empty(args) {
@@ -1228,7 +1239,20 @@ mod tests {
             parse("/e2e reset yes"),
             Some(E2eManage(E2eManageAction::ResetConfirm))
         );
-        for bad in ["/e2e revoke", "/e2e reset now", "/e2e devices all"] {
+        assert_eq!(
+            parse("/e2e forget"),
+            Some(E2eManage(E2eManageAction::Forget))
+        );
+        assert_eq!(
+            parse("/e2e forget yes"),
+            Some(E2eManage(E2eManageAction::ForgetConfirm))
+        );
+        for bad in [
+            "/e2e revoke",
+            "/e2e reset now",
+            "/e2e devices all",
+            "/e2e forget now",
+        ] {
             assert!(matches!(parse(bad), Some(Usage(_))), "{bad}");
         }
     }

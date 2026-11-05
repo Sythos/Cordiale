@@ -2884,6 +2884,17 @@ export component AppWindow inherits Window {
         return @tr("{} Devices: {}. If another device of this account is online, type /e2e pair on that device. Then type /e2e join and the link on this device, or type /e2e accept for its invite. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked.", head, status-command-hint);
     }
 
+    // The recovery text of a replaced identity. This device still holds its
+    // old master key and refuses the grant of a pairing, so the advice starts
+    // with `/e2e forget`. Without another listed device the reset is the only
+    // way, so the general text applies.
+    function e2e-replaced-text(head: string) -> string {
+        if status-message == "none" {
+            return e2e-recovery-text(head);
+        }
+        return @tr("{} Devices: {}. This device holds the old keys, so a pairing cannot work yet. Type /e2e forget on this device: it asks for a confirmation and removes only the keys of this device. Then type /e2e pair on a listed device that holds the identity of the server. Then type /e2e join and the link on this device, or type /e2e accept for its invite.", head, status-command-hint);
+    }
+
     // The status text of the E2E kinds (`e2e-*`).
     function e2e-status-text() -> string {
         if status-kind == "e2e-not-ready" {
@@ -2957,7 +2968,7 @@ export component AppWindow inherits Window {
         } else if status-kind == "e2e-recovery-no-keys" {
             return e2e-recovery-text(@tr("This device has no keys for the E2E identity of this account."));
         } else if status-kind == "e2e-recovery-replaced" {
-            return e2e-recovery-text(@tr("The E2E identity on the server differs from the identity on this device."));
+            return e2e-replaced-text(@tr("The E2E identity on the server differs from the identity on this device."));
         } else if status-kind == "e2e-recovery-left-out" {
             return e2e-recovery-text(@tr("The signed device list does not include this device."));
         } else if status-kind == "e2e-recovery-no-list" {
@@ -2966,6 +2977,14 @@ export component AppWindow inherits Window {
             return @tr("This resets the E2E identity of this device. To confirm, type /e2e reset yes.");
         } else if status-kind == "e2e-reset-done" {
             return @tr("The E2E identity was reset. The locked query cannot send now.");
+        } else if status-kind == "e2e-forget-confirm" {
+            return @tr("This removes the old E2E keys of this device. The identity on the server stays. To confirm, type /e2e forget yes.");
+        } else if status-kind == "e2e-forget-done" {
+            return @tr("The old E2E keys were removed. Type /e2e pair on a listed device, then /e2e join and the link on this device.");
+        } else if status-kind == "e2e-forget-failed" {
+            return @tr("The old E2E keys were not removed.");
+        } else if status-kind == "e2e-forget-not-needed" {
+            return @tr("This device has no replaced E2E identity. Nothing was removed.");
         } else if status-kind == "e2e-reset-pending" {
             return @tr("The reset is not finished. Try again later.");
         } else if status-kind == "e2e-reset-unavailable" {

@@ -3975,3 +3975,23 @@ msgstr "{} Dispositivi: {}. Nessun altro dispositivo in elenco può abbinarsi a 
 msgctxt "AppWindow"
 msgid "{} Devices: {}. If another device of this account is online, type /e2e pair on that device. Then type /e2e join and the link on this device, or type /e2e accept for its invite. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked."
 msgstr "{} Dispositivi: {}. Se un altro dispositivo di questo account è online, scrivi /e2e pair su quel dispositivo. Poi scrivi /e2e join e il link su questo dispositivo, oppure scrivi /e2e accept per il suo invito. Sostituire l’identità richiede /e2e reset e una conferma. Una nuova identità può cambiare la chiave pubblica che i tuoi contatti hanno verificato."
+
+msgctxt "AppWindow"
+msgid "{} Devices: {}. This device holds the old keys, so a pairing cannot work yet. Type /e2e forget on this device: it asks for a confirmation and removes only the keys of this device. Then type /e2e pair on a listed device that holds the identity of the server. Then type /e2e join and the link on this device, or type /e2e accept for its invite."
+msgstr "{} Dispositivi: {}. Questo dispositivo ha ancora le vecchie chiavi, quindi un abbinamento non può ancora funzionare. Scrivi /e2e forget su questo dispositivo: chiede una conferma e rimuove solo le chiavi di questo dispositivo. Poi scrivi /e2e pair su un dispositivo in elenco che ha l’identità del server. Poi scrivi /e2e join e il link su questo dispositivo, oppure scrivi /e2e accept per il suo invito."
+
+msgctxt "AppWindow"
+msgid "This removes the old E2E keys of this device. The identity on the server stays. To confirm, type /e2e forget yes."
+msgstr "Questo rimuove le vecchie chiavi E2E di questo dispositivo. L’identità sul server resta. Per confermare, scrivi /e2e forget yes."
+
+msgctxt "AppWindow"
+msgid "The old E2E keys were removed. Type /e2e pair on a listed device, then /e2e join and the link on this device."
+msgstr "Le vecchie chiavi E2E sono state rimosse. Scrivi /e2e pair su un dispositivo in elenco, poi /e2e join e il link su questo dispositivo."
+
+msgctxt "AppWindow"
+msgid "The old E2E keys were not removed."
+msgstr "Le vecchie chiavi E2E non sono state rimosse."
+
+msgctxt "AppWindow"
+msgid "This device has no replaced E2E identity. Nothing was removed."
+msgstr "Questo dispositivo non ha un’identità E2E sostituita. Non è stato rimosso nulla."
