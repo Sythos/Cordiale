@@ -1582,7 +1582,9 @@ pub(crate) async fn run_e2e_pair(
         network_id: &network,
     };
     // A new start replaces the open pairing: the old one is cancelled first.
+    // A waiting invite is dropped too: its end would replace the new status.
     if matches!(action, E2ePairAction::Start | E2ePairAction::Join(_)) {
+        state.e2e.invite = None;
         clear_pairing_link(ui);
         end_active_pairing(state).await;
     }
