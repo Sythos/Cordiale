@@ -13218,13 +13218,10 @@ fn query_without_a_nick_closes_the_locked_window() {
         state.conn.token = Some("test-token".to_string());
         state.windows.current_query = true;
         state.windows.current_channel = Some(("libera".to_string(), "\u{1F512}bob".to_string()));
-        state
-            .e2e
-            .locked
-            .insert(("libera".to_string(), "bob".to_string()));
+        state.e2e.add_locked("libera", "bob");
         let ui = slint::Weak::<AppWindow>::default();
         network_test_runtime().block_on(handle_send_message(&mut state, &ui, command.to_string()));
-        assert!(state.e2e.locked.is_empty(), "command {command}");
+        assert!(state.e2e.locked_windows().is_empty(), "command {command}");
         assert!(state.windows.current_channel.is_none(), "command {command}");
     }
 }
