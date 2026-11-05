@@ -2687,6 +2687,25 @@ pub(crate) fn classify_locked_input(body: &str) -> LockedInput {
     }
 }
 
+/// The words of `/ctcp <target> ACTION <words>` when the target is the peer of
+/// the locked window under the network case mapping. Any other line gives
+/// `None` and keeps the normal command path.
+pub(crate) fn locked_ctcp_action(
+    body: &str,
+    peer: &str,
+    casemapping: cordiale_core::isupport::CaseMapping,
+) -> Option<String> {
+    use cordiale_core::slash::{parse, SlashCommand};
+    match parse(body) {
+        Some(SlashCommand::Ctcp { target, verb, args })
+            if verb == "ACTION" && casemapping.nick_eq(&target, peer) =>
+        {
+            Some(args.unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
 /// Sends `/me <words>` of a locked window as an encrypted action.
 pub(crate) async fn handle_send_locked_action(
     state: &mut WorkerState,
@@ -2836,6 +2855,49 @@ mod tests {
             LockedInput::Action("waves".to_string())
         );
         assert_eq!(classify_locked_input("/np"), LockedInput::NowPlaying);
+    }
+
+    #[test]
+    fn ctcp_action_to_the_locked_peer_is_an_encrypted_action() {
+        use cordiale_core::isupport::CaseMapping;
+        let map = CaseMapping::Rfc1459;
+        assert_eq!(
+            locked_ctcp_action("/ctcp Alice ACTION waves", "Alice", map),
+            Some("waves".to_string())
+        );
+        assert_eq!(
+            locked_ctcp_action("/ctcp ALICE action waves", "alice", map),
+            Some("waves".to_string())
+        );
+        // Empty text stays empty: the send path then sends nothing.
+        assert_eq!(
+            locked_ctcp_action("/ctcp Alice ACTION", "Alice", map),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn ctcp_action_target_follows_the_network_case_mapping() {
+        use cordiale_core::isupport::CaseMapping;
+        let line = "/ctcp [bob] ACTION waves";
+        assert!(locked_ctcp_action(line, "{bob}", CaseMapping::Rfc1459).is_some());
+        assert!(locked_ctcp_action(line, "{bob}", CaseMapping::Ascii).is_none());
+    }
+
+    #[test]
+    fn other_ctcp_lines_keep_the_command_path() {
+        use cordiale_core::isupport::CaseMapping;
+        let map = CaseMapping::Rfc1459;
+        assert_eq!(
+            locked_ctcp_action("/ctcp Bob ACTION waves", "Alice", map),
+            None
+        );
+        assert_eq!(
+            locked_ctcp_action("/ctcp Alice VERSION", "Alice", map),
+            None
+        );
+        assert_eq!(locked_ctcp_action("/ping Alice", "Alice", map), None);
+        assert_eq!(locked_ctcp_action("/me waves", "Alice", map), None);
     }
 
     #[test]

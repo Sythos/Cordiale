@@ -4334,6 +4334,13 @@ async fn handle_send_message(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     let channel = locked.as_ref().map_or(window, |(_, nick)| nick);
     if let Some((locked_network, nick)) = &locked {
         let (locked_network, nick) = (locked_network.clone(), nick.clone());
+        // A CTCP ACTION to the peer of this window goes out encrypted.
+        if let Some(words) =
+            locked_ctcp_action(&body, &nick, network_casemapping(state, &locked_network))
+        {
+            handle_send_locked_action(state, ui, locked_network, nick, words).await;
+            return;
+        }
         match classify_locked_input(&body) {
             LockedInput::Text(text) => {
                 handle_send_locked(state, ui, locked_network, nick, text).await;
