@@ -211,7 +211,7 @@ impl E2eRuntime {
         if known.is_empty() {
             return OfferDecision::WrongNetwork;
         }
-        if self.eligible_network(known).is_none() {
+        if self.eligible_networks(known).is_empty() {
             return OfferDecision::AlreadyPaired;
         }
         if self.pairing.is_some() {
@@ -238,28 +238,35 @@ impl E2eRuntime {
             && (self.needs_pairing.contains(network) || self.reset.contains(network))
     }
 
-    /// The network that an offer joins: the first one, in name order, that
-    /// is in `known` and lacks the identity on this device.
-    fn eligible_network(&self, known: &[String]) -> Option<String> {
-        let mut networks: Vec<&String> = known.iter().collect();
-        networks.sort();
-        networks
-            .into_iter()
-            .find(|network| self.can_take_offer(network))
+    /// The networks that an offer can join, in name order: those in `known`
+    /// that lack the identity on this device. The offer names no network. The
+    /// holder names it in its sealed `offer`, so the join step picks one of
+    /// these networks then.
+    fn eligible_networks(&self, known: &[String]) -> Vec<String> {
+        let mut networks: Vec<String> = known
+            .iter()
+            .filter(|network| self.can_take_offer(network))
             .cloned()
+            .collect();
+        networks.sort();
+        networks.dedup();
+        networks
     }
 
     /// Takes the waiting offer for an accept. The slot is empty after this
     /// call, so one accept gives the offer once. An offer that ended, or
     /// whose networks no longer need a pairing, gives `None`. The result is
-    /// the network and the code (`<id>.<key>`) for the join step.
-    fn take_offer(&mut self, known: &[String], now: i64) -> Option<(String, String)> {
+    /// the candidate networks and the code (`<id>.<key>`) for the join step.
+    fn take_offer(&mut self, known: &[String], now: i64) -> Option<(Vec<String>, String)> {
         let offer = self.offer.take()?;
         if !offer.is_current(now) || self.pairing.is_some() {
             return None;
         }
-        let network = self.eligible_network(known)?;
-        Some((network, offer.link().code()))
+        let candidates = self.eligible_networks(known);
+        if candidates.is_empty() {
+            return None;
+        }
+        Some((candidates, offer.link().code()))
     }
 
     /// Drops the waiting offer when its end time passed. True when it did.
@@ -1560,13 +1567,20 @@ pub(crate) async fn run_e2e_pair(
     // An accept joins once with the id and the key of the waiting offer. The
     // offer slot is empty after the accept. The join path below keeps the
     // code check.
+    // The offer names no network, so the join starts on the first candidate
+    // and moves to the network that the sealed offer of the holder names.
+    let mut candidates: Vec<String> = Vec::new();
     let (network, action) = match action {
         E2ePairAction::Accept => {
             let known: Vec<String> = state.networks.own_nicks.keys().cloned().collect();
             let taken = state.e2e.take_offer(&known, now);
             set_offer_dialog(ui, false);
             match taken {
-                Some((network, code)) => (network, E2ePairAction::Join(code)),
+                Some((networks, code)) => {
+                    let first = networks[0].clone();
+                    candidates = networks;
+                    (first, E2ePairAction::Join(code))
+                }
                 None => return show_pairing_kind(ui, "e2e-pair-offer-none", String::new()),
             }
         }
@@ -1629,7 +1643,9 @@ pub(crate) async fn run_e2e_pair(
                 text.clear();
                 return show_pairing_kind(ui, "e2e-not-ready", String::new());
             };
-            let result = pairing::start_joiner(&ctx, engine.state_mut(), &mut text, now).await;
+            let result =
+                pairing::start_joiner_any(&ctx, engine.state_mut(), &mut text, &candidates, now)
+                    .await;
             state.e2e.engines.insert(network.clone(), engine);
             match result {
                 Ok(session) => {
@@ -2116,7 +2132,69 @@ async fn pump_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     };
     let result = pairing::pump(&ctx, engine.state_mut(), &mut active.session).await;
     state.e2e.engines.insert(network, engine);
-    finish_pairing_step(state, ui, active, result.err());
+    let error = follow_offered_network(state, &mut active, result).await;
+    finish_pairing_step(state, ui, active, error);
+}
+
+/// The result of a pairing step, after the move of a joiner to the network
+/// that the sealed offer of the holder named. A step that failed stays as it
+/// is.
+async fn follow_offered_network(
+    state: &mut WorkerState,
+    active: &mut ActivePairing,
+    result: Result<(), pairing::DriveError>,
+) -> Option<pairing::DriveError> {
+    match result {
+        Err(error) => Some(error),
+        Ok(()) => rebind_joiner(state, active).await.err(),
+    }
+}
+
+/// A joiner that accepted an offer starts on the first candidate network. When
+/// the sealed offer names another network, the pairing moves to the engine of
+/// that network: the joiner takes the device of its store, saves the pairing
+/// record there, and sends the join if the code is confirmed. The record of
+/// the first network is cleared. Nothing changes if the network is the same.
+async fn rebind_joiner(
+    state: &mut WorkerState,
+    active: &mut ActivePairing,
+) -> Result<(), pairing::DriveError> {
+    let offered = active.session.network().to_string();
+    if offered == active.network || !active.session.is_active() {
+        return Ok(());
+    }
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return Ok(());
+    };
+    let protocol = state.conn.server_protocol_version;
+    let first = active.network.clone();
+    let Some(mut engine) = take_pairing_engine(state, &offered, true) else {
+        // No engine for the offered network: the pairing cannot go on.
+        if let Some(mut old) = take_pairing_engine(state, &first, false) {
+            let ctx = PairingContext {
+                client: &client,
+                token: &token,
+                protocol,
+                network_id: &first,
+            };
+            pairing::cancel(&ctx, old.state_mut(), &mut active.session).await;
+            state.e2e.engines.insert(first, old);
+        }
+        return Err(pairing::FlowError::Store.into());
+    };
+    if let Some(old) = state.e2e.engines.get_mut(&first) {
+        let _ = pairing::clear_pending(old.state_mut());
+    }
+    let ctx = PairingContext {
+        client: &client,
+        token: &token,
+        protocol,
+        network_id: &offered,
+    };
+    let result = pairing::bind_joiner(&ctx, engine.state_mut(), &mut active.session).await;
+    state.e2e.engines.insert(offered.clone(), engine);
+    active.network = offered;
+    result
 }
 
 /// Keeps the pairing while it is open and shows its state or its error.
@@ -2185,7 +2263,8 @@ pub(crate) async fn handle_e2e_pairing(
     };
     let result = pairing::on_push(&ctx, engine.state_mut(), &mut active.session, &push).await;
     state.e2e.engines.insert(network, engine);
-    finish_pairing_step(state, ui, active, result.err());
+    let error = follow_offered_network(state, &mut active, result).await;
+    finish_pairing_step(state, ui, active, error);
 }
 
 /// Drops the waiting pairing offer when its end time passed, and tells the
@@ -3265,10 +3344,10 @@ mod tests {
         let mut runtime = runtime_needing_pairing();
         let known = nets(&["libera"]);
         runtime.admit_offer(offer(OFFER_ID), &known, P55, OFFER_END - 60);
-        let (network, code) = runtime
+        let (networks, code) = runtime
             .take_offer(&known, OFFER_END - 30)
             .expect("one offer");
-        assert_eq!(network, "libera");
+        assert_eq!(networks, nets(&["libera"]));
         assert_eq!(code, format!("{OFFER_ID}.{OFFER_KEY}"));
         // The hand-off data is gone: a second accept gets nothing.
         assert!(runtime.offer.is_none());
@@ -3568,15 +3647,16 @@ mod tests {
     }
 
     #[test]
-    fn the_offer_picks_the_first_network_that_needs_the_identity() {
+    fn the_offer_gives_every_network_that_needs_the_identity_and_picks_none() {
         let mut runtime = E2eRuntime::default();
         runtime.needs_pairing.insert("oftc".to_string());
         runtime.needs_pairing.insert("libera".to_string());
         runtime.provisioned.insert("azzurra".to_string());
         let known = nets(&["oftc", "azzurra", "libera"]);
         runtime.admit_offer(offer(OFFER_ID), &known, P55, OFFER_END - 60);
-        let (network, _) = runtime.take_offer(&known, OFFER_END - 30).expect("offer");
-        assert_eq!(network, "libera");
+        // The offer names no network: the sealed offer of the holder does.
+        let (networks, _) = runtime.take_offer(&known, OFFER_END - 30).expect("offer");
+        assert_eq!(networks, nets(&["libera", "oftc"]));
     }
 
     fn offer_frame(topic: &str, payload: Value) -> PhoenixMessage {
