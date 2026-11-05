@@ -366,6 +366,8 @@ pub struct ChatSignals {
     pub peer_revoked: bool,
     pub ready: bool,
     pub sas_verified: bool,
+    /// The user verified the stored master key by an outside comparison.
+    pub key_verified: bool,
     /// The drop reason of the newest sent row, if it was dropped.
     pub last_drop: Option<DropReason>,
 }
@@ -400,7 +402,7 @@ pub fn locked_chat_state(signals: &ChatSignals) -> ChatState {
         ChatState::SendFailed
     } else if signals.last_drop == Some(DropReason::Late) {
         ChatState::Expired
-    } else if !signals.sas_verified {
+    } else if !signals.sas_verified && !signals.key_verified {
         ChatState::SasPending
     } else {
         ChatState::Active

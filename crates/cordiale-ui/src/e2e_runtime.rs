@@ -536,6 +536,7 @@ pub(crate) fn locked_entry_state(state: &WorkerState, network: &str, nick: &str)
             .and_then(|message| engine.dropped_reason(&message.id));
         let trust = engine.trust();
         signals.sas_verified = trust.is_sas_verified(network, nick);
+        signals.key_verified = trust.is_key_verified(network, nick);
         // The current list never holds a revoked key: read the revoked set.
         signals.peer_revoked = trust.has_revoked_devices(network, nick);
     }
@@ -2434,6 +2435,125 @@ pub(crate) fn handle_e2e_sas(state: &mut WorkerState, ui: &slint::Weak<AppWindow
     push_open_locked_state(state, ui);
 }
 
+/// A step of the peer key view, chosen by the user in the banner of the
+/// locked chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerKeyStep {
+    Open,
+    Close,
+    Verify,
+}
+
+impl PeerKeyStep {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "open" => Some(PeerKeyStep::Open),
+            "close" => Some(PeerKeyStep::Close),
+            "verify" => Some(PeerKeyStep::Verify),
+            _ => None,
+        }
+    }
+}
+
+/// The full master key of the peer and its outside check state. It is
+/// `None` with a trust alarm, without an engine or without a stored master.
+fn peer_key_facts(state: &WorkerState, network: &str, nick: &str) -> Option<(String, bool)> {
+    if state
+        .e2e
+        .trust_alarm
+        .contains(&(network.to_string(), nick.to_string()))
+    {
+        return None;
+    }
+    let engine = state.e2e.engines.get(network)?;
+    Some((engine.sas_master(nick)?, engine.is_key_verified(nick)))
+}
+
+/// Marks `key` as verified for the peer. The engine accepts the key only when
+/// it is the stored master now, so a delayed request for an old key fails.
+fn verify_peer_key(state: &mut WorkerState, network: &str, nick: &str, key: &str) -> bool {
+    if peer_key_facts(state, network, nick).is_none() {
+        return false;
+    }
+    state
+        .e2e
+        .engines
+        .get_mut(network)
+        .is_some_and(|engine| engine.confirm_key(nick, key).is_ok())
+}
+
+fn push_peer_key(
+    ui: &slint::Weak<AppWindow>,
+    open: bool,
+    network: String,
+    nick: String,
+    key: String,
+    verified: bool,
+) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_e2e_peer_key_open(open);
+        ui.set_e2e_peer_key_network(network.into());
+        ui.set_e2e_peer_key_nick(nick.into());
+        ui.set_e2e_peer_key(key.into());
+        ui.set_e2e_peer_key_verified(verified);
+    });
+}
+
+fn close_peer_key(ui: &slint::Weak<AppWindow>) {
+    push_peer_key(
+        ui,
+        false,
+        String::new(),
+        String::new(),
+        String::new(),
+        false,
+    );
+}
+
+/// Runs one step of the peer key view for the open locked entry. Open and
+/// close never change trust. Only a verify for the network, the peer and the
+/// key that the view shows marks the key as verified.
+pub(crate) fn handle_e2e_peer_key(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    step: PeerKeyStep,
+    network: String,
+    nick: String,
+    key: String,
+) {
+    let open = open_locked_window(state);
+    if step == PeerKeyStep::Close {
+        close_peer_key(ui);
+        return;
+    }
+    // A delayed request for another window or peer is ignored.
+    if open.as_ref() != Some(&(network.clone(), nick.clone())) {
+        return;
+    }
+    match step {
+        PeerKeyStep::Open => match peer_key_facts(state, &network, &nick) {
+            Some((master, verified)) => push_peer_key(ui, true, network, nick, master, verified),
+            None => close_peer_key(ui),
+        },
+        PeerKeyStep::Verify => {
+            let kind = if verify_peer_key(state, &network, &nick, &key) {
+                "e2e-key-verified"
+            } else {
+                "e2e-key-failed"
+            };
+            match peer_key_facts(state, &network, &nick) {
+                Some((master, verified)) => {
+                    push_peer_key(ui, true, network, nick, master, verified);
+                }
+                None => close_peer_key(ui),
+            }
+            set_e2e_status(ui, kind);
+            push_open_locked_state(state, ui);
+        }
+        PeerKeyStep::Close => {}
+    }
+}
+
 /// Pushes the state banner of the open locked entry.
 fn push_open_locked_state(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let Some((network, nick)) = open_locked_window(state) else {
@@ -2570,6 +2690,7 @@ pub(crate) fn handle_select_locked_query(
     // A SAS check belongs to the window that opened it.
     state.e2e.sas_check = None;
     push_sas_code(ui, String::new());
+    close_peer_key(ui);
     open_window(state, &key);
     load_locked_rows(state, &network, &nick);
     refresh_network_groups(state, ui);
@@ -3508,6 +3629,69 @@ mod tests {
         handle_e2e_sas(&mut state, &ui, SasStep::Confirm);
         assert!(sas_verified(&state));
         assert_eq!(state.e2e.sas_check, None);
+    }
+
+    fn key_verified(state: &WorkerState) -> bool {
+        state.e2e.engines["net"]
+            .trust()
+            .is_key_verified("net", "ada")
+    }
+
+    #[test]
+    fn the_peer_key_view_verifies_only_the_exact_stored_key_on_request() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, peer) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        let args = |step, nick: &str, key: &str| (step, nick.to_string(), key.to_string());
+        // The facts hold the full key and change nothing.
+        assert_eq!(
+            peer_key_facts(&state, "net", "ada"),
+            Some((peer.clone(), false))
+        );
+        assert_eq!(peer.len(), 43);
+        let (step, nick, key) = args(PeerKeyStep::Open, "ada", "");
+        handle_e2e_peer_key(&mut state, &ui, step, "net".into(), nick, key);
+        assert!(!key_verified(&state));
+        // A key that is not the stored one, or another network, is refused.
+        assert!(!verify_peer_key(&mut state, "net", "ada", "other-key"));
+        assert!(!verify_peer_key(&mut state, "other-net", "ada", &peer));
+        assert!(!key_verified(&state));
+        // A verify for another peer is ignored.
+        let (step, nick, key) = args(PeerKeyStep::Verify, "bob", &peer);
+        handle_e2e_peer_key(&mut state, &ui, step, "net".into(), nick, key);
+        assert!(!key_verified(&state));
+        // The check does not touch SAS and the peer leaves the SAS state.
+        let (step, nick, key) = args(PeerKeyStep::Verify, "ada", &peer);
+        handle_e2e_peer_key(&mut state, &ui, step, "net".into(), nick, key);
+        assert!(key_verified(&state));
+        assert!(!sas_verified(&state));
+        assert_eq!(peer_key_facts(&state, "net", "ada"), Some((peer, true)));
+        assert_eq!(locked_entry_state(&state, "net", "ada"), ChatState::Active);
+        // A trust alarm hides the key and refuses a verify.
+        state
+            .e2e
+            .trust_alarm
+            .insert(("net".to_string(), "ada".to_string()));
+        assert_eq!(peer_key_facts(&state, "net", "ada"), None);
+        assert_eq!(PeerKeyStep::parse("verify"), Some(PeerKeyStep::Verify));
+        assert_eq!(PeerKeyStep::parse("Verify"), None);
+    }
+
+    #[test]
+    fn a_key_check_never_counts_with_a_trust_alarm() {
+        let signals = ChatSignals {
+            engine: true,
+            ready: true,
+            key_verified: true,
+            trust_alarm: true,
+            ..ChatSignals::default()
+        };
+        assert_eq!(locked_chat_state(&signals), ChatState::TrustAlarm);
+        let signals = ChatSignals {
+            trust_alarm: false,
+            ..signals
+        };
+        assert_eq!(locked_chat_state(&signals), ChatState::Active);
     }
 
     #[test]

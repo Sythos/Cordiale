@@ -221,6 +221,14 @@ enum WorkerCommand {
     },
     /// A SAS step of the open locked query: show, confirm, reject, cancel.
     E2eSas(SasStep),
+    /// A step of the peer key view. A verify carries the key that the view
+    /// shows.
+    E2ePeerKey {
+        step: e2e_runtime::PeerKeyStep,
+        network: String,
+        nick: String,
+        key: String,
+    },
     /// Asks the server to send the invite of the open pairing to the other
     /// sessions of the account.
     E2ePairInvite,
@@ -1901,6 +1909,14 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::E2eSas(step)) => {
                         handle_e2e_sas(&mut state, &ui, step);
+                    }
+                    Some(WorkerCommand::E2ePeerKey {
+                        step,
+                        network,
+                        nick,
+                        key,
+                    }) => {
+                        e2e_runtime::handle_e2e_peer_key(&mut state, &ui, step, network, nick, key);
                     }
                     Some(WorkerCommand::E2ePairInvite) => {
                         e2e_runtime::send_pairing_invite(&state, &ui).await;

@@ -273,6 +273,38 @@ msgid "Show SAS code"
 msgstr "Mostra il codice SAS"
 
 msgctxt "AppWindow"
+msgid "Show peer key"
+msgstr "Mostra la chiave del contatto"
+
+msgctxt "AppWindow"
+msgid "Close peer key"
+msgstr "Chiudi la chiave del contatto"
+
+msgctxt "AppWindow"
+msgid "Verify this key"
+msgstr "Verifica questa chiave"
+
+msgctxt "AppWindow"
+msgid "Network: {}. Contact: {}."
+msgstr "Rete: {}. Contatto: {}."
+
+msgctxt "AppWindow"
+msgid "This key is verified."
+msgstr "Questa chiave è verificata."
+
+msgctxt "AppWindow"
+msgid "This key is not verified. Compare it with the contact in a trusted channel."
+msgstr "Questa chiave non è verificata. Confrontala con il contatto in un canale fidato."
+
+msgctxt "AppWindow"
+msgid "You verified this key. This contact is verified."
+msgstr "Hai verificato questa chiave. Questo contatto è verificato."
+
+msgctxt "AppWindow"
+msgid "The key of this contact changed. The key was not verified."
+msgstr "La chiave di questo contatto è cambiata. La chiave non è stata verificata."
+
+msgctxt "AppWindow"
 msgid "SAS code: {}"
 msgstr "Codice SAS: {}"
 
