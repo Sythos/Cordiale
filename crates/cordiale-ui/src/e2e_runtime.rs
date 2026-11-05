@@ -1879,7 +1879,8 @@ async fn resume_pending_manage(
 
 /// Marks `network` as reset and puts its engine back. The engine stays in the
 /// map for the sealed history only. The end of the session drops the queued
-/// texts, so nothing goes out for the deleted device.
+/// texts, so nothing goes out for the deleted device. The reset also clears
+/// the provisioning marker: the device no longer has the identity.
 fn settle_reset(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -1889,6 +1890,7 @@ fn settle_reset(
     engine.end_session();
     let changed = engine.take_changed_peers();
     state.e2e.engines.insert(network.to_string(), engine);
+    state.e2e.provisioned.remove(network);
     state.e2e.reset.insert(network.to_string());
     state.e2e.clear_ciphertext_views(network);
     for nick in changed {
@@ -2827,6 +2829,34 @@ mod tests {
         runtime.reset.insert("libera".to_string());
         let decision = runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 60);
         assert_eq!(decision, InviteDecision::Show);
+    }
+
+    #[test]
+    fn a_provisioned_device_can_take_an_invite_after_a_reset() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, _peer) = sas_state(&dir);
+        state.e2e.provisioned.insert("net".to_string());
+        assert_eq!(
+            state
+                .e2e
+                .admit_invite(invite("net", INVITE_ID), true, INVITE_END - 60),
+            InviteDecision::AlreadyPaired
+        );
+        let engine = state.e2e.engines.remove("net").expect("engine");
+        settle_reset(
+            &mut state,
+            &slint::Weak::<AppWindow>::default(),
+            "net",
+            engine,
+        );
+        assert!(!state.e2e.provisioned.contains("net"));
+        assert!(state.e2e.reset.contains("net"));
+        assert_eq!(
+            state
+                .e2e
+                .admit_invite(invite("net", INVITE_ID), true, INVITE_END - 60),
+            InviteDecision::Show
+        );
     }
 
     #[test]
