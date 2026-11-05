@@ -39,8 +39,8 @@ use cordiale_core::session::{route_e2e_message, route_e2e_pairing, route_e2e_pai
 use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
 use crate::e2e_view::{
-    device_rows, locked_chat_state, pairing_error_key, pairing_help, pairing_status_key,
-    recovery_for_list, recovery_for_provision, register_own_device, reset_status_key,
+    device_rows, devices_reason, locked_chat_state, pairing_error_key, pairing_help,
+    pairing_status_key, recovery_for_provision, register_own_device, reset_status_key,
     revoke_status_key, ChatSignals, ChatState, DeviceRow, KeyRequest, LocalQuery, QueryLane,
     RecoveryReason,
 };
@@ -1909,8 +1909,13 @@ pub(crate) async fn run_e2e_manage(
                     .filter_map(|key| did_from_key_text(key).ok())
                     .collect()
             });
-            // No list, or a list without this device: explain, never reset.
-            if let Some(reason) = recovery_for_list(&own, ids.as_deref()) {
+            // The reason of the provisioning run comes first: an engine can
+            // open with an old local list. Then the local list gives the
+            // reason. The view explains and never resets.
+            let saved = state.e2e.recovery.get(&network).copied();
+            if let Some((reason, from_signed_list)) = devices_reason(saved, &own, ids.as_deref()) {
+                // An old local list does not tell the devices of the account.
+                let ids = if from_signed_list { ids } else { None };
                 return show_recovery(ui, &client, &token, &network, protocol, &own, reason, ids)
                     .await;
             }

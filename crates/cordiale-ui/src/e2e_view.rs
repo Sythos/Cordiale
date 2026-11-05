@@ -567,6 +567,21 @@ pub(crate) fn recovery_for_list(own: &str, ids: Option<&[String]>) -> Option<Rec
     }
 }
 
+/// The reason for `/e2e devices` when an engine is open. A reason that the
+/// provisioning run saved comes first, because the engine can open with an
+/// old local list. The flag is true when the reason comes from the local
+/// signed list, so that list may name the devices.
+pub(crate) fn devices_reason(
+    saved: Option<RecoveryReason>,
+    own: &str,
+    ids: Option<&[String]>,
+) -> Option<(RecoveryReason, bool)> {
+    match saved {
+        Some(reason) => Some((reason, false)),
+        None => recovery_for_list(own, ids).map(|reason| (reason, true)),
+    }
+}
+
 /// How the recovery text speaks of pairing: `pair` when a listed device other
 /// than this one exists, `none` when the list has no other device, `unknown`
 /// when the list could not be read.
@@ -1056,6 +1071,30 @@ mod tests {
             Some(RecoveryReason::LeftOut)
         );
         assert_eq!(recovery_for_list("aaa", None), Some(RecoveryReason::NoList));
+    }
+
+    #[test]
+    fn a_saved_reason_comes_before_the_local_list() {
+        let healthy = ids(&["aaa", "bbb"]);
+        // An open engine with a healthy old list still shows the saved reason.
+        assert_eq!(
+            devices_reason(Some(RecoveryReason::Replaced), "aaa", Some(&healthy)),
+            Some((RecoveryReason::Replaced, false))
+        );
+        assert_eq!(
+            devices_reason(Some(RecoveryReason::NoKeys), "aaa", None),
+            Some((RecoveryReason::NoKeys, false))
+        );
+        // Without a saved reason the local list decides.
+        assert_eq!(devices_reason(None, "aaa", Some(&healthy)), None);
+        assert_eq!(
+            devices_reason(None, "zzz", Some(&healthy)),
+            Some((RecoveryReason::LeftOut, true))
+        );
+        assert_eq!(
+            devices_reason(None, "aaa", None),
+            Some((RecoveryReason::NoList, true))
+        );
     }
 
     #[test]
