@@ -1845,18 +1845,28 @@ confermati o sostituiti dal testo di Grappa §4f e §4g e da Cicchetto:
   da cui nasce il QR (`show_pairing_qr`), senza costruire un secondo link. Il link vive solo nella proprietà
   `e2e-pair-link` e si cancella (`clear_pairing_link`) quando l abbinamento finisce, scade, viene sostituito
   o annullato. Il link e il codice non vanno nei log.
-- **Invito ad altre sessioni (lato ricevente fatto, mittente in attesa di Grappa).** Il protocollo
-  documentato non ha l evento: `route_e2e_pairing` legge solo `e2e_pairing_message` e
-  `e2e_pairing_closed`. Contratto richiesto a Grappa: un evento `e2e_pairing_invite` sul canale utente
-  (`grappa:user:<account>`), inviato solo alle sessioni attive dello stesso account autenticato, con
-  - `network_id`: lo slug della rete, come nelle rotte `/networks/:network_id/e2e/...`;
-  - `rendezvous_id`: l id del rendezvous (22 caratteri);
-  - `ephemeral_key`: la chiave pubblica temporanea del creatore (43 caratteri), la stessa del QR;
-  - `expires_at`: testo ISO-8601 in UTC (`Z` o `+00:00`), non oltre 300 s da ora.
+- **Invito ad altre sessioni (lato ricevente e lato mittente fatti, rotta di Grappa da definire).** Il protocollo
+  documentato non ha l evento né la rotta: `route_e2e_pairing` legge solo `e2e_pairing_message` e
+  `e2e_pairing_closed`. Contratto richiesto a Grappa, in due parti.
 
-  Resta da definire a Grappa la richiesta con cui il creatore chiede l invito (la chiave temporanea è
-  solo sul client, quindi il server non può farlo da solo). Cordiale non manda nessun invito finché
-  questa rotta non esiste, e non usa mai IRC.
+  1. Richiesta del creatore: `POST /e2e/pairings/:id/invite` con corpo `{"network_id": "<slug>",
+     "ephemeral_key": "<43 caratteri>"}`, risposta **204**. La chiave temporanea è solo sul client, per questo
+     la manda il creatore: è la stessa del QR. Solo il creatore del rendezvous può chiamarla (un altro
+     account riceve 404, un altro dispositivo dello stesso account 403 `pairing_not_a_party`). Vale la
+     regola delle altre rotte del relay: sessione piena, protocollo 48 o più.
+  2. Evento: `e2e_pairing_invite` sul canale utente (`grappa:user:<account>`), inviato solo alle sessioni
+     attive dello stesso account autenticato, con
+     - `network_id`: lo slug della rete, come nelle rotte `/networks/:network_id/e2e/...`;
+     - `rendezvous_id`: l id del rendezvous (22 caratteri);
+     - `ephemeral_key`: la chiave pubblica temporanea del creatore (43 caratteri), la stessa del QR;
+     - `expires_at`: testo ISO-8601 in UTC (`Z` o `+00:00`), non oltre 300 s da ora.
+
+  **Invio in Cordiale (`send_pairing_invite`).** La finestra «Pair a new device» ha il pulsante «Send invite».
+  Chiama `GrappaClient::invite_pairing` con l id e la chiave del link che tiene `ActivePairing` (lo stesso
+  del QR e del pulsante «Copy link»): nessun secondo pairing, nessuna seconda chiave. Il link vive solo con
+  il pairing aperto. Il risultato è in barra di stato: inviato, server senza la rotta (404, 405 o 501: si
+  usa «Copy link») o invio fallito. Un fallimento non chiude il pairing. Cordiale non usa mai IRC per
+  l invito e non scrive nei log il link, la chiave o il codice.
 - **Ricezione in Cordiale (`handle_e2e_pairing_invite`).** L invito vale solo sul canale utente
   dell account. Il client lo ignora, senza prompt né pairing, se è scaduto o oltre 300 s, doppio (stesso
   `rendezvous_id` già visto), chiuso (`e2e_pairing_closed` per quel rendezvous), di una rete che la
