@@ -317,10 +317,6 @@ msgid "They do not match"
 msgstr "Ils ne correspondent pas"
 
 msgctxt "AppWindow"
-msgid "Pairing link: {}. On the new device, type /e2e join and this link."
-msgstr "Lien d'appairage : {}. Sur le nouvel appareil, tape /e2e join et ce lien."
-
-msgctxt "AppWindow"
 msgid "Waiting for the new device to join."
 msgstr "En attente de la connexion du nouvel appareil."
 
@@ -359,14 +355,6 @@ msgstr "Ce serveur ne prend pas en charge l'appairage d'appareils."
 msgctxt "AppWindow"
 msgid "No pairing is open. Type /e2e pair on the first device."
 msgstr "Aucun appairage ouvert. Tape /e2e pair sur le premier appareil."
-
-msgctxt "AppWindow"
-msgid "Another device of your account invites this device to pair on {}. Type /e2e accept to join, or /e2e decline."
-msgstr "Un autre appareil de ton compte invite cet appareil à s'appairer sur {}. Tape /e2e accept pour rejoindre, ou /e2e decline."
-
-msgctxt "AppWindow"
-msgid "No pairing invite is open."
-msgstr "Aucune invitation d'appairage ouverte."
 
 msgctxt "AppWindow"
 msgid "Device {} was revoked."
@@ -3705,22 +3693,6 @@ msgid "Pair a new device"
 msgstr "Appairer un nouvel appareil"
 
 msgctxt "AppWindow"
-msgid "Close the pairing code"
-msgstr "Fermer le code d'appairage"
-
-msgctxt "AppWindow"
-msgid "Scan this code on the new device. Anyone who has it can pair a device until it expires, so do not post it."
-msgstr "Scanne ce code sur le nouvel appareil. Quiconque l'a peut appairer un appareil jusqu'à son expiration, ne le publie donc pas."
-
-msgctxt "AppWindow"
-msgid "QR code of the pairing link"
-msgstr "Code QR du lien d'appairage"
-
-msgctxt "AppWindow"
-msgid "Pairing code"
-msgstr "Code d'appairage"
-
-msgctxt "AppWindow"
 msgid "Download"
 msgstr "Télécharger"
 
@@ -3877,28 +3849,40 @@ msgid "Show plaintext"
 msgstr "Afficher le texte en clair"
 
 msgctxt "AppWindow"
-msgid "The link is copied."
-msgstr "Le lien est copié."
+msgid "Close the pairing window"
+msgstr "Fermer la fenêtre d’appairage"
 
 msgctxt "AppWindow"
-msgid "The link was not copied. The pairing stays open."
-msgstr "Le lien n’a pas été copié. L’association reste ouverte."
+msgid "The pairing is offered to your other devices. On the new device, accept the offer. Then compare the code on both devices."
+msgstr "L’appairage est proposé à tes autres appareils. Sur le nouvel appareil, accepte l’offre. Compare ensuite le code sur les deux appareils."
 
 msgctxt "AppWindow"
-msgid "Send invite"
-msgstr "Envoyer l’invitation"
+msgid "This server cannot offer the pairing to your other devices. The status bar shows the code to type on the new device."
+msgstr "Ce serveur ne peut pas proposer l’appairage à tes autres appareils. La barre d’état affiche le code à saisir sur le nouvel appareil."
 
 msgctxt "AppWindow"
-msgid "The invite is sent to your other sessions. Compare the code on both devices."
-msgstr "L’invitation est envoyée à vos autres sessions. Comparez le code sur les deux appareils."
+msgid "The offer ends when the pairing ends or expires."
+msgstr "L’offre se termine quand l’appairage se termine ou expire."
 
 msgctxt "AppWindow"
-msgid "This server cannot send a pairing invite. Use Copy link."
-msgstr "Ce serveur ne peut pas envoyer d’invitation d’association. Utilisez Copier le lien."
+msgid "Pairing offer"
+msgstr "Offre d’appairage"
 
 msgctxt "AppWindow"
-msgid "The invite was not sent. The pairing stays open."
-msgstr "L’invitation n’a pas été envoyée. L’association reste ouverte."
+msgid "Another device of your account offers to pair with this device. Accept only if you started it. Then compare the code on both devices."
+msgstr "Un autre appareil de ton compte propose de s’appairer avec cet appareil. Accepte seulement si tu l’as lancé. Compare ensuite le code sur les deux appareils."
+
+msgctxt "AppWindow"
+msgid "This server cannot offer the pairing. On the new device, type /e2e join and this code: {}."
+msgstr "Ce serveur ne peut pas proposer l’appairage. Sur le nouvel appareil, saisis /e2e join et ce code : {}."
+
+msgctxt "AppWindow"
+msgid "The pairing is offered to your other devices. Accept it on the new device, then compare the code."
+msgstr "L’appairage est proposé à tes autres appareils. Accepte-le sur le nouvel appareil, puis compare le code."
+
+msgctxt "AppWindow"
+msgid "No pairing offer is open."
+msgstr "Aucune offre d’appairage n’est ouverte."
 
 msgctxt "AppWindow"
 msgid "Device {} (this device): last activity {}"

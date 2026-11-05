@@ -94,7 +94,8 @@ User guide (plain English, no protocol details): [e2e-user-guide.md](e2e-user-gu
    la conferma sul nuovo dispositivo (in Cordiale `/e2e code`) parte `join`;
    il detentore firma solo dopo `join` e chiude il rendezvous dopo `done`.
    Cordiale accoppia una rete per volta: le altre reti dell'`offer` vanno in
-   `skipped`. Le rotte `/e2e/pairings`, i token di errore e i push
+   `skipped`. Il joiner di un'offerta in app sceglie la rete quando arriva
+   l'`offer` sigillato, tra le reti che mancano di identità. Le rotte `/e2e/pairings`, i token di errore e i push
    `e2e_pairing_message` e `e2e_pairing_closed` sono riletti sul testo 4g
    (`client.rs`, `e2e_pairing.rs`, `session.rs`). Codice: `e2e_pairing_flow.rs`. Prove: fixture
    `tests/fixtures/e2e/pairing_v1.json`
@@ -156,9 +157,9 @@ Il controllo "sessione già vista" segue il motore di irc-olm (OLM-4,
 
 ## Versione del protocollo
 
-`CLIENT_PROTOCOL_VERSION` is 54. The client supports the per-device E2E
+`CLIENT_PROTOCOL_VERSION` is 55. The client supports the per-device E2E
 format from protocol 49, inbox row flags from 50, explicit consent from 53,
-and `no_such_nick` from 54. The client sends this integer in the WebSocket
+`no_such_nick` from 54, and the pairing offer from 55. The client sends this integer in the WebSocket
 URL. A server below 49 does not speak the per-device format, so Cordiale does
 not use E2E with that server. Consent routes and the v52/v54 events use their
 own protocol gates.

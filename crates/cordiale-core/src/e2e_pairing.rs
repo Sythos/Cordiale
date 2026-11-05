@@ -23,7 +23,7 @@
 //! Typed models of the protocol 48 pairing relay (X1) and the pairing link.
 //!
 //! This module holds data only: the answers of the relay routes, the two
-//! user-topic events, the pairing link of the QR code and the mapping of a
+//! user-topic events, the pairing code and the mapping of a
 //! relay refusal to an error. It does no network call and no crypto. The
 //! ECIES session, the REST calls and the signing come in later phases.
 //!
@@ -97,13 +97,12 @@ pub struct PostPayload<'a> {
     pub payload: &'a str,
 }
 
-/// Request body of `POST /e2e/pairings/:id/invite`. It holds the public
-/// ephemeral key of the creator, the same key as in the QR link. The server
-/// sends the invite to the other sessions of the account only.
+/// Request body of `POST /e2e/pairings` with an offer (protocol 55). It holds
+/// the public ephemeral key of the creator. The server offers the rendezvous
+/// to the other devices of the account.
 #[derive(Serialize)]
-pub struct InviteRequest<'a> {
-    pub network_id: &'a str,
-    pub ephemeral_key: &'a str,
+pub struct CreateRequest<'a> {
+    pub curve: &'a str,
 }
 
 /// Why a rendezvous ended, as the relay names it in `e2e_pairing_closed`.
@@ -244,7 +243,7 @@ pub fn is_rendezvous_id(text: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// What a QR code or a typed code holds: the rendezvous id and the public
+/// What an offer or a typed code holds: the rendezvous id and the public
 /// ephemeral Curve25519 key of the creator. `Debug` prints no field.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PairingLink {
@@ -296,61 +295,57 @@ impl PairingLink {
         &self.ephemeral_key
     }
 
-    /// The code to type on a device with no camera: `<id>.<key>`.
+    /// The code of the pairing: `<id>.<key>`. The join step reads it once.
     pub fn code(&self) -> String {
         format!("{}.{}", self.rendezvous_id, self.ephemeral_key)
     }
-
-    /// The URL for the QR code: `https://<host>/pair#pair=<id>.<key>`.
-    pub fn url(&self, host: &str) -> String {
-        format!("https://{host}/pair#pair={}", self.code())
-    }
 }
 
-/// An invite to pair, sent by an account event (`e2e_pairing_invite`) to the
-/// other active sessions of the same account. It names the network, the
-/// rendezvous, the public ephemeral key of the creator and the end time.
-/// It holds the same values as the QR link. `Debug` prints no field.
+/// An offer to pair (protocol 55). The server sends it as the account event
+/// `e2e_pairing_offered` to the devices of the account when a creator opens a
+/// rendezvous with its public key. It names the rendezvous, the public
+/// ephemeral key of the creator and the end time. It names no network.
+/// `Debug` prints no field.
 #[derive(Clone, PartialEq, Eq)]
-pub struct PairingInvite {
-    network_id: String,
+pub struct PairingOffer {
     link: PairingLink,
     /// Unix seconds, UTC.
     expires_at: i64,
 }
 
-impl fmt::Debug for PairingInvite {
+impl fmt::Debug for PairingOffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("PairingInvite(..)")
+        f.write_str("PairingOffer(..)")
     }
 }
 
-impl PairingInvite {
-    /// Reads `e2e_pairing_invite`. Any other event, and a wrong shape, gives
-    /// `None`: the fields are `network_id`, `rendezvous_id`, `ephemeral_key`
-    /// and `expires_at` (ISO-8601 text in UTC).
+impl PairingOffer {
+    /// Reads `e2e_pairing_offered`. Any other event, and a wrong shape, gives
+    /// `None`: the fields are `rendezvous_id`, `curve` and `expires_at`
+    /// (ISO-8601 text in UTC).
     pub fn from_value(value: &Value) -> Option<Self> {
-        if value.get("kind")?.as_str()? != "e2e_pairing_invite" {
+        if value.get("kind")?.as_str()? != "e2e_pairing_offered" {
             return None;
         }
-        let network_id = value.get("network_id")?.as_str()?;
-        if network_id.is_empty() {
-            return None;
-        }
+        Self::from_fields(value)
+    }
+
+    /// Reads the answer of `GET /e2e/pairings/offer`. `{"offer": null}` and a
+    /// wrong shape give `None`.
+    pub fn from_answer(value: &Value) -> Option<Self> {
+        Self::from_fields(value.get("offer")?)
+    }
+
+    fn from_fields(value: &Value) -> Option<Self> {
         let link = PairingLink::new(
             value.get("rendezvous_id")?.as_str()?,
-            value.get("ephemeral_key")?.as_str()?,
+            value.get("curve")?.as_str()?,
         )
         .ok()?;
         Some(Self {
-            network_id: network_id.to_string(),
             link,
             expires_at: parse_utc_seconds(value.get("expires_at")?.as_str()?)?,
         })
-    }
-
-    pub fn network_id(&self) -> &str {
-        &self.network_id
     }
 
     pub fn link(&self) -> &PairingLink {
@@ -361,8 +356,13 @@ impl PairingInvite {
         self.link.rendezvous_id()
     }
 
+    /// The public key of the creator.
+    pub fn curve(&self) -> &str {
+        self.link.ephemeral_key()
+    }
+
     /// True when the end time is still ahead and is not later than the
-    /// lifetime of a rendezvous. A later end time is not a real invite.
+    /// lifetime of a rendezvous. A later end time is not a real offer.
     pub fn is_current(&self, now: i64) -> bool {
         let lifetime = i64::try_from(PAIRING_LIFETIME_SECS).unwrap_or(i64::MAX);
         now < self.expires_at && self.expires_at - now <= lifetime
@@ -424,7 +424,7 @@ fn parse_utc_seconds(text: &str) -> Option<i64> {
 }
 
 /// Reads a link from `input` and clears `input` at once, also when the
-/// text is not a link. The caller passes the buffer that holds the QR URL.
+/// text is not a link. The caller passes the buffer that holds the code.
 pub fn take_pairing_link(input: &mut String) -> Result<PairingLink, PairingError> {
     let link = PairingLink::parse(input);
     input.zeroize();
@@ -447,7 +447,6 @@ mod tests {
     fn link_reads_url_fragment_code_and_pair_prefix() {
         let code = link().code();
         for text in [
-            link().url("grappa.example"),
             format!("#pair={code}"),
             format!("pair={code}"),
             format!("  {code}  "),
@@ -478,7 +477,7 @@ mod tests {
 
     #[test]
     fn take_pairing_link_clears_the_buffer_on_success_and_on_error() {
-        let mut good = link().url("grappa.example");
+        let mut good = link().code();
         assert_eq!(take_pairing_link(&mut good).unwrap(), link());
         assert!(good.is_empty());
         let mut bad = "https://grappa.example/pair#pair=broken".to_string();
@@ -611,12 +610,11 @@ mod tests {
         assert_eq!(PairingPush::from_value(&no_seq), None);
     }
 
-    fn invite_value(expires_at: &str) -> Value {
+    fn offer_value(expires_at: &str) -> Value {
         serde_json::json!({
-            "kind": "e2e_pairing_invite",
-            "network_id": "libera",
+            "kind": "e2e_pairing_offered",
             "rendezvous_id": ID,
-            "ephemeral_key": KEY,
+            "curve": KEY,
             "expires_at": expires_at,
         })
     }
@@ -648,62 +646,77 @@ mod tests {
     }
 
     #[test]
-    fn invite_carries_the_values_of_the_qr_link() {
-        let invite = PairingInvite::from_value(&invite_value("2026-10-23T10:00:00Z")).unwrap();
-        assert_eq!(invite.network_id(), "libera");
-        assert_eq!(invite.link(), &link());
-        assert_eq!(invite.rendezvous_id(), ID);
-        assert_eq!(invite.link().code(), link().code());
+    fn offer_carries_the_rendezvous_and_the_curve() {
+        let offer = PairingOffer::from_value(&offer_value("2026-10-23T10:00:00Z")).unwrap();
+        assert_eq!(offer.link(), &link());
+        assert_eq!(offer.rendezvous_id(), ID);
+        assert_eq!(offer.curve(), KEY);
     }
 
     #[test]
-    fn invite_with_a_wrong_shape_is_ignored() {
-        let mut other_kind = invite_value("2026-10-23T10:00:00Z");
+    fn offer_answer_reads_the_offer_object_only() {
+        let answer = serde_json::json!({"offer": {
+            "rendezvous_id": ID,
+            "curve": KEY,
+            "expires_at": "2026-10-23T10:00:00Z",
+        }});
+        assert_eq!(
+            PairingOffer::from_answer(&answer).unwrap().rendezvous_id(),
+            ID
+        );
+        assert_eq!(
+            PairingOffer::from_answer(&serde_json::json!({"offer": null})),
+            None
+        );
+    }
+
+    #[test]
+    fn offer_with_a_wrong_shape_is_ignored() {
+        let mut other_kind = offer_value("2026-10-23T10:00:00Z");
         other_kind["kind"] = "e2e_pairing_message".into();
-        let mut no_network = invite_value("2026-10-23T10:00:00Z");
-        no_network["network_id"] = "".into();
-        let mut bad_id = invite_value("2026-10-23T10:00:00Z");
+        let mut old_kind = offer_value("2026-10-23T10:00:00Z");
+        old_kind["kind"] = "e2e_pairing_invite".into();
+        let mut bad_id = offer_value("2026-10-23T10:00:00Z");
         bad_id["rendezvous_id"] = "short".into();
-        let mut bad_key = invite_value("2026-10-23T10:00:00Z");
-        bad_key["ephemeral_key"] = "short".into();
-        let mut no_key = invite_value("2026-10-23T10:00:00Z");
-        no_key.as_object_mut().unwrap().remove("ephemeral_key");
+        let mut bad_key = offer_value("2026-10-23T10:00:00Z");
+        bad_key["curve"] = "short".into();
+        let mut no_key = offer_value("2026-10-23T10:00:00Z");
+        no_key.as_object_mut().unwrap().remove("curve");
         for value in [
             other_kind,
-            no_network,
+            old_kind,
             bad_id,
             bad_key,
             no_key,
-            invite_value("soon"),
-            invite_value("2026-10-23T10:00:00+02:00"),
+            offer_value("soon"),
+            offer_value("2026-10-23T10:00:00+02:00"),
         ] {
-            assert_eq!(PairingInvite::from_value(&value), None);
+            assert_eq!(PairingOffer::from_value(&value), None);
         }
     }
 
     #[test]
-    fn invite_is_current_only_inside_one_rendezvous_lifetime() {
+    fn offer_is_current_only_inside_one_rendezvous_lifetime() {
         let end = 1_792_749_600;
-        let invite = PairingInvite::from_value(&invite_value("2026-10-23T10:00:00Z")).unwrap();
-        assert!(invite.is_current(end - 1));
-        assert!(invite.is_current(end - 300));
-        assert!(!invite.is_current(end));
-        assert!(!invite.is_current(end + 60));
-        assert!(!invite.is_current(end - 301));
+        let offer = PairingOffer::from_value(&offer_value("2026-10-23T10:00:00Z")).unwrap();
+        assert!(offer.is_current(end - 1));
+        assert!(offer.is_current(end - 300));
+        assert!(!offer.is_current(end));
+        assert!(!offer.is_current(end + 60));
+        assert!(!offer.is_current(end - 301));
     }
 
     #[test]
-    fn invite_debug_output_shows_no_value() {
-        let invite = PairingInvite::from_value(&invite_value("2026-10-23T10:00:00Z")).unwrap();
-        let shown = format!("{invite:?}");
+    fn offer_debug_output_shows_no_value() {
+        let offer = PairingOffer::from_value(&offer_value("2026-10-23T10:00:00Z")).unwrap();
+        let shown = format!("{offer:?}");
         assert!(!shown.contains(KEY));
         assert!(!shown.contains(ID));
-        assert!(!shown.contains("libera"));
     }
 
     #[test]
-    fn an_invite_is_not_a_pairing_push() {
-        let value = invite_value("2026-10-23T10:00:00Z");
+    fn an_offer_is_not_a_pairing_push() {
+        let value = offer_value("2026-10-23T10:00:00Z");
         assert_eq!(PairingPush::from_value(&value), None);
     }
 }

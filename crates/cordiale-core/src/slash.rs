@@ -154,10 +154,12 @@ pub enum E2ePairAction {
     Code(String),
     /// `/e2e cancel`.
     Cancel,
-    /// `/e2e accept`: join with the pairing invite of another session of the
-    /// account. The code check still follows.
+    /// `/e2e accept`: join with the pairing offer of another session of the
+    /// account. It is the same action as Accept in the offer window. The code
+    /// check still follows.
     Accept,
-    /// `/e2e decline`: drop the pairing invite.
+    /// `/e2e decline`: drop the pairing offer. It is the same action as
+    /// Dismiss in the offer window.
     Decline,
 }
 

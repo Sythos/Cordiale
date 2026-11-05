@@ -221,6 +221,9 @@ enum WorkerCommand {
     },
     /// A SAS step of the open locked query: show, confirm, reject, cancel.
     E2eSas(SasStep),
+    /// The user accepts (`true`) or dismisses (`false`) the waiting pairing
+    /// offer. Only an accept starts the join step.
+    E2ePairOffer(bool),
     /// A step of the peer key view. A verify carries the key that the view
     /// shows.
     E2ePeerKey {
@@ -229,9 +232,6 @@ enum WorkerCommand {
         nick: String,
         key: String,
     },
-    /// Asks the server to send the invite of the open pairing to the other
-    /// sessions of the account.
-    E2ePairInvite,
     /// A consent action on a plain query, including a manual key re-request.
     E2eRequestAction {
         action: String,
@@ -1910,6 +1910,9 @@ async fn run_worker(
                     Some(WorkerCommand::E2eSas(step)) => {
                         handle_e2e_sas(&mut state, &ui, step);
                     }
+                    Some(WorkerCommand::E2ePairOffer(accept)) => {
+                        e2e_runtime::answer_pairing_offer(&mut state, &ui, accept).await;
+                    }
                     Some(WorkerCommand::E2ePeerKey {
                         step,
                         network,
@@ -1917,9 +1920,6 @@ async fn run_worker(
                         key,
                     }) => {
                         e2e_runtime::handle_e2e_peer_key(&mut state, &ui, step, network, nick, key);
-                    }
-                    Some(WorkerCommand::E2ePairInvite) => {
-                        e2e_runtime::send_pairing_invite(&state, &ui).await;
                     }
                     Some(WorkerCommand::E2eRequestAction {
                         action,

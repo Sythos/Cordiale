@@ -45,8 +45,9 @@
 //! the final text of section 4g of the Grappa client protocol, and match
 //! `pairingMessages.ts` of Cicchetto. This device pairs one network for each
 //! pairing. An `offer` that names more networks is read for that network only,
-//! and the others go in `skipped`. A change of the contract touches this
-//! module only.
+//! and the others go in `skipped`. A joiner of an offer has a list of eligible
+//! networks and takes the network that the sealed `offer` names. A change of
+//! the contract touches this module only.
 //!
 //! The channel secret lives in memory only. The sealed store holds a small
 //! record (role, rendezvous id, start time) in its pairing slot, so a restart
@@ -395,6 +396,10 @@ pub struct PairingSession {
     rendezvous_id: String,
     /// The slug of the network that this pairing changes.
     network: String,
+    /// The joiner of an offer: the networks that it can pair. The network of
+    /// the pairing is the one that the sealed `offer` of the holder names.
+    /// Empty for a joiner that pairs one fixed network.
+    eligible: Vec<String>,
     started_at: i64,
     stage: Stage,
     waiting: Option<Ecies>,
@@ -437,6 +442,7 @@ impl PairingSession {
             role,
             rendezvous_id: rendezvous_id.to_string(),
             network: network.to_string(),
+            eligible: Vec::new(),
             started_at: now,
             stage: Stage::Open,
             waiting: None,
@@ -462,10 +468,20 @@ impl PairingSession {
         network: &str,
         now: i64,
     ) -> Result<(Self, PairingLink), FlowError> {
+        Self::create_with(Ecies::with_info(PAIRING_INFO), rendezvous, network, now)
+    }
+
+    /// The creator side with an ephemeral key made before the open, so the
+    /// open can offer its public key (protocol 55).
+    pub fn create_with(
+        ecies: Ecies,
+        rendezvous: &Rendezvous,
+        network: &str,
+        now: i64,
+    ) -> Result<(Self, PairingLink), FlowError> {
         if rendezvous.role != PairingRole::Creator {
             return Err(FlowError::WrongRole);
         }
-        let ecies = Ecies::with_info(PAIRING_INFO);
         let link = PairingLink::new(&rendezvous.id, &ecies.public_key().to_base64())
             .map_err(FlowError::Link)?;
         let mut session = Self::new(PairingRole::Creator, &rendezvous.id, network, now);
@@ -480,6 +496,23 @@ impl PairingSession {
         link: &PairingLink,
         rendezvous: &Rendezvous,
         network: &str,
+        device: JoinerDevice,
+        now: i64,
+    ) -> Result<(Self, Outgoing), FlowError> {
+        Self::join_any(link, rendezvous, network, &[], device, now)
+    }
+
+    /// The joiner side of an offer. The holder names the network in its
+    /// sealed `offer`, so the joiner takes the network from `eligible` then.
+    /// Until then `network` (one of the eligible networks) and `device` are
+    /// provisional: `network()` tells the network that the offer chose, and
+    /// `bind_device` gives the device of that network. With no eligible
+    /// networks it is `join`.
+    pub fn join_any(
+        link: &PairingLink,
+        rendezvous: &Rendezvous,
+        network: &str,
+        eligible: &[String],
         device: JoinerDevice,
         now: i64,
     ) -> Result<(Self, Outgoing), FlowError> {
@@ -501,6 +534,7 @@ impl PairingSession {
             return Err(FlowError::TooLarge);
         }
         let mut session = Self::new(PairingRole::Joiner, &rendezvous.id, network, now);
+        session.eligible = eligible.to_vec();
         session.code = Some(code_of(&ecies));
         session.channel = Some(ecies);
         session.own_device = Some(device);
@@ -521,6 +555,17 @@ impl PairingSession {
 
     pub fn rendezvous_id(&self) -> &str {
         &self.rendezvous_id
+    }
+
+    /// The network that this pairing changes. For the joiner of an offer it
+    /// can change once, when the sealed `offer` of the holder arrives.
+    pub fn network(&self) -> &str {
+        &self.network
+    }
+
+    /// The joiner takes the device of the store of its final network.
+    pub fn bind_device(&mut self, device: JoinerDevice) {
+        self.own_device = Some(device);
     }
 
     /// The last relay sequence that the session took in.
@@ -680,10 +725,24 @@ impl PairingSession {
     }
 
     /// The joiner keeps the master key offered for its network. The other
-    /// offered networks go in `skipped`.
+    /// offered networks go in `skipped`. A joiner with eligible networks takes
+    /// the network of the offer: its own network first, else the first offered
+    /// network that is eligible.
     fn take_offer(&mut self, networks: Vec<WireNetwork>) -> Result<Option<FlowEvent>, FlowError> {
         if self.master.is_some() {
             return Err(self.fail(EndReason::BadMessage, FlowError::BadMessage));
+        }
+        let chosen = networks
+            .iter()
+            .find(|item| item.network == self.network)
+            .or_else(|| {
+                networks
+                    .iter()
+                    .find(|item| self.eligible.contains(&item.network))
+            })
+            .map(|item| item.network.clone());
+        if let Some(chosen) = chosen {
+            self.network = chosen;
         }
         let mut master = None;
         let mut skipped = Vec::new();
@@ -1183,14 +1242,21 @@ async fn abort(
     error
 }
 
-/// The creator opens a rendezvous and gets the pairing link.
+/// The creator opens a rendezvous and gets the pairing link. With protocol 55
+/// or more the open carries the public key, so the server offers the
+/// rendezvous to the other devices of the account.
 pub async fn start_creator(
     ctx: &PairingContext<'_>,
     store: &mut E2eStateStore,
     now: i64,
 ) -> Result<(PairingSession, PairingLink), DriveError> {
-    let rendezvous = ctx.client.create_pairing(ctx.token, ctx.protocol).await?;
-    let (session, link) = PairingSession::create(&rendezvous, ctx.network_id, now)?;
+    let ecies = Ecies::with_info(PAIRING_INFO);
+    let curve = ecies.public_key().to_base64();
+    let rendezvous = ctx
+        .client
+        .create_pairing(ctx.token, Some(&curve), ctx.protocol)
+        .await?;
+    let (session, link) = PairingSession::create_with(ecies, &rendezvous, ctx.network_id, now)?;
     if let Err(error) = save_pending(store, &session) {
         let _ = ctx
             .client
@@ -1209,6 +1275,21 @@ pub async fn start_joiner(
     text: &mut String,
     now: i64,
 ) -> Result<PairingSession, DriveError> {
+    start_joiner_any(ctx, store, text, &[], now).await
+}
+
+/// Like `start_joiner`, for the accept of an offer. The offer names no
+/// network, so the network of the pairing is the one that the sealed `offer`
+/// of the holder names, if it is in `eligible`. `ctx` and `store` are those
+/// of the first eligible network. When `network()` of the session changes after a
+/// step, call `bind_joiner` with the context and store of the new network.
+pub async fn start_joiner_any(
+    ctx: &PairingContext<'_>,
+    store: &mut E2eStateStore,
+    text: &mut String,
+    eligible: &[String],
+    now: i64,
+) -> Result<PairingSession, DriveError> {
     let link = take_pairing_link(text).map_err(FlowError::Link)?;
     let device = JoinerDevice::from_store(store)?;
     let rendezvous = ctx
@@ -1216,7 +1297,7 @@ pub async fn start_joiner(
         .join_pairing(ctx.token, link.rendezvous_id(), ctx.protocol)
         .await?;
     let (mut session, hello) =
-        PairingSession::join(&link, &rendezvous, ctx.network_id, device, now)?;
+        PairingSession::join_any(&link, &rendezvous, ctx.network_id, eligible, device, now)?;
     if let Err(error) = save_pending(store, &session) {
         session.end(EndReason::Failed);
         cleanup(ctx, store, &session, true).await;
@@ -1263,6 +1344,10 @@ async fn pump_inner(
     for event in session.accept(&messages)? {
         match event {
             FlowEvent::CodeReady => {}
+            // The offer may name another network than the one of this store.
+            // Then the caller moves the session with `bind_joiner`, which
+            // sends the join with the device of that network.
+            FlowEvent::Offered if session.network() != ctx.network_id => {}
             FlowEvent::Offered => send_join_if_ready(ctx, store, session).await?,
             FlowEvent::Joined => finish_creator(ctx, store, session).await?,
             FlowEvent::Signed(grant) => finish_joiner(ctx, store, session, &grant).await?,
@@ -1274,6 +1359,36 @@ async fn pump_inner(
         }
     }
     Ok(())
+}
+
+/// The joiner of an offer moves to the network that the sealed `offer` chose.
+/// `ctx` and `store` are those of that network. The joiner takes the device
+/// of the store and saves the pairing record there. If it confirmed the code
+/// already, the `join` goes out now. A failure ends the pairing and cleans up.
+pub async fn bind_joiner(
+    ctx: &PairingContext<'_>,
+    store: &mut E2eStateStore,
+    session: &mut PairingSession,
+) -> Result<(), DriveError> {
+    let result = bind_joiner_inner(ctx, store, session).await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => Err(abort(ctx, store, session, error).await),
+    }
+}
+
+async fn bind_joiner_inner(
+    ctx: &PairingContext<'_>,
+    store: &mut E2eStateStore,
+    session: &mut PairingSession,
+) -> Result<(), DriveError> {
+    if session.role != PairingRole::Joiner || session.network() != ctx.network_id {
+        return Err(FlowError::NotActive.into());
+    }
+    let device = JoinerDevice::from_store(store)?;
+    session.bind_device(device);
+    save_pending(store, session)?;
+    send_join_if_ready(ctx, store, session).await
 }
 
 /// The holder takes its master key, which the offer carries. A joiner has
@@ -1936,6 +2051,111 @@ mod tests {
             .expect("hello");
         let code = code_text(&other);
         let offer = other.confirm(&code).expect("code").expect("offer");
+        assert_eq!(
+            joiner
+                .accept(&[relay(2, PairingRole::Creator, &offer)])
+                .unwrap_err(),
+            FlowError::NotOffered
+        );
+        assert_eq!(joiner.status(), PairingStatus::Ended(EndReason::Failed));
+    }
+
+    #[test]
+    fn a_joiner_with_eligible_networks_takes_the_network_of_the_offer() {
+        let master = Account::new();
+        let account = Account::new();
+        let (mut creator, link) =
+            PairingSession::create(&rendezvous(PairingRole::Creator), "oftc", 100).expect("create");
+        creator.set_master(&key_of(&master)).expect("master");
+        // The first eligible network is not the network of the holder.
+        let eligible = vec![NET.to_string(), "oftc".to_string()];
+        let (mut joiner, hello) = PairingSession::join_any(
+            &link,
+            &rendezvous(PairingRole::Joiner),
+            NET,
+            &eligible,
+            device_of(&account),
+            100,
+        )
+        .expect("join");
+        assert_eq!(joiner.network(), NET);
+        creator
+            .accept(&[relay(1, PairingRole::Joiner, &hello)])
+            .expect("hello");
+        let code = code_text(&creator);
+        let offer = creator.confirm(&code).expect("code").expect("offer");
+        let events = joiner
+            .accept(&[relay(2, PairingRole::Creator, &offer)])
+            .expect("offer read");
+        assert!(matches!(events.as_slice(), [FlowEvent::Offered]));
+        assert_eq!(joiner.network(), "oftc");
+        assert!(joiner.skipped.is_empty());
+        // The check code is still required before the join goes out.
+        assert!(!joiner.join_ready());
+    }
+
+    #[test]
+    fn a_joiner_with_eligible_networks_joins_the_network_of_the_offer() {
+        let master = Account::new();
+        let account = Account::new();
+        let (mut creator, link) =
+            PairingSession::create(&rendezvous(PairingRole::Creator), "oftc", 100).expect("create");
+        creator.set_master(&key_of(&master)).expect("master");
+        let eligible = vec![NET.to_string(), "oftc".to_string()];
+        let (mut joiner, hello) = PairingSession::join_any(
+            &link,
+            &rendezvous(PairingRole::Joiner),
+            NET,
+            &eligible,
+            device_of(&account),
+            100,
+        )
+        .expect("join");
+        creator
+            .accept(&[relay(1, PairingRole::Joiner, &hello)])
+            .expect("hello");
+        let code = code_text(&creator);
+        let offer = creator.confirm(&code).expect("code").expect("offer");
+        joiner
+            .accept(&[relay(2, PairingRole::Creator, &offer)])
+            .expect("offer read");
+        // The code is typed after the offer. The device of the final network
+        // is bound, then the join goes out for that network.
+        joiner.confirm(&code).expect("confirm");
+        joiner.bind_device(device_of(&account));
+        assert!(joiner.join_ready());
+        let join = joiner
+            .seal_join(&id_signature(&account, &key_of(&master)))
+            .expect("join");
+        let events = creator
+            .accept(&[relay(3, PairingRole::Joiner, &join)])
+            .expect("join read");
+        assert!(matches!(events.as_slice(), [FlowEvent::Joined]));
+    }
+
+    #[test]
+    fn an_offer_for_a_network_outside_the_eligible_networks_ends_the_joiner() {
+        let master = Account::new();
+        let account = Account::new();
+        let (mut creator, link) =
+            PairingSession::create(&rendezvous(PairingRole::Creator), "other-net", 100)
+                .expect("create");
+        creator.set_master(&key_of(&master)).expect("master");
+        let eligible = vec![NET.to_string(), "oftc".to_string()];
+        let (mut joiner, hello) = PairingSession::join_any(
+            &link,
+            &rendezvous(PairingRole::Joiner),
+            NET,
+            &eligible,
+            device_of(&account),
+            100,
+        )
+        .expect("join");
+        creator
+            .accept(&[relay(1, PairingRole::Joiner, &hello)])
+            .expect("hello");
+        let code = code_text(&creator);
+        let offer = creator.confirm(&code).expect("code").expect("offer");
         assert_eq!(
             joiner
                 .accept(&[relay(2, PairingRole::Creator, &offer)])

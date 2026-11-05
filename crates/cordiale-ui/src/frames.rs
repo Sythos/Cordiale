@@ -607,9 +607,9 @@ pub(crate) async fn handle_frame(
         handle_no_such_nick_push(state, ui, &frame.payload);
         return;
     }
-    if payload_kind == "e2e_pairing_invite" {
-        // A pairing invite of the account: control state, never a chat line.
-        handle_e2e_pairing_invite(state, ui, &frame);
+    if payload_kind == "e2e_pairing_offered" {
+        // A pairing offer of the account: control state, never a chat line.
+        handle_e2e_pairing_offer(state, ui, &frame);
         return;
     }
     if payload_kind == "e2e_pairing_message" || payload_kind == "e2e_pairing_closed" {

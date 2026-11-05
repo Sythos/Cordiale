@@ -49,10 +49,12 @@ use crate::e2e_identity_routes::{
 };
 use crate::e2e_pacing::{classify_send_response, parse_send_accepted, SendAnswer, SendResponse};
 use crate::e2e_pairing::{
-    InviteRequest, MessageEnvelope, MessagesEnvelope, PairingCallError, PostPayload, RelayMessage,
-    Rendezvous, RendezvousEnvelope,
+    CreateRequest, MessageEnvelope, MessagesEnvelope, PairingCallError, PairingOffer, PostPayload,
+    RelayMessage, Rendezvous, RendezvousEnvelope,
 };
-use crate::e2e_protocol::{E2eOperation, E2eRequestOperation, PairingOperation};
+use crate::e2e_protocol::{
+    pairing_offer_available, E2eOperation, E2eRequestOperation, PairingOperation,
+};
 use crate::e2e_refusal::E2eRouteError;
 use crate::e2e_wire::{pairing_message_fits, WireError};
 use crate::presence::{PresencePins, PresencePref};
@@ -1285,21 +1287,24 @@ impl GrappaClient {
     }
 
     /// `POST /e2e/pairings` — opens a rendezvous for X1 pairing. The caller
-    /// is the creator.
+    /// is the creator. With protocol 55 or more, `curve` (the public
+    /// ephemeral key) makes the server offer the rendezvous to the other
+    /// devices of the account. An older server gets an empty body.
     pub async fn create_pairing(
         &self,
         token: &str,
+        curve: Option<&str>,
         server_protocol: Option<u32>,
     ) -> Result<Rendezvous, PairingCallError> {
         let url = self.pairing_url(PairingOperation::Create, None, server_protocol, None)?;
-        let body = self
-            .send_pairing_request(
-                self.http
-                    .post(url)
-                    .bearer_auth(token)
-                    .json(&serde_json::json!({})),
-            )
-            .await?;
+        let request = self.http.post(url).bearer_auth(token);
+        let request = match curve {
+            Some(curve) if pairing_offer_available(server_protocol) => {
+                request.json(&CreateRequest { curve })
+            }
+            _ => request.json(&serde_json::json!({})),
+        };
+        let body = self.send_pairing_request(request).await?;
         parse_pairing_answer::<RendezvousEnvelope>(body).map(|envelope| envelope.rendezvous)
     }
 
@@ -1399,30 +1404,19 @@ impl GrappaClient {
         Ok(())
     }
 
-    /// `POST /e2e/pairings/:id/invite` — asks the server to send the pairing
-    /// invite of this rendezvous to the other sessions of the account. The
-    /// body holds the network and the public key of the QR link. The
-    /// answer is 204. Nothing goes to IRC. The caller is the creator.
-    pub async fn invite_pairing(
+    /// `GET /e2e/pairings/offer` — the offered rendezvous of the account, or
+    /// `None` when there is none. It needs protocol 55. The answer is only
+    /// data: it starts no pairing.
+    pub async fn fetch_pairing_offer(
         &self,
         token: &str,
-        rendezvous_id: &str,
-        network_id: &str,
-        ephemeral_key: &str,
         server_protocol: Option<u32>,
-    ) -> Result<(), PairingCallError> {
-        let url = self.pairing_url(
-            PairingOperation::Invite,
-            Some(rendezvous_id),
-            server_protocol,
-            None,
-        )?;
-        self.send_pairing_request(self.http.post(url).bearer_auth(token).json(&InviteRequest {
-            network_id,
-            ephemeral_key,
-        }))
-        .await?;
-        Ok(())
+    ) -> Result<Option<PairingOffer>, PairingCallError> {
+        let url = self.pairing_url(PairingOperation::Offer, None, server_protocol, None)?;
+        let body = self
+            .send_pairing_request(self.http.get(url).bearer_auth(token))
+            .await?;
+        Ok(body.as_ref().and_then(PairingOffer::from_answer))
     }
 
     /// The URL of a pairing route. The relay is at the root of the API, not
@@ -5715,65 +5709,85 @@ mod tests {
     const INVITE_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
     #[tokio::test]
-    async fn invite_pairing_posts_the_network_and_the_public_key_only() {
+    async fn create_pairing_sends_the_curve_only_with_protocol_55() {
         let mock_server = MockServer::start().await;
+        let answer = serde_json::json!({"rendezvous": {
+            "id": INVITE_ID, "role": "creator", "expires_at": "2026-10-23T10:00:00Z"
+        }});
         Mock::given(method("POST"))
-            .and(path(format!("/e2e/pairings/{INVITE_ID}/invite")))
-            .and(header("authorization", "Bearer abc123"))
-            .and(body_json(serde_json::json!({
-                "network_id": "libera",
-                "ephemeral_key": INVITE_KEY,
-            })))
-            .respond_with(ResponseTemplate::new(204))
+            .and(path("/e2e/pairings"))
+            .and(body_json(serde_json::json!({"curve": INVITE_KEY})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(answer.clone()))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/e2e/pairings"))
+            .and(body_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(answer))
             .expect(1)
             .mount(&mock_server)
             .await;
 
         let client = GrappaClient::new(mock_server.uri());
         client
-            .invite_pairing("abc123", INVITE_ID, "libera", INVITE_KEY, Some(48))
+            .create_pairing("abc123", Some(INVITE_KEY), Some(55))
             .await
-            .expect("invite");
+            .expect("offered");
+        client
+            .create_pairing("abc123", Some(INVITE_KEY), Some(54))
+            .await
+            .expect("not offered");
     }
 
     #[tokio::test]
-    async fn invite_pairing_reports_a_server_without_the_route() {
+    async fn fetch_pairing_offer_reads_the_offer_or_nothing() {
         let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(404))
+        Mock::given(method("GET"))
+            .and(path("/e2e/pairings/offer"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "offer": {
+                    "rendezvous_id": INVITE_ID,
+                    "curve": INVITE_KEY,
+                    "expires_at": "2026-10-23T10:00:00Z",
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/e2e/pairings/offer"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"offer": null})),
+            )
             .mount(&mock_server)
             .await;
 
         let client = GrappaClient::new(mock_server.uri());
-        let result = client
-            .invite_pairing("abc123", INVITE_ID, "libera", INVITE_KEY, Some(48))
-            .await;
-        assert!(matches!(
-            result,
-            Err(PairingCallError::Relay(
-                crate::e2e_pairing::PairingError::NotFound
-            ))
-        ));
+        let offer = client
+            .fetch_pairing_offer("abc123", Some(55))
+            .await
+            .expect("offer")
+            .expect("some");
+        assert_eq!(offer.rendezvous_id(), INVITE_ID);
+        assert!(client
+            .fetch_pairing_offer("abc123", Some(55))
+            .await
+            .expect("none")
+            .is_none());
     }
 
     #[tokio::test]
-    async fn invite_pairing_refuses_before_the_request() {
+    async fn fetch_pairing_offer_refuses_below_protocol_55() {
         let mock_server = MockServer::start().await;
         let client = GrappaClient::new(mock_server.uri());
-        for protocol in [None, Some(47)] {
+        for protocol in [None, Some(48), Some(54)] {
             assert!(matches!(
-                client
-                    .invite_pairing("abc123", INVITE_ID, "libera", INVITE_KEY, protocol)
-                    .await,
+                client.fetch_pairing_offer("abc123", protocol).await,
                 Err(PairingCallError::Unavailable)
             ));
         }
-        assert!(matches!(
-            client
-                .invite_pairing("abc123", "../x", "libera", INVITE_KEY, Some(48))
-                .await,
-            Err(PairingCallError::Bad(_))
-        ));
         assert!(mock_server.received_requests().await.unwrap().is_empty());
     }
 
