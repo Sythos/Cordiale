@@ -1995,6 +1995,7 @@ export component AppWindow inherits Window {
     callback copy-text-requested(string);
     // Copies the pairing link and tells whether the clipboard took it.
     callback copy-pair-link(string) -> bool;
+    callback send-pair-invite();
     callback security-copy-recovery-codes();
     callback saved-profile-connect-requested(string, string);
     callback server-selected(string);
@@ -2902,6 +2903,12 @@ export component AppWindow inherits Window {
             return @tr("The code is not the same. Pairing stopped. Start again.");
         } else if status-kind == "e2e-pair-unavailable" {
             return @tr("This server does not support device pairing.");
+        } else if status-kind == "e2e-pair-invite-sent" {
+            return @tr("The invite is sent to your other sessions. Compare the code on both devices.");
+        } else if status-kind == "e2e-pair-invite-unsupported" {
+            return @tr("This server cannot send a pairing invite. Use Copy link.");
+        } else if status-kind == "e2e-pair-invite-failed" {
+            return @tr("The invite was not sent. The pairing stays open.");
         } else if status-kind == "e2e-pair-none" {
             return @tr("No pairing is open. Type /e2e pair on the first device.");
         } else if status-kind == "e2e-revoke-done" {
@@ -9224,6 +9231,11 @@ export component AppWindow inherits Window {
                             clicked => {
                                 e2e-pair-copy-result = copy-pair-link(e2e-pair-link) ? "ok" : "failed";
                             }
+                        }
+                        CompactButton {
+                            text: @tr("Send invite");
+                            enabled: e2e-pair-link != "";
+                            clicked => { send-pair-invite(); }
                         }
                     }
                     if e2e-pair-copy-result == "ok" : Text {

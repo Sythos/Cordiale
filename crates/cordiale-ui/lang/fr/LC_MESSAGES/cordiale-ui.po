@@ -3851,3 +3851,19 @@ msgstr "Le lien est copié."
 msgctxt "AppWindow"
 msgid "The link was not copied. The pairing stays open."
 msgstr "Le lien n’a pas été copié. L’association reste ouverte."
+
+msgctxt "AppWindow"
+msgid "Send invite"
+msgstr "Envoyer l’invitation"
+
+msgctxt "AppWindow"
+msgid "The invite is sent to your other sessions. Compare the code on both devices."
+msgstr "L’invitation est envoyée à vos autres sessions. Comparez le code sur les deux appareils."
+
+msgctxt "AppWindow"
+msgid "This server cannot send a pairing invite. Use Copy link."
+msgstr "Ce serveur ne peut pas envoyer d’invitation d’association. Utilisez Copier le lien."
+
+msgctxt "AppWindow"
+msgid "The invite was not sent. The pairing stays open."
+msgstr "L’invitation n’a pas été envoyée. L’association reste ouverte."
