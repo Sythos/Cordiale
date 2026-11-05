@@ -94,7 +94,8 @@ User guide (plain English, no protocol details): [e2e-user-guide.md](e2e-user-gu
    la conferma sul nuovo dispositivo (in Cordiale `/e2e code`) parte `join`;
    il detentore firma solo dopo `join` e chiude il rendezvous dopo `done`.
    Cordiale accoppia una rete per volta: le altre reti dell'`offer` vanno in
-   `skipped`. Le rotte `/e2e/pairings`, i token di errore e i push
+   `skipped`. Il joiner di un'offerta in app sceglie la rete quando arriva
+   l'`offer` sigillato, tra le reti che mancano di identità. Le rotte `/e2e/pairings`, i token di errore e i push
    `e2e_pairing_message` e `e2e_pairing_closed` sono riletti sul testo 4g
    (`client.rs`, `e2e_pairing.rs`, `session.rs`). Codice: `e2e_pairing_flow.rs`. Prove: fixture
    `tests/fixtures/e2e/pairing_v1.json`

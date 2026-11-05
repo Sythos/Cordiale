@@ -1865,9 +1865,13 @@ Cordiale non lo usa più.
   cade a scadenza, alla chiusura, a ogni disconnessione o riconnessione; un offerta già vista non torna.
 - **Azioni.** Una finestra in app ha «Accept» e «Dismiss» (Escape = Dismiss). L offerta non avvia nulla.
   Solo «Accept» (`take_offer`) prende l id e la chiave dell offerta una volta sola, svuota lo slot e li passa
-  al passo di join (`E2ePairAction::Join`) per la prima rete, in ordine di nome, che manca di identità.
-  Il testo del join si cancella appena letto, anche se il join fallisce. `/e2e accept` e `/e2e decline` sono
-  gli stessi due comandi da tastiera.
+  al passo di join (`E2ePairAction::Join`) con l elenco delle reti che mancano di identità (in ordine di nome).
+  L offerta non dice la rete: la sceglie il joiner quando arriva l `offer` sigillato del detentore, che nomina
+  la rete del suo `/e2e pair` (`PairingSession::join_any`, `bind_joiner`). Se la rete è diversa dalla prima
+  dell elenco, la sessione passa al motore di quella rete e il `join` parte con il dispositivo di quella rete.
+  Se l `offer` non nomina nessuna rete dell elenco, l abbinamento finisce. Il testo del join si cancella
+  appena letto, anche se il join fallisce. `/e2e accept` e `/e2e decline` sono gli stessi due comandi da
+  tastiera.
 - **Resta obbligatorio** il confronto del codice a due cifre su entrambi i dispositivi: il nuovo dispositivo
   non è fidato prima che riesca. Il formato dei messaggi E2E e l handshake Olm non cambiano. Il log riporta
   solo la decisione, mai i valori dell offerta.
