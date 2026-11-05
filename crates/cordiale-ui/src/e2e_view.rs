@@ -898,6 +898,33 @@ mod tests {
     }
 
     #[test]
+    fn a_key_check_or_a_sas_check_ends_the_pending_state_and_an_alarm_wins() {
+        let neither = ChatSignals {
+            sas_verified: false,
+            key_verified: false,
+            ..ready()
+        };
+        assert_eq!(locked_chat_state(&neither), ChatState::SasPending);
+        let sas_only = ChatSignals {
+            sas_verified: true,
+            ..neither
+        };
+        assert_eq!(locked_chat_state(&sas_only), ChatState::Active);
+        let key_only = ChatSignals {
+            key_verified: true,
+            ..neither
+        };
+        assert_eq!(locked_chat_state(&key_only), ChatState::Active);
+        let both = ChatSignals {
+            sas_verified: true,
+            key_verified: true,
+            trust_alarm: true,
+            ..neither
+        };
+        assert_eq!(locked_chat_state(&both), ChatState::TrustAlarm);
+    }
+
+    #[test]
     fn a_reset_wins_over_every_other_chat_state() {
         let signals = ChatSignals {
             reset: true,
