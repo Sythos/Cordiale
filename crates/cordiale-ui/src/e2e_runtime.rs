@@ -2559,7 +2559,12 @@ fn push_open_locked_state(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let Some((network, nick)) = open_locked_window(state) else {
         return;
     };
-    let key = locked_entry_state(state, &network, &nick).key();
+    let chat_state = locked_entry_state(state, &network, &nick);
+    // A trust alarm closes an open peer key view, so it shows no old key.
+    if chat_state == ChatState::TrustAlarm {
+        close_peer_key(ui);
+    }
+    let key = chat_state.key();
     let _ = ui.upgrade_in_event_loop(move |ui| ui.set_current_query_e2e_state(key.into()));
 }
 
@@ -3727,14 +3732,31 @@ mod tests {
         handle_e2e_peer_key(&mut state, &ui, step, "net".into(), nick, key);
         assert!(key_verified(&state));
         assert!(!sas_verified(&state));
-        assert_eq!(peer_key_facts(&state, "net", "ada"), Some((peer, true)));
-        assert_eq!(locked_entry_state(&state, "net", "ada"), ChatState::Active);
+        assert_eq!(
+            peer_key_facts(&state, "net", "ada"),
+            Some((peer.clone(), true))
+        );
+        // The fixture has no peer device. The key check does not make the
+        // entry ready.
+        assert_eq!(
+            locked_entry_state(&state, "net", "ada"),
+            ChatState::MissingKeys
+        );
         // A trust alarm hides the key and refuses a verify.
         state
             .e2e
             .trust_alarm
             .insert(("net".to_string(), "ada".to_string()));
         assert_eq!(peer_key_facts(&state, "net", "ada"), None);
+        assert_eq!(
+            locked_entry_state(&state, "net", "ada"),
+            ChatState::TrustAlarm
+        );
+        assert!(!verify_peer_key(&mut state, "net", "ada", &peer));
+        let (step, nick, key) = args(PeerKeyStep::Verify, "ada", &peer);
+        handle_e2e_peer_key(&mut state, &ui, step, "net".into(), nick, key);
+        assert!(key_verified(&state));
+        assert!(!sas_verified(&state));
         assert_eq!(PeerKeyStep::parse("verify"), Some(PeerKeyStep::Verify));
         assert_eq!(PeerKeyStep::parse("Verify"), None);
     }

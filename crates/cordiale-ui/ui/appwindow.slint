@@ -4350,7 +4350,7 @@ export component AppWindow inherits Window {
                         }
                         Rectangle { horizontal-stretch: 1; }
                     }
-                    if current-query-e2e && e2e-peer-key-open : VerticalBox {
+                    if current-query-e2e && current-query-e2e-state != "e2e-chat-trust" && e2e-peer-key-open : VerticalBox {
                         spacing: 4px;
                         Text {
                             text: @tr("Network: {}. Contact: {}.", e2e-peer-key-network, e2e-peer-key-nick);
