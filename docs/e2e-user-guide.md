@@ -164,6 +164,23 @@ that are in your own device list.
 - Type `/e2e devices` to see the device ids.
 - Type `/e2e revoke <id>` to remove a device. Use the id from the list.
 
+### The identity on the server differs from this device
+
+Cordiale shows this when the identity on the server is not the identity
+that this device holds. The device keeps its old master key and refuses
+a pairing with the identity of the server.
+
+1. Type `/e2e forget` on this device. Cordiale asks you to confirm.
+2. To confirm, type `/e2e forget yes`.
+
+Cordiale removes only the keys of this device. The identity on the server stays.
+
+3. Type `/e2e pair` on a listed device that holds the identity of the server.
+4. Type `/e2e join` and the link on this device, or type `/e2e accept` for its invite.
+
+If no other listed device can pair, use `/e2e reset` as in the section
+"Lose all devices with the identity key".
+
 ### Lose a device
 
 Only a device that holds the master key can remove another device.

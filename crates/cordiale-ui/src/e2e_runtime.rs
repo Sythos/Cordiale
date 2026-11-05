@@ -77,6 +77,14 @@ pub(crate) struct E2eRuntime {
     /// The network for which the user got the question to confirm a reset.
     /// Any other `/e2e` step clears it.
     reset_asked: Option<String>,
+    /// The network for which the user got the question to confirm that this
+    /// device forgets its keys of a replaced identity. Any other `/e2e` step
+    /// clears it.
+    forget_asked: Option<String>,
+    /// Networks whose local keys this device removed with `/e2e forget`. They
+    /// are also in `reset`. The server keeps the identity, so the confirmed
+    /// server reset stays available for them.
+    forgotten: HashSet<String>,
     /// Networks whose identity this device reset. They have no engine work:
     /// no inbox, no key request and no send. The sealed history stays.
     reset: HashSet<String>,
@@ -1892,6 +1900,7 @@ pub(crate) async fn run_e2e_manage(
     action: E2eManageAction,
 ) {
     let asked = state.e2e.reset_asked.take();
+    let forget_asked = state.e2e.forget_asked.take();
     let not_ready = || show_manage_kind(ui, "e2e-not-ready", String::new(), String::new());
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
@@ -1900,7 +1909,17 @@ pub(crate) async fn run_e2e_manage(
         return not_ready();
     };
     let protocol = state.conn.server_protocol_version;
-    if !ensure_engine(state, &network) {
+    // The forget step runs before the engine check: a replaced identity is
+    // the case where the engine does not open.
+    if matches!(
+        action,
+        E2eManageAction::Forget | E2eManageAction::ForgetConfirm
+    ) {
+        let confirmed = matches!(action, E2eManageAction::ForgetConfirm)
+            && forget_asked.as_deref() == Some(network.as_str());
+        return run_e2e_forget(state, ui, &network, &own_nick, confirmed);
+    }
+    if !forgotten_reset_step(state, &network, &action) && !ensure_engine(state, &network) {
         // The list of devices explains why the identity is not open.
         if matches!(action, E2eManageAction::Devices) {
             if let Some(reason) = state.e2e.recovery.get(&network).copied() {
@@ -1962,6 +1981,8 @@ pub(crate) async fn run_e2e_manage(
             let (kind, hint) = revoke_status_key(&result);
             show_manage_kind(ui, kind, hint, String::new());
         }
+        // Both forget steps return before this match.
+        E2eManageAction::Forget | E2eManageAction::ForgetConfirm => {}
         E2eManageAction::Reset => {
             state.e2e.reset_asked = Some(network);
             show_manage_kind(ui, "e2e-reset-confirm", String::new(), String::new());
@@ -1995,6 +2016,58 @@ pub(crate) async fn run_e2e_manage(
                 settle_reset(state, ui, &network, engine);
             }
             show_manage_kind(ui, reset_status_key(&result), String::new(), String::new());
+        }
+    }
+}
+
+/// True for a reset step on a network whose local keys the user forgot. The
+/// server still holds the identity, so the confirmed reset stays available
+/// although the network has no engine work. A network that is only reset
+/// has no identity on the server: it gives false.
+fn forgotten_reset_step(state: &WorkerState, network: &str, action: &E2eManageAction) -> bool {
+    matches!(
+        action,
+        E2eManageAction::Reset | E2eManageAction::ResetConfirm
+    ) && state.e2e.forgotten.contains(network)
+        && state.e2e.engines.contains_key(network)
+}
+
+/// Runs `/e2e forget` and `/e2e forget yes`: the recovery step for a replaced
+/// identity. The device holds the old master key, so it refuses the grant of a
+/// pairing with the identity of the server. The step removes the private state
+/// of this device only. It makes no server call: the identity on the server
+/// stays. Then `/e2e join` can give this device the identity of the server.
+/// The step runs only when the provisioning run found a replaced identity, and
+/// only after the question and the answer for the same network. If no listed
+/// device can pair, `/e2e reset` stays available in the same session.
+fn run_e2e_forget(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    own_nick: &str,
+    confirmed: bool,
+) {
+    let show = |kind: &'static str| show_manage_kind(ui, kind, String::new(), String::new());
+    if state.e2e.recovery.get(network).copied() != Some(RecoveryReason::Replaced) {
+        return show("e2e-forget-not-needed");
+    }
+    if !confirmed {
+        state.e2e.forget_asked = Some(network.to_string());
+        return show("e2e-forget-confirm");
+    }
+    let Some(mut engine) = take_pairing_engine(state, network, true) else {
+        return show("e2e-forget-failed");
+    };
+    match engine.state_mut().finish_reset(network, own_nick) {
+        Ok(()) => {
+            settle_reset(state, ui, network, engine);
+            state.e2e.forgotten.insert(network.to_string());
+            show("e2e-forget-done");
+        }
+        Err(error) => {
+            persistence::log_line(&format!("e2e forget not finished: {error:?}"));
+            state.e2e.engines.insert(network.to_string(), engine);
+            show("e2e-forget-failed");
         }
     }
 }
@@ -2073,6 +2146,7 @@ fn settle_reset(
     state.e2e.engines.insert(network.to_string(), engine);
     state.e2e.provisioned.remove(network);
     state.e2e.reset.insert(network.to_string());
+    state.e2e.forgotten.remove(network);
     state.e2e.recovery.remove(network);
     state.e2e.clear_ciphertext_views(network);
     for nick in changed {
@@ -2213,6 +2287,7 @@ fn finish_pairing_step(
         state.e2e.needs_pairing.remove(&active.network);
         state.e2e.recovery.remove(&active.network);
         state.e2e.reset.remove(&active.network);
+        state.e2e.forgotten.remove(&active.network);
         state.e2e.clear_ciphertext_views(&active.network);
     }
     if active.session.is_active() {
@@ -3337,6 +3412,39 @@ mod tests {
         // The offer only waits: no pairing is open and none starts.
         assert!(runtime.offer.is_some());
         assert!(runtime.pairing.is_none());
+    }
+
+    #[test]
+    fn a_forgotten_network_keeps_the_server_reset_available() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, _peer) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        let engine = state.e2e.engines.remove("net").expect("engine");
+        settle_reset(&mut state, &ui, "net", engine);
+        // A network that is only reset has no identity on the server.
+        for action in [E2eManageAction::Reset, E2eManageAction::ResetConfirm] {
+            assert!(!forgotten_reset_step(&state, "net", &action));
+        }
+        state.e2e.forgotten.insert("net".to_string());
+        for action in [E2eManageAction::Reset, E2eManageAction::ResetConfirm] {
+            assert!(forgotten_reset_step(&state, "net", &action));
+        }
+        for action in [
+            E2eManageAction::Devices,
+            E2eManageAction::Revoke("did".to_string()),
+            E2eManageAction::Forget,
+        ] {
+            assert!(!forgotten_reset_step(&state, "net", &action));
+        }
+        // A real reset clears the marker.
+        let engine = state.e2e.engines.remove("net").expect("engine");
+        settle_reset(&mut state, &ui, "net", engine);
+        assert!(!state.e2e.forgotten.contains("net"));
+        assert!(!forgotten_reset_step(
+            &state,
+            "net",
+            &E2eManageAction::Reset
+        ));
     }
 
     #[test]
