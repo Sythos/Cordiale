@@ -45,7 +45,7 @@ use tokio::time::{interval, sleep, MissedTickBehavior};
 use crate::backoff::{random_unit, Backoff};
 use crate::e2e_device_routes::InboxRow;
 use crate::e2e_pacing::{SendBook, SendDropped};
-use crate::e2e_pairing::{PairingInvite, PairingPush};
+use crate::e2e_pairing::{PairingOffer, PairingPush};
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
 use crate::websocket::{PhoenixSocket, PhoenixSocketError};
 
@@ -273,12 +273,12 @@ pub fn route_e2e_pairing(frame: &PhoenixMessage) -> Option<PairingPush> {
     PairingPush::from_value(&frame.payload)
 }
 
-/// Read one session frame as a pairing invite (`e2e_pairing_invite`) from
-/// another active session of the account. The caller checks that the frame
-/// came on the own user topic. Any other frame, and a frame of the wrong
-/// shape, return `None`. An invite is never a chat line.
-pub fn route_e2e_pairing_invite(frame: &PhoenixMessage) -> Option<PairingInvite> {
-    PairingInvite::from_value(&frame.payload)
+/// Read one session frame as a pairing offer (`e2e_pairing_offered`, protocol
+/// 55). The caller checks that the frame came on the own user topic. Any other
+/// frame, and a frame of the wrong shape, return `None`. An offer is never a
+/// chat line.
+pub fn route_e2e_pairing_offer(frame: &PhoenixMessage) -> Option<PairingOffer> {
+    PairingOffer::from_value(&frame.payload)
 }
 
 /// Starts a session: connects, joins `grappa:user:{user}`, and spawns the
@@ -802,22 +802,21 @@ mod tests {
     }
 
     #[test]
-    fn invite_frames_are_routed_apart_from_the_pairing_pushes() {
-        let invite = reply(
+    fn offer_frames_are_routed_apart_from_the_pairing_pushes() {
+        let offer = reply(
             "1",
             serde_json::json!({
-                "kind": "e2e_pairing_invite",
-                "network_id": "libera",
+                "kind": "e2e_pairing_offered",
                 "rendezvous_id": "AbCdEfGhIjKlMnOpQrStUv",
-                "ephemeral_key": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+                "curve": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo",
                 "expires_at": "2026-10-23T10:00:00Z"
             }),
         );
-        let routed = route_e2e_pairing_invite(&invite).expect("routed");
-        assert_eq!(routed.network_id(), "libera");
-        assert!(route_e2e_pairing(&invite).is_none());
+        let routed = route_e2e_pairing_offer(&offer).expect("routed");
+        assert_eq!(routed.rendezvous_id(), "AbCdEfGhIjKlMnOpQrStUv");
+        assert!(route_e2e_pairing(&offer).is_none());
         let other = reply("2", serde_json::json!({"kind": "message"}));
-        assert!(route_e2e_pairing_invite(&other).is_none());
+        assert!(route_e2e_pairing_offer(&other).is_none());
     }
 
     #[test]

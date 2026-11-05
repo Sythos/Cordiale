@@ -462,10 +462,20 @@ impl PairingSession {
         network: &str,
         now: i64,
     ) -> Result<(Self, PairingLink), FlowError> {
+        Self::create_with(Ecies::with_info(PAIRING_INFO), rendezvous, network, now)
+    }
+
+    /// The creator side with an ephemeral key made before the open, so the
+    /// open can offer its public key (protocol 55).
+    pub fn create_with(
+        ecies: Ecies,
+        rendezvous: &Rendezvous,
+        network: &str,
+        now: i64,
+    ) -> Result<(Self, PairingLink), FlowError> {
         if rendezvous.role != PairingRole::Creator {
             return Err(FlowError::WrongRole);
         }
-        let ecies = Ecies::with_info(PAIRING_INFO);
         let link = PairingLink::new(&rendezvous.id, &ecies.public_key().to_base64())
             .map_err(FlowError::Link)?;
         let mut session = Self::new(PairingRole::Creator, &rendezvous.id, network, now);
@@ -1183,14 +1193,21 @@ async fn abort(
     error
 }
 
-/// The creator opens a rendezvous and gets the pairing link.
+/// The creator opens a rendezvous and gets the pairing link. With protocol 55
+/// or more the open carries the public key, so the server offers the
+/// rendezvous to the other devices of the account.
 pub async fn start_creator(
     ctx: &PairingContext<'_>,
     store: &mut E2eStateStore,
     now: i64,
 ) -> Result<(PairingSession, PairingLink), DriveError> {
-    let rendezvous = ctx.client.create_pairing(ctx.token, ctx.protocol).await?;
-    let (session, link) = PairingSession::create(&rendezvous, ctx.network_id, now)?;
+    let ecies = Ecies::with_info(PAIRING_INFO);
+    let curve = ecies.public_key().to_base64();
+    let rendezvous = ctx
+        .client
+        .create_pairing(ctx.token, Some(&curve), ctx.protocol)
+        .await?;
+    let (session, link) = PairingSession::create_with(ecies, &rendezvous, ctx.network_id, now)?;
     if let Err(error) = save_pending(store, &session) {
         let _ = ctx
             .client

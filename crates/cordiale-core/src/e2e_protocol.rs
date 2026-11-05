@@ -229,6 +229,16 @@ impl E2eOperation {
 /// First protocol version that has the X1 pairing relay.
 pub const PAIRING_MIN_PROTOCOL: u32 = 48;
 
+/// First protocol version that has the pairing offer: `curve` on open, the
+/// `e2e_pairing_offered` event and `GET /e2e/pairings/offer`.
+pub const PAIRING_OFFER_MIN_PROTOCOL: u32 = 55;
+
+/// True when a server with this protocol version offers a rendezvous to the
+/// other devices of the account. An unknown version never allows it.
+pub fn pairing_offer_available(server_protocol: Option<u32>) -> bool {
+    server_protocol.is_some_and(|version| version >= PAIRING_OFFER_MIN_PROTOCOL)
+}
+
 /// One call of the X1 pairing relay. The routes are not below `/networks/:id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PairingOperation {
@@ -242,9 +252,9 @@ pub enum PairingOperation {
     Fetch,
     /// `DELETE /e2e/pairings/:id`: close the rendezvous.
     Close,
-    /// `POST /e2e/pairings/:id/invite`: ask the server to send an
-    /// `e2e_pairing_invite` event to the other sessions of the account.
-    Invite,
+    /// `GET /e2e/pairings/offer` (protocol 55): the offered rendezvous of
+    /// the account, for a client that missed the `e2e_pairing_offered` event.
+    Offer,
 }
 
 impl PairingOperation {
@@ -254,7 +264,7 @@ impl PairingOperation {
         Self::Post,
         Self::Fetch,
         Self::Close,
-        Self::Invite,
+        Self::Offer,
     ];
 
     /// Method and path template. `:id` is the rendezvous id.
@@ -265,7 +275,7 @@ impl PairingOperation {
             Self::Post => (E2eMethod::Post, "/e2e/pairings/:id/messages"),
             Self::Fetch => (E2eMethod::Get, "/e2e/pairings/:id/messages"),
             Self::Close => (E2eMethod::Delete, "/e2e/pairings/:id"),
-            Self::Invite => (E2eMethod::Post, "/e2e/pairings/:id/invite"),
+            Self::Offer => (E2eMethod::Get, "/e2e/pairings/offer"),
         }
     }
 
@@ -285,7 +295,10 @@ impl PairingOperation {
     /// Whether a server with this protocol version has the relay. An unknown
     /// version never allows it.
     pub fn available(self, server_protocol: Option<u32>) -> bool {
-        server_protocol.is_some_and(|version| version >= PAIRING_MIN_PROTOCOL)
+        match self {
+            Self::Offer => pairing_offer_available(server_protocol),
+            _ => server_protocol.is_some_and(|version| version >= PAIRING_MIN_PROTOCOL),
+        }
     }
 }
 
@@ -416,19 +429,31 @@ mod tests {
             "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv/messages",
             "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv/messages",
             "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv",
-            "/e2e/pairings/AbCdEfGhIjKlMnOpQrStUv/invite",
+            "/e2e/pairings/offer",
         ];
         for (operation, path) in PairingOperation::ALL.into_iter().zip(paths) {
             assert_eq!(operation.path(Some(id)).unwrap(), path, "{operation:?}");
             assert!(!operation.available(None));
             assert!(!operation.available(Some(47)));
-            assert!(operation.available(Some(48)));
-            if operation != PairingOperation::Create {
+            if operation == PairingOperation::Offer {
+                assert!(!operation.available(Some(54)));
+                assert!(operation.available(Some(55)));
+            } else {
+                assert!(operation.available(Some(48)));
+            }
+            if !matches!(
+                operation,
+                PairingOperation::Create | PairingOperation::Offer
+            ) {
                 for bad in [None, Some("../x"), Some("short")] {
                     assert_eq!(operation.path(bad), Err(WireError::BadId), "{operation:?}");
                 }
             }
         }
+        assert_eq!(PairingOperation::Offer.route().0, E2eMethod::Get);
+        assert!(!pairing_offer_available(None));
+        assert!(!pairing_offer_available(Some(54)));
+        assert!(pairing_offer_available(Some(55)));
         assert_eq!(PairingOperation::Fetch.route().0, E2eMethod::Get);
         assert_eq!(PairingOperation::Close.route().0, E2eMethod::Delete);
     }
