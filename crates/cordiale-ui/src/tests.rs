@@ -7866,6 +7866,44 @@ fn upload_507_copy_does_not_attribute_the_cause() {
     }
 }
 
+/// The recovery advice names the two pairing roles: `/e2e pair` on the device
+/// that holds the identity, `/e2e join` or `/e2e accept` on this device.
+#[test]
+fn recovery_advice_names_the_pairing_roles_in_every_catalog() {
+    const MSGIDS: [&str; 2] = [
+        "{} Devices: {}. Type /e2e pair on a listed device that holds the identity. Then type /e2e join and the link on this device, or type /e2e accept for its invite. Replace the identity only as the last step: /e2e reset asks for a confirmation. A new identity can change the public key that your peers checked.",
+        "{} Devices: {}. If another device of this account is online, type /e2e pair on that device. Then type /e2e join and the link on this device, or type /e2e accept for its invite. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked.",
+    ];
+    let slint = include_str!("../ui/appwindow.slint");
+    for msgid in MSGIDS {
+        assert!(slint.contains(&format!("@tr(\"{msgid}\"")), "{msgid}");
+    }
+    for (lang, catalog) in [
+        ("it", include_str!("../lang/it/LC_MESSAGES/cordiale-ui.po")),
+        ("fr", include_str!("../lang/fr/LC_MESSAGES/cordiale-ui.po")),
+        ("de", include_str!("../lang/de/LC_MESSAGES/cordiale-ui.po")),
+        ("es", include_str!("../lang/es/LC_MESSAGES/cordiale-ui.po")),
+    ] {
+        for msgid in MSGIDS {
+            let line = format!("msgid \"{msgid}\"");
+            let msgstr = catalog
+                .lines()
+                .skip_while(|l| *l != line)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{lang}: missing msgid"));
+            assert!(msgstr.len() > "msgstr \"\"".len(), "{lang}: {msgstr}");
+            assert_eq!(msgstr.matches("{}").count(), 2, "{lang}: {msgstr}");
+            for command in ["/e2e pair", "/e2e join", "/e2e accept"] {
+                assert!(msgstr.contains(command), "{lang}: {command}");
+            }
+        }
+        assert!(
+            !catalog.contains("Pair this device with a listed device first"),
+            "{lang}"
+        );
+    }
+}
+
 /// The example masks in the ban-type picker and the ignore-mask hint are
 /// IRC syntax, not prose: every catalog must keep them as in the source.
 #[test]

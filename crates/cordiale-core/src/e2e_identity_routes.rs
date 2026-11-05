@@ -103,10 +103,100 @@ pub struct DeviceRecord {
     pub ed25519: String,
     pub curve25519: String,
     pub sig: String,
+    /// Last activity that protocol 56 reports. Older servers omit it.
+    pub last_seen: LastSeen,
+}
+
+/// The optional `last_seen_at` of a device. The four cases stay apart, so a
+/// view can tell "not sent" from "never seen" and from "unreadable".
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LastSeen {
+    /// The field is absent: the server is older than protocol 56.
+    #[default]
+    NotSent,
+    /// The field is JSON `null`: the server never recorded activity.
+    Never,
+    /// The field is a valid ISO 8601 timestamp, kept as sent.
+    At(String),
+    /// The field has a bad type or format.
+    Unreadable,
+}
+
+impl LastSeen {
+    fn from_field(value: Option<&Value>) -> Self {
+        match value {
+            None => Self::NotSent,
+            Some(Value::Null) => Self::Never,
+            Some(Value::String(text)) if is_iso_timestamp(text) => Self::At(text.clone()),
+            Some(_) => Self::Unreadable,
+        }
+    }
+}
+
+/// True for `YYYY-MM-DDTHH:MM:SS[.fraction]` followed by `Z` or `+HH:MM`.
+pub fn is_iso_timestamp(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let digits = |from: usize, len: usize| -> Option<u32> {
+        let part = bytes.get(from..from + len)?;
+        if !part.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(part).ok()?.parse().ok()
+    };
+    let at = |index: usize, wanted: u8| bytes.get(index) == Some(&wanted);
+    let (Some(year), Some(month), Some(day)) = (digits(0, 4), digits(5, 2), digits(8, 2)) else {
+        return false;
+    };
+    let (Some(hour), Some(minute), Some(second)) = (digits(11, 2), digits(14, 2), digits(17, 2))
+    else {
+        return false;
+    };
+    if !(at(4, b'-')
+        && at(7, b'-')
+        && (at(10, b'T') || at(10, b't'))
+        && at(13, b':')
+        && at(16, b':'))
+    {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let month_days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    if day == 0 || day > month_days || hour > 23 || minute > 59 || second > 60 {
+        return false;
+    }
+    let mut index = 19;
+    if at(index, b'.') {
+        index += 1;
+        let start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+    }
+    match bytes.get(index) {
+        Some(b'Z') | Some(b'z') => index + 1 == bytes.len(),
+        Some(b'+') | Some(b'-') => {
+            let (Some(zone_hour), Some(zone_minute)) = (digits(index + 1, 2), digits(index + 4, 2))
+            else {
+                return false;
+            };
+            at(index + 3, b':') && zone_hour <= 23 && zone_minute <= 59 && index + 6 == bytes.len()
+        }
+        _ => false,
+    }
 }
 
 impl DeviceRecord {
-    /// Reads one device. Extra fields are ignored.
+    /// Reads one device. Extra fields are ignored. A bad `last_seen_at`
+    /// marks only the activity as unreadable.
     pub fn from_value(value: &Value) -> Result<Self, WireError> {
         let map = as_object(value)?;
         let ed25519 = key_text(map, "ed25519")?;
@@ -118,6 +208,7 @@ impl DeviceRecord {
             did: did.to_string(),
             curve25519: key_text(map, "curve25519")?,
             sig: signature_text(map, "sig")?,
+            last_seen: LastSeen::from_field(map.get("last_seen_at")),
             ed25519,
         })
     }
@@ -334,6 +425,52 @@ mod tests {
             keys: sorted,
             signature,
         }
+    }
+
+    fn device_value(extra: Option<(&str, Value)>) -> Value {
+        let account = Account::new();
+        let keys = account.identity_keys();
+        let ed = keys.ed25519.to_base64();
+        let mut value = json!({
+            "did": did_from_key_text(&ed).unwrap(),
+            "ed25519": ed,
+            "curve25519": keys.curve25519.to_base64(),
+            "sig": sig_of(&account),
+            "unknown_field": 7,
+        });
+        if let Some((name, field)) = extra {
+            value[name] = field;
+        }
+        value
+    }
+
+    #[test]
+    fn last_seen_is_absent_null_valid_or_unreadable() {
+        let read = |extra| {
+            DeviceRecord::from_value(&device_value(extra))
+                .unwrap()
+                .last_seen
+        };
+        assert_eq!(read(None), LastSeen::NotSent);
+        assert_eq!(read(Some(("last_seen_at", Value::Null))), LastSeen::Never);
+        let stamp = "2026-11-05T10:20:30.123Z";
+        assert_eq!(
+            read(Some(("last_seen_at", json!(stamp)))),
+            LastSeen::At(stamp.to_string())
+        );
+        for bad in [json!("yesterday"), json!(12), json!("2026-13-05T10:20:30Z")] {
+            assert_eq!(read(Some(("last_seen_at", bad))), LastSeen::Unreadable);
+        }
+    }
+
+    #[test]
+    fn timestamp_check_covers_zones_and_dates() {
+        assert!(is_iso_timestamp("2026-11-05T10:20:30+01:00"));
+        assert!(is_iso_timestamp("2024-02-29T00:00:00Z"));
+        assert!(!is_iso_timestamp("2026-02-29T00:00:00Z"));
+        assert!(!is_iso_timestamp("2026-11-05T10:20:30"));
+        assert!(!is_iso_timestamp("2026-11-05T10:20:30.Z"));
+        assert!(!is_iso_timestamp("2026-11-05 10:20:30Z"));
     }
 
     #[test]
