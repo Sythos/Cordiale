@@ -39,8 +39,10 @@ use cordiale_core::session::{route_e2e_message, route_e2e_pairing, route_e2e_pai
 use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
 use crate::e2e_view::{
-    locked_chat_state, pairing_error_key, pairing_status_key, register_own_device,
-    reset_status_key, revoke_status_key, ChatSignals, ChatState, KeyRequest, LocalQuery, QueryLane,
+    device_rows, devices_reason, locked_chat_state, pairing_error_key, pairing_help,
+    pairing_status_key, recovery_for_provision, register_own_device, reset_status_key,
+    revoke_status_key, ChatSignals, ChatState, DeviceRow, KeyRequest, LocalQuery, QueryLane,
+    RecoveryReason,
 };
 
 /// How often the timers of the engines run: queued texts expire or go out.
@@ -98,6 +100,9 @@ pub(crate) struct E2eRuntime {
     /// Networks where this session saw that the account has an identity this
     /// device does not hold. Only such a network can take a pairing invite.
     needs_pairing: HashSet<String>,
+    /// Why this device cannot use the identity of a network, when the last
+    /// provisioning run found out. A failed read sets no reason.
+    recovery: HashMap<String, RecoveryReason>,
     /// The one pairing invite that waits for `/e2e accept`. It is not saved.
     invite: Option<PairingInvite>,
     /// Rendezvous ids of the invites this session already took, newest last.
@@ -873,6 +878,7 @@ async fn provision_network(state: &mut WorkerState, network: &str) {
     match result {
         Ok(_) => {
             state.e2e.needs_pairing.remove(network);
+            state.e2e.recovery.remove(network);
             state.e2e.provisioned.insert(network.to_string());
             // A network without a state file before this run can open its
             // engine now.
@@ -881,6 +887,11 @@ async fn provision_network(state: &mut WorkerState, network: &str) {
         Err(error) => {
             if matches!(error, ProvisionError::NeedsPairing) {
                 state.e2e.needs_pairing.insert(network.to_string());
+            }
+            // Only an identity outcome sets a reason. A failed read keeps the
+            // old state and never offers a new identity.
+            if let Some(reason) = recovery_for_provision(&error) {
+                state.e2e.recovery.insert(network.to_string(), reason);
             }
             persistence::log_line(&format!("e2e identity not made for {network}: {error:?}"));
         }
@@ -1789,6 +1800,75 @@ pub(crate) fn show_e2e_identity(
     });
 }
 
+/// Reads the device list of the server. A failure is logged by kind and gives
+/// None, so the caller never shows it as an empty list.
+async fn read_device_records(
+    client: &cordiale_core::client::GrappaClient,
+    token: &str,
+    network: &str,
+    protocol: Option<u32>,
+) -> Option<Vec<cordiale_core::e2e_identity_routes::DeviceRecord>> {
+    match client.list_e2e_devices(token, network, protocol).await {
+        Ok(records) => Some(records),
+        Err(error) => {
+            persistence::log_line(&format!("e2e device list for {network}: {error:?}"));
+            None
+        }
+    }
+}
+
+/// The text of the device rows inside the window thread. A list that could
+/// not be read says so, and an empty list says that it is empty.
+fn device_rows_text(ui: &AppWindow, rows: Option<&[DeviceRow]>) -> String {
+    match rows {
+        None => ui.invoke_e2e_list_unavailable_text().to_string(),
+        Some([]) => ui.invoke_e2e_list_empty_text().to_string(),
+        Some(rows) => rows
+            .iter()
+            .map(|row| {
+                ui.invoke_e2e_device_row_text(
+                    row.did.as_str().into(),
+                    row.mine,
+                    row.kind.into(),
+                    row.time.as_str().into(),
+                )
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    }
+}
+
+/// Shows why this device cannot use the identity, with the listed devices
+/// and the pairing advice. The view only explains: it never creates or
+/// replaces an identity. `signed_ids` are the ids of the local signed list,
+/// or None when the server list gives the devices.
+#[allow(clippy::too_many_arguments)]
+async fn show_recovery(
+    ui: &slint::Weak<AppWindow>,
+    client: &cordiale_core::client::GrappaClient,
+    token: &str,
+    network: &str,
+    protocol: Option<u32>,
+    own: &str,
+    reason: RecoveryReason,
+    signed_ids: Option<Vec<String>>,
+) {
+    let records = read_device_records(client, token, network, protocol).await;
+    let ids = match (signed_ids, &records) {
+        (Some(ids), _) => Some(ids),
+        (None, Some(records)) => Some(records.iter().map(|record| record.did.clone()).collect()),
+        (None, None) => None,
+    };
+    let rows: Option<Vec<DeviceRow>> = ids.map(|ids| device_rows(&ids, own, records.as_deref()));
+    let help = pairing_help(rows.as_deref());
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_status_command_hint(device_rows_text(&ui, rows.as_deref()).into());
+        ui.set_status_message(help.into());
+        ui.set_status_kind(reason.status_key().into());
+    });
+}
+
 /// Runs one `/e2e devices`, `revoke` or `reset` step on `network`. A reset
 /// runs only after the question and the answer `/e2e reset yes` for the same
 /// network.
@@ -1806,25 +1886,49 @@ pub(crate) async fn run_e2e_manage(
     let Some(own_nick) = state.networks.own_nicks.get(&network).cloned() else {
         return not_ready();
     };
+    let protocol = state.conn.server_protocol_version;
     if !ensure_engine(state, &network) {
+        // The list of devices explains why the identity is not open.
+        if matches!(action, E2eManageAction::Devices) {
+            if let Some(reason) = state.e2e.recovery.get(&network).copied() {
+                return show_recovery(ui, &client, &token, &network, protocol, "", reason, None)
+                    .await;
+            }
+        }
         return not_ready();
     }
-    let protocol = state.conn.server_protocol_version;
     match action {
         E2eManageAction::Devices => {
             let Some(engine) = state.e2e.engines.get_mut(&network) else {
                 return not_ready();
             };
             let own = engine.own_did().to_string();
-            let Some(list) = engine.state_mut().signed_list() else {
-                return not_ready();
-            };
-            let ids: Vec<String> = list
-                .keys
-                .iter()
-                .filter_map(|key| did_from_key_text(key).ok())
-                .collect();
-            show_manage_kind(ui, "e2e-devices", ids.join(" "), own);
+            let ids: Option<Vec<String>> = engine.state_mut().signed_list().map(|list| {
+                list.keys
+                    .iter()
+                    .filter_map(|key| did_from_key_text(key).ok())
+                    .collect()
+            });
+            // The reason of the provisioning run comes first: an engine can
+            // open with an old local list. Then the local list gives the
+            // reason. The view explains and never resets.
+            let saved = state.e2e.recovery.get(&network).copied();
+            if let Some((reason, from_signed_list)) = devices_reason(saved, &own, ids.as_deref()) {
+                // An old local list does not tell the devices of the account.
+                let ids = if from_signed_list { ids } else { None };
+                return show_recovery(ui, &client, &token, &network, protocol, &own, reason, ids)
+                    .await;
+            }
+            let ids = ids.unwrap_or_default();
+            // The server list adds the activity. A failed read keeps the ids
+            // of the signed list and shows the activity as unavailable.
+            let records = read_device_records(&client, &token, &network, protocol).await;
+            let rows = device_rows(&ids, &own, records.as_deref());
+            let _ = ui.upgrade_in_event_loop(move |ui| {
+                ui.set_status_command_hint(device_rows_text(&ui, Some(rows.as_slice())).into());
+                ui.set_status_message(own.into());
+                ui.set_status_kind("e2e-devices".into());
+            });
         }
         E2eManageAction::Revoke(did) => {
             let Some(mut engine) = state.e2e.engines.remove(&network) else {
@@ -1956,6 +2060,7 @@ fn settle_reset(
     state.e2e.engines.insert(network.to_string(), engine);
     state.e2e.provisioned.remove(network);
     state.e2e.reset.insert(network.to_string());
+    state.e2e.recovery.remove(network);
     state.e2e.clear_ciphertext_views(network);
     for nick in changed {
         refresh_locked_view(state, ui, network, &nick);
@@ -2031,6 +2136,7 @@ fn finish_pairing_step(
     // A finished join gave the device a new identity after a reset.
     if matches!(active.session.status(), PairingStatus::Done) {
         state.e2e.needs_pairing.remove(&active.network);
+        state.e2e.recovery.remove(&active.network);
         state.e2e.reset.remove(&active.network);
         state.e2e.clear_ciphertext_views(&active.network);
     }

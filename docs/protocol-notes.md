@@ -1878,3 +1878,26 @@ confermati o sostituiti dal testo di Grappa §4f e §4g e da Cicchetto:
   passo di join con lo stesso link del QR (`E2ePairAction::Join`), `/e2e decline` lo scarta. Il confronto
   del codice a due cifre e i controlli di fiducia restano obbligatori. Il log riporta solo la decisione,
   mai i valori dell invito.
+
+## Attività dei dispositivi e recupero dell'identità E2E (issue 608, proposta protocollo 56)
+
+`DeviceRecord` (`e2e_identity_routes.rs`) legge il campo opzionale `last_seen_at` come `LastSeen`:
+`NotSent` (campo assente, protocollo 55), `Never` (`null`), `At(testo ISO 8601 originale)` e
+`Unreadable` (tipo o formato errato). Un timestamp errato non scarta il record; i campi sconosciuti
+restano ignorati e il protocollo minimo non cambia. `/e2e devices` elenca gli id della lista firmata,
+marca questo dispositivo (id esatto) e mostra l'attività di `GET /e2e/devices` in ora locale. Se la
+lettura fallisce restano gli id con attività «non disponibile»: mai una lista vuota. Cordiale non salva
+etichette né data di aggiunta, quindi non le mostra.
+
+Motivi di identità non disponibile. I nomi (`no-keys`, `replaced`, `left-out`, `no-list`) vengono dalla
+proposta della PR 2556 di Grappa, ancora aperta: confermare il contratto finale prima del rilascio. Il
+client non legge un campo del server: li ricava dal proprio stato (`e2e_view::RecoveryReason`).
+`NeedsPairing` dà `no-keys`; `MasterMismatch` dà `replaced`; una lista firmata senza questo dispositivo
+dà `left-out`; nessuna lista firmata dà `no-list`. Un errore di lettura o di chiamata non dà alcun
+motivo, quindi non offre mai una nuova identità. `/e2e devices` usa prima il motivo salvato dal
+provisioning, anche se il motore si apre con una lista locale vecchia; solo senza motivo salvato deriva
+il motivo dalla lista locale. Mostra la spiegazione, i dispositivi del server e, per primo, il pairing
+(flusso della issue 605) se esiste un altro dispositivo in elenco: `/e2e pair` sul dispositivo che ha
+l'identità, poi `/e2e join <link>` o `/e2e accept` su questo dispositivo. La
+sostituzione resta `/e2e reset` con la sua conferma `yes`, con l'avviso che una nuova identità può
+cambiare la chiave pubblica verificata dai contatti. Nessuna vista crea o sostituisce un'identità.
