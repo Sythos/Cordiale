@@ -1577,14 +1577,14 @@ export component AppWindow inherits Window {
     // The SAS step of the user: "start", "confirm", "reject" or "cancel".
     callback e2e-sas-requested(string);
     callback e2e-request-action(string, string, string, string);
-    // The pairing QR code of `/e2e pair`, drawn from the pairing link URL.
-    in property <image> e2e-pair-qr;
-    in property <string> e2e-pair-qr-code: "";
-    // The link behind the QR code, held only while the pairing is open, and
-    // the result of the last copy ("", "ok" or "failed").
-    in-out property <string> e2e-pair-link: "";
-    in-out property <string> e2e-pair-copy-result: "";
-    in-out property <bool> e2e-pair-qr-visible: false;
+    // The pairing window of `/e2e pair`. It holds no link and no QR code.
+    // `e2e-pair-offered` is true when the server offers the pairing to the
+    // other devices of the account (protocol 55).
+    in-out property <bool> e2e-pair-dialog-visible: false;
+    in property <bool> e2e-pair-offered: false;
+    // The in-app offer on the device that needs the identity. The join step
+    // starts only after the user accepts.
+    in-out property <bool> e2e-pair-offer-visible: false;
     // Only show the roster after Grappa confirms this window is joined.
     // Autojoin entries in `/boot` can be known but not currently connected.
     in property <bool> current-window-is-joined: false;
@@ -1993,9 +1993,9 @@ export component AppWindow inherits Window {
     callback security-passwordless-cancel();
     callback security-copy-passwordless-codes();
     callback copy-text-requested(string);
-    // Copies the pairing link and tells whether the clipboard took it.
-    callback copy-pair-link(string) -> bool;
-    callback send-pair-invite();
+    // The user accepts or dismisses the waiting pairing offer.
+    callback accept-pair-offer();
+    callback dismiss-pair-offer();
     callback security-copy-recovery-codes();
     callback saved-profile-connect-requested(string, string);
     callback server-selected(string);
@@ -2879,12 +2879,12 @@ export component AppWindow inherits Window {
             return @tr("The SAS code is not available now.");
         } else if status-kind == "e2e-sas-failed" {
             return @tr("The master key of this contact changed. The check was not saved.");
-        } else if status-kind == "e2e-pair-link" {
-            return @tr("Pairing link: {}. On the new device, type /e2e join and this link.", status-command-hint);
-        } else if status-kind == "e2e-pair-invite" {
-            return @tr("Another device of your account invites this device to pair on {}. Type /e2e accept to join, or /e2e decline.", status-command-hint);
-        } else if status-kind == "e2e-pair-invite-none" {
-            return @tr("No pairing invite is open.");
+        } else if status-kind == "e2e-pair-manual" {
+            return @tr("This server cannot offer the pairing. On the new device, type /e2e join and this code: {}.", status-command-hint);
+        } else if status-kind == "e2e-pair-offered" {
+            return @tr("The pairing is offered to your other devices. Accept it on the new device, then compare the code.");
+        } else if status-kind == "e2e-pair-offer-none" {
+            return @tr("No pairing offer is open.");
         } else if status-kind == "e2e-pair-waiting" {
             return @tr("Waiting for the new device to join.");
         } else if status-kind == "e2e-pair-code" {
@@ -2903,12 +2903,6 @@ export component AppWindow inherits Window {
             return @tr("The code is not the same. Pairing stopped. Start again.");
         } else if status-kind == "e2e-pair-unavailable" {
             return @tr("This server does not support device pairing.");
-        } else if status-kind == "e2e-pair-invite-sent" {
-            return @tr("The invite is sent to your other sessions. Compare the code on both devices.");
-        } else if status-kind == "e2e-pair-invite-unsupported" {
-            return @tr("This server cannot send a pairing invite. Use Copy link.");
-        } else if status-kind == "e2e-pair-invite-failed" {
-            return @tr("The invite was not sent. The pairing stays open.");
         } else if status-kind == "e2e-pair-none" {
             return @tr("No pairing is open. Type /e2e pair on the first device.");
         } else if status-kind == "e2e-revoke-done" {
@@ -9142,7 +9136,7 @@ export component AppWindow inherits Window {
         }
     }
 
-    if e2e-pair-qr-visible : Rectangle {
+    if e2e-pair-dialog-visible : Rectangle {
         width: parent.width;
         height: parent.height;
         background: #00000099;
@@ -9158,9 +9152,7 @@ export component AppWindow inherits Window {
             init => { self.focus(); }
             key-pressed(event) => {
                 if event.text == Key.Escape {
-                    e2e-pair-qr-visible = false;
-                    e2e-pair-link = "";
-                    e2e-pair-copy-result = "";
+                    e2e-pair-dialog-visible = false;
                     return accept;
                 }
                 return reject;
@@ -9191,62 +9183,90 @@ export component AppWindow inherits Window {
                         }
                         Button {
                             text: "✕";
-                            accessible-label: @tr("Close the pairing code");
+                            accessible-label: @tr("Close the pairing window");
                             clicked => {
-                                e2e-pair-qr-visible = false;
-                                e2e-pair-link = "";
-                                e2e-pair-copy-result = "";
+                                e2e-pair-dialog-visible = false;
                             }
                         }
                     }
 
-                    Text {
-                        text: @tr("Scan this code on the new device. Anyone who has it can pair a device until it expires, so do not post it.");
+                    if e2e-pair-offered : Text {
+                        text: @tr("The pairing is offered to your other devices. On the new device, accept the offer. Then compare the code on both devices.");
                         wrap: word-wrap;
                     }
-                    HorizontalLayout {
-                        alignment: center;
-
-                        Image {
-                            source: e2e-pair-qr;
-                            width: 192px;
-                            height: 192px;
-                            image-rendering: pixelated;
-                            accessible-role: AccessibleRole.image;
-                            accessible-label: @tr("QR code of the pairing link");
-                        }
+                    if !e2e-pair-offered : Text {
+                        text: @tr("This server cannot offer the pairing to your other devices. The status bar shows the code to type on the new device.");
+                        wrap: word-wrap;
                     }
-                    HorizontalLayout {
-                        spacing: 6px;
-
-                        LineEdit {
-                            text: e2e-pair-qr-code;
-                            read-only: true;
-                            accessible-label: @tr("Pairing code");
-                            horizontal-stretch: 1;
-                        }
-                        CompactButton {
-                            text: "📋  " + @tr("Copy link");
-                            enabled: e2e-pair-link != "";
-                            clicked => {
-                                e2e-pair-copy-result = copy-pair-link(e2e-pair-link) ? "ok" : "failed";
-                            }
-                        }
-                        CompactButton {
-                            text: @tr("Send invite");
-                            enabled: e2e-pair-link != "";
-                            clicked => { send-pair-invite(); }
-                        }
-                    }
-                    if e2e-pair-copy-result == "ok" : Text {
-                        text: @tr("The link is copied.");
+                    Text {
+                        text: @tr("The offer ends when the pairing ends or expires.");
                         wrap: word-wrap;
                         color: palette-muted;
                     }
-                    if e2e-pair-copy-result == "failed" : Text {
-                        text: @tr("The link was not copied. The pairing stays open.");
+                }
+            }
+        }
+    }
+
+    // The in-app pairing offer. The join step starts only when the user
+    // accepts. A dismiss or an Escape starts nothing.
+    if e2e-pair-offer-visible : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+        }
+
+        FocusScope {
+            width: parent.width;
+            height: parent.height;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    dismiss-pair-offer();
+                    return accept;
+                }
+                return reject;
+            }
+
+            Rectangle {
+                width: min(420px, parent.width - 32px);
+                height: min(220px, parent.height - 32px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-width: 1px;
+                border-radius: 8px;
+                border-color: #8080806a;
+                background: theme == "dark" ? #242424 : white;
+
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 12px;
+
+                    Text {
+                        text: @tr("Pairing offer");
+                        font-size: 18px * FontScale.percent / 100;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: @tr("Another device of your account offers to pair with this device. Accept only if you started it. Then compare the code on both devices.");
                         wrap: word-wrap;
-                        color: #d04040;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+
+                        CompactButton {
+                            text: @tr("Dismiss");
+                            clicked => { dismiss-pair-offer(); }
+                        }
+                        CompactButton {
+                            text: @tr("Accept");
+                            clicked => { accept-pair-offer(); }
+                        }
                     }
                 }
             }

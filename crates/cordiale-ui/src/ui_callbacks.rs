@@ -389,10 +389,13 @@ pub(crate) fn register_passkey_callbacks(
         }
     });
     ui.on_copy_text_requested(|text| copy_text(&text));
-    ui.on_copy_pair_link(|link| e2e_runtime::copy_pairing_link(&link, try_copy_text));
-    let tx_for_pair_invite = worker_tx.clone();
-    ui.on_send_pair_invite(move || {
-        let _ = tx_for_pair_invite.send(WorkerCommand::E2ePairInvite);
+    let tx_for_offer_accept = worker_tx.clone();
+    ui.on_accept_pair_offer(move || {
+        let _ = tx_for_offer_accept.send(WorkerCommand::E2ePairOffer(true));
+    });
+    let tx_for_offer_dismiss = worker_tx.clone();
+    ui.on_dismiss_pair_offer(move || {
+        let _ = tx_for_offer_dismiss.send(WorkerCommand::E2ePairOffer(false));
     });
     ui.on_format_chat_copy(|lines| chat_copy_text(&lines).into());
     let weak_for_codes = ui.as_weak();
