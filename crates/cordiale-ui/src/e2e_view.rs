@@ -33,9 +33,11 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use cordiale_core::e2e_engine::{locked_label, route_for_window, SendRoute};
+use cordiale_core::e2e_identity_routes::{DeviceRecord, LastSeen};
 use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing::{ClosedReason, PairingCallError};
 use cordiale_core::e2e_pairing_flow::{DriveError, EndReason, FlowError, PairingStatus};
+use cordiale_core::e2e_provision::ProvisionError;
 use cordiale_core::e2e_refusal::E2eRouteError;
 use cordiale_core::e2e_revoke::{RevokeError, Revoked};
 use cordiale_core::e2e_store::{E2eHistoryStore, E2eMessage, E2eStoreError};
@@ -452,6 +454,130 @@ fn undeliverable_text_for(
     }
 }
 
+/// One entry of the own-device view. `kind` selects the translated activity
+/// text in `e2e-device-row-text()`: `at`, `never`, `not-sent`, `unreadable`
+/// or `unknown`. `time` is set only for `at`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceRow {
+    pub did: String,
+    pub mine: bool,
+    pub kind: &'static str,
+    pub time: String,
+}
+
+/// Formats a protocol timestamp in the zone `zone`. None when the text is
+/// not a full RFC 3339 time.
+pub(crate) fn activity_time_in<Tz: chrono::TimeZone>(raw: &str, zone: &Tz) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    Some(
+        parsed
+            .with_timezone(zone)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
+    )
+}
+
+/// The activity kind and the local time text of one device record.
+fn activity_of(last_seen: &LastSeen) -> (&'static str, String) {
+    match last_seen {
+        LastSeen::NotSent => ("not-sent", String::new()),
+        LastSeen::Never => ("never", String::new()),
+        LastSeen::Unreadable => ("unreadable", String::new()),
+        LastSeen::At(raw) => match activity_time_in(raw, &chrono::Local) {
+            Some(time) => ("at", time),
+            None => ("unreadable", String::new()),
+        },
+    }
+}
+
+/// Builds the rows of the own-device view from the ids of the signed list.
+/// `records` is the server list, or None when it could not be read: then
+/// every activity is `unknown`, and the ids still show. The local device is
+/// marked by its exact id.
+pub(crate) fn device_rows(
+    ids: &[String],
+    own: &str,
+    records: Option<&[DeviceRecord]>,
+) -> Vec<DeviceRow> {
+    ids.iter()
+        .map(|did| {
+            let record = records.and_then(|list| list.iter().find(|record| &record.did == did));
+            let (kind, time) = match record {
+                Some(record) => activity_of(&record.last_seen),
+                None => ("unknown", String::new()),
+            };
+            DeviceRow {
+                did: did.clone(),
+                mine: did == own,
+                kind,
+                time,
+            }
+        })
+        .collect()
+}
+
+/// Why this device cannot use the E2E identity of the account. The names
+/// follow the protocol 56 proposal; the client finds each one from its own
+/// state, not from a server field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryReason {
+    /// This device has no keys for the identity.
+    NoKeys,
+    /// The stored identity differs from the one on the server.
+    Replaced,
+    /// The signed device list does not name this device.
+    LeftOut,
+    /// The identity has no signed device list that this device can read.
+    NoList,
+}
+
+impl RecoveryReason {
+    /// The `status-kind` key that selects the translated explanation.
+    pub(crate) fn status_key(self) -> &'static str {
+        match self {
+            Self::NoKeys => "e2e-recovery-no-keys",
+            Self::Replaced => "e2e-recovery-replaced",
+            Self::LeftOut => "e2e-recovery-left-out",
+            Self::NoList => "e2e-recovery-no-list",
+        }
+    }
+}
+
+/// The reason that a failed provisioning run gives. Only the two identity
+/// outcomes give one: a failed read or call gives None, so it never looks like
+/// a missing identity and never leads to a new one.
+pub(crate) fn recovery_for_provision(error: &ProvisionError) -> Option<RecoveryReason> {
+    match error {
+        ProvisionError::NeedsPairing => Some(RecoveryReason::NoKeys),
+        ProvisionError::MasterMismatch => Some(RecoveryReason::Replaced),
+        _ => None,
+    }
+}
+
+/// The reason that the signed list of an open engine gives: `ids` is None
+/// when the engine holds no list.
+pub(crate) fn recovery_for_list(own: &str, ids: Option<&[String]>) -> Option<RecoveryReason> {
+    match ids {
+        None => Some(RecoveryReason::NoList),
+        Some(ids) if !ids.iter().any(|did| did == own) => Some(RecoveryReason::LeftOut),
+        Some(_) => None,
+    }
+}
+
+/// How the recovery text speaks of pairing: `pair` when a listed device other
+/// than this one exists, `none` when the list has no other device, `unknown`
+/// when the list could not be read.
+pub(crate) fn pairing_help(rows: Option<&[DeviceRow]>) -> &'static str {
+    match rows {
+        None => "unknown",
+        Some(rows) if rows.iter().any(|row| !row.mine) => "pair",
+        Some(_) => "none",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,5 +958,112 @@ mod tests {
             1
         );
         assert!(search_history_in_view(&store, None, "secret", true).is_empty());
+    }
+
+    fn record(did: &str, last_seen: LastSeen) -> DeviceRecord {
+        DeviceRecord {
+            did: did.to_string(),
+            ed25519: String::new(),
+            curve25519: String::new(),
+            sig: String::new(),
+            last_seen,
+        }
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn device_rows_mark_the_exact_own_id_and_keep_each_activity_apart() {
+        let ids = ids(&["aaa", "bbb", "ccc", "ddd"]);
+        let records = vec![
+            record("aaa", LastSeen::Never),
+            record("bbb", LastSeen::NotSent),
+            record("ccc", LastSeen::Unreadable),
+        ];
+        let rows = device_rows(&ids, "bbb", Some(&records));
+        let kinds: Vec<&str> = rows.iter().map(|row| row.kind).collect();
+        assert_eq!(kinds, ["never", "not-sent", "unreadable", "unknown"]);
+        let mine: Vec<bool> = rows.iter().map(|row| row.mine).collect();
+        assert_eq!(mine, [false, true, false, false]);
+        // A near id is not the own id.
+        assert!(device_rows(&ids, "bb", Some(&records))
+            .iter()
+            .all(|row| !row.mine));
+    }
+
+    #[test]
+    fn a_failed_read_keeps_every_id_with_unknown_activity() {
+        let rows = device_rows(&ids(&["aaa", "bbb"]), "aaa", None);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.kind == "unknown"));
+        assert!(rows.iter().all(|row| row.time.is_empty()));
+    }
+
+    #[test]
+    fn a_valid_time_shows_in_the_given_zone_and_a_bad_one_does_not() {
+        let zone = chrono::FixedOffset::east_opt(3600).unwrap();
+        assert_eq!(
+            activity_time_in("2026-11-05T10:20:30Z", &zone).as_deref(),
+            Some("2026-11-05 11:20")
+        );
+        assert_eq!(activity_time_in("soon", &zone), None);
+        let records = vec![record("aaa", LastSeen::At("2026-11-05T10:20:30Z".into()))];
+        let rows = device_rows(&ids(&["aaa"]), "zzz", Some(&records));
+        assert_eq!(rows[0].kind, "at");
+        assert!(!rows[0].time.is_empty());
+    }
+
+    #[test]
+    fn each_recovery_reason_has_its_own_status_key() {
+        let keys: BTreeSet<&str> = [
+            RecoveryReason::NoKeys,
+            RecoveryReason::Replaced,
+            RecoveryReason::LeftOut,
+            RecoveryReason::NoList,
+        ]
+        .iter()
+        .map(|reason| reason.status_key())
+        .collect();
+        assert_eq!(keys.len(), 4);
+    }
+
+    #[test]
+    fn only_identity_outcomes_give_a_recovery_reason() {
+        assert_eq!(
+            recovery_for_provision(&ProvisionError::NeedsPairing),
+            Some(RecoveryReason::NoKeys)
+        );
+        assert_eq!(
+            recovery_for_provision(&ProvisionError::MasterMismatch),
+            Some(RecoveryReason::Replaced)
+        );
+        // A failed read or call never leads to a recovery that replaces.
+        assert_eq!(
+            recovery_for_provision(&ProvisionError::Route(E2eRouteError::Unavailable)),
+            None
+        );
+        assert_eq!(recovery_for_provision(&ProvisionError::ResetPending), None);
+    }
+
+    #[test]
+    fn the_signed_list_gives_left_out_or_no_list() {
+        let listed = ids(&["aaa", "bbb"]);
+        assert_eq!(recovery_for_list("aaa", Some(&listed)), None);
+        assert_eq!(
+            recovery_for_list("zzz", Some(&listed)),
+            Some(RecoveryReason::LeftOut)
+        );
+        assert_eq!(recovery_for_list("aaa", None), Some(RecoveryReason::NoList));
+    }
+
+    #[test]
+    fn pairing_help_needs_a_listed_device_other_than_this_one() {
+        let only_me = device_rows(&ids(&["aaa"]), "aaa", None);
+        let two = device_rows(&ids(&["aaa", "bbb"]), "aaa", None);
+        assert_eq!(pairing_help(Some(&only_me)), "none");
+        assert_eq!(pairing_help(Some(&two)), "pair");
+        assert_eq!(pairing_help(None), "unknown");
     }
 }

@@ -2855,6 +2855,26 @@ export component AppWindow inherits Window {
         return "";
     }
 
+    public pure function e2e-list-unavailable-text() -> string {
+        return @tr("The device list is unavailable");
+    }
+
+    public pure function e2e-list-empty-text() -> string {
+        return @tr("the list has no device");
+    }
+
+    // The recovery text: the reason, the listed devices, the pairing advice
+    // and the warning about a new identity. `status-message` is the pairing
+    // help (`pair`, `none` or `unknown`).
+    function e2e-recovery-text(head: string) -> string {
+        if status-message == "pair" {
+            return @tr("{} Devices: {}. Pair this device with a listed device first: type /e2e pair. Replace the identity only as the last step: /e2e reset asks for a confirmation. A new identity can change the public key that your peers checked.", head, status-command-hint);
+        } else if status-message == "none" {
+            return @tr("{} Devices: {}. No other listed device can pair with this device. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked.", head, status-command-hint);
+        }
+        return @tr("{} Devices: {}. If another device of this account is online, pair first: type /e2e pair. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked.", head, status-command-hint);
+    }
+
     // The status text of the E2E kinds (`e2e-*`).
     function e2e-status-text() -> string {
         if status-kind == "e2e-not-ready" {
@@ -2921,6 +2941,14 @@ export component AppWindow inherits Window {
             return @tr("The device was not revoked.");
         } else if status-kind == "e2e-devices" {
             return @tr("Own devices: {}. This device: {}.", status-command-hint, status-message);
+        } else if status-kind == "e2e-recovery-no-keys" {
+            return e2e-recovery-text(@tr("This device has no keys for the E2E identity of this account."));
+        } else if status-kind == "e2e-recovery-replaced" {
+            return e2e-recovery-text(@tr("The E2E identity on the server differs from the identity on this device."));
+        } else if status-kind == "e2e-recovery-left-out" {
+            return e2e-recovery-text(@tr("The signed device list does not include this device."));
+        } else if status-kind == "e2e-recovery-no-list" {
+            return e2e-recovery-text(@tr("The E2E identity has no signed device list that this device can read."));
         } else if status-kind == "e2e-reset-confirm" {
             return @tr("This resets the E2E identity of this device. To confirm, type /e2e reset yes.");
         } else if status-kind == "e2e-reset-done" {
@@ -2933,6 +2961,35 @@ export component AppWindow inherits Window {
             return @tr("The E2E identity was not reset.");
         }
         return status-message;
+    }
+
+    // One entry of the own-device list. `kind` comes from `device_rows()`.
+    public pure function e2e-device-row-text(did: string, mine: bool, kind: string, time: string) -> string {
+        if kind == "at" {
+            if mine {
+                return @tr("Device {} (this device): last activity {}", did, time);
+            }
+            return @tr("Device {}: last activity {}", did, time);
+        } else if kind == "never" {
+            if mine {
+                return @tr("Device {} (this device): no activity recorded", did);
+            }
+            return @tr("Device {}: no activity recorded", did);
+        } else if kind == "not-sent" {
+            if mine {
+                return @tr("Device {} (this device): the server does not report activity", did);
+            }
+            return @tr("Device {}: the server does not report activity", did);
+        } else if kind == "unreadable" {
+            if mine {
+                return @tr("Device {} (this device): activity is unreadable", did);
+            }
+            return @tr("Device {}: activity is unreadable", did);
+        }
+        if mine {
+            return @tr("Device {} (this device): activity is unavailable", did);
+        }
+        return @tr("Device {}: activity is unavailable", did);
     }
 
     function status-text() -> string {

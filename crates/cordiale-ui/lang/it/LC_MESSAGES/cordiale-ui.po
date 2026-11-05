@@ -3867,3 +3867,79 @@ msgstr "Questo server non può inviare un invito di abbinamento. Usa Copia link.
 msgctxt "AppWindow"
 msgid "The invite was not sent. The pairing stays open."
 msgstr "L’invito non è stato inviato. L’abbinamento resta aperto."
+
+msgctxt "AppWindow"
+msgid "Device {} (this device): last activity {}"
+msgstr "Dispositivo {} (questo dispositivo): ultima attività {}"
+
+msgctxt "AppWindow"
+msgid "Device {}: last activity {}"
+msgstr "Dispositivo {}: ultima attività {}"
+
+msgctxt "AppWindow"
+msgid "Device {} (this device): no activity recorded"
+msgstr "Dispositivo {} (questo dispositivo): nessuna attività registrata"
+
+msgctxt "AppWindow"
+msgid "Device {}: no activity recorded"
+msgstr "Dispositivo {}: nessuna attività registrata"
+
+msgctxt "AppWindow"
+msgid "Device {} (this device): the server does not report activity"
+msgstr "Dispositivo {} (questo dispositivo): il server non comunica l’attività"
+
+msgctxt "AppWindow"
+msgid "Device {}: the server does not report activity"
+msgstr "Dispositivo {}: il server non comunica l’attività"
+
+msgctxt "AppWindow"
+msgid "Device {} (this device): activity is unreadable"
+msgstr "Dispositivo {} (questo dispositivo): l’attività non è leggibile"
+
+msgctxt "AppWindow"
+msgid "Device {}: activity is unreadable"
+msgstr "Dispositivo {}: l’attività non è leggibile"
+
+msgctxt "AppWindow"
+msgid "Device {} (this device): activity is unavailable"
+msgstr "Dispositivo {} (questo dispositivo): attività non disponibile"
+
+msgctxt "AppWindow"
+msgid "Device {}: activity is unavailable"
+msgstr "Dispositivo {}: attività non disponibile"
+
+msgctxt "AppWindow"
+msgid "The device list is unavailable"
+msgstr "L’elenco dei dispositivi non è disponibile"
+
+msgctxt "AppWindow"
+msgid "the list has no device"
+msgstr "l’elenco non contiene dispositivi"
+
+msgctxt "AppWindow"
+msgid "This device has no keys for the E2E identity of this account."
+msgstr "Questo dispositivo non ha le chiavi dell’identità E2E di questo account."
+
+msgctxt "AppWindow"
+msgid "The E2E identity on the server differs from the identity on this device."
+msgstr "L’identità E2E sul server è diversa da quella di questo dispositivo."
+
+msgctxt "AppWindow"
+msgid "The signed device list does not include this device."
+msgstr "L’elenco firmato dei dispositivi non include questo dispositivo."
+
+msgctxt "AppWindow"
+msgid "The E2E identity has no signed device list that this device can read."
+msgstr "L’identità E2E non ha un elenco firmato dei dispositivi che questo dispositivo possa leggere."
+
+msgctxt "AppWindow"
+msgid "{} Devices: {}. Pair this device with a listed device first: type /e2e pair. Replace the identity only as the last step: /e2e reset asks for a confirmation. A new identity can change the public key that your peers checked."
+msgstr "{} Dispositivi: {}. Prima abbina questo dispositivo a uno dei dispositivi in elenco: scrivi /e2e pair. Sostituisci l’identità solo come ultimo passo: /e2e reset chiede una conferma. Una nuova identità può cambiare la chiave pubblica che i tuoi contatti hanno verificato."
+
+msgctxt "AppWindow"
+msgid "{} Devices: {}. No other listed device can pair with this device. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked."
+msgstr "{} Dispositivi: {}. Nessun altro dispositivo in elenco può abbinarsi a questo. Sostituire l’identità richiede /e2e reset e una conferma. Una nuova identità può cambiare la chiave pubblica che i tuoi contatti hanno verificato."
+
+msgctxt "AppWindow"
+msgid "{} Devices: {}. If another device of this account is online, pair first: type /e2e pair. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked."
+msgstr "{} Dispositivi: {}. Se un altro dispositivo di questo account è online, prima abbina: scrivi /e2e pair. Sostituire l’identità richiede /e2e reset e una conferma. Una nuova identità può cambiare la chiave pubblica che i tuoi contatti hanno verificato."
