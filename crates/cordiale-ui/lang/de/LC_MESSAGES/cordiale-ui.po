@@ -3933,13 +3933,13 @@ msgid "The E2E identity has no signed device list that this device can read."
 msgstr "Die E2E-Identität hat keine signierte Geräteliste, die dieses Gerät lesen kann."
 
 msgctxt "AppWindow"
-msgid "{} Devices: {}. Pair this device with a listed device first: type /e2e pair. Replace the identity only as the last step: /e2e reset asks for a confirmation. A new identity can change the public key that your peers checked."
-msgstr "{} Geräte: {}. Koppel dieses Gerät zuerst mit einem Gerät aus der Liste: gib /e2e pair ein. Ersetze die Identität nur als letzten Schritt: /e2e reset fragt nach einer Bestätigung. Eine neue Identität kann den öffentlichen Schlüssel ändern, den deine Kontakte geprüft haben."
+msgid "{} Devices: {}. Type /e2e pair on a listed device that holds the identity. Then type /e2e join and the link on this device, or type /e2e accept for its invite. Replace the identity only as the last step: /e2e reset asks for a confirmation. A new identity can change the public key that your peers checked."
+msgstr "{} Geräte: {}. Gib /e2e pair auf einem Gerät aus der Liste ein, das die Identität besitzt. Gib dann auf diesem Gerät /e2e join und den Link ein, oder gib /e2e accept für die Einladung ein. Ersetze die Identität nur als letzten Schritt: /e2e reset fragt nach einer Bestätigung. Eine neue Identität kann den öffentlichen Schlüssel ändern, den deine Kontakte geprüft haben."
 
 msgctxt "AppWindow"
 msgid "{} Devices: {}. No other listed device can pair with this device. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked."
 msgstr "{} Geräte: {}. Kein anderes Gerät in der Liste kann sich mit diesem Gerät koppeln. Das Ersetzen der Identität braucht /e2e reset und eine Bestätigung. Eine neue Identität kann den öffentlichen Schlüssel ändern, den deine Kontakte geprüft haben."
 
 msgctxt "AppWindow"
-msgid "{} Devices: {}. If another device of this account is online, pair first: type /e2e pair. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked."
-msgstr "{} Geräte: {}. Wenn ein anderes Gerät dieses Kontos online ist, koppel zuerst: gib /e2e pair ein. Das Ersetzen der Identität braucht /e2e reset und eine Bestätigung. Eine neue Identität kann den öffentlichen Schlüssel ändern, den deine Kontakte geprüft haben."
+msgid "{} Devices: {}. If another device of this account is online, type /e2e pair on that device. Then type /e2e join and the link on this device, or type /e2e accept for its invite. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked."
+msgstr "{} Geräte: {}. Wenn ein anderes Gerät dieses Kontos online ist, gib /e2e pair auf jenem Gerät ein. Gib dann auf diesem Gerät /e2e join und den Link ein, oder gib /e2e accept für die Einladung ein. Das Ersetzen der Identität braucht /e2e reset und eine Bestätigung. Eine neue Identität kann den öffentlichen Schlüssel ändern, den deine Kontakte geprüft haben."

@@ -2868,11 +2868,11 @@ export component AppWindow inherits Window {
     // help (`pair`, `none` or `unknown`).
     function e2e-recovery-text(head: string) -> string {
         if status-message == "pair" {
-            return @tr("{} Devices: {}. Pair this device with a listed device first: type /e2e pair. Replace the identity only as the last step: /e2e reset asks for a confirmation. A new identity can change the public key that your peers checked.", head, status-command-hint);
+            return @tr("{} Devices: {}. Type /e2e pair on a listed device that holds the identity. Then type /e2e join and the link on this device, or type /e2e accept for its invite. Replace the identity only as the last step: /e2e reset asks for a confirmation. A new identity can change the public key that your peers checked.", head, status-command-hint);
         } else if status-message == "none" {
             return @tr("{} Devices: {}. No other listed device can pair with this device. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked.", head, status-command-hint);
         }
-        return @tr("{} Devices: {}. If another device of this account is online, pair first: type /e2e pair. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked.", head, status-command-hint);
+        return @tr("{} Devices: {}. If another device of this account is online, type /e2e pair on that device. Then type /e2e join and the link on this device, or type /e2e accept for its invite. Replacing the identity needs /e2e reset and a confirmation. A new identity can change the public key that your peers checked.", head, status-command-hint);
     }
 
     // The status text of the E2E kinds (`e2e-*`).
