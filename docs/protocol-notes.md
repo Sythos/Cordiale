@@ -1839,45 +1839,42 @@ confermati o sostituiti dal testo di Grappa §4f e §4g e da Cicchetto:
   detentore chiude il rendezvous. Cordiale accoppia una rete per volta.
 - **Scelta del client:** la finestra di replay di 256 id per dispositivo (`e2e_peer.rs`).
 
-## Link di abbinamento e invito (issue 598)
+## Offerta di abbinamento, protocollo 55 (issue 605)
 
-- **Copia link (fatto).** La finestra «Pair a new device» ha il pulsante «Copy link». Copia la stessa stringa
-  da cui nasce il QR (`show_pairing_qr`), senza costruire un secondo link. Il link vive solo nella proprietà
-  `e2e-pair-link` e si cancella (`clear_pairing_link`) quando l abbinamento finisce, scade, viene sostituito
-  o annullato. Il link e il codice non vanno nei log.
-- **Invito ad altre sessioni (lato ricevente e lato mittente fatti, rotta di Grappa da definire).** Il protocollo
-  documentato non ha l evento né la rotta: `route_e2e_pairing` legge solo `e2e_pairing_message` e
-  `e2e_pairing_closed`. Contratto richiesto a Grappa, in due parti.
+Contratto riletto su `CLIENT_PROTOCOL.md` (§4g, issue 2537 e 2549 di Grappa). Cordiale dichiara
+`client_proto=55`; `MIN_SUPPORTED_PROTOCOL_VERSION` resta 1. Il vecchio contratto dell invito
+(`POST /e2e/pairings/:id/invite`, evento `e2e_pairing_invite`, link con QR) non esiste in Grappa e
+Cordiale non lo usa più.
 
-  1. Richiesta del creatore: `POST /e2e/pairings/:id/invite` con corpo `{"network_id": "<slug>",
-     "ephemeral_key": "<43 caratteri>"}`, risposta **204**. La chiave temporanea è solo sul client, per questo
-     la manda il creatore: è la stessa del QR. Solo il creatore del rendezvous può chiamarla (un altro
-     account riceve 404, un altro dispositivo dello stesso account 403 `pairing_not_a_party`). Vale la
-     regola delle altre rotte del relay: sessione piena, protocollo 48 o più.
-  2. Evento: `e2e_pairing_invite` sul canale utente (`grappa:user:<account>`), inviato solo alle sessioni
-     attive dello stesso account autenticato, con
-     - `network_id`: lo slug della rete, come nelle rotte `/networks/:network_id/e2e/...`;
-     - `rendezvous_id`: l id del rendezvous (22 caratteri);
-     - `ephemeral_key`: la chiave pubblica temporanea del creatore (43 caratteri), la stessa del QR;
-     - `expires_at`: testo ISO-8601 in UTC (`Z` o `+00:00`), non oltre 300 s da ora.
-
-  **Invio in Cordiale (`send_pairing_invite`).** La finestra «Pair a new device» ha il pulsante «Send invite».
-  Chiama `GrappaClient::invite_pairing` con l id e la chiave del link che tiene `ActivePairing` (lo stesso
-  del QR e del pulsante «Copy link»): nessun secondo pairing, nessuna seconda chiave. Il link vive solo con
-  il pairing aperto. Il risultato è in barra di stato: inviato, server senza la rotta (404, 405 o 501: si
-  usa «Copy link») o invio fallito. Un fallimento non chiude il pairing. Cordiale non usa mai IRC per
-  l invito e non scrive nei log il link, la chiave o il codice.
-- **Ricezione in Cordiale (`handle_e2e_pairing_invite`).** L invito vale solo sul canale utente
-  dell account. Il client lo ignora, senza prompt né pairing, se è scaduto o oltre 300 s, doppio (stesso
-  `rendezvous_id` già visto), chiuso (`e2e_pairing_closed` per quel rendezvous), di una rete che la
-  sessione non ha, di una rete dove il dispositivo ha già l identità, o se un pairing è già aperto. Un
-  invito più nuovo sostituisce quello in attesa. Un invito in attesa cade a scadenza, alla chiusura del
-  rendezvous e a ogni disconnessione o riconnessione. Un dispositivo può accettare solo se il
-  provisioning ha dato `NeedsPairing` in questa sessione o se l identità è stata azzerata: un invito
-  arrivato prima di quel controllo è ignorato. Il prompt è nella barra di stato; `/e2e accept` apre il
-  passo di join con lo stesso link del QR (`E2ePairAction::Join`), `/e2e decline` lo scarta. Il confronto
-  del codice a due cifre e i controlli di fiducia restano obbligatori. Il log riporta solo la decisione,
-  mai i valori dell invito.
+- **Apertura con offerta.** `POST /e2e/pairings` con `{"curve": "<chiave pubblica, 43 caratteri>"}` apre il
+  rendezvous e lo offre agli altri dispositivi dell account. La chiave si crea prima della chiamata
+  (`PairingSession::create_with`). Con un server sotto la 55 il corpo resta vuoto: il server ignora `curve`
+  e non offre nulla. In quel caso la barra di stato mostra il codice `<id>.<chiave>` da scrivere con
+  `/e2e join` sul nuovo dispositivo; la finestra lo dice e non mostra né link né QR.
+- **Evento.** `e2e_pairing_offered` sul canale utente: `rendezvous_id`, `curve`, `expires_at`. Non porta
+  la rete. `GET /e2e/pairings/offer` (`GrappaClient::fetch_pairing_offer`, solo dalla 55) dà la stessa
+  offerta a un client che non è sul socket; Cordiale non lo chiama da solo.
+- **Disponibilità.** `PairingOperation::Offer` e l offerta in app valgono dalla 55
+  (`pairing_offer_available`). Sotto la 55, o con versione ignota, l offerta non compare e non c è azione.
+  Le altre operazioni del relay restano dalla 48.
+- **Ricezione (`handle_e2e_pairing_offer`).** Solo sul canale utente dell account e mai in una sessione
+  guest. Si ignora, senza finestra né abbinamento, un offerta scaduta o oltre 300 s, doppia (stesso
+  `rendezvous_id`), chiusa (`e2e_pairing_closed`), già usata (`e2e_pairing_message`), con la `curve`
+  del rendezvous aperto da questo dispositivo, di un dispositivo che ha già l identità su ogni rete della
+  sessione, o mentre un abbinamento è aperto. Un offerta più nuova sostituisce quella in attesa. L offerta
+  cade a scadenza, alla chiusura, a ogni disconnessione o riconnessione; un offerta già vista non torna.
+- **Azioni.** Una finestra in app ha «Accept» e «Dismiss» (Escape = Dismiss). L offerta non avvia nulla.
+  Solo «Accept» (`take_offer`) prende l id e la chiave dell offerta una volta sola, svuota lo slot e li passa
+  al passo di join (`E2ePairAction::Join`) con l elenco delle reti che mancano di identità (in ordine di nome).
+  L offerta non dice la rete: la sceglie il joiner quando arriva l `offer` sigillato del detentore, che nomina
+  la rete del suo `/e2e pair` (`PairingSession::join_any`, `bind_joiner`). Se la rete è diversa dalla prima
+  dell elenco, la sessione passa al motore di quella rete e il `join` parte con il dispositivo di quella rete.
+  Se l `offer` non nomina nessuna rete dell elenco, l abbinamento finisce. Il testo del join si cancella
+  appena letto, anche se il join fallisce. `/e2e accept` e `/e2e decline` sono gli stessi due comandi da
+  tastiera.
+- **Resta obbligatorio** il confronto del codice a due cifre su entrambi i dispositivi: il nuovo dispositivo
+  non è fidato prima che riesca. Il formato dei messaggi E2E e l handshake Olm non cambiano. Il log riporta
+  solo la decisione, mai i valori dell offerta.
 
 ## Attività dei dispositivi e recupero dell'identità E2E (issue 608, proposta protocollo 56)
 
@@ -1898,6 +1895,6 @@ motivo, quindi non offre mai una nuova identità. `/e2e devices` usa prima il mo
 provisioning, anche se il motore si apre con una lista locale vecchia; solo senza motivo salvato deriva
 il motivo dalla lista locale. Mostra la spiegazione, i dispositivi del server e, per primo, il pairing
 (flusso della issue 605) se esiste un altro dispositivo in elenco: `/e2e pair` sul dispositivo che ha
-l'identità, poi `/e2e join <link>` o `/e2e accept` su questo dispositivo. La
+l'identità, poi `/e2e join <codice>` o `/e2e accept` su questo dispositivo. La
 sostituzione resta `/e2e reset` con la sua conferma `yes`, con l'avviso che una nuova identità può
 cambiare la chiave pubblica verificata dai contatti. Nessuna vista crea o sostituisce un'identità.

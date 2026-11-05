@@ -120,38 +120,37 @@ The server must support pairing. If it does not, Cordiale shows a message.
 Use the first device, which holds the identity key, and the new device.
 
 1. On the first device, type `/e2e pair`.
-2. Cordiale shows the **Pair a new device** window with a QR code and a pairing code.
-3. On the new device, type `/e2e join` and the pairing link or the code.
+2. Cordiale shows the **Pair a new device** window.
+   The server offers the pairing to your other devices.
+3. On the new device, accept the offer, as in "Accept an offer from another device".
 4. Both devices show a short check code, for example `42`.
 5. Compare the check code on both devices.
 6. If the codes are the same, type `/e2e code 42` on each device that asks for it.
    Use the real code, not the example.
 7. Wait for the message "The new device is paired."
 
-> **Warning:** Do not post the QR code or the pairing link. A person who has
-> them can pair a device until they expire.
-
 If the codes are not the same, the pairing stops. Start again.
 To stop a pairing, type `/e2e cancel`.
 A pairing that takes too long expires. Start again.
 
-> **Note:** The current build has no screen that reads the QR code with
-> a camera. Use the link or the code that Cordiale shows.
+> **Note:** An offer needs a server with protocol 55 or higher.
+> If the server is older, the window says so.
+> The status bar then shows a pairing code.
+> On the new device, type `/e2e join` and this code.
 
-You can copy the pairing link with the **Copy link** button in the
-**Pair a new device** window.
+### Accept an offer from another device
 
-### Accept an invite from another device
+When the server sends a pairing offer, Cordiale shows the **Pairing offer** window.
+Cordiale shows an offer only if this device does not have the identity of
+a network yet.
 
-When the server sends a pairing invite, Cordiale shows it in the status bar.
-Cordiale shows an invite only if this device does not have the identity of
-that network yet.
-
-1. To join, type `/e2e accept`.
-2. To refuse, type `/e2e decline`.
+1. To join, select **Accept**.
+2. To refuse, select **Dismiss**.
 3. Compare the check code on both devices, as in "Add a device".
 
-An invite that expired, closed or was seen before is ignored.
+Cordiale does not start a pairing until you select **Accept**.
+An offer that expired, closed, was used or was seen before is ignored.
+After a reconnect, Cordiale does not show an old offer again.
 
 ### When Cordiale sends a copy to your other devices
 
@@ -306,5 +305,5 @@ If the message matters, ask the peer if they got it.
 ### Safety rules
 
 > **Warning:** Never send a private key, a password, or a recovery code to
-> another person. This includes the QR code and the pairing link.
+> another person. This includes the pairing code.
 > Nobody who helps you needs them.

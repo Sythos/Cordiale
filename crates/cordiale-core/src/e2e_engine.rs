@@ -7252,6 +7252,49 @@ mod tests {
     }
 
     #[test]
+    fn a_key_check_is_separate_from_sas_and_a_new_master_does_not_inherit_it() {
+        let alice_id = Ident::new("alice");
+        let bob_id = Ident::new("bob");
+        let mut alice = alice_id.engine();
+        alice.accept_keys("bob", &bob_id.keys()).expect("keys");
+        // Receiving the keys does not verify the key.
+        assert!(!alice.is_key_verified("bob"));
+        // A key that is not the stored master is refused.
+        let other_id = Ident::new("other");
+        assert!(matches!(
+            alice.confirm_key("bob", &ed(&other_id.master)),
+            Err(EngineError::Device(E2eError::MasterChanged))
+        ));
+        assert!(!alice.is_key_verified("bob"));
+        // The key check leaves the SAS check as it was.
+        alice
+            .confirm_key("bob", &ed(&bob_id.master))
+            .expect("confirm key");
+        assert!(alice.is_key_verified("bob"));
+        assert!(!alice.trust().is_sas_verified(NET, "bob"));
+        // A SAS check leaves the key check as it was, and the SAS still works.
+        alice.confirm_sas("bob", &ed(&bob_id.master)).expect("sas");
+        assert!(alice.trust().is_sas_verified(NET, "bob"));
+        assert!(alice.is_key_verified("bob"));
+        // A restart keeps the check.
+        drop(alice);
+        let mut alice = alice_id.engine();
+        assert!(alice.is_key_verified("bob"));
+        // Other keys do not replace the master and keep the check.
+        let _ = alice.accept_keys("bob", &other_id.keys());
+        assert!(alice.is_key_verified("bob"));
+        // After an explicit replace the new master starts unverified.
+        alice
+            .replace_peer_master("bob", &ed(&other_id.master))
+            .expect("replace");
+        assert!(!alice.is_key_verified("bob"));
+        assert!(!alice.trust().is_sas_verified(NET, "bob"));
+        drop(alice);
+        let alice = alice_id.engine();
+        assert!(!alice.is_key_verified("bob"));
+    }
+
+    #[test]
     fn a_master_change_drops_the_devices_of_the_old_master_only() {
         let alice_id = Ident::new("alice");
         let bob_id = Ident::new("bob");

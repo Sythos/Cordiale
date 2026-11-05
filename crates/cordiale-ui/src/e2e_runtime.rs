@@ -21,11 +21,13 @@ use cordiale_core::e2e_engine::{
     E2eEngine, EngineError, RowOutcome, SendRoute, OWN_DEVICE,
 };
 use cordiale_core::e2e_pacing::DropReason;
-use cordiale_core::e2e_pairing::{PairingCallError, PairingInvite, PairingLink, PairingPush};
+use cordiale_core::e2e_pairing::{PairingOffer, PairingPush};
 use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
 };
-use cordiale_core::e2e_protocol::{E2eOperation, CONSENT_MIN_PROTOCOL, NO_SUCH_NICK_MIN_PROTOCOL};
+use cordiale_core::e2e_protocol::{
+    pairing_offer_available, E2eOperation, CONSENT_MIN_PROTOCOL, NO_SUCH_NICK_MIN_PROTOCOL,
+};
 use cordiale_core::e2e_provision::{provision_device, ProvisionError};
 use cordiale_core::e2e_revoke::{
     finish_pending_revoke, reset_identity, resume_reset, revoke_device, OwnRoutes,
@@ -35,7 +37,7 @@ use cordiale_core::e2e_store::{E2eHistoryStore, E2eMessage};
 use cordiale_core::e2e_wire::did_from_key_text;
 use cordiale_core::phoenix::PhoenixMessage;
 use cordiale_core::rest::{E2eConsentLine, E2eRequest, E2eRequestCreate, E2eRequestState};
-use cordiale_core::session::{route_e2e_message, route_e2e_pairing, route_e2e_pairing_invite};
+use cordiale_core::session::{route_e2e_message, route_e2e_pairing, route_e2e_pairing_offer};
 use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
 use crate::e2e_view::{
@@ -106,33 +108,38 @@ pub(crate) struct E2eRuntime {
     /// shown code was made from. It is not saved.
     sas_check: Option<SasCheck>,
     /// Networks where this session saw that the account has an identity this
-    /// device does not hold. Only such a network can take a pairing invite.
+    /// device does not hold. Only such a network can take a pairing offer.
     needs_pairing: HashSet<String>,
+    /// The one pairing offer that waits for the user to accept or dismiss
+    /// it. It is not saved, and it is the only source of the join data.
+    offer: Option<PairingOffer>,
+    /// Rendezvous ids of the offers this session already took, newest last.
+    /// An offer seen again is a duplicate.
+    seen_offers: VecDeque<String>,
     /// Why this device cannot use the identity of a network, when the last
     /// provisioning run found out. A failed read sets no reason.
     recovery: HashMap<String, RecoveryReason>,
-    /// The one pairing invite that waits for `/e2e accept`. It is not saved.
-    invite: Option<PairingInvite>,
-    /// Rendezvous ids of the invites this session already took, newest last.
-    /// An invite seen again is a duplicate.
-    seen_invites: VecDeque<String>,
 }
 
-/// How many rendezvous ids of earlier invites a session remembers.
-const SEEN_INVITES_MAX: usize = 32;
+/// How many rendezvous ids of earlier offers a session remembers.
+const SEEN_OFFERS_MAX: usize = 32;
 
-/// What the session does with a pairing invite.
+/// What the session does with a pairing offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InviteDecision {
-    /// The invite waits for the user.
+pub(crate) enum OfferDecision {
+    /// The offer waits for the user.
     Show,
+    /// The server protocol is below 55: it has no offer.
+    Unsupported,
     /// The end time is past, or too far ahead.
     Expired,
-    /// The invite was seen before.
+    /// The offer was seen before.
     Duplicate,
-    /// The network is not one of this session.
+    /// The offer is the rendezvous that this device opened.
+    Own,
+    /// The session has no network.
     WrongNetwork,
-    /// This device already has the identity of the network.
+    /// This device already has the identity of every network.
     AlreadyPaired,
     /// A pairing of this session is open.
     Busy,
@@ -177,85 +184,121 @@ impl SasStep {
 struct ActivePairing {
     network: String,
     session: PairingSession,
-    /// The link of a pairing this device opened. The QR code and the invite
-    /// use it. It lives with the pairing and is not saved. A joiner has none.
-    link: Option<PairingLink>,
 }
 
 impl E2eRuntime {
-    /// Decides on a pairing invite. Only `Show` keeps it: it waits in the
-    /// invite slot and replaces an older one. Nothing is sent to the server,
-    /// and the code check of the pairing still follows an accept.
-    pub(crate) fn admit_invite(
+    /// Decides on a pairing offer. Only `Show` keeps it: it waits in the
+    /// offer slot and replaces an older one. Nothing is sent to the server
+    /// and no join starts. The user must accept, and the code check of the
+    /// pairing still follows an accept. `known` lists the networks of the
+    /// session.
+    pub(crate) fn admit_offer(
         &mut self,
-        invite: PairingInvite,
-        network_known: bool,
+        offer: PairingOffer,
+        known: &[String],
+        server_protocol: Option<u32>,
         now: i64,
-    ) -> InviteDecision {
-        let id = invite.rendezvous_id();
-        if !invite.is_current(now) {
-            return InviteDecision::Expired;
+    ) -> OfferDecision {
+        if !pairing_offer_available(server_protocol) {
+            return OfferDecision::Unsupported;
         }
-        if self.seen_invites.iter().any(|seen| seen == id) {
-            return InviteDecision::Duplicate;
+        let id = offer.rendezvous_id();
+        if !offer.is_current(now) {
+            return OfferDecision::Expired;
         }
-        if !network_known {
-            return InviteDecision::WrongNetwork;
+        if self.seen_offers.iter().any(|seen| seen == id) {
+            return OfferDecision::Duplicate;
         }
-        if !self.can_take_invite(invite.network_id()) {
-            return InviteDecision::AlreadyPaired;
+        if self
+            .pairing
+            .as_ref()
+            .is_some_and(|active| active.session.rendezvous_id() == id)
+        {
+            return OfferDecision::Own;
+        }
+        if known.is_empty() {
+            return OfferDecision::WrongNetwork;
+        }
+        if self.eligible_networks(known).is_empty() {
+            return OfferDecision::AlreadyPaired;
         }
         if self.pairing.is_some() {
-            return InviteDecision::Busy;
+            return OfferDecision::Busy;
         }
-        self.remember_invite(invite.rendezvous_id());
-        self.invite = Some(invite);
-        InviteDecision::Show
+        self.remember_offer(id);
+        self.offer = Some(offer);
+        OfferDecision::Show
     }
 
-    fn remember_invite(&mut self, id: &str) {
-        if self.seen_invites.iter().any(|seen| seen == id) {
+    fn remember_offer(&mut self, id: &str) {
+        if self.seen_offers.iter().any(|seen| seen == id) {
             return;
         }
-        self.seen_invites.push_back(id.to_string());
-        while self.seen_invites.len() > SEEN_INVITES_MAX {
-            self.seen_invites.pop_front();
+        self.seen_offers.push_back(id.to_string());
+        while self.seen_offers.len() > SEEN_OFFERS_MAX {
+            self.seen_offers.pop_front();
         }
     }
 
     /// True when this device lacks the identity of `network` and can join.
-    fn can_take_invite(&self, network: &str) -> bool {
+    fn can_take_offer(&self, network: &str) -> bool {
         !self.provisioned.contains(network)
             && (self.needs_pairing.contains(network) || self.reset.contains(network))
     }
 
-    /// Takes the waiting invite for an accept. An invite that ended, or whose
-    /// network no longer needs a pairing, gives `None`.
-    fn take_invite(&mut self, now: i64) -> Option<PairingInvite> {
-        let invite = self.invite.take()?;
-        (invite.is_current(now) && self.can_take_invite(invite.network_id())).then_some(invite)
+    /// The networks that an offer can join, in name order: those in `known`
+    /// that lack the identity on this device. The offer names no network. The
+    /// holder names it in its sealed `offer`, so the join step picks one of
+    /// these networks then.
+    fn eligible_networks(&self, known: &[String]) -> Vec<String> {
+        let mut networks: Vec<String> = known
+            .iter()
+            .filter(|network| self.can_take_offer(network))
+            .cloned()
+            .collect();
+        networks.sort();
+        networks.dedup();
+        networks
     }
 
-    /// Drops the waiting invite when its end time passed. True when it did.
-    pub(crate) fn expire_invite(&mut self, now: i64) -> bool {
-        if self.invite.as_ref().is_some_and(|i| !i.is_current(now)) {
-            self.invite = None;
+    /// Takes the waiting offer for an accept. The slot is empty after this
+    /// call, so one accept gives the offer once. An offer that ended, or
+    /// whose networks no longer need a pairing, gives `None`. The result is
+    /// the candidate networks and the code (`<id>.<key>`) for the join step.
+    fn take_offer(&mut self, known: &[String], now: i64) -> Option<(Vec<String>, String)> {
+        let offer = self.offer.take()?;
+        if !offer.is_current(now) || self.pairing.is_some() {
+            return None;
+        }
+        let candidates = self.eligible_networks(known);
+        if candidates.is_empty() {
+            return None;
+        }
+        Some((candidates, offer.link().code()))
+    }
+
+    /// Drops the waiting offer when its end time passed. True when it did.
+    pub(crate) fn expire_offer(&mut self, now: i64) -> bool {
+        if self.offer.as_ref().is_some_and(|o| !o.is_current(now)) {
+            self.offer = None;
             return true;
         }
         false
     }
 
-    /// The rendezvous `id` is closed, expired or replaced. A later invite
-    /// for it is a duplicate, and a waiting invite for it is dropped. True
+    /// The rendezvous `id` is closed, expired or replaced. A later offer
+    /// for it is a duplicate, and a waiting offer for it is dropped. True
     /// when it dropped one.
-    fn close_invite_of(&mut self, id: &str) -> bool {
-        self.remember_invite(id);
-        if self
-            .invite
-            .as_ref()
-            .is_some_and(|i| i.rendezvous_id() == id)
-        {
-            self.invite = None;
+    fn close_offer_of(&mut self, id: &str) -> bool {
+        self.remember_offer(id);
+        self.drop_offer_of(id)
+    }
+
+    /// Someone joined the rendezvous `id`: the offer for it is gone. True
+    /// when the waiting offer was that one.
+    fn drop_offer_of(&mut self, id: &str) -> bool {
+        if self.offer.as_ref().is_some_and(|o| o.rendezvous_id() == id) {
+            self.offer = None;
             return true;
         }
         false
@@ -910,7 +953,7 @@ async fn provision_network(state: &mut WorkerState, network: &str) {
 /// Opens the engines of the signed-in networks and reads their inboxes. Call
 /// it when the session connects, also after a reconnect.
 pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    retire_expired_invite(state, ui);
+    retire_expired_offer(state, ui);
     let mut networks: Vec<String> = state.networks.own_nicks.keys().cloned().collect();
     networks.sort();
     for network in networks {
@@ -1468,95 +1511,46 @@ fn show_pairing(ui: &slint::Weak<AppWindow>, status: &PairingStatus) {
     show_pairing_kind(ui, kind, hint);
 }
 
-/// The host part of a server base URL, for the pairing link.
-pub(crate) fn pairing_host(base_url: &str) -> String {
-    let rest = base_url
-        .split_once("://")
-        .map_or(base_url, |(_, rest)| rest);
-    rest.split('/').next().unwrap_or(rest).to_string()
-}
-
-/// Draws the QR code of the pairing link in a dialog. The link and the code
-/// are never logged.
-fn show_pairing_qr(ui: &slint::Weak<AppWindow>, url: &str, code: String) {
-    let qr = crate::totp::qr_rgb(url);
-    // The same string feeds the QR code and the copy button.
-    let link = url.to_string();
+/// Opens the pairing dialog of the creator. `offered` tells if the server
+/// offers the rendezvous to the other devices (protocol 55). The dialog holds
+/// no link, no QR code and no code.
+fn show_pairing_dialog(ui: &slint::Weak<AppWindow>, offered: bool) {
     let _ = ui.upgrade_in_event_loop(move |ui| {
-        ui.set_e2e_pair_link(link.into());
-        ui.set_e2e_pair_copy_result("".into());
-        let image = qr
-            .map(|(side, rgb)| {
-                slint::Image::from_rgb8(slint::SharedPixelBuffer::clone_from_slice(
-                    &rgb, side, side,
-                ))
-            })
-            .unwrap_or_default();
-        ui.set_e2e_pair_qr(image);
-        ui.set_e2e_pair_qr_code(code.into());
-        ui.set_e2e_pair_qr_visible(true);
+        ui.set_e2e_pair_offered(offered);
+        ui.set_e2e_pair_dialog_visible(true);
     });
 }
 
-/// Asks the server to send the pairing invite of the open pairing to the
-/// other sessions of the account. It uses the link of the QR code: the same
-/// rendezvous and the same public key, and no second pairing. The invite goes
-/// through the account API, never through IRC. The link and the key are not
-/// logged.
-pub(crate) async fn send_pairing_invite(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
-    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
-        return;
-    };
-    let Some(active) = state.e2e.pairing.as_ref() else {
-        return show_pairing_kind(ui, "e2e-pair-none", String::new());
-    };
-    let Some(link) = active.link.as_ref() else {
-        return show_pairing_kind(ui, "e2e-pair-none", String::new());
-    };
-    let result = client
-        .invite_pairing(
-            &token,
-            link.rendezvous_id(),
-            &active.network,
-            link.ephemeral_key(),
-            state.conn.server_protocol_version,
-        )
-        .await;
-    show_pairing_kind(ui, invite_result_key(&result), String::new());
-}
-
-/// The `status-kind` key of the answer to an invite request. A server without
-/// the route answers 404, 405 or 501: the copy button stays the way to move
-/// the link.
-pub(crate) fn invite_result_key(result: &Result<(), PairingCallError>) -> &'static str {
-    use cordiale_core::e2e_pairing::PairingError;
-    match result {
-        Ok(()) => "e2e-pair-invite-sent",
-        Err(PairingCallError::Unavailable) => "e2e-pair-unavailable",
-        Err(PairingCallError::Relay(
-            PairingError::NotFound | PairingError::Unexpected(405 | 501),
-        )) => "e2e-pair-invite-unsupported",
-        Err(_) => "e2e-pair-invite-failed",
-    }
-}
-
-/// Closes the pairing dialog and drops the link, the QR code and the code
-/// from memory. Call it when the pairing ends, expires, is replaced or is
-/// cancelled.
-fn clear_pairing_link(ui: &slint::Weak<AppWindow>) {
+/// Closes the pairing dialog. Call it when the pairing ends, expires, is
+/// replaced or is cancelled.
+fn clear_pairing_dialog(ui: &slint::Weak<AppWindow>) {
     let _ = ui.upgrade_in_event_loop(|ui| {
-        ui.set_e2e_pair_qr_visible(false);
-        ui.set_e2e_pair_link("".into());
-        ui.set_e2e_pair_copy_result("".into());
-        ui.set_e2e_pair_qr_code("".into());
-        ui.set_e2e_pair_qr(slint::Image::default());
+        ui.set_e2e_pair_dialog_visible(false);
+        ui.set_e2e_pair_offered(false);
     });
 }
 
-/// Copies the pairing link with `copier`. An empty link is not copied. The
-/// result tells if the copy worked; a failed copy never ends the pairing.
-pub(crate) fn copy_pairing_link(link: &str, copier: impl FnOnce(&str) -> bool) -> bool {
-    !link.is_empty() && copier(link)
+/// Shows or hides the in-app offer of the receiving device. The offer holds
+/// no value: the join data stays in the worker until the user accepts.
+fn set_offer_dialog(ui: &slint::Weak<AppWindow>, visible: bool) {
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_e2e_pair_offer_visible(visible);
+    });
+}
+
+/// The answer of the user to the waiting offer: accept (`true`) or dismiss
+/// (`false`). Only an accept starts the join step.
+pub(crate) async fn answer_pairing_offer(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    accept: bool,
+) {
+    let action = if accept {
+        E2ePairAction::Accept
+    } else {
+        E2ePairAction::Decline
+    };
+    run_e2e_pair(state, ui, String::new(), action).await;
 }
 
 fn show_pairing_kind(ui: &slint::Weak<AppWindow>, kind: &'static str, hint: String) {
@@ -1578,19 +1572,30 @@ pub(crate) async fn run_e2e_pair(
         return;
     };
     let now = e2e_now();
-    // An accept joins with the link of the invite, on the network of the
-    // invite. The join path below keeps the code check.
+    // An accept joins once with the id and the key of the waiting offer. The
+    // offer slot is empty after the accept. The join path below keeps the
+    // code check.
+    // The offer names no network, so the join starts on the first candidate
+    // and moves to the network that the sealed offer of the holder names.
+    let mut candidates: Vec<String> = Vec::new();
     let (network, action) = match action {
-        E2ePairAction::Accept => match state.e2e.take_invite(now) {
-            Some(invite) => (
-                invite.network_id().to_string(),
-                E2ePairAction::Join(invite.link().code()),
-            ),
-            None => return show_pairing_kind(ui, "e2e-pair-invite-none", String::new()),
-        },
+        E2ePairAction::Accept => {
+            let known: Vec<String> = state.networks.own_nicks.keys().cloned().collect();
+            let taken = state.e2e.take_offer(&known, now);
+            set_offer_dialog(ui, false);
+            match taken {
+                Some((networks, code)) => {
+                    let first = networks[0].clone();
+                    candidates = networks;
+                    (first, E2ePairAction::Join(code))
+                }
+                None => return show_pairing_kind(ui, "e2e-pair-offer-none", String::new()),
+            }
+        }
         E2ePairAction::Decline => {
-            state.e2e.invite = None;
-            return show_pairing_kind(ui, "e2e-pair-invite-none", String::new());
+            state.e2e.offer = None;
+            set_offer_dialog(ui, false);
+            return show_pairing_kind(ui, "e2e-pair-offer-none", String::new());
         }
         other => (network, other),
     };
@@ -1602,10 +1607,11 @@ pub(crate) async fn run_e2e_pair(
         network_id: &network,
     };
     // A new start replaces the open pairing: the old one is cancelled first.
-    // A waiting invite is dropped too: its end would replace the new status.
+    // A waiting offer is dropped too: its end would replace the new status.
     if matches!(action, E2ePairAction::Start | E2ePairAction::Join(_)) {
-        state.e2e.invite = None;
-        clear_pairing_link(ui);
+        state.e2e.offer = None;
+        set_offer_dialog(ui, false);
+        clear_pairing_dialog(ui);
         end_active_pairing(state).await;
     }
     match action {
@@ -1621,16 +1627,21 @@ pub(crate) async fn run_e2e_pair(
             state.e2e.engines.insert(network.clone(), engine);
             match result {
                 Ok((session, link)) => {
-                    let code = link.code();
-                    let url = link.url(&pairing_host(client.base_url()));
                     state.e2e.pairing = Some(ActivePairing {
                         network: network.clone(),
                         session,
-                        link: Some(link),
                     });
                     push_open_locked_state(state, ui);
-                    show_pairing_kind(ui, "e2e-pair-link", code.clone());
-                    show_pairing_qr(ui, &url, code);
+                    // With protocol 55 the server offers the rendezvous to the
+                    // other devices. An older server cannot: the user types the
+                    // code on the new device. No link and no QR code exist.
+                    let offered = pairing_offer_available(protocol);
+                    if offered {
+                        show_pairing_kind(ui, "e2e-pair-offered", String::new());
+                    } else {
+                        show_pairing_kind(ui, "e2e-pair-manual", link.code());
+                    }
+                    show_pairing_dialog(ui, offered);
                 }
                 Err(error) => show_pairing_kind(ui, pairing_error_key(&error), String::new()),
             }
@@ -1640,7 +1651,9 @@ pub(crate) async fn run_e2e_pair(
                 text.clear();
                 return show_pairing_kind(ui, "e2e-not-ready", String::new());
             };
-            let result = pairing::start_joiner(&ctx, engine.state_mut(), &mut text, now).await;
+            let result =
+                pairing::start_joiner_any(&ctx, engine.state_mut(), &mut text, &candidates, now)
+                    .await;
             state.e2e.engines.insert(network.clone(), engine);
             match result {
                 Ok(session) => {
@@ -1648,7 +1661,6 @@ pub(crate) async fn run_e2e_pair(
                     state.e2e.pairing = Some(ActivePairing {
                         network: network.clone(),
                         session,
-                        link: None,
                     });
                     push_open_locked_state(state, ui);
                 }
@@ -1686,7 +1698,7 @@ pub(crate) async fn run_e2e_pair(
             if state.e2e.pairing.is_none() {
                 return show_pairing_kind(ui, "e2e-pair-none", String::new());
             }
-            clear_pairing_link(ui);
+            clear_pairing_dialog(ui);
             end_active_pairing(state).await;
             push_open_locked_state(state, ui);
             show_pairing(ui, &PairingStatus::Ended(pairing::EndReason::Cancelled));
@@ -2177,7 +2189,7 @@ async fn pump_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
         return;
     };
     if !active.session.is_active() {
-        clear_pairing_link(ui);
+        clear_pairing_dialog(ui);
         return;
     }
     let Some(mut engine) = take_pairing_engine(state, &active.network, false) else {
@@ -2194,7 +2206,69 @@ async fn pump_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     };
     let result = pairing::pump(&ctx, engine.state_mut(), &mut active.session).await;
     state.e2e.engines.insert(network, engine);
-    finish_pairing_step(state, ui, active, result.err());
+    let error = follow_offered_network(state, &mut active, result).await;
+    finish_pairing_step(state, ui, active, error);
+}
+
+/// The result of a pairing step, after the move of a joiner to the network
+/// that the sealed offer of the holder named. A step that failed stays as it
+/// is.
+async fn follow_offered_network(
+    state: &mut WorkerState,
+    active: &mut ActivePairing,
+    result: Result<(), pairing::DriveError>,
+) -> Option<pairing::DriveError> {
+    match result {
+        Err(error) => Some(error),
+        Ok(()) => rebind_joiner(state, active).await.err(),
+    }
+}
+
+/// A joiner that accepted an offer starts on the first candidate network. When
+/// the sealed offer names another network, the pairing moves to the engine of
+/// that network: the joiner takes the device of its store, saves the pairing
+/// record there, and sends the join if the code is confirmed. The record of
+/// the first network is cleared. Nothing changes if the network is the same.
+async fn rebind_joiner(
+    state: &mut WorkerState,
+    active: &mut ActivePairing,
+) -> Result<(), pairing::DriveError> {
+    let offered = active.session.network().to_string();
+    if offered == active.network || !active.session.is_active() {
+        return Ok(());
+    }
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return Ok(());
+    };
+    let protocol = state.conn.server_protocol_version;
+    let first = active.network.clone();
+    let Some(mut engine) = take_pairing_engine(state, &offered, true) else {
+        // No engine for the offered network: the pairing cannot go on.
+        if let Some(mut old) = take_pairing_engine(state, &first, false) {
+            let ctx = PairingContext {
+                client: &client,
+                token: &token,
+                protocol,
+                network_id: &first,
+            };
+            pairing::cancel(&ctx, old.state_mut(), &mut active.session).await;
+            state.e2e.engines.insert(first, old);
+        }
+        return Err(pairing::FlowError::Store.into());
+    };
+    if let Some(old) = state.e2e.engines.get_mut(&first) {
+        let _ = pairing::clear_pending(old.state_mut());
+    }
+    let ctx = PairingContext {
+        client: &client,
+        token: &token,
+        protocol,
+        network_id: &offered,
+    };
+    let result = pairing::bind_joiner(&ctx, engine.state_mut(), &mut active.session).await;
+    state.e2e.engines.insert(offered.clone(), engine);
+    active.network = offered;
+    result
 }
 
 /// Keeps the pairing while it is open and shows its state or its error.
@@ -2219,7 +2293,7 @@ fn finish_pairing_step(
     if active.session.is_active() {
         state.e2e.pairing = Some(active);
     } else {
-        clear_pairing_link(ui);
+        clear_pairing_dialog(ui);
     }
     push_open_locked_state(state, ui);
 }
@@ -2235,11 +2309,15 @@ pub(crate) async fn handle_e2e_pairing(
     let Some(push) = route_e2e_pairing(frame) else {
         return;
     };
-    // A closed rendezvous ends a waiting invite for it.
-    if let PairingPush::Closed { rendezvous_id, .. } = &push {
-        if state.e2e.close_invite_of(rendezvous_id) {
-            show_pairing_kind(ui, "e2e-pair-invite-none", String::new());
-        }
+    // A closed rendezvous ends a waiting offer for it. The first message of
+    // a joiner means that someone joined: the offer is gone too.
+    let dropped = match &push {
+        PairingPush::Closed { rendezvous_id, .. } => state.e2e.close_offer_of(rendezvous_id),
+        PairingPush::Message { rendezvous_id, .. } => state.e2e.drop_offer_of(rendezvous_id),
+    };
+    if dropped {
+        set_offer_dialog(ui, false);
+        show_pairing_kind(ui, "e2e-pair-offer-none", String::new());
     }
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
@@ -2260,23 +2338,25 @@ pub(crate) async fn handle_e2e_pairing(
     };
     let result = pairing::on_push(&ctx, engine.state_mut(), &mut active.session, &push).await;
     state.e2e.engines.insert(network, engine);
-    finish_pairing_step(state, ui, active, result.err());
+    let error = follow_offered_network(state, &mut active, result).await;
+    finish_pairing_step(state, ui, active, error);
 }
 
-/// Drops the waiting pairing invite when its end time passed, and tells the
+/// Drops the waiting pairing offer when its end time passed, and tells the
 /// user that it ended.
-fn retire_expired_invite(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    if state.e2e.expire_invite(e2e_now()) {
-        show_pairing_kind(ui, "e2e-pair-invite-none", String::new());
+fn retire_expired_offer(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    if state.e2e.expire_offer(e2e_now()) {
+        set_offer_dialog(ui, false);
+        show_pairing_kind(ui, "e2e-pair-offer-none", String::new());
     }
 }
 
-/// Reads one `e2e_pairing_invite` frame. Only the own user topic carries a
-/// valid invite. An invite that is not valid or not for this device shows
-/// nothing and starts nothing. The log names the decision only, never a
-/// value of the invite. The frame is never a chat line, and Cordiale sends
-/// no invite over IRC.
-pub(crate) fn handle_e2e_pairing_invite(
+/// Reads one `e2e_pairing_offered` frame (protocol 55). Only the own user
+/// topic carries a valid offer. An offer that is not valid or not for this
+/// device shows nothing and starts nothing. A valid offer opens the in-app
+/// offer and waits for the user: no join starts here. The log names the
+/// decision only, never a value of the offer. The frame is never a chat line.
+pub(crate) fn handle_e2e_pairing_offer(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     frame: &PhoenixMessage,
@@ -2287,20 +2367,20 @@ pub(crate) fn handle_e2e_pairing_invite(
     if frame.topic != format!("grappa:user:{user}") || state.conn.guest_session {
         return;
     }
-    let Some(invite) = route_e2e_pairing_invite(frame) else {
+    let Some(offer) = route_e2e_pairing_offer(frame) else {
         return;
     };
-    let network = invite.network_id().to_string();
-    let known = state.networks.own_nicks.contains_key(&network);
-    match state.e2e.admit_invite(invite, known, e2e_now()) {
-        InviteDecision::Show => show_pairing_kind(ui, "e2e-pair-invite", network),
-        other => persistence::log_line(&format!("e2e pairing invite ignored: {other:?}")),
+    let known: Vec<String> = state.networks.own_nicks.keys().cloned().collect();
+    let protocol = state.conn.server_protocol_version;
+    match state.e2e.admit_offer(offer, &known, protocol, e2e_now()) {
+        OfferDecision::Show => set_offer_dialog(ui, true),
+        other => persistence::log_line(&format!("e2e pairing offer ignored: {other:?}")),
     }
 }
 
 /// Ends a pairing whose lifetime is over. Call it for every E2E tick.
 pub(crate) async fn tick_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    retire_expired_invite(state, ui);
+    retire_expired_offer(state, ui);
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
     };
@@ -2322,7 +2402,7 @@ pub(crate) async fn tick_pairing(state: &mut WorkerState, ui: &slint::Weak<AppWi
     let ended = pairing::tick(&ctx, engine.state_mut(), &mut active.session, e2e_now()).await;
     state.e2e.engines.insert(network, engine);
     if ended {
-        clear_pairing_link(ui);
+        clear_pairing_dialog(ui);
         show_pairing(ui, &active.session.status());
     } else {
         state.e2e.pairing = Some(active);
@@ -3073,9 +3153,10 @@ pub(crate) async fn handle_send_locked(
 /// every engine becomes a `session_ended` drop, and every queue is emptied.
 /// The locked window shows the dropped rows.
 pub(crate) fn end_e2e_sessions(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
-    // An invite of the ended session is stale after a reconnect.
-    if state.e2e.invite.take().is_some() {
-        show_pairing_kind(ui, "e2e-pair-invite-none", String::new());
+    // An offer of the ended session is stale after a reconnect.
+    if state.e2e.offer.take().is_some() {
+        set_offer_dialog(ui, false);
+        show_pairing_kind(ui, "e2e-pair-offer-none", String::new());
     }
     let mut networks: Vec<String> = state.e2e.engines.keys().cloned().collect();
     networks.sort();
@@ -3291,113 +3372,28 @@ mod tests {
         assert!(windows.contains(&("net".to_string(), label)));
     }
 
-    #[test]
-    fn copy_pairing_link_passes_the_exact_link_to_the_clipboard() {
-        let link = "https://grappa.example/pair#abc";
-        let mut seen = String::new();
-        let copied = copy_pairing_link(link, |text| {
-            seen = text.to_string();
-            true
-        });
-        assert!(copied);
-        assert_eq!(seen, link);
-    }
-
-    #[test]
-    fn copy_pairing_link_reports_a_failed_copy() {
-        assert!(!copy_pairing_link(
-            "https://grappa.example/pair#abc",
-            |_| { false }
-        ));
-    }
-
-    #[test]
-    fn copy_pairing_link_skips_an_empty_link() {
-        let mut called = false;
-        let copied = copy_pairing_link("", |_| {
-            called = true;
-            true
-        });
-        assert!(!copied);
-        assert!(!called);
-    }
-
-    #[test]
-    fn invite_result_key_names_each_outcome() {
-        use cordiale_core::e2e_pairing::PairingError;
-        assert_eq!(invite_result_key(&Ok(())), "e2e-pair-invite-sent");
-        assert_eq!(
-            invite_result_key(&Err(PairingCallError::Unavailable)),
-            "e2e-pair-unavailable"
-        );
-        for error in [
-            PairingError::NotFound,
-            PairingError::Unexpected(405),
-            PairingError::Unexpected(501),
-        ] {
-            assert_eq!(
-                invite_result_key(&Err(PairingCallError::Relay(error))),
-                "e2e-pair-invite-unsupported"
-            );
-        }
-        for error in [
-            PairingError::RateLimited,
-            PairingError::Forbidden,
-            PairingError::Unexpected(500),
-        ] {
-            assert_eq!(
-                invite_result_key(&Err(PairingCallError::Relay(error))),
-                "e2e-pair-invite-failed"
-            );
-        }
-    }
-
-    #[test]
-    fn the_invite_link_is_the_link_of_the_open_pairing() {
-        use cordiale_core::e2e_pairing::{PairingRole, Rendezvous};
-        let rendezvous = Rendezvous {
-            id: "ZyXwVuTsRqPoNmLkJiHgFe".to_string(),
-            role: PairingRole::Creator,
-            expires_at: "later".to_string(),
-        };
-        let (session, link) = PairingSession::create(&rendezvous, "libera", 0).unwrap();
-        let mut runtime = runtime_needing_pairing();
-        runtime.pairing = Some(ActivePairing {
-            network: "libera".to_string(),
-            session,
-            link: Some(link.clone()),
-        });
-        let held = runtime.pairing.as_ref().and_then(|a| a.link.as_ref());
-        assert_eq!(held, Some(&link));
-        assert_eq!(held.unwrap().rendezvous_id(), rendezvous.id);
-        // The QR code and the invite share one string and one public key.
-        assert!(held.unwrap().code().ends_with(link.ephemeral_key()));
-        // The slot is gone with the pairing: nothing can send it again.
-        runtime.pairing = None;
-        assert!(runtime
-            .pairing
-            .as_ref()
-            .and_then(|a| a.link.as_ref())
-            .is_none());
-    }
-
-    const INVITE_ID: &str = "AbCdEfGhIjKlMnOpQrStUv";
-    const INVITE_KEY: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo";
+    const OFFER_ID: &str = "AbCdEfGhIjKlMnOpQrStUv";
+    const OFFER_KEY: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo";
     /// `2026-10-23T10:00:00Z`.
-    const INVITE_END: i64 = 1_792_749_600;
+    const OFFER_END: i64 = 1_792_749_600;
+    /// A server that speaks the pairing offer.
+    const P55: Option<u32> = Some(55);
 
-    fn invite_payload(network: &str, id: &str) -> Value {
+    fn offer_payload(id: &str) -> Value {
         serde_json::json!({
-            "kind": "e2e_pairing_invite",
-            "network_id": network,
+            "kind": "e2e_pairing_offered",
             "rendezvous_id": id,
-            "ephemeral_key": INVITE_KEY,
+            "curve": OFFER_KEY,
             "expires_at": "2026-10-23T10:00:00Z",
         })
     }
 
-    fn invite(network: &str, id: &str) -> PairingInvite {
-        PairingInvite::from_value(&invite_payload(network, id)).unwrap()
+    fn offer(id: &str) -> PairingOffer {
+        PairingOffer::from_value(&offer_payload(id)).unwrap()
+    }
+
+    fn nets(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
     }
 
     /// A runtime whose device lacks the identity of `libera`.
@@ -3408,18 +3404,14 @@ mod tests {
     }
 
     #[test]
-    fn an_invite_for_an_unpaired_device_waits_and_keeps_the_qr_link() {
+    fn an_offer_waits_for_the_user_and_starts_no_join() {
         let mut runtime = runtime_needing_pairing();
-        let decision = runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 60);
-        assert_eq!(decision, InviteDecision::Show);
-        // An accept takes the one link of the creator: the join step gets it,
-        // and it runs the same code check as a typed link.
-        let taken = runtime.take_invite(INVITE_END - 30).expect("invite");
-        let expected = cordiale_core::e2e_pairing::PairingLink::new(INVITE_ID, INVITE_KEY).unwrap();
-        assert_eq!(taken.link(), &expected);
-        assert_eq!(taken.link().code(), expected.code());
-        assert_eq!(taken.network_id(), "libera");
-        assert!(runtime.invite.is_none());
+        let known = nets(&["libera"]);
+        let decision = runtime.admit_offer(offer(OFFER_ID), &known, P55, OFFER_END - 60);
+        assert_eq!(decision, OfferDecision::Show);
+        // The offer only waits: no pairing is open and none starts.
+        assert!(runtime.offer.is_some());
+        assert!(runtime.pairing.is_none());
     }
 
     #[test]
@@ -3456,23 +3448,73 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_device_can_take_an_invite() {
-        let mut runtime = E2eRuntime::default();
-        runtime.reset.insert("libera".to_string());
-        let decision = runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 60);
-        assert_eq!(decision, InviteDecision::Show);
+    fn one_accept_gives_the_exact_offered_id_and_key_once() {
+        let mut runtime = runtime_needing_pairing();
+        let known = nets(&["libera"]);
+        runtime.admit_offer(offer(OFFER_ID), &known, P55, OFFER_END - 60);
+        let (networks, code) = runtime
+            .take_offer(&known, OFFER_END - 30)
+            .expect("one offer");
+        assert_eq!(networks, nets(&["libera"]));
+        assert_eq!(code, format!("{OFFER_ID}.{OFFER_KEY}"));
+        // The hand-off data is gone: a second accept gets nothing.
+        assert!(runtime.offer.is_none());
+        assert!(runtime.take_offer(&known, OFFER_END - 30).is_none());
     }
 
     #[test]
-    fn a_provisioned_device_can_take_an_invite_after_a_reset() {
+    fn a_failed_accept_still_clears_the_hand_off_data() {
+        let mut runtime = runtime_needing_pairing();
+        let known = nets(&["libera"]);
+        runtime.admit_offer(offer(OFFER_ID), &known, P55, OFFER_END - 60);
+        // The offer ended before the accept: it gives nothing and is gone.
+        assert!(runtime.take_offer(&known, OFFER_END).is_none());
+        assert!(runtime.offer.is_none());
+        // The join step clears the text it reads, also when the join fails.
+        let mut text = format!("{OFFER_ID}.{OFFER_KEY}");
+        let _ = cordiale_core::e2e_pairing::take_pairing_link(&mut text);
+        assert!(text.is_empty());
+        let mut bad = "broken".to_string();
+        assert!(cordiale_core::e2e_pairing::take_pairing_link(&mut bad).is_err());
+        assert!(bad.is_empty());
+    }
+
+    #[test]
+    fn a_reset_device_can_take_an_offer() {
+        let mut runtime = E2eRuntime::default();
+        runtime.reset.insert("libera".to_string());
+        let decision =
+            runtime.admit_offer(offer(OFFER_ID), &nets(&["libera"]), P55, OFFER_END - 60);
+        assert_eq!(decision, OfferDecision::Show);
+    }
+
+    #[test]
+    fn a_server_below_protocol_55_shows_no_offer() {
+        let mut runtime = runtime_needing_pairing();
+        for protocol in [None, Some(48), Some(54)] {
+            assert_eq!(
+                runtime.admit_offer(
+                    offer(OFFER_ID),
+                    &nets(&["libera"]),
+                    protocol,
+                    OFFER_END - 60
+                ),
+                OfferDecision::Unsupported
+            );
+        }
+        assert!(runtime.offer.is_none());
+    }
+
+    #[test]
+    fn a_provisioned_device_can_take_an_offer_after_a_reset() {
         let dir = tempfile::tempdir().expect("dir");
         let (mut state, _peer) = sas_state(&dir);
         state.e2e.provisioned.insert("net".to_string());
         assert_eq!(
             state
                 .e2e
-                .admit_invite(invite("net", INVITE_ID), true, INVITE_END - 60),
-            InviteDecision::AlreadyPaired
+                .admit_offer(offer(OFFER_ID), &nets(&["net"]), P55, OFFER_END - 60),
+            OfferDecision::AlreadyPaired
         );
         let engine = state.e2e.engines.remove("net").expect("engine");
         settle_reset(
@@ -3486,149 +3528,246 @@ mod tests {
         assert_eq!(
             state
                 .e2e
-                .admit_invite(invite("net", INVITE_ID), true, INVITE_END - 60),
-            InviteDecision::Show
+                .admit_offer(offer(OFFER_ID), &nets(&["net"]), P55, OFFER_END - 60),
+            OfferDecision::Show
         );
     }
 
     #[test]
-    fn an_invalid_invite_starts_no_prompt() {
-        let now = INVITE_END - 60;
-        // An expired invite.
+    fn an_invalid_offer_starts_no_prompt() {
+        let now = OFFER_END - 60;
+        let known = nets(&["libera"]);
+        // An expired offer.
         let mut runtime = runtime_needing_pairing();
         assert_eq!(
-            runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END + 1),
-            InviteDecision::Expired
+            runtime.admit_offer(offer(OFFER_ID), &known, P55, OFFER_END + 1),
+            OfferDecision::Expired
         );
         // An end time that is later than one rendezvous lifetime.
         assert_eq!(
-            runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 3_600),
-            InviteDecision::Expired
+            runtime.admit_offer(offer(OFFER_ID), &known, P55, OFFER_END - 3_600),
+            OfferDecision::Expired
         );
-        // A network that is not one of this session.
+        // A session with no network.
         assert_eq!(
-            runtime.admit_invite(invite("other", INVITE_ID), false, now),
-            InviteDecision::WrongNetwork
+            runtime.admit_offer(offer(OFFER_ID), &[], P55, now),
+            OfferDecision::WrongNetwork
         );
-        assert!(runtime.invite.is_none());
+        // Networks that are not the networks of this device.
+        assert_eq!(
+            runtime.admit_offer(offer(OFFER_ID), &nets(&["other"]), P55, now),
+            OfferDecision::AlreadyPaired
+        );
+        assert!(runtime.offer.is_none());
         // A device that already has the identity.
         let mut paired = E2eRuntime::default();
         paired.provisioned.insert("libera".to_string());
         assert_eq!(
-            paired.admit_invite(invite("libera", INVITE_ID), true, now),
-            InviteDecision::AlreadyPaired
+            paired.admit_offer(offer(OFFER_ID), &known, P55, now),
+            OfferDecision::AlreadyPaired
         );
         paired.needs_pairing.insert("libera".to_string());
         assert_eq!(
-            paired.admit_invite(invite("libera", INVITE_ID), true, now),
-            InviteDecision::AlreadyPaired
+            paired.admit_offer(offer(OFFER_ID), &known, P55, now),
+            OfferDecision::AlreadyPaired
         );
         // A network where the device is not known to need a pairing.
         let mut unknown = E2eRuntime::default();
         assert_eq!(
-            unknown.admit_invite(invite("libera", INVITE_ID), true, now),
-            InviteDecision::AlreadyPaired
+            unknown.admit_offer(offer(OFFER_ID), &known, P55, now),
+            OfferDecision::AlreadyPaired
         );
-        assert!(paired.invite.is_none() && unknown.invite.is_none());
+        assert!(paired.offer.is_none() && unknown.offer.is_none());
     }
 
-    #[test]
-    fn an_invite_is_ignored_while_a_pairing_is_open() {
+    fn creator_pairing(id: &str) -> ActivePairing {
         use cordiale_core::e2e_pairing::{PairingRole, Rendezvous};
-        let mut runtime = runtime_needing_pairing();
         let rendezvous = Rendezvous {
-            id: "ZyXwVuTsRqPoNmLkJiHgFe".to_string(),
+            id: id.to_string(),
             role: PairingRole::Creator,
             expires_at: "later".to_string(),
         };
         let (session, _link) = PairingSession::create(&rendezvous, "libera", 0).unwrap();
-        runtime.pairing = Some(ActivePairing {
+        ActivePairing {
             network: "libera".to_string(),
             session,
-            link: None,
-        });
-        assert_eq!(
-            runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 60),
-            InviteDecision::Busy
-        );
-        assert!(runtime.invite.is_none());
+        }
     }
 
     #[test]
-    fn a_duplicate_or_closed_invite_is_ignored() {
-        let now = INVITE_END - 60;
+    fn an_offer_is_ignored_while_a_pairing_is_open() {
+        let mut runtime = runtime_needing_pairing();
+        runtime.pairing = Some(creator_pairing("ZyXwVuTsRqPoNmLkJiHgFe"));
+        assert_eq!(
+            runtime.admit_offer(offer(OFFER_ID), &nets(&["libera"]), P55, OFFER_END - 60),
+            OfferDecision::Busy
+        );
+        assert!(runtime.offer.is_none());
+    }
+
+    #[test]
+    fn the_offer_of_the_own_rendezvous_is_ignored() {
+        let mut runtime = runtime_needing_pairing();
+        runtime.pairing = Some(creator_pairing(OFFER_ID));
+        assert_eq!(
+            runtime.admit_offer(offer(OFFER_ID), &nets(&["libera"]), P55, OFFER_END - 60),
+            OfferDecision::Own
+        );
+        assert!(runtime.offer.is_none());
+    }
+
+    #[test]
+    fn a_duplicate_or_closed_offer_is_ignored() {
+        let now = OFFER_END - 60;
+        let known = nets(&["libera"]);
         let mut runtime = runtime_needing_pairing();
         assert_eq!(
-            runtime.admit_invite(invite("libera", INVITE_ID), true, now),
-            InviteDecision::Show
+            runtime.admit_offer(offer(OFFER_ID), &known, P55, now),
+            OfferDecision::Show
         );
         assert_eq!(
-            runtime.admit_invite(invite("libera", INVITE_ID), true, now),
-            InviteDecision::Duplicate
+            runtime.admit_offer(offer(OFFER_ID), &known, P55, now),
+            OfferDecision::Duplicate
         );
         // The rendezvous closes: the prompt goes, and a replay is a duplicate.
-        assert!(runtime.close_invite_of(INVITE_ID));
-        assert!(runtime.invite.is_none());
+        assert!(runtime.close_offer_of(OFFER_ID));
+        assert!(runtime.offer.is_none());
         assert_eq!(
-            runtime.admit_invite(invite("libera", INVITE_ID), true, now),
-            InviteDecision::Duplicate
+            runtime.admit_offer(offer(OFFER_ID), &known, P55, now),
+            OfferDecision::Duplicate
         );
-        // A close with no waiting invite still blocks a later invite.
+        // A close with no waiting offer still blocks a later offer.
         let other = "ZyXwVuTsRqPoNmLkJiHgFe";
-        assert!(!runtime.close_invite_of(other));
+        assert!(!runtime.close_offer_of(other));
         assert_eq!(
-            runtime.admit_invite(invite("libera", other), true, now),
-            InviteDecision::Duplicate
+            runtime.admit_offer(offer(other), &known, P55, now),
+            OfferDecision::Duplicate
         );
     }
 
     #[test]
-    fn a_newer_invite_replaces_the_waiting_one() {
-        let now = INVITE_END - 60;
+    fn a_join_by_someone_removes_the_waiting_offer() {
+        let now = OFFER_END - 60;
+        let known = nets(&["libera"]);
+        let mut runtime = runtime_needing_pairing();
+        runtime.admit_offer(offer(OFFER_ID), &known, P55, now);
+        assert!(!runtime.drop_offer_of("ZyXwVuTsRqPoNmLkJiHgFe"));
+        assert!(runtime.drop_offer_of(OFFER_ID));
+        assert!(runtime.offer.is_none());
+        // The used offer stays a duplicate.
+        assert_eq!(
+            runtime.admit_offer(offer(OFFER_ID), &known, P55, now),
+            OfferDecision::Duplicate
+        );
+    }
+
+    #[test]
+    fn a_newer_offer_replaces_the_waiting_one() {
+        let now = OFFER_END - 60;
+        let known = nets(&["libera"]);
         let newer = "ZyXwVuTsRqPoNmLkJiHgFe";
         let mut runtime = runtime_needing_pairing();
-        runtime.admit_invite(invite("libera", INVITE_ID), true, now);
+        runtime.admit_offer(offer(OFFER_ID), &known, P55, now);
         assert_eq!(
-            runtime.admit_invite(invite("libera", newer), true, now),
-            InviteDecision::Show
+            runtime.admit_offer(offer(newer), &known, P55, now),
+            OfferDecision::Show
         );
-        let taken = runtime.take_invite(now).expect("invite");
-        assert_eq!(taken.rendezvous_id(), newer);
+        let (_, code) = runtime.take_offer(&known, now).expect("offer");
+        assert_eq!(code, format!("{newer}.{OFFER_KEY}"));
     }
 
     #[test]
-    fn an_invite_ends_with_its_time_and_a_reconnect_does_not_reopen_it() {
-        let now = INVITE_END - 60;
+    fn an_offer_ends_with_its_time_and_a_reconnect_does_not_reopen_it() {
+        let now = OFFER_END - 60;
+        let known = nets(&["libera"]);
         let mut runtime = runtime_needing_pairing();
-        runtime.admit_invite(invite("libera", INVITE_ID), true, now);
-        assert!(!runtime.expire_invite(now));
-        assert!(runtime.expire_invite(INVITE_END));
-        assert!(runtime.invite.is_none());
-        assert!(runtime.take_invite(now).is_none());
-        // The same invite replayed after a reconnect is not shown again.
+        runtime.admit_offer(offer(OFFER_ID), &known, P55, now);
+        assert!(!runtime.expire_offer(now));
+        assert!(runtime.expire_offer(OFFER_END));
+        assert!(runtime.offer.is_none());
+        assert!(runtime.take_offer(&known, now).is_none());
+        // The same offer replayed after a reconnect is not shown again.
         assert_eq!(
-            runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END),
-            InviteDecision::Expired
+            runtime.admit_offer(offer(OFFER_ID), &known, P55, OFFER_END),
+            OfferDecision::Expired
         );
         assert_eq!(
-            runtime.admit_invite(invite("libera", INVITE_ID), true, now),
-            InviteDecision::Duplicate
+            runtime.admit_offer(offer(OFFER_ID), &known, P55, now),
+            OfferDecision::Duplicate
         );
+    }
+
+    #[test]
+    fn a_reconnect_drops_the_waiting_offer() {
+        let ui = slint::Weak::<AppWindow>::default();
+        let mut state = WorkerState::new();
+        state.e2e.needs_pairing.insert("libera".to_string());
+        state
+            .e2e
+            .admit_offer(offer(OFFER_ID), &nets(&["libera"]), P55, OFFER_END - 60);
+        assert!(state.e2e.offer.is_some());
+        end_e2e_sessions(&mut state, &ui);
+        assert!(state.e2e.offer.is_none());
+        // The old offer does not come back as a new one.
+        assert_eq!(
+            state
+                .e2e
+                .admit_offer(offer(OFFER_ID), &nets(&["libera"]), P55, OFFER_END - 60),
+            OfferDecision::Duplicate
+        );
+    }
+
+    #[test]
+    fn the_pairing_window_has_no_link_qr_code_or_copy_action() {
+        let source = include_str!("../ui/appwindow.slint");
+        for gone in [
+            "e2e-pair-qr",
+            "e2e-pair-link",
+            "e2e-pair-copy-result",
+            "copy-pair-link",
+            "send-pair-invite",
+            "QR code of the pairing link",
+        ] {
+            assert!(!source.contains(gone), "{gone}");
+        }
+        // The in-app offer has an accept and a separate dismiss action.
+        assert!(source.contains("callback accept-pair-offer();"));
+        assert!(source.contains("callback dismiss-pair-offer();"));
     }
 
     #[test]
     fn an_accept_after_the_end_or_after_a_pairing_gives_nothing() {
-        let now = INVITE_END - 60;
+        let now = OFFER_END - 60;
+        let known = nets(&["libera"]);
         let mut late = runtime_needing_pairing();
-        late.admit_invite(invite("libera", INVITE_ID), true, now);
-        assert!(late.take_invite(INVITE_END).is_none());
+        late.admit_offer(offer(OFFER_ID), &known, P55, now);
+        assert!(late.take_offer(&known, OFFER_END).is_none());
         let mut paired = runtime_needing_pairing();
-        paired.admit_invite(invite("libera", INVITE_ID), true, now);
+        paired.admit_offer(offer(OFFER_ID), &known, P55, now);
         paired.needs_pairing.remove("libera");
-        assert!(paired.take_invite(now).is_none());
+        assert!(paired.take_offer(&known, now).is_none());
+        // A pairing opened after the offer: the accept starts nothing.
+        let mut busy = runtime_needing_pairing();
+        busy.admit_offer(offer(OFFER_ID), &known, P55, now);
+        busy.pairing = Some(creator_pairing("ZyXwVuTsRqPoNmLkJiHgFe"));
+        assert!(busy.take_offer(&known, now).is_none());
+        assert!(busy.offer.is_none());
     }
 
-    fn invite_frame(topic: &str, payload: Value) -> PhoenixMessage {
+    #[test]
+    fn the_offer_gives_every_network_that_needs_the_identity_and_picks_none() {
+        let mut runtime = E2eRuntime::default();
+        runtime.needs_pairing.insert("oftc".to_string());
+        runtime.needs_pairing.insert("libera".to_string());
+        runtime.provisioned.insert("azzurra".to_string());
+        let known = nets(&["oftc", "azzurra", "libera"]);
+        runtime.admit_offer(offer(OFFER_ID), &known, P55, OFFER_END - 60);
+        // The offer names no network: the sealed offer of the holder does.
+        let (networks, _) = runtime.take_offer(&known, OFFER_END - 30).expect("offer");
+        assert_eq!(networks, nets(&["libera", "oftc"]));
+    }
+
+    fn offer_frame(topic: &str, payload: Value) -> PhoenixMessage {
         PhoenixMessage {
             join_ref: None,
             message_ref: None,
@@ -3639,17 +3778,18 @@ mod tests {
     }
 
     #[test]
-    fn only_the_own_user_topic_gives_an_invite() {
+    fn only_the_own_user_topic_gives_an_offer_and_it_starts_no_pairing() {
         let ui = slint::Weak::<AppWindow>::default();
         let now = e2e_now();
         let soon = chrono::DateTime::from_timestamp(now + 120, 0)
             .unwrap()
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
-        let mut payload = invite_payload("libera", INVITE_ID);
+        let mut payload = offer_payload(OFFER_ID);
         payload["expires_at"] = soon.into();
         let mut state = WorkerState::new();
         state.conn.identifier = Some("vjt".to_string());
+        state.conn.server_protocol_version = P55;
         state
             .networks
             .own_nicks
@@ -3660,38 +3800,30 @@ mod tests {
             "grappa:user:other",
             "grappa:user:vjt/network:libera/channel:#a",
         ] {
-            handle_e2e_pairing_invite(&mut state, &ui, &invite_frame(topic, payload.clone()));
-            assert!(state.e2e.invite.is_none(), "{topic}");
+            handle_e2e_pairing_offer(&mut state, &ui, &offer_frame(topic, payload.clone()));
+            assert!(state.e2e.offer.is_none(), "{topic}");
         }
         state.conn.guest_session = true;
-        handle_e2e_pairing_invite(
+        handle_e2e_pairing_offer(
             &mut state,
             &ui,
-            &invite_frame("grappa:user:vjt", payload.clone()),
+            &offer_frame("grappa:user:vjt", payload.clone()),
         );
-        assert!(state.e2e.invite.is_none());
+        assert!(state.e2e.offer.is_none());
         state.conn.guest_session = false;
-        // A wrong network of the frame.
-        let mut wrong = payload.clone();
-        wrong["network_id"] = "other".into();
-        handle_e2e_pairing_invite(&mut state, &ui, &invite_frame("grappa:user:vjt", wrong));
-        assert!(state.e2e.invite.is_none());
-        // The own topic with a valid invite keeps it.
-        handle_e2e_pairing_invite(&mut state, &ui, &invite_frame("grappa:user:vjt", payload));
-        assert!(state.e2e.invite.is_some());
-    }
-
-    #[test]
-    fn the_pairing_host_has_no_scheme_or_path() {
-        assert_eq!(
-            pairing_host("https://grappa.example.org"),
-            "grappa.example.org"
+        // A server below protocol 55 has no offer to show.
+        state.conn.server_protocol_version = Some(54);
+        handle_e2e_pairing_offer(
+            &mut state,
+            &ui,
+            &offer_frame("grappa:user:vjt", payload.clone()),
         );
-        assert_eq!(
-            pairing_host("https://grappa.example.org:8443/"),
-            "grappa.example.org:8443"
-        );
-        assert_eq!(pairing_host("grappa.example.org"), "grappa.example.org");
+        assert!(state.e2e.offer.is_none());
+        state.conn.server_protocol_version = P55;
+        // The own topic with a valid offer keeps it and opens no pairing.
+        handle_e2e_pairing_offer(&mut state, &ui, &offer_frame("grappa:user:vjt", payload));
+        assert!(state.e2e.offer.is_some());
+        assert!(state.e2e.pairing.is_none());
     }
 
     #[test]
@@ -3973,6 +4105,77 @@ mod tests {
         assert!(!sas_verified(&state));
         assert_eq!(PeerKeyStep::parse("verify"), Some(PeerKeyStep::Verify));
         assert_eq!(PeerKeyStep::parse("Verify"), None);
+    }
+
+    #[test]
+    fn a_sas_check_and_a_key_check_do_not_change_each_other() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, peer) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        // A SAS check does not verify the key.
+        handle_e2e_sas(&mut state, &ui, SasStep::Start);
+        handle_e2e_sas(&mut state, &ui, SasStep::Confirm);
+        assert!(sas_verified(&state));
+        assert!(!key_verified(&state));
+        // A key check on the SAS-verified peer works and keeps the SAS check.
+        handle_e2e_peer_key(
+            &mut state,
+            &ui,
+            PeerKeyStep::Verify,
+            "net".into(),
+            "ada".into(),
+            peer,
+        );
+        assert!(sas_verified(&state));
+        assert!(key_verified(&state));
+        // A new SAS code after the key check stays available and keeps both.
+        handle_e2e_sas(&mut state, &ui, SasStep::Start);
+        assert!(state.e2e.sas_check.is_some());
+        handle_e2e_sas(&mut state, &ui, SasStep::Cancel);
+        assert!(sas_verified(&state));
+        assert!(key_verified(&state));
+    }
+
+    #[test]
+    fn a_trust_alarm_refuses_a_key_check_until_the_explicit_key_change() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, peer) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        state
+            .e2e
+            .note_engine_error("net", "ada", &EngineError::Device(E2eError::MasterChanged));
+        assert_eq!(
+            locked_entry_state(&state, "net", "ada"),
+            ChatState::TrustAlarm
+        );
+        // The view shows no key and a verify changes nothing.
+        assert_eq!(peer_key_facts(&state, "net", "ada"), None);
+        handle_e2e_peer_key(
+            &mut state,
+            &ui,
+            PeerKeyStep::Verify,
+            "net".into(),
+            "ada".into(),
+            peer.clone(),
+        );
+        assert!(!key_verified(&state));
+        assert_eq!(
+            locked_entry_state(&state, "net", "ada"),
+            ChatState::TrustAlarm
+        );
+        // A SAS check stays refused with the alarm.
+        handle_e2e_sas(&mut state, &ui, SasStep::Start);
+        assert_eq!(state.e2e.sas_check, None);
+        // A key check of the old master is no proof for the new master.
+        let other = master_text(&Account::new());
+        state
+            .e2e
+            .engine_mut("net")
+            .expect("engine")
+            .replace_peer_master("ada", &other)
+            .expect("replace");
+        assert!(!verify_peer_key(&mut state, "net", "ada", &peer));
+        assert!(!key_verified(&state));
     }
 
     #[test]
