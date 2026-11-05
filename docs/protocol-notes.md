@@ -1894,7 +1894,10 @@ proposta della PR 2556 di Grappa, ancora aperta: confermare il contratto finale 
 client non legge un campo del server: li ricava dal proprio stato (`e2e_view::RecoveryReason`).
 `NeedsPairing` dà `no-keys`; `MasterMismatch` dà `replaced`; una lista firmata senza questo dispositivo
 dà `left-out`; nessuna lista firmata dà `no-list`. Un errore di lettura o di chiamata non dà alcun
-motivo, quindi non offre mai una nuova identità. `/e2e devices` mostra la spiegazione, i dispositivi in
-elenco e, per primo, `/e2e pair` (flusso della issue 605) se esiste un altro dispositivo in elenco. La
+motivo, quindi non offre mai una nuova identità. `/e2e devices` usa prima il motivo salvato dal
+provisioning, anche se il motore si apre con una lista locale vecchia; solo senza motivo salvato deriva
+il motivo dalla lista locale. Mostra la spiegazione, i dispositivi del server e, per primo, il pairing
+(flusso della issue 605) se esiste un altro dispositivo in elenco: `/e2e pair` sul dispositivo che ha
+l'identità, poi `/e2e join <link>` o `/e2e accept` su questo dispositivo. La
 sostituzione resta `/e2e reset` con la sua conferma `yes`, con l'avviso che una nuova identità può
 cambiare la chiave pubblica verificata dai contatti. Nessuna vista crea o sostituisce un'identità.
