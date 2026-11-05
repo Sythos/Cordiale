@@ -607,6 +607,11 @@ pub(crate) async fn handle_frame(
         handle_no_such_nick_push(state, ui, &frame.payload);
         return;
     }
+    if payload_kind == "e2e_pairing_invite" {
+        // A pairing invite of the account: control state, never a chat line.
+        handle_e2e_pairing_invite(state, ui, &frame);
+        return;
+    }
     if payload_kind == "e2e_pairing_message" || payload_kind == "e2e_pairing_closed" {
         // Pairing control state: the status bar shows it. It is never a chat
         // line, and nothing of it reaches the plain `<user>` query.

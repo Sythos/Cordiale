@@ -136,7 +136,7 @@ pub enum SlashCommand {
     Usage(&'static str),
     /// A command Cordiale doesn't know, as typed (`/frobnicate`).
     Unknown(String),
-    /// `/e2e pair|join|code|cancel`: the X1 pairing of a new device.
+    /// `/e2e pair|join|accept|decline|code|cancel`: the X1 pairing of a new device.
     E2ePair(E2ePairAction),
     /// `/e2e devices|revoke|reset`: the management of the own devices.
     E2eManage(E2eManageAction),
@@ -154,6 +154,11 @@ pub enum E2ePairAction {
     Code(String),
     /// `/e2e cancel`.
     Cancel,
+    /// `/e2e accept`: join with the pairing invite of another session of the
+    /// account. The code check still follows.
+    Accept,
+    /// `/e2e decline`: drop the pairing invite.
+    Decline,
 }
 
 impl std::fmt::Debug for E2ePairAction {
@@ -163,6 +168,8 @@ impl std::fmt::Debug for E2ePairAction {
             Self::Join(_) => "E2ePairAction::Join(..)",
             Self::Code(_) => "E2ePairAction::Code(..)",
             Self::Cancel => "E2ePairAction::Cancel",
+            Self::Accept => "E2ePairAction::Accept",
+            Self::Decline => "E2ePairAction::Decline",
         })
     }
 }
@@ -520,6 +527,8 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
         "e2e" => match words(args).as_slice() {
             [step] if step == "pair" => E2ePair(E2ePairAction::Start),
             [step] if step == "cancel" => E2ePair(E2ePairAction::Cancel),
+            [step] if step == "accept" => E2ePair(E2ePairAction::Accept),
+            [step] if step == "decline" => E2ePair(E2ePairAction::Decline),
             [step, link] if step == "join" => E2ePair(E2ePairAction::Join(link.clone())),
             [step, code] if step == "code" => E2ePair(E2ePairAction::Code(code.clone())),
             [step] if step == "devices" => E2eManage(E2eManageAction::Devices),
@@ -529,7 +538,7 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
                 E2eManage(E2eManageAction::ResetConfirm)
             }
             _ => Usage(
-                "/e2e pair | join <link> | code <nn> | cancel | devices | revoke <id> | reset",
+                "/e2e pair | join <link> | accept | decline | code <nn> | cancel | devices | revoke <id> | reset",
             ),
         },
         "hilight" | "highlight" | "dehilight" => match non_empty(args) {
@@ -1179,6 +1188,8 @@ mod tests {
     fn e2e_pairing_steps() {
         assert_eq!(parse("/e2e pair"), Some(E2ePair(E2ePairAction::Start)));
         assert_eq!(parse("/e2e cancel"), Some(E2ePair(E2ePairAction::Cancel)));
+        assert_eq!(parse("/e2e accept"), Some(E2ePair(E2ePairAction::Accept)));
+        assert_eq!(parse("/e2e decline"), Some(E2ePair(E2ePairAction::Decline)));
         assert_eq!(
             parse("/e2e join abc.def"),
             Some(E2ePair(E2ePairAction::Join("abc.def".to_string())))
@@ -1187,7 +1198,13 @@ mod tests {
             parse("/e2e code 42"),
             Some(E2ePair(E2ePairAction::Code("42".to_string())))
         );
-        for bad in ["/e2e", "/e2e join", "/e2e pair now", "/e2e other"] {
+        for bad in [
+            "/e2e",
+            "/e2e join",
+            "/e2e pair now",
+            "/e2e accept now",
+            "/e2e other",
+        ] {
             assert!(matches!(parse(bad), Some(Usage(_))), "{bad}");
         }
         let shown = format!("{:?}", E2ePairAction::Join("secret-link".to_string()));

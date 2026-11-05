@@ -2880,6 +2880,10 @@ export component AppWindow inherits Window {
             return @tr("The master key of this contact changed. The check was not saved.");
         } else if status-kind == "e2e-pair-link" {
             return @tr("Pairing link: {}. On the new device, type /e2e join and this link.", status-command-hint);
+        } else if status-kind == "e2e-pair-invite" {
+            return @tr("Another device of your account invites this device to pair on {}. Type /e2e accept to join, or /e2e decline.", status-command-hint);
+        } else if status-kind == "e2e-pair-invite-none" {
+            return @tr("No pairing invite is open.");
         } else if status-kind == "e2e-pair-waiting" {
             return @tr("Waiting for the new device to join.");
         } else if status-kind == "e2e-pair-code" {

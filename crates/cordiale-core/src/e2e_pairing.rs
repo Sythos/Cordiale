@@ -37,7 +37,7 @@ use serde_json::Value;
 use zeroize::Zeroize;
 
 use crate::client::GrappaClientError;
-use crate::e2e_wire::{decode_key, WireError};
+use crate::e2e_wire::{decode_key, WireError, PAIRING_LIFETIME_SECS};
 
 /// The side of a rendezvous: the device that opened it or the one that joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -298,6 +298,122 @@ impl PairingLink {
     }
 }
 
+/// An invite to pair, sent by an account event (`e2e_pairing_invite`) to the
+/// other active sessions of the same account. It names the network, the
+/// rendezvous, the public ephemeral key of the creator and the end time.
+/// It holds the same values as the QR link. `Debug` prints no field.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PairingInvite {
+    network_id: String,
+    link: PairingLink,
+    /// Unix seconds, UTC.
+    expires_at: i64,
+}
+
+impl fmt::Debug for PairingInvite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PairingInvite(..)")
+    }
+}
+
+impl PairingInvite {
+    /// Reads `e2e_pairing_invite`. Any other event, and a wrong shape, gives
+    /// `None`: the fields are `network_id`, `rendezvous_id`, `ephemeral_key`
+    /// and `expires_at` (ISO-8601 text in UTC).
+    pub fn from_value(value: &Value) -> Option<Self> {
+        if value.get("kind")?.as_str()? != "e2e_pairing_invite" {
+            return None;
+        }
+        let network_id = value.get("network_id")?.as_str()?;
+        if network_id.is_empty() {
+            return None;
+        }
+        let link = PairingLink::new(
+            value.get("rendezvous_id")?.as_str()?,
+            value.get("ephemeral_key")?.as_str()?,
+        )
+        .ok()?;
+        Some(Self {
+            network_id: network_id.to_string(),
+            link,
+            expires_at: parse_utc_seconds(value.get("expires_at")?.as_str()?)?,
+        })
+    }
+
+    pub fn network_id(&self) -> &str {
+        &self.network_id
+    }
+
+    pub fn link(&self) -> &PairingLink {
+        &self.link
+    }
+
+    pub fn rendezvous_id(&self) -> &str {
+        self.link.rendezvous_id()
+    }
+
+    /// True when the end time is still ahead and is not later than the
+    /// lifetime of a rendezvous. A later end time is not a real invite.
+    pub fn is_current(&self, now: i64) -> bool {
+        let lifetime = i64::try_from(PAIRING_LIFETIME_SECS).unwrap_or(i64::MAX);
+        now < self.expires_at && self.expires_at - now <= lifetime
+    }
+}
+
+/// Reads `YYYY-MM-DDTHH:MM:SS[.fff]` with the suffix `Z` or `+00:00` as
+/// Unix seconds. Any other shape, and any other offset, gives `None`.
+fn parse_utc_seconds(text: &str) -> Option<i64> {
+    let text = text
+        .strip_suffix('Z')
+        .or_else(|| text.strip_suffix("+00:00"))?;
+    let whole = match text.split_once('.') {
+        Some((whole, fraction)) => {
+            if fraction.is_empty() || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            whole
+        }
+        None => text,
+    };
+    let bytes = whole.as_bytes();
+    if bytes.len() != 19
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let number = |from: usize, to: usize| -> Option<i64> {
+        let part = whole.get(from..to)?;
+        if part.bytes().all(|b| b.is_ascii_digit()) {
+            part.parse().ok()
+        } else {
+            None
+        }
+    };
+    let (year, month, day) = (number(0, 4)?, number(5, 7)?, number(8, 10)?);
+    let (hour, minute, second) = (number(11, 13)?, number(14, 16)?, number(17, 19)?);
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    // Days since 1970-01-01 in the proleptic Gregorian calendar.
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_from_march = (month + 9) % 12;
+    let day_of_year = (153 * month_from_march + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 /// Reads a link from `input` and clears `input` at once, also when the
 /// text is not a link. The caller passes the buffer that holds the QR URL.
 pub fn take_pairing_link(input: &mut String) -> Result<PairingLink, PairingError> {
@@ -484,5 +600,101 @@ mod tests {
             "from": "joiner",
         });
         assert_eq!(PairingPush::from_value(&no_seq), None);
+    }
+
+    fn invite_value(expires_at: &str) -> Value {
+        serde_json::json!({
+            "kind": "e2e_pairing_invite",
+            "network_id": "libera",
+            "rendezvous_id": ID,
+            "ephemeral_key": KEY,
+            "expires_at": expires_at,
+        })
+    }
+
+    #[test]
+    fn utc_text_is_read_as_unix_seconds() {
+        assert_eq!(parse_utc_seconds("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_utc_seconds("2026-10-23T10:00:00Z"),
+            Some(1_792_749_600)
+        );
+        assert_eq!(
+            parse_utc_seconds("2024-02-29T23:59:59.250+00:00"),
+            Some(1_709_251_199)
+        );
+        assert_eq!(parse_utc_seconds("1999-12-31T00:00:01Z"), Some(946_598_401));
+        for bad in [
+            "",
+            "2026-10-23T10:00:00",
+            "2026-10-23 10:00:00Z",
+            "2026-10-23T10:00:00+02:00",
+            "2026-13-23T10:00:00Z",
+            "2026-10-23T24:00:00Z",
+            "2026-10-23T10:00:00.Z",
+            "2026-1x-23T10:00:00Z",
+        ] {
+            assert_eq!(parse_utc_seconds(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn invite_carries_the_values_of_the_qr_link() {
+        let invite = PairingInvite::from_value(&invite_value("2026-10-23T10:00:00Z")).unwrap();
+        assert_eq!(invite.network_id(), "libera");
+        assert_eq!(invite.link(), &link());
+        assert_eq!(invite.rendezvous_id(), ID);
+        assert_eq!(invite.link().code(), link().code());
+    }
+
+    #[test]
+    fn invite_with_a_wrong_shape_is_ignored() {
+        let mut other_kind = invite_value("2026-10-23T10:00:00Z");
+        other_kind["kind"] = "e2e_pairing_message".into();
+        let mut no_network = invite_value("2026-10-23T10:00:00Z");
+        no_network["network_id"] = "".into();
+        let mut bad_id = invite_value("2026-10-23T10:00:00Z");
+        bad_id["rendezvous_id"] = "short".into();
+        let mut bad_key = invite_value("2026-10-23T10:00:00Z");
+        bad_key["ephemeral_key"] = "short".into();
+        let mut no_key = invite_value("2026-10-23T10:00:00Z");
+        no_key.as_object_mut().unwrap().remove("ephemeral_key");
+        for value in [
+            other_kind,
+            no_network,
+            bad_id,
+            bad_key,
+            no_key,
+            invite_value("soon"),
+            invite_value("2026-10-23T10:00:00+02:00"),
+        ] {
+            assert_eq!(PairingInvite::from_value(&value), None);
+        }
+    }
+
+    #[test]
+    fn invite_is_current_only_inside_one_rendezvous_lifetime() {
+        let end = 1_792_749_600;
+        let invite = PairingInvite::from_value(&invite_value("2026-10-23T10:00:00Z")).unwrap();
+        assert!(invite.is_current(end - 1));
+        assert!(invite.is_current(end - 300));
+        assert!(!invite.is_current(end));
+        assert!(!invite.is_current(end + 60));
+        assert!(!invite.is_current(end - 301));
+    }
+
+    #[test]
+    fn invite_debug_output_shows_no_value() {
+        let invite = PairingInvite::from_value(&invite_value("2026-10-23T10:00:00Z")).unwrap();
+        let shown = format!("{invite:?}");
+        assert!(!shown.contains(KEY));
+        assert!(!shown.contains(ID));
+        assert!(!shown.contains("libera"));
+    }
+
+    #[test]
+    fn an_invite_is_not_a_pairing_push() {
+        let value = invite_value("2026-10-23T10:00:00Z");
+        assert_eq!(PairingPush::from_value(&value), None);
     }
 }
