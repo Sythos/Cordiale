@@ -221,6 +221,9 @@ enum WorkerCommand {
     },
     /// A SAS step of the open locked query: show, confirm, reject, cancel.
     E2eSas(SasStep),
+    /// Asks the server to send the invite of the open pairing to the other
+    /// sessions of the account.
+    E2ePairInvite,
     /// A consent action on a plain query, including a manual key re-request.
     E2eRequestAction {
         action: String,
@@ -1898,6 +1901,9 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::E2eSas(step)) => {
                         handle_e2e_sas(&mut state, &ui, step);
+                    }
+                    Some(WorkerCommand::E2ePairInvite) => {
+                        e2e_runtime::send_pairing_invite(&state, &ui).await;
                     }
                     Some(WorkerCommand::E2eRequestAction {
                         action,

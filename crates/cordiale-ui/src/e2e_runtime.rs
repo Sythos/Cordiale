@@ -21,7 +21,7 @@ use cordiale_core::e2e_engine::{
     E2eEngine, EngineError, RowOutcome, SendRoute, OWN_DEVICE,
 };
 use cordiale_core::e2e_pacing::DropReason;
-use cordiale_core::e2e_pairing::{PairingInvite, PairingPush};
+use cordiale_core::e2e_pairing::{PairingCallError, PairingInvite, PairingLink, PairingPush};
 use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
 };
@@ -164,6 +164,9 @@ impl SasStep {
 struct ActivePairing {
     network: String,
     session: PairingSession,
+    /// The link of a pairing this device opened. The QR code and the invite
+    /// use it. It lives with the pairing and is not saved. A joiner has none.
+    link: Option<PairingLink>,
 }
 
 impl E2eRuntime {
@@ -1475,6 +1478,48 @@ fn show_pairing_qr(ui: &slint::Weak<AppWindow>, url: &str, code: String) {
     });
 }
 
+/// Asks the server to send the pairing invite of the open pairing to the
+/// other sessions of the account. It uses the link of the QR code: the same
+/// rendezvous and the same public key, and no second pairing. The invite goes
+/// through the account API, never through IRC. The link and the key are not
+/// logged.
+pub(crate) async fn send_pairing_invite(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
+    let Some(active) = state.e2e.pairing.as_ref() else {
+        return show_pairing_kind(ui, "e2e-pair-none", String::new());
+    };
+    let Some(link) = active.link.as_ref() else {
+        return show_pairing_kind(ui, "e2e-pair-none", String::new());
+    };
+    let result = client
+        .invite_pairing(
+            &token,
+            link.rendezvous_id(),
+            &active.network,
+            link.ephemeral_key(),
+            state.conn.server_protocol_version,
+        )
+        .await;
+    show_pairing_kind(ui, invite_result_key(&result), String::new());
+}
+
+/// The `status-kind` key of the answer to an invite request. A server without
+/// the route answers 404, 405 or 501: the copy button stays the way to move
+/// the link.
+pub(crate) fn invite_result_key(result: &Result<(), PairingCallError>) -> &'static str {
+    use cordiale_core::e2e_pairing::PairingError;
+    match result {
+        Ok(()) => "e2e-pair-invite-sent",
+        Err(PairingCallError::Unavailable) => "e2e-pair-unavailable",
+        Err(PairingCallError::Relay(
+            PairingError::NotFound | PairingError::Unexpected(405 | 501),
+        )) => "e2e-pair-invite-unsupported",
+        Err(_) => "e2e-pair-invite-failed",
+    }
+}
+
 /// Closes the pairing dialog and drops the link, the QR code and the code
 /// from memory. Call it when the pairing ends, expires, is replaced or is
 /// cancelled.
@@ -1554,13 +1599,16 @@ pub(crate) async fn run_e2e_pair(
             state.e2e.engines.insert(network.clone(), engine);
             match result {
                 Ok((session, link)) => {
+                    let code = link.code();
+                    let url = link.url(&pairing_host(client.base_url()));
                     state.e2e.pairing = Some(ActivePairing {
                         network: network.clone(),
                         session,
+                        link: Some(link),
                     });
                     push_open_locked_state(state, ui);
-                    show_pairing_kind(ui, "e2e-pair-link", link.code());
-                    show_pairing_qr(ui, &link.url(&pairing_host(client.base_url())), link.code());
+                    show_pairing_kind(ui, "e2e-pair-link", code.clone());
+                    show_pairing_qr(ui, &url, code);
                 }
                 Err(error) => show_pairing_kind(ui, pairing_error_key(&error), String::new()),
             }
@@ -1578,6 +1626,7 @@ pub(crate) async fn run_e2e_pair(
                     state.e2e.pairing = Some(ActivePairing {
                         network: network.clone(),
                         session,
+                        link: None,
                     });
                     push_open_locked_state(state, ui);
                 }
@@ -2902,6 +2951,65 @@ mod tests {
         assert!(!called);
     }
 
+    #[test]
+    fn invite_result_key_names_each_outcome() {
+        use cordiale_core::e2e_pairing::PairingError;
+        assert_eq!(invite_result_key(&Ok(())), "e2e-pair-invite-sent");
+        assert_eq!(
+            invite_result_key(&Err(PairingCallError::Unavailable)),
+            "e2e-pair-unavailable"
+        );
+        for error in [
+            PairingError::NotFound,
+            PairingError::Unexpected(405),
+            PairingError::Unexpected(501),
+        ] {
+            assert_eq!(
+                invite_result_key(&Err(PairingCallError::Relay(error))),
+                "e2e-pair-invite-unsupported"
+            );
+        }
+        for error in [
+            PairingError::RateLimited,
+            PairingError::Forbidden,
+            PairingError::Unexpected(500),
+        ] {
+            assert_eq!(
+                invite_result_key(&Err(PairingCallError::Relay(error))),
+                "e2e-pair-invite-failed"
+            );
+        }
+    }
+
+    #[test]
+    fn the_invite_link_is_the_link_of_the_open_pairing() {
+        use cordiale_core::e2e_pairing::{PairingRole, Rendezvous};
+        let rendezvous = Rendezvous {
+            id: "ZyXwVuTsRqPoNmLkJiHgFe".to_string(),
+            role: PairingRole::Creator,
+            expires_at: "later".to_string(),
+        };
+        let (session, link) = PairingSession::create(&rendezvous, "libera", 0).unwrap();
+        let mut runtime = runtime_needing_pairing();
+        runtime.pairing = Some(ActivePairing {
+            network: "libera".to_string(),
+            session,
+            link: Some(link.clone()),
+        });
+        let held = runtime.pairing.as_ref().and_then(|a| a.link.as_ref());
+        assert_eq!(held, Some(&link));
+        assert_eq!(held.unwrap().rendezvous_id(), rendezvous.id);
+        // The QR code and the invite share one string and one public key.
+        assert!(held.unwrap().code().ends_with(link.ephemeral_key()));
+        // The slot is gone with the pairing: nothing can send it again.
+        runtime.pairing = None;
+        assert!(runtime
+            .pairing
+            .as_ref()
+            .and_then(|a| a.link.as_ref())
+            .is_none());
+    }
+
     const INVITE_ID: &str = "AbCdEfGhIjKlMnOpQrStUv";
     const INVITE_KEY: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo";
     /// `2026-10-23T10:00:00Z`.
@@ -3033,6 +3141,7 @@ mod tests {
         runtime.pairing = Some(ActivePairing {
             network: "libera".to_string(),
             session,
+            link: None,
         });
         assert_eq!(
             runtime.admit_invite(invite("libera", INVITE_ID), true, INVITE_END - 60),
