@@ -1089,6 +1089,22 @@ impl E2eEngine {
         Ok(())
     }
 
+    /// True when the user verified the stored master of the peer by an
+    /// outside comparison of the full key.
+    pub fn is_key_verified(&self, nick: &str) -> bool {
+        self.state.trust().is_key_verified(&self.network, nick)
+    }
+
+    /// Records the outside check of the master the user compared. It fails
+    /// with `MasterChanged` when `master` is no longer the stored master of
+    /// the peer. It does not touch the SAS check.
+    pub fn confirm_key(&mut self, nick: &str, master: &str) -> Result<(), EngineError> {
+        let mut trust = self.state.trust();
+        trust.mark_key_verified(&self.network, nick, master)?;
+        self.state.set_trust(&trust)?;
+        Ok(())
+    }
+
     /// Takes a new master for the peer after an explicit user action. The
     /// old SAS check, the list and the devices go away, and the new master
     /// starts unverified.

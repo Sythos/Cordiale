@@ -59,6 +59,10 @@ pub enum MasterStatus {
 struct PeerRecord {
     master: String,
     sas_verified: bool,
+    /// True after the user compared the stored master outside Cordiale and
+    /// verified it. It is separate from the SAS check.
+    #[serde(default)]
+    key_verified: bool,
     list: ListState,
     /// Device Ed25519 key to its Curve25519 key, for devices seen so far.
     curves: BTreeMap<String, String>,
@@ -83,6 +87,7 @@ impl PeerRecord {
         PeerRecord {
             master: master.to_string(),
             sas_verified: false,
+            key_verified: false,
             list: ListState::default(),
             curves: BTreeMap::new(),
             revoked: BTreeSet::new(),
@@ -97,6 +102,8 @@ impl PeerRecord {
     /// a list. The revoked keys stay.
     fn take_master(&mut self, master: &str) {
         self.master = master.to_string();
+        self.sas_verified = false;
+        self.key_verified = false;
         self.released = false;
     }
 
@@ -184,6 +191,31 @@ impl PeerTrust {
         }
     }
 
+    /// True when the user verified the stored master by an outside
+    /// comparison of the full key.
+    pub fn is_key_verified(&self, network: &str, nick: &str) -> bool {
+        self.peers
+            .get(&peer_key(network, nick))
+            .is_some_and(|record| !record.released && record.key_verified)
+    }
+
+    /// Records the outside check of `master`. It fails with `MasterChanged`
+    /// when `master` is not the stored one. It never stores a new master.
+    pub fn mark_key_verified(
+        &mut self,
+        network: &str,
+        nick: &str,
+        master: &str,
+    ) -> Result<(), E2eError> {
+        match self.peers.get_mut(&peer_key(network, nick)) {
+            Some(record) if !record.released && record.master == master => {
+                record.key_verified = true;
+                Ok(())
+            }
+            _ => Err(E2eError::MasterChanged),
+        }
+    }
+
     /// Drops the master of an account after a reset of the own identity. The
     /// list, the devices and the SAS check go. The revoked keys stay, so a
     /// revoked device stays revoked. The next master is `New`.
@@ -191,6 +223,7 @@ impl PeerTrust {
         if let Some(record) = self.peers.get_mut(&peer_key(network, nick)) {
             record.released = true;
             record.sas_verified = false;
+            record.key_verified = false;
             record.list = ListState::default();
             record.curves.clear();
             record.certified.clear();
@@ -657,6 +690,39 @@ mod tests {
             .unwrap();
         assert_eq!(trust.master(NET, NICK), Some(key_of(&other).as_str()));
         assert!(!trust.is_sas_verified(NET, NICK));
+    }
+
+    #[test]
+    fn key_check_binds_to_the_exact_master_and_is_separate_from_sas() {
+        let master = Account::new();
+        let master_key = key_of(&master);
+        let other = Account::new();
+        let mut trust = PeerTrust::default();
+        trust.observe_master(NET, NICK, &master_key).unwrap();
+        assert!(!trust.is_key_verified(NET, NICK));
+        assert_eq!(
+            trust.mark_key_verified(NET, NICK, &key_of(&other)),
+            Err(E2eError::MasterChanged)
+        );
+        assert_eq!(
+            trust.mark_key_verified(NET, "bob", &master_key),
+            Err(E2eError::MasterChanged)
+        );
+        assert!(!trust.is_key_verified(NET, NICK));
+        trust.mark_key_verified(NET, NICK, &master_key).unwrap();
+        assert!(trust.is_key_verified(NET, NICK));
+        assert!(!trust.is_sas_verified(NET, NICK));
+        assert!(!trust.is_key_verified("other-net", NICK));
+        assert!(!trust.is_key_verified(NET, "bob"));
+        // A new master starts unverified.
+        trust
+            .replace_master_by_user(NET, NICK, &key_of(&other))
+            .unwrap();
+        assert!(!trust.is_key_verified(NET, NICK));
+        // A reset releases the master and clears the check.
+        trust.mark_key_verified(NET, NICK, &key_of(&other)).unwrap();
+        trust.release_master(NET, NICK);
+        assert!(!trust.is_key_verified(NET, NICK));
     }
 
     #[test]
