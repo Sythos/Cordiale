@@ -1913,9 +1913,6 @@ async fn run_worker(
                     Some(WorkerCommand::E2ePairOffer(accept)) => {
                         e2e_runtime::answer_pairing_offer(&mut state, &ui, accept).await;
                     }
-                    Some(WorkerCommand::E2ePairOffer(accept)) => {
-                        e2e_runtime::answer_pairing_offer(&mut state, &ui, accept).await;
-                    }
                     Some(WorkerCommand::E2ePeerKey {
                         step,
                         network,
