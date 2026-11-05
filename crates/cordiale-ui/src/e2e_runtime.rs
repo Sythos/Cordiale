@@ -17,8 +17,8 @@ use std::collections::{BTreeSet, VecDeque};
 
 use cordiale_core::e2e_device::E2eError;
 use cordiale_core::e2e_engine::{
-    conversation_id, history_peers_of, locked_label, route_for_window, E2eEngine, EngineError,
-    RowOutcome, SendRoute, OWN_DEVICE,
+    action_body, action_text, conversation_id, history_peers_of, locked_label, route_for_window,
+    E2eEngine, EngineError, RowOutcome, SendRoute, OWN_DEVICE,
 };
 use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing::{PairingInvite, PairingPush};
@@ -643,15 +643,22 @@ pub(crate) fn locked_row_with_drop(
                 .to_string()
         })
         .unwrap_or_default();
+    // An action row has the shape of a plain `/me` row: no nick cell and
+    // the line `* nick words`.
+    let action = action_body(&message.text);
+    let shown = match action {
+        Some(words) => format!("* {nick} {words}"),
+        None => message.text.clone(),
+    };
     RenderedMessage {
         timestamp,
-        nick: Some(nick.to_string()),
+        nick: action.is_none().then(|| nick.to_string()),
         text: if dropped.is_some() {
-            format!("\u{26A0} {}", message.text)
+            format!("\u{26A0} {shown}")
         } else {
-            message.text.clone()
+            shown
         },
-        italic: dropped.is_some(),
+        italic: dropped.is_some() || action.is_some(),
         message_id: None,
         server_time: message.sent_at.checked_mul(1000),
         presence_noise: false,
@@ -705,6 +712,12 @@ pub(crate) fn locked_rows_for_view(
         .into_iter()
         .map(|text| RenderedMessage {
             text,
+            nick: Some(if message.sender_device == OWN_DEVICE {
+                own_nick.to_string()
+            } else {
+                peer.to_string()
+            }),
+            italic: dropped.is_some(),
             ..plain.clone()
         })
         .collect()
@@ -2591,6 +2604,52 @@ pub(crate) fn close_locked_query(
 /// Sends `body` from a locked window through the engine. The text goes out
 /// as an Olm message or not at all: on any failure the user sees an error and
 /// nothing is sent as clear text.
+/// What a line typed in a locked window is. Only `Text` and `Action` go to
+/// the E2E send path. A command runs as in a plain query and never reaches
+/// the peer as an encrypted message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LockedInput {
+    /// Chat text. A `//text` line is the text `/text`.
+    Text(String),
+    /// `/me <words>`: chat content that the peer shows as an action.
+    Action(String),
+    /// `/np`: the radio line as an encrypted action.
+    NowPlaying,
+    /// A command that has its own handler.
+    Command,
+    /// A line with a slash that is no command. Nothing is sent.
+    Reject,
+}
+
+/// Sorts one line of a locked window. Run it before the E2E send path.
+pub(crate) fn classify_locked_input(body: &str) -> LockedInput {
+    use cordiale_core::slash::{parse, SlashCommand};
+    if !body.trim_start().starts_with('/') {
+        return LockedInput::Text(body.to_string());
+    }
+    match parse(body) {
+        Some(SlashCommand::Say(text)) => LockedInput::Text(text),
+        Some(SlashCommand::Action(text)) => LockedInput::Action(text),
+        Some(SlashCommand::NowPlaying) => LockedInput::NowPlaying,
+        Some(_) => LockedInput::Command,
+        None => LockedInput::Reject,
+    }
+}
+
+/// Sends `/me <words>` of a locked window as an encrypted action.
+pub(crate) async fn handle_send_locked_action(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    nick: String,
+    words: String,
+) {
+    if words.trim().is_empty() {
+        return;
+    }
+    handle_send_locked(state, ui, network, nick, action_text(&words)).await;
+}
+
 pub(crate) async fn handle_send_locked(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -2599,10 +2658,6 @@ pub(crate) async fn handle_send_locked(
     body: String,
 ) {
     if body.trim().is_empty() {
-        return;
-    }
-    if body.trim_start().starts_with('/') {
-        set_e2e_status(ui, "e2e-text-only");
         return;
     }
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
@@ -2691,6 +2746,71 @@ pub(crate) async fn tick_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_in_a_locked_window_is_not_a_chat_text() {
+        let secret = format!("pw{}", std::process::id());
+        let identify = format!("/ns identify {secret}");
+        assert_eq!(classify_locked_input(&identify), LockedInput::Command);
+        assert_eq!(classify_locked_input("/whois"), LockedInput::Command);
+        assert_eq!(classify_locked_input("/join #room"), LockedInput::Command);
+        assert_eq!(classify_locked_input("/msg alice hi"), LockedInput::Command);
+        assert_eq!(classify_locked_input("/e2e devices"), LockedInput::Command);
+    }
+
+    #[test]
+    fn an_unknown_command_in_a_locked_window_is_not_sent_as_text() {
+        // The normal command code shows the error for an unknown command.
+        assert_eq!(classify_locked_input("/frob x"), LockedInput::Command);
+        // A lone slash is no command and no text.
+        assert_eq!(classify_locked_input("/"), LockedInput::Reject);
+    }
+
+    #[test]
+    fn text_and_the_double_slash_escape_keep_the_encrypted_send_path() {
+        assert_eq!(
+            classify_locked_input("hello"),
+            LockedInput::Text("hello".to_string())
+        );
+        assert_eq!(
+            classify_locked_input("//shrug"),
+            LockedInput::Text("/shrug".to_string())
+        );
+    }
+
+    #[test]
+    fn me_in_a_locked_window_is_an_encrypted_action() {
+        assert_eq!(
+            classify_locked_input("/me waves"),
+            LockedInput::Action("waves".to_string())
+        );
+        assert_eq!(classify_locked_input("/np"), LockedInput::NowPlaying);
+    }
+
+    #[test]
+    fn an_action_row_renders_as_an_action_line() {
+        let message = E2eMessage {
+            id: "net:in:1".to_string(),
+            conversation_id: "c".to_string(),
+            sender_device: "did".to_string(),
+            sent_at: 100,
+            text: action_text("waves"),
+            encrypted: true,
+            captures: Vec::new(),
+        };
+        let row = locked_row_with_drop(&message, "me", "alice", None);
+        assert_eq!(row.text, "* alice waves");
+        assert_eq!(row.nick, None);
+        assert!(row.encrypted);
+        let own = E2eMessage {
+            sender_device: OWN_DEVICE.to_string(),
+            ..message
+        };
+        assert_eq!(
+            locked_row_with_drop(&own, "me", "alice", None).text,
+            "* me waves"
+        );
+    }
 
     #[test]
     fn a_reset_network_gets_no_engine_and_keeps_its_marker() {

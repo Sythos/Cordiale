@@ -247,6 +247,13 @@ If the message matters, ask the peer if they got it.
 - Encrypted queries take plain text only. Files and media are not available
   in an encrypted query. Cordiale shows "An encrypted chat takes plain text
   only" and sends nothing.
+- A line that starts with a slash is a command, not a message. Cordiale runs
+  it as in a normal query and never sends it to the peer. Commands such as
+  `/ns identify` keep their normal visibility: E2E does not protect them from
+  the server or the service. `/me` stays inside the encrypted chat and shows
+  as an action on the other device. To send a text that starts with a slash,
+  type two slashes: `//text`. `/query` with no nick closes the encrypted
+  query and does not close the normal query.
 - A peer without a compatible client cannot read encrypted messages.
   A plain IRC client can show control text that looks like random characters.
   This text is not a message.
