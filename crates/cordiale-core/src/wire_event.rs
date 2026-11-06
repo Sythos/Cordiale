@@ -59,6 +59,8 @@ pub enum ClientEventKind {
     DirectoryComplete,
     DirectoryFailed,
     DirectoryProgress,
+    E2eIncoming,
+    E2eIncomingLost,
     E2eMessage,
     E2ePairingClosed,
     E2ePairingMessage,
@@ -135,6 +137,8 @@ impl ClientEventKind {
             "directory_complete" => Self::DirectoryComplete,
             "directory_failed" => Self::DirectoryFailed,
             "directory_progress" => Self::DirectoryProgress,
+            "e2e_incoming" => Self::E2eIncoming,
+            "e2e_incoming_lost" => Self::E2eIncomingLost,
             "e2e_message" => Self::E2eMessage,
             "e2e_pairing_closed" => Self::E2ePairingClosed,
             "e2e_pairing_message" => Self::E2ePairingMessage,
@@ -205,6 +209,8 @@ impl ClientEventKind {
             Self::DirectoryComplete => "directory_complete",
             Self::DirectoryFailed => "directory_failed",
             Self::DirectoryProgress => "directory_progress",
+            Self::E2eIncoming => "e2e_incoming",
+            Self::E2eIncomingLost => "e2e_incoming_lost",
             Self::E2eMessage => "e2e_message",
             Self::E2ePairingClosed => "e2e_pairing_closed",
             Self::E2ePairingMessage => "e2e_pairing_message",
@@ -281,7 +287,7 @@ mod tests {
     use std::collections::HashSet;
 
     /// Every kind, to check the wire-name table end to end.
-    const ALL_CLIENT_EVENT_KINDS: [ClientEventKind; 64] = [
+    const ALL_CLIENT_EVENT_KINDS: [ClientEventKind; 66] = [
         ClientEventKind::ArchiveChanged,
         ClientEventKind::ArchivePurged,
         ClientEventKind::AutoAwayDebounceChanged,
@@ -300,6 +306,8 @@ mod tests {
         ClientEventKind::DirectoryComplete,
         ClientEventKind::DirectoryFailed,
         ClientEventKind::DirectoryProgress,
+        ClientEventKind::E2eIncoming,
+        ClientEventKind::E2eIncomingLost,
         ClientEventKind::E2eMessage,
         ClientEventKind::E2ePairingClosed,
         ClientEventKind::E2ePairingMessage,
@@ -349,13 +357,13 @@ mod tests {
     ];
 
     #[test]
-    fn inventory_has_64_unique_wire_names_and_round_trips() {
+    fn inventory_has_66_unique_wire_names_and_round_trips() {
         let names: HashSet<_> = ALL_CLIENT_EVENT_KINDS
             .iter()
             .map(|kind| kind.as_wire_name())
             .collect();
-        assert_eq!(ALL_CLIENT_EVENT_KINDS.len(), 64);
-        assert_eq!(names.len(), 64);
+        assert_eq!(ALL_CLIENT_EVENT_KINDS.len(), 66);
+        assert_eq!(names.len(), 66);
         for kind in ALL_CLIENT_EVENT_KINDS {
             assert_eq!(
                 ClientEventKind::from_wire_name(kind.as_wire_name()),
