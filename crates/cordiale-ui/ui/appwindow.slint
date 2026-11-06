@@ -2945,6 +2945,8 @@ export component AppWindow inherits Window {
             return @tr("Pairing failed. Start again.");
         } else if status-kind == "e2e-pair-wrong-code" {
             return @tr("The code is not the same. Pairing stopped. Start again.");
+        } else if status-kind == "e2e-pair-full" {
+            return @tr("This identity has three devices. Revoke a device before you add a new one.");
         } else if status-kind == "e2e-pair-unavailable" {
             return @tr("This server does not support device pairing.");
         } else if status-kind == "e2e-pair-none" {

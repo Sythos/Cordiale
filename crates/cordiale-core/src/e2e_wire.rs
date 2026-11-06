@@ -35,8 +35,13 @@ use serde_json::value::RawValue;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// A signed device list holds 1 to 4 devices.
+/// A signed device list that Cordiale reads holds 1 to 4 devices. An old
+/// identity can hold four.
 pub const MAX_LIST_DEVICES: usize = 4;
+
+/// Cordiale adds a device only to a list that holds fewer devices than this.
+/// This limit is for new enrollment. It does not apply to a received list.
+pub const MAX_ENROLLED_DEVICES: usize = 3;
 
 /// Highest accepted value for `ver` and `lv`: 2^31 - 1.
 pub const MAX_VERSION: u32 = i32::MAX as u32;
