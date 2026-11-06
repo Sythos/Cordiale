@@ -192,6 +192,7 @@ pub fn pairing_error_key(error: &DriveError) -> &'static str {
             "e2e-pair-unavailable"
         }
         DriveError::Flow(FlowError::WrongCode) => "e2e-pair-wrong-code",
+        DriveError::Flow(FlowError::ListFull) => "e2e-pair-full",
         DriveError::Flow(FlowError::NotActive | FlowError::NoChannel) => "e2e-pair-none",
         _ => "e2e-pair-failed",
     }
@@ -670,6 +671,8 @@ mod tests {
         assert_eq!(pairing_error_key(&wrong), "e2e-pair-wrong-code");
         let none = DriveError::Flow(FlowError::NotActive);
         assert_eq!(pairing_error_key(&none), "e2e-pair-none");
+        let full = DriveError::Flow(FlowError::ListFull);
+        assert_eq!(pairing_error_key(&full), "e2e-pair-full");
         let other = DriveError::Flow(FlowError::TooLarge);
         assert_eq!(pairing_error_key(&other), "e2e-pair-failed");
     }

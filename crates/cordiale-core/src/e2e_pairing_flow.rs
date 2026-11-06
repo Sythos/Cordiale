@@ -85,7 +85,7 @@ use crate::e2e_refusal::E2eRouteError;
 use crate::e2e_state::E2eStateStore;
 use crate::e2e_wire::{
     check_list_devices, decode_key, decode_signature, device_id_signed_text, pairing_message_fits,
-    MAX_VERSION, PAIRING_LIFETIME_SECS, PAIRING_MESSAGE_MAX_BYTES,
+    MAX_ENROLLED_DEVICES, MAX_VERSION, PAIRING_LIFETIME_SECS, PAIRING_MESSAGE_MAX_BYTES,
 };
 
 /// The info text of the ECIES channel. Final value: section 4g of the Grappa
@@ -144,7 +144,8 @@ pub enum FlowError {
     BadMessage,
     /// The signed answer does not verify, or it is for another device.
     BadGrant,
-    /// The list has four devices already, or its version is at the top.
+    /// The list has three devices already (the enrollment cap), or its
+    /// version is at the top.
     ListFull,
     /// The creator has no master key or no own list.
     NoIdentity,
@@ -1013,6 +1014,11 @@ pub fn build_grant(
         .ok_or(FlowError::ListFull)?;
     let mut keys = current.keys.clone();
     if !keys.iter().any(|key| key == device_ed25519) {
+        // A list from an old identity can hold four devices. It is read, but
+        // no device is added to it.
+        if keys.len() >= MAX_ENROLLED_DEVICES {
+            return Err(FlowError::ListFull);
+        }
         keys.push(device_ed25519.to_string());
     }
     check_list_devices(&keys).map_err(|_| FlowError::ListFull)?;
@@ -1250,6 +1256,14 @@ pub async fn start_creator(
     store: &mut E2eStateStore,
     now: i64,
 ) -> Result<(PairingSession, PairingLink), DriveError> {
+    // The own list is the list of this identity on this network. A full list
+    // gets no rendezvous: the new device would be refused at the end.
+    if store
+        .signed_list()
+        .is_some_and(|list| list.keys.len() >= MAX_ENROLLED_DEVICES)
+    {
+        return Err(FlowError::ListFull.into());
+    }
     let ecies = Ecies::with_info(PAIRING_INFO);
     let curve = ecies.public_key().to_base64();
     let rendezvous = ctx
@@ -2306,7 +2320,18 @@ mod tests {
     }
 
     #[test]
-    fn a_full_list_gives_no_grant() {
+    fn a_list_of_three_devices_gives_no_grant() {
+        let master = Account::new();
+        let keys: Vec<String> = (0..MAX_ENROLLED_DEVICES).map(|_| key()).collect();
+        let list = signed_list_of(&master, 1, &keys);
+        assert_eq!(
+            build_grant(&master, &list, &key()).unwrap_err(),
+            FlowError::ListFull
+        );
+    }
+
+    #[test]
+    fn a_list_of_four_old_devices_gives_no_grant() {
         let master = Account::new();
         let keys: Vec<String> = (0..4).map(|_| key()).collect();
         let list = signed_list_of(&master, 1, &keys);
@@ -2314,6 +2339,38 @@ mod tests {
             build_grant(&master, &list, &key()).unwrap_err(),
             FlowError::ListFull
         );
+    }
+
+    #[test]
+    fn a_list_of_two_devices_gives_a_grant_for_a_third() {
+        let master = Account::new();
+        let keys: Vec<String> = (0..2).map(|_| key()).collect();
+        let list = signed_list_of(&master, 1, &keys);
+        let grant = build_grant(&master, &list, &key()).expect("grant");
+        assert_eq!(grant.list.keys.len(), 3);
+    }
+
+    #[test]
+    fn a_joiner_still_applies_a_signed_list_of_four_devices() {
+        let master = Account::new();
+        let joiner = Account::new();
+        let mut keys: Vec<String> = (0..3).map(|_| key()).collect();
+        keys.push(key_of(&joiner));
+        keys.sort();
+        let list = signed_list_of(&master, 1, &keys);
+        let master_key = master.identity_keys().ed25519.to_base64();
+        let certificate = build_device_certificate(1, &key_of(&joiner), &master_key, |text| {
+            master.sign(text).to_base64()
+        })
+        .expect("certificate");
+        let grant = Grant {
+            master: master_key,
+            certificate,
+            list,
+        };
+        let dir = scratch_dir("four-devices");
+        let mut store = open_store(&dir, "joiner.bin");
+        apply_grant(&mut store, &key_of(&joiner), &grant).expect("four devices are read");
     }
 
     #[test]

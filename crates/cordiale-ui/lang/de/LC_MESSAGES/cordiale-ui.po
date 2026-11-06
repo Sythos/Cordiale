@@ -349,6 +349,10 @@ msgid "The code is not the same. Pairing stopped. Start again."
 msgstr "Der Code stimmt nicht überein. Kopplung gestoppt. Starte neu."
 
 msgctxt "AppWindow"
+msgid "This identity has three devices. Revoke a device before you add a new one."
+msgstr "Diese Identität hat drei Geräte. Widerrufe ein Gerät, bevor du ein neues hinzufügst."
+
+msgctxt "AppWindow"
 msgid "This server does not support device pairing."
 msgstr "Dieser Server unterstützt die Gerätekopplung nicht."
 
