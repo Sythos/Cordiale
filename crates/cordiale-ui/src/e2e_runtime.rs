@@ -963,6 +963,11 @@ pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<
             // so a revoked device gets no inbox work.
             resume_pending_manage(state, ui, &network).await;
             drain_network(state, ui, &network).await;
+        } else if state.e2e.forgotten.contains(&network) {
+            // The user forgot the local keys, but the server still holds the
+            // identity. A confirmed reset that stayed open ends here. The
+            // network gets no inbox or send work.
+            resume_pending_manage(state, ui, &network).await;
         }
         sync_e2e_requests(state, ui, &network).await;
     }
