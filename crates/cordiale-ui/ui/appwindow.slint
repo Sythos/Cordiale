@@ -2989,6 +2989,11 @@ export component AppWindow inherits Window {
         return status-message;
     }
 
+    // The time of the first registration of a device, shown after its row.
+    public pure function e2e-device-added-text(time: string) -> string {
+        return @tr("Added {}", time);
+    }
+
     // One entry of the own-device list. `kind` comes from `device_rows()`.
     public pure function e2e-device-row-text(did: string, mine: bool, kind: string, time: string) -> string {
         if kind == "at" {
