@@ -3979,3 +3979,7 @@ msgstr "Le vecchie chiavi E2E non sono state rimosse."
 msgctxt "AppWindow"
 msgid "This device has no replaced E2E identity. Nothing was removed."
 msgstr "Questo dispositivo non ha un’identità E2E sostituita. Non è stato rimosso nulla."
+
+msgctxt "AppWindow"
+msgid "is sending an encrypted message..."
+msgstr "sta inviando un messaggio cifrato..."

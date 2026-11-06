@@ -9446,7 +9446,12 @@ fn chat_line_from_message(
     };
     // A rename row shows its sentence up to the new nick as text; the nick
     // itself is a separate action, so it never passes through the markup.
-    let (display_text, rename_target) = rename_row_parts(message);
+    let incoming = is_incoming_row(message);
+    let (display_text, rename_target) = if incoming {
+        ("", "")
+    } else {
+        rename_row_parts(message)
+    };
     let runs: Vec<(String, (u8, u8, u8), bool)> =
         cordiale_core::formatting::parse_mirc_text(display_text)
             .into_iter()
@@ -9476,7 +9481,11 @@ fn chat_line_from_message(
         nick_color: nick_color_value,
         italic: message.italic,
         body,
-        reply_body: message.text.clone().into(),
+        reply_body: if incoming {
+            String::new().into()
+        } else {
+            message.text.clone().into()
+        },
         reply_id: message
             .message_id
             .map(|id| id.to_string())
@@ -9485,7 +9494,19 @@ fn chat_line_from_message(
         mention,
         rename_target: rename_target.into(),
         encrypted: message_lock_visible(message),
+        incoming,
     }
+}
+
+/// The marker text of the progress row of a multi-frame E2E message on its
+/// way. A NUL byte cannot come over IRC, and a decrypted row is always
+/// `encrypted`, so no peer text is read as this row.
+const INCOMING_ROW_TEXT: &str = "\u{0}e2e-incoming";
+
+/// Whether a row is the progress row of a multi-frame E2E message. It has no
+/// content: the window shows its own translated sentence.
+fn is_incoming_row(message: &RenderedMessage) -> bool {
+    message.text == INCOMING_ROW_TEXT && message.italic && !message.encrypted
 }
 
 /// Whether a row shows the E2E lock: only an ordinary chat message that was

@@ -595,6 +595,15 @@ pub(crate) async fn handle_frame(
         handle_e2e_message(state, ui, &frame).await;
         return;
     }
+    if payload_kind == "e2e_incoming" {
+        // A multi-frame message began to arrive: a progress row, no content.
+        handle_e2e_incoming(state, ui, &frame);
+        return;
+    }
+    if payload_kind == "e2e_incoming_lost" {
+        handle_e2e_incoming_lost(state, ui, &frame);
+        return;
+    }
     if payload_kind == "e2e_request" {
         handle_e2e_request_push(state, ui, &frame.payload).await;
         return;
