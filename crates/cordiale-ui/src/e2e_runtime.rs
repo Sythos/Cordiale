@@ -126,7 +126,8 @@ pub(crate) struct E2eRuntime {
     /// Multi-frame messages that began to arrive for this device and are not
     /// whole yet (`e2e_incoming`, protocol 59). Each one shows a progress row
     /// in the locked window of its sender. The row has no content. The
-    /// server does not replay the event, and this list is not saved.
+    /// server does not replay the event, and this list is not saved. The end
+    /// of a session clears it.
     incoming: Vec<PendingIncoming>,
 }
 
@@ -456,6 +457,21 @@ impl E2eRuntime {
             .iter()
             .position(|row| row.matches(network, from_did, msgid))?;
         Some(self.incoming.remove(at).nick)
+    }
+
+    /// Removes every progress row, because the session ended. The server does
+    /// not replay the events, so a row of the ended session never ends by
+    /// itself. Returns the `(network, nick)` of the windows that had a row,
+    /// sorted and without repeats.
+    fn clear_incoming(&mut self) -> Vec<(String, String)> {
+        let mut windows: Vec<(String, String)> = self
+            .incoming
+            .drain(..)
+            .map(|row| (row.network, row.nick))
+            .collect();
+        windows.sort();
+        windows.dedup();
+        windows
     }
 
     /// The progress rows of the locked window of `nick`. A row belongs to a
@@ -3327,7 +3343,8 @@ pub(crate) async fn handle_send_locked(
 
 /// The session stopped (a disconnect or a reconnect): every open send of
 /// every engine becomes a `session_ended` drop, and every queue is emptied.
-/// The locked window shows the dropped rows.
+/// The locked window shows the dropped rows. The progress rows of messages on
+/// their way are removed: the inbox read after a reconnect shows the whole ones.
 pub(crate) fn end_e2e_sessions(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     // An offer of the ended session is stale after a reconnect.
     if state.e2e.offer.take().is_some() {
@@ -3346,6 +3363,9 @@ pub(crate) fn end_e2e_sessions(state: &mut WorkerState, ui: &slint::Weak<AppWind
         for nick in changed {
             refresh_locked_view(state, ui, network, &nick);
         }
+    }
+    for (network, nick) in state.e2e.clear_incoming() {
+        refresh_locked_view(state, ui, &network, &nick);
     }
     if any {
         set_e2e_status(ui, "e2e-send-failed");
@@ -3478,6 +3498,36 @@ mod tests {
             runtime.note_incoming_lost(&lost, OWN_DID).as_deref(),
             Some("Alice")
         );
+        assert_eq!(runtime.incoming_rows("azzurra", "Alice").len(), 1);
+    }
+
+    #[test]
+    fn the_end_of_a_session_clears_every_progress_row() {
+        let mut runtime = E2eRuntime::default();
+        for (from, did, msgid) in [
+            ("Bob", SIBLING_DID, "m1"),
+            ("Alice", PEER_DID, "m1"),
+            ("Alice", PEER_DID, "m2"),
+        ] {
+            let event = incoming_event("azzurra", from, did, "*", msgid);
+            assert!(runtime.note_incoming(&event, OWN_DID).is_some());
+        }
+        assert_eq!(
+            runtime.clear_incoming(),
+            vec![
+                ("azzurra".to_string(), "Alice".to_string()),
+                ("azzurra".to_string(), "Bob".to_string()),
+            ]
+        );
+        assert!(runtime.incoming_rows("azzurra", "Alice").is_empty());
+        assert!(runtime.incoming_rows("azzurra", "Bob").is_empty());
+        assert_eq!(runtime.take_incoming("azzurra", PEER_DID, "m1"), None);
+        let lost = lost_event("azzurra", PEER_DID, "*", "m2");
+        assert_eq!(runtime.note_incoming_lost(&lost, OWN_DID), None);
+        assert!(runtime.clear_incoming().is_empty());
+        // A new event of the next session adds a row again.
+        let event = incoming_event("azzurra", "Alice", PEER_DID, "*", "m3");
+        assert!(runtime.note_incoming(&event, OWN_DID).is_some());
         assert_eq!(runtime.incoming_rows("azzurra", "Alice").len(), 1);
     }
 
