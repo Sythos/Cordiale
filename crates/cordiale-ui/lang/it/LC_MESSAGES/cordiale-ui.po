@@ -3897,6 +3897,10 @@ msgid "Device {}: last activity {}"
 msgstr "Dispositivo {}: ultima attività {}"
 
 msgctxt "AppWindow"
+msgid "Added {}"
+msgstr "Aggiunto {}"
+
+msgctxt "AppWindow"
 msgid "Device {} (this device): no activity recorded"
 msgstr "Dispositivo {} (questo dispositivo): nessuna attività registrata"
 

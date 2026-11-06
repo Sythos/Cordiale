@@ -459,13 +459,15 @@ fn undeliverable_text_for(
 
 /// One entry of the own-device view. `kind` selects the translated activity
 /// text in `e2e-device-row-text()`: `at`, `never`, `not-sent`, `unreadable`
-/// or `unknown`. `time` is set only for `at`.
+/// or `unknown`. `time` is set only for `at`. `added` is the local time of
+/// the first registration, empty when the server does not give it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DeviceRow {
     pub did: String,
     pub mine: bool,
     pub kind: &'static str,
     pub time: String,
+    pub added: String,
 }
 
 /// Formats a protocol timestamp in the zone `zone`. None when the text is
@@ -517,6 +519,10 @@ pub(crate) fn device_rows(
                 mine: did == own,
                 kind,
                 time,
+                added: record
+                    .and_then(|record| record.inserted_at.as_deref())
+                    .and_then(|raw| activity_time_in(raw, &chrono::Local))
+                    .unwrap_or_default(),
             }
         })
         .collect()
@@ -1008,7 +1014,12 @@ mod tests {
     }
 
     fn record(did: &str, last_seen: LastSeen) -> DeviceRecord {
+        record_added(did, last_seen, None)
+    }
+
+    fn record_added(did: &str, last_seen: LastSeen, inserted_at: Option<&str>) -> DeviceRecord {
         DeviceRecord {
+            inserted_at: inserted_at.map(str::to_string),
             did: did.to_string(),
             ed25519: String::new(),
             curve25519: String::new(),
@@ -1060,6 +1071,21 @@ mod tests {
         let rows = device_rows(&ids(&["aaa"]), "zzz", Some(&records));
         assert_eq!(rows[0].kind, "at");
         assert!(!rows[0].time.is_empty());
+    }
+
+    #[test]
+    fn the_added_time_shows_only_when_given_and_is_not_the_activity() {
+        let records = vec![
+            record_added("aaa", LastSeen::Never, Some("2026-10-01T08:00:00Z")),
+            record_added("bbb", LastSeen::At("2026-11-05T10:20:30Z".into()), None),
+        ];
+        let rows = device_rows(&ids(&["aaa", "bbb", "ccc"]), "zzz", Some(&records));
+        assert!(!rows[0].added.is_empty());
+        assert_eq!(rows[0].kind, "never");
+        assert!(rows[0].time.is_empty());
+        assert!(rows[1].added.is_empty());
+        assert_eq!(rows[1].kind, "at");
+        assert!(rows[2].added.is_empty());
     }
 
     #[test]

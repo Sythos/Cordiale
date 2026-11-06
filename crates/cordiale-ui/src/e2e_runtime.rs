@@ -1859,13 +1859,20 @@ fn device_rows_text(ui: &AppWindow, rows: Option<&[DeviceRow]>) -> String {
         Some(rows) => rows
             .iter()
             .map(|row| {
-                ui.invoke_e2e_device_row_text(
-                    row.did.as_str().into(),
-                    row.mine,
-                    row.kind.into(),
-                    row.time.as_str().into(),
-                )
-                .to_string()
+                let text = ui
+                    .invoke_e2e_device_row_text(
+                        row.did.as_str().into(),
+                        row.mine,
+                        row.kind.into(),
+                        row.time.as_str().into(),
+                    )
+                    .to_string();
+                if row.added.is_empty() {
+                    text
+                } else {
+                    let added = ui.invoke_e2e_device_added_text(row.added.as_str().into());
+                    format!("{text} ({added})")
+                }
             })
             .collect::<Vec<_>>()
             .join("; "),
