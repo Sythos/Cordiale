@@ -43,7 +43,7 @@ slint = { version = "1", default-features = false, features = [
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 # Display width of the sidebar rows, for the sidebar's minimum width; Slint
 # already brings the crate in.
-unicode-width = "0.2"
+unicode-width = "0.2.3"
 # The private copy of a file waiting to be uploaded: a new file with a random
 # name, readable by the owner only, deleted when dropped.
 tempfile = "3"
@@ -83,7 +83,7 @@ video-shrink = ["cordiale-core/video-shrink"]
 # of the key-request and SAS tests; the UI itself does no crypto.
 [dev-dependencies]
 chacha20poly1305 = "0.11"
-vodozemac = "0.11.1"
+vodozemac = "0.11.2"
 
 [build-dependencies]
 slint-build = "1"
