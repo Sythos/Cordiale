@@ -43,7 +43,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 
 use crate::backoff::{random_unit, Backoff};
-use crate::e2e_device_routes::InboxRow;
+use crate::e2e_device_routes::{InboxRow, IncomingEvent, IncomingLostEvent};
 use crate::e2e_pacing::{SendBook, SendDropped};
 use crate::e2e_pairing::{PairingOffer, PairingPush};
 use crate::phoenix::{PhoenixMessage, RefCounter, HEARTBEAT_EVENT, HEARTBEAT_TOPIC};
@@ -262,6 +262,24 @@ pub fn route_e2e_message(frame: &PhoenixMessage, server_protocol: Option<u32>) -
         return None;
     }
     InboxRow::from_value(&frame.payload, server_protocol).ok()
+}
+
+/// Read one session frame as an `e2e_incoming` event (protocol 59). Any other
+/// frame, and an event that does not read, return `None`.
+pub fn route_e2e_incoming(frame: &PhoenixMessage) -> Option<IncomingEvent> {
+    if frame.payload.get("kind")?.as_str()? != "e2e_incoming" {
+        return None;
+    }
+    IncomingEvent::from_value(&frame.payload).ok()
+}
+
+/// Read one session frame as an `e2e_incoming_lost` event (protocol 59). Any
+/// other frame, and an event that does not read, return `None`.
+pub fn route_e2e_incoming_lost(frame: &PhoenixMessage) -> Option<IncomingLostEvent> {
+    if frame.payload.get("kind")?.as_str()? != "e2e_incoming_lost" {
+        return None;
+    }
+    IncomingLostEvent::from_value(&frame.payload).ok()
 }
 
 /// Read one session frame as a pairing event (`e2e_pairing_message` or
@@ -849,6 +867,36 @@ mod tests {
         // A frame of another kind is ignored.
         let other = reply("2", serde_json::json!({"kind": "message"}));
         assert!(route_e2e_send_dropped(&mut book, &other).is_none());
+    }
+
+    #[test]
+    fn frames_with_incoming_events_route_only_their_own_kind() {
+        let incoming = reply(
+            "1",
+            serde_json::json!({
+                "kind": "e2e_incoming", "network": "azzurra", "from": "Alice",
+                "from_did": "AaZaARRDyBk", "to": "*", "msgid": "q83vEjRWeJA"
+            }),
+        );
+        let lost = reply(
+            "2",
+            serde_json::json!({
+                "kind": "e2e_incoming_lost", "network": "azzurra",
+                "from_did": "AaZaARRDyBk", "to": "*", "msgid": "q83vEjRWeJA"
+            }),
+        );
+        let old = reply("3", serde_json::json!({"kind": "message"}));
+        assert_eq!(route_e2e_incoming(&incoming).expect("event").from, "Alice");
+        assert_eq!(
+            route_e2e_incoming_lost(&lost).expect("event").msgid,
+            "q83vEjRWeJA"
+        );
+        // Each router reads only its own kind. Other kinds are ignored.
+        assert!(route_e2e_incoming(&lost).is_none());
+        assert!(route_e2e_incoming_lost(&incoming).is_none());
+        assert!(route_e2e_incoming(&old).is_none());
+        assert!(route_e2e_incoming_lost(&old).is_none());
+        assert!(route_e2e_message(&incoming, Some(59)).is_none());
     }
 
     #[test]

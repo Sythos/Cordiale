@@ -63,9 +63,12 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// explicit encrypted-chat consent (53), and `no_such_nick` (54). Protocol 51
 /// also restarts the live session after an admin credential edit. Protocol 55
 /// adds the pairing offer: `curve` on `POST /e2e/pairings`, the
-/// `e2e_pairing_offered` event and `GET /e2e/pairings/offer`. This client
-/// uses the highest Grappa protocol version it implements.
-pub const CLIENT_PROTOCOL_VERSION: u32 = 55;
+/// `e2e_pairing_offered` event and `GET /e2e/pairings/offer`. Protocols 56 to
+/// 58 add only fields and an upload route that this client does not need.
+/// Protocol 59 adds the `e2e_incoming` and `e2e_incoming_lost` events. The
+/// server sends them only to a client that declares 59. This client uses the
+/// highest Grappa protocol version it implements.
+pub const CLIENT_PROTOCOL_VERSION: u32 = 59;
 
 /// The first Grappa `protocol_version` that reads the `before_time`,
 /// `after_time` and `around_time` history cursors. An older server ignores
@@ -135,13 +138,14 @@ mod tests {
     }
 
     #[test]
-    fn client_declares_protocol_55_with_the_pairing_offer() {
+    fn client_declares_protocol_59_with_the_incoming_events() {
         use crate::e2e_protocol::{PairingOperation, PAIRING_OFFER_MIN_PROTOCOL};
-        assert_eq!(CLIENT_PROTOCOL_VERSION, 55);
+        assert_eq!(CLIENT_PROTOCOL_VERSION, 59);
         assert_eq!(MIN_SUPPORTED_PROTOCOL_VERSION, 1);
-        assert_eq!(PAIRING_OFFER_MIN_PROTOCOL, CLIENT_PROTOCOL_VERSION);
+        assert_eq!(PAIRING_OFFER_MIN_PROTOCOL, 55);
         assert!(PairingOperation::Offer.available(Some(CLIENT_PROTOCOL_VERSION)));
-        assert!(!PairingOperation::Offer.available(Some(CLIENT_PROTOCOL_VERSION - 1)));
+        assert!(PairingOperation::Offer.available(Some(PAIRING_OFFER_MIN_PROTOCOL)));
+        assert!(!PairingOperation::Offer.available(Some(PAIRING_OFFER_MIN_PROTOCOL - 1)));
     }
 
     #[test]

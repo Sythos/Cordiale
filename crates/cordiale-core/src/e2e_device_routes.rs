@@ -337,6 +337,96 @@ impl InboxRow {
     }
 }
 
+/// The `e2e_incoming` event of section 4l (protocol 59): a PKMSG or MSG that
+/// spans several lines began to arrive. It has no text. `from` is the raw
+/// nick of the sender. `to` is a device id or `*`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingEvent {
+    pub network: String,
+    pub from: String,
+    pub from_did: String,
+    pub to: String,
+    pub msgid: String,
+}
+
+/// The `e2e_incoming_lost` event of section 4l (protocol 59): a message that
+/// `e2e_incoming` announced will not reach the device that `to` names. It has
+/// no `from`. Match it by network, `from_did` and `msgid`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingLostEvent {
+    pub network: String,
+    pub from_did: String,
+    pub to: String,
+    pub msgid: String,
+}
+
+/// Reads the `to` field of an incoming event: a device id or `*`.
+fn incoming_to(map: &serde_json::Map<String, Value>) -> Result<String, WireError> {
+    let to = required_str(map, "to")?;
+    if to != WILDCARD && !is_did_shape(to) {
+        return Err(WireError::BadDid);
+    }
+    Ok(to.to_string())
+}
+
+/// Reads the sender device id of an incoming event. It is never `*`.
+fn incoming_from_did(map: &serde_json::Map<String, Value>) -> Result<String, WireError> {
+    let from_did = required_str(map, "from_did")?;
+    if !is_did_shape(from_did) {
+        return Err(WireError::BadDid);
+    }
+    Ok(from_did.to_string())
+}
+
+impl IncomingEvent {
+    /// Reads one event. A missing field, a wrong type and a bad `did` are
+    /// errors. Extra fields are ignored.
+    pub fn from_value(value: &Value) -> Result<Self, WireError> {
+        let map = as_object(value)?;
+        if required_str(map, "kind")? != "e2e_incoming" {
+            return Err(WireError::BadFieldType);
+        }
+        let from = required_str(map, "from")?;
+        if from.is_empty() {
+            return Err(WireError::MissingField);
+        }
+        Ok(Self {
+            network: required_str(map, "network")?.to_string(),
+            from: from.to_string(),
+            from_did: incoming_from_did(map)?,
+            to: incoming_to(map)?,
+            msgid: required_msgid(map)?,
+        })
+    }
+
+    /// Whether the event is for the device `own_did`: `to` names it or is `*`.
+    pub fn is_for(&self, own_did: &str) -> bool {
+        self.to == WILDCARD || self.to == own_did
+    }
+}
+
+impl IncomingLostEvent {
+    /// Reads one event. A missing field, a wrong type and a bad `did` are
+    /// errors. Extra fields are ignored.
+    pub fn from_value(value: &Value) -> Result<Self, WireError> {
+        let map = as_object(value)?;
+        if required_str(map, "kind")? != "e2e_incoming_lost" {
+            return Err(WireError::BadFieldType);
+        }
+        Ok(Self {
+            network: required_str(map, "network")?.to_string(),
+            from_did: incoming_from_did(map)?,
+            to: incoming_to(map)?,
+            msgid: required_msgid(map)?,
+        })
+    }
+
+    /// Whether the event is for the device `own_did`: `to` names it or is `*`.
+    pub fn is_for(&self, own_did: &str) -> bool {
+        self.to == WILDCARD || self.to == own_did
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +636,85 @@ mod tests {
             InboxRow::page_from_value(&json!({"messages": {}}), Some(50)),
             Err(WireError::BadFieldType)
         );
+    }
+
+    fn incoming() -> Value {
+        json!({
+            "kind": "e2e_incoming", "network": "azzurra", "from": "vjt-claude",
+            "from_did": DID, "to": "*", "msgid": "q83vEjRWeJA"
+        })
+    }
+
+    fn incoming_lost() -> Value {
+        json!({
+            "kind": "e2e_incoming_lost", "network": "azzurra",
+            "from_did": DID, "to": OTHER_DID, "msgid": "q83vEjRWeJA"
+        })
+    }
+
+    #[test]
+    fn incoming_event_reads_every_field_and_ignores_extra_fields() {
+        let mut value = incoming();
+        value["extra"] = json!(1);
+        let event = IncomingEvent::from_value(&value).unwrap();
+        assert_eq!(event.network, "azzurra");
+        assert_eq!(event.from, "vjt-claude");
+        assert_eq!(event.from_did, DID);
+        assert_eq!(event.to, "*");
+        assert_eq!(event.msgid, "q83vEjRWeJA");
+    }
+
+    #[test]
+    fn incoming_event_refuses_bad_values() {
+        for (field, bad) in [
+            ("from", json!("")),
+            ("from", json!(7)),
+            ("from_did", json!("*")),
+            ("from_did", json!("x")),
+            ("to", json!("x")),
+            ("msgid", json!("a b")),
+            ("network", json!(null)),
+        ] {
+            let mut value = incoming();
+            value[field] = bad;
+            assert!(IncomingEvent::from_value(&value).is_err(), "{value}");
+        }
+        let mut value = incoming();
+        value.as_object_mut().unwrap().remove("from");
+        assert_eq!(
+            IncomingEvent::from_value(&value),
+            Err(WireError::MissingField)
+        );
+        assert!(IncomingEvent::from_value(&incoming_lost()).is_err());
+    }
+
+    #[test]
+    fn incoming_lost_event_has_no_from_field() {
+        let event = IncomingLostEvent::from_value(&incoming_lost()).unwrap();
+        assert_eq!(event.network, "azzurra");
+        assert_eq!(event.from_did, DID);
+        assert_eq!(event.to, OTHER_DID);
+        assert_eq!(event.msgid, "q83vEjRWeJA");
+        assert!(IncomingLostEvent::from_value(&incoming()).is_err());
+        let mut value = incoming_lost();
+        value["from_did"] = json!("*");
+        assert_eq!(
+            IncomingLostEvent::from_value(&value),
+            Err(WireError::BadDid)
+        );
+    }
+
+    #[test]
+    fn incoming_events_are_for_this_device_or_the_wildcard() {
+        let wild = IncomingEvent::from_value(&incoming()).unwrap();
+        assert!(wild.is_for(OTHER_DID));
+        let mut value = incoming();
+        value["to"] = json!(OTHER_DID);
+        let named = IncomingEvent::from_value(&value).unwrap();
+        assert!(named.is_for(OTHER_DID));
+        assert!(!named.is_for(DID));
+        let lost = IncomingLostEvent::from_value(&incoming_lost()).unwrap();
+        assert!(lost.is_for(OTHER_DID));
+        assert!(!lost.is_for(DID));
     }
 }

@@ -1252,9 +1252,33 @@ v54. The internal `MIN_SUPPORTED_PROTOCOL_VERSION` stays at 1.
 | 53 | Consent to start an E2E chat: `/e2e/requests`, `e2e_request`, and `e2e_request_gone` | Typed API routes are in `client.rs` and `rest.rs`. The worker reads the request list on connect and reconnect. A new chat starts only after a user action. After acceptance, Cordiale opens `🔒<user>` and asks for keys. Refusal does not need an E2E identity. |
 | 54 | `no_such_nick` event after a 401 for a missing nick | The event router accepts the kind. The engine fails only text that waits for keys, stops key requests, and clears the nick's pacing state. Text that Grappa accepted stays in its original state. |
 
-The event inventory has 64 kinds. Cordiale must include
+The event inventory has 66 kinds (with `e2e_incoming` and
+`e2e_incoming_lost` of protocol 59, §4l). Cordiale must include
 `e2e_pairing_message` and `e2e_pairing_closed`. Otherwise the first filter in
 `frames.rs` drops them before the pairing handler can read them.
+
+## E2E protocollo 59: messaggio in arrivo (§4l)
+
+Il server invia `e2e_incoming` e `e2e_incoming_lost` solo a un client che
+dichiara `client_proto=59`; Cordiale dichiara 59. I protocolli 56-58 aggiungono
+solo campi e una rotta di upload che il client non usa.
+
+- `e2e_incoming` (`network`, `from`, `from_did`, `to`, `msgid`) arriva una volta
+  per un PKMSG o MSG su più righe, mai per uno su una riga. `to` è un id
+  dispositivo o `*`: Cordiale lo usa solo se è il proprio id o `*`. Mostra una
+  riga di avanzamento senza contenuto nella finestra cifrata del mittente
+  (`from` è il nick raw).
+- La riga si identifica con rete, `from_did` e `msgid`, mai sul solo nick. Finisce
+  con `e2e_message` (stesso `from_did` e `msgid`), che la sostituisce con il
+  messaggio normale, o con `e2e_incoming_lost` (senza `from`), che la toglie.
+- Un `e2e_incoming_lost` senza riga non crea nulla. Gli eventi non sono
+  riproposti: la sessione nuova parte senza righe e Cordiale non ha un timer
+  proprio.
+- Una disconnessione o una riconnessione toglie tutte le righe di avanzamento:
+  la lettura dell'inbox dopo la riconnessione mostra i messaggi completi.
+- Codice: `IncomingEvent` e `IncomingLostEvent` in `e2e_device_routes.rs`,
+  `route_e2e_incoming*` in `session.rs`, stato e righe in `e2e_runtime.rs`
+  (crate UI).
 
 ## E2E protocol update: v52-v54
 

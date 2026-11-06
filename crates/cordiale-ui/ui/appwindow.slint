@@ -235,6 +235,9 @@ struct ChatLine {
     // This message was sent or received through E2E. Set per message, never
     // inferred from the query; false when the state is unknown.
     encrypted: bool,
+    // A multi-frame E2E message is on its way. The row has no content: it
+    // shows a translated sentence in place of `body`.
+    incoming: bool,
 }
 
 // One row in the admin Sessions list.
@@ -2945,6 +2948,8 @@ export component AppWindow inherits Window {
             return @tr("Pairing failed. Start again.");
         } else if status-kind == "e2e-pair-wrong-code" {
             return @tr("The code is not the same. Pairing stopped. Start again.");
+        } else if status-kind == "e2e-pair-full" {
+            return @tr("This identity has three devices. Revoke a device before you add a new one.");
         } else if status-kind == "e2e-pair-unavailable" {
             return @tr("This server does not support device pairing.");
         } else if status-kind == "e2e-pair-none" {
@@ -2987,6 +2992,11 @@ export component AppWindow inherits Window {
             return @tr("The E2E identity was not reset.");
         }
         return status-message;
+    }
+
+    // The time of the first registration of a device, shown after its row.
+    public pure function e2e-device-added-text(time: string) -> string {
+        return @tr("Added {}", time);
     }
 
     // One entry of the own-device list. `kind` comes from `device_rows()`.
@@ -5001,7 +5011,15 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        StyledText {
+                        if line.incoming : Text {
+                            text: @tr("is sending an encrypted message...");
+                            font-italic: true;
+                            color: line.timestamp-color;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                        }
+
+                        if !line.incoming : StyledText {
                             text: line.body;
                             default-color: theme == "dark" ? white : black;
                             link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);

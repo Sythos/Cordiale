@@ -16,6 +16,7 @@ use super::*;
 use std::collections::{BTreeSet, VecDeque};
 
 use cordiale_core::e2e_device::E2eError;
+use cordiale_core::e2e_device_routes::{InboxRow, IncomingEvent, IncomingLostEvent};
 use cordiale_core::e2e_engine::{
     action_body, action_text, conversation_id, history_peers_of, locked_label, route_for_window,
     E2eEngine, EngineError, RowOutcome, SendRoute, OWN_DEVICE,
@@ -37,7 +38,10 @@ use cordiale_core::e2e_store::{E2eHistoryStore, E2eMessage};
 use cordiale_core::e2e_wire::did_from_key_text;
 use cordiale_core::phoenix::PhoenixMessage;
 use cordiale_core::rest::{E2eConsentLine, E2eRequest, E2eRequestCreate, E2eRequestState};
-use cordiale_core::session::{route_e2e_message, route_e2e_pairing, route_e2e_pairing_offer};
+use cordiale_core::session::{
+    route_e2e_incoming, route_e2e_incoming_lost, route_e2e_message, route_e2e_pairing,
+    route_e2e_pairing_offer,
+};
 use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
 use crate::e2e_view::{
@@ -119,6 +123,28 @@ pub(crate) struct E2eRuntime {
     /// Why this device cannot use the identity of a network, when the last
     /// provisioning run found out. A failed read sets no reason.
     recovery: HashMap<String, RecoveryReason>,
+    /// Multi-frame messages that began to arrive for this device and are not
+    /// whole yet (`e2e_incoming`, protocol 59). Each one shows a progress row
+    /// in the locked window of its sender. The row has no content. The
+    /// server does not replay the event, and this list is not saved. The end
+    /// of a session clears it.
+    incoming: Vec<PendingIncoming>,
+}
+
+/// A multi-frame encrypted message on its way. The key is the network, the
+/// sender device id and the message id; the nick is only for the row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingIncoming {
+    network: String,
+    nick: String,
+    from_did: String,
+    msgid: String,
+}
+
+impl PendingIncoming {
+    fn matches(&self, network: &str, from_did: &str, msgid: &str) -> bool {
+        self.network == network && self.from_did == from_did && self.msgid == msgid
+    }
 }
 
 /// How many rendezvous ids of earlier offers a session remembers.
@@ -390,6 +416,73 @@ impl E2eRuntime {
     fn put_request(&mut self, network: &str, request: E2eRequest) {
         self.requests
             .insert((network.to_string(), request.id), request);
+    }
+
+    /// Notes an `e2e_incoming` event for the device `own_did`. Returns the
+    /// sender nick when the event adds a new progress row. An event for
+    /// another device, and a repeated event, add nothing.
+    fn note_incoming(&mut self, event: &IncomingEvent, own_did: &str) -> Option<String> {
+        if !event.is_for(own_did)
+            || self
+                .incoming
+                .iter()
+                .any(|row| row.matches(&event.network, &event.from_did, &event.msgid))
+        {
+            return None;
+        }
+        self.incoming.push(PendingIncoming {
+            network: event.network.clone(),
+            nick: event.from.clone(),
+            from_did: event.from_did.clone(),
+            msgid: event.msgid.clone(),
+        });
+        Some(event.from.clone())
+    }
+
+    /// Removes the progress row of an `e2e_incoming_lost` event for the
+    /// device `own_did`. Returns the sender nick of the removed row. A lost
+    /// event with no row, or for another device, changes nothing.
+    fn note_incoming_lost(&mut self, event: &IncomingLostEvent, own_did: &str) -> Option<String> {
+        if !event.is_for(own_did) {
+            return None;
+        }
+        self.take_incoming(&event.network, &event.from_did, &event.msgid)
+    }
+
+    /// Removes the progress row of a message that arrived whole. Returns the
+    /// sender nick of the removed row.
+    fn take_incoming(&mut self, network: &str, from_did: &str, msgid: &str) -> Option<String> {
+        let at = self
+            .incoming
+            .iter()
+            .position(|row| row.matches(network, from_did, msgid))?;
+        Some(self.incoming.remove(at).nick)
+    }
+
+    /// Removes every progress row, because the session ended. The server does
+    /// not replay the events, so a row of the ended session never ends by
+    /// itself. Returns the `(network, nick)` of the windows that had a row,
+    /// sorted and without repeats.
+    fn clear_incoming(&mut self) -> Vec<(String, String)> {
+        let mut windows: Vec<(String, String)> = self
+            .incoming
+            .drain(..)
+            .map(|row| (row.network, row.nick))
+            .collect();
+        windows.sort();
+        windows.dedup();
+        windows
+    }
+
+    /// The progress rows of the locked window of `nick`. A row belongs to a
+    /// window by network and nick; the device id and the message id identify
+    /// the row itself.
+    fn incoming_rows(&self, network: &str, nick: &str) -> Vec<RenderedMessage> {
+        self.incoming
+            .iter()
+            .filter(|row| row.network == network && row.nick.eq_ignore_ascii_case(nick))
+            .map(|row| incoming_progress_row(&row.nick))
+            .collect()
     }
 
     fn remove_request(&mut self, network: &str, id: u64) {
@@ -751,6 +844,23 @@ pub(crate) fn locked_row_with_drop(
         presence_noise: false,
         rename_to: None,
         encrypted: true,
+    }
+}
+
+/// The progress row of a multi-frame message on its way. It has no content:
+/// only the sender nick and a marker text. The row shows the translated
+/// sentence of the window in place of the marker.
+pub(crate) fn incoming_progress_row(nick: &str) -> RenderedMessage {
+    RenderedMessage {
+        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+        nick: Some(nick.to_string()),
+        text: INCOMING_ROW_TEXT.to_string(),
+        italic: true,
+        message_id: None,
+        server_time: None,
+        presence_noise: false,
+        rename_to: None,
+        encrypted: false,
     }
 }
 
@@ -1882,13 +1992,20 @@ fn device_rows_text(ui: &AppWindow, rows: Option<&[DeviceRow]>) -> String {
         Some(rows) => rows
             .iter()
             .map(|row| {
-                ui.invoke_e2e_device_row_text(
-                    row.did.as_str().into(),
-                    row.mine,
-                    row.kind.into(),
-                    row.time.as_str().into(),
-                )
-                .to_string()
+                let text = ui
+                    .invoke_e2e_device_row_text(
+                        row.did.as_str().into(),
+                        row.mine,
+                        row.kind.into(),
+                        row.time.as_str().into(),
+                    )
+                    .to_string();
+                if row.added.is_empty() {
+                    text
+                } else {
+                    let added = ui.invoke_e2e_device_added_text(row.added.as_str().into());
+                    format!("{text} ({added})")
+                }
             })
             .collect::<Vec<_>>()
             .join("; "),
@@ -2505,6 +2622,68 @@ pub(crate) async fn handle_e2e_message(
     let Some(row) = route_e2e_message(frame, protocol) else {
         return;
     };
+    // The whole message ends the progress row of the same sender device and
+    // message id. The engine call below adds the normal row; the redraw after
+    // it shows one row only.
+    let settled = state
+        .e2e
+        .take_incoming(&row.network, &row.from_did, &row.msgid);
+    read_e2e_row(state, ui, &row).await;
+    if let Some(nick) = settled {
+        refresh_locked_view(state, ui, &row.network, &nick);
+    }
+}
+
+/// Reads a progress event (`e2e_incoming`, protocol 59) and shows its row.
+/// An event for another device, for a network without an engine, and a
+/// repeated event change nothing.
+pub(crate) fn handle_e2e_incoming(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    frame: &PhoenixMessage,
+) {
+    let Some(event) = route_e2e_incoming(frame) else {
+        return;
+    };
+    let Some(own_did) = state
+        .e2e
+        .engines
+        .get(&event.network)
+        .map(|engine| engine.own_did().to_string())
+    else {
+        return;
+    };
+    if let Some(nick) = state.e2e.note_incoming(&event, &own_did) {
+        refresh_locked_view(state, ui, &event.network, &nick);
+    }
+}
+
+/// Reads a loss event (`e2e_incoming_lost`, protocol 59) and removes the
+/// matching progress row. A loss with no row creates nothing.
+pub(crate) fn handle_e2e_incoming_lost(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    frame: &PhoenixMessage,
+) {
+    let Some(event) = route_e2e_incoming_lost(frame) else {
+        return;
+    };
+    let Some(own_did) = state
+        .e2e
+        .engines
+        .get(&event.network)
+        .map(|engine| engine.own_did().to_string())
+    else {
+        return;
+    };
+    if let Some(nick) = state.e2e.note_incoming_lost(&event, &own_did) {
+        refresh_locked_view(state, ui, &event.network, &nick);
+    }
+}
+
+/// Gives one inbox row to the engine of its network.
+async fn read_e2e_row(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, row: &InboxRow) {
+    let protocol = state.conn.server_protocol_version;
     if !ensure_engine(state, &row.network) {
         return;
     }
@@ -2518,7 +2697,7 @@ pub(crate) async fn handle_e2e_message(
     // own list is read again, then the row is read once more.
     for _ in 0..2 {
         match engine
-            .handle_event(&client, &token, protocol, &row, e2e_now())
+            .handle_event(&client, &token, protocol, row, e2e_now())
             .await
         {
             Ok(RowOutcome::StaleList) => {
@@ -2895,7 +3074,7 @@ fn load_locked_rows(state: &mut WorkerState, network: &str, nick: &str) {
         .unwrap_or_else(|| "me".to_string());
     let engine = state.e2e.engines.get(network);
     let ciphertext = state.e2e.shows_ciphertext(network, nick);
-    let rows: Vec<RenderedMessage> = state
+    let mut rows: Vec<RenderedMessage> = state
         .e2e
         .history_of(network)
         .map(|history| {
@@ -2909,6 +3088,8 @@ fn load_locked_rows(state: &mut WorkerState, network: &str, nick: &str) {
                 .collect()
         })
         .unwrap_or_default();
+    // Messages on their way come after the stored ones.
+    rows.extend(state.e2e.incoming_rows(network, nick));
     state.transcript.messages.insert(
         LocalQuery::new(network, QueryLane::Locked, nick).key(),
         rows,
@@ -3192,7 +3373,8 @@ pub(crate) async fn handle_send_locked(
 
 /// The session stopped (a disconnect or a reconnect): every open send of
 /// every engine becomes a `session_ended` drop, and every queue is emptied.
-/// The locked window shows the dropped rows.
+/// The locked window shows the dropped rows. The progress rows of messages on
+/// their way are removed: the inbox read after a reconnect shows the whole ones.
 pub(crate) fn end_e2e_sessions(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
     // An offer of the ended session is stale after a reconnect.
     if state.e2e.offer.take().is_some() {
@@ -3211,6 +3393,9 @@ pub(crate) fn end_e2e_sessions(state: &mut WorkerState, ui: &slint::Weak<AppWind
         for nick in changed {
             refresh_locked_view(state, ui, network, &nick);
         }
+    }
+    for (network, nick) in state.e2e.clear_incoming() {
+        refresh_locked_view(state, ui, &network, &nick);
     }
     if any {
         set_e2e_status(ui, "e2e-send-failed");
@@ -3245,6 +3430,35 @@ pub(crate) async fn tick_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<A
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const OWN_DID: &str = "AAAAAAAAAAA";
+    const PEER_DID: &str = "If4x36FUomE";
+    const SIBLING_DID: &str = "BBBBBBBBBBB";
+
+    fn incoming_event(
+        network: &str,
+        from: &str,
+        did: &str,
+        to: &str,
+        msgid: &str,
+    ) -> IncomingEvent {
+        IncomingEvent {
+            network: network.to_string(),
+            from: from.to_string(),
+            from_did: did.to_string(),
+            to: to.to_string(),
+            msgid: msgid.to_string(),
+        }
+    }
+
+    fn lost_event(network: &str, did: &str, to: &str, msgid: &str) -> IncomingLostEvent {
+        IncomingLostEvent {
+            network: network.to_string(),
+            from_did: did.to_string(),
+            to: to.to_string(),
+            msgid: msgid.to_string(),
+        }
+    }
 
     fn consent_request(id: u64, peer: &str, state: E2eRequestState) -> E2eRequest {
         E2eRequest {
@@ -3315,6 +3529,133 @@ mod tests {
             ChatState::KeyRequestAccepted
         ));
         assert!(!locked_chat_passed_key_request(ChatState::Unavailable));
+    }
+
+    #[test]
+    fn an_incoming_event_adds_one_progress_row_in_the_window_of_its_sender() {
+        let mut runtime = E2eRuntime::default();
+        let event = incoming_event("azzurra", "Alice", PEER_DID, "*", "m1");
+        assert_eq!(
+            runtime.note_incoming(&event, OWN_DID).as_deref(),
+            Some("Alice")
+        );
+        // A repeated event adds no second row.
+        assert_eq!(runtime.note_incoming(&event, OWN_DID), None);
+        let rows = runtime.incoming_rows("azzurra", "alice");
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].italic);
+        assert!(!rows[0].encrypted);
+        assert!(runtime.incoming_rows("azzurra", "bob").is_empty());
+        assert!(runtime.incoming_rows("libera", "Alice").is_empty());
+    }
+
+    #[test]
+    fn an_incoming_event_for_a_sibling_device_adds_no_row() {
+        let mut runtime = E2eRuntime::default();
+        let sibling = incoming_event("azzurra", "Alice", PEER_DID, SIBLING_DID, "m1");
+        assert_eq!(runtime.note_incoming(&sibling, OWN_DID), None);
+        assert!(runtime.incoming_rows("azzurra", "Alice").is_empty());
+        let own = incoming_event("azzurra", "Alice", PEER_DID, OWN_DID, "m1");
+        assert!(runtime.note_incoming(&own, OWN_DID).is_some());
+    }
+
+    #[test]
+    fn the_whole_message_replaces_only_its_own_row() {
+        let mut runtime = E2eRuntime::default();
+        for (did, msgid) in [(PEER_DID, "m1"), (PEER_DID, "m2"), (SIBLING_DID, "m1")] {
+            let event = incoming_event("azzurra", "Alice", did, "*", msgid);
+            assert!(runtime.note_incoming(&event, OWN_DID).is_some());
+        }
+        // The same message id on another network is another row.
+        assert_eq!(runtime.take_incoming("libera", PEER_DID, "m1"), None);
+        assert_eq!(
+            runtime.take_incoming("azzurra", PEER_DID, "m1").as_deref(),
+            Some("Alice")
+        );
+        // A second whole message with the same key finds no row.
+        assert_eq!(runtime.take_incoming("azzurra", PEER_DID, "m1"), None);
+        assert_eq!(runtime.incoming_rows("azzurra", "Alice").len(), 2);
+    }
+
+    #[test]
+    fn a_lost_event_clears_only_its_own_row() {
+        let mut runtime = E2eRuntime::default();
+        for msgid in ["m1", "m2"] {
+            let event = incoming_event("azzurra", "Alice", PEER_DID, "*", msgid);
+            assert!(runtime.note_incoming(&event, OWN_DID).is_some());
+        }
+        // Another network, another sender device and another device change
+        // nothing.
+        for lost in [
+            lost_event("libera", PEER_DID, "*", "m1"),
+            lost_event("azzurra", SIBLING_DID, "*", "m1"),
+            lost_event("azzurra", PEER_DID, SIBLING_DID, "m1"),
+        ] {
+            assert_eq!(runtime.note_incoming_lost(&lost, OWN_DID), None);
+        }
+        assert_eq!(runtime.incoming_rows("azzurra", "Alice").len(), 2);
+        let lost = lost_event("azzurra", PEER_DID, OWN_DID, "m1");
+        assert_eq!(
+            runtime.note_incoming_lost(&lost, OWN_DID).as_deref(),
+            Some("Alice")
+        );
+        assert_eq!(runtime.incoming_rows("azzurra", "Alice").len(), 1);
+    }
+
+    #[test]
+    fn the_end_of_a_session_clears_every_progress_row() {
+        let mut runtime = E2eRuntime::default();
+        for (from, did, msgid) in [
+            ("Bob", SIBLING_DID, "m1"),
+            ("Alice", PEER_DID, "m1"),
+            ("Alice", PEER_DID, "m2"),
+        ] {
+            let event = incoming_event("azzurra", from, did, "*", msgid);
+            assert!(runtime.note_incoming(&event, OWN_DID).is_some());
+        }
+        assert_eq!(
+            runtime.clear_incoming(),
+            vec![
+                ("azzurra".to_string(), "Alice".to_string()),
+                ("azzurra".to_string(), "Bob".to_string()),
+            ]
+        );
+        assert!(runtime.incoming_rows("azzurra", "Alice").is_empty());
+        assert!(runtime.incoming_rows("azzurra", "Bob").is_empty());
+        assert_eq!(runtime.take_incoming("azzurra", PEER_DID, "m1"), None);
+        let lost = lost_event("azzurra", PEER_DID, "*", "m2");
+        assert_eq!(runtime.note_incoming_lost(&lost, OWN_DID), None);
+        assert!(runtime.clear_incoming().is_empty());
+        // A new event of the next session adds a row again.
+        let event = incoming_event("azzurra", "Alice", PEER_DID, "*", "m3");
+        assert!(runtime.note_incoming(&event, OWN_DID).is_some());
+        assert_eq!(runtime.incoming_rows("azzurra", "Alice").len(), 1);
+    }
+
+    #[test]
+    fn a_lost_event_before_its_row_creates_nothing() {
+        let mut runtime = E2eRuntime::default();
+        let lost = lost_event("azzurra", PEER_DID, "*", "m1");
+        assert_eq!(runtime.note_incoming_lost(&lost, OWN_DID), None);
+        assert!(runtime.incoming_rows("azzurra", "Alice").is_empty());
+        // A one-frame message has no event: it is not delayed by a row.
+        assert_eq!(runtime.take_incoming("azzurra", PEER_DID, "m1"), None);
+    }
+
+    #[test]
+    fn the_progress_row_has_a_marker_and_no_content() {
+        let row = incoming_progress_row("Alice");
+        assert_eq!(row.nick.as_deref(), Some("Alice"));
+        assert!(is_incoming_row(&row));
+        // A decrypted row with the same text is never the progress row.
+        let spoofed = RenderedMessage {
+            encrypted: true,
+            ..row.clone()
+        };
+        assert!(!is_incoming_row(&spoofed));
+        assert!(chat_line_from_message(&row, true, "").incoming);
+        assert!(!chat_line_from_message(&spoofed, true, "").incoming);
+        assert!(chat_line_from_message(&row, true, "").reply_body.is_empty());
     }
 
     #[test]

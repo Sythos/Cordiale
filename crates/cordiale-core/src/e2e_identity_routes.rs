@@ -105,6 +105,9 @@ pub struct DeviceRecord {
     pub sig: String,
     /// Last activity that protocol 56 reports. Older servers omit it.
     pub last_seen: LastSeen,
+    /// When the device was first registered (protocol 57). None when the
+    /// field is absent, null or not a valid timestamp.
+    pub inserted_at: Option<String>,
 }
 
 /// The optional `last_seen_at` of a device. The four cases stay apart, so a
@@ -209,6 +212,10 @@ impl DeviceRecord {
             curve25519: key_text(map, "curve25519")?,
             sig: signature_text(map, "sig")?,
             last_seen: LastSeen::from_field(map.get("last_seen_at")),
+            inserted_at: match map.get("inserted_at") {
+                Some(Value::String(text)) if is_iso_timestamp(text) => Some(text.clone()),
+                _ => None,
+            },
             ed25519,
         })
     }
@@ -461,6 +468,18 @@ mod tests {
         for bad in [json!("yesterday"), json!(12), json!("2026-13-05T10:20:30Z")] {
             assert_eq!(read(Some(("last_seen_at", bad))), LastSeen::Unreadable);
         }
+    }
+
+    #[test]
+    fn inserted_at_is_kept_apart_from_last_seen() {
+        let read = |extra| DeviceRecord::from_value(&device_value(extra)).unwrap();
+        let stamp = "2026-10-01T08:00:00.5Z";
+        let added = read(Some(("inserted_at", json!(stamp))));
+        assert_eq!(added.inserted_at.as_deref(), Some(stamp));
+        assert_eq!(added.last_seen, LastSeen::NotSent);
+        assert_eq!(read(None).inserted_at, None);
+        assert_eq!(read(Some(("inserted_at", Value::Null))).inserted_at, None);
+        assert_eq!(read(Some(("inserted_at", json!("soon")))).inserted_at, None);
     }
 
     #[test]

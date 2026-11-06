@@ -349,6 +349,10 @@ msgid "The code is not the same. Pairing stopped. Start again."
 msgstr "Der Code stimmt nicht überein. Kopplung gestoppt. Starte neu."
 
 msgctxt "AppWindow"
+msgid "This identity has three devices. Revoke a device before you add a new one."
+msgstr "Diese Identität hat drei Geräte. Widerrufe ein Gerät, bevor du ein neues hinzufügst."
+
+msgctxt "AppWindow"
 msgid "This server does not support device pairing."
 msgstr "Dieser Server unterstützt die Gerätekopplung nicht."
 
@@ -3893,6 +3897,10 @@ msgid "Device {}: last activity {}"
 msgstr "Gerät {}: letzte Aktivität {}"
 
 msgctxt "AppWindow"
+msgid "Added {}"
+msgstr "Hinzugefügt {}"
+
+msgctxt "AppWindow"
 msgid "Device {} (this device): no activity recorded"
 msgstr "Gerät {} (dieses Gerät): keine Aktivität aufgezeichnet"
 
@@ -3979,3 +3987,7 @@ msgstr "Die alten E2E-Schlüssel wurden nicht entfernt."
 msgctxt "AppWindow"
 msgid "This device has no replaced E2E identity. Nothing was removed."
 msgstr "Dieses Gerät hat keine ersetzte E2E-Identität. Es wurde nichts entfernt."
+
+msgctxt "AppWindow"
+msgid "is sending an encrypted message..."
+msgstr "sendet eine verschlüsselte Nachricht..."

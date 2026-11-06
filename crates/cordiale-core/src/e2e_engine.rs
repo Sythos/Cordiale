@@ -1498,6 +1498,27 @@ impl E2eEngine {
         });
     }
 
+    /// Queues the own signed list for the sender of an authenticated message
+    /// that holds a body for a device that the own list does not name. The
+    /// sender holds an old list. The rate limit of a list request reply
+    /// applies. Call it only after the message decrypted.
+    fn refresh_stale_list(&mut self, nick: &str, row: &InboxRow) {
+        let Ok(payload) = MessagePayload::parse(row.verb, &row.payload) else {
+            return;
+        };
+        let Some((list, _)) = self.own_list() else {
+            return;
+        };
+        let listed: HashSet<String> = list
+            .keys
+            .iter()
+            .filter_map(|key| did_from_key_text(key).ok())
+            .collect();
+        if payload.bodies().keys().any(|did| !listed.contains(did)) {
+            self.queue_list_reply(nick, &row.from_did);
+        }
+    }
+
     /// Queues one `listreq` when the sender holds a list newer than the
     /// stored one: once for each list version, and once for each nick in the
     /// list request interval.
@@ -1741,6 +1762,7 @@ impl E2eEngine {
         };
         // A message that the engine read is proof of E2E capability.
         self.set_peer_capability(&nick, true);
+        self.refresh_stale_list(&nick, row);
         // Text from a person goes to the conversation of the sender. A message
         // that does not fit is acknowledged and not stored. A kind that is no
         // text only moves the session on.
@@ -5339,6 +5361,85 @@ mod tests {
         p.bob.queue_list_reply("alice", &did);
         p.bob.queue_list_reply("alice", &did);
         assert_eq!(p.bob.list_jobs.len(), 1);
+    }
+
+    /// Replaces the own list of `engine` with a signed list that names a key
+    /// other than the key of the device: a list that is behind the peer.
+    fn set_own_list_without_this_device(engine: &mut E2eEngine) {
+        let master = engine.state.master_key().expect("key").expect("master");
+        let keys = vec![ed(&fresh_device())];
+        let signature = build_signed_list_signature(2, &keys, |text| master.sign(text).to_base64())
+            .expect("list");
+        engine
+            .state_mut()
+            .set_signed_list(&SignedList {
+                version: 2,
+                keys,
+                signature,
+            })
+            .expect("own list");
+    }
+
+    fn list_replies(engine: &E2eEngine) -> usize {
+        engine.list_jobs.iter().filter(|job| job.reply).count()
+    }
+
+    #[tokio::test]
+    async fn a_message_for_a_device_missing_from_the_own_list_queues_one_list() {
+        let mut p = pair();
+        set_own_list_without_this_device(&mut p.bob);
+        let server = MockServer::start().await;
+        mount_send(&server, "first").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, "start").await;
+        let item = inbox_row(1, "alice", &p.alice_did, &p.bob_did, &body);
+        assert_eq!(p.bob.handle_row(&item, 10), RowOutcome::Stored);
+        assert_eq!(list_replies(&p.bob), 1);
+        let job = p.bob.list_jobs.iter().find(|job| job.reply).expect("job");
+        assert_eq!(job.did, p.alice_did);
+
+        // A second message of the same device inside the interval queues no
+        // second list.
+        let (_, body) = alice_sends(&mut p.alice, &server, "again").await;
+        let item = inbox_row(2, "alice", &p.alice_did, &p.bob_did, &body);
+        p.bob.handle_row(&item, 20);
+        assert_eq!(list_replies(&p.bob), 1);
+    }
+
+    #[tokio::test]
+    async fn a_message_for_listed_devices_only_queues_no_list() {
+        let mut p = started_pair().await;
+        assert_eq!(list_replies(&p.bob), 0);
+        let server = MockServer::start().await;
+        mount_send(&server, "second").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, "again").await;
+        let item = inbox_row(2, "alice", &p.alice_did, &p.bob_did, &body);
+        p.bob.handle_row(&item, 20);
+        assert_eq!(list_replies(&p.bob), 0);
+    }
+
+    #[tokio::test]
+    async fn a_message_that_does_not_authenticate_queues_no_list() {
+        let mut p = pair();
+        set_own_list_without_this_device(&mut p.bob);
+        let server = MockServer::start().await;
+        mount_send(&server, "first").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, "start").await;
+        let item = inbox_row(1, "alice", "AAAAAAAAAAA", &p.bob_did, &body);
+        assert_eq!(p.bob.handle_row(&item, 10), RowOutcome::Undecryptable);
+        assert!(p.bob.list_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_list_reply_limit_is_for_each_peer_and_each_network() {
+        let mut p = started_pair().await;
+        let did = p.alice_did.clone();
+        p.bob.queue_list_reply("alice", &did);
+        p.bob.queue_list_reply("carol", "BBBBBBBBBBB");
+        assert_eq!(list_replies(&p.bob), 2);
+        // The engine of another network has its own limit.
+        let mut other = started_pair().await;
+        other.bob.queue_list_reply("alice", &did);
+        assert_eq!(list_replies(&other.bob), 1);
     }
 
     #[test]
