@@ -487,11 +487,11 @@ mod tests {
         let stamp = "2026-10-01T08:00:00Z";
         let valid = device_value(Some(("inserted_at", json!(stamp))));
         let missing = device_value(None);
-        let null = device_value(Some(("inserted_at", Value::Null)));
-        let page = json!({"devices": [valid.clone(), missing.clone(), null.clone()]});
+        let nulled = device_value(Some(("inserted_at", Value::Null)));
+        let page = json!({"devices": [valid.clone(), missing.clone(), nulled.clone()]});
         let list = DeviceRecord::list_from_value(&page).unwrap();
         assert_eq!(list.len(), 3);
-        let dids: Vec<&str> = [&valid, &missing, &null]
+        let dids: Vec<&str> = [&valid, &missing, &nulled]
             .iter()
             .map(|value| value["did"].as_str().unwrap())
             .collect();
