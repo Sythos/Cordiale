@@ -83,7 +83,7 @@ video-shrink = ["cordiale-core/video-shrink"]
 # of the key-request and SAS tests; the UI itself does no crypto.
 [dev-dependencies]
 chacha20poly1305 = "0.11"
-vodozemac = "0.11.1"
+vodozemac = "0.11.2"
 
 [build-dependencies]
 slint-build = "1"

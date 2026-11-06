@@ -1,0 +1,36 @@
+# Settings of `cargo audit`, read by the CI step "Audit dependencies".
+#
+# The six advisories below are "unmaintained" notices, not vulnerabilities. All six
+# come from Slint 1.18.1 (the latest release) and from crates that Slint pins. No
+# release or replacement removes them today. Each entry names the cause and the
+# event that makes it useful to look again.
+#
+# Never add a vulnerability here. An ignore by identifier does not hide a new
+# advisory on the same crate.
+
+[advisories]
+ignore = [
+    # bincode 2.0.1. Only a weak feature of typed-index-collections 3.5.0 (used by
+    # i-slint-compiler) names it. No code compiles it.
+    # Look again when i-slint-compiler accepts typed-index-collections 4.
+    "RUSTSEC-2025-0141",
+
+    # ttf-parser 0.25.1. It draws the text of the Wayland title bar (slint, winit 0.30,
+    # sctk-adwaita 0.10, ab_glyph, owned_ttf_parser).
+    # Look again when Slint moves to winit 0.31.
+    "RUSTSEC-2026-0192",
+
+    # pin-utils 0.1.1, through spin_on 0.1.1 (Slint renderer, slint-build and
+    # slint-macros). spin_on has no release since 2020.
+    # Look again when Slint drops spin_on or pin-utils.
+    "RUSTSEC-2026-0441",
+
+    # zbus_names, zvariant and zvariant_derive were merged into zbus 6. They come from
+    # the Linux accessibility chain (accesskit_winit 0.33, accesskit_unix 0.22, atspi
+    # 0.29), which Slint 1.18.1 pins. accesskit_winit 0.34 and atspi 0.30 exist, but
+    # they are not compatible with the version range of Slint.
+    # Look again when a Slint release uses accesskit_winit 0.34 or newer.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
+]
