@@ -718,16 +718,42 @@ fn request_view_state(request: &E2eRequest) -> &'static str {
     }
 }
 
+/// True when the encrypted entry of the peer reached the key comparison or a
+/// later step. The request card of the plain query is then stale. This rule
+/// does not verify any key.
+fn locked_chat_passed_key_request(state: ChatState) -> bool {
+    matches!(state, ChatState::SasPending | ChatState::Active)
+}
+
 fn query_consent_view(
     state: &WorkerState,
     network: &str,
     peer: &str,
 ) -> (String, String, bool, bool, bool) {
     let casemapping = network_casemapping(state, network);
+    let has_locked =
+        state.e2e.locked.iter().any(|(known_network, nick)| {
+            known_network == network && casemapping.nick_eq(nick, peer)
+        });
+    let locked_state = has_locked.then(|| locked_entry_state(state, network, peer));
+    consent_view_for(state, network, peer, locked_state)
+}
+
+/// The consent view of a plain query. `locked_state` is the state of the
+/// encrypted entry of the same peer and network, if it exists.
+fn consent_view_for(
+    state: &WorkerState,
+    network: &str,
+    peer: &str,
+    locked_state: Option<ChatState>,
+) -> (String, String, bool, bool, bool) {
+    let casemapping = network_casemapping(state, network);
+    let stale = locked_state.is_some_and(locked_chat_passed_key_request);
     let request = state
         .e2e
         .request_for_peer(network, peer, casemapping)
-        .filter(|request| request_view_state(request) != "gone");
+        .filter(|request| request_view_state(request) != "gone")
+        .filter(|_| !stale);
     let request_state = request
         .map_or("", |request| request_view_state(request))
         .to_string();
@@ -739,10 +765,7 @@ fn query_consent_view(
         .server_protocol_version
         .is_some_and(|version| version >= CONSENT_MIN_PROTOCOL)
         && can_accept;
-    let has_locked =
-        state.e2e.locked.iter().any(|(known_network, nick)| {
-            known_network == network && casemapping.nick_eq(nick, peer)
-        });
+    let has_locked = locked_state.is_some();
     (request_state, request_id, can_start, can_accept, has_locked)
 }
 
@@ -3435,6 +3458,77 @@ mod tests {
             to: to.to_string(),
             msgid: msgid.to_string(),
         }
+    }
+
+    fn consent_request(id: u64, peer: &str, state: E2eRequestState) -> E2eRequest {
+        E2eRequest {
+            id,
+            peer: peer.to_string(),
+            state,
+            payload: None,
+            at: "2026-11-06T10:00:00Z".to_string(),
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn a_stale_request_card_hides_after_key_comparison() {
+        for kind in [E2eRequestState::Outgoing, E2eRequestState::Incoming] {
+            let mut state = WorkerState::new();
+            state
+                .e2e
+                .replace_requests("net", vec![consent_request(7, "bob", kind)]);
+            let shown = consent_view_for(&state, "net", "bob", None);
+            assert_eq!(shown.0, kind.as_str());
+            assert_eq!(shown.1, "7");
+            for before in [ChatState::MissingKeys, ChatState::KeyRequestWaiting] {
+                let view = consent_view_for(&state, "net", "bob", Some(before));
+                assert_eq!(view.0, kind.as_str());
+                assert!(view.4);
+            }
+            for after in [ChatState::SasPending, ChatState::Active] {
+                let view = consent_view_for(&state, "net", "bob", Some(after));
+                assert_eq!(view.0, "");
+                assert_eq!(view.1, "");
+                assert!(view.4);
+            }
+            // A reload with the same stale snapshot does not restore the card.
+            state
+                .e2e
+                .replace_requests("net", vec![consent_request(7, "bob", kind)]);
+            let view = consent_view_for(&state, "net", "bob", Some(ChatState::SasPending));
+            assert_eq!(view.0, "");
+        }
+    }
+
+    #[test]
+    fn a_request_for_another_peer_or_network_stays_visible() {
+        let mut state = WorkerState::new();
+        state.e2e.replace_requests(
+            "net",
+            vec![consent_request(1, "carol", E2eRequestState::Outgoing)],
+        );
+        state.e2e.replace_requests(
+            "other",
+            vec![consent_request(2, "bob", E2eRequestState::Incoming)],
+        );
+        // Only the encrypted entry of bob on "net" is past key comparison.
+        let carol = consent_view_for(&state, "net", "carol", None);
+        assert_eq!(carol.0, "outgoing");
+        let other = consent_view_for(&state, "other", "bob", None);
+        assert_eq!(other.0, "incoming");
+        let none = consent_view_for(&state, "net", "bob", Some(ChatState::Active));
+        assert_eq!(none.0, "");
+    }
+
+    #[test]
+    fn the_key_comparison_rule_does_not_verify_a_key() {
+        assert!(locked_chat_passed_key_request(ChatState::SasPending));
+        assert!(locked_chat_passed_key_request(ChatState::Active));
+        assert!(!locked_chat_passed_key_request(
+            ChatState::KeyRequestAccepted
+        ));
+        assert!(!locked_chat_passed_key_request(ChatState::Unavailable));
     }
 
     #[test]
