@@ -184,6 +184,10 @@ impl SasStep {
 struct ActivePairing {
     network: String,
     session: PairingSession,
+    /// The code that the user types on the new device. Only a creator on a
+    /// server without the pairing offer holds it. It lasts as long as the
+    /// open rendezvous.
+    manual_code: Option<String>,
 }
 
 impl E2eRuntime {
@@ -1632,19 +1636,21 @@ pub(crate) async fn run_e2e_pair(
             state.e2e.engines.insert(network.clone(), engine);
             match result {
                 Ok((session, link)) => {
-                    state.e2e.pairing = Some(ActivePairing {
-                        network: network.clone(),
-                        session,
-                    });
-                    push_open_locked_state(state, ui);
                     // With protocol 55 the server offers the rendezvous to the
                     // other devices. An older server cannot: the user types the
                     // code on the new device. No link and no QR code exist.
+                    // The code stays with the pairing until the rendezvous ends.
                     let offered = pairing_offer_available(protocol);
-                    if offered {
-                        show_pairing_kind(ui, "e2e-pair-offered", String::new());
-                    } else {
-                        show_pairing_kind(ui, "e2e-pair-manual", link.code());
+                    let manual_code = (!offered).then(|| link.code());
+                    state.e2e.pairing = Some(ActivePairing {
+                        network: network.clone(),
+                        session,
+                        manual_code: manual_code.clone(),
+                    });
+                    push_open_locked_state(state, ui);
+                    match manual_code {
+                        Some(code) => show_pairing_kind(ui, "e2e-pair-manual", code),
+                        None => show_pairing_kind(ui, "e2e-pair-offered", String::new()),
                     }
                     show_pairing_dialog(ui, offered);
                 }
@@ -1666,6 +1672,7 @@ pub(crate) async fn run_e2e_pair(
                     state.e2e.pairing = Some(ActivePairing {
                         network: network.clone(),
                         session,
+                        manual_code: None,
                     });
                     push_open_locked_state(state, ui);
                 }
@@ -2285,7 +2292,13 @@ fn finish_pairing_step(
 ) {
     match error {
         Some(error) => show_pairing_kind(ui, pairing_error_key(&error), String::new()),
-        None => show_pairing(ui, &active.session.status()),
+        None => match (&active.manual_code, active.session.status()) {
+            // The creator keeps the code on screen while the rendezvous waits.
+            (Some(code), PairingStatus::Waiting) => {
+                show_pairing_kind(ui, "e2e-pair-manual", code.clone());
+            }
+            (_, status) => show_pairing(ui, &status),
+        },
     }
     // A finished join gave the device a new identity after a reset.
     if matches!(active.session.status(), PairingStatus::Done) {
@@ -3596,6 +3609,7 @@ mod tests {
         ActivePairing {
             network: "libera".to_string(),
             session,
+            manual_code: None,
         }
     }
 
