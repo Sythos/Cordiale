@@ -1274,6 +1274,8 @@ solo campi e una rotta di upload che il client non usa.
 - Un `e2e_incoming_lost` senza riga non crea nulla. Gli eventi non sono
   riproposti: la sessione nuova parte senza righe e Cordiale non ha un timer
   proprio.
+- Una disconnessione o una riconnessione toglie tutte le righe di avanzamento:
+  la lettura dell'inbox dopo la riconnessione mostra i messaggi completi.
 - Codice: `IncomingEvent` e `IncomingLostEvent` in `e2e_device_routes.rs`,
   `route_e2e_incoming*` in `session.rs`, stato e righe in `e2e_runtime.rs`
   (crate UI).
