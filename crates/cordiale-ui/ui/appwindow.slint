@@ -235,6 +235,9 @@ struct ChatLine {
     // This message was sent or received through E2E. Set per message, never
     // inferred from the query; false when the state is unknown.
     encrypted: bool,
+    // A multi-frame E2E message is on its way. The row has no content: it
+    // shows a translated sentence in place of `body`.
+    incoming: bool,
 }
 
 // One row in the admin Sessions list.
@@ -5008,7 +5011,15 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        StyledText {
+                        if line.incoming : Text {
+                            text: @tr("is sending an encrypted message...");
+                            font-italic: true;
+                            color: line.timestamp-color;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                        }
+
+                        if !line.incoming : StyledText {
                             text: line.body;
                             default-color: theme == "dark" ? white : black;
                             link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
