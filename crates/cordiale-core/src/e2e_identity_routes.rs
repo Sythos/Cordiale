@@ -483,6 +483,32 @@ mod tests {
     }
 
     #[test]
+    fn a_device_list_keeps_every_device_whatever_its_added_time() {
+        let stamp = "2026-10-01T08:00:00Z";
+        let valid = device_value(Some(("inserted_at", json!(stamp))));
+        let missing = device_value(None);
+        let nulled = device_value(Some(("inserted_at", Value::Null)));
+        let page = json!({"devices": [valid.clone(), missing.clone(), nulled.clone()]});
+        let list = DeviceRecord::list_from_value(&page).unwrap();
+        assert_eq!(list.len(), 3);
+        let dids: Vec<&str> = [&valid, &missing, &nulled]
+            .iter()
+            .map(|value| value["did"].as_str().unwrap())
+            .collect();
+        for (record, did) in list.iter().zip(dids) {
+            assert_eq!(record.did, did);
+        }
+        assert_eq!(list[0].inserted_at.as_deref(), Some(stamp));
+        assert_eq!(list[1].inserted_at, None);
+        assert_eq!(list[2].inserted_at, None);
+        // The identity block is unchanged, so pairing and revoke still match.
+        let request =
+            DeviceIdRequest::new(&list[0].ed25519, &list[0].curve25519, &list[0].sig).unwrap();
+        assert!(list[0].matches(&request));
+        assert!(!list[1].matches(&request));
+    }
+
+    #[test]
     fn timestamp_check_covers_zones_and_dates() {
         assert!(is_iso_timestamp("2026-11-05T10:20:30+01:00"));
         assert!(is_iso_timestamp("2024-02-29T00:00:00Z"));
