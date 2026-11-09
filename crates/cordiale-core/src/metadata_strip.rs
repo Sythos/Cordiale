@@ -77,6 +77,7 @@ fn strip_jpeg(bytes: &[u8]) -> Result<Vec<u8>, StripError> {
     }
     let mut out = vec![0xFF, 0xD8];
     let mut orientation = None;
+    let mut scanned = false;
     let mut pos = 2;
     loop {
         // Fill bytes before a marker are allowed.
@@ -87,19 +88,31 @@ fn strip_jpeg(bytes: &[u8]) -> Result<Vec<u8>, StripError> {
             return Err(StripError::Malformed);
         };
         match marker {
-            // Start of scan: the entropy-coded data runs to the end of the
-            // file and is copied as it is.
+            // Start of scan: the scan header and its entropy-coded data are
+            // copied as they are, up to the next marker. A progressive file
+            // has more scans, and other segments can sit between them: the
+            // loop goes on and cleans those too.
             0xDA => {
-                insert_orientation(&mut out, orientation);
-                out.extend_from_slice(&bytes[pos..]);
-                return Ok(out);
+                if !scanned {
+                    insert_orientation(&mut out, orientation);
+                    scanned = true;
+                }
+                let header = segment_length(bytes, pos + 2)?;
+                let end = scan_data_end(bytes, pos + 2 + header)?;
+                out.extend_from_slice(&bytes[pos..end]);
+                pos = end;
             }
             // Markers without a length field.
             0x01 | 0xD0..=0xD7 => {
                 out.extend_from_slice(&bytes[pos..pos + 2]);
                 pos += 2;
             }
-            // End of image before any scan: not a picture.
+            // End of image: whatever follows it is dropped.
+            0xD9 if scanned => {
+                out.extend_from_slice(&[0xFF, 0xD9]);
+                return Ok(out);
+            }
+            // End of image before any scan, or a second start: not a picture.
             0xD9 | 0xD8 => return Err(StripError::Malformed),
             _ => {
                 let len = segment_length(bytes, pos + 2)?;
@@ -122,6 +135,26 @@ fn strip_jpeg(bytes: &[u8]) -> Result<Vec<u8>, StripError> {
                 }
                 pos = end;
             }
+        }
+    }
+}
+
+/// The index of the first marker after the entropy-coded data that starts at
+/// `from`. A `FF 00` pair, a restart marker and fill bytes belong to the data.
+/// Data that ends before a marker is not a complete image.
+fn scan_data_end(bytes: &[u8], from: usize) -> Result<usize, StripError> {
+    let mut pos = from;
+    loop {
+        let offset = bytes
+            .get(pos..)
+            .and_then(|rest| rest.iter().position(|byte| *byte == 0xFF))
+            .ok_or(StripError::Malformed)?;
+        pos += offset;
+        match bytes.get(pos + 1) {
+            Some(0x00 | 0xD0..=0xD7) => pos += 2,
+            Some(0xFF) => pos += 1,
+            Some(_) => return Ok(pos),
+            None => return Err(StripError::Malformed),
         }
     }
 }
@@ -423,6 +456,42 @@ mod tests {
         assert!(contains(&clean, b"JFIF"));
         assert!(clean.ends_with(&[0x12, 0x34, 0xFF, 0xD9]));
         assert!(!contains(&clean, b"Exif"));
+    }
+
+    #[test]
+    fn jpeg_is_cleaned_between_scans_and_after_the_end() {
+        let mut file = vec![0xFF, 0xD8];
+        file.extend(jpeg_segment(0xDB, &[0; 65]));
+        file.extend(jpeg_segment(0xDA, &[1, 1, 0, 0, 63, 0]));
+        // Entropy data with a stuffed FF 00 and a restart marker.
+        file.extend_from_slice(&[0x12, 0xFF, 0x00, 0xFF, 0xD0, 0x34]);
+        file.extend(jpeg_segment(0xFE, b"comment-between-scans"));
+        file.extend(jpeg_segment(0xE1, b"Exif\0\0later-gps-secret"));
+        file.extend(jpeg_segment(0xDA, &[1, 1, 0, 0, 63, 0]));
+        file.extend_from_slice(&[0x56, 0x78]);
+        file.extend_from_slice(&[0xFF, 0xD9]);
+        file.extend_from_slice(b"trailing-secret-bytes");
+        let clean = strip_image_metadata("image/jpeg", &file).expect("clean");
+        for secret in [
+            &b"comment-between-scans"[..],
+            b"later-gps-secret",
+            b"trailing-secret-bytes",
+        ] {
+            assert!(!contains(&clean, secret));
+        }
+        assert!(contains(&clean, &[0x12, 0xFF, 0x00, 0xFF, 0xD0, 0x34]));
+        assert!(contains(&clean, &[0x56, 0x78]));
+        assert!(clean.ends_with(&[0xFF, 0xD9]));
+    }
+
+    #[test]
+    fn jpeg_without_an_end_marker_is_refused() {
+        let mut file = sample_jpeg(1);
+        file.truncate(file.len() - 2);
+        assert_eq!(
+            strip_image_metadata("image/jpeg", &file),
+            Err(StripError::Malformed)
+        );
     }
 
     #[test]
