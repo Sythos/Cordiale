@@ -1185,9 +1185,19 @@ impl E2eEngine {
     /// result is `Pending`: nothing goes out in clear text. `Plain` needs
     /// the explicit choice of the user (`allow_plain`).
     pub fn channel_plan_send(&self, channel: &str, allow_plain: bool) -> SendPlan {
-        self.state
-            .channels()
-            .plan_send(&self.network, channel, allow_plain)
+        let ring = self.state.channels();
+        match ring.plan_send(&self.network, channel, allow_plain) {
+            // A member without the key could not read what a send before
+            // its key share moves past: wait for the shares.
+            SendPlan::Encrypt if ring.has_missing_shares(&self.network, channel, &self.own_did) => {
+                if allow_plain {
+                    SendPlan::Plain
+                } else {
+                    SendPlan::Pending
+                }
+            }
+            plan => plan,
+        }
     }
 
     /// The member devices of a channel: the own device and every verified,
@@ -1323,6 +1333,14 @@ impl E2eEngine {
         // A session that a revoked device holds is never used again.
         self.drop_revoked_channel_members()?;
         let (network, own) = (self.network.clone(), self.own_did.clone());
+        // Keep the ratchet while a member waits for its key share.
+        if self
+            .state
+            .channels()
+            .has_missing_shares(&network, channel, &own)
+        {
+            return Err(ChannelOpError::Channel(ChannelError::NoKey));
+        }
         let wire = self
             .state
             .update_channels(|ring| ring.encrypt(&network, channel, &own, text))?
@@ -1391,15 +1409,22 @@ impl E2eEngine {
         if row.own || row.from_did == self.own_did {
             return RowOutcome::Ignored;
         }
-        let Some(entry) = self.peers.get(&row.from_did).cloned() else {
+        // A revoked device leaves the channel members first. The sender
+        // cache is empty after a restart: the stored members and group keys
+        // then decide, because only a verified device gave a group key.
+        if self.drop_revoked_channel_members().is_err() {
+            return RowOutcome::StoreFailed;
+        }
+        if self.revoked_dids.contains(&row.from_did) {
             return RowOutcome::Undecryptable;
-        };
-        let trust = self.state.trust();
-        if self.revoked_dids.contains(&row.from_did)
-            || trust.is_did_revoked(&self.network, &entry.nick, &row.from_did)
-            || self.entry_revoked(&entry, &trust)
-        {
-            return RowOutcome::Undecryptable;
+        }
+        if let Some(entry) = self.peers.get(&row.from_did).cloned() {
+            let trust = self.state.trust();
+            if trust.is_did_revoked(&self.network, &entry.nick, &row.from_did)
+                || self.entry_revoked(&entry, &trust)
+            {
+                return RowOutcome::Undecryptable;
+            }
         }
         let row_id = format!("{}:in:{}", self.network, row.id);
         let conversation = conversation_id(&self.network, channel);

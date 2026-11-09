@@ -443,6 +443,14 @@ impl ChannelKeyring {
             .collect()
     }
 
+    /// True when a member still lacks the key of the current own session.
+    /// A send then moves the ratchet before that member has the key.
+    pub fn has_missing_shares(&self, network: &str, channel: &str, own_did: &str) -> bool {
+        self.channels
+            .get(&channel_id(network, channel))
+            .is_some_and(|state| !Self::missing_shares(state, own_did).is_empty())
+    }
+
     /// The text of the key share for the current own session. The caller
     /// sends it to one member through the Olm path only. The key is
     /// exported at the current message index.
@@ -957,6 +965,16 @@ mod tests {
         let wire = send(&mut b, "from b");
         assert_eq!(a1.ring.decrypt(NET, CH, "b", &wire).unwrap().text, "from b");
         assert_eq!(a2.ring.decrypt(NET, CH, "b", &wire).unwrap().text, "from b");
+    }
+
+    #[test]
+    fn a_member_without_the_key_counts_as_missing_share() {
+        let (mut a, mut b) = (dev("a"), dev("b"));
+        membership(&mut [&mut a, &mut b], 1, &["a", "b"]);
+        a.ring.prepare_outbound(NET, CH, "a").unwrap();
+        assert!(a.ring.has_missing_shares(NET, CH, "a"));
+        a.ring.mark_shared(NET, CH, "b");
+        assert!(!a.ring.has_missing_shares(NET, CH, "a"));
     }
 
     #[test]
