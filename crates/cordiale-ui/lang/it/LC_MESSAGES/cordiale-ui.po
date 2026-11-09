@@ -249,8 +249,36 @@ msgid "The message was not encrypted or not sent. Nothing was sent as clear text
 msgstr "Il messaggio non è stato cifrato o non è stato inviato. Nulla è stato inviato in chiaro."
 
 msgctxt "AppWindow"
-msgid "An encrypted chat takes plain text only. Nothing was sent."
-msgstr "Una chat cifrata accetta solo testo semplice. Non è stato inviato nulla."
+msgid "An encrypted chat takes text and files only. Nothing was sent."
+msgstr "Una chat cifrata accetta solo testo e file. Non è stato inviato nulla."
+
+msgctxt "AppWindow"
+msgid "This server cannot store encrypted files, so {} was not sent."
+msgstr "Questo server non può conservare file cifrati, quindi {} non è stato inviato."
+
+msgctxt "AppWindow"
+msgid "The metadata of {} could not be removed, so it was not sent."
+msgstr "I metadati di {} non si sono potuti rimuovere, quindi non è stato inviato."
+
+msgctxt "AppWindow"
+msgid "This build cannot remove video metadata, so {} was not sent."
+msgstr "Questa versione non può rimuovere i metadati dei video, quindi {} non è stato inviato."
+
+msgctxt "AppWindow"
+msgid "{} was not encrypted or not uploaded. Nothing was sent as clear text."
+msgstr "{} non è stato cifrato o caricato. Nulla è stato inviato in chiaro."
+
+msgctxt "AppWindow"
+msgid "The encrypted file {} is not valid and was not opened."
+msgstr "Il file cifrato {} non è valido e non è stato aperto."
+
+msgctxt "AppWindow"
+msgid "The encrypted file {} has expired."
+msgstr "Il file cifrato {} è scaduto."
+
+msgctxt "AppWindow"
+msgid "The encrypted file {} could not be downloaded or opened."
+msgstr "Il file cifrato {} non si è potuto scaricare o aprire."
 
 msgctxt "AppWindow"
 msgid "The SAS codes match. This contact is verified."

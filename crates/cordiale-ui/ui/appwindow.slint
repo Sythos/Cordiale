@@ -2913,7 +2913,21 @@ export component AppWindow inherits Window {
         } else if status-kind == "e2e-send-failed" {
             return @tr("The message was not encrypted or not sent. Nothing was sent as clear text.");
         } else if status-kind == "e2e-text-only" {
-            return @tr("An encrypted chat takes plain text only. Nothing was sent.");
+            return @tr("An encrypted chat takes text and files only. Nothing was sent.");
+        } else if status-kind == "e2e-file-unsupported-server" {
+            return @tr("This server cannot store encrypted files, so {} was not sent.", status-attach-name);
+        } else if status-kind == "e2e-file-strip-failed" {
+            return @tr("The metadata of {} could not be removed, so it was not sent.", status-attach-name);
+        } else if status-kind == "e2e-file-strip-unavailable" {
+            return @tr("This build cannot remove video metadata, so {} was not sent.", status-attach-name);
+        } else if status-kind == "e2e-file-failed" {
+            return @tr("{} was not encrypted or not uploaded. Nothing was sent as clear text.", status-attach-name);
+        } else if status-kind == "e2e-file-invalid" {
+            return @tr("The encrypted file {} is not valid and was not opened.", status-attach-name);
+        } else if status-kind == "e2e-file-expired" {
+            return @tr("The encrypted file {} has expired.", status-attach-name);
+        } else if status-kind == "e2e-file-open-failed" {
+            return @tr("The encrypted file {} could not be downloaded or opened.", status-attach-name);
         } else if status-kind == "e2e-sas-verified" {
             return @tr("The SAS codes match. This contact is verified.");
         } else if status-kind == "e2e-sas-rejected" {

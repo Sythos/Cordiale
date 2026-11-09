@@ -21,6 +21,9 @@ use cordiale_core::e2e_engine::{
     action_body, action_text, conversation_id, history_peers_of, locked_label, route_for_window,
     E2eEngine, EngineError, RowOutcome, SendRoute, OWN_DEVICE,
 };
+use cordiale_core::e2e_file::{
+    file_descriptor, file_row_text, is_file_text, same_url, FileDescriptor,
+};
 use cordiale_core::e2e_pacing::DropReason;
 use cordiale_core::e2e_pairing::{PairingOffer, PairingPush};
 use cordiale_core::e2e_pairing_flow::{
@@ -577,6 +580,27 @@ impl E2eRuntime {
     pub(crate) fn engine_mut(&mut self, network: &str) -> Option<&mut E2eEngine> {
         self.engines.get_mut(network)
     }
+
+    /// The descriptor of the file row whose link is `href`, from the sealed
+    /// history of the locked entries. A link that no row of an encrypted chat
+    /// holds gives `None`: it is not an encrypted file and keeps the normal
+    /// link path.
+    pub(crate) fn file_for_link(&self, href: &str) -> Option<FileDescriptor> {
+        for (network, nick) in &self.locked {
+            let Some(history) = self.history_of(network) else {
+                continue;
+            };
+            for message in history.messages(&conversation_id(network, nick)) {
+                let Some(file) = file_descriptor(&message.text) else {
+                    continue;
+                };
+                if same_url(&file.url, href) {
+                    return Some(file);
+                }
+            }
+        }
+        None
+    }
 }
 
 fn e2e_now() -> i64 {
@@ -826,9 +850,14 @@ pub(crate) fn locked_row_with_drop(
     // An action row has the shape of a plain `/me` row: no nick cell and
     // the line `* nick words`.
     let action = action_body(&message.text);
-    let shown = match action {
-        Some(words) => format!("* {nick} {words}"),
-        None => message.text.clone(),
+    // A file row shows the name, the type, the size and the link that opens
+    // the decrypting viewer. A row that only looks like a file never shows
+    // its raw text.
+    let shown = match (action, file_descriptor(&message.text)) {
+        (Some(words), _) => format!("* {nick} {words}"),
+        (None, Some(file)) => file_row_text(&file),
+        (None, None) if is_file_text(&message.text) => INVALID_FILE_ROW_TEXT.to_string(),
+        (None, None) => message.text.clone(),
     };
     RenderedMessage {
         timestamp,
@@ -863,6 +892,10 @@ pub(crate) fn incoming_progress_row(nick: &str) -> RenderedMessage {
         encrypted: false,
     }
 }
+
+/// The text of a row that has the stored form of a file but no valid
+/// descriptor.
+pub(crate) const INVALID_FILE_ROW_TEXT: &str = "[Invalid encrypted file]";
 
 /// The text of a row in the ciphertext view that has no captured payload.
 pub(crate) const NO_CIPHERTEXT_TEXT: &str = "[No ciphertext on this device]";
