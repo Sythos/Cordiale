@@ -1290,6 +1290,8 @@ Cicchetto `cicchetto/src/lib/e2e/engine.ts`, `e2eRequests.ts`, and
 - **No automatic start.** Opening or selecting a plain query sends no
   `KEYREQ`. The **Start encrypted chat** button sends a consent request. After
   acceptance, Cordiale opens the separate locked entry and asks for keys.
+  The button shows in every plain query, also when local start is not
+  available. A local or server rejection shows an error in the status bar.
   Refusal works when the device has no E2E identity.
 - **Reconnect.** Grappa does not replay pushes. Each session reads
   `GET /networks/:id/e2e/requests` and applies the current states. An accepted
