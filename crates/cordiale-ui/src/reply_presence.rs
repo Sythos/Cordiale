@@ -372,6 +372,16 @@ pub(crate) fn store_draft(
     }
 }
 
+/// Keeps `text` as the draft of `key` after an input-history recall. The
+/// pending reply of the window is not touched.
+pub(crate) fn store_recalled_draft(state: &mut WorkerState, key: (String, String), text: String) {
+    if text.is_empty() {
+        state.transcript.drafts.remove(&key);
+    } else {
+        state.transcript.drafts.insert(key, text);
+    }
+}
+
 /// Reply on a chat row: quotes the author by the nick they have now (when an
 /// observed nick change says so), puts the quote into the draft and starts
 /// watching the author's presence in the channel. A private window keeps the

@@ -1117,8 +1117,16 @@ pub(crate) fn register_composer_callbacks(
         match recalled {
             Some(new_text) => {
                 // Setting `compose-text` from Rust does not fire `edited`,
-                // so the draft is saved here, as nick completion does.
-                let _ = tx_for_history.send(WorkerCommand::ComposeTextChanged(new_text.clone()));
+                // so the draft is saved here. The key is the window the
+                // recall happened in, and a pending reply stays.
+                let draft_key = (
+                    ui.get_window_source_network().to_string(),
+                    ui.get_window_source_target().to_string(),
+                );
+                let _ = tx_for_history.send(WorkerCommand::DraftRecalled {
+                    key: draft_key,
+                    text: new_text.clone(),
+                });
                 new_text.into()
             }
             None => text,

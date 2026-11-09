@@ -14067,6 +14067,47 @@ fn input_history_editing_a_recalled_entry_leaves_navigation() {
 }
 
 #[test]
+fn recalled_draft_keeps_the_pending_reply_and_stays_in_its_window() {
+    let mut state = WorkerState::new();
+    let first = history_key("libera", "#rust");
+    let second = history_key("libera", "#go");
+    let log = reply_presence::PresenceLog::default();
+    let casemapping = cordiale_core::isupport::CaseMapping::Rfc1459;
+    let (quote, context) =
+        reply_presence::new_reply(&log, &[], casemapping, "alice", "hello", None).unwrap();
+    state.transcript.reply_contexts.insert(
+        first.clone(),
+        context.expect("a channel reply has a context"),
+    );
+    state
+        .transcript
+        .drafts
+        .insert(second.clone(), "other".into());
+    state.windows.current_channel = Some(second.clone());
+
+    reply_presence::store_recalled_draft(&mut state, first.clone(), "older entry".into());
+    assert!(state.transcript.reply_contexts.contains_key(&first));
+    assert_eq!(
+        state.transcript.drafts.get(&first).map(String::as_str),
+        Some("older entry")
+    );
+    // The other window keeps its own draft.
+    assert_eq!(
+        state.transcript.drafts.get(&second).map(String::as_str),
+        Some("other")
+    );
+
+    reply_presence::store_recalled_draft(&mut state, first.clone(), quote.clone());
+    assert!(state.transcript.reply_contexts.contains_key(&first));
+    assert_eq!(
+        state.transcript.drafts.get(&first).map(String::as_str),
+        Some(quote.as_str())
+    );
+    reply_presence::store_recalled_draft(&mut state, first.clone(), String::new());
+    assert!(!state.transcript.drafts.contains_key(&first));
+}
+
+#[test]
 fn input_history_clear_drops_every_channel() {
     let mut history = input_history::InputHistory::default();
     let first = history_key("libera", "#rust");

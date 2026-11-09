@@ -321,6 +321,12 @@ enum WorkerCommand {
         key: (String, String),
         text: String,
     },
+    /// An input-history recall in one window: the draft changes, a pending
+    /// reply stays.
+    DraftRecalled {
+        key: (String, String),
+        text: String,
+    },
     ToggleTheme,
     SelectColorTheme(String),
     /// Night slot of the account's theme pair; "" goes back to one theme.
@@ -2121,6 +2127,9 @@ async fn run_worker(
                     // belongs to, not for whichever one is open by now.
                     Some(WorkerCommand::DraftSynced { key, text }) => {
                         reply_presence::store_draft(&mut state, &ui, key, text);
+                    }
+                    Some(WorkerCommand::DraftRecalled { key, text }) => {
+                        reply_presence::store_recalled_draft(&mut state, key, text);
                     }
                     Some(WorkerCommand::ReplyToMessage { nick, body, id }) => {
                         reply_presence::start_reply(&mut state, &ui, &nick, &body, id.parse().ok());
