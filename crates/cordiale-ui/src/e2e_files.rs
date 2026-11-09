@@ -162,7 +162,7 @@ pub(crate) fn handle_attach_locked(
         fail("e2e-not-ready");
         return;
     };
-    if state.e2e.reset.contains(&network) || !state.e2e.engines.contains_key(&network) {
+    if !state.e2e.can_use_engine(&network) {
         fail("e2e-not-ready");
         return;
     }
@@ -363,6 +363,15 @@ fn open_with(mime: &str) -> OpenWith {
     }
 }
 
+/// Like [`open_with`], but a text over the size limit of the text viewer goes
+/// to the save dialog: the viewer would show only a part of it.
+fn open_for_size(mime: &str, len: usize) -> OpenWith {
+    match open_with(mime) {
+        OpenWith::Text if len > cordiale_core::media::MAX_TEXT_BYTES => OpenWith::Save,
+        other => other,
+    }
+}
+
 /// Status key for a descriptor or a download that was refused.
 fn open_error_status(error: e2e_file::FileError) -> &'static str {
     match error {
@@ -424,7 +433,7 @@ pub(crate) fn open_e2e_file(
 /// Shows a decrypted file by its type.
 fn show_decrypted(ui: &slint::Weak<AppWindow>, file: &e2e_file::ValidFile, plain: Vec<u8>) {
     let (name, url) = (file.name.clone(), file.url.to_string());
-    match open_with(&file.mime) {
+    match open_for_size(&file.mime, plain.len()) {
         OpenWith::Image(extension) => {
             let written = temp_files::write_private("e2e-media", &format!(".{extension}"), &plain);
             let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -454,16 +463,16 @@ fn show_decrypted(ui: &slint::Weak<AppWindow>, file: &e2e_file::ValidFile, plain
             });
         }
         OpenWith::Text => {
-            let limit = cordiale_core::media::MAX_TEXT_BYTES;
-            let cut = plain.len() > limit;
-            let shown = String::from_utf8_lossy(&plain[..plain.len().min(limit)]).into_owned();
+            // Only a text that fits the viewer comes here: a larger one goes
+            // to the save dialog, so the whole file stays reachable.
+            let shown = String::from_utf8_lossy(&plain).into_owned();
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 media_save::forget();
                 ui.set_media_url(url.into());
                 ui.set_media_title(name.into());
                 ui.set_media_zoom(false);
                 ui.set_media_text(shown.into());
-                ui.set_media_truncated(cut);
+                ui.set_media_truncated(false);
                 ui.set_media_kind("text".into());
                 ui.set_media_open(true);
             });
@@ -667,6 +676,17 @@ mod tests {
         ] {
             assert_eq!(open_with(mime), OpenWith::Save, "{mime}");
         }
+    }
+
+    #[test]
+    fn a_text_over_the_viewer_limit_goes_to_the_save_dialog() {
+        let limit = cordiale_core::media::MAX_TEXT_BYTES;
+        assert_eq!(open_for_size("text/plain", limit), OpenWith::Text);
+        assert_eq!(open_for_size("text/markdown", limit + 1), OpenWith::Save);
+        assert_eq!(
+            open_for_size("image/png", limit + 1),
+            OpenWith::Image("png")
+        );
     }
 
     #[test]
