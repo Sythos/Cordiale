@@ -47,7 +47,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::e2e_protocol::own_flag_allowed;
+use crate::e2e_protocol::{channel_allowed, own_flag_allowed};
 use crate::e2e_wire::{
     as_object, is_did_shape, parse_payload, required_str, WireError, INBOX_PAGE_MAX,
     SEND_PAYLOAD_MAX_BYTES, WILDCARD,
@@ -270,6 +270,9 @@ pub struct InboxRow {
     pub msgid: String,
     pub payload: String,
     pub own: bool,
+    /// The folded channel name of a channel message (protocol 62 and
+    /// higher), or `None` on a query row.
+    pub channel: Option<String>,
 }
 
 /// The `e2e_message` event of section 4f. Its kind is
@@ -291,6 +294,12 @@ impl InboxRow {
             None => false,
             Some(_) if !own_flag_allowed(server_protocol) => return Err(WireError::UnknownField),
             Some(Value::Bool(own)) => *own,
+            Some(_) => return Err(WireError::BadFieldType),
+        };
+        let channel = match map.get("channel") {
+            None | Some(Value::Null) => None,
+            Some(_) if !channel_allowed(server_protocol) => return Err(WireError::UnknownField),
+            Some(Value::String(name)) if !name.is_empty() => Some(name.clone()),
             Some(_) => return Err(WireError::BadFieldType),
         };
         let verb = InboxVerb::parse(required_str(map, "verb")?)?;
@@ -318,6 +327,7 @@ impl InboxRow {
             msgid: required_msgid(map)?,
             payload: payload.to_string(),
             own,
+            channel,
         })
     }
 
@@ -551,6 +561,34 @@ mod tests {
         assert_eq!(read.msgid, "q83vEjRWeJA");
         assert_eq!(read.payload, r#"{"v":2}"#);
         assert!(!read.own);
+    }
+
+    #[test]
+    fn inbox_row_reads_the_channel_from_protocol_62() {
+        let mut value = row();
+        assert_eq!(
+            InboxRow::from_value(&value, Some(62)).unwrap().channel,
+            None
+        );
+        value["channel"] = json!("#room");
+        assert_eq!(
+            InboxRow::from_value(&value, Some(62)).unwrap().channel,
+            Some("#room".to_string())
+        );
+        assert_eq!(
+            InboxRow::from_value(&value, Some(61)),
+            Err(WireError::UnknownField)
+        );
+        value["channel"] = json!(7);
+        assert_eq!(
+            InboxRow::from_value(&value, Some(62)),
+            Err(WireError::BadFieldType)
+        );
+        value["channel"] = json!(null);
+        assert_eq!(
+            InboxRow::from_value(&value, Some(61)).unwrap().channel,
+            None
+        );
     }
 
     #[test]

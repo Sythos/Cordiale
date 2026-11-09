@@ -57,6 +57,7 @@ use sha2::{Digest, Sha256};
 use vodozemac::olm::{Account, AccountPickle, Session, SessionPickle};
 use zeroize::Zeroize;
 
+use crate::e2e_channel::ChannelKeyring;
 use crate::e2e_device::VersionedDeviceCertificate;
 use crate::e2e_manage::SignedList;
 use crate::e2e_peer::{peer_device_key, ReplayState};
@@ -126,6 +127,10 @@ struct StateData {
     /// (public values). The mark survives a restart.
     #[serde(default)]
     dropped_rows: BTreeMap<String, String>,
+    /// Group sessions of the E2E channels. Kept apart from the Olm sessions
+    /// of the private queries.
+    #[serde(default)]
+    channels: ChannelKeyring,
 }
 
 /// An own device that a revoke removes from the list (public values).
@@ -498,6 +503,24 @@ impl E2eStateStore {
         self.commit(|data| data.trust = trust)
     }
 
+    /// The channel group sessions.
+    pub fn channels(&self) -> &ChannelKeyring {
+        &self.data.channels
+    }
+
+    /// Runs `change` on a copy of the channel group sessions and saves the
+    /// copy in the sealed state. A failed write keeps the old sessions in the
+    /// file and in memory. The result of `change` is given back.
+    pub fn update_channels<R>(
+        &mut self,
+        change: impl FnOnce(&mut ChannelKeyring) -> R,
+    ) -> Result<R, E2eStoreError> {
+        let mut keyring = self.data.channels.clone();
+        let result = change(&mut keyring);
+        self.commit(|data| data.channels = keyring)?;
+        Ok(result)
+    }
+
     /// The drop marks of the sent rows: row id to the wire name of the reason.
     pub fn dropped_rows(&self) -> &BTreeMap<String, String> {
         &self.data.dropped_rows
@@ -846,6 +869,42 @@ mod tests {
         let loaded = store.session("peer-1").expect("session").expect("present");
         assert_eq!(loaded.session_id(), session.session_id());
         assert!(store.session("other").expect("session").is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_sessions_survive_a_restart_and_stay_apart_from_olm_sessions() {
+        let dir = scratch_dir("channels");
+        let path = dir.join("state.bin");
+        let provider = fresh_key();
+        let members: std::collections::BTreeSet<String> =
+            ["a".to_string(), "b".to_string()].into_iter().collect();
+        let wire = {
+            let mut store = E2eStateStore::open(path.clone(), &provider).expect("open");
+            store
+                .update_channels(|ring| {
+                    ring.apply_membership("net", "#room", 1, members.clone());
+                    ring.prepare_outbound("net", "#room", "a").expect("prepare");
+                })
+                .expect("save");
+            store
+                .update_channels(|ring| ring.encrypt("net", "#room", "a", "kept"))
+                .expect("save")
+                .expect("encrypt")
+        };
+        let mut store = E2eStateStore::open(path.clone(), &provider).expect("reopen");
+        assert!(store.olm_identity().expect("account").is_none());
+        let mut ring = store.channels().clone();
+        assert_eq!(
+            ring.status("net", "#room", true),
+            crate::e2e_channel::ChannelStatus::Encrypted
+        );
+        // The ratchet was saved: the next message has the next index.
+        let next = ring.encrypt("net", "#room", "a", "next").expect("encrypt");
+        assert_ne!(wire, next);
+        store
+            .update_channels(|current| *current = ring)
+            .expect("save");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -37,7 +37,7 @@ use serde_json::Value;
 use crate::e2e_device_routes::check_compact_json;
 use crate::e2e_wire::{
     as_object, check_addresses, is_did_shape, reject_unknown_fields, required_str, Verb, WireError,
-    SEND_PAYLOAD_MAX_BYTES, SEND_PAYLOAD_MAX_LINES,
+    SEND_PAYLOAD_MAX_BYTES, SEND_PAYLOAD_MAX_LINES, WILDCARD,
 };
 use crate::slash::{is_channel, is_statusmsg_target};
 
@@ -933,6 +933,42 @@ impl E2eSendRequest {
         })
     }
 
+    /// Builds a channel message (protocol 62 and higher): the target is the
+    /// channel, the verb is `msg` and `to` is always `*`. The payload is the
+    /// group payload of the channel. A target that is not a plain channel is
+    /// refused.
+    pub fn channel_message(
+        channel: &str,
+        from: &str,
+        payload: &str,
+        priority: Option<E2eSendPriority>,
+    ) -> Result<Self, WireError> {
+        if !is_channel(channel)
+            || is_statusmsg_target(channel)
+            || channel.contains(QUERY_LOCK_LABEL)
+            || channel.contains(['\r', '\n', '\0', ' ', ','])
+        {
+            return Err(WireError::BadTarget);
+        }
+        check_addresses(E2eSendVerb::Msg.frame_verb(), from, WILDCARD)?;
+        if payload.len() > SEND_PAYLOAD_MAX_BYTES {
+            return Err(WireError::PayloadTooLarge);
+        }
+        if payload.lines().count() > SEND_PAYLOAD_MAX_LINES {
+            return Err(WireError::TooManyLines);
+        }
+        check_compact_json(payload)?;
+        Ok(Self {
+            target: channel.to_string(),
+            verb: E2eSendVerb::Msg,
+            from: from.to_string(),
+            to: WILDCARD.to_string(),
+            payload: payload.to_string(),
+            priority,
+            expires_at: None,
+        })
+    }
+
     /// Reads a request from JSON, strictly: a missing, unknown or wrongly
     /// typed field is an error. An integer is never read from a string, a
     /// boolean or a number with a fraction.
@@ -1279,6 +1315,47 @@ mod tests {
             let error = E2eSendRequest::from_value(&case["request"]).expect_err("invalid request");
             assert_eq!(format!("{error:?}"), case["error"], "{case}");
         }
+    }
+
+    #[test]
+    fn a_channel_message_request_has_the_channel_target_and_wildcard_to() {
+        let payload = r##"{"v":3,"ch":"#room","sid":"S","i":0,"body":"B"}"##;
+        let request = E2eSendRequest::channel_message(
+            "#room",
+            "AAAAAAAAAAA",
+            payload,
+            Some(E2eSendPriority::Text),
+        )
+        .expect("channel request");
+        let value: Value = serde_json::from_str(&request.to_json()).expect("json");
+        assert_eq!(value["target"], "#room");
+        assert_eq!(value["verb"], "msg");
+        assert_eq!(value["to"], "*");
+        assert_eq!(value["payload"], payload);
+        // A query target, a status-prefixed channel, a wildcard sender and a
+        // payload that is not compact JSON are refused.
+        for target in ["bot", "@#room", "#a b", "\u{1F512}#room", "#a,#b"] {
+            assert_eq!(
+                E2eSendRequest::channel_message(target, "AAAAAAAAAAA", payload, None),
+                Err(WireError::BadTarget),
+                "{target}"
+            );
+        }
+        assert!(E2eSendRequest::channel_message("#room", "*", payload, None).is_err());
+        assert!(E2eSendRequest::channel_message("#room", "AAAAAAAAAAA", "not json", None).is_err());
+        // The ordinary builder still refuses a channel.
+        assert_eq!(
+            E2eSendRequest::new(
+                "#room",
+                E2eSendVerb::Msg,
+                "AAAAAAAAAAA",
+                "*",
+                payload,
+                None,
+                None
+            ),
+            Err(WireError::BadTarget)
+        );
     }
 
     #[test]

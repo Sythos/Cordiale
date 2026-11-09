@@ -1983,3 +1983,54 @@ below follows its design, not shipped code. Check it again when Cicchetto ships.
 - **Not verified.** Never tried against a real Grappa with the door, nor against Cicchetto: the
   descriptor follows a design that can still change. `CLIENT_PROTOCOL_VERSION` stays 59: protocol 58 is
   below it, so no minimum changes.
+
+## E2E dei canali (chiavi di gruppo, protocollo 62 e successivi)
+
+Contratto: `CLIENT_PROTOCOL.md`, sezione «Channel messages (v63)». Una chiave di gruppo (Megolm) per
+ogni dispositivo che scrive, non una chiave unica di canale. Il modello è in
+`crates/cordiale-core/src/e2e_channel.rs`; lo stato sta nel file sigillato dell'E2E (`e2e_state.rs`,
+campo `channels`), separato dalle sessioni Olm delle query.
+
+**Allineamento con Cicchetto (letto sul repository `vjt/grappa-irc`).** Cicchetto non ha ancora una E2E
+dei canali: l'E2E c'è solo per le query, e la issue ombrello E2E elenca la cifratura dei canali (Megolm,
+solo canali piccoli) come obiettivo successivo. Cordiale segue quindi il contratto del server, non un
+client di riferimento. Limiti dichiarati dal maintainer di Grappa che valgono anche qui: i messaggi CTCP
+sono limitati (il pacer del server conta un canale come un solo destinatario), l'attesa di
+riassemblaggio è di 60 s dall'ultima riga, nessun ritorno al testo in chiaro dopo la verifica.
+
+**Stato dei lavori.** Fatti e provati con test: modello delle chiavi, cifratura, appartenenza, rotazione;
+lettura del messaggio di chiave `gkey` (`InnerKind::GroupKey`) e delle righe di canale (`InboxRow.channel`,
+solo da protocollo 62); invio della chiave in un messaggio Olm (`send_group_key`, `channel_sync_keys`);
+invio di un messaggio di canale alla porta REST (`E2eSendRequest::channel_message`,
+`send_channel_text`: bersaglio il canale, `verb` `msg`, `to` `*`); API `channel_*` del motore.
+**Non ancora collegati:** nel client (`cordiale-ui`) gli eventi JOIN/PART/KICK/QUIT/NICK verso
+`channel_set_members`; la scelta del canale cifrato, il comando di invio e la riga dello storico nella
+finestra del canale; la consegna delle chiavi agli altri dispositivi dello stesso account (passa dal
+percorso delle copie, non da `send_group_key`); lo stato di cifratura e la scelta del testo in chiaro
+nella UI. `CLIENT_PROTOCOL_VERSION` non cambia finché questi punti non sono implementati e provati.
+
+- **Messaggio.** `{"v":3,"ch":<canale>,"sid":<sessione>,"i":<indice>,"body":<Megolm base64>}`. `ch` è il nome
+  del canale già normalizzato (case-fold). L'indice deve essere quello del messaggio Megolm.
+- **Chiave.** Ogni dispositivo dà la chiave della propria sessione a ogni membro in un solo messaggio Olm
+  `{"t":"gkey","ch":…,"sid":…,"key":…}`. Mai al server, mai in una riga di canale. La chiave è esportata
+  all'indice corrente: chi entra dopo non legge i messaggi prima.
+- **Chiave in anticipo.** Il primo messaggio Olm di un peer nuovo può arrivare prima dell'evento di
+  appartenenza. La chiave aspetta (al massimo 16 per canale) e si legge quando il mittente diventa membro.
+- **Ingresso.** Un membro nuovo riceve la chiave da ogni dispositivo (`missing_shares`); chi è già membro
+  non la riceve di nuovo.
+- **Uscita, rimozione.** La sessione propria diventa non valida: nessun invio finché non ne esiste una
+  nuova (`prepare_outbound`), che va solo ai membri rimasti. La vecchia sessione è cancellata, come le
+  sessioni in ingresso del membro uscito.
+- **Membri.** Sono i dispositivi verificati e pronti dei nick nel canale, più il dispositivo proprio. Un
+  nick senza dispositivo verificato non è membro e non legge.
+- **Mittente.** È il dispositivo verificato che ha dato la chiave per Olm; una riga di canale si apre solo
+  con la sessione di un dispositivo membro. Mai dal nick.
+- **Rifiuti.** Formato, canale diverso, mittente non membro, sessione ignota, testo cifrato o firma non
+  validi, indice diverso da `i`, indice ripetuto (finestra di 1024 indici per sessione). L'indice si salva
+  solo dopo l'apertura; nell'engine lo stato del gruppo avanza solo dopo la scrittura nello storico.
+- **Appartenenza.** Ogni evento ha un numero di sequenza; un numero non superiore all'ultimo è ignorato,
+  quindi duplicati e ordine invertito sono sicuri.
+- **Invio senza chiave.** Mai testo in chiaro in automatico: `send_channel_text` fallisce con `NoKey` e non
+  invia nulla (`SendPlan::Pending`); il testo in chiaro parte solo dopo la scelta esplicita dell'utente
+  (`SendPlan::Plain`).
+- **Canali in chiaro.** Invariati.
