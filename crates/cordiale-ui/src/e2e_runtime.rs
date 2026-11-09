@@ -2884,8 +2884,8 @@ fn refresh_locked_view(
 }
 
 /// Like `refresh_locked_view`. With `Some(was_ciphertext)` the view just
-/// switched from that mode: the reader keeps the message at the top of the
-/// pane.
+/// switched from that mode: the message of the top row goes flush with the
+/// top of the pane. The offset inside the row is not kept between views.
 fn refresh_locked_view_keeping_place(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -3138,10 +3138,7 @@ fn show_locked_rows(
                 usize::try_from(ui.get_chat_content_rows()).unwrap_or(0),
                 ui.get_chat_lines().row_count(),
             )?;
-            Some(ChatAnchor {
-                row: remap_message_row(&old_counts, &new_counts, anchor.row),
-                ..anchor
-            })
+            Some(view_switch_anchor(anchor, &old_counts, &new_counts))
         });
         show_chat_lines(&ui, chat_lines_model(&lines, dark_theme));
         if let Some(anchor) = anchor {
@@ -3178,6 +3175,22 @@ fn locked_row_counts(
         .unwrap_or_default();
     counts.extend(state.e2e.incoming_rows(network, nick).iter().map(|_| 1));
     counts
+}
+
+/// The anchor for the new view. The offset is dropped: it was measured in a
+/// row of the old view, and the new row can be much shorter. The message
+/// goes flush with the top of the pane. The row height stays the old
+/// average, which the pane still seeks by until it lays the new rows out.
+fn view_switch_anchor(
+    anchor: ChatAnchor,
+    old_counts: &[usize],
+    new_counts: &[usize],
+) -> ChatAnchor {
+    ChatAnchor {
+        row: remap_message_row(old_counts, new_counts, anchor.row),
+        offset: 0.0,
+        row_height: anchor.row_height,
+    }
 }
 
 /// The row in the new view for the message that owns `row` in the old view:
@@ -3974,6 +3987,32 @@ mod tests {
         // A stale row maps to the last message; no messages map to row 0.
         assert_eq!(remap_message_row(&clear, &cipher, 99), 4);
         assert_eq!(remap_message_row(&[], &[], 5), 0);
+    }
+
+    #[test]
+    fn a_view_switch_anchor_drops_the_offset_of_the_old_row() {
+        let cipher = [1, 3, 1];
+        let clear = [1, 1, 1];
+        // Third capture row of the middle message, scrolled 40 px in.
+        let anchor = ChatAnchor {
+            row: 3,
+            offset: 40.0,
+            row_height: 22.0,
+        };
+        let to_clear = view_switch_anchor(anchor, &cipher, &clear);
+        assert_eq!(to_clear.row, 1);
+        assert_eq!(to_clear.offset, 0.0);
+        assert_eq!(to_clear.row_height, 22.0);
+        // Clear text to ciphertext.
+        let anchor = ChatAnchor {
+            row: 2,
+            offset: 5.0,
+            row_height: 18.0,
+        };
+        let to_cipher = view_switch_anchor(anchor, &clear, &cipher);
+        assert_eq!(to_cipher.row, 4);
+        assert_eq!(to_cipher.offset, 0.0);
+        assert_eq!(to_cipher.row_height, 18.0);
     }
 
     const OFFER_ID: &str = "AbCdEfGhIjKlMnOpQrStUv";
