@@ -5882,6 +5882,14 @@ fn plain_query_e2e_actions_are_available_in_the_right_pane() {
 
         ui.set_current_query_e2e_start_confirm_open(false);
         ui.set_current_query_e2e_can_start(false);
+        ui.window().take_snapshot().unwrap();
+        click();
+        assert!(
+            ui.get_current_query_e2e_start_confirm_open(),
+            "Start encrypted chat must stay available when local start is false in a {width}px window"
+        );
+
+        ui.set_current_query_e2e_start_confirm_open(false);
         ui.set_current_query_e2e_has_locked(true);
         ui.window().take_snapshot().unwrap();
         click();

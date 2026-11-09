@@ -1744,7 +1744,8 @@ export component AppWindow inherits Window {
         min(sidebar-rows-min-width, sidebar-hard-max-width));
     property <length> members-e2e-action-min-width:
         current-query && !current-query-e2e
-            && (current-query-e2e-can-start || current-query-e2e-has-locked
+            && (current-query-e2e-request-state == ""
+                || current-query-e2e-has-locked
                 || current-query-e2e-request-state == "accepted")
             ? max(e2e-start-probe.preferred-width, e2e-open-probe.preferred-width) + 16px
             : 0px;
@@ -4567,7 +4568,6 @@ export component AppWindow inherits Window {
                     }
                     if current-query-e2e-request-state == "expired" || current-query-e2e-request-state == "refused" : CompactButton {
                         text: @tr("Try again");
-                        enabled: current-query-e2e-can-start;
                         clicked => {
                             e2e-request-action("retry", window-source-network, current-query-peer-nick, current-query-e2e-request-id);
                         }
@@ -5277,7 +5277,6 @@ export component AppWindow inherits Window {
                 && (current-query-e2e-has-locked
                     || current-query-e2e-request-state == "accepted"
                     || (current-query-e2e-request-state == ""
-                        && current-query-e2e-can-start
                         && !current-query-e2e-start-confirm-open)) : CompactButton {
                 text: current-query-e2e-has-locked || current-query-e2e-request-state == "accepted"
                     ? @tr("Open encrypted chat")
