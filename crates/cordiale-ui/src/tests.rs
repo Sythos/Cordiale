@@ -13971,3 +13971,113 @@ fn the_worker_session_id_follows_the_connection_state() {
         &current_identity_session(&state)
     ));
 }
+
+fn history_key(network: &str, channel: &str) -> (String, String) {
+    (network.to_string(), channel.to_string())
+}
+
+#[test]
+fn input_history_recalls_older_entries_and_stops_at_the_oldest() {
+    let mut history = input_history::InputHistory::default();
+    let key = history_key("libera", "#rust");
+    history.record(&key, "one");
+    history.record(&key, "two");
+    assert_eq!(history.navigate(&key, true, "").as_deref(), Some("two"));
+    assert_eq!(history.navigate(&key, true, "two").as_deref(), Some("one"));
+    assert_eq!(history.navigate(&key, true, "one"), None);
+    assert_eq!(history.navigate(&key, true, "one"), None);
+}
+
+#[test]
+fn input_history_down_restores_the_unsent_draft() {
+    let mut history = input_history::InputHistory::default();
+    let key = history_key("libera", "#rust");
+    history.record(&key, "one");
+    history.record(&key, "two");
+    assert_eq!(
+        history.navigate(&key, true, "half typed").as_deref(),
+        Some("two")
+    );
+    assert_eq!(history.navigate(&key, true, "two").as_deref(), Some("one"));
+    assert_eq!(history.navigate(&key, false, "one").as_deref(), Some("two"));
+    assert_eq!(
+        history.navigate(&key, false, "two").as_deref(),
+        Some("half typed")
+    );
+    assert_eq!(history.navigate(&key, false, "half typed"), None);
+}
+
+#[test]
+fn input_history_keeps_eight_entries_and_ignores_empty_input() {
+    let mut history = input_history::InputHistory::default();
+    let key = history_key("libera", "#rust");
+    history.record(&key, "");
+    history.record(&key, "   ");
+    assert_eq!(history.navigate(&key, true, ""), None);
+    for index in 0..10 {
+        history.record(&key, &format!("entry {index}"));
+    }
+    let mut seen = Vec::new();
+    let mut current = String::new();
+    while let Some(text) = history.navigate(&key, true, &current) {
+        seen.push(text.clone());
+        current = text;
+    }
+    assert_eq!(seen.len(), input_history::INPUT_HISTORY_LIMIT);
+    assert_eq!(seen.first().map(String::as_str), Some("entry 9"));
+    assert_eq!(seen.last().map(String::as_str), Some("entry 2"));
+}
+
+#[test]
+fn input_history_is_separate_for_each_network_and_channel() {
+    let mut history = input_history::InputHistory::default();
+    let first = history_key("libera", "#rust");
+    history.record(&first, "hello");
+    assert_eq!(
+        history.navigate(&history_key("libera", "#go"), true, ""),
+        None
+    );
+    assert_eq!(
+        history.navigate(&history_key("oftc", "#rust"), true, ""),
+        None
+    );
+    assert_eq!(history.navigate(&first, true, "").as_deref(), Some("hello"));
+}
+
+#[test]
+fn input_history_editing_a_recalled_entry_leaves_navigation() {
+    let mut history = input_history::InputHistory::default();
+    let key = history_key("libera", "#rust");
+    history.record(&key, "one");
+    history.record(&key, "two");
+    assert_eq!(history.navigate(&key, true, "").as_deref(), Some("two"));
+    // The user edits "two": the edit becomes the draft and the next Up
+    // starts again from the newest entry.
+    assert_eq!(
+        history.navigate(&key, true, "two edited").as_deref(),
+        Some("two")
+    );
+    assert_eq!(
+        history.navigate(&key, false, "two").as_deref(),
+        Some("two edited")
+    );
+    // The stored entries are unchanged.
+    assert_eq!(history.navigate(&key, true, "").as_deref(), Some("two"));
+    assert_eq!(history.navigate(&key, true, "two").as_deref(), Some("one"));
+}
+
+#[test]
+fn input_history_key_is_only_for_joined_channels() {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.set_window_source_network("libera".into());
+    ui.set_window_source_target("#Rust".into());
+    assert_eq!(input_history_key(&ui), None);
+    ui.set_current_window_is_joined(true);
+    assert!(input_history_key(&ui).is_some());
+    ui.set_current_query(true);
+    assert_eq!(input_history_key(&ui), None);
+    ui.set_current_query(false);
+    ui.set_current_server_window(true);
+    assert_eq!(input_history_key(&ui), None);
+}
