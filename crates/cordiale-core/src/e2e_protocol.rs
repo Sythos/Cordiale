@@ -99,6 +99,16 @@ pub fn own_flag_allowed(server_protocol: Option<u32>) -> bool {
     server_protocol.is_some_and(|version| version >= OWN_FLAG_MIN_PROTOCOL)
 }
 
+/// First server protocol whose `e2e_message` rows carry `channel` and whose
+/// door takes a channel target.
+pub const CHANNEL_MIN_PROTOCOL: u32 = 62;
+
+/// True when the server may send a `channel` field on an inbox row and take
+/// a channel target on the send door.
+pub fn channel_allowed(server_protocol: Option<u32>) -> bool {
+    server_protocol.is_some_and(|version| version >= CHANNEL_MIN_PROTOCOL)
+}
+
 /// Consent route used to ask for, accept, refuse, or dismiss an E2E chat
 /// request. It is separate from per-device operations and needs protocol 53.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

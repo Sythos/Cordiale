@@ -68,7 +68,7 @@
 //! requests; [`E2eEngine::send_list_messages`] sends them. A message for a
 //! peer goes to every trusted device of the peer, one body for each device.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,9 @@ use vodozemac::olm::{Account, Message, OlmMessage, PreKeyMessage, Session, Sessi
 use vodozemac::Curve25519PublicKey;
 
 use crate::client::{GrappaClient, GrappaClientError};
+use crate::e2e_channel::{
+    ChannelError, ChannelKeyring, ChannelStatus, MembershipOutcome, Opened, SendPlan,
+};
 use crate::e2e_device::{verify_signature, verify_signed_list, E2eError, PeerDevice};
 use crate::e2e_device_routes::{
     ClaimRequest, CopyRequest, CopyVerb, InboxAckRequest, InboxRow, InboxVerb,
@@ -213,6 +216,23 @@ fn storage_part(server: &str, account: &str, network: &str) -> Option<String> {
         part.push_str(&format!("{byte:02x}"));
     }
     Some(part)
+}
+
+/// Why a channel call of the engine failed.
+#[derive(Debug)]
+pub enum ChannelOpError {
+    /// The channel state refused the call.
+    Channel(ChannelError),
+    /// The sealed state could not be written.
+    Store(E2eStoreError),
+    /// The send door or the Olm path failed. Nothing reached the channel.
+    Send(EngineError),
+}
+
+impl From<E2eStoreError> for ChannelOpError {
+    fn from(error: E2eStoreError) -> Self {
+        ChannelOpError::Store(error)
+    }
 }
 
 /// Why an engine call failed.
@@ -469,6 +489,10 @@ pub enum InnerKind {
     List { master: MasterBlock },
     /// A request for the signed list of the receiver: `{"t":"listreq"}`.
     ListReq,
+    /// The key of a channel group session of the sender:
+    /// `{"t":"gkey","ch":…,"sid":…,"key":…}`. `text` is the whole plaintext;
+    /// [`ChannelKeyring::accept_key`] reads it.
+    GroupKey { channel: String, text: String },
     /// Any other kind: a challenge, an unknown one. The engine keeps the
     /// session and stores nothing.
     Other,
@@ -531,6 +555,13 @@ impl Inner {
                 .and_then(|master| serde_json::from_value(master.clone()).ok())
                 .map_or(InnerKind::Other, |master| InnerKind::List { master }),
             "listreq" => InnerKind::ListReq,
+            "gkey" => field("ch").filter(|channel| !channel.is_empty()).map_or(
+                InnerKind::Other,
+                |channel| InnerKind::GroupKey {
+                    channel: channel.to_string(),
+                    text: text.to_string(),
+                },
+            ),
             _ => InnerKind::Other,
         };
         Some(Self {
@@ -767,6 +798,8 @@ enum Outgoing<'a> {
     Text(&'a str),
     List(&'a MasterBlock),
     ListReq,
+    /// The text of a channel key share: the object `{"t":"gkey",…}`.
+    GroupKey(&'a str),
 }
 
 impl Outgoing<'_> {
@@ -797,6 +830,20 @@ impl Outgoing<'_> {
             }
             Outgoing::List(master) => ("list", Some(*master)),
             Outgoing::ListReq => ("listreq", None),
+            Outgoing::GroupKey(share) => {
+                // The share is an object with `t`, `ch`, `sid` and `key`. The
+                // list version and the binding go in as in every inner
+                // message.
+                let mut map = match serde_json::from_str::<Value>(share) {
+                    Ok(Value::Object(map)) => map,
+                    _ => serde_json::Map::new(),
+                };
+                map.insert("lv".to_string(), Value::from(lv));
+                if let Some(fb) = fb {
+                    map.insert("fb".to_string(), Value::from(fb));
+                }
+                return Value::Object(map).to_string();
+            }
         };
         let mut map = serde_json::Map::new();
         map.insert("t".to_string(), Value::from(t));
@@ -1079,6 +1126,316 @@ impl E2eEngine {
 
     pub fn own_did(&self) -> &str {
         &self.own_did
+    }
+
+    /// The devices of this network that `trust` revokes: every revoked key of
+    /// the trust state and every cached device that it flags. The own device
+    /// is never in it.
+    fn revoked_devices(&self, trust: &PeerTrust) -> BTreeSet<String> {
+        let mut dids = trust.revoked_dids_on(&self.network);
+        dids.extend(
+            self.peers
+                .iter()
+                .filter(|(_, entry)| self.entry_revoked(entry, trust))
+                .map(|(did, _)| did.clone()),
+        );
+        dids.extend(self.revoked_dids.iter().cloned());
+        dids.remove(&self.own_did);
+        dids
+    }
+
+    /// Saves `trust`. Every channel member that it revokes leaves its
+    /// channels in the same write, and the own session of such a channel
+    /// becomes invalid. Then the cached devices that it revokes are dropped.
+    fn save_trust_and_revoke(&mut self, trust: &PeerTrust) -> Result<(), E2eStoreError> {
+        let dids = self.revoked_devices(trust);
+        let mut ring = self.state.channels().clone();
+        if ring.revoke_devices(&self.network, &dids) {
+            self.state.set_trust_and_channels(trust, &ring)?;
+        } else {
+            self.state.set_trust(trust)?;
+        }
+        self.forget_revoked(trust);
+        Ok(())
+    }
+
+    /// Removes from the channels every member device that the persisted
+    /// trust or this session revokes. It also covers a revocation from
+    /// before a restart, when the cache of devices is empty. Call it before
+    /// the own session is used.
+    fn drop_revoked_channel_members(&mut self) -> Result<(), E2eStoreError> {
+        let dids = self.revoked_devices(&self.state.trust());
+        if dids.is_empty() {
+            return Ok(());
+        }
+        let mut ring = self.state.channels().clone();
+        if ring.revoke_devices(&self.network, &dids) {
+            self.state.update_channels(|current| *current = ring)?;
+        }
+        Ok(())
+    }
+
+    /// What the UI shows for a channel. `e2e` is true when the channel is
+    /// set to E2E.
+    pub fn channel_status(&self, channel: &str, e2e: bool) -> ChannelStatus {
+        self.state.channels().status(&self.network, channel, e2e)
+    }
+
+    /// Chooses the route of a send in an E2E channel. Without a key the
+    /// result is `Pending`: nothing goes out in clear text. `Plain` needs
+    /// the explicit choice of the user (`allow_plain`).
+    pub fn channel_plan_send(&self, channel: &str, allow_plain: bool) -> SendPlan {
+        self.state
+            .channels()
+            .plan_send(&self.network, channel, allow_plain)
+    }
+
+    /// The member devices of a channel: the own device and every verified,
+    /// ready device of the listed nicks. A nick without a verified device
+    /// has no device here and cannot read the channel.
+    pub fn channel_devices_of(&self, nicks: &[String]) -> BTreeSet<String> {
+        let mut dids = BTreeSet::from([self.own_did.clone()]);
+        for nick in nicks {
+            for entry in self.pick_devices(nick) {
+                dids.insert(entry.device.did().to_string());
+            }
+        }
+        dids
+    }
+
+    /// Applies a membership event of a channel. `nicks` are the nicks in the
+    /// channel after a JOIN, PART, KICK, QUIT or NICK; `seq` grows with each
+    /// event. A number that is not new is ignored. A member that left makes
+    /// the own session invalid until the next
+    /// [`E2eEngine::channel_sync_keys`].
+    pub fn channel_set_members(
+        &mut self,
+        channel: &str,
+        seq: u64,
+        nicks: &[String],
+    ) -> Result<MembershipOutcome, E2eStoreError> {
+        let members = self.channel_devices_of(nicks);
+        let network = self.network.clone();
+        self.state
+            .update_channels(|ring| ring.apply_membership(&network, channel, seq, members))
+    }
+
+    /// Opens a channel message of a member device and returns its text. The
+    /// group state is saved when the message opened.
+    pub fn channel_decrypt(
+        &mut self,
+        channel: &str,
+        sender_did: &str,
+        wire: &str,
+    ) -> Result<Opened, ChannelOpError> {
+        let network = self.network.clone();
+        self.state
+            .update_channels(|ring| ring.decrypt(&network, channel, sender_did, wire))?
+            .map_err(ChannelOpError::Channel)
+    }
+
+    /// Sends the key of the own channel session to the device `did` of
+    /// `nick`, in one Olm message through the send door. The key goes to no
+    /// other place. The device counts as served only after the relay accepted
+    /// the message.
+    pub async fn send_group_key(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        channel: &str,
+        nick: &str,
+        did: &str,
+    ) -> Result<(), ChannelOpError> {
+        let text = self
+            .state
+            .channels()
+            .key_share(&self.network, channel)
+            .map_err(ChannelOpError::Channel)?;
+        let entry = self
+            .pick_specific_device(nick, did)
+            .ok_or(ChannelOpError::Send(EngineError::NotReady))?;
+        let identity = self
+            .state
+            .olm_identity()?
+            .ok_or(ChannelOpError::Send(EngineError::NotReady))?;
+        let own = self.own_wire(&identity).map_err(ChannelOpError::Send)?;
+        let sealed = self
+            .seal(&identity, &[entry], &Outgoing::GroupKey(&text), own.lv)
+            .map_err(ChannelOpError::Send)?;
+        let emitted = self
+            .emit(client, token, nick, sealed, &own, E2eSendPriority::Control)
+            .await
+            .map_err(ChannelOpError::Send)?;
+        if emitted.is_empty() {
+            return Err(ChannelOpError::Send(EngineError::NotReady));
+        }
+        let network = self.network.clone();
+        self.state
+            .update_channels(|ring| ring.mark_shared(&network, channel, did))?;
+        Ok(())
+    }
+
+    /// Makes sure the own device has a valid channel session, then sends its
+    /// key to each member device that still needs it. Returns the number of
+    /// devices that the relay served. A device that fails stays on the list
+    /// for the next call.
+    pub async fn channel_sync_keys(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        channel: &str,
+    ) -> Result<usize, ChannelOpError> {
+        // A revoked member never gets the key of the new session.
+        self.drop_revoked_channel_members()?;
+        let (network, own) = (self.network.clone(), self.own_did.clone());
+        let needed = self
+            .state
+            .update_channels(|ring| ring.prepare_outbound(&network, channel, &own))?
+            .map_err(ChannelOpError::Channel)?;
+        let mut served = 0;
+        for did in needed {
+            let Some(nick) = self.peers.get(&did).map(|entry| entry.nick.clone()) else {
+                continue;
+            };
+            if self
+                .send_group_key(client, token, channel, &nick, &did)
+                .await
+                .is_ok()
+            {
+                served += 1;
+            }
+        }
+        Ok(served)
+    }
+
+    /// Encrypts a message for an E2E channel and sends it once to the
+    /// channel (protocol 62 and higher). Without a valid session the call
+    /// fails with `NoKey` and sends nothing: the caller keeps the message
+    /// pending or asks the user for a plain send.
+    pub async fn send_channel_text(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        channel: &str,
+        text: &str,
+        now: i64,
+    ) -> Result<SentText, ChannelOpError> {
+        // A session that a revoked device holds is never used again.
+        self.drop_revoked_channel_members()?;
+        let (network, own) = (self.network.clone(), self.own_did.clone());
+        let wire = self
+            .state
+            .update_channels(|ring| ring.encrypt(&network, channel, &own, text))?
+            .map_err(ChannelOpError::Channel)?;
+        // The state with the moved ratchet is saved before the send: a
+        // skipped index is harmless, a reused one is not.
+        let request = E2eSendRequest::channel_message(
+            channel,
+            &self.own_did,
+            &wire,
+            Some(E2eSendPriority::Text),
+        )
+        .map_err(|error| ChannelOpError::Send(EngineError::Wire(error)))?;
+        let answer = client
+            .send_e2e_message(token, &self.network, &request)
+            .await
+            .map_err(|error| ChannelOpError::Send(EngineError::Client(error)))?;
+        if answer.response != SendResponse::Accepted {
+            return Err(ChannelOpError::Send(EngineError::Rejected(answer.response)));
+        }
+        let suffix = answer.msgid.clone().unwrap_or_else(fresh_local_id);
+        let row_id = format!("{}:out:{suffix}", self.network);
+        let message = E2eMessage {
+            id: row_id.clone(),
+            conversation_id: conversation_id(&self.network, channel),
+            sender_device: OWN_DEVICE.to_string(),
+            sent_at: now,
+            text: text.to_string(),
+            encrypted: true,
+            captures: vec![E2eCapture {
+                verb: send_verb_name(E2eSendVerb::Msg).to_string(),
+                msgid: answer.msgid.clone(),
+                payload: wire,
+                direction: CaptureDirection::Out,
+            }],
+        };
+        self.history
+            .append(message)
+            .map_err(ChannelOpError::Store)?;
+        let key = answer
+            .msgid
+            .as_deref()
+            .map(|msgid| SendKey::new(&self.network, channel, msgid));
+        if let Some(key) = &key {
+            self.book.start(key.clone());
+            self.book.apply_response(key, SendResponse::Accepted);
+            self.row_ids.insert(key.clone(), row_id);
+        }
+        self.note_changed(channel);
+        Ok(SentText {
+            msgid: answer.msgid,
+            key,
+        })
+    }
+
+    /// Reads one channel message. The sender is a device that the engine
+    /// verified before: only such a device gave a group key through Olm. A
+    /// message of an unknown, revoked or own device, or one that does not
+    /// open, is acknowledged and not stored. The group state moves only
+    /// after the text is in the history, so a failed write keeps the row
+    /// readable on the next drain.
+    fn receive_channel_message(&mut self, row: &InboxRow, channel: &str, now: i64) -> RowOutcome {
+        if row.verb != InboxVerb::Msg {
+            return RowOutcome::Undecryptable;
+        }
+        if row.own || row.from_did == self.own_did {
+            return RowOutcome::Ignored;
+        }
+        let Some(entry) = self.peers.get(&row.from_did).cloned() else {
+            return RowOutcome::Undecryptable;
+        };
+        let trust = self.state.trust();
+        if self.revoked_dids.contains(&row.from_did)
+            || trust.is_did_revoked(&self.network, &entry.nick, &row.from_did)
+            || self.entry_revoked(&entry, &trust)
+        {
+            return RowOutcome::Undecryptable;
+        }
+        let row_id = format!("{}:in:{}", self.network, row.id);
+        let conversation = conversation_id(&self.network, channel);
+        if self
+            .history
+            .messages(&conversation)
+            .iter()
+            .any(|message| message.id == row_id)
+        {
+            return RowOutcome::Duplicate;
+        }
+        let mut ring = self.state.channels().clone();
+        let Ok(opened) = ring.decrypt(&self.network, channel, &row.from_did, &row.payload) else {
+            return RowOutcome::Undecryptable;
+        };
+        let message = E2eMessage {
+            id: row_id,
+            conversation_id: conversation,
+            sender_device: row.from_did.clone(),
+            sent_at: now,
+            text: opened.text,
+            encrypted: true,
+            captures: Vec::new(),
+        };
+        if self.history.append(message).is_err() {
+            return RowOutcome::StoreFailed;
+        }
+        if self
+            .state
+            .update_channels(|current| *current = ring)
+            .is_err()
+        {
+            return RowOutcome::StoreFailed;
+        }
+        self.note_changed(channel);
+        RowOutcome::Stored
     }
 
     /// Builds the identity hint for a user action that starts an encrypted
@@ -1449,9 +1806,9 @@ impl E2eEngine {
         if master_changed {
             self.note_trust_changed(nick);
         }
-        self.state.set_trust(&trust)?;
-        // A newer list stays even when a device is refused.
-        self.forget_revoked(&trust);
+        // A newer list stays even when a device is refused. A device that it
+        // revokes also leaves the channels.
+        self.save_trust_and_revoke(&trust)?;
         let mut dids = Vec::new();
         for (device, one_time_key) in accepted {
             let did = device.did().to_string();
@@ -1507,8 +1864,7 @@ impl E2eEngine {
         );
         match decision {
             Ok(ListDecision::Replace) => {
-                self.state.set_trust(&trust)?;
-                self.forget_revoked(&trust);
+                self.save_trust_and_revoke(&trust)?;
                 self.listreq_lv.remove(&self.casemapping.fold(nick));
                 Ok(())
             }
@@ -1663,7 +2019,10 @@ impl E2eEngine {
                 self.on_nack(row);
                 RowOutcome::Ignored
             }
-            InboxVerb::PkMsg | InboxVerb::Msg => self.receive_message(row, now),
+            InboxVerb::PkMsg | InboxVerb::Msg => match row.channel.clone() {
+                Some(channel) => self.receive_channel_message(row, &channel, now),
+                None => self.receive_message(row, now),
+            },
         };
         if outcome.acknowledge() {
             self.seen.insert(row.id);
@@ -1843,6 +2202,19 @@ impl E2eEngine {
                     Err(_) => RowOutcome::StoreFailed,
                 }
             }
+            InnerKind::GroupKey { channel, text } => {
+                // The key share and the Olm state that read it are saved in
+                // one write. A failed write keeps the old session, so the row
+                // stays readable on the next drain. A refused share changes
+                // nothing but the bounded waiting list; the session of the
+                // row is kept.
+                let mut ring = self.state.channels().clone();
+                let _ = ring.accept_key(&self.network, channel, &row.from_did, text);
+                match self.save_state_with(&nick, &row.from_did, &decrypted, Some(&ring)) {
+                    Ok(()) => RowOutcome::Ignored,
+                    Err(_) => RowOutcome::StoreFailed,
+                }
+            }
             InnerKind::Copy { .. } => RowOutcome::Undecryptable,
         };
         // The sender holds a newer list than the stored one: ask for it.
@@ -1918,17 +2290,40 @@ impl E2eEngine {
         did: &str,
         decrypted: &Decrypted,
     ) -> Result<(), E2eStoreError> {
+        self.save_state_with(nick, did, decrypted, None)
+    }
+
+    /// Like [`E2eEngine::save_state`]. `channels`, when given, is saved in
+    /// the same write as the session, the account and the replay state.
+    fn save_state_with(
+        &mut self,
+        nick: &str,
+        did: &str,
+        decrypted: &Decrypted,
+        channels: Option<&ChannelKeyring>,
+    ) -> Result<(), E2eStoreError> {
         if let Some((_, trust)) = &decrypted.learned {
             self.state.set_trust(trust)?;
         }
-        self.state.set_inbound(
-            &self.network,
-            nick,
-            did,
-            &decrypted.session,
-            decrypted.identity.as_ref(),
-            decrypted.replay.as_ref(),
-        )?;
+        match channels {
+            Some(channels) => self.state.set_inbound_with_channels(
+                &self.network,
+                nick,
+                did,
+                &decrypted.session,
+                decrypted.identity.as_ref(),
+                decrypted.replay.as_ref(),
+                channels,
+            )?,
+            None => self.state.set_inbound(
+                &self.network,
+                nick,
+                did,
+                &decrypted.session,
+                decrypted.identity.as_ref(),
+                decrypted.replay.as_ref(),
+            )?,
+        }
         if let Some((entry, _)) = &decrypted.learned {
             self.revoked_dids.remove(entry.device.did());
             self.peers
@@ -3653,6 +4048,423 @@ mod tests {
         assert!(sent_rows[0].encrypted);
     }
 
+    async fn mount_inbox(server: &MockServer, did: &str, rows: Vec<Value>) {
+        Mock::given(method("GET"))
+            .and(path(format!("/networks/{NET}/e2e/devices/{did}/inbox")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "messages": rows })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/networks/{NET}/e2e/devices/{did}/inbox/ack")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_channel_key_and_a_channel_message_reach_a_member_and_nothing_goes_in_clear() {
+        const CHANNEL: &str = "#room";
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+
+        // Without a key nothing is sent, in clear or in any other form.
+        assert_eq!(p.alice.channel_plan_send(CHANNEL, false), SendPlan::Pending);
+        p.alice
+            .channel_set_members(CHANNEL, 1, &["bob".to_string()])
+            .expect("members");
+        let refused = p
+            .alice
+            .send_channel_text(&client, TOKEN, CHANNEL, "too early", 90)
+            .await;
+        assert!(matches!(
+            refused,
+            Err(ChannelOpError::Channel(ChannelError::NoKey))
+        ));
+        assert!(sent_requests(&server).await.is_empty());
+
+        // The key goes to Bob in one Olm message, never as a channel line.
+        let served = p
+            .alice
+            .channel_sync_keys(&client, TOKEN, CHANNEL)
+            .await
+            .expect("sync");
+        assert_eq!(served, 1);
+        assert_eq!(
+            p.alice.channel_status(CHANNEL, true),
+            ChannelStatus::Encrypted
+        );
+        let sent = p
+            .alice
+            .send_channel_text(&client, TOKEN, CHANNEL, "hi all", 100)
+            .await
+            .expect("channel send");
+        assert!(sent.key.is_some());
+        let requests = sent_requests(&server).await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["verb"], "pkmsg");
+        assert_eq!(requests[0]["target"], "bob");
+        assert_eq!(requests[1]["verb"], "msg");
+        assert_eq!(requests[1]["target"], CHANNEL);
+        assert_eq!(requests[1]["to"], "*");
+        for request in &requests {
+            let text = request.to_string();
+            assert!(!text.contains("hi all"));
+            assert!(!text.contains("too early"));
+        }
+        let own_rows = p.alice.history().messages(&conversation_id(NET, CHANNEL));
+        assert_eq!(own_rows.len(), 1);
+        assert_eq!(own_rows[0].text, "hi all");
+
+        // Bob reads the key first. He does not know the members yet, so the
+        // key waits.
+        let first = MockServer::start().await;
+        let key_payload = requests[0]["payload"].as_str().expect("payload");
+        mount_inbox(
+            &first,
+            &p.bob_did,
+            vec![row(
+                5,
+                "alice",
+                &p.alice_did,
+                &p.bob_did,
+                "pkmsg",
+                "k1",
+                key_payload,
+            )],
+        )
+        .await;
+        let outcomes = p
+            .bob
+            .drain(&GrappaClient::new(first.uri()), TOKEN, Some(62), 200)
+            .await
+            .expect("drain");
+        assert_eq!(outcomes, vec![(5, RowOutcome::Ignored)]);
+
+        // The membership event comes. The key is read. The channel message
+        // opens as a verified encrypted row.
+        let members: BTreeSet<String> = [p.alice_did.clone(), p.bob_did.clone()].into();
+        p.bob
+            .state_mut()
+            .update_channels(|ring| ring.apply_membership(NET, CHANNEL, 1, members))
+            .expect("members");
+        let second = MockServer::start().await;
+        let mut channel_row = row(
+            6,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "msg",
+            "m1",
+            requests[1]["payload"].as_str().expect("payload"),
+        );
+        channel_row["channel"] = json!(CHANNEL);
+        mount_inbox(&second, &p.bob_did, vec![channel_row.clone()]).await;
+        let outcomes = p
+            .bob
+            .drain(&GrappaClient::new(second.uri()), TOKEN, Some(62), 300)
+            .await
+            .expect("drain");
+        assert_eq!(outcomes, vec![(6, RowOutcome::Stored)]);
+        let rows = p.bob.history().messages(&conversation_id(NET, CHANNEL));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "hi all");
+        assert!(rows[0].encrypted);
+        assert_eq!(rows[0].sender_device, p.alice_did);
+
+        // The same row again opens nothing twice, and the same message under
+        // a new row id is refused as a repeat.
+        let third = MockServer::start().await;
+        let mut forged = channel_row.clone();
+        forged["id"] = json!(7);
+        forged["msgid"] = json!("m2");
+        mount_inbox(&third, &p.bob_did, vec![channel_row, forged]).await;
+        let outcomes = p
+            .bob
+            .drain(&GrappaClient::new(third.uri()), TOKEN, Some(62), 400)
+            .await
+            .expect("drain");
+        assert_eq!(
+            outcomes,
+            vec![(6, RowOutcome::Duplicate), (7, RowOutcome::Undecryptable)]
+        );
+        assert_eq!(
+            p.bob
+                .history()
+                .messages(&conversation_id(NET, CHANNEL))
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_member_who_leaves_makes_the_own_channel_session_invalid() {
+        const CHANNEL: &str = "#room";
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+        p.alice
+            .channel_set_members(CHANNEL, 1, &["bob".to_string()])
+            .expect("members");
+        p.alice
+            .channel_sync_keys(&client, TOKEN, CHANNEL)
+            .await
+            .expect("sync");
+        assert_eq!(
+            p.alice.channel_status(CHANNEL, true),
+            ChannelStatus::Encrypted
+        );
+        // Bob leaves, and the same event comes twice: only the first counts.
+        assert_eq!(
+            p.alice
+                .channel_set_members(CHANNEL, 2, &[])
+                .expect("members"),
+            MembershipOutcome::Changed { removed: true }
+        );
+        assert_eq!(
+            p.alice
+                .channel_set_members(CHANNEL, 2, &[])
+                .expect("members"),
+            MembershipOutcome::Stale
+        );
+        assert_eq!(p.alice.channel_status(CHANNEL, true), ChannelStatus::NoKey);
+        let before = sent_requests(&server).await.len();
+        let refused = p
+            .alice
+            .send_channel_text(&client, TOKEN, CHANNEL, "after leave", 100)
+            .await;
+        assert!(matches!(
+            refused,
+            Err(ChannelOpError::Channel(ChannelError::NoKey))
+        ));
+        assert_eq!(sent_requests(&server).await.len(), before);
+        // A new session goes to nobody: the only member is Alice.
+        let served = p
+            .alice
+            .channel_sync_keys(&client, TOKEN, CHANNEL)
+            .await
+            .expect("sync");
+        assert_eq!(served, 0);
+        assert_eq!(
+            p.alice.channel_status(CHANNEL, true),
+            ChannelStatus::Encrypted
+        );
+        assert_eq!(sent_requests(&server).await.len(), before);
+    }
+
+    /// Alice gives Bob the key of her channel session. Returns the server,
+    /// the client and the `did` of the device of Bob.
+    async fn alice_shares_with_bob(
+        alice: &mut E2eEngine,
+        bob_id: &Ident,
+        channel: &str,
+    ) -> (MockServer, GrappaClient, String) {
+        alice
+            .accept_keys("bob", &bob_id.keys())
+            .expect("alice reads bob");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+        alice
+            .channel_set_members(channel, 1, &["bob".to_string()])
+            .expect("members");
+        let served = alice
+            .channel_sync_keys(&client, TOKEN, channel)
+            .await
+            .expect("sync");
+        assert_eq!(served, 1);
+        assert_eq!(
+            alice.channel_status(channel, true),
+            ChannelStatus::Encrypted
+        );
+        let bob_did = did_from_key_text(&ed(&bob_id.device)).expect("did");
+        (server, client, bob_did)
+    }
+
+    #[tokio::test]
+    async fn a_revoked_member_device_makes_the_own_channel_session_invalid() {
+        const CHANNEL: &str = "#room";
+        let alice_id = Ident::new("alice-channel-revoke");
+        let bob_id = Ident::new("bob-channel-revoke");
+        let mut alice = alice_id.engine();
+        let (server, client, old_did) = alice_shares_with_bob(&mut alice, &bob_id, CHANNEL).await;
+        let before = sent_requests(&server).await.len();
+
+        // Bob signs list 2 with a new device only: the old device is revoked,
+        // and the nick of Bob stays in the channel.
+        let new_device = fresh_device();
+        let new_did = did_from_key_text(&ed(&new_device)).expect("did");
+        alice
+            .accept_keys("bob", &bob_id.newer_keys(&new_device))
+            .expect("newer list");
+        assert_eq!(alice.channel_status(CHANNEL, true), ChannelStatus::NoKey);
+        let refused = alice
+            .send_channel_text(&client, TOKEN, CHANNEL, "secret", 100)
+            .await;
+        assert!(matches!(
+            refused,
+            Err(ChannelOpError::Channel(ChannelError::NoKey))
+        ));
+        assert_eq!(sent_requests(&server).await.len(), before);
+
+        // The new session goes to nobody: the revoked device is no member.
+        let served = alice
+            .channel_sync_keys(&client, TOKEN, CHANNEL)
+            .await
+            .expect("sync");
+        assert_eq!(served, 0);
+        assert_eq!(sent_requests(&server).await.len(), before);
+        assert!(!alice
+            .state
+            .channels()
+            .members(NET, CHANNEL)
+            .contains(&old_did));
+
+        // The next membership event adds the new device, and only it gets
+        // the key.
+        alice
+            .channel_set_members(CHANNEL, 2, &["bob".to_string()])
+            .expect("members");
+        let served = alice
+            .channel_sync_keys(&client, TOKEN, CHANNEL)
+            .await
+            .expect("sync");
+        assert_eq!(served, 1);
+        let requests = sent_requests(&server).await;
+        assert_eq!(requests.len(), before + 1);
+        assert_eq!(requests[before]["to"], new_did.as_str());
+        assert!(!alice
+            .state
+            .channels()
+            .members(NET, CHANNEL)
+            .contains(&old_did));
+    }
+
+    #[tokio::test]
+    async fn a_revocation_from_before_a_restart_stops_the_channel_session() {
+        const CHANNEL: &str = "#room";
+        let alice_id = Ident::new("alice-channel-restart");
+        let bob_id = Ident::new("bob-channel-restart");
+        let mut alice = alice_id.engine();
+        let (server, client, old_did) = alice_shares_with_bob(&mut alice, &bob_id, CHANNEL).await;
+        // Only the trust state knows the revocation: the channels did not
+        // change, as with a state written before this check existed.
+        let newer = bob_id.newer_keys_struct(&fresh_device());
+        let mut trust = alice.state.trust();
+        apply_peer_list(
+            &mut trust,
+            NET,
+            "bob",
+            &newer.master.ed25519,
+            newer.master.list.ver,
+            &newer.master.list.devices,
+            &newer.master.sig,
+        )
+        .expect("newer list");
+        alice.state.set_trust(&trust).expect("trust");
+        assert!(alice
+            .state
+            .channels()
+            .members(NET, CHANNEL)
+            .contains(&old_did));
+
+        // A restart empties the cache of devices.
+        drop(alice);
+        let mut alice = alice_id.engine();
+        let before = sent_requests(&server).await.len();
+        let refused = alice
+            .send_channel_text(&client, TOKEN, CHANNEL, "secret", 100)
+            .await;
+        assert!(matches!(
+            refused,
+            Err(ChannelOpError::Channel(ChannelError::NoKey))
+        ));
+        assert_eq!(sent_requests(&server).await.len(), before);
+        assert_eq!(alice.channel_status(CHANNEL, true), ChannelStatus::NoKey);
+        assert!(!alice
+            .state
+            .channels()
+            .members(NET, CHANNEL)
+            .contains(&old_did));
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_of_a_key_share_keeps_the_row_readable() {
+        fn failing(_: &std::path::Path, _: &[u8]) -> std::io::Result<()> {
+            Err(std::io::Error::other("disk full"))
+        }
+        const CHANNEL: &str = "#room";
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+        p.alice
+            .channel_set_members(CHANNEL, 1, &["bob".to_string()])
+            .expect("members");
+        p.alice
+            .channel_sync_keys(&client, TOKEN, CHANNEL)
+            .await
+            .expect("sync");
+        let requests = sent_requests(&server).await;
+        let key_row = InboxRow::from_value(
+            &row(
+                5,
+                "alice",
+                &p.alice_did,
+                &p.bob_did,
+                "pkmsg",
+                "k1",
+                requests[0]["payload"].as_str().expect("payload"),
+            ),
+            Some(62),
+        )
+        .expect("row");
+        let members: BTreeSet<String> = [p.alice_did.clone(), p.bob_did.clone()].into();
+        p.bob
+            .state_mut()
+            .update_channels(|ring| ring.apply_membership(NET, CHANNEL, 1, members))
+            .expect("members");
+
+        // The write fails: nothing of the row is kept, so the row is not
+        // acknowledged and the Olm message is not used up.
+        let replay = p.bob.state.replay();
+        let channels = p.bob.state.channels().clone();
+        p.bob.state.set_writer(failing);
+        assert_eq!(p.bob.handle_row(&key_row, 200), RowOutcome::StoreFailed);
+        assert!(p
+            .bob
+            .state
+            .peer_session(NET, "alice", &p.alice_did)
+            .expect("read")
+            .is_none());
+        assert_eq!(p.bob.state.replay(), replay);
+        assert_eq!(p.bob.state.channels(), &channels);
+
+        // The write works again: the same row gives the key and the session
+        // together.
+        p.bob.state.set_writer(crate::persistence::write_atomic);
+        assert_eq!(p.bob.handle_row(&key_row, 300), RowOutcome::Ignored);
+        assert!(p
+            .bob
+            .state
+            .peer_session(NET, "alice", &p.alice_did)
+            .expect("read")
+            .is_some());
+        p.alice
+            .send_channel_text(&client, TOKEN, CHANNEL, "after retry", 400)
+            .await
+            .expect("channel send");
+        let requests = sent_requests(&server).await;
+        let wire = requests[1]["payload"].as_str().expect("payload");
+        let opened = p
+            .bob
+            .channel_decrypt(CHANNEL, &p.alice_did, wire)
+            .expect("open");
+        assert_eq!(opened.text, "after retry");
+    }
+
     #[tokio::test]
     async fn the_pkmsg_and_msg_payloads_follow_the_wire_v2_shape() {
         let mut p = pair();
@@ -5238,6 +6050,23 @@ mod tests {
         // A list request and a list with a master block.
         let inner = Inner::parse(br#"{"t":"listreq","lv":2}"#).expect("inner");
         assert_eq!(inner.kind, InnerKind::ListReq);
+        // A channel key share keeps its whole text; one without a channel is
+        // no key share. The sender adds the list version and the binding.
+        let gkey = r##"{"t":"gkey","ch":"#room","sid":"S","key":"K"}"##;
+        let inner = Inner::parse(gkey.as_bytes()).expect("inner");
+        assert_eq!(
+            inner.kind,
+            InnerKind::GroupKey {
+                channel: "#room".to_string(),
+                text: gkey.to_string()
+            }
+        );
+        let inner = Inner::parse(br#"{"t":"gkey","sid":"S"}"#).expect("inner");
+        assert_eq!(inner.kind, InnerKind::Other);
+        let sent = Outgoing::GroupKey(gkey).to_json(2, Some("FB"));
+        let inner = Inner::parse(sent.as_bytes()).expect("inner");
+        assert_eq!((inner.lv, inner.fb.as_deref()), (Some(2), Some("FB")));
+        assert!(matches!(inner.kind, InnerKind::GroupKey { .. }));
         let list = r#"{"t":"list","master":{"ed25519":"M","list":{"ver":2,"devices":["D"]},"sig":"S"},"lv":2}"#;
         let inner = Inner::parse(list.as_bytes()).expect("inner");
         assert_eq!(
