@@ -1961,21 +1961,24 @@ below follows its design, not shipped code. Check it again when Cicchetto ships.
   bytes), an expiry that reads as UTC and is in the future, and a URL with the scheme, host and port
   of the configured server and the path `<server path>/uploads/<slug>` (slug of letters, digits, `-`
   and `_`; no credentials, query or fragment). A descriptor with a bad field is not stored. The
-  download is a `GET` with no token and no redirect to another origin. It must have exactly
+  download is a `GET` with no token. It uses its own client, which refuses a redirect to another
+  origin before the request goes out (`same_origin_redirects` in `client.rs`) and follows at most
+  five hops inside the first origin. The answer must have exactly
   `size + 16` bytes. The hash is checked before the decryption, then the tag, then the length.
   A click on the link of a file row is the only way to start a download: Cordiale never fetches a
   URL from a message by itself, and a link that no locked row holds keeps the normal link path.
 - **Metadata.** Before sealing, images lose EXIF, GPS, XMP, IPTC, comments and text chunks
   (`metadata_strip.rs`: JPEG, PNG and APNG, GIF, WebP; the JPEG orientation stays in a new minimal
-  EXIF block). A file that cannot be read as the type it claims is refused:
-  `e2e-file-strip-failed`. A video is encoded again into a new MP4 with FFmpeg (no metadata is
+  EXIF block). A JPEG is cleaned in every scan (a progressive file has several), and the bytes
+  after the end-of-image marker are dropped. A JPEG that has no end marker is refused. A file
+  that cannot be read as the type it claims is refused: `e2e-file-strip-failed`. A video is encoded again into a new MP4 with FFmpeg (no metadata is
   copied). A build without the `video-shrink` feature refuses a video: `e2e-file-strip-unavailable`.
   Audio and documents are sealed as they are: Cordiale cannot clean them.
 - **No fallback.** A locked window never reaches `POST /api/uploads`. Any failure shows a status and
   sends nothing. The plain upload keeps working in plain queries and channels.
 - **Viewing.** JPEG, PNG, GIF and WebP open in the image viewer (Download saves the decrypted
-  bytes), `text/plain` and `text/markdown` in the text viewer. Any other type opens a save dialog and
-  is never run. The decrypted bytes live in memory and, for an image, in a private temporary file
+  bytes), `text/plain` and `text/markdown` in the text viewer when the text is at most 1 MiB. A
+  larger text, and any other type, opens a save dialog with the whole file, and is never run. The decrypted bytes live in memory and, for an image, in a private temporary file
   that is deleted at once.
 - **Not verified.** Never tried against a real Grappa with the door, nor against Cicchetto: the
   descriptor follows a design that can still change. `CLIENT_PROTOCOL_VERSION` stays 59: protocol 58 is
