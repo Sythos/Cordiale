@@ -2016,11 +2016,20 @@ nella UI. `CLIENT_PROTOCOL_VERSION` non cambia finché questi punti non sono imp
   all'indice corrente: chi entra dopo non legge i messaggi prima.
 - **Chiave in anticipo.** Il primo messaggio Olm di un peer nuovo può arrivare prima dell'evento di
   appartenenza. La chiave aspetta (al massimo 16 per canale) e si legge quando il mittente diventa membro.
+- **Scrittura unica della chiave.** La chiave ricevuta, la sessione Olm, l'account e lo stato anti-replay
+  si salvano nella stessa scrittura (`set_inbound_with_channels`). Se la scrittura fallisce non resta
+  nulla: la riga non è confermata e si legge di nuovo al drain successivo, senza perdere la chiave.
 - **Ingresso.** Un membro nuovo riceve la chiave da ogni dispositivo (`missing_shares`); chi è già membro
   non la riceve di nuovo.
 - **Uscita, rimozione.** La sessione propria diventa non valida: nessun invio finché non ne esiste una
   nuova (`prepare_outbound`), che va solo ai membri rimasti. La vecchia sessione è cancellata, come le
   sessioni in ingresso del membro uscito.
+- **Revoca.** Un dispositivo che una lista verificata revoca (KEYS o messaggio `list`) esce subito da ogni
+  canale, anche se il suo nick resta nel canale. La revoca e il cambio dei canali si salvano nella stessa
+  scrittura (`set_trust_and_channels`). La sessione propria diventa non valida e la chiave nuova va solo
+  ai membri rimasti; il numero di sequenza dell'appartenenza non cambia. Prima di ogni invio e di ogni
+  `channel_sync_keys` il motore controlla di nuovo i membri contro lo stato di fiducia salvato: copre
+  anche una revoca di prima di un riavvio.
 - **Membri.** Sono i dispositivi verificati e pronti dei nick nel canale, più il dispositivo proprio. Un
   nick senza dispositivo verificato non è membro e non legge.
 - **Mittente.** È il dispositivo verificato che ha dato la chiave per Olm; una riga di canale si apre solo
