@@ -2880,12 +2880,31 @@ fn refresh_locked_view(
     network: &str,
     nick: &str,
 ) {
+    refresh_locked_view_keeping_place(state, ui, network, nick, None);
+}
+
+/// Like `refresh_locked_view`. With `Some(was_ciphertext)` the view just
+/// switched from that mode: the message of the top row goes flush with the
+/// top of the pane. The offset inside the row is not kept between views.
+fn refresh_locked_view_keeping_place(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    nick: &str,
+    was_ciphertext: Option<bool>,
+) {
     let is_open = open_locked_window(state)
         .is_some_and(|(open_network, open_nick)| open_network == network && open_nick == nick);
     if is_open {
         mark_active_window_read(state, ui);
         load_locked_rows(state, network, nick);
-        show_locked_rows(state, ui, network, nick);
+        let places = was_ciphertext.map(|was| {
+            (
+                locked_row_counts(state, network, nick, was),
+                locked_row_counts(state, network, nick, !was),
+            )
+        });
+        show_locked_rows(state, ui, network, nick, places);
     }
 }
 
@@ -3089,7 +3108,13 @@ fn push_open_locked_state(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
 }
 
 /// Redraws only the rows of the locked window of `nick`.
-fn show_locked_rows(state: &WorkerState, ui: &slint::Weak<AppWindow>, network: &str, nick: &str) {
+fn show_locked_rows(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    nick: &str,
+    places: Option<(Vec<usize>, Vec<usize>)>,
+) {
     let lines = state
         .transcript
         .messages
@@ -3100,8 +3125,88 @@ fn show_locked_rows(state: &WorkerState, ui: &slint::Weak<AppWindow>, network: &
     refresh_mention_context(state);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        use slint::Model as _;
+        // Read the place before the rows change. A reader at the bottom
+        // stays there: the pane keeps following the newest row.
+        let anchor = places.and_then(|(old_counts, new_counts)| {
+            if ui.get_chat_follow_bottom() {
+                return None;
+            }
+            let anchor = top_line_anchor(
+                ui.get_chat_scroll_y(),
+                ui.get_chat_content_height(),
+                usize::try_from(ui.get_chat_content_rows()).unwrap_or(0),
+                ui.get_chat_lines().row_count(),
+            )?;
+            Some(view_switch_anchor(anchor, &old_counts, &new_counts))
+        });
         show_chat_lines(&ui, chat_lines_model(&lines, dark_theme));
+        if let Some(anchor) = anchor {
+            restore_chat_anchor(&ui, anchor);
+        }
     });
+}
+
+/// How many rows each stored message of the locked window has in one view,
+/// then one row for each message on its way (those come after the stored
+/// ones, as in `load_locked_rows`).
+fn locked_row_counts(
+    state: &WorkerState,
+    network: &str,
+    nick: &str,
+    ciphertext: bool,
+) -> Vec<usize> {
+    let mut counts: Vec<usize> = state
+        .e2e
+        .history_of(network)
+        .map(|history| {
+            history
+                .messages(&conversation_id(network, nick))
+                .into_iter()
+                .map(|message| {
+                    if ciphertext {
+                        message.captures.len().max(1)
+                    } else {
+                        1
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    counts.extend(state.e2e.incoming_rows(network, nick).iter().map(|_| 1));
+    counts
+}
+
+/// The anchor for the new view. The offset is dropped: it was measured in a
+/// row of the old view, and the new row can be much shorter. The message
+/// goes flush with the top of the pane. The row height stays the old
+/// average, which the pane still seeks by until it lays the new rows out.
+fn view_switch_anchor(
+    anchor: ChatAnchor,
+    old_counts: &[usize],
+    new_counts: &[usize],
+) -> ChatAnchor {
+    ChatAnchor {
+        row: remap_message_row(old_counts, new_counts, anchor.row),
+        offset: 0.0,
+        row_height: anchor.row_height,
+    }
+}
+
+/// The row in the new view for the message that owns `row` in the old view:
+/// the first row of that message. A row past the end maps to the last
+/// message; no messages map to row 0.
+fn remap_message_row(old_counts: &[usize], new_counts: &[usize], row: usize) -> usize {
+    let mut start = 0;
+    let mut message = old_counts.len().saturating_sub(1);
+    for (index, count) in old_counts.iter().enumerate() {
+        if row < start + count {
+            message = index;
+            break;
+        }
+        start += count;
+    }
+    new_counts.iter().take(message).sum()
 }
 
 fn load_locked_rows(state: &mut WorkerState, network: &str, nick: &str) {
@@ -3260,9 +3365,9 @@ pub(crate) fn toggle_ciphertext_view(
     {
         return false;
     }
-    state.e2e.toggle_ciphertext(network, &nick);
+    let now_ciphertext = state.e2e.toggle_ciphertext(network, &nick);
     // An entry that is not open loads its rows when the user opens it.
-    refresh_locked_view(state, ui, network, &nick);
+    refresh_locked_view_keeping_place(state, ui, network, &nick, Some(!now_ciphertext));
     refresh_network_groups(state, ui);
     true
 }
@@ -3862,6 +3967,52 @@ mod tests {
         let windows = ciphertext_view_windows(&state);
         let label = LocalQuery::new("net", QueryLane::Locked, "bob").window_name();
         assert!(windows.contains(&("net".to_string(), label)));
+    }
+
+    #[test]
+    fn a_view_switch_maps_the_top_row_to_the_first_row_of_its_message() {
+        // Clear text: one row for each of three messages. Ciphertext: the
+        // middle message has three rows.
+        let clear = [1, 1, 1];
+        let cipher = [1, 3, 1];
+        // Clear to ciphertext.
+        assert_eq!(remap_message_row(&clear, &cipher, 0), 0);
+        assert_eq!(remap_message_row(&clear, &cipher, 1), 1);
+        assert_eq!(remap_message_row(&clear, &cipher, 2), 4);
+        // Ciphertext to clear: any row of the middle message gives its row.
+        assert_eq!(remap_message_row(&cipher, &clear, 0), 0);
+        assert_eq!(remap_message_row(&cipher, &clear, 1), 1);
+        assert_eq!(remap_message_row(&cipher, &clear, 3), 1);
+        assert_eq!(remap_message_row(&cipher, &clear, 4), 2);
+        // A stale row maps to the last message; no messages map to row 0.
+        assert_eq!(remap_message_row(&clear, &cipher, 99), 4);
+        assert_eq!(remap_message_row(&[], &[], 5), 0);
+    }
+
+    #[test]
+    fn a_view_switch_anchor_drops_the_offset_of_the_old_row() {
+        let cipher = [1, 3, 1];
+        let clear = [1, 1, 1];
+        // Third capture row of the middle message, scrolled 40 px in.
+        let anchor = ChatAnchor {
+            row: 3,
+            offset: 40.0,
+            row_height: 22.0,
+        };
+        let to_clear = view_switch_anchor(anchor, &cipher, &clear);
+        assert_eq!(to_clear.row, 1);
+        assert_eq!(to_clear.offset, 0.0);
+        assert_eq!(to_clear.row_height, 22.0);
+        // Clear text to ciphertext.
+        let anchor = ChatAnchor {
+            row: 2,
+            offset: 5.0,
+            row_height: 18.0,
+        };
+        let to_cipher = view_switch_anchor(anchor, &clear, &cipher);
+        assert_eq!(to_cipher.row, 4);
+        assert_eq!(to_cipher.offset, 0.0);
+        assert_eq!(to_cipher.row_height, 18.0);
     }
 
     const OFFER_ID: &str = "AbCdEfGhIjKlMnOpQrStUv";
