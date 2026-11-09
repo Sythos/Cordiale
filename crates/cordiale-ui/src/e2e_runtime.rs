@@ -581,6 +581,12 @@ impl E2eRuntime {
         self.engines.get_mut(network)
     }
 
+    /// True when `network` has an engine and no reset waits. A send of a
+    /// locked window needs both.
+    pub(crate) fn can_use_engine(&self, network: &str) -> bool {
+        !self.reset.contains(network) && self.engines.contains_key(network)
+    }
+
     /// The descriptor of the file row whose link is `href`, from the sealed
     /// history of the locked entries. A link that no row of an encrypted chat
     /// holds gives `None`: it is not an encrypted file and keeps the normal
