@@ -442,6 +442,7 @@ pub(crate) fn register_saved_profile_callbacks(
 pub(crate) fn register_navigation_callbacks(
     ui: &AppWindow,
     worker_tx: &mpsc::UnboundedSender<WorkerCommand>,
+    input_history: &Rc<RefCell<input_history::InputHistory>>,
 ) {
     let tx_for_chat_read_state = worker_tx.clone();
     ui.on_chat_read_state_changed(move |visible, follow_bottom| {
@@ -453,8 +454,11 @@ pub(crate) fn register_navigation_callbacks(
 
     let tx_for_disconnect = worker_tx.clone();
     let weak_for_disconnect = ui.as_weak();
+    let history_for_disconnect = input_history.clone();
     ui.on_disconnect_requested(move || {
         let _ = tx_for_disconnect.send(WorkerCommand::Disconnect);
+        // The history belongs to the signed-in account.
+        history_for_disconnect.borrow_mut().clear();
         if let Some(ui) = weak_for_disconnect.upgrade() {
             clear_share_link(&ui);
             reset_identity_view(&ui, "");
@@ -1045,6 +1049,7 @@ pub(crate) fn register_attach_callbacks(
 pub(crate) fn register_composer_callbacks(
     ui: &AppWindow,
     worker_tx: &mpsc::UnboundedSender<WorkerCommand>,
+    input_history: &Rc<RefCell<input_history::InputHistory>>,
 ) {
     // Ctrl+V (Cmd+V) in the compose box: an image on the clipboard is
     // uploaded like a picked file, and a multi-line text can go up as a .txt
@@ -1074,16 +1079,57 @@ pub(crate) fn register_composer_callbacks(
         }
     });
 
+    // Input history is UI-thread only, like the nick completion cycle.
+    let input_history = input_history.clone();
+
     let tx_for_send = worker_tx.clone();
     let weak_for_send = ui.as_weak();
+    let history_for_send = input_history.clone();
     ui.on_send_chat_message(move |body| {
         let body = body.to_string();
         if body.trim().is_empty() {
             return;
         }
+        if let Some(ui) = weak_for_send.upgrade() {
+            if let Some(key) = input_history_key(&ui) {
+                history_for_send.borrow_mut().record(&key, &body);
+            }
+        }
         let _ = tx_for_send.send(WorkerCommand::SendMessage { body });
         if let Some(ui) = weak_for_send.upgrade() {
             ui.set_compose_text("".into());
+        }
+    });
+
+    let tx_for_history = worker_tx.clone();
+    let weak_for_history = ui.as_weak();
+    ui.on_input_history_requested(move |older| {
+        let Some(ui) = weak_for_history.upgrade() else {
+            return slint::SharedString::default();
+        };
+        let text = ui.get_compose_text();
+        let Some(key) = input_history_key(&ui) else {
+            return text;
+        };
+        let recalled = input_history
+            .borrow_mut()
+            .navigate(&key, older, text.as_str());
+        match recalled {
+            Some(new_text) => {
+                // Setting `compose-text` from Rust does not fire `edited`,
+                // so the draft is saved here. The key is the window the
+                // recall happened in, and a pending reply stays.
+                let draft_key = (
+                    ui.get_window_source_network().to_string(),
+                    ui.get_window_source_target().to_string(),
+                );
+                let _ = tx_for_history.send(WorkerCommand::DraftRecalled {
+                    key: draft_key,
+                    text: new_text.clone(),
+                });
+                new_text.into()
+            }
+            None => text,
         }
     });
 

@@ -2299,6 +2299,9 @@ export component AppWindow inherits Window {
     callback home-featured-open(string, string); // network, channel
     callback send-chat-message(string);
     callback compose-text-changed(string);
+    // Up (true) or Down (false) in the compose box: the recalled entry, or
+    // the unchanged text when there is nothing to recall.
+    callback input-history-requested(bool) -> string;
     callback reply-to-message-requested(string, string, string); // nick, raw body, message id
     // Tab-completes the word before the (assumed end-of-text) caret against
     // the open channel's member nicks, or the query peer's nick in a
@@ -5154,6 +5157,16 @@ export component AppWindow inherits Window {
                         if event.text == Key.PageUp || event.text == Key.PageDown {
                             chat-page-direction = event.text == Key.PageUp ? -1 : 1;
                             chat-page-seq += 1;
+                            return EventResult.accept;
+                        }
+                        // Up/Down recall the channel's submitted entries; the
+                        // single-line field has no other use for them.
+                        if event.text == Key.UpArrow || event.text == Key.DownArrow {
+                            let recalled = input-history-requested(event.text == Key.UpArrow);
+                            if recalled != compose-text {
+                                compose-text = recalled;
+                                compose-line-edit.set-selection-offsets(2147483647, 2147483647);
+                            }
                             return EventResult.accept;
                         }
                         // Nick completion instead of the default

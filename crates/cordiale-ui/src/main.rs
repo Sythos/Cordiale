@@ -38,6 +38,7 @@ mod e2e_view;
 mod frames;
 mod history;
 mod home;
+mod input_history;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
 mod key_prompt;
 mod media_save;
@@ -317,6 +318,12 @@ enum WorkerCommand {
     },
     /// The compose text of one window, set from the UI side.
     DraftSynced {
+        key: (String, String),
+        text: String,
+    },
+    /// An input-history recall in one window: the draft changes, a pending
+    /// reply stays.
+    DraftRecalled {
         key: (String, String),
         text: String,
     },
@@ -697,7 +704,8 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
 
-    register_navigation_callbacks(&ui, &worker_tx);
+    let input_history = Rc::new(RefCell::new(input_history::InputHistory::default()));
+    register_navigation_callbacks(&ui, &worker_tx, &input_history);
     register_member_callbacks(&ui, &worker_tx);
     register_channel_callbacks(&ui, &worker_tx);
     register_directory_callbacks(&ui, &worker_tx);
@@ -740,7 +748,7 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
 
-    register_composer_callbacks(&ui, &worker_tx);
+    register_composer_callbacks(&ui, &worker_tx, &input_history);
     register_theme_callbacks(&ui, &worker_tx);
     register_notification_callbacks(&ui, &worker_tx);
     register_admin_user_callbacks(&ui, &worker_tx);
@@ -2119,6 +2127,9 @@ async fn run_worker(
                     // belongs to, not for whichever one is open by now.
                     Some(WorkerCommand::DraftSynced { key, text }) => {
                         reply_presence::store_draft(&mut state, &ui, key, text);
+                    }
+                    Some(WorkerCommand::DraftRecalled { key, text }) => {
+                        reply_presence::store_recalled_draft(&mut state, key, text);
                     }
                     Some(WorkerCommand::ReplyToMessage { nick, body, id }) => {
                         reply_presence::start_reply(&mut state, &ui, &nick, &body, id.parse().ok());
@@ -10313,6 +10324,23 @@ fn complete_nick(
             last_text: new_text,
         },
     ))
+}
+
+/// The history key of the open window, or `None` unless it is a joined
+/// channel (not a query, the server window or a channel not joined).
+fn input_history_key(ui: &AppWindow) -> Option<(String, String)> {
+    if !ui.get_current_window_is_joined()
+        || ui.get_current_query()
+        || ui.get_current_server_window()
+    {
+        return None;
+    }
+    let network = ui.get_window_source_network();
+    let channel = ui.get_window_source_target();
+    if network.is_empty() || channel.is_empty() {
+        return None;
+    }
+    Some(window_state_key(network.as_str(), channel.as_str()))
 }
 
 /// Tab-completion candidates for the currently open window, in the order
