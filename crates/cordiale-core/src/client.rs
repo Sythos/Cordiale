@@ -109,7 +109,28 @@ impl HistoryTimeCursor {
 #[derive(Clone)]
 pub struct GrappaClient {
     http: Client,
+    /// Used only for the download of an encrypted file: it follows a redirect
+    /// only inside the origin of the first request.
+    download_http: Client,
     base_url: String,
+}
+
+/// Redirect rule of the download of an encrypted file. A hop to another
+/// origin stops before the request goes out. Five hops at most.
+fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| first.origin() == attempt.url().origin());
+        if attempt.previous().len() >= 5 {
+            attempt.error("too many redirects")
+        } else if same_origin {
+            attempt.follow()
+        } else {
+            attempt.error("redirect to another origin")
+        }
+    })
 }
 
 #[derive(Debug)]
@@ -371,8 +392,16 @@ impl GrappaClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_else(|_| Client::new());
+        let download_http = Client::builder()
+            .user_agent(crate::GRAPPA_USER_AGENT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(same_origin_redirects())
+            .build()
+            .unwrap_or_else(|_| Client::new());
         GrappaClient {
             http,
+            download_http,
             base_url: base_url.into(),
         }
     }
@@ -3919,7 +3948,7 @@ impl GrappaClient {
             .map_err(|_| GrappaClientError::TooLarge { limit: usize::MAX })?;
         let too_large = GrappaClientError::TooLarge { limit: expected };
         let mut response = self
-            .http
+            .download_http
             .get(file.url.clone())
             .timeout(upload_timeout(expected))
             .send()
@@ -8434,6 +8463,48 @@ mod tests {
         assert!(requests
             .iter()
             .all(|request| !request.headers.contains_key("authorization")));
+    }
+
+    #[tokio::test]
+    async fn encrypted_download_refuses_a_redirect_to_another_origin_before_it_goes_out() {
+        use crate::e2e_file::{seal, FileDescriptor};
+        use crate::upload::UploadCategory;
+        let other = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 26]))
+            .expect(0)
+            .mount(&other)
+            .await;
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/uploads/moved"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/uploads/moved", other.uri())),
+            )
+            .mount(&mock_server)
+            .await;
+        let sealed = seal(b"0123456789").expect("seal");
+        let valid = FileDescriptor::for_sealed(
+            &sealed,
+            &format!("{}/uploads/moved", mock_server.uri()),
+            "2099-01-01T00:00:00Z",
+            ("a.txt", "text/plain", UploadCategory::Document),
+        )
+        .validate(&mock_server.uri(), 1_000)
+        .expect("valid");
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .fetch_encrypted_file(&valid)
+            .await
+            .expect_err("cross-origin redirect");
+        // The mock server of the other origin checks on drop that it got no
+        // request.
+        assert!(other
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
     }
 
     #[test]
