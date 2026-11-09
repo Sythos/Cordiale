@@ -34,6 +34,27 @@ pub enum UploadCategory {
 }
 
 impl UploadCategory {
+    /// The name of the category in an encrypted file descriptor.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Document => "document",
+            Self::Audio => "audio",
+        }
+    }
+
+    /// The category of a descriptor name, `None` for an unknown name.
+    pub fn from_wire_name(name: &str) -> Option<Self> {
+        match name {
+            "image" => Some(Self::Image),
+            "video" => Some(Self::Video),
+            "document" => Some(Self::Document),
+            "audio" => Some(Self::Audio),
+            _ => None,
+        }
+    }
+
     /// Prefix Cicchetto puts before an uploaded file's link in the message
     /// it posts; attachments stay ordinary text messages on IRC.
     pub fn emoji(self) -> &'static str {
