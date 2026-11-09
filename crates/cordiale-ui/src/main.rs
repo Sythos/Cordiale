@@ -698,7 +698,8 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }
 
-    register_navigation_callbacks(&ui, &worker_tx);
+    let input_history = Rc::new(RefCell::new(input_history::InputHistory::default()));
+    register_navigation_callbacks(&ui, &worker_tx, &input_history);
     register_member_callbacks(&ui, &worker_tx);
     register_channel_callbacks(&ui, &worker_tx);
     register_directory_callbacks(&ui, &worker_tx);
@@ -741,7 +742,7 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
 
-    register_composer_callbacks(&ui, &worker_tx);
+    register_composer_callbacks(&ui, &worker_tx, &input_history);
     register_theme_callbacks(&ui, &worker_tx);
     register_notification_callbacks(&ui, &worker_tx);
     register_admin_user_callbacks(&ui, &worker_tx);

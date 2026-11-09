@@ -442,6 +442,7 @@ pub(crate) fn register_saved_profile_callbacks(
 pub(crate) fn register_navigation_callbacks(
     ui: &AppWindow,
     worker_tx: &mpsc::UnboundedSender<WorkerCommand>,
+    input_history: &Rc<RefCell<input_history::InputHistory>>,
 ) {
     let tx_for_chat_read_state = worker_tx.clone();
     ui.on_chat_read_state_changed(move |visible, follow_bottom| {
@@ -453,8 +454,11 @@ pub(crate) fn register_navigation_callbacks(
 
     let tx_for_disconnect = worker_tx.clone();
     let weak_for_disconnect = ui.as_weak();
+    let history_for_disconnect = input_history.clone();
     ui.on_disconnect_requested(move || {
         let _ = tx_for_disconnect.send(WorkerCommand::Disconnect);
+        // The history belongs to the signed-in account.
+        history_for_disconnect.borrow_mut().clear();
         if let Some(ui) = weak_for_disconnect.upgrade() {
             clear_share_link(&ui);
             reset_identity_view(&ui, "");
@@ -1045,6 +1049,7 @@ pub(crate) fn register_attach_callbacks(
 pub(crate) fn register_composer_callbacks(
     ui: &AppWindow,
     worker_tx: &mpsc::UnboundedSender<WorkerCommand>,
+    input_history: &Rc<RefCell<input_history::InputHistory>>,
 ) {
     // Ctrl+V (Cmd+V) in the compose box: an image on the clipboard is
     // uploaded like a picked file, and a multi-line text can go up as a .txt
@@ -1075,7 +1080,7 @@ pub(crate) fn register_composer_callbacks(
     });
 
     // Input history is UI-thread only, like the nick completion cycle.
-    let input_history = std::rc::Rc::new(RefCell::new(input_history::InputHistory::default()));
+    let input_history = input_history.clone();
 
     let tx_for_send = worker_tx.clone();
     let weak_for_send = ui.as_weak();

@@ -14067,6 +14067,18 @@ fn input_history_editing_a_recalled_entry_leaves_navigation() {
 }
 
 #[test]
+fn input_history_clear_drops_every_channel() {
+    let mut history = input_history::InputHistory::default();
+    let first = history_key("libera", "#rust");
+    let second = history_key("oftc", "#go");
+    history.record(&first, "secret");
+    history.record(&second, "other");
+    history.clear();
+    assert_eq!(history.navigate(&first, true, ""), None);
+    assert_eq!(history.navigate(&second, true, ""), None);
+}
+
+#[test]
 fn input_history_key_is_only_for_joined_channels() {
     set_headless_software_platform();
     let ui = AppWindow::new().unwrap();

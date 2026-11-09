@@ -25,6 +25,11 @@ pub(crate) struct InputHistory {
 }
 
 impl InputHistory {
+    /// Drops every entry, cursor and saved draft (used on sign-out).
+    pub(crate) fn clear(&mut self) {
+        self.channels.clear();
+    }
+
     /// Adds a submitted entry. An empty entry is ignored.
     pub(crate) fn record(&mut self, key: &(String, String), text: &str) {
         if text.trim().is_empty() {
