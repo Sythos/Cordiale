@@ -352,10 +352,42 @@ impl E2eStateStore {
         account: Option<&Account>,
         replay: Option<&ReplayState>,
     ) -> Result<(), E2eStoreError> {
+        self.write_inbound(network, nick, did, session, account, replay, None)
+    }
+
+    /// Like [`E2eStateStore::set_inbound`], and also saves the channel group
+    /// sessions in the same write. A received channel key share and the Olm
+    /// state that read it are kept together, or neither is kept.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_inbound_with_channels(
+        &mut self,
+        network: &str,
+        nick: &str,
+        did: &str,
+        session: &Session,
+        account: Option<&Account>,
+        replay: Option<&ReplayState>,
+        channels: &ChannelKeyring,
+    ) -> Result<(), E2eStoreError> {
+        self.write_inbound(network, nick, did, session, account, replay, Some(channels))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_inbound(
+        &mut self,
+        network: &str,
+        nick: &str,
+        did: &str,
+        session: &Session,
+        account: Option<&Account>,
+        replay: Option<&ReplayState>,
+        channels: Option<&ChannelKeyring>,
+    ) -> Result<(), E2eStoreError> {
         let key = peer_device_key(network, nick, did);
         let session_text = session.pickle().encrypt(&self.key);
         let account_text = account.map(|account| account.pickle().encrypt(&self.key));
         let replay = replay.cloned();
+        let channels = channels.cloned();
         self.commit(|data| {
             data.sessions.insert(key, session_text);
             if let Some(text) = account_text {
@@ -363,6 +395,9 @@ impl E2eStateStore {
             }
             if let Some(replay) = replay {
                 data.replay = replay;
+            }
+            if let Some(channels) = channels {
+                data.channels = channels;
             }
         })
     }
@@ -501,6 +536,20 @@ impl E2eStateStore {
     pub fn set_trust(&mut self, trust: &PeerTrust) -> Result<(), E2eStoreError> {
         let trust = trust.clone();
         self.commit(|data| data.trust = trust)
+    }
+
+    /// Saves the trust state and the channel group sessions in one write. A
+    /// revocation and the channel change that it causes are kept together.
+    pub fn set_trust_and_channels(
+        &mut self,
+        trust: &PeerTrust,
+        channels: &ChannelKeyring,
+    ) -> Result<(), E2eStoreError> {
+        let (trust, channels) = (trust.clone(), channels.clone());
+        self.commit(|data| {
+            data.trust = trust;
+            data.channels = channels;
+        })
     }
 
     /// The channel group sessions.

@@ -439,6 +439,19 @@ impl PeerTrust {
                     .any(|key| did_from_key_text(key).is_ok_and(|revoked| revoked == did))
             })
     }
+
+    /// The `did` of every revoked device key on `network`, for any nick. Use
+    /// it when the nick of a device is not known, for example for the
+    /// members of a channel after a restart.
+    pub fn revoked_dids_on(&self, network: &str) -> BTreeSet<String> {
+        let prefix = peer_key(network, "");
+        self.peers
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .flat_map(|(_, record)| record.revoked.iter())
+            .filter_map(|key| did_from_key_text(key).ok())
+            .collect()
+    }
 }
 
 #[cfg(test)]

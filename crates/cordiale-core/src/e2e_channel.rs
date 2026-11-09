@@ -342,6 +342,47 @@ impl ChannelKeyring {
         MembershipOutcome::Changed { removed }
     }
 
+    /// Removes revoked devices from every channel of `network`. A revoked
+    /// device is a removed member: its inbound sessions and waiting key
+    /// shares are deleted. When it was a member or held the key of the own
+    /// session, the own session becomes invalid and the next send makes a
+    /// new one for the remaining members only. The sequence number of the
+    /// membership does not change. Returns true when a channel changed.
+    pub fn revoke_devices(&mut self, network: &str, dids: &BTreeSet<String>) -> bool {
+        let prefix = channel_id(network, "");
+        let mut changed = false;
+        for (key, state) in self.channels.iter_mut() {
+            if !key.starts_with(&prefix) {
+                continue;
+            }
+            let mut rotate = false;
+            for did in dids {
+                rotate |= state.members.remove(did);
+                rotate |= state.shared_to.contains(did);
+                if let Some(sessions) = state.inbound.remove(did) {
+                    for mut entry in sessions.into_values() {
+                        entry.pickle.zeroize();
+                    }
+                    changed = true;
+                }
+            }
+            for (did, mut text) in std::mem::take(&mut state.pending) {
+                if dids.contains(&did) {
+                    text.zeroize();
+                    changed = true;
+                } else {
+                    state.pending.push((did, text));
+                }
+            }
+            if rotate {
+                state.wipe();
+                state.needs_rotation = true;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Makes sure the own device can send: it makes a new outbound session
     /// when there is none or when a member left. Returns the members that
     /// still need the key of the current session. The own device must be a
@@ -970,6 +1011,72 @@ mod tests {
         assert_eq!(
             a.ring.rotate(NET, CH, "z"),
             Err(ChannelError::NotAuthorized)
+        );
+    }
+
+    #[test]
+    fn a_revoked_device_is_a_removed_member() {
+        let (mut a, mut b, mut c) = (dev("a"), dev("b"), dev("c"));
+        membership(&mut [&mut a, &mut b, &mut c], 1, &["a", "b", "c"]);
+        share(&mut a, &mut [&mut b, &mut c]);
+        share(&mut c, &mut [&mut a]);
+        assert_eq!(a.ring.status(NET, CH, true), ChannelStatus::Encrypted);
+        let from_c = send(&mut c, "before");
+        // The list of c drops its device: the own session of a is invalid.
+        let revoked: BTreeSet<String> = set(&["c"]);
+        assert!(a.ring.revoke_devices(NET, &revoked));
+        assert_eq!(a.ring.status(NET, CH, true), ChannelStatus::NoKey);
+        assert_eq!(a.ring.encrypt(NET, CH, "a", "x"), Err(ChannelError::NoKey));
+        assert_eq!(
+            a.ring.members(NET, CH),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        // The sessions of c are gone, and c is no sender any more.
+        assert_eq!(
+            a.ring.decrypt(NET, CH, "c", &from_c),
+            Err(ChannelError::NotMember)
+        );
+        // The new session goes to b only, and c cannot read it.
+        let needed = a.ring.prepare_outbound(NET, CH, "a").unwrap();
+        assert_eq!(needed, vec!["b".to_string()]);
+        share(&mut a, &mut [&mut b, &mut c]);
+        let wire = send(&mut a, "after");
+        assert_eq!(b.ring.decrypt(NET, CH, "a", &wire).unwrap().text, "after");
+        assert_eq!(
+            c.ring.decrypt(NET, CH, "a", &wire),
+            Err(ChannelError::UnknownSession)
+        );
+        // A second call changes nothing, and the membership order stays.
+        assert!(!a.ring.revoke_devices(NET, &revoked));
+        assert_eq!(
+            a.ring.apply_membership(NET, CH, 1, set(&["a", "b", "c"])),
+            MembershipOutcome::Stale
+        );
+    }
+
+    #[test]
+    fn a_revocation_on_another_network_changes_nothing() {
+        let (mut a, mut b) = (dev("a"), dev("b"));
+        membership(&mut [&mut a, &mut b], 1, &["a", "b"]);
+        share(&mut a, &mut [&mut b]);
+        assert!(!a.ring.revoke_devices("other", &set(&["b"])));
+        assert_eq!(a.ring.status(NET, CH, true), ChannelStatus::Encrypted);
+    }
+
+    #[test]
+    fn a_revocation_deletes_a_waiting_key_share() {
+        let (mut a, mut b) = (dev("a"), dev("b"));
+        membership(&mut [&mut a], 1, &["a", "b"]);
+        a.ring.prepare_outbound(NET, CH, "a").unwrap();
+        let text = a.ring.key_share(NET, CH).unwrap();
+        assert!(b.ring.accept_key(NET, CH, "a", &text).is_err());
+        assert!(b.ring.revoke_devices(NET, &set(&["a"])));
+        // The membership event comes later: the deleted share is not read.
+        membership(&mut [&mut b], 1, &["a", "b"]);
+        let wire = send(&mut a, "x");
+        assert_eq!(
+            b.ring.decrypt(NET, CH, "a", &wire),
+            Err(ChannelError::UnknownSession)
         );
     }
 
