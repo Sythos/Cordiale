@@ -6832,6 +6832,30 @@ fn message_markdown_escapes_text_and_keeps_every_run() {
 }
 
 #[test]
+fn message_text_keeps_crosses_accents_and_mirc_formatting() {
+    let crosses =
+        "\u{2020}\u{2021}\u{2626}\u{2628}\u{2629}\u{271d}\u{271e}\u{271f}\u{2720}\u{1f547}";
+    let raw = format!("\u{2}caf\u{e9}\u{2} {crosses} \u{3}04rosso \u{e8}\u{f}\u{1f600}");
+    let segments = cordiale_core::formatting::parse_mirc_text(&raw);
+    let plain: String = segments.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(plain, format!("caf\u{e9} {crosses} rosso \u{e8}\u{1f600}"));
+    assert!(segments.iter().any(|s| s.bold && s.text == "caf\u{e9}"));
+    assert!(segments.iter().any(|s| s.color.is_some()));
+
+    let runs: Vec<(String, (u8, u8, u8), bool)> = segments
+        .into_iter()
+        .map(|s| (s.text, s.color.unwrap_or((0, 0, 0)), s.bold))
+        .collect();
+    let markdown = message_markdown(&runs, false);
+    for ch in crosses.chars() {
+        assert!(markdown.contains(ch), "U+{:04X} was dropped", ch as u32);
+    }
+    assert!(markdown.contains("caf\u{e9}"));
+    assert!(markdown.contains('\u{1f600}'));
+    assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+}
+
+#[test]
 fn member_prefixes_keep_every_role_highest_first() {
     let order: Vec<String> = ["@", "%", "+"].iter().map(|s| s.to_string()).collect();
     assert_eq!(update_member_prefix("+", "@", true, &order), "@+");
