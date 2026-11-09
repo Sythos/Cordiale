@@ -32,6 +32,7 @@ mod ceremony_ctap;
 mod channels;
 mod dates;
 mod debug_info;
+mod e2e_files;
 mod e2e_runtime;
 mod e2e_view;
 mod frames;
@@ -296,6 +297,13 @@ enum WorkerCommand {
     ServiceConsoleClose,
     /// A picked file and what was chosen for it.
     AttachFile(std::path::PathBuf, UploadOptions),
+    /// A file of a locked window that is sealed and uploaded: its descriptor
+    /// goes to the peer through the engine.
+    E2eFileReady {
+        network: String,
+        nick: String,
+        descriptor: Box<cordiale_core::e2e_file::FileDescriptor>,
+    },
     UploadPrefsChanged {
         ttl: Option<i64>,
         confirm: bool,
@@ -1987,22 +1995,28 @@ async fn run_worker(
                         delete_archive_target(&mut state, &ui, &target).await;
                     }
                     Some(WorkerCommand::OpenLink(href)) => {
-                        match cordiale_core::media::validated_url(&href) {
-                            Ok(url) => {
-                                let href = url.to_string();
-                                match audio_link(&state, &href) {
-                                    Some((hint, allow_local)) => play_audio_link(
-                                        &mut radio_state,
-                                        &radio,
-                                        &ui,
-                                        &href,
-                                        hint,
-                                        allow_local,
-                                    ),
-                                    None => open_link(&state, &ui, href),
+                        // The link of a file row of a locked window opens the
+                        // decrypting viewer, never the browser.
+                        if let Some(file) = state.e2e.file_for_link(&href) {
+                            e2e_files::open_e2e_file(&state, &ui, file);
+                        } else {
+                            match cordiale_core::media::validated_url(&href) {
+                                Ok(url) => {
+                                    let href = url.to_string();
+                                    match audio_link(&state, &href) {
+                                        Some((hint, allow_local)) => play_audio_link(
+                                            &mut radio_state,
+                                            &radio,
+                                            &ui,
+                                            &href,
+                                            hint,
+                                            allow_local,
+                                        ),
+                                        None => open_link(&state, &ui, href),
+                                    }
                                 }
+                                Err(refusal) => link_refused(&ui, refusal),
                             }
-                            Err(refusal) => link_refused(&ui, refusal),
                         }
                     }
                     Some(WorkerCommand::RadioTune(key)) => {
@@ -2067,9 +2081,17 @@ async fn run_worker(
                             &ui,
                             path,
                             options,
-                            Arc::clone(&shrink_notices),
+                            (&worker_self, Arc::clone(&shrink_notices)),
                         )
                         .await;
+                    }
+                    Some(WorkerCommand::E2eFileReady {
+                        network,
+                        nick,
+                        descriptor,
+                    }) => {
+                        e2e_files::send_prepared(&mut state, &ui, network, nick, *descriptor)
+                            .await;
                     }
                     Some(WorkerCommand::UploadPrefsChanged { ttl, confirm }) => {
                         run_upload_prefs_changed(&mut state, ttl, confirm).await;
@@ -4516,7 +4538,10 @@ async fn handle_attach_file(
     ui: &slint::Weak<AppWindow>,
     path: std::path::PathBuf,
     options: UploadOptions,
-    shrink_notices: Arc<Mutex<ShrinkNoticeTracker>>,
+    (worker_self, shrink_notices): (
+        &mpsc::UnboundedSender<WorkerCommand>,
+        Arc<Mutex<ShrinkNoticeTracker>>,
+    ),
 ) {
     let filename = path
         .file_name()
@@ -4529,9 +4554,19 @@ async fn handle_attach_file(
             ui.set_status_kind(kind.into());
         });
     };
-    // A locked window takes text only: a link would go out as plain text.
-    if open_locked_window(state).is_some() {
-        set_status("e2e-text-only", filename);
+    // A locked window never uses the plain upload: its files are sealed on
+    // this device and go up as ciphertext only. Nothing here falls back to
+    // the plain path.
+    if let Some(locked) = open_locked_window(state) {
+        e2e_files::handle_attach_locked(
+            state,
+            ui,
+            locked,
+            path,
+            options,
+            worker_self,
+            shrink_notices,
+        );
         return;
     }
     // The window open when the upload starts is where the link goes, even

@@ -249,8 +249,36 @@ msgid "The message was not encrypted or not sent. Nothing was sent as clear text
 msgstr "Le message n'a pas été chiffré ou n'a pas été envoyé. Rien n'a été envoyé en clair."
 
 msgctxt "AppWindow"
-msgid "An encrypted chat takes plain text only. Nothing was sent."
-msgstr "Un chat chiffré accepte uniquement du texte simple. Rien n'a été envoyé."
+msgid "An encrypted chat takes text and files only. Nothing was sent."
+msgstr "Un chat chiffré accepte uniquement du texte et des fichiers. Rien n'a été envoyé."
+
+msgctxt "AppWindow"
+msgid "This server cannot store encrypted files, so {} was not sent."
+msgstr "Ce serveur ne peut pas stocker de fichiers chiffrés, donc {} n'a pas été envoyé."
+
+msgctxt "AppWindow"
+msgid "The metadata of {} could not be removed, so it was not sent."
+msgstr "Les métadonnées de {} n'ont pas pu être supprimées, donc il n'a pas été envoyé."
+
+msgctxt "AppWindow"
+msgid "This build cannot remove video metadata, so {} was not sent."
+msgstr "Cette version ne peut pas supprimer les métadonnées des vidéos, donc {} n'a pas été envoyé."
+
+msgctxt "AppWindow"
+msgid "{} was not encrypted or not uploaded. Nothing was sent as clear text."
+msgstr "{} n'a pas été chiffré ou envoyé sur le serveur. Rien n'a été envoyé en clair."
+
+msgctxt "AppWindow"
+msgid "The encrypted file {} is not valid and was not opened."
+msgstr "Le fichier chiffré {} n'est pas valide et n'a pas été ouvert."
+
+msgctxt "AppWindow"
+msgid "The encrypted file {} has expired."
+msgstr "Le fichier chiffré {} a expiré."
+
+msgctxt "AppWindow"
+msgid "The encrypted file {} could not be downloaded or opened."
+msgstr "Le fichier chiffré {} n'a pas pu être téléchargé ou ouvert."
 
 msgctxt "AppWindow"
 msgid "The SAS codes match. This contact is verified."

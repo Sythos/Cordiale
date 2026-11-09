@@ -371,7 +371,7 @@ impl PairingOffer {
 
 /// Reads `YYYY-MM-DDTHH:MM:SS[.fff]` with the suffix `Z` or `+00:00` as
 /// Unix seconds. Any other shape, and any other offset, gives `None`.
-fn parse_utc_seconds(text: &str) -> Option<i64> {
+pub(crate) fn parse_utc_seconds(text: &str) -> Option<i64> {
     let text = text
         .strip_suffix('Z')
         .or_else(|| text.strip_suffix("+00:00"))?;

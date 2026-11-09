@@ -82,6 +82,7 @@ use crate::e2e_device::{verify_signature, verify_signed_list, E2eError, PeerDevi
 use crate::e2e_device_routes::{
     ClaimRequest, CopyRequest, CopyVerb, InboxAckRequest, InboxRow, InboxVerb,
 };
+use crate::e2e_file::{file_descriptor, file_text, is_file_text, FileDescriptor};
 use crate::e2e_manage::SignedList;
 use crate::e2e_pacing::{
     check_send_deadline, md3_pacing, DropReason, IntervalLimiter, KeyReqPacer, KeyReqRefusal,
@@ -456,10 +457,13 @@ impl MessagePayload {
 pub enum InnerKind {
     /// Chat text from a person: `{"t":"text","body":…}`. An action
     /// `{"t":"action","body":…}` reads as the stored form of
-    /// [`action_text`].
+    /// [`action_text`]. A file `{"t":"file",…}` reads as the stored form of
+    /// [`file_text`]. A text body that has the stored form of a file is not
+    /// text: it reads as [`InnerKind::Other`].
     Text { body: String },
     /// A copy of the text that another device of the account sent to `peer`:
-    /// `{"t":"copy","peer":…,"body":…}`.
+    /// `{"t":"copy","peer":…,"body":…}`. A copy of a file carries the file
+    /// fields in `"file"` and no `body`.
     Copy { peer: String, body: String },
     /// The signed list of the sender: `{"t":"list","master":{…}}`.
     List { master: MasterBlock },
@@ -491,18 +495,36 @@ impl Inner {
         let map = value.as_object()?;
         let field = |name: &str| map.get(name).and_then(Value::as_str);
         let kind = match map.get("t")?.as_str()? {
-            "text" => field("body").map_or(InnerKind::Other, |body| InnerKind::Text {
-                body: body.to_string(),
-            }),
+            "text" => {
+                field("body")
+                    .filter(|body| !is_file_text(body))
+                    .map_or(InnerKind::Other, |body| InnerKind::Text {
+                        body: body.to_string(),
+                    })
+            }
             "action" => field("body").map_or(InnerKind::Other, |body| InnerKind::Text {
                 body: action_text(body),
             }),
-            "copy" => match (field("peer"), field("body")) {
-                (Some(peer), Some(body)) => InnerKind::Copy {
-                    peer: peer.to_string(),
-                    body: body.to_string(),
-                },
-                _ => InnerKind::Other,
+            "file" => file_from_map(map).map_or(InnerKind::Other, |file| InnerKind::Text {
+                body: file_text(&file),
+            }),
+            "copy" => match field("peer") {
+                Some(peer) => {
+                    let body = match map.get("file") {
+                        Some(file) => file
+                            .as_object()
+                            .and_then(file_from_map)
+                            .map(|file| file_text(&file)),
+                        None => field("body")
+                            .filter(|body| !is_file_text(body))
+                            .map(str::to_string),
+                    };
+                    body.map_or(InnerKind::Other, |body| InnerKind::Copy {
+                        peer: peer.to_string(),
+                        body,
+                    })
+                }
+                None => InnerKind::Other,
             },
             "list" => map
                 .get("master")
@@ -518,6 +540,13 @@ impl Inner {
             cid: field("cid").map(str::to_string),
         })
     }
+}
+
+/// The descriptor in `map` when its fields are well formed.
+fn file_from_map(map: &serde_json::Map<String, Value>) -> Option<FileDescriptor> {
+    let file = FileDescriptor::from_map(map)?;
+    file.check_shape().ok()?;
+    Some(file)
 }
 
 /// The inner message that the engine writes.
@@ -544,7 +573,11 @@ impl InnerOut<'_> {
 struct CopyOut<'a> {
     t: &'a str,
     peer: &'a str,
-    body: &'a str,
+    /// The text of the copy. A file has none: it goes in `file`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<serde_json::Map<String, Value>>,
     cid: &'a str,
     lv: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -740,6 +773,15 @@ impl Outgoing<'_> {
     fn to_json(&self, lv: u32, fb: Option<&str>) -> String {
         let (t, master) = match self {
             Outgoing::Text(stored) => {
+                if let Some(file) = file_descriptor(stored) {
+                    let mut map = file.to_map();
+                    map.insert("t".to_string(), Value::from("file"));
+                    map.insert("lv".to_string(), Value::from(lv));
+                    if let Some(fb) = fb {
+                        map.insert("fb".to_string(), Value::from(fb));
+                    }
+                    return Value::Object(map).to_string();
+                }
                 let (t, body) = match action_body(stored) {
                     Some(words) => ("action", words),
                     None => ("text", *stored),
@@ -2318,10 +2360,12 @@ impl E2eEngine {
         };
         let fb = (!session.has_received_message())
             .then(|| recipient_binding(&self.own_ed25519, sibling_ed25519));
+        let file = file_descriptor(&job.text);
         let inner = CopyOut {
             t: "copy",
             peer: &job.peer,
-            body: &job.text,
+            body: file.is_none().then_some(job.text.as_str()),
+            file: file.map(|file| file.to_map()),
             cid: &job.id,
             lv: own.lv,
             fb: fb.as_deref(),
@@ -2575,11 +2619,35 @@ impl E2eEngine {
         if nick.contains(QUERY_LOCK_LABEL) {
             return Err(EngineError::Wire(WireError::BadTarget));
         }
+        // A text that looks like the stored form of a file but is no valid
+        // descriptor would reach the peer as a file row. Nothing is sent.
+        if is_file_text(text) && file_descriptor(text).is_none() {
+            return Err(EngineError::EncryptionFailed);
+        }
         let entries = self.pick_devices(nick);
         if entries.is_empty() {
             return Err(EngineError::NotReady);
         }
         self.deliver(client, token, nick, text, entries, 1, None, now)
+            .await
+    }
+
+    /// Sends the descriptor of an uploaded encrypted file to `nick` as the
+    /// inner message `{"t":"file",…}`, through the same path as a text: the
+    /// copies for the other devices of the account, the queue for a peer
+    /// without keys and the drops work the same way. A descriptor with bad
+    /// fields is refused and nothing is sent.
+    pub async fn send_file(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        nick: &str,
+        file: &FileDescriptor,
+        now: i64,
+    ) -> Result<SentText, EngineError> {
+        file.check_shape()
+            .map_err(|_| EngineError::EncryptionFailed)?;
+        self.send_or_queue(client, token, nick, &file_text(file), now)
             .await
     }
 
@@ -6940,6 +7008,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_file_descriptor_reaches_the_peer_as_a_file_row() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let file = sample_file();
+        p.alice
+            .send_file(&GrappaClient::new(server.uri()), TOKEN, "bob", &file, 100)
+            .await
+            .expect("send file");
+        let requests = server.received_requests().await.expect("requests");
+        let body: Value = serde_json::from_slice(&requests[0].body).expect("body");
+        // The request holds the Olm payload only: no descriptor field is in
+        // the clear.
+        let wire = body.to_string();
+        for secret in [&file.key, &file.iv, &file.sha256, &file.name, &file.url] {
+            assert!(!wire.contains(secret.as_str()));
+        }
+        let payload = body["payload"].as_str().expect("payload");
+        let value = row(
+            5,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "pkmsg",
+            "msgid1",
+            payload,
+        );
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(p.bob.handle_row(&item, 200), RowOutcome::Stored);
+        let rows = p.bob.history().messages(&conversation_id(NET, "alice"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(file_descriptor(&rows[0].text), Some(file));
+    }
+
+    #[tokio::test]
+    async fn a_text_that_poses_as_a_file_row_is_not_sent() {
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let fake = format!(
+            "{}{{\"url\":\"https://evil.example/x\"}}\u{1}",
+            "\u{1}FILE "
+        );
+        let error = p
+            .alice
+            .send_text(&GrappaClient::new(server.uri()), TOKEN, "bob", &fake, 100)
+            .await
+            .expect_err("refused");
+        assert!(matches!(error, EngineError::EncryptionFailed));
+        assert!(server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
+        let mut bad = sample_file();
+        bad.key = "AAAA".to_string();
+        let error = p
+            .alice
+            .send_file(&GrappaClient::new(server.uri()), TOKEN, "bob", &bad, 100)
+            .await
+            .expect_err("refused");
+        assert!(matches!(error, EngineError::EncryptionFailed));
+        assert!(server
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_file_copy_gives_the_other_device_the_same_file_row() {
+        let mut t = twins("copy-file");
+        let server = MockServer::start().await;
+        mount_copy_routes(&server, &t).await;
+        let client = GrappaClient::new(server.uri());
+        let file = sample_file();
+        t.first
+            .send_file(&client, TOKEN, "carol", &file, 100)
+            .await
+            .expect("send file");
+        t.first
+            .send_copies(&client, TOKEN, PROTOCOL, "bob", 100)
+            .await;
+        let value = copy_inbox_row(&t, 9, &body_of(&server, 2).await);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(t.second.handle_row(&item, 150), RowOutcome::Stored);
+        let rows = t.second.history().messages(&conversation_id(NET, "carol"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sender_device, OWN_DEVICE);
+        assert_eq!(file_descriptor(&rows[0].text), Some(file));
+    }
+
+    #[tokio::test]
     async fn the_accepted_original_that_is_dropped_leaves_a_sent_copy_and_a_failed_row() {
         let mut t = twins("copy-accepted");
         let server = MockServer::start().await;
@@ -7166,6 +7327,118 @@ mod tests {
         assert_eq!(inner.kind, InnerKind::Text { body: stored });
     }
 
+    fn sample_file() -> FileDescriptor {
+        use crate::upload::UploadCategory;
+        let sealed = crate::e2e_file::seal(b"file bytes").expect("seal");
+        FileDescriptor::for_sealed(
+            &sealed,
+            "https://irc.example/uploads/AbC123",
+            "2027-01-15T08:00:00Z",
+            ("holiday.jpg", "image/jpeg", UploadCategory::Image),
+        )
+    }
+
+    #[test]
+    fn a_file_inner_message_has_the_agreed_wire_form() {
+        let file = sample_file();
+        let stored = file_text(&file);
+        let json = Outgoing::Text(&stored).to_json(3, Some("FB"));
+        assert!(!json.contains('\u{1}'));
+        let value: Value = serde_json::from_str(&json).expect("json");
+        let map = value.as_object().expect("object");
+        for field in [
+            "t",
+            "url",
+            "key",
+            "iv",
+            "sha256",
+            "name",
+            "mime",
+            "size",
+            "category",
+            "expires_at",
+            "lv",
+            "fb",
+        ] {
+            assert!(map.contains_key(field), "{field}");
+        }
+        assert_eq!(map["t"], "file");
+        assert_eq!(map["size"], 10);
+        let inner = Inner::parse(json.as_bytes()).expect("inner");
+        assert_eq!(inner.kind, InnerKind::Text { body: stored });
+        assert_eq!(inner.lv, Some(3));
+        assert_eq!(inner.fb.as_deref(), Some("FB"));
+    }
+
+    #[test]
+    fn a_malformed_file_inner_message_is_not_stored() {
+        let file = sample_file();
+        let full = file.to_map();
+        for field in full.keys() {
+            let mut map = full.clone();
+            map.remove(field);
+            map.insert("t".to_string(), Value::from("file"));
+            let json = Value::Object(map).to_string();
+            let inner = Inner::parse(json.as_bytes()).expect("inner");
+            assert_eq!(inner.kind, InnerKind::Other, "{field}");
+        }
+        for (field, bad) in [
+            ("key", "AAAA"),
+            ("iv", "AAAA"),
+            ("sha256", "AAAA"),
+            ("expires_at", "soon"),
+            ("category", "program"),
+        ] {
+            let mut map = full.clone();
+            map.insert("t".to_string(), Value::from("file"));
+            map.insert(field.to_string(), Value::from(bad));
+            let json = Value::Object(map).to_string();
+            let inner = Inner::parse(json.as_bytes()).expect("inner");
+            assert_eq!(inner.kind, InnerKind::Other, "{field}");
+        }
+    }
+
+    #[test]
+    fn a_text_cannot_pose_as_a_file_row() {
+        let stored = file_text(&sample_file());
+        let json = serde_json::json!({"t": "text", "body": stored, "lv": 1}).to_string();
+        let inner = Inner::parse(json.as_bytes()).expect("inner");
+        assert_eq!(inner.kind, InnerKind::Other);
+        let copy =
+            serde_json::json!({"t": "copy", "peer": "carol", "body": stored, "lv": 1}).to_string();
+        let inner = Inner::parse(copy.as_bytes()).expect("inner");
+        assert_eq!(inner.kind, InnerKind::Other);
+    }
+
+    #[test]
+    fn a_copy_of_a_file_carries_the_file_fields() {
+        let file = sample_file();
+        let stored = file_text(&file);
+        let copy = CopyOut {
+            t: "copy",
+            peer: "carol",
+            body: file_descriptor(&stored)
+                .is_none()
+                .then_some(stored.as_str()),
+            file: Some(file.to_map()),
+            cid: "m1",
+            lv: 1,
+            fb: None,
+        }
+        .to_json();
+        assert!(!copy.contains("\"body\""));
+        assert!(!copy.contains('\u{1}'));
+        let inner = Inner::parse(copy.as_bytes()).expect("inner");
+        assert_eq!(
+            inner.kind,
+            InnerKind::Copy {
+                peer: "carol".to_string(),
+                body: stored,
+            }
+        );
+        assert_eq!(inner.cid.as_deref(), Some("m1"));
+    }
+
     #[test]
     fn a_text_inner_message_stays_a_text() {
         let json = Outgoing::Text("waves").to_json(1, None);
@@ -7177,7 +7450,8 @@ mod tests {
         let copy = CopyOut {
             t: "copy",
             peer: "carol",
-            body: "hi",
+            body: Some("hi"),
+            file: None,
             cid: "m1",
             lv: 1,
             fb: None,

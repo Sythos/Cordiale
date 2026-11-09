@@ -1261,7 +1261,8 @@ The event inventory has 66 kinds (with `e2e_incoming` and
 
 Il server invia `e2e_incoming` e `e2e_incoming_lost` solo a un client che
 dichiara `client_proto=59`; Cordiale dichiara 59. I protocolli 56-58 aggiungono
-solo campi e una rotta di upload che il client non usa.
+campi e la rotta di upload cifrato, che Cordiale usa dalla v58 (sezione
+«E2E files: v58»).
 
 - `e2e_incoming` (`network`, `from`, `from_did`, `to`, `msgid`) arriva una volta
   per un PKMSG o MSG su più righe, mai per uno su una riga. `to` è un id
@@ -1922,3 +1923,63 @@ il motivo dalla lista locale. Mostra la spiegazione, i dispositivi del server e,
 l'identità, poi `/e2e join <codice>` o `/e2e accept` su questo dispositivo. La
 sostituzione resta `/e2e reset` con la sua conferma `yes`, con l'avviso che una nuova identità può
 cambiare la chiave pubblica verificata dai contatti. Nessuna vista crea o sostituisce un'identità.
+
+## E2E files: v58 (issue 635)
+
+Sources: Grappa `docs/CLIENT_PROTOCOL.md` section 4k (issue 2517, server door) and the Cicchetto
+design on issue 2517 (inner message `file`, comment of 2026-11-08). The server door is in Grappa
+since protocol 58. The Cicchetto half was still open when this section was written: the descriptor
+below follows its design, not shipped code. Check it again when Cicchetto ships.
+
+- **Door.** `POST /api/uploads/encrypted`, multipart `file` and optional `expire` (3600, 43200,
+  86400 or 259200 seconds). Answer 201 `{slug, url, expires_at}`. The route has no extension in its
+  URL. Cordiale sends the part with the neutral name `blob` and the type `application/octet-stream`.
+  The server ignores both. It stores the bytes as they are and strips nothing.
+- **Size and space.** One cap on the server: the largest category cap plus 16 bytes (the GCM tag).
+  Cordiale checks the cap of the real category on the plain file before it seals. A 413 gives
+  `attach-rejected-size`, a 507 gives `attach-no-space`. A 404, 405 or 501 means a server without the
+  door: `e2e-file-unsupported-server`. Cordiale also refuses before any request when
+  `protocol_version` is under 58 or not known.
+- **Seal.** AES-256-GCM, a new random 32-byte key and a new random 12-byte nonce (`iv`) for each
+  file, no associated data. The ciphertext is the plain length plus 16 bytes. Code: `e2e_file.rs`.
+- **Descriptor.** The inner Olm message `{"t":"file","url","key","iv","sha256","name","mime",
+  "size","category","expires_at","lv"[,"fb"]}`. `key`, `iv` and `sha256` are standard base64 without
+  padding (padded text is read too). `sha256` is the hash of the ciphertext. `size` is the plain
+  length. `category` is `image`, `video`, `document` or `audio`. `expires_at` comes from the upload
+  answer, as UTC text. The name and the type travel here only, never in the multipart part. The
+  descriptor goes through the same send path as a text: queue for a peer without keys, drops,
+  pacing, and the copy for the other devices.
+- **Self-copy.** `{"t":"copy","peer","file":{…},"cid","lv"[,"fb"]}`: the `file` object has the same
+  fields as the descriptor and the copy has no `body`. A sibling stores one file row in the locked
+  query of the peer. A copy with a `body` that has the stored form of a file is not read.
+- **Stored form.** The history keeps a file as a text row `\u{1}FILE <json>\u{1}`, like an action row.
+  A `text` or `copy` body of this form is refused on receive (`Other`), and `send_text` refuses it
+  on send. The locked window shows `<emoji> <name> (<type>, <size>) <url>` and never the raw row.
+- **Receive checks, before any download** (`FileDescriptor::validate`): key 32 bytes, nonce 12,
+  hash 32, category known, type of the shape `type/subtype`, size under 4 GiB, a name that is not
+  empty after clean-up (no control characters, no bidirectional marks, no `/` or `\`, at most 255
+  bytes), an expiry that reads as UTC and is in the future, and a URL with the scheme, host and port
+  of the configured server and the path `<server path>/uploads/<slug>` (slug of letters, digits, `-`
+  and `_`; no credentials, query or fragment). A descriptor with a bad field is not stored. The
+  download is a `GET` with no token. It uses its own client, which refuses a redirect to another
+  origin before the request goes out (`same_origin_redirects` in `client.rs`) and follows at most
+  five hops inside the first origin. The answer must have exactly
+  `size + 16` bytes. The hash is checked before the decryption, then the tag, then the length.
+  A click on the link of a file row is the only way to start a download: Cordiale never fetches a
+  URL from a message by itself, and a link that no locked row holds keeps the normal link path.
+- **Metadata.** Before sealing, images lose EXIF, GPS, XMP, IPTC, comments and text chunks
+  (`metadata_strip.rs`: JPEG, PNG and APNG, GIF, WebP; the JPEG orientation stays in a new minimal
+  EXIF block). A JPEG is cleaned in every scan (a progressive file has several), and the bytes
+  after the end-of-image marker are dropped. A JPEG that has no end marker is refused. A file
+  that cannot be read as the type it claims is refused: `e2e-file-strip-failed`. A video is encoded again into a new MP4 with FFmpeg (no metadata is
+  copied). A build without the `video-shrink` feature refuses a video: `e2e-file-strip-unavailable`.
+  Audio and documents are sealed as they are: Cordiale cannot clean them.
+- **No fallback.** A locked window never reaches `POST /api/uploads`. Any failure shows a status and
+  sends nothing. The plain upload keeps working in plain queries and channels.
+- **Viewing.** JPEG, PNG, GIF and WebP open in the image viewer (Download saves the decrypted
+  bytes), `text/plain` and `text/markdown` in the text viewer when the text is at most 1 MiB. A
+  larger text, and any other type, opens a save dialog with the whole file, and is never run. The decrypted bytes live in memory and, for an image, in a private temporary file
+  that is deleted at once.
+- **Not verified.** Never tried against a real Grappa with the door, nor against Cicchetto: the
+  descriptor follows a design that can still change. `CLIENT_PROTOCOL_VERSION` stays 59: protocol 58 is
+  below it, so no minimum changes.

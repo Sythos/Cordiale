@@ -260,9 +260,19 @@ If the message matters, ask the peer if they got it.
 - Cordiale sends a long message in parts, with pauses. A long paste takes time.
   Encryption makes a message larger. A very long message can be too large
   to send. Cordiale then sends nothing. Divide a very long text into shorter messages.
-- Encrypted queries take plain text only. Files and media are not available
-  in an encrypted query. Cordiale shows "An encrypted chat takes plain text
-  only" and sends nothing.
+- You can send files in an encrypted query. Cordiale encrypts the file on
+  your device and uploads only the encrypted bytes. The name, the type and
+  the size go to your peer inside the encrypted message. The server needs
+  protocol 58 or newer. Otherwise Cordiale shows an error and sends nothing:
+  it never uploads a file in clear text from an encrypted query.
+- Cordiale removes the metadata of images (location, camera, comments)
+  before it encrypts them. It encodes a video again to remove its metadata.
+  A build without the video encoder refuses videos. Cordiale cannot clean
+  audio files and documents: it sends them as they are, inside the
+  encryption.
+- The file expires with the upload: after that time nobody can open it. Click
+  the link in the row to open the file. Images and text open in the viewer.
+  Other files open a save dialog.
 - A line that starts with a slash is a command, not a message. Cordiale runs
   it as in a normal query and never sends it to the peer. Commands such as
   `/ns identify` keep their normal visibility: E2E does not protect them from

@@ -109,7 +109,28 @@ impl HistoryTimeCursor {
 #[derive(Clone)]
 pub struct GrappaClient {
     http: Client,
+    /// Used only for the download of an encrypted file: it follows a redirect
+    /// only inside the origin of the first request.
+    download_http: Client,
     base_url: String,
+}
+
+/// Redirect rule of the download of an encrypted file. A hop to another
+/// origin stops before the request goes out. Five hops at most.
+fn same_origin_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        let same_origin = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| first.origin() == attempt.url().origin());
+        if attempt.previous().len() >= 5 {
+            attempt.error("too many redirects")
+        } else if same_origin {
+            attempt.follow()
+        } else {
+            attempt.error("redirect to another origin")
+        }
+    })
 }
 
 #[derive(Debug)]
@@ -371,8 +392,16 @@ impl GrappaClient {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .unwrap_or_else(|_| Client::new());
+        let download_http = Client::builder()
+            .user_agent(crate::GRAPPA_USER_AGENT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(same_origin_redirects())
+            .build()
+            .unwrap_or_else(|_| Client::new());
         GrappaClient {
             http,
+            download_http,
             base_url: base_url.into(),
         }
     }
@@ -3872,6 +3901,76 @@ impl GrappaClient {
             .await?
             .error_for_status()?;
         Ok(response.json::<UploadResponse>().await?)
+    }
+
+    /// `POST /api/uploads/encrypted` (protocol 58) — uploads the ciphertext
+    /// of a file of an encrypted query. The part has a neutral name and the
+    /// type `application/octet-stream`: the server ignores both, and the real
+    /// name and type go to the peer inside the Olm message only. Nothing is
+    /// stripped or checked by the server, so the caller seals the file after
+    /// cleaning it. A 413 is final: this method never sends the file again.
+    pub async fn upload_encrypted_file(
+        &self,
+        token: &str,
+        ciphertext: Vec<u8>,
+        expire: Option<i64>,
+    ) -> Result<UploadResponse, GrappaClientError> {
+        let url = format!("{}/api/uploads/encrypted", self.base_url);
+        let timeout = upload_timeout(ciphertext.len());
+        let part = reqwest::multipart::Part::bytes(ciphertext)
+            .file_name("blob")
+            .mime_str("application/octet-stream")?;
+        let mut form = reqwest::multipart::Form::new().part("file", part);
+        if let Some(expire) = expire {
+            form = form.text("expire", expire.to_string());
+        }
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(token)
+            .timeout(timeout)
+            .multipart(form)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.json::<UploadResponse>().await?)
+    }
+
+    /// `GET /uploads/:slug` of a checked descriptor. The route has no
+    /// authentication, so no token goes with the request. The answer must
+    /// have exactly the length of the ciphertext and must come from the same
+    /// origin as the request: a redirect to another host is refused.
+    pub async fn fetch_encrypted_file(
+        &self,
+        file: &crate::e2e_file::ValidFile,
+    ) -> Result<Vec<u8>, GrappaClientError> {
+        let expected = usize::try_from(file.ciphertext_len())
+            .map_err(|_| GrappaClientError::TooLarge { limit: usize::MAX })?;
+        let too_large = GrappaClientError::TooLarge { limit: expected };
+        let mut response = self
+            .download_http
+            .get(file.url.clone())
+            .timeout(upload_timeout(expected))
+            .send()
+            .await?
+            .error_for_status()?;
+        if response.url().origin() != file.url.origin() {
+            return Err(GrappaClientError::InvalidUrl(file.url.to_string()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length != expected as u64)
+        {
+            return Err(too_large);
+        }
+        let mut bytes = Vec::with_capacity(expected);
+        while let Some(chunk) = response.chunk().await? {
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() > expected {
+                return Err(too_large);
+            }
+        }
+        Ok(bytes)
     }
 
     /// `GET /me/settings/upload-ttl-seconds` — the lifetime given to new
@@ -8263,6 +8362,149 @@ mod tests {
             .expect_err("413");
         assert_eq!(err.status(), Some(StatusCode::PAYLOAD_TOO_LARGE));
         // The mock server checks on drop that it got exactly one request.
+    }
+
+    #[tokio::test]
+    async fn encrypted_upload_sends_only_ciphertext_with_a_neutral_part() {
+        use crate::e2e_file::seal;
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uploads/encrypted"))
+            .and(header("authorization", "Bearer abc123"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "slug": "abcd",
+                "url": "https://irc.example/uploads/abcd",
+                "expires_at": "2026-09-25T10:00:00Z"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let plain = b"plain-marker-bytes-of-a-private-file".to_vec();
+        let sealed = seal(&plain).expect("seal");
+        let client = GrappaClient::new(mock_server.uri());
+        let uploaded = client
+            .upload_encrypted_file("abc123", sealed.ciphertext.clone(), Some(3600))
+            .await
+            .expect("encrypted upload");
+        assert_eq!(uploaded.url, "https://irc.example/uploads/abcd");
+        let requests = mock_server.received_requests().await.expect("requests");
+        let body = &requests[0].body;
+        let has = |needle: &[u8]| body.windows(needle.len()).any(|w| w == needle);
+        assert!(has(&sealed.ciphertext));
+        assert!(!has(&plain));
+        assert!(has(b"application/octet-stream"));
+        assert!(has(b"filename=\"blob\""));
+    }
+
+    #[tokio::test]
+    async fn encrypted_upload_failure_is_final_and_names_the_status() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uploads/encrypted"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        // The plain door must never see a request from this call.
+        Mock::given(method("POST"))
+            .and(path("/api/uploads"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+        let client = GrappaClient::new(mock_server.uri());
+        let err = client
+            .upload_encrypted_file("t", vec![0; 32], None)
+            .await
+            .expect_err("404");
+        assert_eq!(err.status(), Some(StatusCode::NOT_FOUND));
+    }
+
+    #[tokio::test]
+    async fn encrypted_download_checks_length_and_sends_no_token() {
+        use crate::e2e_file::{seal, FileDescriptor};
+        use crate::upload::UploadCategory;
+        let mock_server = MockServer::start().await;
+        let plain = b"hello encrypted world".to_vec();
+        let sealed = seal(&plain).expect("seal");
+        Mock::given(method("GET"))
+            .and(path("/uploads/good"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(sealed.ciphertext.clone()))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/uploads/long"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 500]))
+            .mount(&mock_server)
+            .await;
+        let make = |slug: &str| {
+            FileDescriptor::for_sealed(
+                &sealed,
+                &format!("{}/uploads/{slug}", mock_server.uri()),
+                "2099-01-01T00:00:00Z",
+                ("a.txt", "text/plain", UploadCategory::Document),
+            )
+            .validate(&mock_server.uri(), 1_000)
+            .expect("valid")
+        };
+        let client = GrappaClient::new(mock_server.uri());
+        let bytes = client
+            .fetch_encrypted_file(&make("good"))
+            .await
+            .expect("download");
+        assert_eq!(make("good").open(&bytes).expect("open"), plain);
+        let err = client
+            .fetch_encrypted_file(&make("long"))
+            .await
+            .expect_err("wrong length");
+        assert!(matches!(err, GrappaClientError::TooLarge { .. }));
+        let requests = mock_server.received_requests().await.expect("requests");
+        assert!(requests
+            .iter()
+            .all(|request| !request.headers.contains_key("authorization")));
+    }
+
+    #[tokio::test]
+    async fn encrypted_download_refuses_a_redirect_to_another_origin_before_it_goes_out() {
+        use crate::e2e_file::{seal, FileDescriptor};
+        use crate::upload::UploadCategory;
+        let other = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 26]))
+            .expect(0)
+            .mount(&other)
+            .await;
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/uploads/moved"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/uploads/moved", other.uri())),
+            )
+            .mount(&mock_server)
+            .await;
+        let sealed = seal(b"0123456789").expect("seal");
+        let valid = FileDescriptor::for_sealed(
+            &sealed,
+            &format!("{}/uploads/moved", mock_server.uri()),
+            "2099-01-01T00:00:00Z",
+            ("a.txt", "text/plain", UploadCategory::Document),
+        )
+        .validate(&mock_server.uri(), 1_000)
+        .expect("valid");
+        let client = GrappaClient::new(mock_server.uri());
+        client
+            .fetch_encrypted_file(&valid)
+            .await
+            .expect_err("cross-origin redirect");
+        // The mock server of the other origin checks on drop that it got no
+        // request.
+        assert!(other
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
     }
 
     #[test]
