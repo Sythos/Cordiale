@@ -3984,10 +3984,6 @@ async fn sync_e2e_channel(
     let key = (network.to_string(), channel.to_string());
     let start = state.e2e.channel_key_cursor.get(&key).copied().unwrap_or(0) % total.max(1);
     let mut visited = 0;
-    // A member whose request is in flight has no device yet. The saved
-    // members stay until the KEYS row comes: an empty device cache after a
-    // restart is not a departure.
-    let mut rediscovering = false;
     while visited < total {
         if asked >= CHANNEL_KEY_REQUESTS_MAX {
             break;
@@ -4010,18 +4006,22 @@ async fn sync_e2e_channel(
         .e2e
         .channel_key_cursor
         .insert(key, (start + visited) % total.max(1));
-    for nick in &nicks {
-        if !casemapping.nick_eq(nick, &own_nick)
-            && !engine.is_ready(nick)
-            && matches!(
-                state.e2e.key_request(network, nick),
-                KeyRequest::Accepted | KeyRequest::Waiting
-            )
-        {
-            rediscovering = true;
-        }
-    }
-    let outcome = engine.channel_set_members_keeping(channel, seq, &nicks, rediscovering);
+    // A member whose request is in flight has no device yet. Its saved
+    // devices stay until the KEYS row comes: an empty device cache after a
+    // restart is not a departure. The devices of a member that left go.
+    let rediscovering: Vec<String> = nicks
+        .iter()
+        .filter(|nick| {
+            !casemapping.nick_eq(nick, &own_nick)
+                && !engine.is_ready(nick)
+                && matches!(
+                    state.e2e.key_request(network, nick),
+                    KeyRequest::Accepted | KeyRequest::Waiting
+                )
+        })
+        .cloned()
+        .collect();
+    let outcome = engine.channel_set_members_keeping(channel, seq, &nicks, &rediscovering);
     let changed = matches!(outcome, Ok(MembershipOutcome::Changed { .. }));
     let waiting = engine.channel_plan_send(channel, false) != SendPlan::Encrypt;
     match &outcome {

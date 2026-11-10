@@ -406,6 +406,27 @@ impl PeerTrust {
         }
     }
 
+    /// The `did` of every device that the saved state links to a peer: the
+    /// devices of the stored list and the certified devices that are not
+    /// revoked. A key that does not give a `did` is skipped. The set reads
+    /// only saved values, so it is complete after a restart too.
+    pub fn device_dids(&self, network: &str, nick: &str) -> BTreeSet<String> {
+        let Some(record) = self.peers.get(&peer_key(network, nick)) else {
+            return BTreeSet::new();
+        };
+        let certified = record.certified.keys().filter(|key| {
+            let curve = record.curves.get(*key).map(String::as_str);
+            !record.is_revoked(key, curve)
+        });
+        record
+            .list
+            .keys()
+            .iter()
+            .chain(certified)
+            .filter_map(|key| did_from_key_text(key).ok())
+            .collect()
+    }
+
     /// True when a signed list of the peer revoked at least one device. The
     /// current list never holds a revoked key, so read this set, not the list.
     pub fn has_revoked_devices(&self, network: &str, nick: &str) -> bool {
