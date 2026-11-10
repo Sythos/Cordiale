@@ -1291,7 +1291,24 @@ impl E2eEngine {
         seq: u64,
         nicks: &[String],
     ) -> Result<MembershipOutcome, E2eStoreError> {
-        let members = self.channel_devices_of(nicks);
+        self.channel_set_members_keeping(channel, seq, nicks, false)
+    }
+
+    /// Like [`E2eEngine::channel_set_members`]. With `keep_saved` the saved
+    /// members stay in the set. The caller sets it while the devices of some
+    /// nicks are not known yet, for example after a restart: a device that is
+    /// not known yet is not a device that left.
+    pub fn channel_set_members_keeping(
+        &mut self,
+        channel: &str,
+        seq: u64,
+        nicks: &[String],
+        keep_saved: bool,
+    ) -> Result<MembershipOutcome, E2eStoreError> {
+        let mut members = self.channel_devices_of(nicks);
+        if keep_saved {
+            members.extend(self.state.channels().members(&self.network, channel));
+        }
         let network = self.network.clone();
         self.state
             .update_channels(|ring| ring.apply_membership(&network, channel, seq, members))
@@ -8924,6 +8941,35 @@ mod tests {
             Err(ChannelOpError::Channel(ChannelError::NoKey))
         ));
         assert!(sent_requests(&server).await.is_empty());
+    }
+
+    #[test]
+    fn saved_members_stay_while_their_devices_are_not_known_yet() {
+        let id = Ident::new("channel-keep-saved");
+        let mut engine = id.engine();
+        let own = engine.channel_devices_of(&[]);
+        let mut saved = own.clone();
+        saved.insert("unknown-device".to_string());
+        let network = engine.network.clone();
+        engine
+            .state
+            .update_channels(|ring| ring.apply_membership(&network, "#room", 1, saved))
+            .expect("members");
+        // The device is not in the cache: the event keeps it.
+        let kept = engine
+            .channel_set_members_keeping("#room", 2, &[], true)
+            .expect("members");
+        assert_eq!(kept, MembershipOutcome::Unchanged);
+        assert!(engine
+            .state
+            .channels()
+            .members(&engine.network, "#room")
+            .contains(&"unknown-device".to_string()));
+        // Without the flag the same roster removes it.
+        let dropped = engine
+            .channel_set_members_keeping("#room", 3, &[], false)
+            .expect("members");
+        assert_eq!(dropped, MembershipOutcome::Changed { removed: true });
     }
 
     #[test]
