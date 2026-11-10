@@ -1594,31 +1594,34 @@ fn consent_context(state: &WorkerState, network: &str) -> Result<ConsentContext,
     Ok((client, token, protocol, line))
 }
 
-/// Like `consent_context`, with one safe provisioning try when the device has
-/// no identity. The core run is idempotent: it makes a first identity only when
-/// the server has no list, and it never makes a second one. A pairing case or
-/// a corrupt store stops here, so no consent call goes out before the identity
-/// is ready.
+/// Like `consent_context`, with one safe provisioning try when the identity is
+/// not ready. Ready means that a full provisioning run ended with success in
+/// this session. A local master key alone is not enough: a run can save it and
+/// then fail to publish the device or the keys. The core run is idempotent: it
+/// makes a first identity only when the server has no list, and it never makes
+/// a second one. A failed run, a pairing case or a corrupt store stops here, so
+/// no consent call goes out before the identity is ready.
 async fn ready_consent_context(
     state: &mut WorkerState,
     network: &str,
 ) -> Result<ConsentContext, ConsentBlock> {
     match consent_context(state, network) {
-        Err(ConsentBlock::NoIdentity) => {}
-        other => return other,
+        Ok(context) if state.e2e.provisioned.contains(network) => return Ok(context),
+        Ok(_) | Err(ConsentBlock::NoIdentity) => {}
+        Err(block) => return Err(block),
     }
-    // An engine without a master key or a missing engine: run provisioning
-    // once more, also when an earlier run ended with success.
+    // A missing engine, an engine without a master key or a run that did not
+    // end: run provisioning once more.
     state.e2e.provisioned.remove(network);
     let outcome = provision_network(state, network).await;
     if outcome != ProvisionOutcome::Skipped {
         ensure_engine(state, network);
     }
-    match consent_context(state, network) {
-        Err(ConsentBlock::NoIdentity) if outcome == ProvisionOutcome::Failed => {
-            Err(ConsentBlock::Network)
-        }
-        other => other,
+    match outcome {
+        ProvisionOutcome::Failed => Err(ConsentBlock::Network),
+        ProvisionOutcome::Pairing => Err(ConsentBlock::Pairing),
+        ProvisionOutcome::Store => Err(ConsentBlock::Store),
+        ProvisionOutcome::Done | ProvisionOutcome::Skipped => consent_context(state, network),
     }
 }
 
@@ -4215,6 +4218,32 @@ mod tests {
             consent_context(&state, "net").err(),
             Some(ConsentBlock::NoIdentity)
         );
+    }
+
+    #[test]
+    fn a_failed_provisioning_run_stops_the_consent_action() {
+        let dir = tempfile::tempdir().expect("dir");
+        // The engine holds a master key, so a consent line exists, but no
+        // run ended with success: the device is not published.
+        let (mut state, _peer) = sas_state(&dir);
+        state.conn.server_protocol_version = Some(CONSENT_MIN_PROTOCOL);
+        state.conn.client = Some(GrappaClient::new("http://127.0.0.1:9".to_string()));
+        state.conn.token = Some("t".to_string());
+        state.conn.identifier = Some("ada".to_string());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        // Every try fails again: a local consent line is no bypass.
+        for _ in 0..2 {
+            let result = runtime.block_on(ready_consent_context(&mut state, "net"));
+            assert_eq!(result.err(), Some(ConsentBlock::Network));
+            assert!(!state.e2e.provisioned.contains("net"));
+        }
+        // After a full run the context is ready, with no new call.
+        state.e2e.provisioned.insert("net".to_string());
+        let result = runtime.block_on(ready_consent_context(&mut state, "net"));
+        assert!(result.is_ok());
     }
 
     #[test]
