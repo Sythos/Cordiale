@@ -13,7 +13,7 @@ use slint::fontique_011::{fontique, shared_collection};
 
 /// Scripts whose fallback list receives the symbol fonts. Symbols have the
 /// Common script, so the renderer asks for the script of the text around them.
-const FALLBACK_SCRIPTS: [&str; 5] = ["Latn", "Cyrl", "Grek", "Zyyy", "Zinh"];
+const FALLBACK_SCRIPTS: [[u8; 4]; 5] = [*b"Latn", *b"Cyrl", *b"Grek", *b"Zyyy", *b"Zinh"];
 
 /// System font files that hold symbol and dingbat glyphs, most useful first.
 /// `windows_dir` is the Windows directory, when the platform has one.
@@ -73,7 +73,7 @@ pub fn register_symbol_fonts() {
         return;
     }
     for script in FALLBACK_SCRIPTS {
-        let key = fontique::FallbackKey::new(fontique::Script::from_str_unchecked(script), None);
+        let key = fontique::FallbackKey::new(fontique::Script::from_bytes(script), None);
         // Reading the list first keeps the fallback font of the system: once a
         // list is set, the system is not asked for that script again.
         let current: Vec<_> = collection.fallback_families(key).collect();
@@ -117,8 +117,7 @@ mod tests {
     #[test]
     fn the_fallback_scripts_are_valid_codes() {
         for script in FALLBACK_SCRIPTS {
-            assert_eq!(script.len(), 4, "{script}");
-            assert!(script.chars().all(|c| c.is_ascii_alphabetic()), "{script}");
+            assert!(script.iter().all(u8::is_ascii_alphabetic), "{script:?}");
         }
     }
 }
