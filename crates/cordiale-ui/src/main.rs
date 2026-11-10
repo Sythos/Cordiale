@@ -49,6 +49,7 @@ mod queries;
 mod reply;
 mod reply_presence;
 mod slash;
+mod symbol_fonts;
 mod taskbar;
 mod temp_files;
 mod totp;
@@ -582,6 +583,7 @@ enum PasskeySignIn {
 
 fn main() -> Result<(), slint::PlatformError> {
     persistence::init_storage();
+    symbol_fonts::register_symbol_fonts();
     let ui = AppWindow::new()?;
     debug_info::watch_renderer(ui.window());
 

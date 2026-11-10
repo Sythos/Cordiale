@@ -6856,6 +6856,47 @@ fn message_text_keeps_crosses_accents_and_mirc_formatting() {
 }
 
 #[test]
+fn crosses_stay_the_same_from_json_frame_to_copy_text() {
+    let crosses =
+        "\u{2020}\u{2021}\u{2626}\u{2628}\u{2629}\u{271d}\u{271e}\u{271f}\u{2720}\u{1f547}";
+    let body = format!("\u{2}caf\u{e9}\u{2} {crosses} \u{3}04rosso \u{e8}\u{f}\u{1f600}");
+    let frame = serde_json::json!([
+        null,
+        null,
+        "grappa:user:me/network:azzurra/channel:#convento",
+        "event",
+        {
+            "kind": "message",
+            "message": {
+                "kind": "privmsg",
+                "sender": "vjt",
+                "body": body,
+                "channel": "#convento",
+                "network": "azzurra",
+                "id": 1,
+            },
+        },
+    ])
+    .to_string();
+    let parsed = cordiale_core::phoenix::PhoenixMessage::from_json(&frame).unwrap();
+    let inner = parsed.payload.get("message").unwrap();
+    let rendered = render_message(inner, None);
+    assert_eq!(rendered.text, body);
+
+    let lines: slint::ModelRc<ChatLine> = Rc::new(slint::VecModel::from(vec![ChatLine {
+        timestamp: "12:00".into(),
+        nick: "vjt".into(),
+        reply_body: rendered.text.as_str().into(),
+        ..Default::default()
+    }]))
+    .into();
+    assert_eq!(
+        chat_copy_text(&lines),
+        format!("[12:00] <vjt> caf\u{e9} {crosses} rosso \u{e8}\u{1f600}")
+    );
+}
+
+#[test]
 fn member_prefixes_keep_every_role_highest_first() {
     let order: Vec<String> = ["@", "%", "+"].iter().map(|s| s.to_string()).collect();
     assert_eq!(update_member_prefix("+", "@", true, &order), "@+");

@@ -39,6 +39,8 @@ slint = { version = "1", default-features = false, features = [
     # Files dropped on the window (`WindowEvent::DroppedFile`), which Slint
     # itself doesn't handle yet.
     "unstable-winit-030",
+    # The shared font collection, to add symbol fonts to the font fallback.
+    "unstable-fontique-011",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 # Display width of the sidebar rows, for the sidebar's minimum width; Slint
