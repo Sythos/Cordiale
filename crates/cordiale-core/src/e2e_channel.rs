@@ -291,6 +291,15 @@ impl ChannelKeyring {
             .unwrap_or_default()
     }
 
+    /// The sequence number of the last membership event applied to the
+    /// channel, or 0 when the channel has no state. The value is saved with
+    /// the keyring, so it survives a restart.
+    pub fn membership_seq(&self, network: &str, channel: &str) -> u64 {
+        self.channels
+            .get(&channel_id(network, channel))
+            .map_or(0, |state| state.membership_seq)
+    }
+
     /// Applies a membership event. `members` is the full set of authorized
     /// devices after the event. A number that is not above the last one is
     /// ignored. A member that left invalidates the own session and deletes

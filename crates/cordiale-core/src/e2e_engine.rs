@@ -1274,6 +1274,12 @@ impl E2eEngine {
         dids
     }
 
+    /// The sequence number of the last membership event that the saved state
+    /// of the channel holds. A new event must use a higher number.
+    pub fn channel_membership_seq(&self, channel: &str) -> u64 {
+        self.state.channels().membership_seq(&self.network, channel)
+    }
+
     /// Applies a membership event of a channel. `nicks` are the nicks in the
     /// channel after a JOIN, PART, KICK, QUIT or NICK; `seq` grows with each
     /// event. A number that is not new is ignored. A member that left makes
@@ -8918,5 +8924,29 @@ mod tests {
             Err(ChannelOpError::Channel(ChannelError::NoKey))
         ));
         assert!(sent_requests(&server).await.is_empty());
+    }
+
+    #[test]
+    fn the_channel_sequence_number_is_saved_and_read_after_a_restart() {
+        let id = Ident::new("channel-seq");
+        {
+            let mut engine = id.engine();
+            assert_eq!(engine.channel_membership_seq("#room"), 0);
+            engine
+                .channel_set_members("#room", 5, &[])
+                .expect("members");
+            assert_eq!(engine.channel_membership_seq("#room"), 5);
+            // A number that is not above the saved one is stale.
+            assert_eq!(
+                engine
+                    .channel_set_members("#room", 5, &["bob".to_string()])
+                    .expect("members"),
+                MembershipOutcome::Stale
+            );
+        }
+        // The engine of the next run reads the saved value.
+        let engine = id.engine();
+        assert_eq!(engine.channel_membership_seq("#room"), 5);
+        assert_eq!(engine.channel_membership_seq("#other"), 0);
     }
 }

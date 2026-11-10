@@ -144,7 +144,8 @@ pub(crate) struct E2eRuntime {
     channels: BTreeSet<(String, String)>,
     /// The sequence number of the last membership event that went to the
     /// engine, for each E2E channel. It only grows: a repeated event does not
-    /// repeat a change.
+    /// repeat a change. Each event starts above the saved keyring value too,
+    /// so a restart or a closed window never makes new events stale.
     channel_seq: HashMap<(String, String), u64>,
 }
 
@@ -3866,8 +3867,9 @@ pub(crate) async fn handle_e2e_channel_roster(
 }
 
 /// Runs [`sync_e2e_channel`] for each E2E channel of `network`. With
-/// `only_when_needed` a channel that can send and has no member without its
-/// key is left alone: the timer does not write the state for nothing.
+/// `only_when_needed` a channel is left alone when it can send, no member
+/// lacks its key and no roster nick waits for a failed key request: the timer
+/// does not write the state for nothing.
 async fn resync_e2e_channels(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -3887,12 +3889,38 @@ async fn resync_e2e_channels(
                 engine.channel_plan_send(&channel, false) != SendPlan::Encrypt
                     || engine.channel_missing_keys(&channel)
             });
-            if !waiting {
+            if !waiting && !channel_key_request_failed(state, network, &channel) {
                 continue;
             }
         }
         sync_e2e_channel(state, ui, network, &channel).await;
     }
+}
+
+/// True when a roster nick of the channel has no ready device and its last
+/// key request failed. Such a nick is no member yet, so the channel can look
+/// complete. The timer asks again; the pacer of the engine limits the
+/// requests. A nick that got no request (`NotSent`, also a peer that cannot
+/// do E2E) does not count, so it causes no sync at each tick.
+fn channel_key_request_failed(state: &WorkerState, network: &str, channel: &str) -> bool {
+    let (Some(engine), Some(nicks)) = (
+        state.e2e.engines.get(network),
+        channel_roster(state, network, channel),
+    ) else {
+        return false;
+    };
+    let casemapping = network_casemapping(state, network);
+    let own_nick = state
+        .networks
+        .own_nicks
+        .get(network)
+        .map(String::as_str)
+        .unwrap_or_default();
+    nicks.iter().any(|nick| {
+        !casemapping.nick_eq(nick, own_nick)
+            && !engine.is_ready(nick)
+            && state.e2e.key_request(network, nick) == KeyRequest::Failed
+    })
 }
 
 /// Gives the roster of an E2E channel to the engine and sends the channel
@@ -3929,17 +3957,20 @@ async fn sync_e2e_channel(
         .cloned()
         .unwrap_or_default();
     let casemapping = network_casemapping(state, network);
+    let Some(mut engine) = state.e2e.engines.remove(network) else {
+        return;
+    };
+    // The saved keyring keeps the last sequence number across a restart and a
+    // close of the window. A new event goes above it, or the engine ignores it
+    // as stale. No early return follows: the engine goes back below.
     let seq = {
         let counter = state
             .e2e
             .channel_seq
             .entry((network.to_string(), channel.to_string()))
             .or_insert(0);
-        *counter += 1;
+        *counter = (*counter).max(engine.channel_membership_seq(channel)) + 1;
         *counter
-    };
-    let Some(mut engine) = state.e2e.engines.remove(network) else {
-        return;
     };
     // A member whose keys are not known cannot read the channel yet. The keys
     // come in a later KEYS row, and the roster is applied again then.
@@ -5326,6 +5357,96 @@ mod tests {
             .messages(&conversation_id("net", "#room"))
             .is_empty());
         assert_eq!(engine.channel_plan_send("#room", false), SendPlan::Pending);
+    }
+
+    /// A channel state with a roster `me, bob`, an own nick `me` and a client
+    /// whose port refuses every connection.
+    fn roster_state(dir: &tempfile::TempDir) -> WorkerState {
+        let mut state = channel_state(dir);
+        state
+            .networks
+            .own_nicks
+            .insert("net".to_string(), "me".to_string());
+        state.transcript.members.insert(
+            ("net".to_string(), "#room".to_string()),
+            vec![
+                ("me".to_string(), "@".to_string()),
+                ("bob".to_string(), String::new()),
+            ],
+        );
+        state.conn.client = Some(GrappaClient::new("http://127.0.0.1:9".to_string()));
+        state.conn.token = Some("t".to_string());
+        state
+    }
+
+    fn channel_seq_of(state: &WorkerState) -> Option<u64> {
+        state
+            .e2e
+            .channel_seq
+            .get(&("net".to_string(), "#room".to_string()))
+            .copied()
+    }
+
+    #[test]
+    fn a_roster_after_a_restart_goes_above_the_saved_sequence_number() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut state = roster_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        // The saved keyring holds sequence 5 from an earlier run. This run
+        // starts with no counter, as after a restart or a closed window.
+        state
+            .e2e
+            .engines
+            .get_mut("net")
+            .expect("engine")
+            .channel_set_members("#room", 5, &[])
+            .expect("members");
+        assert_eq!(channel_seq_of(&state), None);
+
+        test_runtime().block_on(sync_e2e_channel(&mut state, &ui, "net", "#room"));
+
+        // The event is applied, not ignored as stale.
+        assert_eq!(channel_seq_of(&state), Some(6));
+        let engine = &state.e2e.engines["net"];
+        assert_eq!(engine.channel_membership_seq("#room"), 6);
+        assert_eq!(engine.channel_plan_send("#room", false), SendPlan::Encrypt);
+    }
+
+    #[test]
+    fn the_timer_retries_a_failed_key_request_of_a_roster_nick() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut state = roster_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        let runtime = test_runtime();
+        runtime.block_on(sync_e2e_channel(&mut state, &ui, "net", "#room"));
+        // The channel can send and every member has the key.
+        assert_eq!(
+            state.e2e.engines["net"].channel_plan_send("#room", false),
+            SendPlan::Encrypt
+        );
+
+        // A nick whose request the API accepted, or that got no request,
+        // causes no sync at the timer tick.
+        state.e2e.note_key_request("net", "bob", &Ok(()));
+        assert!(!channel_key_request_failed(&state, "net", "#room"));
+        let before = channel_seq_of(&state);
+        runtime.block_on(tick_e2e_engines(&mut state, &ui));
+        assert_eq!(channel_seq_of(&state), before);
+
+        // A failed request: the timer syncs the channel and asks again.
+        state
+            .e2e
+            .note_key_request("net", "bob", &Err(EngineError::NotReady));
+        assert!(channel_key_request_failed(&state, "net", "#room"));
+        runtime.block_on(tick_e2e_engines(&mut state, &ui));
+        assert_eq!(channel_seq_of(&state), before.map(|seq| seq + 1));
+
+        // The own nick never counts.
+        state.e2e.key_requests.clear();
+        state
+            .e2e
+            .note_key_request("net", "me", &Err(EngineError::NotReady));
+        assert!(!channel_key_request_failed(&state, "net", "#room"));
     }
 
     #[test]
