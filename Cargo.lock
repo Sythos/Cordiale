@@ -1140,7 +1140,6 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tokio",
- "ttf-parser",
  "unicode-width 0.2.3",
  "vodozemac",
  "windows",
