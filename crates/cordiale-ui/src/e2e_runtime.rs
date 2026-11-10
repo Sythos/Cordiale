@@ -147,6 +147,10 @@ pub(crate) struct E2eRuntime {
     /// repeat a change. Each event starts above the saved keyring value too,
     /// so a restart or a closed window never makes new events stale.
     channel_seq: HashMap<(String, String), u64>,
+    /// Where the next key discovery of an E2E channel starts in the roster.
+    /// A run asks a limited number of nicks. The cursor moves on, so nicks
+    /// that never answer do not hide the later members.
+    channel_key_cursor: HashMap<(String, String), usize>,
 }
 
 /// A multi-frame encrypted message on its way. The key is the network, the
@@ -3578,6 +3582,7 @@ pub(crate) fn close_locked_query(
     let channel = channel_key(state, network, &nick);
     state.e2e.channels.remove(&channel);
     state.e2e.channel_seq.remove(&channel);
+    state.e2e.channel_key_cursor.remove(&channel);
     state.e2e.locked.remove(&(network.to_string(), nick));
     state
         .transcript
@@ -3975,10 +3980,20 @@ async fn sync_e2e_channel(
     // A member whose keys are not known cannot read the channel yet. The keys
     // come in a later KEYS row, and the roster is applied again then.
     let mut asked = 0;
-    for nick in &nicks {
+    let total = nicks.len();
+    let key = (network.to_string(), channel.to_string());
+    let start = state.e2e.channel_key_cursor.get(&key).copied().unwrap_or(0) % total.max(1);
+    let mut visited = 0;
+    // A member whose request is in flight has no device yet. The saved
+    // members stay until the KEYS row comes: an empty device cache after a
+    // restart is not a departure.
+    let mut rediscovering = false;
+    while visited < total {
         if asked >= CHANNEL_KEY_REQUESTS_MAX {
             break;
         }
+        let nick = &nicks[(start + visited) % total];
+        visited += 1;
         if casemapping.nick_eq(nick, &own_nick) || engine.is_ready(nick) {
             continue;
         }
@@ -3991,7 +4006,22 @@ async fn sync_e2e_channel(
             }
         }
     }
-    let outcome = engine.channel_set_members(channel, seq, &nicks);
+    state
+        .e2e
+        .channel_key_cursor
+        .insert(key, (start + visited) % total.max(1));
+    for nick in &nicks {
+        if !casemapping.nick_eq(nick, &own_nick)
+            && !engine.is_ready(nick)
+            && matches!(
+                state.e2e.key_request(network, nick),
+                KeyRequest::Accepted | KeyRequest::Waiting
+            )
+        {
+            rediscovering = true;
+        }
+    }
+    let outcome = engine.channel_set_members_keeping(channel, seq, &nicks, rediscovering);
     let changed = matches!(outcome, Ok(MembershipOutcome::Changed { .. }));
     let waiting = engine.channel_plan_send(channel, false) != SendPlan::Encrypt;
     match &outcome {
