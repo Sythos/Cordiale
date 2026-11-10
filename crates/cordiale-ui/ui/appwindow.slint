@@ -6743,7 +6743,6 @@ export component AppWindow inherits Window {
             if settings-section == "radio" : SectionCard {
                 icon: "📻";
                 title: @tr("Radio stations");
-                fill: true;
 
                 Text {
                     text: @tr("Add your own MP3, Ogg Vorbis or FLAC stations (a stream or a .pls/.m3u playlist URL). They are kept on this device only, next to Cicchetto's stations on the Radio screen.");
@@ -8346,6 +8345,12 @@ export component AppWindow inherits Window {
                         text: line;
                         wrap: word-wrap;
                     }
+                }
+
+                // Panels without a list keep their content at the top: the
+                // extra height goes to this spacer, not to the controls.
+                if admin-section == "e2e-identity" || admin-section == "server" : Rectangle {
+                    vertical-stretch: 1;
                 }
             }
 

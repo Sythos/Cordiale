@@ -14207,3 +14207,28 @@ fn input_history_key_is_only_for_joined_channels() {
     ui.set_current_server_window(true);
     assert_eq!(input_history_key(&ui), None);
 }
+
+#[test]
+fn radio_and_admin_settings_keep_controls_at_the_top_in_tall_windows() {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.set_theme("dark".into());
+    ui.set_screen("settings".into());
+    ui.show().unwrap();
+    for (section, admin_section) in [("radio", "sessions"), ("admin", "e2e-identity")] {
+        ui.set_settings_section(section.into());
+        ui.set_admin_section(admin_section.into());
+        let top_rows = |height: f32| {
+            ui.window().set_size(slint::LogicalSize::new(900., height));
+            let snapshot = ui.window().take_snapshot().unwrap();
+            let row_bytes = snapshot.width() as usize * 4;
+            snapshot.as_bytes()[..row_bytes * 150].to_vec()
+        };
+        let normal = top_rows(600.);
+        let tall = top_rows(1400.);
+        assert!(
+            normal == tall,
+            "{section}: the top of the panel changes with the window height"
+        );
+    }
+}
