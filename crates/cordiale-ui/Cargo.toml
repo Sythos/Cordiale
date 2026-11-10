@@ -86,6 +86,9 @@ video-shrink = ["cordiale-core/video-shrink"]
 [dev-dependencies]
 chacha20poly1305 = "0.11"
 vodozemac = "0.11.2"
+# Reads the character map of the system symbol fonts in a test; Slint already
+# brings the crate in.
+ttf-parser = "0.25"
 [build-dependencies]
 slint-build = "1"
 winresource = "0.1"

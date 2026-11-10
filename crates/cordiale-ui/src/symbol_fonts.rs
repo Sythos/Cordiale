@@ -114,6 +114,39 @@ mod tests {
         }
     }
 
+    /// True when the font file has a glyph for the character.
+    fn font_has_glyph(data: &[u8], face_count: u32, ch: char) -> bool {
+        (0..face_count.max(1)).any(|index| {
+            ttf_parser::Face::parse(data, index)
+                .map(|face| face.glyph_index(ch).is_some())
+                .unwrap_or(false)
+        })
+    }
+
+    #[test]
+    fn the_system_symbol_fonts_draw_the_crosses() {
+        let windir = std::env::var("WINDIR").ok();
+        let fonts: Vec<Vec<u8>> = symbol_font_candidates(windir.as_deref())
+            .into_iter()
+            .filter_map(|path| std::fs::read(path).ok())
+            .collect();
+        if fonts.is_empty() {
+            // No symbol font on this machine: nothing to check.
+            return;
+        }
+        let crosses = [
+            '\u{2020}', '\u{2021}', '\u{2626}', '\u{2628}', '\u{2629}', '\u{271d}', '\u{271e}',
+            '\u{271f}', '\u{2720}',
+        ];
+        for ch in crosses {
+            let drawn = fonts.iter().any(|data| {
+                let count = ttf_parser::fonts_in_collection(data).unwrap_or(1);
+                font_has_glyph(data, count, ch)
+            });
+            assert!(drawn, "no system symbol font draws U+{:04X}", ch as u32);
+        }
+    }
+
     #[test]
     fn the_fallback_scripts_are_valid_codes() {
         for script in FALLBACK_SCRIPTS {
