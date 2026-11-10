@@ -317,3 +317,25 @@ If the message matters, ask the peer if they got it.
 > **Warning:** Never send a private key, a password, or a recovery code to
 > another person. This includes the pairing code.
 > Nobody who helps you needs them.
+
+## 7. Encrypted channels
+
+A channel can have an encrypted window next to its plain window.
+The server must use protocol 62 or later.
+
+1. Open the plain channel window.
+2. Type `/e2e channel`.
+
+Cordiale adds a locked window with the name of the channel. The plain window does not change.
+
+- Cordiale makes a channel key for your device and sends it to each member that has a verified device.
+  Every key goes in an encrypted message to one device. The key never goes to the channel.
+- Cordiale sends the key to your other devices as an encrypted copy.
+- A member without a verified device cannot read the channel. Cordiale asks the member for keys.
+- When a member leaves, is kicked or changes nick, Cordiale makes a new key.
+  It sends the new key only to the members that remain.
+- The banner of the locked window shows if the channel can send or waits for its key.
+
+If the channel has no key, Cordiale sends nothing. It never sends the text as clear text.
+Type the text again after the banner shows that the channel is active.
+A locked channel window takes text only. It does not take files.
