@@ -3865,6 +3865,14 @@ msgid "This device has no E2E identity for this network."
 msgstr "Cet appareil n’a pas d’identité E2E pour ce réseau."
 
 msgctxt "AppWindow"
+msgid "The server holds an E2E identity that this device does not have. Pair this device with a listed device. No new identity was made."
+msgstr "Le serveur détient une identité E2E que cet appareil n’a pas. Associe cet appareil à un appareil de la liste. Aucune nouvelle identité n’a été créée."
+
+msgctxt "AppWindow"
+msgid "The local E2E store of this network cannot be read. It was not changed. Restore it from a backup, then connect again."
+msgstr "Le stockage E2E local de ce réseau est illisible. Il n’a pas été modifié. Restaure-le depuis une sauvegarde, puis reconnecte-toi."
+
+msgctxt "AppWindow"
 msgid "Ask {} to start an encrypted chat? They need a compatible client. The request expires after 24 hours."
 msgstr "Demander à {} de démarrer une discussion chiffrée ? Cette personne a besoin d’un client compatible. La demande expire après 24 heures."
 
