@@ -427,6 +427,24 @@ impl PeerTrust {
             .collect()
     }
 
+    /// Like [`PeerTrust::device_dids`], but a saved nick matches when `same`
+    /// says that it is the same nick as `nick`. The caller passes the
+    /// casemapping of the network, so `bob` and `Bob` find the same peer.
+    pub fn device_dids_matching(
+        &self,
+        network: &str,
+        nick: &str,
+        same: impl Fn(&str, &str) -> bool,
+    ) -> BTreeSet<String> {
+        let prefix = peer_key(network, "");
+        self.peers
+            .keys()
+            .filter_map(|key| key.strip_prefix(&prefix))
+            .filter(|saved| same(saved, nick))
+            .flat_map(|saved| self.device_dids(network, saved))
+            .collect()
+    }
+
     /// True when a signed list of the peer revoked at least one device. The
     /// current list never holds a revoked key, so read this set, not the list.
     pub fn has_revoked_devices(&self, network: &str, nick: &str) -> bool {
