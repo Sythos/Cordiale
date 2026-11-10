@@ -126,6 +126,9 @@ pub(crate) struct E2eRuntime {
     /// Why this device cannot use the identity of a network, when the last
     /// provisioning run found out. A failed read sets no reason.
     recovery: HashMap<String, RecoveryReason>,
+    /// Networks whose local E2E store did not open or did not read. Such a
+    /// network never gets a new identity: the user must recover it.
+    store_failed: HashSet<String>,
     /// Multi-frame messages that began to arrive for this device and are not
     /// whole yet (`e2e_incoming`, protocol 59). Each one shows a progress row
     /// in the locked window of its sender. The row has no content. The
@@ -1020,10 +1023,14 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
                     persistence::log_line(&format!("e2e pairing slot for {network}: {error:?}"))
                 }
             }
+            state.e2e.store_failed.remove(network);
             state.e2e.engines.insert(network.to_string(), engine);
             true
         }
         Err(error) => {
+            if matches!(error, EngineError::Store(_)) {
+                state.e2e.store_failed.insert(network.to_string());
+            }
             if !matches!(error, EngineError::NotReady) {
                 persistence::log_line(&format!("e2e engine not opened for {network}: {error:?}"));
             }
@@ -1067,19 +1074,19 @@ fn open_history_only(state: &mut WorkerState, network: &str) {
 /// account was saved leaves an engine without a master or a bundle. A reset
 /// network and a guest session are left as they are. A failure is logged by
 /// kind.
-async fn provision_network(state: &mut WorkerState, network: &str) {
+async fn provision_network(state: &mut WorkerState, network: &str) -> ProvisionOutcome {
     if state.e2e.reset.contains(network)
         || state.e2e.provisioned.contains(network)
         || state.conn.guest_session
     {
-        return;
+        return ProvisionOutcome::Skipped;
     }
     let (Some(client), Some(token), Some(account)) = (
         state.conn.client.clone(),
         state.conn.token.clone(),
         state.conn.identifier.clone(),
     ) else {
-        return;
+        return ProvisionOutcome::Skipped;
     };
     let protocol = state.conn.server_protocol_version;
     let result = match state.e2e.engines.remove(network) {
@@ -1111,10 +1118,15 @@ async fn provision_network(state: &mut WorkerState, network: &str) {
             // A network without a state file before this run can open its
             // engine now.
             state.e2e.unavailable.remove(network);
+            state.e2e.store_failed.remove(network);
+            ProvisionOutcome::Done
         }
         Err(error) => {
             if matches!(error, ProvisionError::NeedsPairing) {
                 state.e2e.needs_pairing.insert(network.to_string());
+            }
+            if matches!(error, ProvisionError::Store(_)) {
+                state.e2e.store_failed.insert(network.to_string());
             }
             // Only an identity outcome sets a reason. A failed read keeps the
             // old state and never offers a new identity.
@@ -1122,8 +1134,29 @@ async fn provision_network(state: &mut WorkerState, network: &str) {
                 state.e2e.recovery.insert(network.to_string(), reason);
             }
             persistence::log_line(&format!("e2e identity not made for {network}: {error:?}"));
+            match error {
+                ProvisionError::Store(_) => ProvisionOutcome::Store,
+                ProvisionError::NeedsPairing | ProvisionError::MasterMismatch => {
+                    ProvisionOutcome::Pairing
+                }
+                _ => ProvisionOutcome::Failed,
+            }
         }
     }
+}
+
+/// How one provisioning run ended, for the caller that must tell the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProvisionOutcome {
+    /// The run did not start: a reset network, a guest, a done run or no session.
+    Skipped,
+    Done,
+    /// The server holds an identity that this device must pair with.
+    Pairing,
+    /// The local store does not open or does not read.
+    Store,
+    /// A call failed or the server refused it.
+    Failed,
 }
 
 /// Opens the engines of the signed-in networks and reads their inboxes. Call
@@ -1133,7 +1166,7 @@ pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<
     let mut networks: Vec<String> = state.networks.own_nicks.keys().cloned().collect();
     networks.sort();
     for network in networks {
-        provision_network(state, &network).await;
+        let _ = provision_network(state, &network).await;
         if ensure_engine(state, &network) {
             // A revoke or a reset that an earlier run left open ends first,
             // so a revoked device gets no inbox work.
@@ -1347,9 +1380,13 @@ pub(crate) async fn handle_e2e_request_action(
                 handle_select_locked_query(state, ui, network.clone(), &locked_label(&peer));
                 return;
             }
-            let Some((client, token, protocol, line)) = consent_context(state, &network) else {
-                set_e2e_status(ui, "e2e-request-no-identity");
-                return;
+            let (client, token, protocol, line) = match ready_consent_context(state, &network).await
+            {
+                Ok(context) => context,
+                Err(block) => {
+                    set_e2e_status(ui, block.status_key());
+                    return;
+                }
             };
             if action == "retry" {
                 let Some(id) = request_id else { return };
@@ -1395,9 +1432,13 @@ pub(crate) async fn handle_e2e_request_action(
         }
         "accept" => {
             let Some(id) = request_id else { return };
-            let Some((client, token, protocol, line)) = consent_context(state, &network) else {
-                set_e2e_status(ui, "e2e-request-no-identity");
-                return;
+            let (client, token, protocol, line) = match ready_consent_context(state, &network).await
+            {
+                Ok(context) => context,
+                Err(block) => {
+                    set_e2e_status(ui, block.status_key());
+                    return;
+                }
             };
             let incoming = state.e2e.requests.get(&(network.clone(), id)).cloned();
             if !incoming
@@ -1492,17 +1533,96 @@ pub(crate) async fn handle_e2e_request_action(
     }
 }
 
-fn consent_context(
-    state: &WorkerState,
-    network: &str,
-) -> Option<(GrappaClient, String, u32, E2eConsentLine)> {
-    let protocol = state.conn.server_protocol_version?;
-    if protocol < CONSENT_MIN_PROTOCOL {
-        return None;
+/// Why a consent action cannot start. Each case has its own status key, so
+/// the user sees the real cause and the next step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsentBlock {
+    /// The session has no client, token or server version yet.
+    Session,
+    /// The server protocol has no consent requests.
+    Protocol,
+    /// This device has no engine and no identity for the network.
+    NoIdentity,
+    /// The server holds an identity that this device must pair with.
+    Pairing,
+    /// The local store is corrupt or unreadable. The user must recover it.
+    Store,
+    /// The provisioning call failed. A later try can work.
+    Network,
+}
+
+impl ConsentBlock {
+    fn status_key(self) -> &'static str {
+        match self {
+            Self::Session => "e2e-not-ready",
+            Self::Protocol => "e2e-request-unsupported",
+            Self::NoIdentity => "e2e-request-no-identity",
+            Self::Pairing => "e2e-request-needs-pairing",
+            Self::Store => "e2e-request-store",
+            Self::Network => "e2e-request-failed",
+        }
     }
-    let (client, token) = (state.conn.client.clone()?, state.conn.token.clone()?);
-    let line = state.e2e.engines.get(network)?.own_consent_line().ok()?;
-    Some((client, token, protocol, line))
+}
+
+type ConsentContext = (GrappaClient, String, u32, E2eConsentLine);
+
+/// The data for a consent call, or the reason that it cannot start. It reads
+/// the state only and sends nothing.
+fn consent_context(state: &WorkerState, network: &str) -> Result<ConsentContext, ConsentBlock> {
+    let protocol = state
+        .conn
+        .server_protocol_version
+        .ok_or(ConsentBlock::Session)?;
+    if protocol < CONSENT_MIN_PROTOCOL {
+        return Err(ConsentBlock::Protocol);
+    }
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return Err(ConsentBlock::Session);
+    };
+    if state.e2e.store_failed.contains(network) {
+        return Err(ConsentBlock::Store);
+    }
+    if state.e2e.needs_pairing.contains(network) || state.e2e.recovery.contains_key(network) {
+        return Err(ConsentBlock::Pairing);
+    }
+    let Some(engine) = state.e2e.engines.get(network) else {
+        return Err(ConsentBlock::NoIdentity);
+    };
+    let line = engine
+        .own_consent_line()
+        .map_err(|_| ConsentBlock::NoIdentity)?;
+    Ok((client, token, protocol, line))
+}
+
+/// Like `consent_context`, with one safe provisioning try when the identity is
+/// not ready. Ready means that a full provisioning run ended with success in
+/// this session. A local master key alone is not enough: a run can save it and
+/// then fail to publish the device or the keys. The core run is idempotent: it
+/// makes a first identity only when the server has no list, and it never makes
+/// a second one. A failed run, a pairing case or a corrupt store stops here, so
+/// no consent call goes out before the identity is ready.
+async fn ready_consent_context(
+    state: &mut WorkerState,
+    network: &str,
+) -> Result<ConsentContext, ConsentBlock> {
+    match consent_context(state, network) {
+        Ok(context) if state.e2e.provisioned.contains(network) => return Ok(context),
+        Ok(_) | Err(ConsentBlock::NoIdentity) => {}
+        Err(block) => return Err(block),
+    }
+    // A missing engine, an engine without a master key or a run that did not
+    // end: run provisioning once more.
+    state.e2e.provisioned.remove(network);
+    let outcome = provision_network(state, network).await;
+    if outcome != ProvisionOutcome::Skipped {
+        ensure_engine(state, network);
+    }
+    match outcome {
+        ProvisionOutcome::Failed => Err(ConsentBlock::Network),
+        ProvisionOutcome::Pairing => Err(ConsentBlock::Pairing),
+        ProvisionOutcome::Store => Err(ConsentBlock::Store),
+        ProvisionOutcome::Done | ProvisionOutcome::Skipped => consent_context(state, network),
+    }
 }
 
 async fn handle_e2e_rekey(
@@ -4055,6 +4175,75 @@ mod tests {
         // The offer only waits: no pairing is open and none starts.
         assert!(runtime.offer.is_some());
         assert!(runtime.pairing.is_none());
+    }
+
+    #[test]
+    fn a_consent_action_reports_the_real_block() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, _peer) = sas_state(&dir);
+        state.conn.server_protocol_version = None;
+        assert_eq!(
+            consent_context(&state, "net").err(),
+            Some(ConsentBlock::Session)
+        );
+        state.conn.server_protocol_version = Some(CONSENT_MIN_PROTOCOL - 1);
+        assert_eq!(
+            consent_context(&state, "net").err(),
+            Some(ConsentBlock::Protocol)
+        );
+        state.conn.server_protocol_version = Some(CONSENT_MIN_PROTOCOL);
+        state.conn.client = None;
+        assert_eq!(
+            consent_context(&state, "net").err(),
+            Some(ConsentBlock::Session)
+        );
+        // The identity blocks come before the engine lookup, so the user sees
+        // the cause and no consent call goes out.
+        state.e2e.needs_pairing.insert("net".to_string());
+        state.conn.client = Some(GrappaClient::new("http://localhost".to_string()));
+        state.conn.token = Some("t".to_string());
+        assert_eq!(
+            consent_context(&state, "net").err(),
+            Some(ConsentBlock::Pairing)
+        );
+        state.e2e.needs_pairing.remove("net");
+        state.e2e.store_failed.insert("net".to_string());
+        assert_eq!(
+            consent_context(&state, "net").err(),
+            Some(ConsentBlock::Store)
+        );
+        state.e2e.store_failed.remove("net");
+        state.e2e.engines.remove("net");
+        assert_eq!(
+            consent_context(&state, "net").err(),
+            Some(ConsentBlock::NoIdentity)
+        );
+    }
+
+    #[test]
+    fn a_failed_provisioning_run_stops_the_consent_action() {
+        let dir = tempfile::tempdir().expect("dir");
+        // The engine holds a master key, so a consent line exists, but no
+        // run ended with success: the device is not published.
+        let (mut state, _peer) = sas_state(&dir);
+        state.conn.server_protocol_version = Some(CONSENT_MIN_PROTOCOL);
+        state.conn.client = Some(GrappaClient::new("http://127.0.0.1:9".to_string()));
+        state.conn.token = Some("t".to_string());
+        state.conn.identifier = Some("ada".to_string());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        // Every try fails again: a local consent line is no bypass.
+        for _ in 0..2 {
+            let result = runtime.block_on(ready_consent_context(&mut state, "net"));
+            assert_eq!(result.err(), Some(ConsentBlock::Network));
+            assert!(!state.e2e.provisioned.contains("net"));
+        }
+        // After a full run the context is ready, with no new call.
+        state.e2e.provisioned.insert("net".to_string());
+        let result = runtime.block_on(ready_consent_context(&mut state, "net"));
+        assert!(result.is_ok());
     }
 
     #[test]
