@@ -78,6 +78,13 @@ jobs:
       - name: Lint with Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The mock-server tests open many local connections. Windows keeps each
+      # closed one in TIME_WAIT, and the default range of 16384 ephemeral
+      # ports can run out (bind fails with WSAENOBUFS, error 10055).
+      - name: Widen the Windows ephemeral port range
+        if: runner.os == 'Windows'
+        run: netsh int ipv4 set dynamicport tcp start=10000 num=55536
+
       - name: Run workspace tests
         run: cargo test --workspace
 
