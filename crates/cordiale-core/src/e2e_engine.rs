@@ -1291,7 +1291,39 @@ impl E2eEngine {
         seq: u64,
         nicks: &[String],
     ) -> Result<MembershipOutcome, E2eStoreError> {
-        let members = self.channel_devices_of(nicks);
+        self.channel_set_members_keeping(channel, seq, nicks, &[])
+    }
+
+    /// Like [`E2eEngine::channel_set_members`]. `rediscovering` are the nicks
+    /// of `nicks` whose devices are not known yet, for example after a
+    /// restart: a device that is not known yet is not a device that left.
+    /// A saved member stays only when the saved trust links it to one of
+    /// these nicks. The devices of a member that left go, so the own session
+    /// still rotates.
+    pub fn channel_set_members_keeping(
+        &mut self,
+        channel: &str,
+        seq: u64,
+        nicks: &[String],
+        rediscovering: &[String],
+    ) -> Result<MembershipOutcome, E2eStoreError> {
+        let mut members = self.channel_devices_of(nicks);
+        if !rediscovering.is_empty() {
+            let cm = self.casemapping;
+            let trust = self.state.trust();
+            let attributable: BTreeSet<String> = rediscovering
+                .iter()
+                .filter(|nick| nicks.iter().any(|member| cm.nick_eq(member, nick)))
+                .flat_map(|nick| trust.device_dids(&self.network, nick))
+                .collect();
+            members.extend(
+                self.state
+                    .channels()
+                    .members(&self.network, channel)
+                    .into_iter()
+                    .filter(|did| attributable.contains(did)),
+            );
+        }
         let network = self.network.clone();
         self.state
             .update_channels(|ring| ring.apply_membership(&network, channel, seq, members))
@@ -8924,6 +8956,84 @@ mod tests {
             Err(ChannelOpError::Channel(ChannelError::NoKey))
         ));
         assert!(sent_requests(&server).await.is_empty());
+    }
+
+    #[test]
+    fn saved_members_stay_only_for_nicks_that_are_rediscovered() {
+        let alice = Ident::new("channel-keep-alice");
+        let bob = Ident::new("channel-keep-bob");
+        let carol = Ident::new("channel-keep-carol");
+        let mut engine = alice.engine();
+        engine.accept_keys("bob", &bob.keys()).expect("bob keys");
+        engine
+            .accept_keys("carol", &carol.keys())
+            .expect("carol keys");
+        let bob_did = did_from_key_text(&ed(&bob.device)).expect("bob did");
+        let carol_did = did_from_key_text(&ed(&carol.device)).expect("carol did");
+        let mut saved = engine.channel_devices_of(&[]);
+        saved.insert(bob_did.clone());
+        saved.insert(carol_did.clone());
+        let network = engine.network.clone();
+        engine
+            .state
+            .update_channels(|ring| ring.apply_membership(&network, "#room", 1, saved))
+            .expect("members");
+        // A restart: the device cache is empty, the saved trust stays.
+        engine.peers.clear();
+        let both = vec!["bob".to_string(), "carol".to_string()];
+        let members = |engine: &E2eEngine| engine.state.channels().members(NET, "#room");
+
+        // Both nicks wait for their keys: no saved device goes.
+        let kept = engine
+            .channel_set_members_keeping("#room", 2, &both, &both)
+            .expect("members");
+        assert_eq!(kept, MembershipOutcome::Unchanged);
+        assert!(members(&engine).contains(&bob_did));
+        assert!(members(&engine).contains(&carol_did));
+
+        // Carol left while Bob waits for his keys: only Carol goes and the
+        // own session rotates.
+        let bob_only = vec!["bob".to_string()];
+        let left = engine
+            .channel_set_members_keeping("#room", 3, &bob_only, &bob_only)
+            .expect("members");
+        assert_eq!(left, MembershipOutcome::Changed { removed: true });
+        assert!(members(&engine).contains(&bob_did));
+        assert!(!members(&engine).contains(&carol_did));
+        assert_ne!(engine.channel_plan_send("#room", false), SendPlan::Encrypt);
+
+        // A nick that is not in the roster keeps nothing.
+        let gone = engine
+            .channel_set_members_keeping("#room", 4, &[], &bob_only)
+            .expect("members");
+        assert_eq!(gone, MembershipOutcome::Changed { removed: true });
+        assert!(!members(&engine).contains(&bob_did));
+    }
+
+    #[test]
+    fn no_saved_member_stays_without_a_rediscovered_nick() {
+        let alice = Ident::new("channel-keep-none-alice");
+        let bob = Ident::new("channel-keep-none-bob");
+        let mut engine = alice.engine();
+        engine.accept_keys("bob", &bob.keys()).expect("bob keys");
+        let bob_did = did_from_key_text(&ed(&bob.device)).expect("bob did");
+        let mut saved = engine.channel_devices_of(&[]);
+        saved.insert(bob_did.clone());
+        let network = engine.network.clone();
+        engine
+            .state
+            .update_channels(|ring| ring.apply_membership(&network, "#room", 1, saved))
+            .expect("members");
+        engine.peers.clear();
+        let dropped = engine
+            .channel_set_members_keeping("#room", 2, &["bob".to_string()], &[])
+            .expect("members");
+        assert_eq!(dropped, MembershipOutcome::Changed { removed: true });
+        assert!(!engine
+            .state
+            .channels()
+            .members(NET, "#room")
+            .contains(&bob_did));
     }
 
     #[test]
