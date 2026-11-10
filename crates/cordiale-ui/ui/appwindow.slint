@@ -2824,6 +2824,10 @@ export component AppWindow inherits Window {
             return @tr("This chat is clear text. Its messages are not end-to-end encrypted.");
         } else if current-query-e2e-state == "e2e-chat-active" {
             return @tr("End-to-end encryption is active.");
+        } else if current-query-e2e-state == "e2e-chat-channel-active" {
+            return @tr("End-to-end encryption is active in this channel. A member without a verified device cannot read it.");
+        } else if current-query-e2e-state == "e2e-chat-channel-keys" {
+            return @tr("This channel has no key to send with yet. Nothing is sent as clear text.");
         } else if current-query-e2e-state == "e2e-chat-trust" {
             return @tr("The master key of this contact changed. Do not trust this chat until you verify it.");
         } else if current-query-e2e-state == "e2e-chat-keys" {
@@ -2920,6 +2924,10 @@ export component AppWindow inherits Window {
             return @tr("The local E2E store of this network cannot be read. It was not changed. Restore it from a backup, then connect again.");
         } else if status-kind == "e2e-send-failed" {
             return @tr("The message was not encrypted or not sent. Nothing was sent as clear text.");
+        } else if status-kind == "e2e-channel-on" {
+            return @tr("E2E is on for this channel. Use the locked channel in the list.");
+        } else if status-kind == "e2e-channel-only" {
+            return @tr("Type /e2e channel in a channel window.");
         } else if status-kind == "e2e-text-only" {
             return @tr("An encrypted chat takes text and files only. Nothing was sent.");
         } else if status-kind == "e2e-file-unsupported-server" {

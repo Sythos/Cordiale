@@ -194,6 +194,9 @@ pub enum E2eManageAction {
     /// keys on this device, so a pairing can give the device the identity of
     /// the server.
     ForgetConfirm,
+    /// `/e2e channel`: turn on E2E for the open channel. The channel gets an
+    /// encrypted window next to the plain one.
+    Channel,
 }
 
 /// Whether `name` is a channel rather than a nick.
@@ -546,12 +549,13 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
             [step, answer] if step == "reset" && answer == "yes" => {
                 E2eManage(E2eManageAction::ResetConfirm)
             }
+            [step] if step == "channel" => E2eManage(E2eManageAction::Channel),
             [step] if step == "forget" => E2eManage(E2eManageAction::Forget),
             [step, answer] if step == "forget" && answer == "yes" => {
                 E2eManage(E2eManageAction::ForgetConfirm)
             }
             _ => Usage(
-                "/e2e pair | join <link> | accept | decline | code <nn> | cancel | devices | revoke <id> | reset | forget",
+                "/e2e pair | join <link> | accept | decline | code <nn> | cancel | devices | revoke <id> | channel | reset | forget",
             ),
         },
         "hilight" | "highlight" | "dehilight" => match non_empty(args) {
@@ -1249,11 +1253,16 @@ mod tests {
             parse("/e2e forget yes"),
             Some(E2eManage(E2eManageAction::ForgetConfirm))
         );
+        assert_eq!(
+            parse("/e2e channel"),
+            Some(E2eManage(E2eManageAction::Channel))
+        );
         for bad in [
             "/e2e revoke",
             "/e2e reset now",
             "/e2e devices all",
             "/e2e forget now",
+            "/e2e channel on",
         ] {
             assert!(matches!(parse(bad), Some(Usage(_))), "{bad}");
         }

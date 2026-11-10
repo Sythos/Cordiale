@@ -15,11 +15,12 @@ use super::*;
 
 use std::collections::{BTreeSet, VecDeque};
 
+use cordiale_core::e2e_channel::{ChannelError, MembershipOutcome, SendPlan};
 use cordiale_core::e2e_device::E2eError;
 use cordiale_core::e2e_device_routes::{InboxRow, IncomingEvent, IncomingLostEvent};
 use cordiale_core::e2e_engine::{
     action_body, action_text, conversation_id, history_peers_of, locked_label, route_for_window,
-    E2eEngine, EngineError, RowOutcome, SendRoute, OWN_DEVICE,
+    ChannelOpError, E2eEngine, EngineError, RowOutcome, SendRoute, OWN_DEVICE,
 };
 use cordiale_core::e2e_file::{
     file_descriptor, file_row_text, is_file_text, same_url, FileDescriptor,
@@ -30,7 +31,8 @@ use cordiale_core::e2e_pairing_flow::{
     self as pairing, PairingContext, PairingSession, PairingStatus, StalePairing,
 };
 use cordiale_core::e2e_protocol::{
-    pairing_offer_available, E2eOperation, CONSENT_MIN_PROTOCOL, NO_SUCH_NICK_MIN_PROTOCOL,
+    channel_allowed, pairing_offer_available, E2eOperation, CONSENT_MIN_PROTOCOL,
+    NO_SUCH_NICK_MIN_PROTOCOL,
 };
 use cordiale_core::e2e_provision::{provision_device, ProvisionError};
 use cordiale_core::e2e_revoke::{
@@ -48,10 +50,10 @@ use cordiale_core::session::{
 use cordiale_core::slash::{E2eManageAction, E2ePairAction};
 
 use crate::e2e_view::{
-    device_rows, devices_reason, locked_chat_state, pairing_error_key, pairing_help,
-    pairing_status_key, recovery_for_provision, register_own_device, reset_status_key,
-    revoke_status_key, ChatSignals, ChatState, DeviceRow, KeyRequest, LocalQuery, QueryLane,
-    RecoveryReason,
+    channel_chat_state, device_rows, devices_reason, locked_chat_state, pairing_error_key,
+    pairing_help, pairing_status_key, recovery_for_provision, register_own_device,
+    reset_status_key, revoke_status_key, ChatSignals, ChatState, DeviceRow, KeyRequest, LocalQuery,
+    QueryLane, RecoveryReason,
 };
 
 /// How often the timers of the engines run: queued texts expire or go out.
@@ -135,6 +137,15 @@ pub(crate) struct E2eRuntime {
     /// server does not replay the event, and this list is not saved. The end
     /// of a session clears it.
     incoming: Vec<PendingIncoming>,
+    /// The channels with an E2E window: `(network, channel)`, the channel
+    /// under the case mapping of the network. The window is the locked entry
+    /// of the same name. A channel with a sealed history is restored when the
+    /// engine opens.
+    channels: BTreeSet<(String, String)>,
+    /// The sequence number of the last membership event that went to the
+    /// engine, for each E2E channel. It only grows: a repeated event does not
+    /// repeat a change.
+    channel_seq: HashMap<(String, String), u64>,
 }
 
 /// A multi-frame encrypted message on its way. The key is the network, the
@@ -696,6 +707,16 @@ pub(crate) fn mark_locked_read(state: &mut WorkerState, network: &str, nick: &st
 /// session.
 pub(crate) fn locked_entry_state(state: &WorkerState, network: &str, nick: &str) -> ChatState {
     let engine = state.e2e.engines.get(network);
+    // An E2E channel has no peer: its state is the state of the channel key.
+    if is_e2e_channel(state, network, nick) {
+        let encrypted =
+            engine.is_some_and(|engine| engine.channel_plan_send(nick, false) == SendPlan::Encrypt);
+        return channel_chat_state(
+            state.e2e.reset.contains(network),
+            engine.is_some(),
+            encrypted,
+        );
+    }
     let mut signals = ChatSignals {
         reset: state.e2e.reset.contains(network),
         engine: engine.is_some(),
@@ -1008,6 +1029,12 @@ fn ensure_engine(state: &mut WorkerState, network: &str) -> bool {
             register_own_device(engine.own_did());
             for peer in engine.history_peers() {
                 state.e2e.add_locked(network, &peer);
+                if cordiale_core::slash::is_channel(&peer) {
+                    state
+                        .e2e
+                        .channels
+                        .insert((network.to_string(), peer.clone()));
+                }
                 let seen = incoming_rows(engine.history(), network, &peer);
                 state
                     .e2e
@@ -1172,6 +1199,10 @@ pub(crate) async fn start_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<
             // so a revoked device gets no inbox work.
             resume_pending_manage(state, ui, &network).await;
             drain_network(state, ui, &network).await;
+            // After a reconnect the members and the keys of each E2E channel
+            // are read again. A channel whose roster is not known yet waits for
+            // its roster event.
+            resync_e2e_channels(state, ui, &network, false).await;
         } else if state.e2e.forgotten.contains(&network) {
             // The user forgot the local keys, but the server still holds the
             // identity. A confirmed reset that stayed open ends here. The
@@ -2294,6 +2325,9 @@ pub(crate) async fn run_e2e_manage(
         }
         // Both forget steps return before this match.
         E2eManageAction::Forget | E2eManageAction::ForgetConfirm => {}
+        // The channel step needs the open window: the command dispatcher runs
+        // it with `enable_e2e_channel` before this function.
+        E2eManageAction::Channel => {}
         E2eManageAction::Reset => {
             state.e2e.reset_asked = Some(network);
             show_manage_kind(ui, "e2e-reset-confirm", String::new(), String::new());
@@ -2737,6 +2771,7 @@ async fn drain_network(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, net
     };
     // A copy from a device with a newer list stops the run. The own list is
     // read again, then the inbox is drained once more.
+    let mut keys_read = false;
     for _ in 0..2 {
         match engine.drain(&client, &token, protocol, e2e_now()).await {
             Ok(outcomes) => {
@@ -2744,6 +2779,9 @@ async fn drain_network(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, net
                     "e2e inbox read for {network}: {} items",
                     outcomes.len()
                 ));
+                keys_read |= outcomes
+                    .iter()
+                    .any(|(_, outcome)| *outcome == RowOutcome::KeysRead);
                 if !outcomes
                     .iter()
                     .any(|(_, outcome)| *outcome == RowOutcome::StaleList)
@@ -2769,6 +2807,10 @@ async fn drain_network(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, net
         }
     }
     settle_engine(state, ui, network, engine).await;
+    // New keys can make a member of an E2E channel ready.
+    if keys_read {
+        resync_e2e_channels(state, ui, network, false).await;
+    }
 }
 
 /// Reads one `e2e_message` frame with the engine of its network.
@@ -2854,6 +2896,7 @@ async fn read_e2e_row(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, row:
     };
     // A copy from a device that the own list does not know yet waits: the
     // own list is read again, then the row is read once more.
+    let mut keys_read = false;
     for _ in 0..2 {
         match engine
             .handle_event(&client, &token, protocol, row, e2e_now())
@@ -2869,7 +2912,10 @@ async fn read_e2e_row(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, row:
                     break;
                 }
             }
-            Ok(_) => break,
+            Ok(outcome) => {
+                keys_read = outcome == RowOutcome::KeysRead;
+                break;
+            }
             Err(error) => {
                 persistence::log_line(&format!("e2e item not read for {}: {error:?}", row.network));
                 state.e2e.note_engine_error(&row.network, &row.from, &error);
@@ -2878,6 +2924,9 @@ async fn read_e2e_row(state: &mut WorkerState, ui: &slint::Weak<AppWindow>, row:
         }
     }
     settle_engine(state, ui, &row.network, engine).await;
+    if keys_read {
+        resync_e2e_channels(state, ui, &row.network, false).await;
+    }
 }
 
 /// Puts the engine back and shows what its last call changed: it asks for
@@ -2899,6 +2948,20 @@ async fn settle_engine(
         }
         send_copies(state, network, &mut engine, &client, &token).await;
         engine.send_list_messages(&client, &token).await;
+        // A saved `pkmsg` used a one-time key: top up the keys on the server.
+        // The state of the message is on disk. A failed upload keeps the need,
+        // and the next settle or timer tick tries again.
+        if engine.one_time_key_refill_wanted() {
+            let protocol = state.conn.server_protocol_version;
+            match engine.refill_one_time_keys(&client, &token, protocol).await {
+                Ok(count) => persistence::log_line(&format!(
+                    "e2e one-time keys topped up for {network}: {count}"
+                )),
+                Err(error) => persistence::log_line(&format!(
+                    "e2e one-time keys not topped up for {network}: {error:?}"
+                )),
+            }
+        }
     }
     let wanted = engine.take_keys_wanted();
     if let (false, Some(client), Some(token)) = (
@@ -3509,6 +3572,11 @@ pub(crate) fn close_locked_query(
         .e2e
         .cipher_view
         .remove(&(network.to_string(), nick.clone()));
+    // Closing the window of an E2E channel ends the local E2E mode of the
+    // channel: no more key work for it. The sealed history stays.
+    let channel = channel_key(state, network, &nick);
+    state.e2e.channels.remove(&channel);
+    state.e2e.channel_seq.remove(&channel);
     state.e2e.locked.remove(&(network.to_string(), nick));
     state
         .transcript
@@ -3603,6 +3671,12 @@ pub(crate) async fn handle_send_locked(
     if body.trim().is_empty() {
         return;
     }
+    // The locked window of a channel sends with the channel key, never to a
+    // nick.
+    if is_e2e_channel(state, &network, &nick) {
+        send_e2e_channel(state, ui, network, nick, body).await;
+        return;
+    }
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         set_e2e_status(ui, "e2e-not-ready");
         return;
@@ -3676,18 +3750,289 @@ pub(crate) async fn tick_e2e_engines(state: &mut WorkerState, ui: &slint::Weak<A
         if state.e2e.reset.contains(&network) {
             continue;
         }
-        if !state
-            .e2e
-            .engines
-            .get(&network)
-            .is_some_and(|engine| engine.has_queued_text() || engine.has_pending_copies())
-        {
+        if !state.e2e.engines.get(&network).is_some_and(|engine| {
+            engine.has_queued_text()
+                || engine.has_pending_copies()
+                || engine.one_time_key_refill_wanted()
+        }) {
             continue;
         }
         let Some(engine) = state.e2e.engines.remove(&network) else {
             continue;
         };
         settle_engine(state, ui, &network, engine).await;
+    }
+    // An E2E channel without a key, or with a member that lacks it, asks the
+    // members again.
+    let mut with_channels: Vec<String> = state
+        .e2e
+        .channels
+        .iter()
+        .map(|(network, _)| network.clone())
+        .collect();
+    with_channels.dedup();
+    for network in with_channels {
+        if !state.e2e.reset.contains(&network) {
+            resync_e2e_channels(state, ui, &network, true).await;
+        }
+    }
+}
+
+// ---- E2E channels -----------------------------------------------------------
+
+/// The most nicks of one roster that get a key request in one run. An E2E
+/// channel is for a small channel. The pacer of the engine limits each nick.
+const CHANNEL_KEY_REQUESTS_MAX: usize = 32;
+
+/// The key of a channel in the maps of the E2E channels: the network and the
+/// channel under the case mapping of the network.
+fn channel_key(state: &WorkerState, network: &str, channel: &str) -> (String, String) {
+    (
+        network.to_string(),
+        network_casemapping(state, network).fold(channel),
+    )
+}
+
+/// True when `name` is a channel of `network` with an E2E window.
+pub(crate) fn is_e2e_channel(state: &WorkerState, network: &str, name: &str) -> bool {
+    !state.e2e.channels.is_empty()
+        && state
+            .e2e
+            .channels
+            .contains(&channel_key(state, network, name))
+}
+
+/// The nicks of the roster of a channel. `None` when the roster is not known
+/// yet or is empty: such a roster must not remove the members of a channel.
+fn channel_roster(state: &WorkerState, network: &str, folded: &str) -> Option<Vec<String>> {
+    let casemapping = network_casemapping(state, network);
+    state
+        .transcript
+        .members
+        .iter()
+        .find(|((known_network, name), _)| {
+            known_network.as_str() == network && casemapping.fold(name) == folded
+        })
+        .map(|(_, members)| {
+            members
+                .iter()
+                .map(|(nick, _)| nick.clone())
+                .collect::<Vec<String>>()
+        })
+        .filter(|nicks| !nicks.is_empty())
+}
+
+/// Turns on E2E for the open channel (`/e2e channel`). The channel gets a
+/// locked window with the same name. The plain window stays as it is. The
+/// window sends nothing until the own device holds a channel key.
+pub(crate) async fn enable_e2e_channel(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: Option<String>,
+) {
+    let Some(channel) = channel else {
+        return set_e2e_status(ui, "e2e-channel-only");
+    };
+    if !channel_allowed(state.conn.server_protocol_version) || !ensure_engine(state, &network) {
+        return set_e2e_status(ui, "e2e-not-ready");
+    }
+    let key = channel_key(state, &network, &channel);
+    state.e2e.channels.insert(key.clone());
+    state.e2e.add_locked(&network, &key.1);
+    sync_e2e_channel(state, ui, &network, &key.1).await;
+    refresh_network_groups(state, ui);
+    set_e2e_status(ui, "e2e-channel-on");
+}
+
+/// Reads a roster change of a channel (a snapshot, JOIN, PART, KICK, QUIT or
+/// NICK) and, for an E2E channel, gives it to the engine.
+pub(crate) async fn handle_e2e_channel_roster(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: &(String, String),
+) {
+    if state.e2e.channels.is_empty() {
+        return;
+    }
+    let (network, channel) = channel_key(state, &key.0, &key.1);
+    if state
+        .e2e
+        .channels
+        .contains(&(network.clone(), channel.clone()))
+    {
+        sync_e2e_channel(state, ui, &network, &channel).await;
+    }
+}
+
+/// Runs [`sync_e2e_channel`] for each E2E channel of `network`. With
+/// `only_when_needed` a channel that can send and has no member without its
+/// key is left alone: the timer does not write the state for nothing.
+async fn resync_e2e_channels(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    only_when_needed: bool,
+) {
+    let channels: Vec<String> = state
+        .e2e
+        .channels
+        .iter()
+        .filter(|(known, _)| known == network)
+        .map(|(_, channel)| channel.clone())
+        .collect();
+    for channel in channels {
+        if only_when_needed {
+            let waiting = state.e2e.engines.get(network).is_some_and(|engine| {
+                engine.channel_plan_send(&channel, false) != SendPlan::Encrypt
+                    || engine.channel_missing_keys(&channel)
+            });
+            if !waiting {
+                continue;
+            }
+        }
+        sync_e2e_channel(state, ui, network, &channel).await;
+    }
+}
+
+/// Gives the roster of an E2E channel to the engine and sends the channel
+/// keys that follow from it.
+///
+/// - The engine makes the members from the verified devices of the roster
+///   nicks, the own device and the other devices of the account.
+/// - A member that left makes the own session invalid. The next key sync makes
+///   a new session and sends its key to the members that remain.
+/// - A new member gets the current key. A roster that changes nothing makes no
+///   session and sends nothing, when the channel can send already.
+/// - Every key goes in an Olm message, to a nick through the send door and to
+///   an own device through the copy door. No key goes to the channel.
+async fn sync_e2e_channel(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    channel: &str,
+) {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return;
+    };
+    let protocol = state.conn.server_protocol_version;
+    if state.e2e.reset.contains(network) || !channel_allowed(protocol) {
+        return;
+    }
+    let Some(nicks) = channel_roster(state, network, channel) else {
+        return;
+    };
+    let own_nick = state
+        .networks
+        .own_nicks
+        .get(network)
+        .cloned()
+        .unwrap_or_default();
+    let casemapping = network_casemapping(state, network);
+    let seq = {
+        let counter = state
+            .e2e
+            .channel_seq
+            .entry((network.to_string(), channel.to_string()))
+            .or_insert(0);
+        *counter += 1;
+        *counter
+    };
+    let Some(mut engine) = state.e2e.engines.remove(network) else {
+        return;
+    };
+    // A member whose keys are not known cannot read the channel yet. The keys
+    // come in a later KEYS row, and the roster is applied again then.
+    let mut asked = 0;
+    for nick in &nicks {
+        if asked >= CHANNEL_KEY_REQUESTS_MAX {
+            break;
+        }
+        if casemapping.nick_eq(nick, &own_nick) || engine.is_ready(nick) {
+            continue;
+        }
+        asked += 1;
+        let result = engine.request_keys(&client, &token, nick).await;
+        state.e2e.note_key_request(network, nick, &result);
+        if let Err(error) = result {
+            if !matches!(error, EngineError::Paced(_) | EngineError::PeerNotCapable) {
+                persistence::log_line(&format!("e2e channel key request failed: {error:?}"));
+            }
+        }
+    }
+    let outcome = engine.channel_set_members(channel, seq, &nicks);
+    let changed = matches!(outcome, Ok(MembershipOutcome::Changed { .. }));
+    let waiting = engine.channel_plan_send(channel, false) != SendPlan::Encrypt;
+    match &outcome {
+        Err(error) => persistence::log_line(&format!(
+            "e2e channel members not saved for {network}: {error:?}"
+        )),
+        Ok(_) if changed || waiting => {
+            if let Err(error) = engine.channel_sync_keys(&client, &token, channel).await {
+                persistence::log_line(&format!(
+                    "e2e channel keys not sent for {network}: {error:?}"
+                ));
+            }
+            if let Err(error) = engine
+                .channel_sync_sibling_keys(&client, &token, protocol, &own_nick, channel)
+                .await
+            {
+                persistence::log_line(&format!(
+                    "e2e channel keys not copied for {network}: {error:?}"
+                ));
+            }
+        }
+        Ok(_) => {}
+    }
+    settle_engine(state, ui, network, engine).await;
+}
+
+/// Sends one text of a locked channel window. The text goes out only with a
+/// valid channel key. Without one the call sends nothing, in any form, shows
+/// the failure and asks the members for the key again.
+async fn send_e2e_channel(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: String,
+    body: String,
+) {
+    let channel = channel_key(state, &network, &channel).1;
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return set_e2e_status(ui, "e2e-not-ready");
+    };
+    if state.e2e.reset.contains(&network) || !channel_allowed(state.conn.server_protocol_version) {
+        return set_e2e_status(ui, "e2e-not-ready");
+    }
+    // A channel carries text only: a file would need its own channel path.
+    // Nothing is sent.
+    if is_file_text(&body) {
+        return set_e2e_status(ui, "e2e-send-failed");
+    }
+    let Some(mut engine) = state.e2e.engines.remove(&network) else {
+        return set_e2e_status(ui, "e2e-not-ready");
+    };
+    let result = match engine.channel_plan_send(&channel, false) {
+        SendPlan::Encrypt => engine
+            .send_channel_text(&client, &token, &channel, &body, e2e_now())
+            .await
+            .map(|_| ()),
+        // No key. The text is not kept and goes nowhere.
+        SendPlan::Pending | SendPlan::Plain => Err(ChannelOpError::Channel(ChannelError::NoKey)),
+    };
+    let sent = result.is_ok();
+    if let Err(error) = &result {
+        // The log gets the kind of the failure, never the text.
+        persistence::log_line(&format!("e2e channel send failed for {network}: {error:?}"));
+        set_e2e_status(ui, "e2e-send-failed");
+    } else {
+        set_chat_follow_bottom(state, ui);
+    }
+    settle_engine(state, ui, &network, engine).await;
+    if sent {
+        mark_active_window_read(state, ui);
+    } else {
+        sync_e2e_channel(state, ui, &network, &channel).await;
     }
 }
 
@@ -4844,6 +5189,143 @@ mod tests {
         state.e2e.engines["net"]
             .trust()
             .is_sas_verified("net", "ada")
+    }
+
+    /// A state with an engine for `net` and an E2E channel `#room`.
+    fn channel_state(dir: &tempfile::TempDir) -> WorkerState {
+        let (mut state, _peer) = sas_state(dir);
+        state.conn.server_protocol_version = Some(62);
+        state
+            .e2e
+            .channels
+            .insert(("net".to_string(), "#room".to_string()));
+        state.e2e.add_locked("net", "#room");
+        state
+    }
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+    }
+
+    #[test]
+    fn an_e2e_channel_is_found_under_the_case_mapping_of_its_network() {
+        let dir = tempfile::tempdir().expect("dir");
+        let state = channel_state(&dir);
+        assert!(is_e2e_channel(&state, "net", "#room"));
+        assert!(is_e2e_channel(&state, "net", "#Room"));
+        assert!(!is_e2e_channel(&state, "net", "#other"));
+        assert!(!is_e2e_channel(&state, "other", "#room"));
+        // A nick of a locked query is no channel.
+        assert!(!is_e2e_channel(&state, "net", "ada"));
+    }
+
+    #[test]
+    fn a_roster_that_is_unknown_or_empty_gives_no_members() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut state = channel_state(&dir);
+        // An unknown roster must not remove the members of a channel.
+        assert_eq!(channel_roster(&state, "net", "#room"), None);
+        let key = ("net".to_string(), "#Room".to_string());
+        state.transcript.members.insert(key.clone(), Vec::new());
+        assert_eq!(channel_roster(&state, "net", "#room"), None);
+        state.transcript.members.insert(
+            key,
+            vec![
+                ("ada".to_string(), "@".to_string()),
+                ("bob".to_string(), String::new()),
+            ],
+        );
+        assert_eq!(
+            channel_roster(&state, "net", "#room"),
+            Some(vec!["ada".to_string(), "bob".to_string()])
+        );
+        assert_eq!(channel_roster(&state, "other", "#room"), None);
+    }
+
+    #[test]
+    fn an_e2e_channel_shows_the_state_of_its_key() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut state = channel_state(&dir);
+        // No key yet: the window never claims encryption.
+        assert_eq!(
+            locked_entry_state(&state, "net", "#room"),
+            ChatState::ChannelNoKey
+        );
+        state.e2e.reset.insert("net".to_string());
+        assert_eq!(locked_entry_state(&state, "net", "#room"), ChatState::Reset);
+        state.e2e.reset.remove("net");
+        state.e2e.engines.remove("net");
+        assert_eq!(
+            locked_entry_state(&state, "net", "#room"),
+            ChatState::Unavailable
+        );
+    }
+
+    #[test]
+    fn the_channel_step_needs_a_channel_window_and_a_server_with_channels() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, _peer) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        let runtime = test_runtime();
+        runtime.block_on(enable_e2e_channel(&mut state, &ui, "net".to_string(), None));
+        assert!(state.e2e.channels.is_empty());
+        // A server before protocol 62 has no channel messages.
+        state.conn.server_protocol_version = Some(61);
+        runtime.block_on(enable_e2e_channel(
+            &mut state,
+            &ui,
+            "net".to_string(),
+            Some("#room".to_string()),
+        ));
+        assert!(state.e2e.channels.is_empty());
+        state.conn.server_protocol_version = Some(62);
+        runtime.block_on(enable_e2e_channel(
+            &mut state,
+            &ui,
+            "net".to_string(),
+            Some("#Room".to_string()),
+        ));
+        assert!(is_e2e_channel(&state, "net", "#room"));
+        assert!(state
+            .e2e
+            .locked
+            .contains(&("net".to_string(), "#room".to_string())));
+    }
+
+    #[test]
+    fn a_send_in_an_e2e_channel_without_a_key_sends_nothing_in_any_form() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut state = channel_state(&dir);
+        // A listener that counts connections: a send of any kind would open one.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let url = format!("http://{}", listener.local_addr().expect("address"));
+        state.conn.client = Some(GrappaClient::new(url));
+        state.conn.token = Some("t".to_string());
+        let ui = slint::Weak::<AppWindow>::default();
+        let runtime = test_runtime();
+
+        runtime.block_on(handle_send_locked(
+            &mut state,
+            &ui,
+            "net".to_string(),
+            "#Room".to_string(),
+            "secret text".to_string(),
+        ));
+
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        let engine = &state.e2e.engines["net"];
+        assert!(engine
+            .history()
+            .messages(&conversation_id("net", "#room"))
+            .is_empty());
+        assert_eq!(engine.channel_plan_send("#room", false), SendPlan::Pending);
     }
 
     #[test]

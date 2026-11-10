@@ -719,6 +719,9 @@ pub(crate) async fn handle_frame(
                 if state.windows.current_channel.as_ref() == Some(&key) {
                     push_members_update(state, ui, &key);
                 }
+                // The snapshot is the whole roster: an E2E channel reads its
+                // members and keys again from it.
+                handle_e2e_channel_roster(state, ui, &key).await;
             }
             // Confirms the event arrives but this server's actual field
             // names differ from Cicchetto's (`network`/`channel`/`members`
@@ -800,6 +803,7 @@ pub(crate) async fn handle_frame(
             if state.windows.current_channel.as_ref() == Some(&key) {
                 push_members_update(state, ui, &key);
             }
+            handle_e2e_channel_roster(state, ui, &key).await;
         }
         return;
     }
@@ -1089,6 +1093,11 @@ pub(crate) async fn handle_frame(
     }
     if members_changed && state.windows.current_channel.as_ref() == Some(&key) {
         push_members_update(state, ui, &key);
+    }
+    // A JOIN, PART, KICK, QUIT or NICK that changed the roster goes to the
+    // channel membership of the engine. A replayed row changes no roster.
+    if members_changed {
+        handle_e2e_channel_roster(state, ui, &key).await;
     }
     reply_presence::push_reply_presence(state, ui);
 }
