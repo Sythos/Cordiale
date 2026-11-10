@@ -4027,3 +4027,19 @@ msgstr "Questo dispositivo non ha un’identità E2E sostituita. Non è stato ri
 msgctxt "AppWindow"
 msgid "is sending an encrypted message..."
 msgstr "sta inviando un messaggio cifrato..."
+
+msgctxt "AppWindow"
+msgid "E2E is on for this channel. Use the locked channel in the list."
+msgstr "E2E è attiva per questo canale. Usa il canale bloccato nell'elenco."
+
+msgctxt "AppWindow"
+msgid "Type /e2e channel in a channel window."
+msgstr "Scrivi /e2e channel in una finestra di canale."
+
+msgctxt "AppWindow"
+msgid "End-to-end encryption is active in this channel. A member without a verified device cannot read it."
+msgstr "La cifratura end-to-end è attiva in questo canale. Un membro senza dispositivo verificato non può leggerlo."
+
+msgctxt "AppWindow"
+msgid "This channel has no key to send with yet. Nothing is sent as clear text."
+msgstr "Questo canale non ha ancora una chiave per inviare. Nulla viene inviato in chiaro."

@@ -66,6 +66,10 @@ pub(crate) async fn run_slash_command(
             run_e2e_pair(state, ui, network, action).await;
             return;
         }
+        SlashCommand::E2eManage(cordiale_core::slash::E2eManageAction::Channel) => {
+            enable_e2e_channel(state, ui, network, open_channel()).await;
+            return;
+        }
         SlashCommand::E2eManage(action) => {
             run_e2e_manage(state, ui, network, action).await;
             return;

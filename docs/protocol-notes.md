@@ -2005,11 +2005,38 @@ lettura del messaggio di chiave `gkey` (`InnerKind::GroupKey`) e delle righe di 
 solo da protocollo 62); invio della chiave in un messaggio Olm (`send_group_key`, `channel_sync_keys`);
 invio di un messaggio di canale alla porta REST (`E2eSendRequest::channel_message`,
 `send_channel_text`: bersaglio il canale, `verb` `msg`, `to` `*`); API `channel_*` del motore.
-**Non ancora collegati:** nel client (`cordiale-ui`) gli eventi JOIN/PART/KICK/QUIT/NICK verso
-`channel_set_members`; la scelta del canale cifrato, il comando di invio e la riga dello storico nella
-finestra del canale; la consegna delle chiavi agli altri dispositivi dello stesso account (passa dal
-percorso delle copie, non da `send_group_key`); lo stato di cifratura e la scelta del testo in chiaro
-nella UI. `CLIENT_PROTOCOL_VERSION` non cambia finché questi punti non sono implementati e provati.
+**Collegato nel client (`cordiale-ui`, `e2e_runtime.rs`).** Il comando `/e2e channel` accende l'E2E per il
+canale aperto e crea una finestra bloccata con lo stesso nome (`🔒#canale`); la finestra in chiaro resta
+com'è. Un canale con storico sigillato torna E2E all'apertura del motore.
+- **Appartenenza.** Un'istantanea dell'elenco (`members_seeded`, `names_reply`) e ogni JOIN, PART, KICK,
+  QUIT e NICK che cambia l'elenco vanno a `channel_set_members` con un numero di sequenza che cresce. Un
+  elenco ancora ignoto o vuoto non si applica mai: non può togliere membri. Un evento che non cambia
+  nulla non crea una sessione. Un NICK rende il nuovo nick un membro solo dopo le sue chiavi verificate
+  (la fiducia è per nick), quindi il vecchio dispositivo esce e la chiave ruota.
+- **Chiavi.** Dopo un cambio vero (`Changed`) o finché il canale non può inviare, il client chiama
+  `channel_sync_keys` (a ogni nick, porta di invio, messaggio Olm) e `channel_sync_sibling_keys` (agli
+  altri dispositivi dell'account, porta delle copie, messaggio Olm). Dopo una uscita la chiave nuova va
+  solo ai membri rimasti. Il timer da 15 s riprova solo per un canale senza chiave o con un membro che
+  non l'ha ricevuta. Le chiavi di un membro ignoto si chiedono con KEYREQ, al massimo 32 nick per giro.
+- **Altri dispositivi.** I dispositivi della lista propria sono membri del canale. La chiave di gruppo
+  parte come messaggio `gkey` di copia (`own: true`, senza `channel`) e il riceventi la leggono in
+  `receive_copy`, nella stessa scrittura della sessione Olm.
+- **Riconnessione.** Dopo il drain della coda, e a ogni riga KEYS, il client rilegge membri e chiavi di
+  ogni canale E2E di cui conosce l'elenco; l'istantanea dopo il join lo rilegge di nuovo.
+- **Invio e stato.** La finestra bloccata del canale invia solo con `send_channel_text`. Senza chiave
+  (`SendPlan::Pending`) non parte nulla, in nessuna forma, e lo stato dice che il testo non è stato
+  inviato. Il testo in chiaro non è mai una scelta di questa finestra. I file non passano dal canale. La
+  riga dello storico è quella sigillata della conversazione `(rete, canale)`. Il banner dice se il canale
+  può inviare (`e2e-chat-channel-active`) o aspetta la chiave (`e2e-chat-channel-keys`).
+- **Rifornimento OTK.** Quando un `pkmsg` crea una sessione nuova e lo stato è salvato, il motore alza
+  un solo segnale per rete (`one_time_key_refill_wanted`). `settle_engine`, che segue sia l'evento in
+  diretta sia il drain, chiama `refill_one_time_keys`: solo `KeysFetch` e `KeysPublish`, mai account,
+  master, liste o certificato. Un `msg` e un `pkmsg` di una sessione già nota non alzano il segnale. Un
+  upload fallito lascia il segnale e le chiavi nuove non pubblicate; riprova il giro successivo o il
+  timer.
+
+`CLIENT_PROTOCOL_VERSION` non cambia in questo passo. **Non verificato:** mai provato contro un Grappa
+reale né contro un altro client con E2E dei canali.
 
 - **Messaggio.** `{"v":3,"ch":<canale>,"sid":<sessione>,"i":<indice>,"body":<Megolm base64>}`. `ch` è il nome
   del canale già normalizzato (case-fold). L'indice deve essere quello del messaggio Megolm.

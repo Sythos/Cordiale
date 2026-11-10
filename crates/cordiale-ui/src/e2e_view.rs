@@ -316,6 +316,10 @@ pub enum ChatState {
     SasPending,
     /// Encryption is active.
     Active,
+    /// An E2E channel: the own device has no valid channel key to send with.
+    ChannelNoKey,
+    /// An E2E channel: the own device can send encrypted texts.
+    ChannelActive,
 }
 
 impl ChatState {
@@ -338,6 +342,8 @@ impl ChatState {
             ChatState::NoSuchNick => "e2e-chat-no-such-nick",
             ChatState::SasPending => "e2e-chat-sas",
             ChatState::Active => "e2e-chat-active",
+            ChatState::ChannelNoKey => "e2e-chat-channel-keys",
+            ChatState::ChannelActive => "e2e-chat-channel-active",
         }
     }
 }
@@ -409,6 +415,21 @@ pub fn locked_chat_state(signals: &ChatSignals) -> ChatState {
         ChatState::SasPending
     } else {
         ChatState::Active
+    }
+}
+
+/// The state of the window of an E2E channel. `encrypted` is true when the
+/// own device holds a valid channel key and can send. A channel never reports
+/// clear text: the plain window of the channel is a different window.
+pub fn channel_chat_state(reset: bool, engine: bool, encrypted: bool) -> ChatState {
+    if reset {
+        ChatState::Reset
+    } else if !engine {
+        ChatState::Unavailable
+    } else if encrypted {
+        ChatState::ChannelActive
+    } else {
+        ChatState::ChannelNoKey
     }
 }
 
@@ -1162,5 +1183,24 @@ mod tests {
         assert_eq!(pairing_help(Some(&only_me)), "none");
         assert_eq!(pairing_help(Some(&two)), "pair");
         assert_eq!(pairing_help(None), "unknown");
+    }
+
+    #[test]
+    fn an_e2e_channel_state_is_encrypted_or_waits_for_the_key() {
+        assert_eq!(channel_chat_state(true, true, true), ChatState::Reset);
+        assert_eq!(
+            channel_chat_state(false, false, true),
+            ChatState::Unavailable
+        );
+        assert_eq!(
+            channel_chat_state(false, true, false),
+            ChatState::ChannelNoKey
+        );
+        assert_eq!(
+            channel_chat_state(false, true, true),
+            ChatState::ChannelActive
+        );
+        assert_eq!(ChatState::ChannelNoKey.key(), "e2e-chat-channel-keys");
+        assert_eq!(ChatState::ChannelActive.key(), "e2e-chat-channel-active");
     }
 }
