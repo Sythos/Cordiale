@@ -1314,7 +1314,11 @@ impl E2eEngine {
             let attributable: BTreeSet<String> = rediscovering
                 .iter()
                 .filter(|nick| nicks.iter().any(|member| cm.nick_eq(member, nick)))
-                .flat_map(|nick| trust.device_dids(&self.network, nick))
+                .flat_map(|nick| {
+                    trust.device_dids_matching(&self.network, nick, |saved, wanted| {
+                        cm.nick_eq(saved, wanted)
+                    })
+                })
                 .collect();
             members.extend(
                 self.state
@@ -9008,6 +9012,33 @@ mod tests {
             .expect("members");
         assert_eq!(gone, MembershipOutcome::Changed { removed: true });
         assert!(!members(&engine).contains(&bob_did));
+    }
+
+    #[test]
+    fn saved_members_stay_when_the_roster_spells_the_nick_in_another_case() {
+        let alice = Ident::new("channel-keep-case-alice");
+        let bob = Ident::new("channel-keep-case-bob");
+        let mut engine = alice.engine();
+        engine.accept_keys("bob", &bob.keys()).expect("bob keys");
+        let bob_did = did_from_key_text(&ed(&bob.device)).expect("bob did");
+        let mut saved = engine.channel_devices_of(&[]);
+        saved.insert(bob_did.clone());
+        let network = engine.network.clone();
+        engine
+            .state
+            .update_channels(|ring| ring.apply_membership(&network, "#room", 1, saved))
+            .expect("members");
+        engine.peers.clear();
+        let roster = vec!["Bob".to_string()];
+        let kept = engine
+            .channel_set_members_keeping("#room", 2, &roster, &roster)
+            .expect("members");
+        assert_eq!(kept, MembershipOutcome::Unchanged);
+        assert!(engine
+            .state
+            .channels()
+            .members(NET, "#room")
+            .contains(&bob_did));
     }
 
     #[test]
