@@ -346,8 +346,41 @@ pub async fn provision_device(
         store.clear_list_pending()?;
     }
 
+    let (one_time_keys_published, fallback_published) = top_up_keys(
+        client,
+        token,
+        network_id,
+        server_protocol,
+        store,
+        &mut local,
+        &did,
+    )
+    .await?;
+    Ok(Provisioned {
+        did,
+        identity_created,
+        device_registered,
+        list_published,
+        one_time_keys_published,
+        fallback_published,
+    })
+}
+
+/// Tops up the one-time keys of the server to 50 and makes a fallback key
+/// when the server has none. It saves the account before the upload and marks
+/// the keys as published only after a 2xx answer. Returns the number of
+/// one-time keys and whether a fallback key went in the upload.
+async fn top_up_keys(
+    client: &GrappaClient,
+    token: &str,
+    network_id: &str,
+    server_protocol: Option<u32>,
+    store: &mut E2eStateStore,
+    local: &mut LocalAccount,
+    did: &str,
+) -> Result<(usize, bool), ProvisionError> {
     let server_keys = client
-        .fetch_e2e_keys(token, network_id, &did, server_protocol)
+        .fetch_e2e_keys(token, network_id, did, server_protocol)
         .await?;
     let wanted = ONE_TIME_KEYS_MAX.saturating_sub(server_keys.one_time_keys);
     let waiting = local.unpublished_one_time_keys().len();
@@ -365,34 +398,67 @@ pub async fn provision_device(
 
     let one_time = local.unpublished_one_time_keys();
     let fallback = local.unpublished_fallback_key();
-    let mut outcome = Provisioned {
-        did: did.clone(),
-        identity_created,
-        device_registered,
-        list_published,
-        one_time_keys_published: 0,
-        fallback_published: false,
-    };
     if one_time.is_empty() && fallback.is_none() {
-        return Ok(outcome);
+        return Ok((0, false));
     }
     let one_time_signed = one_time
         .iter()
-        .map(|key| signed_key(&local, key))
+        .map(|key| signed_key(local, key))
         .collect::<Result<Vec<_>, WireError>>()?;
     let fallback_signed = fallback
         .as_deref()
-        .map(|key| signed_key(&local, key))
+        .map(|key| signed_key(local, key))
         .transpose()?;
     let request = KeysUploadRequest::new(one_time_signed, fallback_signed)?;
     client
-        .publish_e2e_keys(token, network_id, &did, server_protocol, &request)
+        .publish_e2e_keys(token, network_id, did, server_protocol, &request)
         .await?;
     local.mark_published();
     store.set_account(local.account())?;
-    outcome.one_time_keys_published = one_time.len();
-    outcome.fallback_published = fallback.is_some();
-    Ok(outcome)
+    Ok((one_time.len(), fallback.is_some()))
+}
+
+/// Tops up the one-time keys of an existing device after an incoming `pkmsg`
+/// used one. It reads the saved Olm account, so the call runs after the state
+/// of the message is on disk. It never makes an account, a master key, a list
+/// or a certificate, and it never registers the device. A store with no
+/// account has nothing to top up and gives `Ok(0)`. A failed upload keeps the
+/// new keys unpublished: the next call sends the same keys. Returns the number
+/// of one-time keys that the upload carried.
+pub async fn refill_one_time_keys(
+    client: &GrappaClient,
+    token: &str,
+    network_id: &str,
+    server_protocol: Option<u32>,
+    store: &mut E2eStateStore,
+) -> Result<usize, ProvisionError> {
+    const NEEDED: [E2eOperation; 2] = [E2eOperation::KeysPublish, E2eOperation::KeysFetch];
+    if NEEDED
+        .iter()
+        .any(|operation| !operation.available(server_protocol))
+    {
+        return Err(E2eRouteError::Unavailable.into());
+    }
+    if store.reset_pending() {
+        return Err(ProvisionError::ResetPending);
+    }
+    let Some(account) = store.olm_identity()? else {
+        return Ok(0);
+    };
+    let ed25519 = account.identity_keys().ed25519.to_base64();
+    let did = did_from_key_text(&ed25519)?;
+    let mut local = LocalAccount::from_account(AccountId::new(network_id, &did)?, account);
+    let (one_time, _) = top_up_keys(
+        client,
+        token,
+        network_id,
+        server_protocol,
+        store,
+        &mut local,
+        &did,
+    )
+    .await?;
+    Ok(one_time)
 }
 
 /// True when the store holds the certificate that `master` signed for this
@@ -1338,5 +1404,103 @@ mod tests {
         assert!(server.received_requests().await.unwrap().is_empty());
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&damaged_dir);
+    }
+
+    #[tokio::test]
+    async fn a_refill_tops_up_the_keys_and_changes_nothing_else() {
+        let dir = scratch_dir("refill");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        run(&server, &mut store, PROTOCOL).await.expect("first run");
+        let master_before = ed25519_of(&store.master_key().unwrap().unwrap());
+        let device_before = ed25519_of(&store.olm_identity().unwrap().unwrap());
+        let (puts, posts) = {
+            let held = state.lock().unwrap();
+            (held.list_puts, held.device_posts)
+        };
+
+        // A pkmsg used one key: the server holds 49.
+        state.lock().unwrap().one_time_keys = ONE_TIME_KEYS_MAX - 1;
+        let client = GrappaClient::new(server.uri());
+        let sent = refill_one_time_keys(&client, "abc123", "libera", PROTOCOL, &mut store)
+            .await
+            .expect("refill");
+        assert_eq!(sent, 1);
+        {
+            let held = state.lock().unwrap();
+            assert_eq!(held.one_time_keys, ONE_TIME_KEYS_MAX);
+            assert_eq!(held.list_puts, puts);
+            assert_eq!(held.device_posts, posts);
+        }
+        assert_eq!(
+            ed25519_of(&store.master_key().unwrap().unwrap()),
+            master_before
+        );
+        assert_eq!(
+            ed25519_of(&store.olm_identity().unwrap().unwrap()),
+            device_before
+        );
+
+        // A full server gets no upload.
+        let again = refill_one_time_keys(&client, "abc123", "libera", PROTOCOL, &mut store)
+            .await
+            .expect("refill");
+        assert_eq!(again, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_refill_upload_keeps_the_keys_for_the_next_call() {
+        let dir = scratch_dir("refill-retry");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        run(&server, &mut store, PROTOCOL).await.expect("first run");
+        state.lock().unwrap().one_time_keys = ONE_TIME_KEYS_MAX - 1;
+        state.lock().unwrap().fail_keys = true;
+        let device_before = ed25519_of(&store.olm_identity().unwrap().unwrap());
+
+        let client = GrappaClient::new(server.uri());
+        let failed = refill_one_time_keys(&client, "abc123", "libera", PROTOCOL, &mut store).await;
+        assert!(failed.is_err());
+        // The identity and the new key are on disk, unpublished.
+        let account = store.olm_identity().unwrap().unwrap();
+        assert_eq!(ed25519_of(&account), device_before);
+        assert!(master_is_kept(&store));
+        assert!(!account.one_time_keys().is_empty());
+
+        state.lock().unwrap().fail_keys = false;
+        let sent = refill_one_time_keys(&client, "abc123", "libera", PROTOCOL, &mut store)
+            .await
+            .expect("retry");
+        assert_eq!(sent, 1);
+        assert_eq!(state.lock().unwrap().one_time_keys, ONE_TIME_KEYS_MAX);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn master_is_kept(store: &E2eStateStore) -> bool {
+        store.master_key().ok().flatten().is_some()
+    }
+
+    #[tokio::test]
+    async fn a_refill_without_an_account_makes_no_identity_and_sends_nothing() {
+        let dir = scratch_dir("refill-empty");
+        let provider = fresh_key();
+        let state = Shared::default();
+        let server = fake_server(&state).await;
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+        let client = GrappaClient::new(server.uri());
+
+        let sent = refill_one_time_keys(&client, "abc123", "libera", PROTOCOL, &mut store)
+            .await
+            .expect("refill");
+        assert_eq!(sent, 0);
+        assert!(store.olm_identity().unwrap().is_none());
+        assert!(store.master_key().unwrap().is_none());
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

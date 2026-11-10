@@ -769,6 +769,14 @@ struct CopyJob {
     tries: HashMap<String, u8>,
 }
 
+/// What goes to a sibling device through the copy door.
+enum SiblingPayload<'a> {
+    /// The copy of a text that this device sent.
+    Copy(&'a CopyJob),
+    /// The text of a channel key share (`{"t":"gkey",…}`).
+    GroupKey(&'a str),
+}
+
 /// How one copy step ended when it did not queue the copy.
 enum CopyStep {
     Drop(CopyFailure),
@@ -956,6 +964,10 @@ pub struct E2eEngine {
     listreq: IntervalLimiter,
     /// The list versions that a `listreq` asked for, by folded nick.
     listreq_lv: HashMap<String, HashSet<u32>>,
+    /// True while a saved incoming `pkmsg` made a new session and the
+    /// one-time keys on the server are not topped up since. One flag per
+    /// network makes duplicate requests one request.
+    otk_refill: bool,
 }
 
 impl E2eEngine {
@@ -1006,6 +1018,7 @@ impl E2eEngine {
             list_answered: HashMap::new(),
             listreq: IntervalLimiter::new(md3_pacing::LISTREQ_INTERVAL),
             listreq_lv: HashMap::new(),
+            otk_refill: false,
         })
     }
 
@@ -1175,10 +1188,54 @@ impl E2eEngine {
         Ok(())
     }
 
+    /// True when a saved `pkmsg` used a one-time key and the refill did not
+    /// end with success yet.
+    pub fn one_time_key_refill_wanted(&self) -> bool {
+        self.otk_refill
+    }
+
+    /// Tops up the one-time keys on the server after a saved `pkmsg` used one.
+    /// Without a pending need it does nothing and sends nothing. Many `pkmsg`
+    /// rows before the call give one upload. The local state of the message
+    /// is saved before this call. The call never changes the identity, the
+    /// master key or the lists. A failed upload keeps the need and the new
+    /// keys: the next call tries again. Returns the number of keys uploaded.
+    pub async fn refill_one_time_keys(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        server_protocol: Option<u32>,
+    ) -> Result<usize, ProvisionError> {
+        if !self.otk_refill {
+            return Ok(0);
+        }
+        self.otk_refill = false;
+        let result = crate::e2e_provision::refill_one_time_keys(
+            client,
+            token,
+            &self.network,
+            server_protocol,
+            &mut self.state,
+        )
+        .await;
+        if result.is_err() {
+            self.otk_refill = true;
+        }
+        result
+    }
+
     /// What the UI shows for a channel. `e2e` is true when the channel is
     /// set to E2E.
     pub fn channel_status(&self, channel: &str, e2e: bool) -> ChannelStatus {
         self.state.channels().status(&self.network, channel, e2e)
+    }
+
+    /// True when a member device still lacks the key of the own channel
+    /// session. The caller sends the keys again.
+    pub fn channel_missing_keys(&self, channel: &str) -> bool {
+        self.state
+            .channels()
+            .has_missing_shares(&self.network, channel, &self.own_did)
     }
 
     /// Chooses the route of a send in an E2E channel. Without a key the
@@ -1200,11 +1257,15 @@ impl E2eEngine {
         }
     }
 
-    /// The member devices of a channel: the own device and every verified,
-    /// ready device of the listed nicks. A nick without a verified device
-    /// has no device here and cannot read the channel.
+    /// The member devices of a channel: the own device, the other devices of
+    /// the own list and every verified, ready device of the listed nicks. A
+    /// nick without a verified device has no device here and cannot read the
+    /// channel.
     pub fn channel_devices_of(&self, nicks: &[String]) -> BTreeSet<String> {
         let mut dids = BTreeSet::from([self.own_did.clone()]);
+        // The other devices of the account read the channel too. Their own
+        // list names them; they get the keys through the copy door.
+        dids.extend(self.sibling_dids().into_iter().map(|(did, _)| did));
         for nick in nicks {
             for entry in self.pick_devices(nick) {
                 dids.insert(entry.device.did().to_string());
@@ -1312,6 +1373,56 @@ impl E2eEngine {
                 .await
                 .is_ok()
             {
+                served += 1;
+            }
+        }
+        Ok(served)
+    }
+
+    /// Sends the key of the own channel session to each other device of the
+    /// own list that is a member and still needs it. The key goes through the
+    /// copy door as one Olm message for one sibling: the established path of
+    /// the copies, never IRC and never in clear text. Call it after
+    /// [`E2eEngine::channel_sync_keys`]. Returns the number of siblings that
+    /// the relay served. A sibling that fails stays on the list for the next
+    /// call. `own_nick` is the nick of the account.
+    pub async fn channel_sync_sibling_keys(
+        &mut self,
+        client: &GrappaClient,
+        token: &str,
+        server_protocol: Option<u32>,
+        own_nick: &str,
+        channel: &str,
+    ) -> Result<usize, ChannelOpError> {
+        self.drop_revoked_channel_members()?;
+        let (network, own) = (self.network.clone(), self.own_did.clone());
+        let needed = self
+            .state
+            .update_channels(|ring| ring.prepare_outbound(&network, channel, &own))?
+            .map_err(ChannelOpError::Channel)?;
+        let mut served = 0;
+        for (did, ed25519) in self.sibling_dids() {
+            if !needed.contains(&did) {
+                continue;
+            }
+            let text = self
+                .state
+                .channels()
+                .key_share(&self.network, channel)
+                .map_err(ChannelOpError::Channel)?;
+            let step = self
+                .copy_to(
+                    client,
+                    token,
+                    server_protocol,
+                    own_nick,
+                    SiblingPayload::GroupKey(&text),
+                    (did.as_str(), ed25519.as_str()),
+                )
+                .await;
+            if step.is_ok() {
+                self.state
+                    .update_channels(|ring| ring.mark_shared(&network, channel, &did))?;
                 served += 1;
             }
         }
@@ -2045,7 +2156,12 @@ impl E2eEngine {
                 RowOutcome::Ignored
             }
             InboxVerb::PkMsg | InboxVerb::Msg => match row.channel.clone() {
-                Some(channel) => self.receive_channel_message(row, &channel, now),
+                // The group state and the history use the folded name, as the
+                // sender and the membership events do.
+                Some(channel) => {
+                    let channel = self.casemapping.fold(&channel);
+                    self.receive_channel_message(row, &channel, now)
+                }
                 None => self.receive_message(row, now),
             },
         };
@@ -2122,6 +2238,18 @@ impl E2eEngine {
             // comes from the server, never from a copy.
             InnerKind::Other | InnerKind::List { .. } | InnerKind::ListReq => {
                 match self.save_state(&nick, &row.from_did, &decrypted) {
+                    Ok(()) => RowOutcome::Ignored,
+                    Err(_) => RowOutcome::StoreFailed,
+                }
+            }
+            // A channel key of a sibling. The sibling is a verified device of
+            // the own list, so its key opens the channel messages that it
+            // sends. The key and the Olm state that read it are saved in one
+            // write, as for a key of a peer.
+            InnerKind::GroupKey { channel, text } => {
+                let mut ring = self.state.channels().clone();
+                let _ = ring.accept_key(&self.network, &channel, &row.from_did, &text);
+                match self.save_state_with(&nick, &row.from_did, &decrypted, Some(&ring)) {
                     Ok(()) => RowOutcome::Ignored,
                     Err(_) => RowOutcome::StoreFailed,
                 }
@@ -2348,6 +2476,13 @@ impl E2eEngine {
                 decrypted.identity.as_ref(),
                 decrypted.replay.as_ref(),
             )?,
+        }
+        // A new inbound session came from a `pkmsg` and used a one-time key of
+        // the saved account. The write above made it durable: the refill may
+        // read the account now. A `msg` and a repeated `pkmsg` of a known
+        // session carry no account, so they set nothing.
+        if decrypted.identity.is_some() {
+            self.otk_refill = true;
         }
         if let Some((entry, _)) = &decrypted.learned {
             self.revoked_dids.remove(entry.device.did());
@@ -2703,7 +2838,7 @@ impl E2eEngine {
                         token,
                         server_protocol,
                         own_nick,
-                        &job,
+                        SiblingPayload::Copy(&job),
                         (did.as_str(), ed25519.as_str()),
                     )
                     .await
@@ -2743,14 +2878,15 @@ impl E2eEngine {
         report
     }
 
-    /// Makes and queues the copy of `job` for one sibling.
+    /// Makes and queues one Olm message for one sibling: the copy of a text
+    /// or a channel key share.
     async fn copy_to(
         &mut self,
         client: &GrappaClient,
         token: &str,
         server_protocol: Option<u32>,
         own_nick: &str,
-        job: &CopyJob,
+        payload: SiblingPayload<'_>,
         (did, sibling_ed25519): (&str, &str),
     ) -> Result<(), CopyStep> {
         let failed = || CopyStep::Drop(CopyFailure::Failed);
@@ -2780,17 +2916,24 @@ impl E2eEngine {
         };
         let fb = (!session.has_received_message())
             .then(|| recipient_binding(&self.own_ed25519, sibling_ed25519));
-        let file = file_descriptor(&job.text);
-        let inner = CopyOut {
-            t: "copy",
-            peer: &job.peer,
-            body: file.is_none().then_some(job.text.as_str()),
-            file: file.map(|file| file.to_map()),
-            cid: &job.id,
-            lv: own.lv,
-            fb: fb.as_deref(),
-        }
-        .to_json();
+        let inner = match payload {
+            SiblingPayload::Copy(job) => {
+                let file = file_descriptor(&job.text);
+                CopyOut {
+                    t: "copy",
+                    peer: &job.peer,
+                    body: file.is_none().then_some(job.text.as_str()),
+                    file: file.map(|file| file.to_map()),
+                    cid: &job.id,
+                    lv: own.lv,
+                    fb: fb.as_deref(),
+                }
+                .to_json()
+            }
+            SiblingPayload::GroupKey(share) => {
+                Outgoing::GroupKey(share).to_json(own.lv, fb.as_deref())
+            }
+        };
         let message = session.encrypt(inner.as_bytes()).map_err(|_| failed())?;
         let (verb, payload) = match message {
             OlmMessage::PreKey(message) => (
@@ -8573,5 +8716,207 @@ mod tests {
         alice.accept_keys("bob", &other_id.keys()).expect("fresh");
         assert!(alice.is_ready("bob"));
         assert!(!alice.trust().is_sas_verified(NET, "bob"));
+    }
+
+    /// The key routes of one device: 49 keys on the server, so a refill
+    /// uploads one, and a fallback key that the server holds.
+    async fn mount_key_routes(server: &MockServer, did: &str, upload_status: u16) {
+        let route = format!("/networks/{NET}/e2e/devices/{did}/keys");
+        Mock::given(method("GET"))
+            .and(path(route.clone()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"one_time_keys": 49, "fallback": true})),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(
+                ResponseTemplate::new(upload_status)
+                    .set_body_json(json!({"one_time_keys": 50, "fallback": true})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_saved_pkmsg_gives_one_refill_and_a_failed_upload_is_tried_again() {
+        let mut p = pair();
+        let alice_server = MockServer::start().await;
+        mount_send(&alice_server, "msgid1").await;
+        let (_, first) = alice_sends(&mut p.alice, &alice_server, "one").await;
+        let (_, second) = alice_sends(&mut p.alice, &alice_server, "two").await;
+        let first_row = inbox_row(1, "alice", &p.alice_did, &p.bob_did, &first);
+        let second_row = inbox_row(2, "alice", &p.alice_did, &p.bob_did, &second);
+
+        // Nothing is wanted before a message came, and a refill with no need
+        // sends nothing.
+        let failing = MockServer::start().await;
+        mount_key_routes(&failing, &p.bob_did, 503).await;
+        let failing_client = GrappaClient::new(failing.uri());
+        assert!(!p.bob.one_time_key_refill_wanted());
+        assert_eq!(
+            p.bob
+                .refill_one_time_keys(&failing_client, TOKEN, PROTOCOL)
+                .await
+                .expect("no need"),
+            0
+        );
+        assert!(failing
+            .received_requests()
+            .await
+            .expect("requests")
+            .is_empty());
+
+        // The first `pkmsg` makes a session and uses a one-time key.
+        assert_eq!(p.bob.handle_row(&first_row, 10), RowOutcome::Stored);
+        assert!(p.bob.one_time_key_refill_wanted());
+
+        // A failed upload keeps the need, the identity and the keys.
+        let own_before = p.bob.own_did().to_string();
+        assert!(p
+            .bob
+            .refill_one_time_keys(&failing_client, TOKEN, PROTOCOL)
+            .await
+            .is_err());
+        assert!(p.bob.one_time_key_refill_wanted());
+        assert_eq!(p.bob.own_did(), own_before);
+        assert!(p.bob.state_mut().olm_identity().expect("read").is_some());
+        assert!(p.bob.state_mut().master_key().expect("read").is_some());
+
+        // The next safe sync uploads and clears the need. Only the key routes
+        // are used: no list, no device and no master change.
+        let working = MockServer::start().await;
+        mount_key_routes(&working, &p.bob_did, 200).await;
+        let working_client = GrappaClient::new(working.uri());
+        assert_eq!(
+            p.bob
+                .refill_one_time_keys(&working_client, TOKEN, PROTOCOL)
+                .await
+                .expect("refill"),
+            1
+        );
+        assert!(!p.bob.one_time_key_refill_wanted());
+        let paths = paths_of(&working).await;
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().all(|route| route.ends_with("/keys")));
+
+        // A second `pkmsg` of the session that exists uses no new key.
+        assert_eq!(p.bob.handle_row(&second_row, 11), RowOutcome::Stored);
+        assert!(!p.bob.one_time_key_refill_wanted());
+        assert_eq!(
+            p.bob
+                .refill_one_time_keys(&working_client, TOKEN, PROTOCOL)
+                .await
+                .expect("no need"),
+            0
+        );
+        assert_eq!(paths_of(&working).await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_channel_key_reaches_a_sibling_through_the_copy_door_only() {
+        const CHANNEL: &str = "#room";
+        let mut t = twins("channel-sibling");
+        let server = MockServer::start().await;
+        mount_copy_routes(&server, &t).await;
+        let client = GrappaClient::new(server.uri());
+
+        // The other device of the account is a member with no nick listed.
+        assert!(t.first.channel_devices_of(&[]).contains(&t.second_did));
+        t.first
+            .channel_set_members(CHANNEL, 1, &[])
+            .expect("members");
+        let served = t
+            .first
+            .channel_sync_sibling_keys(&client, TOKEN, PROTOCOL, "bob", CHANNEL)
+            .await
+            .expect("sync");
+        assert_eq!(served, 1);
+        assert_eq!(
+            t.first.channel_status(CHANNEL, true),
+            ChannelStatus::Encrypted
+        );
+        // Only the claim and the copy door. Nothing goes over IRC.
+        assert_eq!(
+            paths_of(&server).await,
+            vec![
+                device_route(&t.second_did, "claim"),
+                device_route(&t.second_did, "copies"),
+            ]
+        );
+        let copy = body_of(&server, 1).await;
+        assert_eq!(copy["verb"], "pkmsg");
+        assert!(!copy.to_string().contains("gkey"));
+
+        // A sibling that has the key is not served again.
+        let again = t
+            .first
+            .channel_sync_sibling_keys(&client, TOKEN, PROTOCOL, "bob", CHANNEL)
+            .await
+            .expect("sync");
+        assert_eq!(again, 0);
+        assert_eq!(paths_of(&server).await.len(), 2);
+
+        // The sibling reads the key from its copy inbox. Then it opens a
+        // channel message of the first device.
+        t.second
+            .channel_set_members(CHANNEL, 1, &[])
+            .expect("members");
+        let value = copy_inbox_row(&t, 9, &copy);
+        let item = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(t.second.handle_row(&item, 150), RowOutcome::Ignored);
+        t.first
+            .send_channel_text(&client, TOKEN, CHANNEL, "hello room", 160)
+            .await
+            .expect("channel send");
+        let requests = sent_requests(&server).await;
+        let wire = requests.last().expect("send");
+        assert_eq!(wire["verb"], "msg");
+        assert_eq!(wire["target"], CHANNEL);
+        let mut channel_row = row(
+            10,
+            "bob",
+            &t.first_did,
+            &t.second_did,
+            "msg",
+            "m1",
+            wire["payload"].as_str().expect("payload"),
+        );
+        channel_row["channel"] = json!(CHANNEL);
+        let item = InboxRow::from_value(&channel_row, Some(62)).expect("row");
+        assert_eq!(t.second.handle_row(&item, 170), RowOutcome::Stored);
+        let rows = t.second.history().messages(&conversation_id(NET, CHANNEL));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "hello room");
+        assert!(rows[0].encrypted);
+    }
+
+    #[tokio::test]
+    async fn a_channel_send_waits_while_a_sibling_has_no_key() {
+        const CHANNEL: &str = "#room";
+        let mut t = twins("channel-sibling-wait");
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let client = GrappaClient::new(server.uri());
+        t.first
+            .channel_set_members(CHANNEL, 1, &[])
+            .expect("members");
+        assert_eq!(t.first.channel_plan_send(CHANNEL, false), SendPlan::Pending);
+        // The sibling has no key yet: the send fails and nothing goes out.
+        t.first
+            .channel_sync_keys(&client, TOKEN, CHANNEL)
+            .await
+            .expect("sync");
+        let refused = t
+            .first
+            .send_channel_text(&client, TOKEN, CHANNEL, "early", 100)
+            .await;
+        assert!(matches!(
+            refused,
+            Err(ChannelOpError::Channel(ChannelError::NoKey))
+        ));
+        assert!(sent_requests(&server).await.is_empty());
     }
 }
