@@ -2315,6 +2315,8 @@ export component AppWindow inherits Window {
     in property <string> status-attach-name: "";
     // Command shown by the `command-*` status messages.
     in property <string> status-command-hint: "";
+    // The network of the E2E recovery dialog actions.
+    in property <string> e2e-recovery-network: "";
     callback admin-refresh-requested();
     callback admin-disconnect-session(string);
     callback admin-reconnect-session(string);
@@ -2906,6 +2908,17 @@ export component AppWindow inherits Window {
         return @tr("{} Devices: {}. This device holds the old keys, so a pairing cannot work yet. Type /e2e forget on this device: it asks for a confirmation and removes only the keys of this device. Then type /e2e pair on a listed device that holds the identity of the server. Then type /e2e join and the link on this device, or type /e2e accept for its invite.", head, status-command-hint);
     }
 
+    // True when the notice offers the forget and create recovery: the
+    // warning step, or a missing or different master key with a device list
+    // that was read. Only these two reasons come from a provisioning run.
+    function e2e-recovery-action-visible() -> bool {
+        if status-kind == "e2e-recovery-confirm" {
+            return true;
+        }
+        return (status-kind == "e2e-recovery-no-keys" || status-kind == "e2e-recovery-replaced")
+            && status-message != "unknown";
+    }
+
     // The status text of the E2E kinds (`e2e-*`).
     function e2e-status-text() -> string {
         if status-kind == "e2e-not-ready" {
@@ -3004,6 +3017,10 @@ export component AppWindow inherits Window {
             return e2e-recovery-text(@tr("The signed device list does not include this device."));
         } else if status-kind == "e2e-recovery-no-list" {
             return e2e-recovery-text(@tr("The E2E identity has no signed device list that this device can read."));
+        } else if status-kind == "e2e-recovery-confirm" {
+            return @tr("Forget the E2E keys of this device and create a new identity? The old identity on the server is removed. Your contacts can see a key change. Old messages can stay unreadable. Select Forget and create identity again to continue.");
+        } else if status-kind == "e2e-recovery-done" {
+            return @tr("This device has a new E2E identity. Select Start encrypted chat again.");
         } else if status-kind == "e2e-reset-confirm" {
             return @tr("This resets the E2E identity of this device. To confirm, type /e2e reset yes.");
         } else if status-kind == "e2e-reset-done" {
@@ -9515,7 +9532,7 @@ export component AppWindow inherits Window {
 
             Rectangle {
                 width: min(520px, parent.width - 32px);
-                height: min(280px, parent.height - 32px);
+                height: min(e2e-recovery-action-visible() ? 340px : 280px, parent.height - 32px);
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 border-width: 1px;
@@ -9561,6 +9578,25 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                             accessible-role: AccessibleRole.text;
                             accessible-live-region: AccessibleLiveness.polite;
+                        }
+                    }
+
+                    if e2e-recovery-action-visible() : HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+
+                        if status-kind == "e2e-recovery-confirm" : CompactButton {
+                            text: @tr("Cancel");
+                            clicked => {
+                                status-kind = "";
+                                status-notice-open = false;
+                            }
+                        }
+                        CompactButton {
+                            text: @tr("Forget and create identity");
+                            clicked => {
+                                e2e-request-action(status-kind == "e2e-recovery-confirm" ? "recover-confirm" : "recover", e2e-recovery-network, "", "");
+                            }
                         }
                     }
                 }

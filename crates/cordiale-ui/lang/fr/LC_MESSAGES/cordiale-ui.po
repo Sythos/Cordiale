@@ -3873,6 +3873,18 @@ msgid "The server list of E2E devices cannot be read now. No identity was made o
 msgstr "La liste des appareils E2E du serveur est illisible pour le moment. Aucune identité n'a été créée ni remplacée. Réessaie plus tard."
 
 msgctxt "AppWindow"
+msgid "Forget the E2E keys of this device and create a new identity? The old identity on the server is removed. Your contacts can see a key change. Old messages can stay unreadable. Select Forget and create identity again to continue."
+msgstr "Oublier les clés E2E de cet appareil et créer une nouvelle identité ? L'ancienne identité sur le serveur est supprimée. Tes contacts peuvent voir un changement de clé. Les anciens messages peuvent rester illisibles. Sélectionne de nouveau Oublier et créer l'identité pour continuer."
+
+msgctxt "AppWindow"
+msgid "This device has a new E2E identity. Select Start encrypted chat again."
+msgstr "Cet appareil a une nouvelle identité E2E. Sélectionne de nouveau Démarrer une discussion chiffrée."
+
+msgctxt "AppWindow"
+msgid "Forget and create identity"
+msgstr "Oublier et créer l'identité"
+
+msgctxt "AppWindow"
 msgid "The local E2E store of this network cannot be read. It was not changed. Restore it from a backup, then connect again."
 msgstr "Le stockage E2E local de ce réseau est illisible. Il n’a pas été modifié. Restaure-le depuis une sauvegarde, puis reconnecte-toi."
 
