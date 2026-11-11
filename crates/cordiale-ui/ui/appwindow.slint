@@ -222,6 +222,12 @@ struct ChatLine {
     nick-color: color,
     italic: bool,
     body: styled-text,
+    // A row without links and with one color and weight shows `selectable-body`
+    // in a read-only text input, so the user can select and copy part of it.
+    selectable: bool,
+    selectable-body: string,
+    body-color: color,
+    body-bold: bool,
     // Raw wire body for Reply; never reconstruct it from styled markup.
     reply-body: string,
     // Message id for Reply (empty when the row has none).
@@ -543,12 +549,13 @@ component MemberContextMenu {
     callback ban(string);
     callback ban-host(string);
     callback kickban(string);
-    callback whois(string);
+    callback whois(string, string); // nick, network of the row
     callback ctcp(string, string); // nick, verb
     callback query(string);
     callback nickname-clicked(string, string, string); // nick, network, source window
     callback ignore(string, bool); // nick, true to ignore
     callback reply(string, string, string); // nick, raw message body, message id
+    callback copy-row(); // copy the displayed text of the row
 
     // Opens the menu from outside, for a chat row whose own right-click
     // area is the whole row. The position is relative to this component.
@@ -562,6 +569,10 @@ component MemberContextMenu {
                 title: "↩  " + @tr("Reply");
                 enabled: reply-body != "";
                 activated => { reply(target-nick, reply-body, reply-id); }
+            }
+            if is-chat-message : MenuItem {
+                title: "📋  " + @tr("Copy");
+                activated => { copy-row(); }
             }
             MenuItem {
                 title: "⬆  " + @tr("Op");
@@ -605,7 +616,7 @@ component MemberContextMenu {
             }
             MenuItem {
                 title: "🔍  " + @tr("WHOIS");
-                activated => { whois(target-nick); }
+                activated => { whois(target-nick, source-network); }
             }
             Menu {
                 title: "📡  " + @tr("CTCP");
@@ -702,40 +713,67 @@ component TopMenuButton inherits Rectangle {
     in property <string> icon;
     in property <string> label;
     in property <bool> dark;
-    out property <bool> has-focus: button.has-focus;
+    out property <bool> has-focus: focus.has-focus;
     callback clicked();
 
     // A fixed square: the sidebar derives its minimum width from this size,
     // so the icon button must not grow with its emoji.
     width: 32px;
     height: 32px;
+    border-radius: 5px;
+    border-width: focus.has-focus ? 1px : 0px;
+    border-color: #8080807f;
+    background: touch.pressed ? #80808055 : (touch.has-hover ? #80808022 : transparent);
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
 
-    button := Button {
-        text: root.icon;
-        accessible-label: root.label;
-        width: parent.width;
-        height: parent.height;
-        clicked => { root.clicked(); }
+    focus := FocusScope {
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
 
-        // Slint's tooltip: an input-transparent popup next to the pointer,
-        // so it never takes a click meant for the icons under it.
-        Tooltip {
-            Rectangle {
-                border-radius: 4px;
-                border-width: 1px;
-                border-color: root.dark ? #5c5c5c : #a0a0a0;
-                background: root.dark ? #2b2b2b : #ffffe1;
+        // The icon fills the whole square and sits at its center, whatever
+        // the width of the glyph.
+        Text {
+            text: root.icon;
+            width: parent.width;
+            height: parent.height;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
 
-                HorizontalLayout {
-                    padding-top: 3px;
-                    padding-bottom: 3px;
-                    padding-left: 6px;
-                    padding-right: 6px;
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
 
-                    Text {
-                        text: root.label;
-                        font-size: 12px * FontScale.percent / 100;
-                        color: root.dark ? #f0f0f0 : #1a1a1a;
+            // Slint's tooltip: an input-transparent popup next to the pointer,
+            // so it never takes a click meant for the icons under it.
+            Tooltip {
+                Rectangle {
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: root.dark ? #5c5c5c : #a0a0a0;
+                    background: root.dark ? #2b2b2b : #ffffe1;
+
+                    HorizontalLayout {
+                        padding-top: 3px;
+                        padding-bottom: 3px;
+                        padding-left: 6px;
+                        padding-right: 6px;
+
+                        Text {
+                            text: root.label;
+                            font-size: 12px * FontScale.percent / 100;
+                            color: root.dark ? #f0f0f0 : #1a1a1a;
+                        }
                     }
                 }
             }
@@ -1259,6 +1297,8 @@ export component AppWindow inherits Window {
     in-out property <string> screen: "splash";
     in-out property <string> chat-copy-text;
     pure callback format-chat-copy([ChatLine]) -> string;
+    // The displayed text of one row, for the Copy item of its menu.
+    pure callback format-chat-row(ChatLine) -> string;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -1633,6 +1673,9 @@ export component AppWindow inherits Window {
     // The WHOIS avatar, once downloaded from Grappa.
     in property <image> reply-avatar;
     in property <bool> reply-avatar-visible: false;
+    // A WHOIS card shows in a popup over the current view; the selected
+    // window and its scroll position do not change.
+    in-out property <bool> whois-popup-open: false;
     in property <[ReplyRow]> reply-rows: [];
     // Archive of one network (`/archive`). `archive-confirm-target` is the
     // row awaiting delete confirmation, set and cleared by the screen itself.
@@ -2032,7 +2075,7 @@ export component AppWindow inherits Window {
     callback member-ban-requested(string);
     callback member-ban-host-requested(string);
     callback member-kickban-requested(string);
-    callback member-whois-requested(string);
+    callback member-whois-requested(string, string); // nick, network of the row
     callback member-ctcp-requested(string, string); // nick, verb
     callback member-query-requested(string);
     callback member-nickname-clicked(string, string, string); // nick, network, source window
@@ -5051,8 +5094,12 @@ export component AppWindow inherits Window {
                         alignment: start;
                         spacing: 0px;
 
-                        Text {
+                        // Read-only inputs, so the time can be selected and
+                        // copied with the mouse or Shift and the arrow keys.
+                        TextInput {
                             text: "[" + line.timestamp + "] ";
+                            read-only: true;
+                            wrap: no-wrap;
                             color: line.timestamp-color;
                             font-italic: line.italic;
                         }
@@ -5086,7 +5133,7 @@ export component AppWindow inherits Window {
                             ban(nick) => { member-ban-requested(nick); }
                             ban-host(nick) => { member-ban-host-requested(nick); }
                             kickban(nick) => { member-kickban-requested(nick); }
-                            whois(nick) => { member-whois-requested(nick); }
+                            whois(nick, network) => { member-whois-requested(nick, network); }
                             ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                             query(nick) => { member-query-requested(nick); }
                             nickname-clicked(nick, network, source) => {
@@ -5098,6 +5145,8 @@ export component AppWindow inherits Window {
                             reply(nick, body, id) => {
                                 reply-to-message-requested(nick, body, id);
                             }
+                            // Copies the row that opened this menu.
+                            copy-row => { copy-text-requested(format-chat-row(line)); }
                         }
 
                         if line.incoming : Text {
@@ -5108,7 +5157,19 @@ export component AppWindow inherits Window {
                             min-width: 0px;
                         }
 
-                        if !line.incoming : StyledText {
+                        if !line.incoming && line.selectable : TextInput {
+                            text: line.selectable-body;
+                            read-only: true;
+                            single-line: false;
+                            wrap: word-wrap;
+                            color: line.body-color;
+                            font-italic: line.italic;
+                            font-weight: line.body-bold ? 700 : 400;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                        }
+
+                        if !line.incoming && !line.selectable : StyledText {
                             text: line.body;
                             default-color: theme == "dark" ? white : black;
                             link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
@@ -5398,7 +5459,7 @@ export component AppWindow inherits Window {
                     ban(nick) => { member-ban-requested(nick); }
                     ban-host(nick) => { member-ban-host-requested(nick); }
                     kickban(nick) => { member-kickban-requested(nick); }
-                    whois(nick) => { member-whois-requested(nick); }
+                    whois(nick, network) => { member-whois-requested(nick, network); }
                     ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                     query(nick) => { member-query-requested(nick); }
                     nickname-clicked(nick, network, source) => {
@@ -5598,9 +5659,13 @@ export component AppWindow inherits Window {
             background: #8080804d;
         }
 
+        // The content pane scrolls on its own, so the navigation stays
+        // visible and tall sections (General) stay reachable.
+        ScrollView {
+            horizontal-stretch: 1;
+
         VerticalLayout {
             spacing: 12px;
-            horizontal-stretch: 1;
 
             if settings-section == "general" : VerticalLayout {
                 spacing: 12px;
@@ -8431,6 +8496,7 @@ export component AppWindow inherits Window {
                 vertical-stretch: 1;
             }
         }
+        }
     }
 
     if screen == "reply" : VerticalBox {
@@ -9734,6 +9800,92 @@ export component AppWindow inherits Window {
                             clicked => {
                                 e2e-request-action(status-kind == "e2e-recovery-confirm" ? "recover-confirm" : "recover", e2e-recovery-network, "", "");
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // WHOIS card: a compact popup over the current view. The screen and
+    // the chat behind it stay as they are, so closing returns to the same
+    // window and scroll position.
+    if whois-popup-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { whois-popup-open = false; }
+        }
+
+        FocusScope {
+            width: parent.width;
+            height: parent.height;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    whois-popup-open = false;
+                    return accept;
+                }
+                return reject;
+            }
+
+            Rectangle {
+                width: min(480px, parent.width - 32px);
+                height: min(420px, parent.height - 32px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-width: 1px;
+                border-radius: 8px;
+                border-color: #8080806a;
+                background: theme == "dark" ? #242424 : white;
+
+                // Keeps clicks inside the card from closing the popup.
+                TouchArea { }
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        spacing: 12px;
+
+                        if reply-avatar-visible : Image {
+                            source: reply-avatar;
+                            width: 64px;
+                            height: 64px;
+                            image-fit: contain;
+                            accessible-label: @tr("Avatar of {}", reply-subject);
+                        }
+                        Text {
+                            text: reply-title-text();
+                            font-size: 18px * FontScale.percent / 100;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            accessible-role: AccessibleRole.text;
+                        }
+                    }
+
+                    ListView {
+                        vertical-stretch: 1;
+                        for row in reply-rows : Text {
+                            text: row.label == ""
+                                ? row.value
+                                : (row.value == "" ? reply-label(row.label) : @tr("{}: {}", reply-label(row.label), row.value));
+                            wrap: word-wrap;
+                            accessible-role: AccessibleRole.text;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: end;
+                        CompactButton {
+                            text: @tr("Close");
+                            clicked => { whois-popup-open = false; }
                         }
                     }
                 }

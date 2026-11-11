@@ -5604,6 +5604,40 @@ fn copy_text_view_preserves_text_and_supports_read_only_copy() {
 }
 
 #[test]
+fn chat_row_text_copies_only_its_own_row_in_full() {
+    let first = ChatLine {
+        timestamp: "12:00".into(),
+        nick: "Alice".into(),
+        reply_body: "\x02Caffè\x02 https://example.org/a_b *not markup*".into(),
+        ..Default::default()
+    };
+    let second = ChatLine {
+        timestamp: "12:01".into(),
+        nick: "Bob".into(),
+        reply_body: "second".into(),
+        ..Default::default()
+    };
+    let system = ChatLine {
+        timestamp: "12:02".into(),
+        reply_body: "joined".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        chat_row_text(&first),
+        "[12:00] <Alice> Caffè https://example.org/a_b *not markup*"
+    );
+    assert_eq!(chat_row_text(&second), "[12:01] <Bob> second");
+    assert_eq!(chat_row_text(&system), "[12:02] joined");
+    // The row text is the matching line of the whole-chat snapshot.
+    let lines: slint::ModelRc<ChatLine> =
+        Rc::new(slint::VecModel::from(vec![first.clone(), second.clone()])).into();
+    assert_eq!(
+        chat_copy_text(&lines),
+        format!("{}\n{}", chat_row_text(&first), chat_row_text(&second))
+    );
+}
+
+#[test]
 fn nick_right_click_opens_menu_without_opening_query() {
     use slint::platform::{PointerEventButton, WindowEvent};
     set_headless_software_platform();
@@ -14354,4 +14388,31 @@ fn radio_and_admin_settings_keep_controls_at_the_top_in_tall_windows() {
             "{section}: the top of the panel changes with the window height"
         );
     }
+}
+
+#[test]
+fn selectable_body_text_keeps_only_plain_single_style_rows() {
+    let white = (255, 255, 255);
+    let red = (255, 0, 0);
+    let plain = vec![("Caff\u{e8} \u{1f642}".to_string(), white, false)];
+    assert_eq!(
+        selectable_body_text(&plain, "Caff\u{e8} \u{1f642}").as_deref(),
+        Some("Caff\u{e8} \u{1f642}")
+    );
+    let two_colors = vec![
+        ("a".to_string(), white, false),
+        ("b".to_string(), red, false),
+    ];
+    assert_eq!(selectable_body_text(&two_colors, "ab"), None);
+    let mixed_bold = vec![
+        ("a".to_string(), white, true),
+        ("b".to_string(), white, false),
+    ];
+    assert_eq!(selectable_body_text(&mixed_bold, "ab"), None);
+    let link = vec![("see https://example.org/a".to_string(), white, false)];
+    assert_eq!(
+        selectable_body_text(&link, "see https://example.org/a"),
+        None
+    );
+    assert_eq!(selectable_body_text(&[], ""), None);
 }

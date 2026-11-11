@@ -535,7 +535,10 @@ enum WorkerCommand {
     MemberBan(String),
     MemberBanHost(String),
     MemberKickBan(String),
-    MemberWhois(String),
+    MemberWhois {
+        nick: String,
+        network: String,
+    },
     MemberCtcp {
         nick: String,
         verb: String,
@@ -2691,8 +2694,8 @@ async fn run_worker(
                     Some(WorkerCommand::MemberKickBan(nick)) => {
                         start_member_host_ban(&mut state, &ui, nick, Some(String::new()));
                     }
-                    Some(WorkerCommand::MemberWhois(nick)) => {
-                        send_member_whois(&state, &nick);
+                    Some(WorkerCommand::MemberWhois { nick, network }) => {
+                        send_member_whois(&state, &network, &nick);
                     }
                     Some(WorkerCommand::MemberCtcp { nick, verb }) => {
                         handle_member_ctcp(&state, &ui, nick, verb).await;
@@ -3397,22 +3400,25 @@ async fn finish_connect(
     }
 }
 
+/// Plain text of one displayed row: time, sender and the full message.
+fn chat_row_text(line: &ChatLine) -> String {
+    let body: String = cordiale_core::formatting::parse_mirc_text(&line.reply_body)
+        .into_iter()
+        .map(|run| run.text)
+        .collect();
+    if line.nick.is_empty() {
+        format!("[{}] {}", line.timestamp, body)
+    } else {
+        format!("[{}] <{}> {}", line.timestamp, line.nick, body)
+    }
+}
+
 /// Plain snapshot of the displayed, loaded rows; preserve literal text and URLs.
 fn chat_copy_text(lines: &slint::ModelRc<ChatLine>) -> String {
     use slint::Model as _;
     lines
         .iter()
-        .map(|line| {
-            let body: String = cordiale_core::formatting::parse_mirc_text(&line.reply_body)
-                .into_iter()
-                .map(|run| run.text)
-                .collect();
-            if line.nick.is_empty() {
-                format!("[{}] {}", line.timestamp, body)
-            } else {
-                format!("[{}] <{}> {}", line.timestamp, line.nick, body)
-            }
-        })
+        .map(|line| chat_row_text(&line))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -7509,15 +7515,14 @@ fn send_member_ban(state: &WorkerState, nick: &str) {
 
 /// `source: "user"` matches Cicchetto's own default (the alternative,
 /// `"rail"`, isn't something Cordiale has a UI path to trigger from).
-fn send_member_whois(state: &WorkerState, nick: &str) {
-    let Some((session, topic, network_id, _channel)) = user_topic_channel_network(state) else {
-        return;
-    };
-    session.send_command(
-        topic,
+fn send_member_whois(state: &WorkerState, network: &str, nick: &str) {
+    // The network comes from the row that asked, never from the selected
+    // window: a query row has no channel and may sit on another network.
+    send_user_verb(
+        state,
+        network,
         "whois",
         serde_json::json!({
-            "network_id": network_id,
             "nick": nick,
             "server": Value::Null,
             "source": "user",
@@ -9464,7 +9469,16 @@ fn chat_line_from_message(
             slint::StyledText::from_plain_text(&plain)
         });
 
+    let selectable_body = selectable_body_text(&runs, display_text);
+
     ChatLine {
+        selectable: selectable_body.is_some() && !incoming && rename_target.is_empty(),
+        selectable_body: selectable_body.unwrap_or_default().into(),
+        body_color: runs.first().map_or(
+            slint::Color::from_rgb_u8(default_color.0, default_color.1, default_color.2),
+            |run| slint::Color::from_rgb_u8(run.1 .0, run.1 .1, run.1 .2),
+        ),
+        body_bold: runs.first().is_some_and(|run| run.2),
         timestamp: message.timestamp.clone().into(),
         timestamp_color: muted_color(dark_theme),
         nick: nick.into(),
@@ -9487,6 +9501,28 @@ fn chat_line_from_message(
         encrypted: message_lock_visible(message),
         incoming,
     }
+}
+
+/// The visible text of a row that a plain text input can show without
+/// losing anything: no link and one color and weight for every run. Other
+/// rows keep the styled text. Hidden markup never enters the text.
+fn selectable_body_text(
+    runs: &[(String, (u8, u8, u8), bool)],
+    display_text: &str,
+) -> Option<String> {
+    let first = runs.first()?;
+    if runs.iter().any(|run| run.1 != first.1 || run.2 != first.2) {
+        return None;
+    }
+    if !cordiale_core::media::find_links(display_text).is_empty() {
+        return None;
+    }
+    let text: String = runs
+        .iter()
+        .flat_map(|run| run.0.chars())
+        .filter(|ch| *ch != slint_markdown_placeholder())
+        .collect();
+    Some(text)
 }
 
 /// The marker text of the progress row of a multi-frame E2E message on its
@@ -11711,6 +11747,9 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
     let rows = view.rows.clone();
     // Only the message rows of the mentions summary (no label) lead anywhere.
     let mentions = kind == "mentions_bundle";
+    // A WHOIS card opens as a popup over the current view, so the chat and
+    // its scroll position stay where they are.
+    let popup = kind == "whois_bundle";
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let rows: Vec<ReplyRow> = rows
@@ -11728,7 +11767,16 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
         ui.set_reply_kind(kind.into());
         ui.set_reply_subject(subject.into());
         ui.set_reply_network(network.into());
-        if open {
+        if open && popup {
+            // The popup and the reply screen share the reply properties:
+            // leave a reply screen so it never shows the WHOIS card.
+            if ui.get_screen() == "reply" {
+                ui.set_screen("connected".into());
+            }
+            ui.set_whois_popup_open(true);
+        } else if open {
+            // A stale WHOIS popup must not draw over another reply.
+            ui.set_whois_popup_open(false);
             ui.set_screen("reply".into());
         }
     });
