@@ -14543,6 +14543,47 @@ fn selectable_body_text_keeps_only_plain_single_style_rows() {
 }
 
 #[test]
+fn rows_with_links_or_styles_get_a_selection_overlay() {
+    let chat_row = |text: &str| {
+        chat_line_from_message(
+            &render_message(
+                &serde_json::json!({"kind": "privmsg", "sender": "alice", "body": text, "id": 1}),
+                None,
+            ),
+            true,
+            "",
+        )
+    };
+    // A plain row uses the text input itself, so it has no overlay.
+    let plain = chat_row("Caff\u{e8} \u{1f642}");
+    assert!(plain.selectable);
+    assert_eq!(plain.overlay_body.as_str(), "");
+    // A link keeps its styled text and gets the visible text as overlay.
+    let link = chat_row("see https://example.org/a now");
+    assert!(!link.selectable);
+    assert_eq!(link.overlay_body.as_str(), "see https://example.org/a now");
+    // Colors and weights never enter the overlay text.
+    let styled = chat_row("\x02bold\x02 \x034red\x03 caff\u{e8}");
+    assert!(!styled.selectable);
+    assert_eq!(styled.overlay_body.as_str(), "bold red caff\u{e8}");
+}
+
+#[test]
+fn link_at_offset_finds_only_the_link_under_the_cursor() {
+    let text = "see https://example.org/a now";
+    assert_eq!(link_at_offset(text, 0), "");
+    assert_eq!(link_at_offset(text, 3), "");
+    assert_eq!(link_at_offset(text, 4), "https://example.org/a");
+    assert_eq!(link_at_offset(text, 10), "https://example.org/a");
+    assert_eq!(link_at_offset(text, 25), "");
+    assert_eq!(link_at_offset(text, -1), "");
+    // Offsets count bytes, as the text input does.
+    let accented = "caff\u{e8} www.example.org/x";
+    assert_eq!(link_at_offset(accented, 5), "");
+    assert_eq!(link_at_offset(accented, 7), "https://www.example.org/x");
+}
+
+#[test]
 fn media_content_uses_the_file_name_hint_last() {
     use cordiale_core::media::LinkTarget;
     // No type in the link or the Content-Type: the file name hint decides.

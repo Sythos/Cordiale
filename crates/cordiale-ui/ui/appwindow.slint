@@ -226,6 +226,10 @@ struct ChatLine {
     // in a read-only text input, so the user can select and copy part of it.
     selectable: bool,
     selectable-body: string,
+    // The visible text of a row that has links or several styles. A
+    // transparent text input over the styled text selects it. Empty when
+    // the row has no such overlay.
+    overlay-body: string,
     body-color: color,
     body-bold: bool,
     // Raw wire body for Reply; never reconstruct it from styled markup.
@@ -1391,6 +1395,8 @@ export component AppWindow inherits Window {
     pure callback format-chat-row(ChatLine) -> string;
     // The displayed text of the rows from the first index to the last one.
     pure callback format-chat-range([ChatLine], int, int) -> string;
+    // The link of a row text under a byte offset of the text cursor, or "".
+    pure callback chat-link-at(string, int) -> string;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -5386,7 +5392,116 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                if !line.incoming && !line.selectable : StyledText {
+                                // Links or several styles: the styled text stays
+                                // visible and a transparent text input of the same
+                                // text lies over it, so the mouse and the keys
+                                // select it. The input takes the clicks, so a click
+                                // on a link opens it from the cursor offset.
+                                if !line.incoming && !line.selectable && line.overlay-body != "" : Rectangle {
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                    min-height: styled-body.preferred-height;
+
+                                    // The link a click can open, and a keyboard move
+                                    // that must not open it.
+                                    property <string> pending-link: "";
+                                    property <bool> key-moved: false;
+
+                                    styled-body := StyledText {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: parent.width;
+                                        text: line.body;
+                                        default-color: theme == "dark" ? white : black;
+                                        link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
+                                    }
+
+                                    // The input never sees the end of a click, so a
+                                    // link opens when the cursor stays on it without
+                                    // a selection for a short time. A drag or a key
+                                    // move cancels it.
+                                    link-timer := Timer {
+                                        interval: 250ms;
+                                        running: false;
+                                        triggered => {
+                                            self.stop();
+                                            if pending-link != ""
+                                                && overlay-input.cursor-position-byte-offset == overlay-input.anchor-position-byte-offset {
+                                                chat-link-clicked(pending-link);
+                                            }
+                                            pending-link = "";
+                                        }
+                                    }
+
+                                    key-timer := Timer {
+                                        interval: 300ms;
+                                        running: false;
+                                        triggered => {
+                                            self.stop();
+                                            key-moved = false;
+                                        }
+                                    }
+
+                                    overlay-input := TextInput {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        text: line.overlay-body;
+                                        read-only: true;
+                                        single-line: false;
+                                        wrap: word-wrap;
+                                        color: transparent;
+                                        selection-foreground-color: transparent;
+                                        selection-background-color: #3b82f688;
+                                        font-italic: line.italic;
+                                        font-weight: line.body-bold ? 700 : 400;
+                                        changed has-focus => {
+                                            if self.has-focus {
+                                                chat-sel-anchor = -1;
+                                                chat-sel-focus = -1;
+                                            }
+                                        }
+                                        // A new selection in an input that keeps its
+                                        // focus drops the old rows. The cursor moves of
+                                        // a drag that picks rows do not.
+                                        changed cursor-position-byte-offset => {
+                                            if !row.ranging {
+                                                chat-sel-anchor = -1;
+                                                chat-sel-focus = -1;
+                                            }
+                                        }
+                                        changed anchor-position-byte-offset => {
+                                            if !row.ranging {
+                                                chat-sel-anchor = -1;
+                                                chat-sel-focus = -1;
+                                            }
+                                        }
+                                        key-pressed(event) => {
+                                            key-moved = true;
+                                            key-timer.start();
+                                            key-timer.restart();
+                                            pending-link = "";
+                                            return reject;
+                                        }
+                                        // Runs on a press and on the cursor moves of a
+                                        // drag. A press without Shift puts the anchor
+                                        // and the cursor at one offset.
+                                        cursor-position-changed(position) => {
+                                            pending-link = "";
+                                            if !key-moved
+                                                && self.cursor-position-byte-offset == self.anchor-position-byte-offset {
+                                                pending-link = chat-link-at(line.overlay-body, self.cursor-position-byte-offset);
+                                                if pending-link != "" {
+                                                    link-timer.start();
+                                                    link-timer.restart();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if !line.incoming && !line.selectable && line.overlay-body == "" : StyledText {
                                     text: line.body;
                                     default-color: theme == "dark" ? white : black;
                                     link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
