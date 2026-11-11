@@ -473,6 +473,8 @@ component NickQueryButton inherits Rectangle {
     in property <bool> selectable: false;
     callback activated();
     callback context-menu-requested(Point);
+    // A drag selected the nick text.
+    callback nick-selected();
 
     property <bool> drag-selected: false;
 
@@ -522,6 +524,7 @@ component NickQueryButton inherits Rectangle {
             if root.selectable && self.pressed && !root.drag-selected
                 && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
                 root.drag-selected = true;
+                root.nick-selected();
                 nick-input.focus();
                 nick-input.select-all();
             }
@@ -572,6 +575,7 @@ component MemberContextMenu {
     in property <bool> text-italic: false;
     // A chat row lets the user select the nick text with a drag.
     in property <bool> selectable-nick: false;
+    callback nick-selected();
     callback mode-action(string, string); // verb, nick
     callback kick(string);
     callback ban(string);
@@ -690,6 +694,7 @@ component MemberContextMenu {
                 text-bold: text-bold;
                 text-italic: text-italic;
                 selectable: selectable-nick;
+                nick-selected => { root.nick-selected(); }
                 activated => {
                     nickname-clicked(target-nick, source-network, source-window);
                 }
@@ -5314,6 +5319,11 @@ export component AppWindow inherits Window {
                                     text-bold: true;
                                     text-italic: line.italic;
                                     selectable-nick: true;
+                                    // A drag on the nick drops the old rows.
+                                    nick-selected => {
+                                        chat-sel-anchor = -1;
+                                        chat-sel-focus = -1;
+                                    }
                                     mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
                                     kick(nick) => { member-kick-requested(nick); }
                                     ban(nick) => { member-ban-requested(nick); }
