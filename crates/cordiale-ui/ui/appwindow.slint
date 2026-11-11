@@ -222,6 +222,12 @@ struct ChatLine {
     nick-color: color,
     italic: bool,
     body: styled-text,
+    // A row without links and with one color and weight shows `selectable-body`
+    // in a read-only text input, so the user can select and copy part of it.
+    selectable: bool,
+    selectable-body: string,
+    body-color: color,
+    body-bold: bool,
     // Raw wire body for Reply; never reconstruct it from styled markup.
     reply-body: string,
     // Message id for Reply (empty when the row has none).
@@ -5032,8 +5038,12 @@ export component AppWindow inherits Window {
                         alignment: start;
                         spacing: 0px;
 
-                        Text {
+                        // Read-only inputs, so the time can be selected and
+                        // copied with the mouse or Shift and the arrow keys.
+                        TextInput {
                             text: "[" + line.timestamp + "] ";
+                            read-only: true;
+                            wrap: no-wrap;
                             color: line.timestamp-color;
                             font-italic: line.italic;
                         }
@@ -5089,7 +5099,19 @@ export component AppWindow inherits Window {
                             min-width: 0px;
                         }
 
-                        if !line.incoming : StyledText {
+                        if !line.incoming && line.selectable : TextInput {
+                            text: line.selectable-body;
+                            read-only: true;
+                            single-line: false;
+                            wrap: word-wrap;
+                            color: line.body-color;
+                            font-italic: line.italic;
+                            font-weight: line.body-bold ? 700 : 400;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                        }
+
+                        if !line.incoming && !line.selectable : StyledText {
                             text: line.body;
                             default-color: theme == "dark" ? white : black;
                             link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
