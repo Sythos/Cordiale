@@ -3,8 +3,10 @@
 //! Everything is decoded in Rust, so the formats do not depend on the codecs
 //! of the platform: symphonia reads the containers and decodes MP3, Vorbis,
 //! FLAC, WAV and AAC; `opus-decoder` decodes Opus (also the Ogg/Opus files
-//! of older iOS devices); `rusty_h265` decodes HEVC/H.265 in MP4, MOV and
-//! M4V; `rusty_vp9` decodes VP9 in WebM.
+//! of older iOS devices); `rusty_h264-decoder` decodes H.264 and `rusty_h265`
+//! decodes HEVC/H.265 in MP4, MOV and M4V; `vp8-decoder`, `rusty_vp9` and
+//! `rusty_av1d` decode VP8, VP9 and AV1 in WebM. Vorbis in WebM goes through
+//! symphonia.
 //!
 //! One controller thread owns the output device and the open file. Audio
 //! plays through rodio and is the clock of the video. A file with no audio
@@ -24,6 +26,7 @@ use rodio::{ChannelCount, Sample, SampleRate, Source};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{
     CodecParameters, Decoder as SymphoniaDecoder, DecoderOptions, CODEC_TYPE_NULL, CODEC_TYPE_OPUS,
+    CODEC_TYPE_VORBIS,
 };
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader, Packet, SeekMode, SeekTo};
@@ -819,6 +822,42 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
     Ok(source)
 }
 
+/// The Vorbis sound of a WebM file. symphonia decodes the packets; the
+/// headers of the track are its set-up data.
+fn vorbis_source(
+    bytes: &Arc<[u8]>,
+    track: media_demux::VorbisTrack,
+    total: Option<Duration>,
+) -> Option<AudioSource> {
+    if track.packets.is_empty() {
+        return None;
+    }
+    let mut params = CodecParameters::new();
+    params
+        .for_codec(CODEC_TYPE_VORBIS)
+        .with_sample_rate(track.sample_rate)
+        .with_extra_data(track.headers.into_boxed_slice());
+    let decoder = symphonia::default::get_codecs()
+        .make(&params, &DecoderOptions::default())
+        .ok()?;
+    let mut source = AudioSource {
+        packets: Packets::List {
+            bytes: Arc::clone(bytes),
+            list: track.packets,
+            next: 0,
+        },
+        track_id: 0,
+        decode: Decode::Symphonia(decoder),
+        channels: track.channels.min(usize::from(u16::MAX)) as u16,
+        rate: track.sample_rate,
+        pending: Vec::new(),
+        at: 0,
+        skip: 0,
+        total,
+    };
+    source.refill().then_some(source)
+}
+
 /// The length of an Ogg/Opus file, from the position of its last page.
 fn ogg_opus_duration(bytes: &[u8], pre_skip: u32) -> Option<Duration> {
     let last = bytes.windows(4).rposition(|window| window == b"OggS")?;
@@ -848,14 +887,20 @@ pub struct Planar {
     pub shift_x: usize,
     pub shift_y: usize,
     pub mono: bool,
+    /// The samples use the full range 0 to 255, not the limited range 16 to
+    /// 235 (luma) and 16 to 240 (chroma).
+    pub full_range: bool,
+    /// The planes hold green, blue and red (identity matrix), not YUV.
+    pub identity: bool,
 }
 
 fn clamp_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
 
-/// Converts a picture to straight RGBA, with the BT.709 matrix and the
-/// limited range that video files use.
+/// Converts a picture to straight RGBA, with the BT.709 matrix. The range is
+/// limited unless the picture says that it is full. A picture with the
+/// identity matrix has its planes copied as green, blue and red.
 pub fn to_rgba(picture: &Planar) -> Option<Vec<u8>> {
     let (width, height) = (picture.width, picture.height);
     if width == 0 || height == 0 || width.checked_mul(height)? > MAX_PIXELS {
@@ -887,12 +932,26 @@ pub fn to_rgba(picture: &Planar) -> Option<Vec<u8>> {
                     i32::from(picture.planes[2][at]),
                 )
             };
-            let c = 298 * (i32::from(luma[column]) - 16);
+            if picture.identity {
+                // Planes in order: green, blue, red.
+                pixel[0] = v as u8;
+                pixel[1] = luma[column];
+                pixel[2] = u as u8;
+                continue;
+            }
             let d = u - 128;
             let e = v - 128;
-            pixel[0] = clamp_u8((c + 459 * e + 128) >> 8);
-            pixel[1] = clamp_u8((c - 55 * d - 136 * e + 128) >> 8);
-            pixel[2] = clamp_u8((c + 541 * d + 128) >> 8);
+            if picture.full_range {
+                let c = 256 * i32::from(luma[column]);
+                pixel[0] = clamp_u8((c + 403 * e + 128) >> 8);
+                pixel[1] = clamp_u8((c - 48 * d - 120 * e + 128) >> 8);
+                pixel[2] = clamp_u8((c + 475 * d + 128) >> 8);
+            } else {
+                let c = 298 * (i32::from(luma[column]) - 16);
+                pixel[0] = clamp_u8((c + 459 * e + 128) >> 8);
+                pixel[1] = clamp_u8((c - 55 * d - 136 * e + 128) >> 8);
+                pixel[2] = clamp_u8((c + 541 * d + 128) >> 8);
+            }
         }
     }
     Some(out)
@@ -967,6 +1026,8 @@ fn hevc_planar(frame: &rusty_h265::frame::Frame) -> Option<Planar> {
         shift_x,
         shift_y,
         mono,
+        full_range: false,
+        identity: false,
     })
 }
 
@@ -1016,12 +1077,156 @@ fn vp9_planar(frame: &rusty_vp9::DecodedFrame) -> Option<Planar> {
         shift_x,
         shift_y,
         mono: false,
+        full_range: false,
+        identity: false,
+    })
+}
+
+/// A picture with 8-bit 4:2:0 planes and tight rows (H.264 and VP8 give
+/// this). `None` when a plane is shorter than the size needs.
+fn yuv420_planar(
+    width: usize,
+    height: usize,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+) -> Option<Planar> {
+    if width == 0 || height == 0 || width.checked_mul(height)? > MAX_PIXELS {
+        return None;
+    }
+    let chroma_width = width.div_ceil(2);
+    let chroma_size = chroma_width * height.div_ceil(2);
+    if y.len() < width * height || u.len() < chroma_size || v.len() < chroma_size {
+        return None;
+    }
+    Some(Planar {
+        width,
+        height,
+        planes: [y, u, v],
+        strides: [width, chroma_width, chroma_width],
+        shift_x: 2,
+        shift_y: 2,
+        mono: false,
+        full_range: false,
+        identity: false,
+    })
+}
+
+/// Puts a picture in the queue at the place of its time. Decoders that do
+/// not reorder give the pictures in decode order, and a B picture has an
+/// earlier time than the picture before it.
+fn queue_sorted(queue: &mut VecDeque<(i64, Planar)>, pts: i64, picture: Planar) {
+    let at = queue.partition_point(|(time, _)| *time <= pts);
+    queue.insert(at, (pts, picture));
+}
+
+/// Sends one AV1 temporal unit to the decoder and queues the pictures that
+/// come out.
+fn av1_decode(
+    decoder: &mut rusty_av1d::Decoder,
+    data: &[u8],
+    pts: i64,
+    queue: &mut VecDeque<(i64, Planar)>,
+) {
+    use rusty_av1d::Rav1dError;
+    let mut sent = decoder.send_data(Box::from(data), None, Some(pts), None);
+    // Every round drains the pictures, so the data that waited goes in at
+    // the next round. The count only stops a decoder that does not advance.
+    for _ in 0..64 {
+        while let Ok(picture) = decoder.get_picture() {
+            if let Some(planar) = av1_planar(&picture) {
+                queue_sorted(queue, picture.timestamp().unwrap_or(pts), planar);
+            }
+        }
+        match sent {
+            Err(Rav1dError::TryAgain) => sent = decoder.send_pending_data(),
+            _ => break,
+        }
+    }
+}
+
+/// A picture of the AV1 decoder as 8-bit planes. A picture with more than 8
+/// bits per sample is narrowed.
+fn av1_planar(picture: &rusty_av1d::Picture) -> Option<Planar> {
+    use rusty_av1d::{PixelLayout, PlanarImageComponent};
+    let (width, height) = (picture.width() as usize, picture.height() as usize);
+    if width == 0 || height == 0 || width.checked_mul(height)? > MAX_PIXELS {
+        return None;
+    }
+    let (shift_x, shift_y, mono) = match picture.pixel_layout() {
+        PixelLayout::I400 => (1usize, 1usize, true),
+        PixelLayout::I420 => (2, 2, false),
+        PixelLayout::I422 => (2, 1, false),
+        PixelLayout::I444 => (1, 1, false),
+    };
+    let wide = picture.bit_depth() > 8;
+    let shift = picture
+        .bits_per_component()
+        .map_or(0, |bits| u32::from(bits.0.saturating_sub(8)));
+    let mut planes: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    let mut strides = [0usize; 3];
+    for (index, component) in [
+        PlanarImageComponent::Y,
+        PlanarImageComponent::U,
+        PlanarImageComponent::V,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if mono && index > 0 {
+            break;
+        }
+        let (plane_width, plane_height) = if index == 0 {
+            (width, height)
+        } else {
+            (width.div_ceil(shift_x), height.div_ceil(shift_y))
+        };
+        let bytes_per_sample = if wide { 2 } else { 1 };
+        let stride = picture.stride(component) as usize;
+        let data = picture.plane(component);
+        let mut out = Vec::with_capacity(plane_width * plane_height);
+        for row in 0..plane_height {
+            let start = row.checked_mul(stride)?;
+            let source = data.get(start..start.checked_add(plane_width * bytes_per_sample)?)?;
+            if wide {
+                out.extend(
+                    source
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| (u16::from_le_bytes(*pair) >> shift) as u8),
+                );
+            } else {
+                out.extend_from_slice(source);
+            }
+        }
+        planes[index] = out;
+        strides[index] = plane_width;
+    }
+    Some(Planar {
+        width,
+        height,
+        planes,
+        strides,
+        shift_x,
+        shift_y,
+        mono,
+        full_range: matches!(picture.color_range(), rusty_av1d::pixel::YUVRange::Full),
+        // A gray picture has no color planes to be identity.
+        identity: !mono
+            && matches!(
+                picture.matrix_coefficients(),
+                rusty_av1d::pixel::MatrixCoefficients::Identity
+            ),
     })
 }
 
 enum Decoder {
+    H264(Box<rusty_h264_decoder::Decoder>),
     Hevc(Box<rusty_h265::decoder::Decoder>),
+    Vp8(Box<vp8_decoder::Decoder>),
     Vp9(Box<rusty_vp9::Vp9Decoder>),
+    Av1(Box<rusty_av1d::Decoder>),
 }
 
 /// The decoded pictures of one file, and the position in its sample list.
@@ -1039,6 +1244,17 @@ struct VideoPlayer {
 /// A track with its decoder set up, or the reason the file can't play.
 fn new_decoder(track: &VideoTrack) -> Result<Decoder, String> {
     match track.codec {
+        VideoCodec::H264 => {
+            let mut decoder = rusty_h264_decoder::Decoder::new();
+            // The sequence and picture parameter sets come first.
+            let mut sets = Vec::new();
+            for set in &track.parameter_sets {
+                sets.extend_from_slice(&ANNEX_B_START);
+                sets.extend_from_slice(set);
+            }
+            let _ = decoder.decode(&sets);
+            Ok(Decoder::H264(Box::new(decoder)))
+        }
         VideoCodec::Hevc => {
             let mut decoder = rusty_h265::decoder::Decoder::new();
             for set in &track.parameter_sets {
@@ -1046,9 +1262,60 @@ fn new_decoder(track: &VideoTrack) -> Result<Decoder, String> {
             }
             Ok(Decoder::Hevc(Box::new(decoder)))
         }
+        VideoCodec::Vp8 => {
+            let mut decoder = vp8_decoder::Decoder::new();
+            decoder.set_max_pixels(MAX_PIXELS as u64);
+            Ok(Decoder::Vp8(Box::new(decoder)))
+        }
         VideoCodec::Vp9 => Ok(Decoder::Vp9(Box::new(rusty_vp9::Vp9Decoder::new()))),
+        VideoCodec::Av1 => {
+            let mut settings = rusty_av1d::Settings::new();
+            // One thread and no frame delay: a picture comes out of the
+            // decoder right after the data that holds it.
+            settings.set_n_threads(1);
+            settings.set_max_frame_delay(1);
+            settings.set_frame_size_limit(MAX_PIXELS as u32);
+            let mut decoder = rusty_av1d::Decoder::with_settings(&settings)
+                .map_err(|_| "unsupported video codec".to_string())?;
+            // The sequence header from the file header, before any frame.
+            for set in &track.parameter_sets {
+                if !set.is_empty() {
+                    let _ = decoder.send_data(set.clone().into_boxed_slice(), None, None, None);
+                    while decoder.send_pending_data().is_err() {
+                        if decoder.get_picture().is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(Decoder::Av1(Box::new(decoder)))
+        }
         VideoCodec::Other => Err("unsupported video codec".to_string()),
     }
+}
+
+/// The start code in front of a NAL unit in an Annex B stream.
+const ANNEX_B_START: [u8; 4] = [0, 0, 0, 1];
+
+/// A sample with a length in front of each NAL unit (MP4, Matroska) as an
+/// Annex B access unit. The data stops at a length that does not fit.
+fn length_prefixed_to_annex_b(data: &[u8], length_size: usize) -> Vec<u8> {
+    let length_size = length_size.clamp(1, 4);
+    let mut out = Vec::with_capacity(data.len() + 16);
+    let mut at = 0usize;
+    while at + length_size <= data.len() {
+        let size = data[at..at + length_size]
+            .iter()
+            .fold(0usize, |acc, byte| (acc << 8) | usize::from(*byte));
+        at += length_size;
+        let Some(nal) = at.checked_add(size).and_then(|end| data.get(at..end)) else {
+            break;
+        };
+        out.extend_from_slice(&ANNEX_B_START);
+        out.extend_from_slice(nal);
+        at += size;
+    }
+    out
 }
 
 impl VideoPlayer {
@@ -1093,6 +1360,8 @@ impl VideoPlayer {
             match &mut self.decoder {
                 Decoder::Hevc(decoder) => decoder.flush(),
                 Decoder::Vp9(decoder) => decoder.flush(),
+                // These give each picture with the sample that holds it.
+                Decoder::H264(_) | Decoder::Vp8(_) | Decoder::Av1(_) => {}
             }
             self.collect();
             return;
@@ -1106,6 +1375,33 @@ impl VideoPlayer {
             return;
         };
         match &mut self.decoder {
+            Decoder::H264(decoder) => {
+                let access_unit = length_prefixed_to_annex_b(data, self.track.nal_length_size);
+                if let Ok(Some(frame)) = decoder.decode(&access_unit) {
+                    if let Some(picture) =
+                        yuv420_planar(frame.width, frame.height, frame.y, frame.u, frame.v)
+                    {
+                        queue_sorted(&mut self.decoded, sample.pts_us, picture);
+                    }
+                }
+            }
+            Decoder::Vp8(decoder) => {
+                if let Ok(Some(picture)) = decoder.decode(data) {
+                    let (width, height) = (picture.width as usize, picture.height as usize);
+                    let luma = width * height;
+                    let chroma = picture.chroma_width() as usize * picture.chroma_height() as usize;
+                    // Tight planes: Y, then U, then V, without padding.
+                    let mut planes = picture.to_i420();
+                    if planes.len() >= luma + 2 * chroma {
+                        let v = planes.split_off(luma + chroma);
+                        let u = planes.split_off(luma);
+                        if let Some(picture) = yuv420_planar(width, height, planes, u, v) {
+                            queue_sorted(&mut self.decoded, sample.pts_us, picture);
+                        }
+                    }
+                }
+            }
+            Decoder::Av1(decoder) => av1_decode(decoder, data, sample.pts_us, &mut self.decoded),
             Decoder::Hevc(decoder) => {
                 let length_size = self.track.nal_length_size.clamp(1, 4);
                 let mut at = 0usize;
@@ -1148,6 +1444,8 @@ impl VideoPlayer {
                     }
                 }
             }
+            // Queued by `decode_next`, with the time of their sample.
+            Decoder::H264(_) | Decoder::Vp8(_) | Decoder::Av1(_) => {}
         }
     }
 
@@ -1200,6 +1498,12 @@ fn open_video(
     if extension == "webm" {
         let media = media_demux::webm(bytes)?;
         let track = media.video.ok_or("no video track")?;
+        let total = media
+            .duration_us
+            .map(|us| Duration::from_micros(us.max(0) as u64));
+        let vorbis = media
+            .vorbis
+            .and_then(|track| vorbis_source(bytes, track, total));
         let audio = media.audio.and_then(|opus| {
             let first = !opus.packets.is_empty();
             let channels = opus.channels;
@@ -1216,12 +1520,11 @@ fn open_video(
                 pending: Vec::new(),
                 at: 0,
                 skip: opus.pre_skip * channels,
-                total: media
-                    .duration_us
-                    .map(|us| Duration::from_micros(us.max(0) as u64)),
+                total,
             };
             (first && source.refill()).then_some(source)
         });
+        let audio = audio.or(vorbis);
         return Ok((VideoPlayer::new(Arc::clone(bytes), track)?, audio));
     }
     let track = media_demux::mp4_video(bytes)?;
@@ -1248,7 +1551,32 @@ mod tests {
             shift_x: 2,
             shift_y: 2,
             mono: false,
+            full_range: false,
+            identity: false,
         }
+    }
+
+    #[test]
+    fn full_range_black_and_white_convert() {
+        let mut black = gray(3, 3, 0);
+        black.full_range = true;
+        assert_eq!(&to_rgba(&black).expect("picture")[..4], &[0, 0, 0, 255]);
+        let mut white = gray(3, 3, 255);
+        white.full_range = true;
+        assert_eq!(
+            &to_rgba(&white).expect("picture")[..4],
+            &[255, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn identity_planes_are_green_blue_and_red() {
+        let mut picture = gray(2, 2, 10);
+        picture.identity = true;
+        picture.planes[1] = vec![20; 1];
+        picture.planes[2] = vec![30; 1];
+        let rgba = to_rgba(&picture).expect("picture");
+        assert_eq!(&rgba[..4], &[30, 10, 20, 255]);
     }
 
     #[test]
@@ -1274,6 +1602,8 @@ mod tests {
             shift_x: 2,
             shift_y: 2,
             mono: false,
+            full_range: false,
+            identity: false,
         };
         assert!(to_rgba(&huge).is_none());
     }
@@ -1356,6 +1686,129 @@ mod tests {
         assert_eq!(clock_text(f64::NAN), "0:00");
         assert_eq!(clock_label(5.0, 61.0), "0:05 / 1:01");
         assert_eq!(clock_label(5.0, 0.0), "0:05");
+    }
+
+    #[test]
+    fn length_prefixed_samples_become_annex_b() {
+        let sample = [0, 0, 0, 2, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC];
+        assert_eq!(
+            length_prefixed_to_annex_b(&sample, 4),
+            vec![0, 0, 0, 1, 0xAA, 0xBB, 0, 0, 0, 1, 0xCC]
+        );
+        // Two bytes of length.
+        assert_eq!(
+            length_prefixed_to_annex_b(&[0, 1, 0xDD, 0, 2, 1, 2], 2),
+            vec![0, 0, 0, 1, 0xDD, 0, 0, 0, 1, 1, 2]
+        );
+        // A length that runs past the data ends the conversion.
+        assert_eq!(
+            length_prefixed_to_annex_b(&[0, 0, 0, 1, 0xEE, 0, 0, 0, 9, 1], 4),
+            vec![0, 0, 0, 1, 0xEE]
+        );
+        assert!(length_prefixed_to_annex_b(&[], 4).is_empty());
+        assert!(length_prefixed_to_annex_b(&[0, 0], 4).is_empty());
+    }
+
+    #[test]
+    fn pictures_in_decode_order_are_queued_in_time_order() {
+        let mut queue = VecDeque::new();
+        // An I picture, a P picture, then the B pictures between them.
+        for pts in [0, 120_000, 40_000, 80_000, 160_000] {
+            queue_sorted(&mut queue, pts, gray(2, 2, 16));
+        }
+        let times: Vec<i64> = queue.iter().map(|(pts, _)| *pts).collect();
+        assert_eq!(times, vec![0, 40_000, 80_000, 120_000, 160_000]);
+        // A picture with a time that is already queued goes after it.
+        queue_sorted(&mut queue, 40_000, gray(2, 2, 235));
+        assert_eq!(queue[1].1.planes[0][0], 16);
+        assert_eq!(queue[2].1.planes[0][0], 235);
+    }
+
+    #[test]
+    fn tight_420_planes_make_a_picture() {
+        let picture =
+            yuv420_planar(3, 3, vec![16; 9], vec![128; 4], vec![128; 4]).expect("picture");
+        assert_eq!(picture.strides, [3, 2, 2]);
+        assert!(to_rgba(&picture).is_some());
+        // A chroma plane that is too short, and a picture of no size.
+        assert!(yuv420_planar(3, 3, vec![16; 9], vec![128; 3], vec![128; 4]).is_none());
+        assert!(yuv420_planar(0, 3, Vec::new(), Vec::new(), Vec::new()).is_none());
+    }
+
+    #[test]
+    fn every_built_in_video_codec_has_a_decoder() {
+        for codec in [
+            VideoCodec::H264,
+            VideoCodec::Hevc,
+            VideoCodec::Vp8,
+            VideoCodec::Vp9,
+            VideoCodec::Av1,
+        ] {
+            let (_, track) = garbage_track(codec);
+            assert!(new_decoder(&track).is_ok(), "{codec:?}");
+        }
+        let (_, track) = garbage_track(VideoCodec::Other);
+        assert!(new_decoder(&track).is_err());
+    }
+
+    /// A file of three samples that are not video, and a track that names
+    /// `codec` for them.
+    fn garbage_track(codec: VideoCodec) -> (Arc<[u8]>, VideoTrack) {
+        let mut sample = vec![0, 0, 0, 12, 0x65];
+        sample.extend_from_slice(&[0xFF; 11]);
+        let bytes: Arc<[u8]> = Arc::from(sample.repeat(3));
+        let samples = (0..3)
+            .map(|index| VideoSample {
+                offset: index * 16,
+                size: 16,
+                pts_us: index as i64 * 40_000,
+                key: index == 0,
+            })
+            .collect();
+        let track = VideoTrack {
+            codec,
+            width: 16,
+            height: 16,
+            parameter_sets: Vec::new(),
+            nal_length_size: 4,
+            samples,
+        };
+        (bytes, track)
+    }
+
+    #[test]
+    fn samples_that_are_not_video_give_no_picture_and_no_panic() {
+        for codec in [VideoCodec::H264, VideoCodec::Vp8, VideoCodec::Av1] {
+            let (bytes, track) = garbage_track(codec);
+            let mut player = VideoPlayer::new(bytes, track).expect("player");
+            for _ in 0..5 {
+                player.decode_next();
+            }
+            assert!(player.decoded.is_empty(), "{codec:?}");
+            assert!(player.finished(), "{codec:?}");
+            // A seek starts over with a new decoder.
+            player.seek(0.0);
+            assert!(!player.finished());
+        }
+    }
+
+    #[test]
+    fn a_vorbis_track_with_bad_headers_is_not_played() {
+        let bytes: Arc<[u8]> = Arc::from(vec![0u8; 8]);
+        let track = media_demux::VorbisTrack {
+            channels: 2,
+            sample_rate: 44_100,
+            headers: vec![1, 2, 3],
+            packets: vec![(0, 4, 0)],
+        };
+        assert!(vorbis_source(&bytes, track, None).is_none());
+        let empty = media_demux::VorbisTrack {
+            channels: 2,
+            sample_rate: 44_100,
+            headers: Vec::new(),
+            packets: Vec::new(),
+        };
+        assert!(vorbis_source(&bytes, empty, None).is_none());
     }
 
     #[test]

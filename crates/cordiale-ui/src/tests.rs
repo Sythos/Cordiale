@@ -7119,6 +7119,40 @@ fn software_renderer_preserves_topics_and_compact_button_hit_areas() {
 }
 
 #[test]
+fn closing_the_media_viewer_keeps_the_chat_scroll_and_draft() {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1200., 800.));
+    ui.set_screen("connected".into());
+    ui.set_current_channel_label("#rust".into());
+    ui.set_compose_text("a draft that is not sent yet".into());
+    ui.set_chat_scroll_y(-420.0);
+    ui.set_chat_follow_bottom(false);
+    // The pane may clamp what was set; the viewer must not change the result.
+    let scroll = ui.get_chat_scroll_y();
+    let follow = ui.get_chat_follow_bottom();
+    for kind in ["loading", "image", "failed"] {
+        ui.set_media_kind(kind.into());
+        ui.set_media_open(true);
+        // The chat is still in place behind the popup.
+        assert_eq!(ui.get_current_channel_label().as_str(), "#rust");
+        assert_eq!(
+            ui.get_compose_text().as_str(),
+            "a draft that is not sent yet"
+        );
+        ui.set_media_open(false);
+        assert_eq!(ui.get_screen().as_str(), "connected");
+        assert_eq!(ui.get_current_channel_label().as_str(), "#rust");
+        assert_eq!(
+            ui.get_compose_text().as_str(),
+            "a draft that is not sent yet"
+        );
+        assert_eq!(ui.get_chat_scroll_y(), scroll);
+        assert_eq!(ui.get_chat_follow_bottom(), follow);
+    }
+}
+
+#[test]
 fn theme_backgrounds_resolve_like_cicchetto() {
     use cordiale_core::rest::ThemeBackgroundWire;
     let builtin = ThemeBackgroundWire {

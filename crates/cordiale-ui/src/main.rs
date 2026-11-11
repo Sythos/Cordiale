@@ -26,6 +26,7 @@ slint::include_modules!();
 
 mod admin_handlers;
 mod admin_uploads;
+mod avif_image;
 mod ceremony;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
 mod ceremony_ctap;
@@ -10147,7 +10148,16 @@ fn media_content_with(
                 },
                 None => MediaContent::Failed("unsupported image".to_string()),
             },
-            "avif" => MediaContent::Failed("unsupported image".to_string()),
+            "avif" => match avif_image::decode(&bytes) {
+                Some(picture) => MediaContent::Pixels {
+                    width: picture.width,
+                    height: picture.height,
+                    rgba: picture.rgba,
+                    extension,
+                    bytes,
+                },
+                None => MediaContent::Failed("unsupported image".to_string()),
+            },
             _ => match raster_image::animation(&bytes, &extension) {
                 Some(frames) => MediaContent::Animated(frames, extension, bytes),
                 None => {

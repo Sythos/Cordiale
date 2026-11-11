@@ -1,7 +1,7 @@
 //! Container readers for the in-app video player: MP4/MOV/M4V and WebM.
 //!
 //! Each reader finds the first video track and the sample list that the
-//! decoder needs. WebM also gives the Opus packets. The readers only read
+//! decoder needs. WebM also gives the Opus or Vorbis packets. The readers only read
 //! the headers and the sample tables; they never run code from the file, and
 //! every length that the file gives is checked against the data.
 
@@ -21,8 +21,11 @@ pub struct Sample {
 /// The video codec of a track, as far as the player has a decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
+    H264,
     Hevc,
+    Vp8,
     Vp9,
+    Av1,
     /// The track exists, but no decoder is built in for it.
     Other,
 }
@@ -32,11 +35,24 @@ pub struct VideoTrack {
     pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
-    /// HEVC: the parameter set NAL units from `hvcC`, in file order.
+    /// H.264 and HEVC: the parameter set NAL units from `avcC` or `hvcC`, in
+    /// file order. AV1: the one configuration OBU block from `av1C`.
     pub parameter_sets: Vec<Vec<u8>>,
-    /// HEVC: bytes of the length field before each NAL unit in a sample.
+    /// H.264 and HEVC: bytes of the length field before each NAL unit in a
+    /// sample.
     pub nal_length_size: usize,
     pub samples: Vec<Sample>,
+}
+
+/// The Vorbis audio of a WebM file. `headers` holds the identification and
+/// the setup packets one after the other, as symphonia reads them.
+#[derive(Debug, Clone)]
+pub struct VorbisTrack {
+    pub channels: usize,
+    pub sample_rate: u32,
+    pub headers: Vec<u8>,
+    /// Packet position in the file, and its time in microseconds.
+    pub packets: Vec<(usize, usize, i64)>,
 }
 
 /// The Opus audio of a WebM file.
@@ -52,6 +68,7 @@ pub struct OpusTrack {
 pub struct WebmMedia {
     pub video: Option<VideoTrack>,
     pub audio: Option<OpusTrack>,
+    pub vorbis: Option<VorbisTrack>,
     pub duration_us: Option<i64>,
 }
 
@@ -177,20 +194,68 @@ fn sample_entry(stsd: &[u8]) -> VideoTrack {
     };
     track.width = u32::from(be16(body, 24).unwrap_or(0));
     track.height = u32::from(be16(body, 26).unwrap_or(0));
-    if &kind != b"hvc1" && &kind != b"hev1" {
-        return track;
-    }
     let Some(extra) = body.get(78..) else {
         return track;
     };
-    if let Some(hvcc) = child(&boxes(extra), b"hvcC") {
-        if let Some((length_size, sets)) = hevc_config(hvcc) {
-            track.codec = VideoCodec::Hevc;
-            track.nal_length_size = length_size;
-            track.parameter_sets = sets;
+    let config = boxes(extra);
+    match &kind {
+        b"hvc1" | b"hev1" => {
+            if let Some((length_size, sets)) = child(&config, b"hvcC").and_then(hevc_config) {
+                track.codec = VideoCodec::Hevc;
+                track.nal_length_size = length_size;
+                track.parameter_sets = sets;
+            }
         }
+        b"avc1" | b"avc3" => {
+            if let Some((length_size, sets)) = child(&config, b"avcC").and_then(avc_config) {
+                track.codec = VideoCodec::H264;
+                track.nal_length_size = length_size;
+                track.parameter_sets = sets;
+            }
+        }
+        b"av01" => {
+            if let Some(obus) = child(&config, b"av1C").and_then(av1_config) {
+                track.codec = VideoCodec::Av1;
+                track.parameter_sets = vec![obus];
+            }
+        }
+        _ => {}
     }
     track
+}
+
+/// The NAL length size and the parameter sets (SPS, then PPS) of an `avcC`
+/// record.
+pub fn avc_config(record: &[u8]) -> Option<(usize, Vec<Vec<u8>>)> {
+    let length_size = usize::from(*record.get(4)? & 3) + 1;
+    let mut at = 6usize;
+    let mut sets = Vec::new();
+    let sps_count = usize::from(*record.get(5)? & 0x1F);
+    for group in 0..2 {
+        let count = if group == 0 {
+            sps_count
+        } else {
+            let count = usize::from(*record.get(at)?);
+            at += 1;
+            count
+        };
+        for _ in 0..count {
+            let length = usize::from(be16(record, at)?);
+            let nal = record.get(at + 2..at + 2 + length)?;
+            sets.push(nal.to_vec());
+            at += 2 + length;
+        }
+    }
+    Some((length_size, sets))
+}
+
+/// The configuration OBUs of an `av1C` record: the bytes after its four-byte
+/// header. They carry the sequence header.
+pub fn av1_config(record: &[u8]) -> Option<Vec<u8>> {
+    if *record.first()? & 0x7F != 1 {
+        return None;
+    }
+    Some(record.get(4..)?.to_vec())
 }
 
 /// The NAL length size and the parameter sets of an `hvcC` record.
@@ -533,19 +598,18 @@ pub fn webm(data: &[u8]) -> Result<WebmMedia, String> {
                 .collect()
         };
         match entry.codec.as_str() {
-            codec @ ("V_VP9" | "V_VP8" | "V_AV1" | "V_MPEGH/ISO/HEVC") if media.video.is_none() => {
+            "V_VP9" | "V_VP8" | "V_AV1" | "V_MPEGH/ISO/HEVC" | "V_MPEG4/ISO/AVC"
+                if media.video.is_none() =>
+            {
                 let list = samples();
                 let first = list.iter().map(|sample| sample.2).min().unwrap_or(0);
+                let (codec, length_size, parameter_sets) = webm_codec(entry);
                 media.video = Some(VideoTrack {
-                    codec: if codec == "V_VP9" {
-                        VideoCodec::Vp9
-                    } else {
-                        VideoCodec::Other
-                    },
+                    codec,
                     width: entry.width,
                     height: entry.height,
-                    parameter_sets: Vec::new(),
-                    nal_length_size: 4,
+                    parameter_sets,
+                    nal_length_size: length_size,
                     samples: list
                         .into_iter()
                         .map(|(offset, size, pts_us, key)| Sample {
@@ -570,6 +634,19 @@ pub fn webm(data: &[u8]) -> Result<WebmMedia, String> {
                         .collect(),
                 });
             }
+            "A_VORBIS" if media.audio.is_none() && media.vorbis.is_none() => {
+                if let Some((channels, sample_rate, headers)) = vorbis_headers(&entry.private) {
+                    media.vorbis = Some(VorbisTrack {
+                        channels,
+                        sample_rate,
+                        headers,
+                        packets: samples()
+                            .into_iter()
+                            .map(|(offset, size, pts_us, _)| (offset, size, pts_us))
+                            .collect(),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -577,6 +654,73 @@ pub fn webm(data: &[u8]) -> Result<WebmMedia, String> {
         return Err("no video track".to_string());
     }
     Ok(media)
+}
+
+/// The codec of a WebM video track, with its NAL length size and parameter
+/// sets from `CodecPrivate`.
+fn webm_codec(entry: &Entry) -> (VideoCodec, usize, Vec<Vec<u8>>) {
+    match entry.codec.as_str() {
+        "V_VP9" => (VideoCodec::Vp9, 4, Vec::new()),
+        "V_VP8" => (VideoCodec::Vp8, 4, Vec::new()),
+        "V_AV1" => match av1_config(&entry.private) {
+            Some(obus) => (VideoCodec::Av1, 4, vec![obus]),
+            // No `av1C`: the sequence header is then inside the frames.
+            None => (VideoCodec::Av1, 4, Vec::new()),
+        },
+        "V_MPEG4/ISO/AVC" => match avc_config(&entry.private) {
+            Some((length_size, sets)) => (VideoCodec::H264, length_size, sets),
+            None => (VideoCodec::Other, 4, Vec::new()),
+        },
+        "V_MPEGH/ISO/HEVC" => match hevc_config(&entry.private) {
+            Some((length_size, sets)) => (VideoCodec::Hevc, length_size, sets),
+            None => (VideoCodec::Other, 4, Vec::new()),
+        },
+        _ => (VideoCodec::Other, 4, Vec::new()),
+    }
+}
+
+/// The channels, the sample rate and the identification and setup packets
+/// from the `CodecPrivate` of a Vorbis track. The three header packets come
+/// with Xiph lacing: the count, the sizes of all but the last, the data.
+fn vorbis_headers(private: &[u8]) -> Option<(usize, u32, Vec<u8>)> {
+    if *private.first()? != 2 {
+        return None;
+    }
+    let mut at = 1usize;
+    let mut sizes = [0usize; 2];
+    for size in &mut sizes {
+        loop {
+            let byte = *private.get(at)?;
+            at += 1;
+            *size = size.checked_add(usize::from(byte))?;
+            if byte != 255 {
+                break;
+            }
+        }
+    }
+    let ident = private.get(at..at.checked_add(sizes[0])?)?;
+    let setup_start = at.checked_add(sizes[0])?.checked_add(sizes[1])?;
+    let setup = private.get(setup_start..)?;
+    // The identification packet: type 1, "vorbis", version, channels, rate.
+    if ident.len() < 30 || ident.first() != Some(&1) || ident.get(1..7) != Some(b"vorbis") {
+        return None;
+    }
+    if setup.first() != Some(&5) {
+        return None;
+    }
+    let channels = usize::from(*ident.get(11)?);
+    let rate = u32::from_le_bytes([
+        *ident.get(12)?,
+        *ident.get(13)?,
+        *ident.get(14)?,
+        *ident.get(15)?,
+    ]);
+    if channels == 0 || rate == 0 {
+        return None;
+    }
+    let mut headers = ident.to_vec();
+    headers.extend_from_slice(setup);
+    Some((channels, rate, headers))
 }
 
 #[cfg(test)]
@@ -677,5 +821,177 @@ mod tests {
     fn a_file_with_no_video_track_is_refused() {
         assert!(webm(&[0x1A, 0x45, 0xDF, 0xA3, 0x80]).is_err());
         assert!(webm(b"").is_err());
+    }
+
+    /// An EBML element with an eight-byte size.
+    fn element(id: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut out = id.to_vec();
+        out.push(0x01);
+        out.extend_from_slice(&(body.len() as u64).to_be_bytes()[1..]);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// A WebM file with one video track and one block of the track.
+    fn webm_file(codec: &str, private: &[u8], extra_entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut entry = element(&[0xD7], &[1]);
+        entry.extend(element(&[0x86], codec.as_bytes()));
+        if !private.is_empty() {
+            entry.extend(element(&[0x63, 0xA2], private));
+        }
+        let mut video = element(&[0xB0], &[0x01, 0x40]);
+        video.extend(element(&[0xBA], &[0x00, 0xF0]));
+        entry.extend(element(&[0xE0], &video));
+        let mut tracks = element(&[0xAE], &entry);
+        for extra in extra_entries {
+            tracks.extend_from_slice(extra);
+        }
+        let mut cluster = element(&[0xE7], &[0]);
+        // Track 1, time 0, key frame, three bytes of data.
+        cluster.extend(element(&[0xA3], &[0x81, 0, 0, 0x80, 7, 8, 9]));
+        let mut segment = element(&[0x16, 0x54, 0xAE, 0x6B], &tracks);
+        segment.extend(element(&[0x1F, 0x43, 0xB6, 0x75], &cluster));
+        element(&[0x18, 0x53, 0x80, 0x67], &segment)
+    }
+
+    #[test]
+    fn webm_names_the_vp8_vp9_and_av1_tracks() {
+        for (name, codec) in [
+            ("V_VP8", VideoCodec::Vp8),
+            ("V_VP9", VideoCodec::Vp9),
+            ("V_UNKNOWN_THING", VideoCodec::Other),
+        ] {
+            let result = webm(&webm_file(name, &[], &[]));
+            if codec == VideoCodec::Other {
+                assert!(result.is_err());
+                continue;
+            }
+            let media = result.expect("media");
+            let track = media.video.expect("video");
+            assert_eq!(track.codec, codec);
+            assert_eq!((track.width, track.height), (320, 240));
+            assert_eq!(track.samples.len(), 1);
+            assert!(track.samples[0].key);
+            assert_eq!(track.samples[0].size, 3);
+        }
+        // AV1 keeps the configuration OBUs that follow the four-byte header.
+        let media = webm(&webm_file("V_AV1", &[0x81, 0, 0, 0, 0x0A, 0x0B], &[])).expect("media");
+        let track = media.video.expect("video");
+        assert_eq!(track.codec, VideoCodec::Av1);
+        assert_eq!(track.parameter_sets, vec![vec![0x0A, 0x0B]]);
+        // A configuration of another version is not taken.
+        let media = webm(&webm_file("V_AV1", &[0x82, 0, 0, 0, 1], &[])).expect("media");
+        assert!(media.video.expect("video").parameter_sets.is_empty());
+    }
+
+    #[test]
+    fn webm_gives_the_h264_parameter_sets() {
+        // avcC: version, profile, compatibility, level, length size 4, one
+        // SPS of two bytes, one PPS of one byte.
+        let record = [1, 66, 0, 30, 0xFF, 0xE1, 0, 2, 0x67, 0x42, 1, 0, 1, 0x68];
+        let media = webm(&webm_file("V_MPEG4/ISO/AVC", &record, &[])).expect("media");
+        let track = media.video.expect("video");
+        assert_eq!(track.codec, VideoCodec::H264);
+        assert_eq!(track.nal_length_size, 4);
+        assert_eq!(track.parameter_sets, vec![vec![0x67, 0x42], vec![0x68]]);
+        // A record that is cut short makes the track unusable, not a panic.
+        let media = webm(&webm_file("V_MPEG4/ISO/AVC", &record[..8], &[])).expect("media");
+        assert_eq!(media.video.expect("video").codec, VideoCodec::Other);
+    }
+
+    #[test]
+    fn avc_config_reads_the_length_size_and_both_sets() {
+        let record = [
+            1, 100, 0, 40, 0xFD, 0xE2, 0, 1, 0x67, 0, 2, 0x68, 0x69, 1, 0, 1, 0x6A,
+        ];
+        let (length_size, sets) = avc_config(&record).expect("config");
+        assert_eq!(length_size, 2);
+        assert_eq!(sets.len(), 3);
+        assert_eq!(sets[0], vec![0x67]);
+        assert_eq!(sets[1], vec![0x68, 0x69]);
+        assert_eq!(sets[2], vec![0x6A]);
+        assert!(avc_config(&record[..6]).is_none());
+        assert!(avc_config(&[]).is_none());
+    }
+
+    /// The `CodecPrivate` of a Vorbis track: three header packets with Xiph
+    /// lacing.
+    fn vorbis_private(channels: u8, rate: u32, setup: &[u8]) -> Vec<u8> {
+        let mut ident = vec![1];
+        ident.extend_from_slice(b"vorbis");
+        ident.extend_from_slice(&0u32.to_le_bytes());
+        ident.push(channels);
+        ident.extend_from_slice(&rate.to_le_bytes());
+        ident.extend_from_slice(&[0u8; 14]);
+        let comment = [3u8, b'v', b'o', b'r', b'b', b'i', b's'];
+        let mut private = vec![2, ident.len() as u8, comment.len() as u8];
+        private.extend_from_slice(&ident);
+        private.extend_from_slice(&comment);
+        private.extend_from_slice(setup);
+        private
+    }
+
+    #[test]
+    fn vorbis_headers_give_the_channels_the_rate_and_the_set_up_data() {
+        let private = vorbis_private(2, 44_100, &[5, 1, 2, 3]);
+        let (channels, rate, headers) = vorbis_headers(&private).expect("headers");
+        assert_eq!((channels, rate), (2, 44_100));
+        // The identification packet and the setup packet, no comment.
+        assert_eq!(headers.len(), 30 + 4);
+        assert_eq!(headers[0], 1);
+        assert_eq!(&headers[30..], &[5, 1, 2, 3]);
+    }
+
+    #[test]
+    fn bad_vorbis_headers_are_refused() {
+        assert!(vorbis_headers(&[]).is_none());
+        assert!(vorbis_headers(&[1, 2, 3]).is_none());
+        // Not a setup packet at the end.
+        assert!(vorbis_headers(&vorbis_private(2, 44_100, &[4, 1])).is_none());
+        // No channels, and no rate.
+        assert!(vorbis_headers(&vorbis_private(0, 44_100, &[5])).is_none());
+        assert!(vorbis_headers(&vorbis_private(2, 0, &[5])).is_none());
+        // A size that runs past the data.
+        assert!(vorbis_headers(&[2, 255, 255, 1]).is_none());
+    }
+
+    #[test]
+    fn webm_gives_the_vorbis_track() {
+        let private = vorbis_private(2, 48_000, &[5, 9]);
+        let mut audio = element(&[0xD7], &[2]);
+        audio.extend(element(&[0x86], b"A_VORBIS"));
+        audio.extend(element(&[0x63, 0xA2], &private));
+        let media = webm(&webm_file("V_VP8", &[], &[element(&[0xAE], &audio)])).expect("media");
+        let track = media.vorbis.expect("vorbis");
+        assert_eq!((track.channels, track.sample_rate), (2, 48_000));
+        assert!(media.audio.is_none());
+    }
+
+    #[test]
+    fn mp4_sample_entries_name_h264_and_av1() {
+        // A visual sample entry: 78 bytes of fields, then the config box.
+        let entry = |kind: &[u8; 4], config: &[u8]| {
+            let mut body = vec![0u8; 78];
+            body[24..26].copy_from_slice(&64u16.to_be_bytes());
+            body[26..28].copy_from_slice(&48u16.to_be_bytes());
+            body.extend(config);
+            let mut stsd = vec![0u8; 8];
+            stsd.extend(boxed(kind, &body));
+            stsd
+        };
+        let avcc = boxed(
+            b"avcC",
+            &[1, 66, 0, 30, 0xFF, 0xE1, 0, 1, 0x67, 1, 0, 1, 0x68],
+        );
+        let track = sample_entry(&entry(b"avc1", &avcc));
+        assert_eq!(track.codec, VideoCodec::H264);
+        assert_eq!((track.width, track.height), (64, 48));
+        assert_eq!(track.parameter_sets, vec![vec![0x67], vec![0x68]]);
+        let av1c = boxed(b"av1C", &[0x81, 0, 0, 0, 0x0A]);
+        let track = sample_entry(&entry(b"av01", &av1c));
+        assert_eq!(track.codec, VideoCodec::Av1);
+        assert_eq!(track.parameter_sets, vec![vec![0x0A]]);
+        // A known name without its config box has no decoder to use.
+        assert_eq!(sample_entry(&entry(b"avc1", &[])).codec, VideoCodec::Other);
     }
 }
