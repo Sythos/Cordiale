@@ -604,8 +604,11 @@ pub(crate) fn register_member_callbacks(
     });
 
     let tx_for_whois = worker_tx.clone();
-    ui.on_member_whois_requested(move |nick| {
-        let _ = tx_for_whois.send(WorkerCommand::MemberWhois(nick.to_string()));
+    ui.on_member_whois_requested(move |nick, network| {
+        let _ = tx_for_whois.send(WorkerCommand::MemberWhois {
+            nick: nick.to_string(),
+            network: network.to_string(),
+        });
     });
 
     let tx_for_ctcp = worker_tx.clone();

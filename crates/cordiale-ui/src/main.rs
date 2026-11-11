@@ -531,7 +531,10 @@ enum WorkerCommand {
     MemberBan(String),
     MemberBanHost(String),
     MemberKickBan(String),
-    MemberWhois(String),
+    MemberWhois {
+        nick: String,
+        network: String,
+    },
     MemberCtcp {
         nick: String,
         verb: String,
@@ -2698,8 +2701,8 @@ async fn run_worker(
                     Some(WorkerCommand::MemberKickBan(nick)) => {
                         start_member_host_ban(&mut state, &ui, nick, Some(String::new()));
                     }
-                    Some(WorkerCommand::MemberWhois(nick)) => {
-                        send_member_whois(&state, &nick);
+                    Some(WorkerCommand::MemberWhois { nick, network }) => {
+                        send_member_whois(&state, &network, &nick);
                     }
                     Some(WorkerCommand::MemberCtcp { nick, verb }) => {
                         handle_member_ctcp(&state, &ui, nick, verb).await;
@@ -7566,15 +7569,14 @@ fn send_member_ban(state: &WorkerState, nick: &str) {
 
 /// `source: "user"` matches Cicchetto's own default (the alternative,
 /// `"rail"`, isn't something Cordiale has a UI path to trigger from).
-fn send_member_whois(state: &WorkerState, nick: &str) {
-    let Some((session, topic, network_id, _channel)) = user_topic_channel_network(state) else {
-        return;
-    };
-    session.send_command(
-        topic,
+fn send_member_whois(state: &WorkerState, network: &str, nick: &str) {
+    // The network comes from the row that asked, never from the selected
+    // window: a query row has no channel and may sit on another network.
+    send_user_verb(
+        state,
+        network,
         "whois",
         serde_json::json!({
-            "network_id": network_id,
             "nick": nick,
             "server": Value::Null,
             "source": "user",
@@ -11629,6 +11631,9 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
     let rows = view.rows.clone();
     // Only the message rows of the mentions summary (no label) lead anywhere.
     let mentions = kind == "mentions_bundle";
+    // A WHOIS card opens as a popup over the current view, so the chat and
+    // its scroll position stay where they are.
+    let popup = kind == "whois_bundle";
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
         let rows: Vec<ReplyRow> = rows
@@ -11646,7 +11651,9 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
         ui.set_reply_kind(kind.into());
         ui.set_reply_subject(subject.into());
         ui.set_reply_network(network.into());
-        if open {
+        if open && popup {
+            ui.set_whois_popup_open(true);
+        } else if open {
             ui.set_screen("reply".into());
         }
     });
