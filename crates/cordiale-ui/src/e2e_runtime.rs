@@ -2355,13 +2355,22 @@ async fn run_e2e_recovery(
     settle_reset(state, ui, &network, engine);
     // The old engine caches the deleted device. The new run opens a new one.
     state.e2e.engines.remove(&network);
-    state.e2e.reset.remove(&network);
+    clear_reset_marks(state, &network);
     let outcome = provision_network(state, &network).await;
     if outcome != ProvisionOutcome::Skipped {
         ensure_engine(state, &network);
     }
     push_open_locked_state(state, ui);
     show(recovery_outcome_key(outcome));
+}
+
+/// Clears the marks of the old identity before the new provisioning run. The
+/// old identity is gone, so the pairing mark is no longer true. A failed new
+/// run then leaves no block, and the next start action runs it again. If the
+/// new run needs pairing, it sets the mark again.
+fn clear_reset_marks(state: &mut WorkerState, network: &str) {
+    state.e2e.reset.remove(network);
+    state.e2e.needs_pairing.remove(network);
 }
 
 /// Runs one `/e2e devices`, `revoke` or `reset` step on `network`. A reset
@@ -4829,6 +4838,19 @@ mod tests {
         );
         assert!(!state.e2e.reset.contains("net"));
         assert!(master(&mut state));
+    }
+
+    #[test]
+    fn a_recovery_clears_the_old_pairing_mark_before_the_new_run() {
+        let mut state = WorkerState::new();
+        state.e2e.reset.insert("net".to_string());
+        state.e2e.needs_pairing.insert("net".to_string());
+        state.e2e.needs_pairing.insert("other".to_string());
+        clear_reset_marks(&mut state, "net");
+        assert!(!state.e2e.reset.contains("net"));
+        assert!(!state.e2e.needs_pairing.contains("net"));
+        // Another network keeps its mark.
+        assert!(state.e2e.needs_pairing.contains("other"));
     }
 
     #[test]

@@ -2909,13 +2909,13 @@ export component AppWindow inherits Window {
     }
 
     // True when the notice offers the forget and create recovery: the
-    // warning step, or a recovery reason with a device list that was read.
+    // warning step, or a missing or different master key with a device list
+    // that was read. Only these two reasons come from a provisioning run.
     function e2e-recovery-action-visible() -> bool {
         if status-kind == "e2e-recovery-confirm" {
             return true;
         }
-        return (status-kind == "e2e-recovery-no-keys" || status-kind == "e2e-recovery-replaced"
-            || status-kind == "e2e-recovery-left-out" || status-kind == "e2e-recovery-no-list")
+        return (status-kind == "e2e-recovery-no-keys" || status-kind == "e2e-recovery-replaced")
             && status-message != "unknown";
     }
 
