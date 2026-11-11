@@ -190,6 +190,13 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
             }
             Ok(Command::Seek(seconds)) => {
                 if let Some(open) = session.as_mut() {
+                    if open.audio_exhausted() {
+                        let paused = open.paused;
+                        match open.restart(volume, device.as_ref()) {
+                            Ok(()) => open.set_paused(paused),
+                            Err(reason) => on_event(open.generation, MediaEvent::Failed(reason)),
+                        }
+                    }
                     open.seek(seconds);
                 }
             }
@@ -333,6 +340,14 @@ impl Session {
         Ok(())
     }
 
+    /// The sound has played to its end, so its source cannot play again
+    /// without opening the file again.
+    fn audio_exhausted(&self) -> bool {
+        self.audio
+            .as_ref()
+            .is_some_and(|audio| !self.audio_live || audio.empty())
+    }
+
     fn position(&self) -> f64 {
         match &self.audio {
             Some(audio) if self.audio_live => audio.get_pos().as_secs_f64(),
@@ -382,6 +397,7 @@ impl Session {
             let _ = audio.try_seek(Duration::from_secs_f64(target));
         }
         self.clock.seek(target);
+        self.audio_at = target;
         if let Some(video) = self.video.as_mut() {
             video.seek(target);
         }
