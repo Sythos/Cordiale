@@ -9549,9 +9549,12 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    ScrollView {
+                    status-notice-scroll := ScrollView {
                         vertical-stretch: 1;
+                        // Fix the text width to the visible area so long text
+                        // wraps and scrolls vertically only.
                         Text {
+                            width: status-notice-scroll.visible-width;
                             text: status-text();
                             wrap: word-wrap;
                             accessible-role: AccessibleRole.text;
