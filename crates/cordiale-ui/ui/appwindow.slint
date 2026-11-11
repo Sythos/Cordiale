@@ -543,7 +543,7 @@ component MemberContextMenu {
     callback ban(string);
     callback ban-host(string);
     callback kickban(string);
-    callback whois(string);
+    callback whois(string, string); // nick, network of the row
     callback ctcp(string, string); // nick, verb
     callback query(string);
     callback nickname-clicked(string, string, string); // nick, network, source window
@@ -610,7 +610,7 @@ component MemberContextMenu {
             }
             MenuItem {
                 title: "🔍  " + @tr("WHOIS");
-                activated => { whois(target-nick); }
+                activated => { whois(target-nick, source-network); }
             }
             Menu {
                 title: "📡  " + @tr("CTCP");
@@ -1667,6 +1667,9 @@ export component AppWindow inherits Window {
     // The WHOIS avatar, once downloaded from Grappa.
     in property <image> reply-avatar;
     in property <bool> reply-avatar-visible: false;
+    // A WHOIS card shows in a popup over the current view; the selected
+    // window and its scroll position do not change.
+    in-out property <bool> whois-popup-open: false;
     in property <[ReplyRow]> reply-rows: [];
     // Archive of one network (`/archive`). `archive-confirm-target` is the
     // row awaiting delete confirmation, set and cleared by the screen itself.
@@ -2066,7 +2069,7 @@ export component AppWindow inherits Window {
     callback member-ban-requested(string);
     callback member-ban-host-requested(string);
     callback member-kickban-requested(string);
-    callback member-whois-requested(string);
+    callback member-whois-requested(string, string); // nick, network of the row
     callback member-ctcp-requested(string, string); // nick, verb
     callback member-query-requested(string);
     callback member-nickname-clicked(string, string, string); // nick, network, source window
@@ -5101,7 +5104,7 @@ export component AppWindow inherits Window {
                             ban(nick) => { member-ban-requested(nick); }
                             ban-host(nick) => { member-ban-host-requested(nick); }
                             kickban(nick) => { member-kickban-requested(nick); }
-                            whois(nick) => { member-whois-requested(nick); }
+                            whois(nick, network) => { member-whois-requested(nick, network); }
                             ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                             query(nick) => { member-query-requested(nick); }
                             nickname-clicked(nick, network, source) => {
@@ -5415,7 +5418,7 @@ export component AppWindow inherits Window {
                     ban(nick) => { member-ban-requested(nick); }
                     ban-host(nick) => { member-ban-host-requested(nick); }
                     kickban(nick) => { member-kickban-requested(nick); }
-                    whois(nick) => { member-whois-requested(nick); }
+                    whois(nick, network) => { member-whois-requested(nick, network); }
                     ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
                     query(nick) => { member-query-requested(nick); }
                     nickname-clicked(nick, network, source) => {
@@ -9660,6 +9663,92 @@ export component AppWindow inherits Window {
                             clicked => {
                                 e2e-request-action(status-kind == "e2e-recovery-confirm" ? "recover-confirm" : "recover", e2e-recovery-network, "", "");
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // WHOIS card: a compact popup over the current view. The screen and
+    // the chat behind it stay as they are, so closing returns to the same
+    // window and scroll position.
+    if whois-popup-open : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #00000099;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            clicked => { whois-popup-open = false; }
+        }
+
+        FocusScope {
+            width: parent.width;
+            height: parent.height;
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    whois-popup-open = false;
+                    return accept;
+                }
+                return reject;
+            }
+
+            Rectangle {
+                width: min(480px, parent.width - 32px);
+                height: min(420px, parent.height - 32px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-width: 1px;
+                border-radius: 8px;
+                border-color: #8080806a;
+                background: theme == "dark" ? #242424 : white;
+
+                // Keeps clicks inside the card from closing the popup.
+                TouchArea { }
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        spacing: 12px;
+
+                        if reply-avatar-visible : Image {
+                            source: reply-avatar;
+                            width: 64px;
+                            height: 64px;
+                            image-fit: contain;
+                            accessible-label: @tr("Avatar of {}", reply-subject);
+                        }
+                        Text {
+                            text: reply-title-text();
+                            font-size: 18px * FontScale.percent / 100;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            accessible-role: AccessibleRole.text;
+                        }
+                    }
+
+                    ListView {
+                        vertical-stretch: 1;
+                        for row in reply-rows : Text {
+                            text: row.label == ""
+                                ? row.value
+                                : (row.value == "" ? reply-label(row.label) : @tr("{}: {}", reply-label(row.label), row.value));
+                            wrap: word-wrap;
+                            accessible-role: AccessibleRole.text;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: end;
+                        CompactButton {
+                            text: @tr("Close");
+                            clicked => { whois-popup-open = false; }
                         }
                     }
                 }
