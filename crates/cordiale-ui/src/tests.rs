@@ -5201,6 +5201,29 @@ fn admin_vhost_label_shows_the_server_name() {
 }
 
 #[test]
+fn admin_vhost_rows_match_the_settings_options() {
+    // The same address and server name read the same in both lists.
+    let view = vhost_view(
+        &[("1.2.3.4", Some("eu-1.example")), ("2001:db8::1", None)],
+        &["1.2.3.4"],
+    );
+    let (vhosts, _) = admin_vhost_rows(&serde_json::json!({
+        "vhosts": [
+            {"id": 1, "address": "1.2.3.4", "name": "eu-1.example", "in_pool": false,
+             "generally_available": false},
+            {"id": 2, "address": "2001:db8::1", "in_pool": false, "generally_available": false}
+        ],
+        "grants": []
+    }));
+    assert_eq!(vhosts.len(), view.available.len());
+    for ((label, _, _, _), option) in vhosts.iter().zip(&view.available) {
+        assert_eq!(label, &option.display_label());
+    }
+    assert_eq!(vhosts[0].0, "1.2.3.4 (eu-1.example)");
+    assert_eq!(vhosts[1].0, "2001:db8::1");
+}
+
+#[test]
 fn vhost_rows_name_their_grants() {
     let (vhosts, grants) = admin_vhost_rows(&serde_json::json!({
         "vhosts": [{"id": 4, "address": "10.0.0.4", "in_pool": true}],
