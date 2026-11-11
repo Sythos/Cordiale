@@ -871,14 +871,20 @@ pub struct Planar {
     pub shift_x: usize,
     pub shift_y: usize,
     pub mono: bool,
+    /// The samples use the full range 0 to 255, not the limited range 16 to
+    /// 235 (luma) and 16 to 240 (chroma).
+    pub full_range: bool,
+    /// The planes hold green, blue and red (identity matrix), not YUV.
+    pub identity: bool,
 }
 
 fn clamp_u8(value: i32) -> u8 {
     value.clamp(0, 255) as u8
 }
 
-/// Converts a picture to straight RGBA, with the BT.709 matrix and the
-/// limited range that video files use.
+/// Converts a picture to straight RGBA, with the BT.709 matrix. The range is
+/// limited unless the picture says that it is full. A picture with the
+/// identity matrix has its planes copied as green, blue and red.
 pub fn to_rgba(picture: &Planar) -> Option<Vec<u8>> {
     let (width, height) = (picture.width, picture.height);
     if width == 0 || height == 0 || width.checked_mul(height)? > MAX_PIXELS {
@@ -910,12 +916,26 @@ pub fn to_rgba(picture: &Planar) -> Option<Vec<u8>> {
                     i32::from(picture.planes[2][at]),
                 )
             };
-            let c = 298 * (i32::from(luma[column]) - 16);
+            if picture.identity {
+                // Planes in order: green, blue, red.
+                pixel[0] = v as u8;
+                pixel[1] = luma[column];
+                pixel[2] = u as u8;
+                continue;
+            }
             let d = u - 128;
             let e = v - 128;
-            pixel[0] = clamp_u8((c + 459 * e + 128) >> 8);
-            pixel[1] = clamp_u8((c - 55 * d - 136 * e + 128) >> 8);
-            pixel[2] = clamp_u8((c + 541 * d + 128) >> 8);
+            if picture.full_range {
+                let c = 256 * i32::from(luma[column]);
+                pixel[0] = clamp_u8((c + 403 * e + 128) >> 8);
+                pixel[1] = clamp_u8((c - 48 * d - 120 * e + 128) >> 8);
+                pixel[2] = clamp_u8((c + 475 * d + 128) >> 8);
+            } else {
+                let c = 298 * (i32::from(luma[column]) - 16);
+                pixel[0] = clamp_u8((c + 459 * e + 128) >> 8);
+                pixel[1] = clamp_u8((c - 55 * d - 136 * e + 128) >> 8);
+                pixel[2] = clamp_u8((c + 541 * d + 128) >> 8);
+            }
         }
     }
     Some(out)
@@ -990,6 +1010,8 @@ fn hevc_planar(frame: &rusty_h265::frame::Frame) -> Option<Planar> {
         shift_x,
         shift_y,
         mono,
+        full_range: false,
+        identity: false,
     })
 }
 
@@ -1039,6 +1061,8 @@ fn vp9_planar(frame: &rusty_vp9::DecodedFrame) -> Option<Planar> {
         shift_x,
         shift_y,
         mono: false,
+        full_range: false,
+        identity: false,
     })
 }
 
@@ -1067,6 +1091,8 @@ fn yuv420_planar(
         shift_x: 2,
         shift_y: 2,
         mono: false,
+        full_range: false,
+        identity: false,
     })
 }
 
@@ -1169,6 +1195,13 @@ fn av1_planar(picture: &rusty_av1d::Picture) -> Option<Planar> {
         shift_x,
         shift_y,
         mono,
+        full_range: matches!(picture.color_range(), rusty_av1d::pixel::YUVRange::Full),
+        // A gray picture has no color planes to be identity.
+        identity: !mono
+            && matches!(
+                picture.matrix_coefficients(),
+                rusty_av1d::pixel::MatrixCoefficients::Identity
+            ),
     })
 }
 
@@ -1502,7 +1535,32 @@ mod tests {
             shift_x: 2,
             shift_y: 2,
             mono: false,
+            full_range: false,
+            identity: false,
         }
+    }
+
+    #[test]
+    fn full_range_black_and_white_convert() {
+        let mut black = gray(3, 3, 0);
+        black.full_range = true;
+        assert_eq!(&to_rgba(&black).expect("picture")[..4], &[0, 0, 0, 255]);
+        let mut white = gray(3, 3, 255);
+        white.full_range = true;
+        assert_eq!(
+            &to_rgba(&white).expect("picture")[..4],
+            &[255, 255, 255, 255]
+        );
+    }
+
+    #[test]
+    fn identity_planes_are_green_blue_and_red() {
+        let mut picture = gray(2, 2, 10);
+        picture.identity = true;
+        picture.planes[1] = vec![20; 1];
+        picture.planes[2] = vec![30; 1];
+        let rgba = to_rgba(&picture).expect("picture");
+        assert_eq!(&rgba[..4], &[30, 10, 20, 255]);
     }
 
     #[test]
@@ -1528,6 +1586,8 @@ mod tests {
             shift_x: 2,
             shift_y: 2,
             mono: false,
+            full_range: false,
+            identity: false,
         };
         assert!(to_rgba(&huge).is_none());
     }
