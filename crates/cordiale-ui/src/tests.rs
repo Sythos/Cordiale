@@ -14507,3 +14507,20 @@ fn selectable_body_text_keeps_only_plain_single_style_rows() {
     );
     assert_eq!(selectable_body_text(&[], ""), None);
 }
+
+#[test]
+fn media_content_uses_the_file_name_hint_last() {
+    use cordiale_core::media::LinkTarget;
+    // No type in the link or the Content-Type: the file name hint decides.
+    assert!(matches!(
+        media_content_with(
+            LinkTarget::Audio("mp3"),
+            "https://x.io/download",
+            Some("mp3"),
+            vec![1],
+            Some("application/octet-stream"),
+            false
+        ),
+        MediaContent::Player(_, extension) if extension == "mp3"
+    ));
+}
