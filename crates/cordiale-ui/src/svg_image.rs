@@ -54,7 +54,7 @@ pub fn render(data: &[u8]) -> Option<Rendered> {
     );
     let mut rgba = pixmap.take();
     // tiny-skia stores premultiplied alpha; the viewer image is straight.
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = u16::from(pixel[3]);
         if alpha != 0 && alpha != 255 {
             for channel in &mut pixel[..3] {
@@ -85,7 +85,12 @@ mod tests {
     fn an_external_image_is_not_loaded() {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10"><image xlink:href="/etc/hostname" width="10" height="10"/><script>alert(1)</script></svg>"#;
         let drawing = render(svg).expect("valid SVG");
-        assert!(drawing.rgba.chunks_exact(4).all(|pixel| pixel[3] == 0));
+        assert!(drawing
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == 0));
     }
 
     #[test]

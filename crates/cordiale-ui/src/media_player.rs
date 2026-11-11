@@ -861,7 +861,7 @@ pub fn to_rgba(picture: &Planar) -> Option<Vec<u8>> {
         let luma = &picture.planes[0][row * width..(row + 1) * width];
         let chroma_row = (row / picture.shift_y) * chroma_width;
         let pixels = &mut out[row * width * 4..(row + 1) * width * 4];
-        for (column, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+        for (column, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let (u, v) = if picture.mono {
                 (128, 128)
             } else {
@@ -982,8 +982,10 @@ fn vp9_planar(frame: &rusty_vp9::DecodedFrame) -> Option<Planar> {
             } else {
                 out.extend(
                     source
-                        .chunks_exact(2)
-                        .map(|pair| (u16::from_le_bytes([pair[0], pair[1]]) >> shift) as u8),
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| (u16::from_le_bytes(*pair) >> shift) as u8),
                 );
             }
         }
@@ -1183,7 +1185,7 @@ fn open_video(
         let media = media_demux::webm(bytes)?;
         let track = media.video.ok_or("no video track")?;
         let audio = media.audio.and_then(|opus| {
-            let first = opus.packets.first().is_some();
+            let first = !opus.packets.is_empty();
             let channels = opus.channels;
             let mut source = AudioSource {
                 packets: Packets::List {
