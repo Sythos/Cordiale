@@ -236,9 +236,17 @@ Cordiale also covers:
   and a video that can't be shrunk or comes out no smaller is not uploaded.
   It needs a build with the `video-shrink` feature (FFmpeg with libvpx);
   other builds show the switch disabled. Links in messages are clickable:
-  image and text uploads on Grappa, and https images elsewhere, open in the
-  media viewer, a popup over the chat that Escape or Close dismisses (fit or actual size; text read-only, with Copy), MP3, Ogg and
-  FLAC links play in the radio's player, and the rest opens in the browser.
+  image, text, audio and video links open in the media viewer, a popup over
+  the chat that Escape or Close dismisses (fit or actual size; text
+  read-only, with Copy). The chat, its scroll position and the draft stay as
+  they are. Everything is decoded in Rust with pure Rust crates, so it does not
+  depend on the codecs of the platform: PNG, JPEG, GIF and APNG (animated),
+  WebP, BMP, ICO, AVIF and SVG (drawn without scripts or external content);
+  MP3, Ogg Vorbis and Opus (also from older iOS devices), FLAC, WAV, AAC and
+  M4A with play, pause, seek and volume; MP4, MOV and M4V video with H.264 or
+  HEVC/H.265, and WebM video with VP8, VP9 or AV1 and Opus or Vorbis sound.
+  A file that can't be decoded shows an error message. Other links open in
+  the browser.
   Channel-topic links above the chat and in the Channels list open in the
   browser, with keyboard access too. Only the link activates the browser;
   clicking other text in a Channels row still joins or opens that channel.
