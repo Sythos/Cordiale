@@ -707,40 +707,67 @@ component TopMenuButton inherits Rectangle {
     in property <string> icon;
     in property <string> label;
     in property <bool> dark;
-    out property <bool> has-focus: button.has-focus;
+    out property <bool> has-focus: focus.has-focus;
     callback clicked();
 
     // A fixed square: the sidebar derives its minimum width from this size,
     // so the icon button must not grow with its emoji.
     width: 32px;
     height: 32px;
+    border-radius: 5px;
+    border-width: focus.has-focus ? 1px : 0px;
+    border-color: #8080807f;
+    background: touch.pressed ? #80808055 : (touch.has-hover ? #80808022 : transparent);
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
 
-    button := Button {
-        text: root.icon;
-        accessible-label: root.label;
-        width: parent.width;
-        height: parent.height;
-        clicked => { root.clicked(); }
+    focus := FocusScope {
+        key-pressed(event) => {
+            if (event.text == " " || event.text == "\n") {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
 
-        // Slint's tooltip: an input-transparent popup next to the pointer,
-        // so it never takes a click meant for the icons under it.
-        Tooltip {
-            Rectangle {
-                border-radius: 4px;
-                border-width: 1px;
-                border-color: root.dark ? #5c5c5c : #a0a0a0;
-                background: root.dark ? #2b2b2b : #ffffe1;
+        // The icon fills the whole square and sits at its center, whatever
+        // the width of the glyph.
+        Text {
+            text: root.icon;
+            width: parent.width;
+            height: parent.height;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
 
-                HorizontalLayout {
-                    padding-top: 3px;
-                    padding-bottom: 3px;
-                    padding-left: 6px;
-                    padding-right: 6px;
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
 
-                    Text {
-                        text: root.label;
-                        font-size: 12px * FontScale.percent / 100;
-                        color: root.dark ? #f0f0f0 : #1a1a1a;
+            // Slint's tooltip: an input-transparent popup next to the pointer,
+            // so it never takes a click meant for the icons under it.
+            Tooltip {
+                Rectangle {
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: root.dark ? #5c5c5c : #a0a0a0;
+                    background: root.dark ? #2b2b2b : #ffffe1;
+
+                    HorizontalLayout {
+                        padding-top: 3px;
+                        padding-bottom: 3px;
+                        padding-left: 6px;
+                        padding-right: 6px;
+
+                        Text {
+                            text: root.label;
+                            font-size: 12px * FontScale.percent / 100;
+                            color: root.dark ? #f0f0f0 : #1a1a1a;
+                        }
                     }
                 }
             }
