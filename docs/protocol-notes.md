@@ -1001,6 +1001,16 @@ separato da `selection`, nessun campo rDNS e nessun elenco di alias:
 `name` è l'unico nome riportato dal server e si mostra com'è. Cordiale non
 inventa né risolve rDNS o alias. Admin → Vhosts mostra gli stessi indirizzi
 da `GET /admin/vhosts`.
+**Admin, campi presenti e mancanti:** ogni voce di `vhosts` ha `id`,
+`address`, `in_pool`, `generally_available`, `inserted_at`, `updated_at`
+(tipo `VhostsAdminWireVhostJson` di Cicchetto, specchio di
+`Grappa.Vhosts.AdminWire`); ogni `grants` ha `id`, `vhost_id`,
+`subject_type`, `subject_id`, `subject_label`. **Non c'è alcun campo `name`,
+rDNS o alias** nella risposta admin. Admin → Vhosts mostra quindi indirizzo e
+flag di pool; legge `name` solo se il server un giorno lo invia, con lo
+stesso formato `indirizzo (nome)` di Settings (`admin_vhost_label` e
+`VhostOption::display_label`; test `admin_vhost_rows_match_the_settings_options`).
+Nessun nome è mai calcolato in locale.
 
 **Ignores** (per-rete) — `GET/POST /networks/:slug/ignores`,
 `DELETE /networks/:slug/ignores/:mask`. Risposta mutazione include
