@@ -86,7 +86,9 @@ use cordiale_core::persistence::{self, Theme};
 use cordiale_core::presence::{
     is_presence_noise, presence_hidden, reconcile, toggled_pref, PresencePref,
 };
-use cordiale_core::profile::{gender_for_index, has_avatar, IgnoreEntry, ProfileFields};
+use cordiale_core::profile::{
+    gender_for_index, has_avatar, IgnoreEntry, ProfileFields, VhostSettingsView,
+};
 use cordiale_core::protocol::CLIENT_PROTOCOL_VERSION;
 use cordiale_core::rest::{
     ActiveThemePair, ArchiveEntry, BootResponse, DateFormat, DirectoryPage, DisplayPrefs,
@@ -505,7 +507,7 @@ enum WorkerCommand {
         expansion: String,
     },
     AliasRemove(String),
-    VhostToggle(String),
+    VhostSelect(String),
     NotifyAdd(String),
     NotifyRemove(String),
     WatchPatternAdd(String),
@@ -2564,8 +2566,8 @@ async fn run_worker(
                         handle_alias_remove(&mut state, &ui, command).await;
                         state.prefs.aliases = None;
                     }
-                    Some(WorkerCommand::VhostToggle(address)) => {
-                        handle_vhost_toggle(&mut state, &ui, address).await;
+                    Some(WorkerCommand::VhostSelect(address)) => {
+                        handle_vhost_select(&mut state, &ui, address).await;
                     }
                     // The server answers each change with a full `notify_list`
                     // snapshot; the local edit only avoids a stale row until
@@ -6728,6 +6730,17 @@ async fn handle_settings_network_refresh(state: &mut WorkerState, ui: &slint::We
     let token = &token;
     let settings_network = state.prefs.settings_network.clone();
 
+    // Loading state: drop the old rows so no address of an earlier
+    // server or account stays on the page while the list is read.
+    {
+        let ui = ui.clone();
+        let _ = ui.upgrade_in_event_loop(|ui| {
+            ui.set_settings_vhost_options(Rc::new(slint::VecModel::from(Vec::new())).into());
+            ui.set_settings_vhost_error("".into());
+            ui.set_settings_vhost_state(VHOST_STATE_LOADING);
+        });
+    }
+
     let ignores: Vec<IgnoreEntry> = match &settings_network {
         Some(network) => match client.fetch_ignores(token, network).await {
             Ok(entries) => {
@@ -6754,7 +6767,7 @@ async fn handle_settings_network_refresh(state: &mut WorkerState, ui: &slint::We
     };
     // A failed read leaves the visible alias list untouched.
     let aliases = client.fetch_aliases(token).await.ok();
-    let vhost = client.fetch_vhost_settings(token).await.ok();
+    let vhost = client.fetch_vhost_settings(token).await;
     let dcc_auto_accept = match &state.prefs.settings_network {
         Some(network) => client
             .fetch_dcc_auto_accept(token, network)
@@ -6773,27 +6786,7 @@ async fn handle_settings_network_refresh(state: &mut WorkerState, ui: &slint::We
             .collect()
     });
 
-    let vhost_rows: Vec<VhostOptionRow> = match vhost {
-        Some(view) => {
-            let selection = view.selection;
-            view.available
-                .into_iter()
-                .map(|option| {
-                    let selected = selection.contains(&option.address);
-                    let label = option
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| option.address.clone());
-                    VhostOptionRow {
-                        address: option.address.into(),
-                        label: label.into(),
-                        selected,
-                    }
-                })
-                .collect()
-        }
-        None => Vec::new(),
-    };
+    let (vhost_rows, vhost_state, vhost_error) = vhost_panel(vhost);
 
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -6804,6 +6797,8 @@ async fn handle_settings_network_refresh(state: &mut WorkerState, ui: &slint::We
             ui.set_settings_aliases(Rc::new(slint::VecModel::from(alias_rows)).into());
         }
         ui.set_settings_vhost_options(Rc::new(slint::VecModel::from(vhost_rows)).into());
+        ui.set_settings_vhost_state(vhost_state);
+        ui.set_settings_vhost_error(vhost_error.into());
         ui.set_pref_dcc_auto_accept(dcc_auto_accept);
     });
 }
@@ -7114,10 +7109,52 @@ async fn handle_alias_remove(
     run_alias_change(state, ui, AliasChange::Remove(command)).await;
 }
 
-/// Toggles one address in the vhost selection — `PUT /me/settings/vhost`
-/// also replaces the whole selection, so this reads the current one,
-/// flips the one address, and writes it back.
-async fn handle_vhost_toggle(
+/// Slint `settings-vhost-state` values: the Source Address panel.
+const VHOST_STATE_LOADING: i32 = 0;
+const VHOST_STATE_READY: i32 = 1;
+const VHOST_STATE_EMPTY: i32 = 2;
+const VHOST_STATE_ERROR: i32 = 3;
+
+/// Rows, panel state and error detail for Settings > Source Address from
+/// the server answer. Exactly one row is selected when the server reports
+/// a current usable address; every value comes from the server.
+fn vhost_panel(
+    result: Result<VhostSettingsView, GrappaClientError>,
+) -> (Vec<VhostOptionRow>, i32, String) {
+    match result {
+        Err(error) => {
+            let detail = error
+                .status()
+                .map(|status| status.as_u16().to_string())
+                .unwrap_or_default();
+            (Vec::new(), VHOST_STATE_ERROR, detail)
+        }
+        Ok(view) => {
+            let current = view.current().map(str::to_string);
+            let rows: Vec<VhostOptionRow> = view
+                .available
+                .iter()
+                .map(|option| VhostOptionRow {
+                    address: option.address.clone().into(),
+                    label: option.display_label().into(),
+                    family: option.family().into(),
+                    selected: current.as_deref() == Some(option.address.as_str()),
+                })
+                .collect();
+            let state = if rows.is_empty() {
+                VHOST_STATE_EMPTY
+            } else {
+                VHOST_STATE_READY
+            };
+            (rows, state, String::new())
+        }
+    }
+}
+
+/// Makes one address the active vhost — `PUT /me/settings/vhost` with a
+/// selection of that address only. A failed request shows an error in
+/// the panel; the next read shows what the server really holds.
+async fn handle_vhost_select(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     address: String,
@@ -7125,17 +7162,14 @@ async fn handle_vhost_toggle(
     let (Some(client), Some(token)) = (&state.conn.client, &state.conn.token) else {
         return;
     };
-    let Ok(current) = client.fetch_vhost_settings(token).await else {
-        return;
-    };
-    let mut selection = current.selection;
-    if let Some(index) = selection.iter().position(|existing| existing == &address) {
-        selection.remove(index);
-    } else {
-        selection.push(address);
-    }
-    let _ = client.update_vhost_selection(token, selection).await;
-    handle_settings_network_refresh(state, ui).await;
+    let result = client.update_vhost_selection(token, vec![address]).await;
+    let (rows, panel_state, detail) = vhost_panel(result);
+    let ui = ui.clone();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_settings_vhost_options(Rc::new(slint::VecModel::from(rows)).into());
+        ui.set_settings_vhost_state(panel_state);
+        ui.set_settings_vhost_error(detail.into());
+    });
 }
 
 /// Pushes the presence watchlist of the network selected in Settings, each

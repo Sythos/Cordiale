@@ -4063,3 +4063,19 @@ msgstr "La cifratura end-to-end è attiva in questo canale. Un membro senza disp
 msgctxt "AppWindow"
 msgid "This channel has no key to send with yet. Nothing is sent as clear text."
 msgstr "Questo canale non ha ancora una chiave per inviare. Nulla viene inviato in chiaro."
+
+msgctxt "AppWindow"
+msgid "Reading the source addresses..."
+msgstr "Lettura degli indirizzi di origine..."
+
+msgctxt "AppWindow"
+msgid "The server reports no usable source address."
+msgstr "Il server non segnala nessun indirizzo di origine utilizzabile."
+
+msgctxt "AppWindow"
+msgid "The source addresses could not be read."
+msgstr "Impossibile leggere gli indirizzi di origine."
+
+msgctxt "AppWindow"
+msgid "The source addresses could not be read (error {})."
+msgstr "Impossibile leggere gli indirizzi di origine (errore {})."

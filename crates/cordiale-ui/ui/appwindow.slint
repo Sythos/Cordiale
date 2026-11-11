@@ -372,6 +372,8 @@ struct AliasRow {
 struct VhostOptionRow {
     address: string,
     label: string,
+    // "IPv4", "IPv6" or empty, read from the address text.
+    family: string,
     selected: bool,
 }
 
@@ -841,6 +843,62 @@ component SidebarRowButton inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
             color: root.selected ? Palette.accent-foreground : Palette.control-foreground;
+        }
+    }
+}
+
+// One source address in Settings > Source Address: a single-choice row.
+// Click, Enter or Space activates it; the border shows the keyboard focus.
+component SourceAddressChoice inherits Rectangle {
+    in property <string> label;
+    in property <string> family;
+    in property <bool> selected: false;
+    callback activated();
+
+    height: 32px;
+    border-radius: 4px;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
+    accessible-role: radio-button;
+    accessible-label: label;
+    accessible-checked: selected;
+    accessible-action-default => { activated(); }
+
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.activated();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            focus.focus();
+            root.activated();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        spacing: 8px;
+        alignment: start;
+        Text {
+            text: root.selected ? "◉" : "○";
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.family;
+            color: Palette.foreground.transparentize(0.4);
+            vertical-alignment: center;
         }
     }
 }
@@ -2017,6 +2075,9 @@ export component AppWindow inherits Window {
     in-out property <string> new-alias-command: "";
     in-out property <string> new-alias-expansion: "";
     in property <[VhostOptionRow]> settings-vhost-options: [];
+    // 0 loading, 1 ready, 2 empty, 3 error (see `vhost_panel` in main.rs).
+    in property <int> settings-vhost-state: 0;
+    in property <string> settings-vhost-error: "";
     in property <[NotifyRow]> settings-notify-nicks: [];
     in-out property <string> new-notify-nick: "";
     in property <[string]> settings-watch-patterns: [];
@@ -2527,7 +2588,7 @@ export component AppWindow inherits Window {
     callback perform-save-requested(string);
     callback alias-add-requested(string, string);
     callback alias-remove-requested(string);
-    callback vhost-toggle-requested(string);
+    callback vhost-select-requested(string);
     callback notify-add-requested(string);
     callback notify-remove-requested(string);
     callback watch-pattern-add-requested(string);
@@ -7213,10 +7274,26 @@ export component AppWindow inherits Window {
                 icon: "🌐";
                 title: @tr("Source Address");
 
-                for option in settings-vhost-options : CheckBox {
-                    text: option.label;
-                    checked: option.selected;
-                    toggled => { vhost-toggle-requested(option.address); }
+                if settings-vhost-state == 0 : Text {
+                    text: @tr("Reading the source addresses...");
+                    wrap: word-wrap;
+                }
+                if settings-vhost-state == 2 : Text {
+                    text: @tr("The server reports no usable source address.");
+                    wrap: word-wrap;
+                }
+                if settings-vhost-state == 3 : Text {
+                    text: settings-vhost-error == ""
+                        ? @tr("The source addresses could not be read.")
+                        : @tr("The source addresses could not be read (error {}).", settings-vhost-error);
+                    color: #d9534f;
+                    wrap: word-wrap;
+                }
+                for option in settings-vhost-options : SourceAddressChoice {
+                    label: option.label;
+                    family: option.family;
+                    selected: option.selected;
+                    activated => { vhost-select-requested(option.address); }
                 }
             }
 
