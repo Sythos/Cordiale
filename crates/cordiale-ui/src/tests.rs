@@ -5927,8 +5927,20 @@ fn chat_row_text_can_still_be_selected_and_copied() {
             position: press,
             button,
         });
-        ui.window()
-            .dispatch_event(WindowEvent::PointerMoved { position: release });
+        // The chat list is a Flickable: it holds a press back for a short
+        // time to tell a scroll from a click on a row. Wait longer than that
+        // hold, so the text field gets the press before the drag starts.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        slint::platform::update_timers_and_animations();
+        let steps = 8;
+        for step in 1..=steps {
+            let fraction = step as f32 / steps as f32;
+            let position =
+                slint::LogicalPosition::new(press.x + (release.x - press.x) * fraction, press.y);
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            slint::platform::update_timers_and_animations();
+        }
         ui.window().take_snapshot().unwrap();
         ui.window().dispatch_event(WindowEvent::PointerReleased {
             position: release,
