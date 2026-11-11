@@ -9864,8 +9864,16 @@ async fn show_media(
         .unwrap_or_default()
         .to_string();
     let url = href.clone();
+    // The viewer count when this file opens. A close or another file changes
+    // the count, and the download that comes after it is then dropped.
+    let ticket = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let opened = Arc::clone(&ticket);
     let _ = ui.upgrade_in_event_loop(move |ui| {
         media_player::end();
+        opened.store(
+            media_player::current(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         media_save::forget();
         ui.set_media_url(url.into());
         ui.set_media_title(title.into());
@@ -9901,7 +9909,10 @@ async fn show_media(
             media_content(target, &href, bytes, content_type.as_deref(), cut)
         });
         let _ = ui.upgrade_in_event_loop(move |ui| {
-            if ui.get_media_url().as_str() != href {
+            let stale = !ui.get_media_open()
+                || ui.get_media_url().as_str() != href
+                || media_player::current() != ticket.load(std::sync::atomic::Ordering::Relaxed);
+            if stale {
                 if let Ok(MediaContent::Image(path, ..)) = &outcome {
                     temp_files::discard(path);
                 }

@@ -238,12 +238,23 @@ impl WallClock {
     }
 }
 
+/// Moves the wall clock to the last position of a sound that has ended. The
+/// clock already runs or stops with the sound, so only its time changes.
+fn hand_over(clock: &mut WallClock, audio_at: f64) {
+    clock.seek(audio_at);
+}
+
 /// The open file.
 struct Session {
     generation: u64,
     bytes: Arc<[u8]>,
     extension: String,
     audio: Option<rodio::Player>,
+    /// The sound still plays and is the clock. When it ends before the
+    /// video, the wall clock goes on from `audio_at`.
+    audio_live: bool,
+    /// The last play position of the sound, in seconds.
+    audio_at: f64,
     video: Option<VideoPlayer>,
     clock: WallClock,
     paused: bool,
@@ -293,6 +304,8 @@ impl Session {
             generation,
             bytes,
             extension: extension.to_string(),
+            audio_live: audio.is_some(),
+            audio_at: 0.0,
             audio,
             video,
             clock,
@@ -322,8 +335,23 @@ impl Session {
 
     fn position(&self) -> f64 {
         match &self.audio {
-            Some(audio) => audio.get_pos().as_secs_f64(),
-            None => self.clock.position(),
+            Some(audio) if self.audio_live => audio.get_pos().as_secs_f64(),
+            _ => self.clock.position(),
+        }
+    }
+
+    /// Keeps the last position of the sound. When the sound has ended, the
+    /// wall clock takes over from that position, so the rest of the video
+    /// still plays.
+    fn follow_audio(&mut self) {
+        let Some(audio) = self.audio.as_ref().filter(|_| self.audio_live) else {
+            return;
+        };
+        if audio.empty() {
+            hand_over(&mut self.clock, self.audio_at);
+            self.audio_live = false;
+        } else {
+            self.audio_at = audio.get_pos().as_secs_f64();
         }
     }
 
@@ -364,6 +392,7 @@ impl Session {
         if self.ended {
             return;
         }
+        self.follow_audio();
         let position = self.position();
         if let Some(video) = self.video.as_mut() {
             video.fill();
@@ -377,7 +406,7 @@ impl Session {
         }
         let audio_done = self.audio.as_ref().is_none_or(|audio| audio.empty());
         let video_done = self.video.as_ref().is_none_or(VideoPlayer::finished);
-        let clock_done = self.audio.is_some() || self.duration <= 0.0 || position >= self.duration;
+        let clock_done = self.audio_live || self.duration <= 0.0 || position >= self.duration;
         if !self.paused && audio_done && video_done && clock_done {
             self.ended = true;
             self.paused = true;
@@ -418,6 +447,12 @@ pub fn existing() -> Option<&'static MediaPlayer> {
 /// file is dropped from now on.
 pub fn begin() -> u64 {
     CURRENT.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// The count of the file in the viewer now. [`end`] changes it, so a task
+/// that keeps the count can see that the viewer has moved on.
+pub fn current() -> u64 {
+    CURRENT.load(Ordering::Relaxed)
 }
 
 /// The viewer shows another file or is closed: stops the sound, the video
@@ -565,7 +600,7 @@ impl Packets {
 enum Decode {
     Symphonia(Box<dyn SymphoniaDecoder>),
     Opus {
-        decoder: OpusDecoder,
+        decoder: Box<OpusDecoder>,
         scratch: Vec<f32>,
     },
 }
@@ -693,7 +728,7 @@ fn opus_decoder(channels: usize) -> Result<Decode, String> {
     let channels = channels.clamp(1, 2);
     let decoder = OpusDecoder::new(OPUS_RATE, channels).map_err(|err| format!("{err:?}"))?;
     Ok(Decode::Opus {
-        decoder,
+        decoder: Box::new(decoder),
         scratch: vec![0.0; OpusDecoder::MAX_FRAME_SIZE_48K * channels],
     })
 }
@@ -1234,6 +1269,27 @@ mod tests {
         let rgba = to_rgba(&picture).expect("picture");
         assert_eq!(rgba[0], rgba[1]);
         assert_eq!(rgba[1], rgba[2]);
+    }
+
+    #[test]
+    fn the_wall_clock_goes_on_from_the_end_of_the_sound() {
+        // A running clock continues from the last sound position.
+        let mut running = WallClock {
+            base: 0.0,
+            started: None,
+        };
+        running.play();
+        hand_over(&mut running, 12.5);
+        assert!(running.position() >= 12.5);
+        assert!(running.started.is_some());
+        // A stopped clock stays stopped at that position.
+        let mut stopped = WallClock {
+            base: 3.0,
+            started: None,
+        };
+        hand_over(&mut stopped, 12.5);
+        assert_eq!(stopped.position(), 12.5);
+        assert!(stopped.started.is_none());
     }
 
     #[test]
