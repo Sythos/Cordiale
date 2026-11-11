@@ -90,6 +90,10 @@ pub(crate) struct E2eRuntime {
     /// device forgets its keys of a replaced identity. Any other `/e2e` step
     /// clears it.
     forget_asked: Option<String>,
+    /// The network for which the user got the warning of the recovery dialog
+    /// (forget the old identity and create a new one). Any other recovery or
+    /// `/e2e` step clears it.
+    recovery_asked: Option<String>,
     /// Networks whose local keys this device removed with `/e2e forget`. They
     /// are also in `reset`. The server keeps the identity, so the confirmed
     /// server reset stays available for them.
@@ -1362,6 +1366,10 @@ pub(crate) async fn handle_e2e_request_action(
     peer: String,
     request_id: String,
 ) {
+    if matches!(action.as_str(), "recover" | "recover-confirm") {
+        let confirmed = action == "recover-confirm";
+        return run_e2e_recovery(state, ui, network, confirmed).await;
+    }
     let consent_action = matches!(
         action.as_str(),
         "start" | "retry" | "accept" | "refuse" | "cancel" | "dismiss"
@@ -2262,11 +2270,98 @@ async fn show_recovery(
     };
     let rows: Option<Vec<DeviceRow>> = ids.map(|ids| device_rows(&ids, own, records.as_deref()));
     let help = pairing_help(rows.as_deref());
+    let network = network.to_string();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_e2e_recovery_network(network.into());
         ui.set_status_command_hint(device_rows_text(&ui, rows.as_deref()).into());
         ui.set_status_message(help.into());
         ui.set_status_kind(reason.status_key().into());
     });
+}
+
+/// The status key that ends a recovery run, by the outcome of the new
+/// provisioning run.
+fn recovery_outcome_key(outcome: ProvisionOutcome) -> &'static str {
+    match outcome {
+        ProvisionOutcome::Done => "e2e-recovery-done",
+        ProvisionOutcome::Pairing => "e2e-request-needs-pairing",
+        ProvisionOutcome::Store => "e2e-request-store",
+        ProvisionOutcome::ListUnavailable => "e2e-request-list-unavailable",
+        ProvisionOutcome::Failed | ProvisionOutcome::Skipped => "e2e-request-failed",
+    }
+}
+
+/// Runs the forget and create recovery of the recovery dialog. The first step
+/// shows the warning and the second step runs only for the same network. The
+/// run needs a reason that a provisioning run set from the identity: a failed
+/// read sets none. It reads the list of devices again and stops if the read
+/// fails, so no identity is replaced after a failed read. The reset drops the
+/// identity on the server first and then the local state. Then a new
+/// provisioning run makes and publishes the new master identity and the
+/// device keys.
+async fn run_e2e_recovery(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    confirmed: bool,
+) {
+    let asked = state.e2e.recovery_asked.take();
+    let show = |kind: &'static str| show_manage_kind(ui, kind, String::new(), String::new());
+    if !state.e2e.recovery.contains_key(&network) {
+        return show("e2e-forget-not-needed");
+    }
+    if !confirmed || asked.as_deref() != Some(network.as_str()) {
+        state.e2e.recovery_asked = Some(network.clone());
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            ui.set_e2e_recovery_network(network.into());
+            ui.set_status_kind("e2e-recovery-confirm".into());
+        });
+        return;
+    }
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return show("e2e-not-ready");
+    };
+    let Some(own_nick) = state.networks.own_nicks.get(&network).cloned() else {
+        return show("e2e-not-ready");
+    };
+    let protocol = state.conn.server_protocol_version;
+    if read_device_records(&client, &token, &network, protocol)
+        .await
+        .is_none()
+    {
+        return show("e2e-request-list-unavailable");
+    }
+    let Some(mut engine) = take_pairing_engine(state, &network, true) else {
+        return show("e2e-reset-failed");
+    };
+    let routes = OwnRoutes {
+        client: &client,
+        token: &token,
+        network: &network,
+        own_nick: &own_nick,
+        server_protocol: protocol,
+    };
+    let result = reset_identity(
+        &routes,
+        engine.state_mut(),
+        ResetConfirmation::user_confirmed(),
+    )
+    .await;
+    if let Err(error) = &result {
+        persistence::log_line(&format!("e2e recovery reset not finished: {error:?}"));
+        state.e2e.engines.insert(network, engine);
+        return show(reset_status_key(&result));
+    }
+    settle_reset(state, ui, &network, engine);
+    // The old engine caches the deleted device. The new run opens a new one.
+    state.e2e.engines.remove(&network);
+    state.e2e.reset.remove(&network);
+    let outcome = provision_network(state, &network).await;
+    if outcome != ProvisionOutcome::Skipped {
+        ensure_engine(state, &network);
+    }
+    push_open_locked_state(state, ui);
+    show(recovery_outcome_key(outcome));
 }
 
 /// Runs one `/e2e devices`, `revoke` or `reset` step on `network`. A reset
@@ -2280,6 +2375,7 @@ pub(crate) async fn run_e2e_manage(
 ) {
     let asked = state.e2e.reset_asked.take();
     let forget_asked = state.e2e.forget_asked.take();
+    state.e2e.recovery_asked = None;
     let not_ready = || show_manage_kind(ui, "e2e-not-ready", String::new(), String::new());
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         return;
@@ -4689,6 +4785,74 @@ mod tests {
         state.e2e.provisioned.insert("net".to_string());
         let result = runtime.block_on(ready_consent_context(&mut state, "net"));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn the_recovery_asks_first_and_keeps_the_identity_after_a_failed_read() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (mut state, _peer) = sas_state(&dir);
+        let ui = slint::Weak::<AppWindow>::default();
+        let runtime = test_runtime();
+        state.conn.server_protocol_version = Some(CONSENT_MIN_PROTOCOL);
+        state.conn.client = Some(GrappaClient::new("http://127.0.0.1:9".to_string()));
+        state.conn.token = Some("t".to_string());
+        state.conn.identifier = Some("ada".to_string());
+        state
+            .networks
+            .own_nicks
+            .insert("net".to_string(), "ada".to_string());
+        // No reason from the identity: nothing to recover, nothing asked.
+        runtime.block_on(run_e2e_recovery(&mut state, &ui, "net".to_string(), true));
+        assert!(state.e2e.recovery_asked.is_none());
+        state
+            .e2e
+            .recovery
+            .insert("net".to_string(), RecoveryReason::Replaced);
+        // An answer without the question asks the question first.
+        runtime.block_on(run_e2e_recovery(&mut state, &ui, "net".to_string(), true));
+        assert_eq!(state.e2e.recovery_asked.as_deref(), Some("net"));
+        let master = |state: &mut WorkerState| {
+            let engine = state.e2e.engines.get_mut("net").expect("engine");
+            engine
+                .state_mut()
+                .master_key()
+                .is_ok_and(|master| master.is_some())
+        };
+        assert!(master(&mut state));
+        // The answer reads the list of devices first. The read fails, so the
+        // identity, the state and the reason stay as they were.
+        runtime.block_on(run_e2e_recovery(&mut state, &ui, "net".to_string(), true));
+        assert!(state.e2e.recovery_asked.is_none());
+        assert_eq!(
+            state.e2e.recovery.get("net"),
+            Some(&RecoveryReason::Replaced)
+        );
+        assert!(!state.e2e.reset.contains("net"));
+        assert!(master(&mut state));
+    }
+
+    #[test]
+    fn each_provisioning_outcome_of_a_recovery_has_its_own_message() {
+        assert_eq!(
+            recovery_outcome_key(ProvisionOutcome::Done),
+            "e2e-recovery-done"
+        );
+        assert_eq!(
+            recovery_outcome_key(ProvisionOutcome::ListUnavailable),
+            "e2e-request-list-unavailable"
+        );
+        assert_eq!(
+            recovery_outcome_key(ProvisionOutcome::Store),
+            "e2e-request-store"
+        );
+        assert_eq!(
+            recovery_outcome_key(ProvisionOutcome::Pairing),
+            "e2e-request-needs-pairing"
+        );
+        assert_eq!(
+            recovery_outcome_key(ProvisionOutcome::Failed),
+            "e2e-request-failed"
+        );
     }
 
     #[test]
