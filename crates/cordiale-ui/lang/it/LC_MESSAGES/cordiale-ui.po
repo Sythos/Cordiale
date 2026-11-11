@@ -4065,6 +4065,18 @@ msgid "This channel has no key to send with yet. Nothing is sent as clear text."
 msgstr "Questo canale non ha ancora una chiave per inviare. Nulla viene inviato in chiaro."
 
 msgctxt "AppWindow"
+msgid "Pause"
+msgstr "Pausa"
+
+msgctxt "AppWindow"
+msgid "Position"
+msgstr "Posizione"
+
+msgctxt "AppWindow"
+msgid "Volume"
+msgstr "Volume"
+
+msgctxt "AppWindow"
 msgid "Reading the source addresses..."
 msgstr "Lettura degli indirizzi di origine..."
 

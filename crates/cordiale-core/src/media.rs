@@ -144,11 +144,16 @@ pub enum LinkTarget {
     Text,
     /// The integrated player, with the decoder hint for its format.
     Audio(&'static str),
+    /// The in-app viewer, for a video file.
+    Video,
     /// The system browser.
     Browser,
 }
 
-const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
+const IMAGE_EXTENSIONS: [&str; 10] = [
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "apng", "avif",
+];
+const VIDEO_EXTENSIONS: [&str; 4] = ["mp4", "webm", "mov", "m4v"];
 const TEXT_EXTENSIONS: [&str; 2] = ["txt", "md"];
 
 /// Audio the integrated player decodes, and the hint it is given.
@@ -156,9 +161,138 @@ fn audio_hint(extension: &str) -> Option<&'static str> {
     match extension {
         "mp3" => Some("mp3"),
         "ogg" | "oga" => Some("ogg"),
+        "opus" => Some("opus"),
         "flac" => Some("flac"),
+        "wav" => Some("wav"),
+        "m4a" => Some("m4a"),
+        "aac" => Some("aac"),
         _ => None,
     }
+}
+
+/// The file extension that a response Content-Type names, when it is a
+/// media type that `link_target` knows. Parameters such as `charset` are
+/// ignored.
+pub fn extension_for_content_type(content_type: &str) -> Option<&'static str> {
+    let mime = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        "image/png" => Some("png"),
+        "image/apng" => Some("apng"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" | "image/x-ms-bmp" => Some("bmp"),
+        "image/avif" => Some("avif"),
+        "image/svg+xml" => Some("svg"),
+        "image/x-icon" | "image/vnd.microsoft.icon" | "image/ico" => Some("ico"),
+        "video/mp4" => Some("mp4"),
+        "video/webm" => Some("webm"),
+        "video/quicktime" => Some("mov"),
+        "video/x-m4v" => Some("m4v"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        "audio/ogg" | "application/ogg" => Some("ogg"),
+        "audio/opus" => Some("opus"),
+        "audio/flac" | "audio/x-flac" => Some("flac"),
+        "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave" => Some("wav"),
+        "audio/mp4" | "audio/x-m4a" => Some("m4a"),
+        "audio/aac" | "audio/aacp" => Some("aac"),
+        _ => None,
+    }
+}
+
+/// The file name in a `Content-Disposition` value, without a directory
+/// part. `filename*` (RFC 5987) wins over `filename`.
+pub fn disposition_file_name(header: &str) -> Option<String> {
+    let mut plain = None;
+    for part in header.split(';').skip(1) {
+        let Some((key, value)) = part.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "filename*" => {
+                let encoded = value.rsplit('\'').next().unwrap_or_default();
+                if let Some(decoded) = percent_decode(encoded) {
+                    return clean_file_name(&decoded);
+                }
+            }
+            "filename" => plain = clean_file_name(value.trim_matches('"')),
+            _ => {}
+        }
+    }
+    plain
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = text.get(index + 1..index + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn clean_file_name(name: &str) -> Option<String> {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or_default().trim();
+    if last.is_empty() || last.chars().any(char::is_control) {
+        None
+    } else {
+        Some(last.to_string())
+    }
+}
+
+/// Where a file with this extension opens.
+pub fn target_for_extension(extension: &str) -> LinkTarget {
+    if IMAGE_EXTENSIONS.contains(&extension) {
+        LinkTarget::Image
+    } else if VIDEO_EXTENSIONS.contains(&extension) {
+        LinkTarget::Video
+    } else if let Some(hint) = audio_hint(extension) {
+        LinkTarget::Audio(hint)
+    } else {
+        LinkTarget::Browser
+    }
+}
+
+/// Where a file opens once its response is known. When the link has no
+/// known extension (for example after a redirect), the file name of the
+/// response and then its Content-Type decide.
+pub fn response_target(
+    href: &str,
+    server_base: &str,
+    content_type: Option<&str>,
+    disposition: Option<&str>,
+) -> LinkTarget {
+    let by_link = link_target(href, server_base);
+    if by_link != LinkTarget::Browser {
+        return by_link;
+    }
+    let by_name = disposition
+        .and_then(disposition_file_name)
+        .and_then(|name| {
+            name.rsplit_once('.')
+                .map(|(_, ext)| ext.to_ascii_lowercase())
+        })
+        .map(|ext| target_for_extension(&ext))
+        .filter(|target| *target != LinkTarget::Browser);
+    by_name.unwrap_or_else(|| {
+        content_type
+            .and_then(extension_for_content_type)
+            .map_or(LinkTarget::Browser, target_for_extension)
+    })
 }
 
 /// Whether `url` is an upload on the Grappa server at `server_base`.
@@ -197,6 +331,9 @@ pub fn link_target(href: &str, server_base: &str) -> LinkTarget {
         if TEXT_EXTENSIONS.contains(&extension.as_str()) {
             return LinkTarget::Text;
         }
+        if VIDEO_EXTENSIONS.contains(&extension.as_str()) {
+            return LinkTarget::Video;
+        }
         if let Some(hint) = audio_hint(&extension) {
             return LinkTarget::Audio(hint);
         }
@@ -205,6 +342,9 @@ pub fn link_target(href: &str, server_base: &str) -> LinkTarget {
         return LinkTarget::Image;
     }
     if url.scheme() == "https" {
+        if VIDEO_EXTENSIONS.contains(&extension.as_str()) {
+            return LinkTarget::Video;
+        }
         if let Some(hint) = audio_hint(&extension) {
             return LinkTarget::Audio(hint);
         }
@@ -420,6 +560,8 @@ fn is_local_v6(ip: Ipv6Addr) -> bool {
 /// Largest image, text, avatar and wallpaper the client downloads.
 pub const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+/// Largest video or sound file the viewer plays; it is held in memory.
+pub const MAX_MEDIA_BYTES: usize = 100 * 1024 * 1024;
 pub const MAX_AVATAR_BYTES: usize = 5 * 1024 * 1024;
 pub const MAX_WALLPAPER_BYTES: usize = 25 * 1024 * 1024;
 
@@ -486,6 +628,43 @@ pub async fn get_public_stream(
     allow_local_start: bool,
 ) -> Result<reqwest::Response, FetchError> {
     get_public_stream_with(href, allow_local_start, lookup).await
+}
+
+/// What a response says about its file: the Content-Type and the
+/// `Content-Disposition` header value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponseHead {
+    pub content_type: Option<String>,
+    pub disposition: Option<String>,
+}
+
+/// Reads the headers of the file at `href`, after the same redirect checks
+/// as [`fetch_public`], and drops the body without reading it. A failure or a
+/// slow server gives an empty head: the caller then opens the link in the
+/// browser as before.
+pub async fn probe_public(href: &str) -> ResponseHead {
+    let probe = async {
+        let response = get_public_stream(href, false).await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let text = |name: reqwest::header::HeaderName| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+        };
+        Some(ResponseHead {
+            content_type: text(reqwest::header::CONTENT_TYPE),
+            disposition: text(reqwest::header::CONTENT_DISPOSITION),
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), probe)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 async fn get_public_stream_with<R, F>(
@@ -702,6 +881,32 @@ mod tests {
         );
         assert_eq!(
             link_target("https://grappa.example/uploads/abc.mp4", base),
+            LinkTarget::Video
+        );
+        assert_eq!(
+            link_target("https://elsewhere.org/clip.MOV", base),
+            LinkTarget::Video
+        );
+        assert_eq!(
+            link_target("https://elsewhere.org/a.opus", base),
+            LinkTarget::Audio("opus")
+        );
+        assert_eq!(
+            link_target("https://elsewhere.org/a.m4a", base),
+            LinkTarget::Audio("m4a")
+        );
+        assert_eq!(
+            link_target("https://elsewhere.org/a.WAV", base),
+            LinkTarget::Audio("wav")
+        );
+        for name in ["a.svg", "a.ico", "a.apng", "a.avif"] {
+            assert_eq!(
+                link_target(&format!("https://elsewhere.org/{name}"), base),
+                LinkTarget::Image
+            );
+        }
+        assert_eq!(
+            link_target("https://elsewhere.org/a.mopv", base),
             LinkTarget::Browser
         );
         assert_eq!(
@@ -734,6 +939,50 @@ mod tests {
         );
         let spaced = "a\u{3000}https://x.io/p";
         assert_eq!(find_links(spaced)[0].range, 4..spaced.len());
+    }
+
+    #[test]
+    fn content_type_names_the_media_kind() {
+        assert_eq!(
+            extension_for_content_type("Video/QuickTime; x=1"),
+            Some("mov")
+        );
+        assert_eq!(extension_for_content_type("image/svg+xml"), Some("svg"));
+        assert_eq!(extension_for_content_type("audio/x-wav"), Some("wav"));
+        assert_eq!(extension_for_content_type("text/html"), None);
+    }
+
+    #[test]
+    fn disposition_names_are_read_and_cleaned() {
+        assert_eq!(
+            disposition_file_name("attachment; filename=\"../a/clip.mov\""),
+            Some("clip.mov".to_string())
+        );
+        assert_eq!(
+            disposition_file_name("attachment; filename=x.txt; filename*=UTF-8''v%C3%A9.mp4"),
+            Some("vé.mp4".to_string())
+        );
+        assert_eq!(disposition_file_name("inline"), None);
+    }
+
+    #[test]
+    fn response_decides_when_the_link_has_no_extension() {
+        let base = "https://grappa.example";
+        let link = "https://cdn.example/download?id=7";
+        assert_eq!(response_target(link, base, None, None), LinkTarget::Browser);
+        assert_eq!(
+            response_target(link, base, Some("video/mp4"), None),
+            LinkTarget::Video
+        );
+        let disposition = Some("attachment; filename=a.m4v");
+        assert_eq!(
+            response_target(link, base, Some("application/octet-stream"), disposition),
+            LinkTarget::Video
+        );
+        assert_eq!(
+            response_target(link, base, Some("text/html"), None),
+            LinkTarget::Browser
+        );
     }
 
     fn url(text: &str) -> reqwest::Url {
