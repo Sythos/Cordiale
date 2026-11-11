@@ -48,8 +48,9 @@ pick, as in Cicchetto.
 In the chat, a message is selectable in place, also with links or mixed
 colors: drag over the time, the nick or the text, or use Shift with the arrow
 keys, then press Ctrl+C (Cmd+C on macOS). A plain click on a nick still opens
-its action. A click on a link opens it after a short pause, unless a drag or a
-key starts a selection. Drag from one row past its edge to pick whole rows;
+its action. In a row with a link and a sender, the text input takes the clicks:
+right-click the row and pick the link to open it. Drag from one row past its
+edge to pick whole rows;
 Ctrl+C copies them with time and nick, and Escape drops the pick.
 
 **Actions → Copy text** stays available. This read-only
