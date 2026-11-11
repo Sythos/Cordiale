@@ -2133,13 +2133,32 @@ export component AppWindow inherits Window {
     callback credits-link-clicked(string);
     // Channel-topic links always open in the browser.
     callback topic-link-clicked(string);
-    // Chat links and the media viewer (images and text uploads, https
-    // images elsewhere). `media-kind` is "loading", "image", "text",
-    // "gone" or "failed".
+    // Chat links and the media viewer (images, video, sound and text
+    // uploads, https media elsewhere). `media-kind` is "loading", "image",
+    // "audio", "video", "text", "gone" or "failed".
     callback chat-link-clicked(string);
     callback media-open-in-browser();
     callback media-download();
     callback media-share();
+    // The player controls of a video or a sound: play or pause, move to a
+    // time in seconds, set the volume (0 to 1). `media-closed` runs when the
+    // popup closes, so the file stops.
+    callback media-play-pause();
+    callback media-seek(float);
+    callback media-volume-changed(float);
+    callback media-closed();
+    in property <float> media-duration: 0;
+    in property <float> media-position: 0;
+    in property <string> media-time: "";
+    in-out property <bool> media-playing: false;
+    in-out property <float> media-volume: 1;
+    // The file is kept in memory, so Download works even when it can't play.
+    in property <bool> media-saveable: false;
+    changed media-open => {
+        if (!media-open) {
+            media-closed();
+        }
+    }
     in property <string> media-url: "";
     in property <string> media-title: "";
     in property <string> media-kind: "";
@@ -8765,7 +8784,7 @@ export component AppWindow inherits Window {
 
                 CompactButton {
                     text: "💾  " + @tr("Download");
-                    enabled: media-kind == "image";
+                    enabled: media-kind == "image" || media-kind == "audio" || media-kind == "video" || media-saveable;
                     clicked => { media-download(); }
                 }
             }
@@ -8776,7 +8795,7 @@ export component AppWindow inherits Window {
                 CompactButton {
                     text: "🔗  " + @tr("Share");
                     a11y-label: @tr("Copy the image link");
-                    enabled: media-kind == "image";
+                    enabled: media-kind == "image" || media-kind == "audio" || media-kind == "video";
                     clicked => { media-share(); }
                 }
             }
@@ -8810,6 +8829,102 @@ export component AppWindow inherits Window {
         if media-kind == "failed" : Text {
             text: @tr("The file couldn't be shown ({}).", media-error);
             wrap: word-wrap;
+        }
+        if media-kind == "audio" : Text {
+            text: "🎵";
+            font-size: 64px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            vertical-stretch: 1;
+            accessible-label: media-title;
+        }
+        if media-kind == "video" : Image {
+            source: media-image;
+            image-fit: contain;
+            vertical-stretch: 1;
+            accessible-role: AccessibleRole.image;
+            accessible-label: media-title;
+        }
+        if media-kind == "audio" || media-kind == "video" : HorizontalLayout {
+            spacing: 8px;
+            height: 32px;
+            vertical-stretch: 0;
+
+            CompactButton {
+                text: media-playing ? "⏸" : "▶";
+                a11y-label: media-playing ? @tr("Pause") : @tr("Play");
+                clicked => { media-play-pause(); }
+            }
+            Text {
+                text: media-time;
+                vertical-alignment: center;
+            }
+            // The seek bar: a click or a drag moves to that time when the
+            // button is released.
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 32px;
+                property <float> scrub: -1;
+                property <float> fraction: scrub >= 0
+                    ? scrub
+                    : (media-duration > 0 ? Math.min(1, Math.max(0, media-position / media-duration)) : 0);
+
+                Rectangle {
+                    y: (parent.height - 4px) / 2;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: #80808060;
+                }
+                Rectangle {
+                    y: (parent.height - 4px) / 2;
+                    height: 4px;
+                    border-radius: 2px;
+                    width: parent.width * parent.fraction;
+                    background: #3b82f6;
+                }
+                Rectangle {
+                    x: parent.width * parent.fraction - 6px;
+                    y: (parent.height - 12px) / 2;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 6px;
+                    background: #3b82f6;
+                }
+                TouchArea {
+                    enabled: media-duration > 0;
+                    accessible-role: AccessibleRole.slider;
+                    accessible-label: @tr("Position");
+                    pointer-event(event) => {
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                            parent.scrub = Math.min(1, Math.max(0, self.mouse-x / self.width));
+                        }
+                        if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                            media-seek(media-duration * Math.min(1, Math.max(0, self.mouse-x / self.width)));
+                            parent.scrub = -1;
+                        }
+                    }
+                    moved => {
+                        if (self.pressed) {
+                            parent.scrub = Math.min(1, Math.max(0, self.mouse-x / self.width));
+                        }
+                    }
+                }
+            }
+            Text {
+                text: "🔊";
+                vertical-alignment: center;
+            }
+            Slider {
+                minimum: 0;
+                maximum: 1;
+                value: media-volume;
+                width: 90px;
+                accessible-label: @tr("Volume");
+                released(value) => {
+                    media-volume = value;
+                    media-volume-changed(value);
+                }
+            }
         }
         if media-kind == "image" && !media-zoom : Image {
             source: media-image;

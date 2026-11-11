@@ -4059,3 +4059,15 @@ msgstr "Le chiffrement de bout en bout est actif dans ce canal. Un membre sans a
 msgctxt "AppWindow"
 msgid "This channel has no key to send with yet. Nothing is sent as clear text."
 msgstr "Ce canal n'a pas encore de clé pour envoyer. Rien n'est envoyé en clair."
+
+msgctxt "AppWindow"
+msgid "Pause"
+msgstr "Pause"
+
+msgctxt "AppWindow"
+msgid "Position"
+msgstr "Position"
+
+msgctxt "AppWindow"
+msgid "Volume"
+msgstr "Volume"

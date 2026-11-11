@@ -13665,6 +13665,129 @@ fn shared_channels_use_the_real_peer_nick_of_a_locked_query() {
 }
 
 #[test]
+fn link_extension_ignores_query_and_fragment() {
+    assert_eq!(
+        link_extension("https://x.io/a/Clip.MOV?dl=1#t=5").as_deref(),
+        Some("mov")
+    );
+    assert_eq!(link_extension("https://x.io/a/clip"), None);
+    assert_eq!(link_extension("https://x.io/a/clip.waytoolong"), None);
+    assert_eq!(link_extension("https://x.io/a.b/clip"), None);
+}
+
+#[test]
+fn media_content_follows_the_content_type_before_the_link() {
+    use cordiale_core::media::LinkTarget;
+    let player = |content: MediaContent, extension: &str| match content {
+        MediaContent::Player(_, found) => found == extension,
+        _ => false,
+    };
+    // A link with no file name: the Content-Type decides.
+    assert!(player(
+        media_content(
+            LinkTarget::Video,
+            "https://x.io/watch?id=1",
+            vec![1],
+            Some("video/quicktime"),
+            false
+        ),
+        "mov"
+    ));
+    // A server file name that is wrong: the Content-Type still wins.
+    assert!(player(
+        media_content(
+            LinkTarget::Audio("ogg"),
+            "https://x.io/a.bin",
+            vec![1],
+            Some("audio/opus"),
+            false
+        ),
+        "opus"
+    ));
+    // Nothing in the Content-Type: the link decides.
+    assert!(player(
+        media_content(
+            LinkTarget::Video,
+            "https://x.io/a.m4v",
+            vec![1],
+            Some("application/octet-stream"),
+            false
+        ),
+        "m4v"
+    ));
+}
+
+#[test]
+fn media_content_keeps_the_safe_fallback_for_bad_files() {
+    use cordiale_core::media::LinkTarget;
+    let failed = |content: MediaContent| matches!(content, MediaContent::Failed(_));
+    // Corrupt SVG and ICO files, an AVIF file (no decoder) and a file whose
+    // type is not media.
+    assert!(failed(media_content(
+        LinkTarget::Image,
+        "https://x.io/a.svg",
+        b"not svg".to_vec(),
+        None,
+        false
+    )));
+    assert!(failed(media_content(
+        LinkTarget::Image,
+        "https://x.io/a.ico",
+        b"not ico".to_vec(),
+        None,
+        false
+    )));
+    assert!(failed(media_content(
+        LinkTarget::Image,
+        "https://x.io/a.avif",
+        vec![0; 8],
+        None,
+        false
+    )));
+    // A link to a picture whose response is a sound plays the sound.
+    assert!(matches!(
+        media_content(
+            LinkTarget::Image,
+            "https://x.io/a.png",
+            vec![0; 8],
+            Some("application/ogg"),
+            false
+        ),
+        MediaContent::Player(_, extension) if extension == "ogg"
+    ));
+    // Text stays text.
+    assert!(matches!(
+        media_content(LinkTarget::Text, "https://x.io/a.txt", b"hi".to_vec(), None, true),
+        MediaContent::Text(body, true) if body == "hi"
+    ));
+}
+
+#[test]
+fn media_content_draws_a_safe_svg() {
+    use cordiale_core::media::LinkTarget;
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="blue"/></svg>"#;
+    match media_content(
+        LinkTarget::Image,
+        "https://x.io/a",
+        svg.to_vec(),
+        Some("image/svg+xml; charset=utf-8"),
+        false,
+    ) {
+        MediaContent::Pixels {
+            width,
+            height,
+            rgba,
+            extension,
+            ..
+        } => {
+            assert_eq!(extension, "svg");
+            assert_eq!(rgba.len(), width as usize * height as usize * 4);
+        }
+        _ => panic!("an SVG gives pixels"),
+    }
+}
+
+#[test]
 fn media_save_names_the_file_after_the_link() {
     assert_eq!(media_save::file_name("photo.png", "png"), "photo.png");
     assert_eq!(media_save::file_name("PHOTO.PNG", "png"), "PHOTO.PNG");

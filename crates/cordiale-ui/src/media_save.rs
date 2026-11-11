@@ -5,12 +5,12 @@
 
 use std::cell::RefCell;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// The image that the viewer shows now.
 struct OpenImage {
     extension: String,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
 }
 
 static OPEN_IMAGE: Mutex<Option<OpenImage>> = Mutex::new(None);
@@ -23,9 +23,11 @@ pub enum Outcome {
     Failed,
 }
 
-/// Keeps the bytes of the image that the viewer shows.
-pub fn remember(extension: &str, bytes: Vec<u8>) {
+/// Keeps the bytes of the file that the viewer shows (an image, a video or
+/// a sound). A file that the player holds is shared, not copied.
+pub fn remember(extension: &str, bytes: impl Into<Arc<[u8]>>) {
     let extension = safe_extension(extension);
+    let bytes = bytes.into();
     if let Ok(mut open) = OPEN_IMAGE.lock() {
         *open = Some(OpenImage { extension, bytes });
     }
@@ -88,7 +90,7 @@ fn write_to(path: &Path) -> Outcome {
     let Some(image) = open.as_ref() else {
         return Outcome::Failed;
     };
-    match std::fs::write(path, &image.bytes) {
+    match std::fs::write(path, &*image.bytes) {
         Ok(()) => Outcome::Done,
         Err(err) => {
             cordiale_core::persistence::log_line(&format!("image not saved: {err}"));

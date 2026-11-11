@@ -4059,3 +4059,15 @@ msgstr "El cifrado de extremo a extremo está activo en este canal. Un miembro s
 msgctxt "AppWindow"
 msgid "This channel has no key to send with yet. Nothing is sent as clear text."
 msgstr "Este canal aún no tiene una clave para enviar. No se envía nada en texto claro."
+
+msgctxt "AppWindow"
+msgid "Pause"
+msgstr "Pausa"
+
+msgctxt "AppWindow"
+msgid "Position"
+msgstr "Posición"
+
+msgctxt "AppWindow"
+msgid "Volume"
+msgstr "Volumen"

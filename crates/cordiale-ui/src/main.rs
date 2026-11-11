@@ -41,14 +41,18 @@ mod home;
 mod input_history;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
 mod key_prompt;
+mod media_demux;
+mod media_player;
 mod media_save;
 mod mentions;
 mod passkeys;
 mod player;
 mod queries;
+mod raster_image;
 mod reply;
 mod reply_presence;
 mod slash;
+mod svg_image;
 mod symbol_fonts;
 mod taskbar;
 mod temp_files;
@@ -2012,18 +2016,7 @@ async fn run_worker(
                         } else {
                             match cordiale_core::media::validated_url(&href) {
                                 Ok(url) => {
-                                    let href = url.to_string();
-                                    match audio_link(&state, &href) {
-                                        Some((hint, allow_local)) => play_audio_link(
-                                            &mut radio_state,
-                                            &radio,
-                                            &ui,
-                                            &href,
-                                            hint,
-                                            allow_local,
-                                        ),
-                                        None => open_link(&state, &ui, href),
-                                    }
+                                    open_link(&state, &ui, url.to_string());
                                 }
                                 Err(refusal) => link_refused(&ui, refusal),
                             }
@@ -5866,56 +5859,6 @@ fn tune_radio(
         status: "connecting",
         error: String::new(),
         upload: false,
-    });
-    push_radio_now(ui, radio_state);
-}
-
-/// The decoder hint when a clicked link is audio the player takes.
-fn audio_link(state: &WorkerState, href: &str) -> Option<(&'static str, bool)> {
-    let base = state
-        .conn
-        .client
-        .as_ref()
-        .map(|client| client.base_url().to_string())
-        .unwrap_or_default();
-    match cordiale_core::media::link_target(href, &base) {
-        // An upload on the user's own Grappa server may be on the local network.
-        cordiale_core::media::LinkTarget::Audio(hint) => {
-            Some((hint, cordiale_core::media::is_upload_link(href, &base)))
-        }
-        _ => None,
-    }
-}
-
-/// Plays an audio link from the chat in the integrated player, replacing
-/// whatever was on, as Cicchetto's mini-player does.
-fn play_audio_link(
-    radio_state: &mut RadioState,
-    radio: &player::RadioPlayer,
-    ui: &slint::Weak<AppWindow>,
-    href: &str,
-    hint: &'static str,
-    allow_local: bool,
-) {
-    radio_state.stop();
-    radio.play(href, allow_local, hint, radio_state.generation);
-    let title = href
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    radio_state.tuned = Some(TunedRadio {
-        key: String::new(),
-        title,
-        source: None,
-        track: None,
-        stream_title: None,
-        status: "connecting",
-        error: String::new(),
-        upload: true,
     });
     push_radio_now(ui, radio_state);
 }
@@ -9813,6 +9756,9 @@ fn link_refused(ui: &slint::Weak<AppWindow>, refusal: cordiale_core::media::Link
     persistence::log_line(&format!("link not opened: {refusal}"));
     let reason = refusal.to_string();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        media_player::end();
+        media_save::forget();
+        ui.set_media_saveable(false);
         ui.set_media_url("".into());
         ui.set_media_title("".into());
         ui.set_media_error(reason.into());
@@ -9822,21 +9768,57 @@ fn link_refused(ui: &slint::Weak<AppWindow>, refusal: cordiale_core::media::Link
     });
 }
 
-/// A clicked chat link, already validated and normalised: images and text uploads (and https images
-/// elsewhere) open in the viewer, like Cicchetto; anything else in the
-/// browser. Grappa files are read with the session; other hosts without
-/// any credential.
+/// A clicked chat link, already validated and normalised: images, video,
+/// sound and text uploads (and https media elsewhere) open in the viewer,
+/// like Cicchetto; anything else in the browser. A link that names no media
+/// file is asked what it is (its Content-Type and file name) before it goes
+/// to the browser, so a redirect to a video opens in the viewer and never
+/// starts a download. Grappa files are read with the session; other hosts
+/// without any credential.
 fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
-    use cordiale_core::media::{self, FetchError, LinkTarget};
+    use cordiale_core::media::{self, LinkTarget};
     let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
         open_in_browser(&href);
         return;
     };
     let target = media::link_target(&href, client.base_url());
-    if target == LinkTarget::Browser {
-        open_in_browser(&href);
-        return;
-    }
+    let ui = ui.clone();
+    tokio::spawn(async move {
+        let target = if target == LinkTarget::Browser {
+            let on_grappa =
+                href.starts_with(&format!("{}/", client.base_url().trim_end_matches('/')));
+            let web = href.starts_with("http://") || href.starts_with("https://");
+            let head = if web && !on_grappa {
+                media::probe_public(&href).await
+            } else {
+                media::ResponseHead::default()
+            };
+            media::response_target(
+                &href,
+                client.base_url(),
+                head.content_type.as_deref(),
+                head.disposition.as_deref(),
+            )
+        } else {
+            target
+        };
+        if target == LinkTarget::Browser {
+            open_in_browser(&href);
+            return;
+        }
+        show_media(client, token, ui, href, target).await;
+    });
+}
+
+/// Opens the viewer on `href` and fills it when the file has arrived.
+async fn show_media(
+    client: cordiale_core::client::GrappaClient,
+    token: String,
+    ui: slint::Weak<AppWindow>,
+    href: String,
+    target: cordiale_core::media::LinkTarget,
+) {
+    use cordiale_core::media::{self, FetchError, LinkTarget};
     let title = href
         .rsplit('/')
         .next()
@@ -9847,21 +9829,23 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
         .to_string();
     let url = href.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        media_player::end();
         media_save::forget();
         ui.set_media_url(url.into());
         ui.set_media_title(title.into());
         ui.set_media_kind("loading".into());
+        ui.set_media_saveable(false);
+        ui.set_media_playing(false);
         ui.set_media_zoom(false);
         ui.set_media_open(true);
     });
-    let ui = ui.clone();
-    tokio::spawn(async move {
+    {
         let on_grappa = href.starts_with(&format!("{}/", client.base_url().trim_end_matches('/')));
         let text = target == LinkTarget::Text;
-        let limit = if text {
-            media::MAX_TEXT_BYTES
-        } else {
-            media::MAX_IMAGE_BYTES
+        let limit = match target {
+            LinkTarget::Text => media::MAX_TEXT_BYTES,
+            LinkTarget::Audio(_) | LinkTarget::Video => media::MAX_MEDIA_BYTES,
+            _ => media::MAX_IMAGE_BYTES,
         };
         let fetched = if on_grappa {
             client
@@ -9878,17 +9862,7 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
             media::fetch_public(&href, limit, text).await
         };
         let outcome = fetched.map(|(bytes, content_type, cut)| {
-            if text {
-                return MediaContent::Text(String::from_utf8_lossy(&bytes).into_owned(), cut);
-            }
-            let extension = avatar_extension(content_type.as_deref())
-                .or_else(|| href.rsplit('.').next().filter(|ext| ext.len() <= 4))
-                .unwrap_or("png")
-                .to_ascii_lowercase();
-            match temp_files::write_private("media", &format!(".{extension}"), &bytes) {
-                Ok(path) => MediaContent::Image(path, extension, bytes),
-                Err(err) => MediaContent::Failed(err.to_string()),
-            }
+            media_content(target, &href, bytes, content_type.as_deref(), cut)
         });
         let _ = ui.upgrade_in_event_loop(move |ui| {
             if ui.get_media_url().as_str() != href {
@@ -9898,6 +9872,33 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
                 return;
             }
             match outcome {
+                Ok(MediaContent::Pixels {
+                    width,
+                    height,
+                    rgba,
+                    extension,
+                    bytes,
+                }) => {
+                    let buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+                        &rgba, width, height,
+                    );
+                    media_save::remember(&extension, bytes);
+                    ui.set_media_image(slint::Image::from_rgba8(buffer));
+                    ui.set_media_kind("image".into());
+                }
+                Ok(MediaContent::Animated(frames, extension, bytes)) => {
+                    media_save::remember(&extension, bytes);
+                    raster_image::start(&ui.as_weak(), frames);
+                    ui.set_media_kind("image".into());
+                }
+                Ok(MediaContent::Player(bytes, extension)) => {
+                    // The sound or the video plays from memory; Download
+                    // gets the same bytes.
+                    let bytes: Arc<[u8]> = Arc::from(bytes);
+                    media_save::remember(&extension, Arc::clone(&bytes));
+                    let generation = media_player::begin();
+                    media_player::shared(&ui.as_weak()).open(bytes, &extension, generation);
+                }
                 Ok(MediaContent::Image(path, extension, bytes)) => {
                     let loaded = slint::Image::load_from_path(&path);
                     temp_files::discard(&path);
@@ -9934,16 +9935,97 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
                 }
             }
         });
-    });
+    }
 }
 
 /// What the viewer shows once a file is downloaded.
 enum MediaContent {
     /// The temporary file, the file type and the bytes for Download.
     Image(std::path::PathBuf, String, Vec<u8>),
+    /// A picture that Cordiale decoded itself (SVG, ICO): the pixels, the
+    /// file type and the bytes for Download.
+    Pixels {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        extension: String,
+        bytes: Vec<u8>,
+    },
+    /// An animated GIF or APNG: the frames, the file type and the bytes.
+    Animated(Vec<raster_image::Frame>, String, Vec<u8>),
+    /// A video or a sound: the bytes and the file type.
+    Player(Vec<u8>, String),
     /// The text, and whether it was cut at the size limit.
     Text(String, bool),
     Failed(String),
+}
+
+/// The file type of the end of a link, without a query or a fragment.
+fn link_extension(href: &str) -> Option<String> {
+    let path = href.split(['?', '#']).next().unwrap_or_default();
+    let name = path.rsplit('/').next().unwrap_or_default();
+    name.rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .filter(|extension| !extension.is_empty() && extension.len() <= 5)
+}
+
+/// Decides what a downloaded file is and prepares it for the viewer. The
+/// Content-Type of the response wins over the end of the link.
+fn media_content(
+    target: cordiale_core::media::LinkTarget,
+    href: &str,
+    bytes: Vec<u8>,
+    content_type: Option<&str>,
+    cut: bool,
+) -> MediaContent {
+    use cordiale_core::media::{self, LinkTarget};
+    if target == LinkTarget::Text {
+        return MediaContent::Text(String::from_utf8_lossy(&bytes).into_owned(), cut);
+    }
+    let extension = content_type
+        .and_then(media::extension_for_content_type)
+        .map(str::to_string)
+        .or_else(|| link_extension(href))
+        .unwrap_or_else(|| match target {
+            LinkTarget::Video => "mp4".to_string(),
+            _ => "png".to_string(),
+        });
+    match media::target_for_extension(&extension) {
+        LinkTarget::Video | LinkTarget::Audio(_) => MediaContent::Player(bytes, extension),
+        LinkTarget::Image => match extension.as_str() {
+            "svg" => match svg_image::render(&bytes) {
+                Some(drawing) => MediaContent::Pixels {
+                    width: drawing.width,
+                    height: drawing.height,
+                    rgba: drawing.rgba,
+                    extension,
+                    bytes,
+                },
+                None => MediaContent::Failed("unsupported image".to_string()),
+            },
+            "ico" => match raster_image::ico(&bytes) {
+                Some((width, height, rgba)) => MediaContent::Pixels {
+                    width,
+                    height,
+                    rgba,
+                    extension,
+                    bytes,
+                },
+                None => MediaContent::Failed("unsupported image".to_string()),
+            },
+            "avif" => MediaContent::Failed("unsupported image".to_string()),
+            _ => match raster_image::animation(&bytes, &extension) {
+                Some(frames) => MediaContent::Animated(frames, extension, bytes),
+                None => {
+                    match temp_files::write_private("media", &format!(".{extension}"), &bytes) {
+                        Ok(path) => MediaContent::Image(path, extension, bytes),
+                        Err(err) => MediaContent::Failed(err.to_string()),
+                    }
+                }
+            },
+        },
+        _ => MediaContent::Failed("unsupported file type".to_string()),
+    }
 }
 
 /// Slint's `@markdown` interpolation placeholder, never valid in chat text.

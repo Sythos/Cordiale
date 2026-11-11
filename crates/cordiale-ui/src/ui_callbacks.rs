@@ -924,6 +924,32 @@ pub(crate) fn register_link_callbacks(
         }
     });
 
+    let weak_for_media_toggle = ui.as_weak();
+    ui.on_media_play_pause(move || {
+        let (Some(ui), Some(player)) = (weak_for_media_toggle.upgrade(), media_player::existing())
+        else {
+            return;
+        };
+        if ui.get_media_playing() {
+            player.pause();
+            ui.set_media_playing(false);
+        } else {
+            player.play();
+            ui.set_media_playing(true);
+        }
+    });
+    ui.on_media_seek(|seconds| {
+        if let Some(player) = media_player::existing() {
+            player.seek(f64::from(seconds));
+        }
+    });
+    ui.on_media_volume_changed(|volume| {
+        if let Some(player) = media_player::existing() {
+            player.set_volume(volume);
+        }
+    });
+    ui.on_media_closed(media_player::end);
+
     ui.on_credits_link_clicked(|href| open_in_browser(&href));
 
     let weak_for_debug = ui.as_weak();

@@ -437,7 +437,9 @@ fn show_decrypted(ui: &slint::Weak<AppWindow>, file: &e2e_file::ValidFile, plain
         OpenWith::Image(extension) => {
             let written = temp_files::write_private("e2e-media", &format!(".{extension}"), &plain);
             let _ = ui.upgrade_in_event_loop(move |ui| {
+                media_player::end();
                 media_save::forget();
+                ui.set_media_saveable(false);
                 ui.set_media_url(url.into());
                 ui.set_media_title(name.into());
                 ui.set_media_zoom(false);
@@ -467,7 +469,9 @@ fn show_decrypted(ui: &slint::Weak<AppWindow>, file: &e2e_file::ValidFile, plain
             // to the save dialog, so the whole file stays reachable.
             let shown = String::from_utf8_lossy(&plain).into_owned();
             let _ = ui.upgrade_in_event_loop(move |ui| {
+                media_player::end();
                 media_save::forget();
+                ui.set_media_saveable(false);
                 ui.set_media_url(url.into());
                 ui.set_media_title(name.into());
                 ui.set_media_zoom(false);
