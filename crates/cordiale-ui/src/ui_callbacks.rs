@@ -398,6 +398,7 @@ pub(crate) fn register_passkey_callbacks(
         let _ = tx_for_offer_dismiss.send(WorkerCommand::E2ePairOffer(false));
     });
     ui.on_format_chat_copy(|lines| chat_copy_text(&lines).into());
+    ui.on_format_chat_row(|line| chat_row_text(&line).into());
     let weak_for_codes = ui.as_weak();
     ui.on_security_copy_recovery_codes(move || {
         if let Some(ui) = weak_for_codes.upgrade() {

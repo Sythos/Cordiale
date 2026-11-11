@@ -3404,22 +3404,25 @@ async fn finish_connect(
     }
 }
 
+/// Plain text of one displayed row: time, sender and the full message.
+fn chat_row_text(line: &ChatLine) -> String {
+    let body: String = cordiale_core::formatting::parse_mirc_text(&line.reply_body)
+        .into_iter()
+        .map(|run| run.text)
+        .collect();
+    if line.nick.is_empty() {
+        format!("[{}] {}", line.timestamp, body)
+    } else {
+        format!("[{}] <{}> {}", line.timestamp, line.nick, body)
+    }
+}
+
 /// Plain snapshot of the displayed, loaded rows; preserve literal text and URLs.
 fn chat_copy_text(lines: &slint::ModelRc<ChatLine>) -> String {
     use slint::Model as _;
     lines
         .iter()
-        .map(|line| {
-            let body: String = cordiale_core::formatting::parse_mirc_text(&line.reply_body)
-                .into_iter()
-                .map(|run| run.text)
-                .collect();
-            if line.nick.is_empty() {
-                format!("[{}] {}", line.timestamp, body)
-            } else {
-                format!("[{}] <{}> {}", line.timestamp, line.nick, body)
-            }
-        })
+        .map(|line| chat_row_text(&line))
         .collect::<Vec<_>>()
         .join("\n")
 }

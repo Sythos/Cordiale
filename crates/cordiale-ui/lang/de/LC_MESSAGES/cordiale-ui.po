@@ -548,6 +548,10 @@ msgctxt "MemberContextMenu"
 msgid "Reply"
 msgstr "Antworten"
 
+msgctxt "MemberContextMenu"
+msgid "Copy"
+msgstr "Kopieren"
+
 msgctxt "AppWindow"
 msgid "connecting"
 msgstr "verbindet"
