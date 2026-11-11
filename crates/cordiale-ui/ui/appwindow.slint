@@ -468,8 +468,13 @@ component NickQueryButton inherits Rectangle {
     in property <color> text-color;
     in property <bool> text-bold: false;
     in property <bool> text-italic: false;
+    // A chat row lets a drag over the nick select it, so the copy keys copy
+    // it. A plain click still activates the button.
+    in property <bool> selectable: false;
     callback activated();
     callback context-menu-requested(Point);
+
+    property <bool> drag-selected: false;
 
     accessible-role: button;
     accessible-label: root.text;
@@ -486,6 +491,22 @@ component NickQueryButton inherits Rectangle {
         }
     }
 
+    HorizontalLayout {
+        // Disabled when the nick is not selectable: no focus stop, and the
+        // text looks the same.
+        nick-input := TextInput {
+            text: root.text;
+            enabled: root.selectable;
+            read-only: true;
+            wrap: no-wrap;
+            font-weight: root.text-bold ? 700 : 400;
+            font-italic: root.text-italic;
+            color: root.text-color;
+        }
+    }
+
+    // In front of the text, so a click keeps working: the input never sees
+    // the mouse. A drag of a few pixels selects the whole nick instead.
     touch := TouchArea {
         mouse-cursor: pointer;
         // Slint 1.18 consumes right presses here before the parent menu.
@@ -493,20 +514,23 @@ component NickQueryButton inherits Rectangle {
             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
                 root.context-menu-requested({ x: self.mouse-x, y: self.mouse-y });
             }
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.drag-selected = false;
+            }
+        }
+        moved => {
+            if root.selectable && self.pressed && !root.drag-selected
+                && (abs(self.mouse-x - self.pressed-x) > 4px || abs(self.mouse-y - self.pressed-y) > 4px) {
+                root.drag-selected = true;
+                nick-input.focus();
+                nick-input.select-all();
+            }
         }
         clicked => {
-            focus.focus();
-            root.activated();
-        }
-    }
-
-    HorizontalLayout {
-        Text {
-            text: root.text;
-            wrap: no-wrap;
-            font-weight: root.text-bold ? 700 : 400;
-            font-italic: root.text-italic;
-            color: root.text-color;
+            if !root.drag-selected {
+                focus.focus();
+                root.activated();
+            }
         }
     }
 }
@@ -546,6 +570,8 @@ component MemberContextMenu {
     in property <color> prefix-color;
     in property <bool> text-bold: false;
     in property <bool> text-italic: false;
+    // A chat row lets the user select the nick text with a drag.
+    in property <bool> selectable-nick: false;
     callback mode-action(string, string); // verb, nick
     callback kick(string);
     callback ban(string);
@@ -663,6 +689,7 @@ component MemberContextMenu {
                 text-color: text-color;
                 text-bold: text-bold;
                 text-italic: text-italic;
+                selectable: selectable-nick;
                 activated => {
                     nickname-clicked(target-nick, source-network, source-window);
                 }
@@ -1357,6 +1384,8 @@ export component AppWindow inherits Window {
     pure callback format-chat-copy([ChatLine]) -> string;
     // The displayed text of one row, for the Copy item of its menu.
     pure callback format-chat-row(ChatLine) -> string;
+    // The displayed text of the rows from the first index to the last one.
+    pure callback format-chat-range([ChatLine], int, int) -> string;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -1589,6 +1618,13 @@ export component AppWindow inherits Window {
     }
     // The row a mention jump landed on, tinted for a moment; -1 for none.
     in-out property <int> chat-highlight-row: -1;
+    // Rows picked by a drag that leaves the row it started in: the row it
+    // started in, the row under the pointer, and the pointer height in the
+    // list's content. -1 means no such selection. The selected rows are
+    // copied whole, by `format-chat-range`.
+    in-out property <int> chat-sel-anchor: -1;
+    in-out property <int> chat-sel-focus: -1;
+    in-out property <length> chat-sel-pointer-y;
     // What lets a chat pane that is torn down and rebuilt (the reader went
     // to the media viewer, Settings...) come back where it was: the number
     // of lines `chat-content-height` was measured for, and the window the
@@ -5005,6 +5041,9 @@ export component AppWindow inherits Window {
                     if older-armed && !history-loading && !history-start-reached && chat-lines.length > 0 {
                         older-armed = false;
                         history-loading = true;
+                        // Older rows shift every row index.
+                        chat-sel-anchor = -1;
+                        chat-sel-focus = -1;
                         older-history-requested();
                     }
                 }
@@ -5114,13 +5153,15 @@ export component AppWindow inherits Window {
                 property <string> window-label: current-channel-label;
                 changed window-label => {
                     chat-pane-label = window-label;
+                    chat-sel-anchor = -1;
+                    chat-sel-focus = -1;
                     resuming = false;
                     self.follow-bottom = true;
                     older-armed = true;
                     self.content-y = min(0px, self.visible-height - self.content-height);
                 }
 
-                for line[line-index] in chat-lines : Rectangle {
+                for line[line-index] in chat-lines : row := Rectangle {
                     // A row never widens the pane: an oversized one (mIRC
                     // block art, a long token without spaces) is clipped on
                     // the right like Cicchetto's `overflow-x: clip`, instead
@@ -5129,7 +5170,27 @@ export component AppWindow inherits Window {
 
                     // Cicchetto's flat mention background; the row a
                     // mention jump landed on is tinted over it.
-                    background: line-index == chat-highlight-row
+                    property <bool> range-selected: chat-sel-anchor >= 0 && chat-sel-focus >= 0
+                        && chat-sel-anchor != chat-sel-focus
+                        && line-index >= min(chat-sel-anchor, chat-sel-focus)
+                        && line-index <= max(chat-sel-anchor, chat-sel-focus);
+                    // True while a drag that started in this row is outside
+                    // the row, or came back into it.
+                    property <bool> ranging: false;
+                    // Only a drag that holds the mouse sees the pointer
+                    // leave the row, so the height under the pointer is
+                    // taken from it. The row under that height ends the range.
+                    property <bool> holds-pointer: chat-sel-anchor >= 0
+                        && self.y <= chat-sel-pointer-y && chat-sel-pointer-y < self.y + self.height;
+                    changed holds-pointer => {
+                        if self.holds-pointer {
+                            chat-sel-focus = line-index;
+                        }
+                    }
+
+                    background: range-selected
+                        ? #3b82f655
+                        : line-index == chat-highlight-row
                         ? #3b82f666
                         : !line.mention
                         ? transparent
@@ -5137,115 +5198,202 @@ export component AppWindow inherits Window {
                         ? palette-mention.with-alpha(0.25)
                         : (theme == "dark" ? #6b5a0066 : #fff2b3);
 
-                    // The whole row opens the menu of its own sender. It sits
-                    // behind the content, so links and the nick keep their
-                    // own clicks. A row without a sender opens nothing.
-                    TouchArea {
-                        pointer-event(event) => {
-                            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && line.nick != "" {
-                                row-menu.show-menu({
-                                    x: self.mouse-x - row-menu.x,
-                                    y: self.mouse-y - row-menu.y,
-                                });
+                    // A drag in a text input of the row keeps the mouse, so the
+                    // copy keys reach the row from here: they copy the picked
+                    // rows, and Escape drops them.
+                    FocusScope {
+                        focus-on-click: false;
+                        capture-key-pressed(event) => {
+                            if (event.modifiers.control || event.modifiers.meta) && !event.modifiers.shift
+                                && (event.text == "c" || event.text == "C")
+                                && chat-sel-anchor >= 0 && chat-sel-focus >= 0 && chat-sel-anchor != chat-sel-focus {
+                                copy-text-requested(format-chat-range(chat-lines, min(chat-sel-anchor, chat-sel-focus), max(chat-sel-anchor, chat-sel-focus)));
+                                return EventResult.accept;
                             }
-                        }
-                    }
-
-                    HorizontalLayout {
-                        alignment: start;
-                        spacing: 0px;
-
-                        // Read-only inputs, so the time can be selected and
-                        // copied with the mouse or Shift and the arrow keys.
-                        TextInput {
-                            text: "[" + line.timestamp + "] ";
-                            read-only: true;
-                            wrap: no-wrap;
-                            color: line.timestamp-color;
-                            font-italic: line.italic;
-                        }
-
-                        if line.encrypted : Text {
-                            text: "🔒 ";
-                            color: line.timestamp-color;
-                            font-size: 10px;
-                        }
-
-                        // Always present so the row can reach it; it draws
-                        // nothing and has no width when the row has no sender.
-                        row-menu := MemberContextMenu {
-                            target-nick: line.nick;
-                            source-network: window-source-network;
-                            source-window: window-source-target;
-                            is-chat-message: true;
-                            reply-body: line.reply-body;
-                            reply-id: line.reply-id;
-                            can-moderate: can-moderate-members;
-                            is-ignored: nick-ignored(line.nick, window-ignore-masks);
-                            prefix-text: line.nick != "" ? "<" + line.nick-prefix : "";
-                            prefix-color: line.nick-color;
-                            display-text: line.nick;
-                            suffix-text: line.nick != "" ? "> " : "";
-                            text-color: line.nick-color;
-                            text-bold: true;
-                            text-italic: line.italic;
-                            mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
-                            kick(nick) => { member-kick-requested(nick); }
-                            ban(nick) => { member-ban-requested(nick); }
-                            ban-host(nick) => { member-ban-host-requested(nick); }
-                            kickban(nick) => { member-kickban-requested(nick); }
-                            whois(nick, network) => { member-whois-requested(nick, network); }
-                            ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
-                            query(nick) => { member-query-requested(nick); }
-                            nickname-clicked(nick, network, source) => {
-                                member-nickname-clicked(nick, network, source);
+                            if event.text == Key.Escape && chat-sel-anchor >= 0 {
+                                chat-sel-anchor = -1;
+                                chat-sel-focus = -1;
+                                return EventResult.accept;
                             }
-                            ignore(nick, add) => { member-ignore-requested(nick, add); }
-                            // The worker bumps `compose-focus-request` once the
-                            // quote is in the compose field.
-                            reply(nick, body, id) => {
-                                reply-to-message-requested(nick, body, id);
+                            return EventResult.reject;
+                        }
+
+                        // The whole row opens the menu of its own sender. It
+                        // is the parent of the content, so links and the nick
+                        // keep their own clicks. A row without a sender opens
+                        // nothing. It also follows the pointer during a drag
+                        // that started in a text input of the row: only then
+                        // can the pointer be outside the row, and the drag
+                        // then picks whole rows from this one.
+                        row-touch := TouchArea {
+                            pointer-event(event) => {
+                                if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && line.nick != "" {
+                                    row-menu.show-menu({
+                                        x: self.mouse-x - row-menu.x,
+                                        y: self.mouse-y - row-menu.y,
+                                    });
+                                }
                             }
-                            // Copies the row that opened this menu.
-                            copy-row => { copy-text-requested(format-chat-row(line)); }
-                        }
+                            changed mouse-y => {
+                                if self.mouse-y < 0px || self.mouse-y > self.height {
+                                    if !row.ranging {
+                                        row.ranging = true;
+                                        chat-sel-anchor = line-index;
+                                    }
+                                    chat-sel-pointer-y = row.y + self.mouse-y;
+                                } else if row.ranging {
+                                    // Back in the row: the range ends here again.
+                                    chat-sel-pointer-y = row.y + self.mouse-y;
+                                }
+                            }
+                            // A release outside the row ends the drag with an
+                            // exit, so later hover does not move the range.
+                            changed has-hover => {
+                                if !self.has-hover {
+                                    row.ranging = false;
+                                }
+                            }
 
-                        if line.incoming : Text {
-                            text: @tr("is sending an encrypted message...");
-                            font-italic: true;
-                            color: line.timestamp-color;
-                            horizontal-stretch: 1;
-                            min-width: 0px;
-                        }
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 0px;
 
-                        if !line.incoming && line.selectable : TextInput {
-                            text: line.selectable-body;
-                            read-only: true;
-                            single-line: false;
-                            wrap: word-wrap;
-                            color: line.body-color;
-                            font-italic: line.italic;
-                            font-weight: line.body-bold ? 700 : 400;
-                            horizontal-stretch: 1;
-                            min-width: 0px;
-                        }
+                                // Read-only inputs, so the time can be selected and
+                                // copied with the mouse or Shift and the arrow keys.
+                                TextInput {
+                                    text: "[" + line.timestamp + "] ";
+                                    read-only: true;
+                                    wrap: no-wrap;
+                                    color: line.timestamp-color;
+                                    font-italic: line.italic;
+                                    changed has-focus => {
+                                        if self.has-focus {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                    // A new selection in an input that keeps its
+                                    // focus drops the old rows. The cursor moves of
+                                    // a drag that picks rows do not.
+                                    changed cursor-position-byte-offset => {
+                                        if !row.ranging {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                    changed anchor-position-byte-offset => {
+                                        if !row.ranging {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                }
 
-                        if !line.incoming && !line.selectable : StyledText {
-                            text: line.body;
-                            default-color: theme == "dark" ? white : black;
-                            link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
-                            horizontal-stretch: line.rename-target == "" ? 1 : 0;
-                            // The longest word must not set the row's minimum
-                            // width; the row's clip trims what doesn't fit.
-                            min-width: 0px;
-                            link-clicked(href) => { chat-link-clicked(href); }
-                        }
+                                if line.encrypted : Text {
+                                    text: "🔒 ";
+                                    color: line.timestamp-color;
+                                    font-size: 10px;
+                                }
 
-                        if line.rename-target != "" : RenameTarget {
-                            nick: line.rename-target;
-                            italic: line.italic;
-                            link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
-                            activated => { rename-target-requested(line.rename-target); }
+                                // Always present so the row can reach it; it draws
+                                // nothing and has no width when the row has no sender.
+                                row-menu := MemberContextMenu {
+                                    target-nick: line.nick;
+                                    source-network: window-source-network;
+                                    source-window: window-source-target;
+                                    is-chat-message: true;
+                                    reply-body: line.reply-body;
+                                    reply-id: line.reply-id;
+                                    can-moderate: can-moderate-members;
+                                    is-ignored: nick-ignored(line.nick, window-ignore-masks);
+                                    prefix-text: line.nick != "" ? "<" + line.nick-prefix : "";
+                                    prefix-color: line.nick-color;
+                                    display-text: line.nick;
+                                    suffix-text: line.nick != "" ? "> " : "";
+                                    text-color: line.nick-color;
+                                    text-bold: true;
+                                    text-italic: line.italic;
+                                    selectable-nick: true;
+                                    mode-action(verb, nick) => { member-mode-action-requested(verb, nick); }
+                                    kick(nick) => { member-kick-requested(nick); }
+                                    ban(nick) => { member-ban-requested(nick); }
+                                    ban-host(nick) => { member-ban-host-requested(nick); }
+                                    kickban(nick) => { member-kickban-requested(nick); }
+                                    whois(nick, network) => { member-whois-requested(nick, network); }
+                                    ctcp(nick, verb) => { member-ctcp-requested(nick, verb); }
+                                    query(nick) => { member-query-requested(nick); }
+                                    nickname-clicked(nick, network, source) => {
+                                        member-nickname-clicked(nick, network, source);
+                                    }
+                                    ignore(nick, add) => { member-ignore-requested(nick, add); }
+                                    // The worker bumps `compose-focus-request` once the
+                                    // quote is in the compose field.
+                                    reply(nick, body, id) => {
+                                        reply-to-message-requested(nick, body, id);
+                                    }
+                                    // Copies the row that opened this menu.
+                                    copy-row => { copy-text-requested(format-chat-row(line)); }
+                                }
+
+                                if line.incoming : Text {
+                                    text: @tr("is sending an encrypted message...");
+                                    font-italic: true;
+                                    color: line.timestamp-color;
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                }
+
+                                if !line.incoming && line.selectable : TextInput {
+                                    text: line.selectable-body;
+                                    read-only: true;
+                                    single-line: false;
+                                    wrap: word-wrap;
+                                    color: line.body-color;
+                                    font-italic: line.italic;
+                                    font-weight: line.body-bold ? 700 : 400;
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                    changed has-focus => {
+                                        if self.has-focus {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                    // A new selection in an input that keeps its
+                                    // focus drops the old rows. The cursor moves of
+                                    // a drag that picks rows do not.
+                                    changed cursor-position-byte-offset => {
+                                        if !row.ranging {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                    changed anchor-position-byte-offset => {
+                                        if !row.ranging {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                }
+
+                                if !line.incoming && !line.selectable : StyledText {
+                                    text: line.body;
+                                    default-color: theme == "dark" ? white : black;
+                                    link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
+                                    horizontal-stretch: line.rename-target == "" ? 1 : 0;
+                                    // The longest word must not set the row's minimum
+                                    // width; the row's clip trims what doesn't fit.
+                                    min-width: 0px;
+                                    link-clicked(href) => { chat-link-clicked(href); }
+                                }
+
+                                if line.rename-target != "" : RenameTarget {
+                                    nick: line.rename-target;
+                                    italic: line.italic;
+                                    link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
+                                    activated => { rename-target-requested(line.rename-target); }
+                                }
+                            }
                         }
                     }
                 }
