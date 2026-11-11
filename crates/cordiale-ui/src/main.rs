@@ -3425,6 +3425,23 @@ fn chat_copy_text(lines: &slint::ModelRc<ChatLine>) -> String {
         .join("\n")
 }
 
+/// The displayed text of the rows from `first` to `last` (both included, in
+/// any order), one row per line. Indexes outside the model are ignored.
+fn chat_range_text(lines: &slint::ModelRc<ChatLine>, first: i32, last: i32) -> String {
+    use slint::Model as _;
+    let (first, last) = (
+        first.min(last).max(0) as usize,
+        first.max(last).max(0) as usize,
+    );
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| (first..=last).contains(index))
+        .map(|(_, line)| chat_row_text(&line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Puts `text` on the system clipboard (a TOTP key, link or recovery
 /// codes); a clipboard that can't be opened is only logged.
 fn copy_text(text: &str) {
@@ -9854,7 +9871,7 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
     let target = media::link_target(&href, client.base_url());
     let ui = ui.clone();
     tokio::spawn(async move {
-        let target = if target == LinkTarget::Browser {
+        let (target, hint) = if target == LinkTarget::Browser {
             let on_grappa =
                 href.starts_with(&format!("{}/", client.base_url().trim_end_matches('/')));
             let web = href.starts_with("http://") || href.starts_with("https://");
@@ -9863,20 +9880,32 @@ fn open_link(state: &WorkerState, ui: &slint::Weak<AppWindow>, href: String) {
             } else {
                 media::ResponseHead::default()
             };
-            media::response_target(
-                &href,
-                client.base_url(),
-                head.content_type.as_deref(),
-                head.disposition.as_deref(),
+            let hint = head
+                .disposition
+                .as_deref()
+                .and_then(media::disposition_file_name)
+                .and_then(|name| {
+                    name.rsplit_once('.')
+                        .map(|(_, ext)| ext.to_ascii_lowercase())
+                })
+                .filter(|ext| media::target_for_extension(ext) != LinkTarget::Browser);
+            (
+                media::response_target(
+                    &href,
+                    client.base_url(),
+                    head.content_type.as_deref(),
+                    head.disposition.as_deref(),
+                ),
+                hint,
             )
         } else {
-            target
+            (target, None)
         };
         if target == LinkTarget::Browser {
             open_in_browser(&href);
             return;
         }
-        show_media(client, token, ui, href, target).await;
+        show_media(client, token, ui, href, target, hint).await;
     });
 }
 
@@ -9887,6 +9916,7 @@ async fn show_media(
     ui: slint::Weak<AppWindow>,
     href: String,
     target: cordiale_core::media::LinkTarget,
+    hint: Option<String>,
 ) {
     use cordiale_core::media::{self, FetchError, LinkTarget};
     let title = href
@@ -9940,7 +9970,14 @@ async fn show_media(
             media::fetch_public(&href, limit, text).await
         };
         let outcome = fetched.map(|(bytes, content_type, cut)| {
-            media_content(target, &href, bytes, content_type.as_deref(), cut)
+            media_content_with(
+                target,
+                &href,
+                hint.as_deref(),
+                bytes,
+                content_type.as_deref(),
+                cut,
+            )
         });
         let _ = ui.upgrade_in_event_loop(move |ui| {
             let stale = !ui.get_media_open()
@@ -10050,11 +10087,26 @@ fn link_extension(href: &str) -> Option<String> {
         .filter(|extension| !extension.is_empty() && extension.len() <= 5)
 }
 
-/// Decides what a downloaded file is and prepares it for the viewer. The
-/// Content-Type of the response wins over the end of the link.
+/// Decides what a downloaded file is and prepares it for the viewer, with no
+/// file type from the response headers.
+#[cfg(test)]
 fn media_content(
     target: cordiale_core::media::LinkTarget,
     href: &str,
+    bytes: Vec<u8>,
+    content_type: Option<&str>,
+    cut: bool,
+) -> MediaContent {
+    media_content_with(target, href, None, bytes, content_type, cut)
+}
+
+/// Decides what a downloaded file is and prepares it for the viewer. The
+/// Content-Type of the response wins over the end of the link. `hint` is the
+/// file type from the Content-Disposition name, used last.
+fn media_content_with(
+    target: cordiale_core::media::LinkTarget,
+    href: &str,
+    hint: Option<&str>,
     bytes: Vec<u8>,
     content_type: Option<&str>,
     cut: bool,
@@ -10067,6 +10119,7 @@ fn media_content(
         .and_then(media::extension_for_content_type)
         .map(str::to_string)
         .or_else(|| link_extension(href))
+        .or_else(|| hint.map(str::to_string))
         .unwrap_or_else(|| match target {
             LinkTarget::Video => "mp4".to_string(),
             _ => "png".to_string(),

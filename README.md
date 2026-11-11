@@ -45,7 +45,13 @@ saved per network and channel, synced with Grappa's `presence_filter`
 preference, and a channel with 200 or more members starts denoised until you
 pick, as in Cicchetto.
 
-To select and copy chat text, open **Actions → Copy text**. This read-only
+In the chat, a message without links or mixed formatting is selectable in
+place: drag over the time, the nick or the text, or use Shift with the arrow
+keys, then press Ctrl+C (Cmd+C on macOS). A plain click on a nick still opens
+its action. Drag from one row past its edge to pick whole rows; Ctrl+C copies
+them with time and nick, and Escape drops the pick.
+
+For the rest, open **Actions → Copy text**. This read-only
 snapshot contains the currently loaded messages with timestamps and nicknames.
 Select with the mouse or keyboard and use **Copy** or Ctrl+C (Cmd+C on macOS).
 **Back** or Escape returns to the chat; its formatted messages and links stay intact.
