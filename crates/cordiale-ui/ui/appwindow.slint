@@ -5174,6 +5174,9 @@ export component AppWindow inherits Window {
                         && chat-sel-anchor != chat-sel-focus
                         && line-index >= min(chat-sel-anchor, chat-sel-focus)
                         && line-index <= max(chat-sel-anchor, chat-sel-focus);
+                    // True while a drag that started in this row is outside
+                    // the row, or came back into it.
+                    property <bool> ranging: false;
                     // Only a drag that holds the mouse sees the pointer
                     // leave the row, so the height under the pointer is
                     // taken from it. The row under that height ends the range.
@@ -5233,8 +5236,21 @@ export component AppWindow inherits Window {
                             }
                             changed mouse-y => {
                                 if self.mouse-y < 0px || self.mouse-y > self.height {
-                                    chat-sel-anchor = line-index;
+                                    if !row.ranging {
+                                        row.ranging = true;
+                                        chat-sel-anchor = line-index;
+                                    }
                                     chat-sel-pointer-y = row.y + self.mouse-y;
+                                } else if row.ranging {
+                                    // Back in the row: the range ends here again.
+                                    chat-sel-pointer-y = row.y + self.mouse-y;
+                                }
+                            }
+                            // A release outside the row ends the drag with an
+                            // exit, so later hover does not move the range.
+                            changed has-hover => {
+                                if !self.has-hover {
+                                    row.ranging = false;
                                 }
                             }
 
@@ -5252,6 +5268,21 @@ export component AppWindow inherits Window {
                                     font-italic: line.italic;
                                     changed has-focus => {
                                         if self.has-focus {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                    // A new selection in an input that keeps its
+                                    // focus drops the old rows. The cursor moves of
+                                    // a drag that picks rows do not.
+                                    changed cursor-position-byte-offset => {
+                                        if !row.ranging {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                    changed anchor-position-byte-offset => {
+                                        if !row.ranging {
                                             chat-sel-anchor = -1;
                                             chat-sel-focus = -1;
                                         }
@@ -5324,6 +5355,21 @@ export component AppWindow inherits Window {
                                     min-width: 0px;
                                     changed has-focus => {
                                         if self.has-focus {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                    // A new selection in an input that keeps its
+                                    // focus drops the old rows. The cursor moves of
+                                    // a drag that picks rows do not.
+                                    changed cursor-position-byte-offset => {
+                                        if !row.ranging {
+                                            chat-sel-anchor = -1;
+                                            chat-sel-focus = -1;
+                                        }
+                                    }
+                                    changed anchor-position-byte-offset => {
+                                        if !row.ranging {
                                             chat-sel-anchor = -1;
                                             chat-sel-focus = -1;
                                         }
