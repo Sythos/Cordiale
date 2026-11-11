@@ -3869,6 +3869,10 @@ msgid "The server holds an E2E identity that this device does not have. Pair thi
 msgstr "El servidor tiene una identidad E2E que este dispositivo no tiene. Vincula este dispositivo con uno de los dispositivos de la lista. No se creó una identidad nueva."
 
 msgctxt "AppWindow"
+msgid "The server list of E2E devices cannot be read now. No identity was made or replaced. Try again later."
+msgstr "La lista de dispositivos E2E del servidor no se puede leer ahora. No se creó ni se reemplazó ninguna identidad. Inténtalo más tarde."
+
+msgctxt "AppWindow"
 msgid "The local E2E store of this network cannot be read. It was not changed. Restore it from a backup, then connect again."
 msgstr "El almacén E2E local de esta red no se puede leer. No se modificó. Restáuralo desde una copia de seguridad y vuelve a conectarte."
 

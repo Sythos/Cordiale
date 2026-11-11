@@ -29,6 +29,13 @@ You can select **Cancel request** while you wait.
 A request that nobody answers expires after 24 hours.
 After a refusal or an expiry, select **Try again** or **Dismiss**.
 
+Cordiale sends the request only after this device has its E2E identity.
+If the server has no identity, Cordiale makes one for you. No second step is needed.
+If the server has an identity that this device does not have, Cordiale shows the listed devices.
+Then use the pairing steps in the section about a missing master key.
+If a read of the server list fails, Cordiale makes no identity and asks you to try again later.
+If the local store cannot be read, Cordiale does not change it.
+
 ### Two separate queries
 
 After the peer accepts, you have two queries for the same person:
