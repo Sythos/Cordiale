@@ -92,6 +92,8 @@ pub enum ProvisionError {
     Store(E2eStoreError),
     /// A call failed, was refused, or is not in the protocol of the server.
     Route(E2eRouteError),
+    /// The server list does not read. No master is made or replaced.
+    ListUnavailable(E2eRouteError),
     Wire(WireError),
     Crypto(E2eError),
     Account(AccountError),
@@ -205,7 +207,7 @@ pub async fn provision_device(
             refusal: E2eRefusal::NotFound,
             ..
         }) => None,
-        Err(err) => return Err(err.into()),
+        Err(err) => return Err(ProvisionError::ListUnavailable(err)),
     };
 
     // A device that joined by X1 pairing holds no master secret: it has the
@@ -859,6 +861,26 @@ mod tests {
         let second = fake.key_posts[1].as_object().unwrap();
         assert!(!second.contains_key("fallback"));
         assert_eq!(second["one_time_keys"].as_array().unwrap().len(), 12);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_server_list_is_not_a_missing_identity() {
+        let dir = scratch_dir("list-unavailable");
+        let provider = fresh_key();
+        let mut store = E2eStateStore::open(state_path(&dir), &provider).expect("open");
+
+        let result = provision_device(
+            &GrappaClient::new("http://127.0.0.1:9".to_string()),
+            "abc123",
+            "libera",
+            PROTOCOL,
+            &mut store,
+        )
+        .await;
+
+        assert!(matches!(result, Err(ProvisionError::ListUnavailable(_))));
+        assert!(store.master_key().unwrap().is_none());
         let _ = fs::remove_dir_all(&dir);
     }
 

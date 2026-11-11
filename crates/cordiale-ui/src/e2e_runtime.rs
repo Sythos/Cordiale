@@ -1171,6 +1171,7 @@ async fn provision_network(state: &mut WorkerState, network: &str) -> ProvisionO
                 ProvisionError::NeedsPairing | ProvisionError::MasterMismatch => {
                     ProvisionOutcome::Pairing
                 }
+                ProvisionError::ListUnavailable(_) => ProvisionOutcome::ListUnavailable,
                 _ => ProvisionOutcome::Failed,
             }
         }
@@ -1187,7 +1188,9 @@ enum ProvisionOutcome {
     Pairing,
     /// The local store does not open or does not read.
     Store,
-    /// A call failed or the server refused it.
+    /// The server list of devices does not read. No identity is made.
+    ListUnavailable,
+    /// A later call failed or the server refused it.
     Failed,
 }
 
@@ -1583,7 +1586,9 @@ enum ConsentBlock {
     Pairing,
     /// The local store is corrupt or unreadable. The user must recover it.
     Store,
-    /// The provisioning call failed. A later try can work.
+    /// The server list of devices does not read. No identity is made.
+    ListUnavailable,
+    /// A later provisioning call failed. A later try can work.
     Network,
 }
 
@@ -1595,7 +1600,8 @@ impl ConsentBlock {
             Self::NoIdentity => "e2e-request-no-identity",
             Self::Pairing => "e2e-request-needs-pairing",
             Self::Store => "e2e-request-store",
-            Self::Network => "e2e-request-list-unavailable",
+            Self::ListUnavailable => "e2e-request-list-unavailable",
+            Self::Network => "e2e-request-failed",
         }
     }
 }
@@ -1679,6 +1685,7 @@ async fn ready_consent_context(
         ensure_engine(state, network);
     }
     match outcome {
+        ProvisionOutcome::ListUnavailable => Err(ConsentBlock::ListUnavailable),
         ProvisionOutcome::Failed => Err(ConsentBlock::Network),
         ProvisionOutcome::Pairing => Err(ConsentBlock::Pairing),
         ProvisionOutcome::Store => Err(ConsentBlock::Store),
@@ -4668,12 +4675,14 @@ mod tests {
         // Every try fails again: a local consent line is no bypass.
         for _ in 0..2 {
             let result = runtime.block_on(ready_consent_context(&mut state, "net"));
-            assert_eq!(result.err(), Some(ConsentBlock::Network));
-            // A failed read has its own message and never shows a recovery.
+            // The list read fails first: it has its own message.
+            assert_eq!(result.err(), Some(ConsentBlock::ListUnavailable));
             assert_eq!(
-                ConsentBlock::Network.status_key(),
+                ConsentBlock::ListUnavailable.status_key(),
                 "e2e-request-list-unavailable"
             );
+            // A failure after the list read keeps the generic message.
+            assert_eq!(ConsentBlock::Network.status_key(), "e2e-request-failed");
             assert!(!state.e2e.provisioned.contains("net"));
         }
         // After a full run the context is ready, with no new call.
