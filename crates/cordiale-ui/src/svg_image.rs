@@ -20,13 +20,14 @@ pub struct Rendered {
 }
 
 fn options() -> usvg::Options<'static> {
-    let mut options = usvg::Options::default();
-    options.resources_dir = None;
-    options.image_href_resolver = usvg::ImageHrefResolver {
-        resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
-        resolve_string: Box::new(|_, _| None),
-    };
-    options
+    usvg::Options {
+        resources_dir: None,
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..usvg::Options::default()
+    }
 }
 
 /// Renders `data` to a bitmap, or `None` when the file is not a valid SVG.
