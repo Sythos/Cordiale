@@ -569,6 +569,11 @@ component MemberContextMenu {
     // Whether the nick has a plain ignore rule: the menu then offers
     // Unignore instead of Ignore.
     in property <bool> is-ignored: false;
+    // The first links of a chat row whose text input takes the clicks, so
+    // the menu opens them. Empty for no link.
+    in property <string> link-1: "";
+    in property <string> link-2: "";
+    in property <string> link-3: "";
     in property <string> display-text;
     in property <string> suffix-text: "";
     in property <color> text-color;
@@ -592,6 +597,7 @@ component MemberContextMenu {
     callback ignore(string, bool); // nick, true to ignore
     callback reply(string, string, string); // nick, raw message body, message id
     callback copy-row(); // copy the displayed text of the row
+    callback open-link(string); // open a link of the row
 
     // Opens the menu from outside, for a chat row whose own right-click
     // area is the whole row. The position is relative to this component.
@@ -609,6 +615,18 @@ component MemberContextMenu {
             if is-chat-message : MenuItem {
                 title: "📋  " + @tr("Copy");
                 activated => { copy-row(); }
+            }
+            if link-1 != "" : MenuItem {
+                title: "🔗  " + link-1;
+                activated => { open-link(link-1); }
+            }
+            if link-2 != "" : MenuItem {
+                title: "🔗  " + link-2;
+                activated => { open-link(link-2); }
+            }
+            if link-3 != "" : MenuItem {
+                title: "🔗  " + link-3;
+                activated => { open-link(link-3); }
             }
             MenuItem {
                 title: "⬆  " + @tr("Op");
@@ -1395,8 +1413,8 @@ export component AppWindow inherits Window {
     pure callback format-chat-row(ChatLine) -> string;
     // The displayed text of the rows from the first index to the last one.
     pure callback format-chat-range([ChatLine], int, int) -> string;
-    // The link of a row text under a byte offset of the text cursor, or "".
-    pure callback chat-link-at(string, int) -> string;
+    // The link of a row text at a position in the order of its links, or "".
+    pure callback chat-link(string, int) -> string;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -5315,6 +5333,9 @@ export component AppWindow inherits Window {
                                     is-chat-message: true;
                                     reply-body: line.reply-body;
                                     reply-id: line.reply-id;
+                                    link-1: chat-link(line.overlay-body, 0);
+                                    link-2: chat-link(line.overlay-body, 1);
+                                    link-3: chat-link(line.overlay-body, 2);
                                     can-moderate: can-moderate-members;
                                     is-ignored: nick-ignored(line.nick, window-ignore-masks);
                                     prefix-text: line.nick != "" ? "<" + line.nick-prefix : "";
@@ -5349,6 +5370,7 @@ export component AppWindow inherits Window {
                                     }
                                     // Copies the row that opened this menu.
                                     copy-row => { copy-text-requested(format-chat-row(line)); }
+                                    open-link(href) => { chat-link-clicked(href); }
                                 }
 
                                 if line.incoming : Text {
@@ -5392,20 +5414,15 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                // Links or several styles: the styled text stays
+                                // Several colors or links: the styled text stays
                                 // visible and a transparent text input of the same
                                 // text lies over it, so the mouse and the keys
-                                // select it. The input takes the clicks, so a click
-                                // on a link opens it from the cursor offset.
+                                // select it. The input takes the clicks, so the
+                                // links of such a row open from its row menu.
                                 if !line.incoming && !line.selectable && line.overlay-body != "" : Rectangle {
                                     horizontal-stretch: 1;
                                     min-width: 0px;
                                     min-height: styled-body.preferred-height;
-
-                                    // The link a click can open, and a keyboard move
-                                    // that must not open it.
-                                    property <string> pending-link: "";
-                                    property <bool> key-moved: false;
 
                                     styled-body := StyledText {
                                         x: 0px;
@@ -5414,32 +5431,6 @@ export component AppWindow inherits Window {
                                         text: line.body;
                                         default-color: theme == "dark" ? white : black;
                                         link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
-                                    }
-
-                                    // The input never sees the end of a click, so a
-                                    // link opens when the cursor stays on it without
-                                    // a selection for a short time. A drag or a key
-                                    // move cancels it.
-                                    link-timer := Timer {
-                                        interval: 250ms;
-                                        running: false;
-                                        triggered => {
-                                            self.stop();
-                                            if pending-link != ""
-                                                && overlay-input.cursor-position-byte-offset == overlay-input.anchor-position-byte-offset {
-                                                chat-link-clicked(pending-link);
-                                            }
-                                            pending-link = "";
-                                        }
-                                    }
-
-                                    key-timer := Timer {
-                                        interval: 300ms;
-                                        running: false;
-                                        triggered => {
-                                            self.stop();
-                                            key-moved = false;
-                                        }
                                     }
 
                                     overlay-input := TextInput {
@@ -5475,27 +5466,6 @@ export component AppWindow inherits Window {
                                             if !row.ranging {
                                                 chat-sel-anchor = -1;
                                                 chat-sel-focus = -1;
-                                            }
-                                        }
-                                        key-pressed(event) => {
-                                            key-moved = true;
-                                            key-timer.start();
-                                            key-timer.restart();
-                                            pending-link = "";
-                                            return reject;
-                                        }
-                                        // Runs on a press and on the cursor moves of a
-                                        // drag. A press without Shift puts the anchor
-                                        // and the cursor at one offset.
-                                        cursor-position-changed(position) => {
-                                            pending-link = "";
-                                            if !key-moved
-                                                && self.cursor-position-byte-offset == self.anchor-position-byte-offset {
-                                                pending-link = chat-link-at(line.overlay-body, self.cursor-position-byte-offset);
-                                                if pending-link != "" {
-                                                    link-timer.start();
-                                                    link-timer.restart();
-                                                }
                                             }
                                         }
                                     }

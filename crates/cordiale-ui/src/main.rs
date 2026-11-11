@@ -9521,13 +9521,18 @@ fn chat_line_from_message(
         });
 
     let selectable_body = selectable_body_text(&runs, display_text);
-    // A row with links or several styles keeps its styled text and gets a
-    // transparent text input over it, so the same text can be selected.
-    let overlay_body = if selectable_body.is_none() && !incoming && rename_target.is_empty() {
-        visible_body_text(&runs)
-    } else {
-        String::new()
-    };
+    // A row with links or several colors keeps its styled text and gets a
+    // transparent text input over it, so the same text can be selected. The
+    // input has one weight, so a row with mixed weights gets none. The input
+    // takes the clicks, so a row with links needs a sender: its menu opens
+    // the links.
+    let visible_body = visible_body_text(&runs);
+    let overlay = selectable_body.is_none()
+        && !incoming
+        && rename_target.is_empty()
+        && has_uniform_weight(&runs)
+        && (message.nick.is_some() || nth_link(&visible_body, 0).is_empty());
+    let overlay_body = if overlay { visible_body } else { String::new() };
 
     ChatLine {
         selectable: selectable_body.is_some() && !incoming && rename_target.is_empty(),
@@ -9588,15 +9593,23 @@ fn visible_body_text(runs: &[(String, (u8, u8, u8), bool)]) -> String {
         .collect()
 }
 
-/// The link of `text` under a byte offset of the text cursor, or an empty
-/// string when the offset is not inside a link.
-fn link_at_offset(text: &str, offset: i32) -> String {
-    let Ok(offset) = usize::try_from(offset) else {
-        return String::new();
-    };
-    cordiale_core::media::find_links(text)
-        .into_iter()
-        .find(|link| link.range.contains(&offset))
+/// Whether every run of a non-empty row has the same weight, so one text
+/// input has the same glyph widths as the styled text.
+fn has_uniform_weight(runs: &[(String, (u8, u8, u8), bool)]) -> bool {
+    runs.first()
+        .is_some_and(|first| runs.iter().all(|run| run.2 == first.2))
+}
+
+/// The link of a row text at a position in the order of the links, or an
+/// empty string when the text has no such link. The row menu opens it.
+fn nth_link(text: &str, index: i32) -> String {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| {
+            cordiale_core::media::find_links(text)
+                .into_iter()
+                .nth(index)
+        })
         .map(|link| link.href)
         .unwrap_or_default()
 }

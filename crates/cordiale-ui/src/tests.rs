@@ -14562,25 +14562,39 @@ fn rows_with_links_or_styles_get_a_selection_overlay() {
     let link = chat_row("see https://example.org/a now");
     assert!(!link.selectable);
     assert_eq!(link.overlay_body.as_str(), "see https://example.org/a now");
-    // Colors and weights never enter the overlay text.
-    let styled = chat_row("\x02bold\x02 \x034red\x03 caff\u{e8}");
-    assert!(!styled.selectable);
-    assert_eq!(styled.overlay_body.as_str(), "bold red caff\u{e8}");
+    // Colors never enter the overlay text.
+    let colored = chat_row("\x034red\x03 caff\u{e8}");
+    assert!(!colored.selectable);
+    assert_eq!(colored.overlay_body.as_str(), "red caff\u{e8}");
+    // Mixed weights have different glyph widths in one text input: no overlay.
+    let mixed = chat_row("\x02bold\x02 normal");
+    assert!(!mixed.selectable);
+    assert_eq!(mixed.overlay_body.as_str(), "");
+    // One weight for the whole row keeps the overlay, with that weight.
+    let bold_link = chat_row("\x02see https://example.org/a\x02");
+    assert_eq!(bold_link.overlay_body.as_str(), "see https://example.org/a");
+    assert!(bold_link.body_bold);
+    // A link row without a sender has no menu to open the link: no overlay.
+    let notice = chat_line_from_message(
+        &render_message(
+            &serde_json::json!({"kind": "server_event", "body": "see https://example.org/a", "id": 2}),
+            None,
+        ),
+        true,
+        "",
+    );
+    assert_eq!(notice.nick.as_str(), "");
+    assert_eq!(notice.overlay_body.as_str(), "");
 }
 
 #[test]
-fn link_at_offset_finds_only_the_link_under_the_cursor() {
-    let text = "see https://example.org/a now";
-    assert_eq!(link_at_offset(text, 0), "");
-    assert_eq!(link_at_offset(text, 3), "");
-    assert_eq!(link_at_offset(text, 4), "https://example.org/a");
-    assert_eq!(link_at_offset(text, 10), "https://example.org/a");
-    assert_eq!(link_at_offset(text, 25), "");
-    assert_eq!(link_at_offset(text, -1), "");
-    // Offsets count bytes, as the text input does.
-    let accented = "caff\u{e8} www.example.org/x";
-    assert_eq!(link_at_offset(accented, 5), "");
-    assert_eq!(link_at_offset(accented, 7), "https://www.example.org/x");
+fn nth_link_returns_the_links_in_order() {
+    let text = "see https://example.org/a and www.example.org/x now";
+    assert_eq!(nth_link(text, 0), "https://example.org/a");
+    assert_eq!(nth_link(text, 1), "https://www.example.org/x");
+    assert_eq!(nth_link(text, 2), "");
+    assert_eq!(nth_link(text, -1), "");
+    assert_eq!(nth_link("no link here", 0), "");
 }
 
 #[test]
