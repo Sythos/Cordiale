@@ -14266,3 +14266,30 @@ fn radio_and_admin_settings_keep_controls_at_the_top_in_tall_windows() {
         );
     }
 }
+
+#[test]
+fn selectable_body_text_keeps_only_plain_single_style_rows() {
+    let white = (255, 255, 255);
+    let red = (255, 0, 0);
+    let plain = vec![("Caff\u{e8} \u{1f642}".to_string(), white, false)];
+    assert_eq!(
+        selectable_body_text(&plain, "Caff\u{e8} \u{1f642}").as_deref(),
+        Some("Caff\u{e8} \u{1f642}")
+    );
+    let two_colors = vec![
+        ("a".to_string(), white, false),
+        ("b".to_string(), red, false),
+    ];
+    assert_eq!(selectable_body_text(&two_colors, "ab"), None);
+    let mixed_bold = vec![
+        ("a".to_string(), white, true),
+        ("b".to_string(), white, false),
+    ];
+    assert_eq!(selectable_body_text(&mixed_bold, "ab"), None);
+    let link = vec![("see https://example.org/a".to_string(), white, false)];
+    assert_eq!(
+        selectable_body_text(&link, "see https://example.org/a"),
+        None
+    );
+    assert_eq!(selectable_body_text(&[], ""), None);
+}

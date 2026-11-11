@@ -9526,7 +9526,16 @@ fn chat_line_from_message(
             slint::StyledText::from_plain_text(&plain)
         });
 
+    let selectable_body = selectable_body_text(&runs, display_text);
+
     ChatLine {
+        selectable: selectable_body.is_some() && !incoming && rename_target.is_empty(),
+        selectable_body: selectable_body.unwrap_or_default().into(),
+        body_color: runs.first().map_or(
+            slint::Color::from_rgb_u8(default_color.0, default_color.1, default_color.2),
+            |run| slint::Color::from_rgb_u8(run.1 .0, run.1 .1, run.1 .2),
+        ),
+        body_bold: runs.first().is_some_and(|run| run.2),
         timestamp: message.timestamp.clone().into(),
         timestamp_color: muted_color(dark_theme),
         nick: nick.into(),
@@ -9549,6 +9558,28 @@ fn chat_line_from_message(
         encrypted: message_lock_visible(message),
         incoming,
     }
+}
+
+/// The visible text of a row that a plain text input can show without
+/// losing anything: no link and one color and weight for every run. Other
+/// rows keep the styled text. Hidden markup never enters the text.
+fn selectable_body_text(
+    runs: &[(String, (u8, u8, u8), bool)],
+    display_text: &str,
+) -> Option<String> {
+    let first = runs.first()?;
+    if runs.iter().any(|run| run.1 != first.1 || run.2 != first.2) {
+        return None;
+    }
+    if !cordiale_core::media::find_links(display_text).is_empty() {
+        return None;
+    }
+    let text: String = runs
+        .iter()
+        .flat_map(|run| run.0.chars())
+        .filter(|ch| *ch != slint_markdown_placeholder())
+        .collect();
+    Some(text)
 }
 
 /// The marker text of the progress row of a multi-frame E2E message on its
