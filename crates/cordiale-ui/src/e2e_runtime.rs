@@ -1420,7 +1420,7 @@ pub(crate) async fn handle_e2e_request_action(
             {
                 Ok(context) => context,
                 Err(block) => {
-                    set_e2e_status(ui, block.status_key());
+                    show_consent_block(state, ui, &network, block).await;
                     return;
                 }
             };
@@ -1472,7 +1472,7 @@ pub(crate) async fn handle_e2e_request_action(
             {
                 Ok(context) => context,
                 Err(block) => {
-                    set_e2e_status(ui, block.status_key());
+                    show_consent_block(state, ui, &network, block).await;
                     return;
                 }
             };
@@ -1595,9 +1595,34 @@ impl ConsentBlock {
             Self::NoIdentity => "e2e-request-no-identity",
             Self::Pairing => "e2e-request-needs-pairing",
             Self::Store => "e2e-request-store",
-            Self::Network => "e2e-request-failed",
+            Self::Network => "e2e-request-list-unavailable",
         }
     }
+}
+
+/// Shows why a consent action cannot start. A pairing block opens the
+/// existing recovery view with the listed devices, so the user can pair or
+/// reset from there. The view only explains: it creates no identity. Other
+/// blocks show their own status key.
+async fn show_consent_block(
+    state: &WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    block: ConsentBlock,
+) {
+    if block == ConsentBlock::Pairing {
+        if let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) {
+            let reason = state
+                .e2e
+                .recovery
+                .get(network)
+                .copied()
+                .unwrap_or(RecoveryReason::NoKeys);
+            let protocol = state.conn.server_protocol_version;
+            return show_recovery(ui, &client, &token, network, protocol, "", reason, None).await;
+        }
+    }
+    set_e2e_status(ui, block.status_key());
 }
 
 type ConsentContext = (GrappaClient, String, u32, E2eConsentLine);
@@ -4644,6 +4669,11 @@ mod tests {
         for _ in 0..2 {
             let result = runtime.block_on(ready_consent_context(&mut state, "net"));
             assert_eq!(result.err(), Some(ConsentBlock::Network));
+            // A failed read has its own message and never shows a recovery.
+            assert_eq!(
+                ConsentBlock::Network.status_key(),
+                "e2e-request-list-unavailable"
+            );
             assert!(!state.e2e.provisioned.contains("net"));
         }
         // After a full run the context is ready, with no new call.

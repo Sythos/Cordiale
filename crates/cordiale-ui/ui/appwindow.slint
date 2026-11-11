@@ -2920,6 +2920,8 @@ export component AppWindow inherits Window {
             return @tr("This device has no E2E identity for this network.");
         } else if status-kind == "e2e-request-needs-pairing" {
             return @tr("The server holds an E2E identity that this device does not have. Pair this device with a listed device. No new identity was made.");
+        } else if status-kind == "e2e-request-list-unavailable" {
+            return @tr("The server list of E2E devices cannot be read now. No identity was made or replaced. Try again later.");
         } else if status-kind == "e2e-request-store" {
             return @tr("The local E2E store of this network cannot be read. It was not changed. Restore it from a backup, then connect again.");
         } else if status-kind == "e2e-send-failed" {
