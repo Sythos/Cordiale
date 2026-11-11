@@ -5579,9 +5579,13 @@ export component AppWindow inherits Window {
             background: #8080804d;
         }
 
+        // The content pane scrolls on its own, so the navigation stays
+        // visible and tall sections (General) stay reachable.
+        ScrollView {
+            horizontal-stretch: 1;
+
         VerticalLayout {
             spacing: 12px;
-            horizontal-stretch: 1;
 
             if settings-section == "general" : VerticalLayout {
                 spacing: 12px;
@@ -8411,6 +8415,7 @@ export component AppWindow inherits Window {
             if settings-section != "themes" && settings-section != "admin" : Rectangle {
                 vertical-stretch: 1;
             }
+        }
         }
     }
 
