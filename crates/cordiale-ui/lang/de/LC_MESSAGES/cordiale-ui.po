@@ -4059,3 +4059,19 @@ msgstr "Die Ende-zu-Ende-Verschlüsselung ist in diesem Kanal aktiv. Ein Mitglie
 msgctxt "AppWindow"
 msgid "This channel has no key to send with yet. Nothing is sent as clear text."
 msgstr "Dieser Kanal hat noch keinen Schlüssel zum Senden. Nichts wird im Klartext gesendet."
+
+msgctxt "AppWindow"
+msgid "Reading the source addresses..."
+msgstr "Quelladressen werden gelesen..."
+
+msgctxt "AppWindow"
+msgid "The server reports no usable source address."
+msgstr "Der Server meldet keine nutzbare Quelladresse."
+
+msgctxt "AppWindow"
+msgid "The source addresses could not be read."
+msgstr "Die Quelladressen konnten nicht gelesen werden."
+
+msgctxt "AppWindow"
+msgid "The source addresses could not be read (error {})."
+msgstr "Die Quelladressen konnten nicht gelesen werden (Fehler {})."

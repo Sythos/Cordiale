@@ -4059,3 +4059,19 @@ msgstr "El cifrado de extremo a extremo está activo en este canal. Un miembro s
 msgctxt "AppWindow"
 msgid "This channel has no key to send with yet. Nothing is sent as clear text."
 msgstr "Este canal aún no tiene una clave para enviar. No se envía nada en texto claro."
+
+msgctxt "AppWindow"
+msgid "Reading the source addresses..."
+msgstr "Leyendo las direcciones de origen..."
+
+msgctxt "AppWindow"
+msgid "The server reports no usable source address."
+msgstr "El servidor no informa de ninguna dirección de origen utilizable."
+
+msgctxt "AppWindow"
+msgid "The source addresses could not be read."
+msgstr "No se pudieron leer las direcciones de origen."
+
+msgctxt "AppWindow"
+msgid "The source addresses could not be read (error {})."
+msgstr "No se pudieron leer las direcciones de origen (error {})."

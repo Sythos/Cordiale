@@ -366,6 +366,8 @@ struct AliasRow {
 struct VhostOptionRow {
     address: string,
     label: string,
+    // "IPv4", "IPv6" or empty, read from the address text.
+    family: string,
     selected: bool,
 }
 
@@ -1974,6 +1976,9 @@ export component AppWindow inherits Window {
     in-out property <string> new-alias-command: "";
     in-out property <string> new-alias-expansion: "";
     in property <[VhostOptionRow]> settings-vhost-options: [];
+    // 0 loading, 1 ready, 2 empty, 3 error (see `vhost_panel` in main.rs).
+    in property <int> settings-vhost-state: 0;
+    in property <string> settings-vhost-error: "";
     in property <[NotifyRow]> settings-notify-nicks: [];
     in-out property <string> new-notify-nick: "";
     in property <[string]> settings-watch-patterns: [];
@@ -2484,7 +2489,7 @@ export component AppWindow inherits Window {
     callback perform-save-requested(string);
     callback alias-add-requested(string, string);
     callback alias-remove-requested(string);
-    callback vhost-toggle-requested(string);
+    callback vhost-select-requested(string);
     callback notify-add-requested(string);
     callback notify-remove-requested(string);
     callback watch-pattern-add-requested(string);
@@ -7148,10 +7153,47 @@ export component AppWindow inherits Window {
                 icon: "🌐";
                 title: @tr("Source Address");
 
-                for option in settings-vhost-options : CheckBox {
-                    text: option.label;
-                    checked: option.selected;
-                    toggled => { vhost-toggle-requested(option.address); }
+                if settings-vhost-state == 0 : Text {
+                    text: @tr("Reading the source addresses...");
+                    wrap: word-wrap;
+                }
+                if settings-vhost-state == 2 : Text {
+                    text: @tr("The server reports no usable source address.");
+                    wrap: word-wrap;
+                }
+                if settings-vhost-state == 3 : Text {
+                    text: settings-vhost-error == ""
+                        ? @tr("The source addresses could not be read.")
+                        : @tr("The source addresses could not be read (error {}).", settings-vhost-error);
+                    color: #d9534f;
+                    wrap: word-wrap;
+                }
+                for option in settings-vhost-options : Rectangle {
+                    height: 32px;
+                    accessible-role: radio-button;
+                    accessible-label: option.label;
+                    accessible-checked: option.selected;
+                    accessible-action-default => { vhost-select-requested(option.address); }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Text {
+                            text: option.selected ? "◉" : "○";
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: option.label;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: option.family;
+                            color: Palette.foreground.transparentize(0.4);
+                            vertical-alignment: center;
+                        }
+                    }
+                    TouchArea {
+                        clicked => { vhost-select-requested(option.address); }
+                    }
                 }
             }
 
