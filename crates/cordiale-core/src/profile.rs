@@ -189,6 +189,44 @@ pub struct VhostSettingsView {
     pub selection: Vec<String>,
 }
 
+impl VhostOption {
+    /// `"IPv4"`, `"IPv6"` or `""` when the address does not parse. Read
+    /// from the address text only: nothing is looked up.
+    pub fn family(&self) -> &'static str {
+        match self.address.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(_)) => "IPv4",
+            Ok(std::net::IpAddr::V6(_)) => "IPv6",
+            Err(_) => "",
+        }
+    }
+
+    /// The address, followed by the name the server reports for it.
+    pub fn display_label(&self) -> String {
+        match self.name.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() && name != self.address => {
+                format!("{} ({name})", self.address)
+            }
+            _ => self.address.clone(),
+        }
+    }
+}
+
+impl VhostSettingsView {
+    /// The one active address: the first entry of `selection` that the
+    /// server also lists in `available`. `None` when the server reports
+    /// no usable current address.
+    pub fn current(&self) -> Option<&str> {
+        self.selection
+            .iter()
+            .find(|address| {
+                self.available
+                    .iter()
+                    .any(|option| &option.address == *address)
+            })
+            .map(String::as_str)
+    }
+}
+
 /// Request body of `PUT /me/settings/vhost`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VhostSelectionRequest {
@@ -424,6 +462,33 @@ mod tests {
         let view: VhostSettingsView = serde_json::from_str(json).expect("deserialize");
         assert_eq!(view.available.len(), 1);
         assert_eq!(view.selection, vec!["1.2.3.4".to_string()]);
+    }
+
+    #[test]
+    fn vhost_current_ignores_unavailable_and_keeps_one() {
+        let option = |address: &str, name: Option<&str>| VhostOption {
+            address: address.to_string(),
+            in_pool: true,
+            granted: true,
+            name: name.map(str::to_string),
+        };
+        let view = VhostSettingsView {
+            available: vec![
+                option("1.2.3.4", Some("eu-1.example")),
+                option("2001:db8::1", None),
+            ],
+            selection: vec!["9.9.9.9".to_string(), "2001:db8::1".to_string()],
+        };
+        assert_eq!(view.current(), Some("2001:db8::1"));
+        assert_eq!(view.available[0].family(), "IPv4");
+        assert_eq!(view.available[1].family(), "IPv6");
+        assert_eq!(view.available[0].display_label(), "1.2.3.4 (eu-1.example)");
+        assert_eq!(view.available[1].display_label(), "2001:db8::1");
+        let empty = VhostSettingsView {
+            available: Vec::new(),
+            selection: vec!["1.2.3.4".to_string()],
+        };
+        assert_eq!(empty.current(), None);
     }
 
     #[test]

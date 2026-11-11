@@ -4075,3 +4075,19 @@ msgstr "Posizione"
 msgctxt "AppWindow"
 msgid "Volume"
 msgstr "Volume"
+
+msgctxt "AppWindow"
+msgid "Reading the source addresses..."
+msgstr "Lettura degli indirizzi di origine..."
+
+msgctxt "AppWindow"
+msgid "The server reports no usable source address."
+msgstr "Il server non segnala nessun indirizzo di origine utilizzabile."
+
+msgctxt "AppWindow"
+msgid "The source addresses could not be read."
+msgstr "Impossibile leggere gli indirizzi di origine."
+
+msgctxt "AppWindow"
+msgid "The source addresses could not be read (error {})."
+msgstr "Impossibile leggere gli indirizzi di origine (errore {})."

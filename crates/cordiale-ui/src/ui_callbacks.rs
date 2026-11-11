@@ -1985,9 +1985,9 @@ pub(crate) fn register_settings_callbacks(
         let _ = tx_for_alias_remove.send(WorkerCommand::AliasRemove(command.to_string()));
     });
 
-    let tx_for_vhost_toggle = worker_tx.clone();
-    ui.on_vhost_toggle_requested(move |address| {
-        let _ = tx_for_vhost_toggle.send(WorkerCommand::VhostToggle(address.to_string()));
+    let tx_for_vhost_select = worker_tx.clone();
+    ui.on_vhost_select_requested(move |address| {
+        let _ = tx_for_vhost_select.send(WorkerCommand::VhostSelect(address.to_string()));
     });
 
     let tx_for_notify_add = worker_tx.clone();

@@ -990,8 +990,17 @@ valore inventato).
 PUT body `{selection: [string]}`, replace totale non diff. "L'utente si
 autoseleziona sempre" (commento nel sorgente Cicchetto) — nessun pin
 admin residuo da conciliare. Implementato: `VhostSettingsView`/
-`VhostSelectionRequest`, UI in Settings → Source Address (checkbox per
-opzione disponibile, toggle = fetch attuale → flip → PUT).
+`VhostSelectionRequest`, UI in Settings → Source Address: scelta singola;
+l'indirizzo attivo è il primo di `selection` presente anche in `available`;
+la scelta di un altro indirizzo è un PUT con quel solo indirizzo. La
+famiglia IPv4/IPv6 si legge dal testo dell'indirizzo. Stati caricamento,
+vuoto ed errore nel pannello; le righe si svuotano a ogni lettura, così
+nessun indirizzo di un altro server resta visibile.
+**Campi non presenti nella risposta:** nessun "IP sorgente corrente"
+separato da `selection`, nessun campo rDNS e nessun elenco di alias:
+`name` è l'unico nome riportato dal server e si mostra com'è. Cordiale non
+inventa né risolve rDNS o alias. Admin → Vhosts mostra gli stessi indirizzi
+da `GET /admin/vhosts`.
 
 **Ignores** (per-rete) — `GET/POST /networks/:slug/ignores`,
 `DELETE /networks/:slug/ignores/:mask`. Risposta mutazione include

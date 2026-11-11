@@ -5132,6 +5132,74 @@ fn fan_out_reaches_only_joined_channels_of_the_network() {
     assert_eq!(joined_channels(&state, "libera"), vec!["#a".to_string()]);
 }
 
+fn vhost_view(addresses: &[(&str, Option<&str>)], selection: &[&str]) -> VhostSettingsView {
+    VhostSettingsView {
+        available: addresses
+            .iter()
+            .map(|(address, name)| cordiale_core::profile::VhostOption {
+                address: address.to_string(),
+                in_pool: true,
+                granted: true,
+                name: name.map(str::to_string),
+            })
+            .collect(),
+        selection: selection
+            .iter()
+            .map(|address| address.to_string())
+            .collect(),
+    }
+}
+
+#[test]
+fn vhost_panel_selects_exactly_the_server_current_address() {
+    let view = vhost_view(
+        &[
+            ("1.2.3.4", Some("eu-1.example")),
+            ("2001:db8::1", None),
+            ("5.6.7.8", None),
+        ],
+        &["2001:db8::1", "5.6.7.8"],
+    );
+    let (rows, state, error) = vhost_panel(Ok(view));
+    assert_eq!(state, VHOST_STATE_READY);
+    assert!(error.is_empty());
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.iter().filter(|row| row.selected).count(), 1);
+    assert!(rows[1].selected);
+    assert_eq!(rows[0].family.as_str(), "IPv4");
+    assert_eq!(rows[1].family.as_str(), "IPv6");
+    assert_eq!(rows[0].label.as_str(), "1.2.3.4 (eu-1.example)");
+    assert_eq!(rows[1].label.as_str(), "2001:db8::1");
+}
+
+#[test]
+fn vhost_panel_selects_nothing_without_a_usable_current_address() {
+    let view = vhost_view(&[("1.2.3.4", None)], &["9.9.9.9"]);
+    let (rows, state, _) = vhost_panel(Ok(view));
+    assert_eq!(state, VHOST_STATE_READY);
+    assert!(rows.iter().all(|row| !row.selected));
+}
+
+#[test]
+fn vhost_panel_reports_empty_and_error_states() {
+    let (rows, state, _) = vhost_panel(Ok(vhost_view(&[], &[])));
+    assert!(rows.is_empty());
+    assert_eq!(state, VHOST_STATE_EMPTY);
+
+    let (rows, state, detail) = vhost_panel(Err(GrappaClientError::InvalidUrl("x".into())));
+    assert!(rows.is_empty());
+    assert_eq!(state, VHOST_STATE_ERROR);
+    assert!(detail.is_empty());
+}
+
+#[test]
+fn admin_vhost_label_shows_the_server_name() {
+    let label = cordiale_core::admin::admin_vhost_label(&serde_json::json!({
+        "address": "10.0.0.4", "name": "eu-1.example", "in_pool": true
+    }));
+    assert_eq!(label, "10.0.0.4 (eu-1.example) · pool");
+}
+
 #[test]
 fn vhost_rows_name_their_grants() {
     let (vhosts, grants) = admin_vhost_rows(&serde_json::json!({

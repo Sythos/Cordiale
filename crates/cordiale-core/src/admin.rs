@@ -587,6 +587,15 @@ pub fn admin_vhost_label(entry: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("?")
         .to_string();
+    // The name the server reports for the address, when it has one.
+    if let Some(name) = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && *name != label)
+    {
+        label.push_str(&format!(" ({name})"));
+    }
     if flag("in_pool") {
         label.push_str(" · pool");
     }
