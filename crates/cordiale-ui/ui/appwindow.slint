@@ -549,6 +549,7 @@ component MemberContextMenu {
     callback nickname-clicked(string, string, string); // nick, network, source window
     callback ignore(string, bool); // nick, true to ignore
     callback reply(string, string, string); // nick, raw message body, message id
+    callback copy-row(); // copy the displayed text of the row
 
     // Opens the menu from outside, for a chat row whose own right-click
     // area is the whole row. The position is relative to this component.
@@ -562,6 +563,10 @@ component MemberContextMenu {
                 title: "↩  " + @tr("Reply");
                 enabled: reply-body != "";
                 activated => { reply(target-nick, reply-body, reply-id); }
+            }
+            if is-chat-message : MenuItem {
+                title: "📋  " + @tr("Copy");
+                activated => { copy-row(); }
             }
             MenuItem {
                 title: "⬆  " + @tr("Op");
@@ -1259,6 +1264,8 @@ export component AppWindow inherits Window {
     in-out property <string> screen: "splash";
     in-out property <string> chat-copy-text;
     pure callback format-chat-copy([ChatLine]) -> string;
+    // The displayed text of one row, for the Copy item of its menu.
+    pure callback format-chat-row(ChatLine) -> string;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -5079,6 +5086,8 @@ export component AppWindow inherits Window {
                             reply(nick, body, id) => {
                                 reply-to-message-requested(nick, body, id);
                             }
+                            // Copies the row that opened this menu.
+                            copy-row => { copy-text-requested(format-chat-row(line)); }
                         }
 
                         if line.incoming : Text {
