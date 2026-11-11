@@ -11652,8 +11652,15 @@ fn push_reply_view(ui: &slint::Weak<AppWindow>, view: &ReplyView, open: bool) {
         ui.set_reply_subject(subject.into());
         ui.set_reply_network(network.into());
         if open && popup {
+            // The popup and the reply screen share the reply properties:
+            // leave a reply screen so it never shows the WHOIS card.
+            if ui.get_screen() == "reply" {
+                ui.set_screen("connected".into());
+            }
             ui.set_whois_popup_open(true);
         } else if open {
+            // A stale WHOIS popup must not draw over another reply.
+            ui.set_whois_popup_open(false);
             ui.set_screen("reply".into());
         }
     });
