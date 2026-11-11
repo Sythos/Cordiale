@@ -3425,6 +3425,23 @@ fn chat_copy_text(lines: &slint::ModelRc<ChatLine>) -> String {
         .join("\n")
 }
 
+/// The displayed text of the rows from `first` to `last` (both included, in
+/// any order), one row per line. Indexes outside the model are ignored.
+fn chat_range_text(lines: &slint::ModelRc<ChatLine>, first: i32, last: i32) -> String {
+    use slint::Model as _;
+    let (first, last) = (
+        first.min(last).max(0) as usize,
+        first.max(last).max(0) as usize,
+    );
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| (first..=last).contains(index))
+        .map(|(_, line)| chat_row_text(&line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Puts `text` on the system clipboard (a TOTP key, link or recovery
 /// codes); a clipboard that can't be opened is only logged.
 fn copy_text(text: &str) {

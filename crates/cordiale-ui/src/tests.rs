@@ -5706,6 +5706,40 @@ fn chat_row_text_copies_only_its_own_row_in_full() {
 }
 
 #[test]
+fn chat_range_text_copies_the_picked_rows_in_full() {
+    let row = |time: &str, nick: &str, body: &str| ChatLine {
+        timestamp: time.into(),
+        nick: nick.into(),
+        reply_body: body.into(),
+        ..Default::default()
+    };
+    let lines: slint::ModelRc<ChatLine> = Rc::new(slint::VecModel::from(vec![
+        row("12:00", "Alice", "Caff\u{e8} \u{1f642}"),
+        row("12:01", "Bob", "\x02two\x02 lines"),
+        row("12:02", "", "joined"),
+        row("12:03", "Carol", "last"),
+    ]))
+    .into();
+    assert_eq!(
+        chat_range_text(&lines, 0, 1),
+        "[12:00] <Alice> Caff\u{e8} \u{1f642}\n[12:01] <Bob> two lines"
+    );
+    // The order of the two ends does not matter, and rows outside the
+    // range stay out.
+    assert_eq!(
+        chat_range_text(&lines, 2, 1),
+        "[12:01] <Bob> two lines\n[12:02] joined"
+    );
+    assert_eq!(chat_range_text(&lines, 3, 9), "[12:03] <Carol> last");
+    use slint::Model as _;
+    assert_eq!(
+        chat_range_text(&lines, -1, 0),
+        chat_row_text(&lines.row_data(0).unwrap())
+    );
+    assert_eq!(chat_range_text(&lines, 7, 9), "");
+}
+
+#[test]
 fn nick_right_click_opens_menu_without_opening_query() {
     use slint::platform::{PointerEventButton, WindowEvent};
     set_headless_software_platform();
