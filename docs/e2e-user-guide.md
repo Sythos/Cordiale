@@ -188,6 +188,29 @@ Cordiale removes only the keys of this device. The identity on the server stays.
 If no other listed device can pair, use `/e2e reset` as in the section
 "Lose all devices with the identity key".
 
+### Forget and create a new identity from the notice
+
+The notice about a missing or different master key has the button
+**Forget and create identity**. Cordiale shows the button only after it
+reads the list of devices from the server.
+
+1. Select **Forget and create identity**.
+   Cordiale warns you that your contacts can see a key change.
+   The warning also says that old messages can stay unreadable.
+2. To continue, select **Forget and create identity** again.
+   To stop, select **Cancel**.
+
+After you confirm, Cordiale reads the list of devices again.
+If the read fails, Cordiale changes nothing. Try again later.
+If the read succeeds, Cordiale removes the old identity from the server and
+from this device. Then it makes and publishes a new identity.
+
+3. Select **Start encrypted chat** again.
+
+Cordiale sends no request for an encrypted chat before the new identity is ready.
+Use the pairing steps first if a listed device is with you.
+A pairing keeps the identity and your old messages.
+
 ### Lose a device
 
 Only a device that holds the master key can remove another device.
