@@ -14855,6 +14855,17 @@ fn rows_with_links_or_styles_get_a_selection_overlay() {
 }
 
 #[test]
+fn all_links_returns_every_link_in_order() {
+    let text = "a https://example.org/a b https://example.org/b c https://example.org/c \
+                d https://example.org/d e https://example.org/e";
+    let links = all_links(text);
+    assert_eq!(links.len(), 5);
+    assert_eq!(links[0], "https://example.org/a");
+    assert_eq!(links[4], "https://example.org/e");
+    assert!(all_links("no link here").is_empty());
+}
+
+#[test]
 fn nth_link_returns_the_links_in_order() {
     let text = "see https://example.org/a and www.example.org/x now";
     assert_eq!(nth_link(text, 0), "https://example.org/a");

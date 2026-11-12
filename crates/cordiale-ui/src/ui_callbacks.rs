@@ -399,7 +399,11 @@ pub(crate) fn register_passkey_callbacks(
     });
     ui.on_format_chat_copy(|lines| chat_copy_text(&lines).into());
     ui.on_format_chat_row(|line| chat_row_text(&line).into());
-    ui.on_chat_link(|text, index| nth_link(&text, index).into());
+    ui.on_chat_links(|text| {
+        let links: Vec<slint::SharedString> =
+            all_links(&text).into_iter().map(Into::into).collect();
+        slint::ModelRc::new(slint::VecModel::from(links))
+    });
     ui.on_format_chat_range(|lines, first, last| chat_range_text(&lines, first, last).into());
     let weak_for_codes = ui.as_weak();
     ui.on_security_copy_recovery_codes(move || {

@@ -549,6 +549,10 @@ msgid "Reply"
 msgstr "Responder"
 
 msgctxt "MemberContextMenu"
+msgid "All links..."
+msgstr "Todos los enlaces..."
+
+msgctxt "MemberContextMenu"
 msgid "Copy"
 msgstr "Copiar"
 
