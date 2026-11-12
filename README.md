@@ -50,8 +50,8 @@ colors: drag over the time, the nick or the text, or use Shift with the arrow
 keys, then press Ctrl+C (Cmd+C on macOS). A plain click on a nick still opens
 its action. In a row with a link and a sender, the text input takes the clicks:
 right-click the row and pick the link to open it. A row that mixes bold and
-plain text is not selectable in place: copy it from the row menu or from
-**Actions → Copy text**. Drag from one row past its
+plain text shows all its text in plain weight, so it can be selected in place
+too. Drag from one row past its
 edge to pick whole rows;
 Ctrl+C copies them with time and nick, and Escape drops the pick.
 
