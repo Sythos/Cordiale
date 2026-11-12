@@ -12665,6 +12665,50 @@ fn channel_link_plan(window: Option<&ChannelWindowState>) -> ChannelLinkPlan {
     }
 }
 
+/// The join step of a channel link click. Returns true when the window
+/// can open: it is joined, or the server accepted the join request. A
+/// pending join and a failed request return false, so no second request
+/// goes out and the current window stays open. A failure shows its error
+/// in the status bar.
+async fn channel_link_join(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: &str,
+    channel: &str,
+) -> bool {
+    if !state.networks.network_ids.contains_key(network) {
+        return false;
+    }
+    let key = window_state_key(network, channel);
+    match channel_link_plan(state.windows.window_states.get(&key)) {
+        ChannelLinkPlan::Wait => false,
+        ChannelLinkPlan::Open => true,
+        ChannelLinkPlan::Join => {
+            let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone())
+            else {
+                return false;
+            };
+            if let Err(err) = client.join_channel(&token, network, channel, None).await {
+                persistence::log_line(&format!("channel link join failed: {err:?}"));
+                if is_invalid_channel(&err) {
+                    set_command_status(ui, "invalid-channel", channel.to_string());
+                } else {
+                    set_command_status(ui, "command-failed", format!("Join {channel}"));
+                }
+                return false;
+            }
+            // The server events replace this state. Until they arrive, a
+            // second click waits instead of sending a second request.
+            state
+                .windows
+                .window_states
+                .entry(key)
+                .or_insert(ChannelWindowState::Pending);
+            true
+        }
+    }
+}
+
 /// A channel name clicked in a chat row: joined on the row's network when
 /// it is not joined, then focused. A failed join keeps the open window and
 /// shows the error in the status bar.
@@ -12674,29 +12718,10 @@ async fn channel_link_activate(
     network: String,
     channel: String,
 ) {
-    if !state.networks.network_ids.contains_key(&network) {
+    if !channel_link_join(state, ui, &network, &channel).await {
         return;
     }
     let key = window_state_key(&network, &channel);
-    match channel_link_plan(state.windows.window_states.get(&key)) {
-        ChannelLinkPlan::Wait => return,
-        ChannelLinkPlan::Open => {}
-        ChannelLinkPlan::Join => {
-            let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone())
-            else {
-                return;
-            };
-            if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
-                persistence::log_line(&format!("channel link join failed: {err:?}"));
-                if is_invalid_channel(&err) {
-                    set_command_status(ui, "invalid-channel", channel);
-                } else {
-                    set_command_status(ui, "command-failed", format!("Join {channel}"));
-                }
-                return;
-            }
-        }
-    }
     // Focus the sidebar's own spelling of the window when it has one.
     let channel = state
         .windows

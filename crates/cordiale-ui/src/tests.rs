@@ -5670,6 +5670,121 @@ fn a_channel_click_joins_only_a_channel_that_is_not_joined_or_pending() {
     }
 }
 
+/// A signed-in state against `base_url` that knows the `libera` and `oftc`
+/// networks, with `#current` open on `oftc`.
+fn channel_link_state(base_url: &str) -> WorkerState {
+    let mut state = WorkerState::new();
+    state.conn.client = Some(GrappaClient::new(base_url));
+    state.conn.token = Some("test-token".to_string());
+    state.networks.network_ids.insert("libera".to_string(), 1);
+    state.networks.network_ids.insert("oftc".to_string(), 2);
+    state.windows.current_channel = Some(("oftc".to_string(), "#current".to_string()));
+    state
+}
+
+/// The paths of the join requests the test server saw.
+fn join_request_paths(seen: &RequestLog) -> Vec<String> {
+    seen.lock()
+        .expect("log")
+        .iter()
+        .filter(|(line, _)| line.starts_with("POST ") && line.contains("/channels"))
+        .map(|(line, _)| line.split(' ').nth(1).unwrap_or_default().to_string())
+        .collect()
+}
+
+#[test]
+fn a_channel_link_joins_on_the_network_of_its_row_and_then_opens() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server_with(|_| (202, "{}"));
+    let mut state = channel_link_state(&url);
+    let opens =
+        network_test_runtime().block_on(channel_link_join(&mut state, &ui, "libera", "#cordiale"));
+    assert!(opens);
+    // The request names the network of the row, not the selected window's.
+    assert_eq!(
+        join_request_paths(&seen),
+        ["/networks/libera/channels".to_string()]
+    );
+    let body: Value = serde_json::from_str(&seen.lock().expect("log")[0].1).expect("json body");
+    assert_eq!(body["name"], "#cordiale");
+    // The open window stays the current one until the focus step runs.
+    assert_eq!(
+        state.windows.current_channel,
+        Some(("oftc".to_string(), "#current".to_string()))
+    );
+}
+
+#[test]
+fn a_channel_link_on_a_joined_channel_opens_it_without_a_join_request() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server_with(|_| (202, "{}"));
+    let mut state = channel_link_state(&url);
+    state.windows.window_states.insert(
+        window_state_key("libera", "#Cordiale"),
+        ChannelWindowState::Joined,
+    );
+    let opens =
+        network_test_runtime().block_on(channel_link_join(&mut state, &ui, "libera", "#cordiale"));
+    assert!(opens);
+    assert!(join_request_paths(&seen).is_empty());
+}
+
+#[test]
+fn a_rejected_channel_link_join_does_not_open_or_mark_the_channel() {
+    let ui = slint::Weak::<AppWindow>::default();
+    for (status, body) in [(422, r#"{"error":"invalid_channel"}"#), (500, "{}")] {
+        let (url, seen) = recording_server_with(move |_| (status, body));
+        let mut state = channel_link_state(&url);
+        let opens = network_test_runtime().block_on(channel_link_join(
+            &mut state,
+            &ui,
+            "libera",
+            "#cordiale",
+        ));
+        assert!(!opens, "{status}");
+        assert_eq!(join_request_paths(&seen).len(), 1, "{status}");
+        assert!(state.windows.window_states.is_empty(), "{status}");
+        assert_eq!(
+            state.windows.current_channel,
+            Some(("oftc".to_string(), "#current".to_string())),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn repeated_channel_link_clicks_send_one_join_request() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server_with(|_| (202, "{}"));
+    let mut state = channel_link_state(&url);
+    let runtime = network_test_runtime();
+    let first = runtime.block_on(channel_link_join(&mut state, &ui, "libera", "#cordiale"));
+    // The server events have not arrived: the window state is pending.
+    let second = runtime.block_on(channel_link_join(&mut state, &ui, "libera", "#CORDIALE"));
+    assert!(first);
+    assert!(!second);
+    assert_eq!(join_request_paths(&seen).len(), 1);
+    // A failed window state allows a new attempt.
+    state.windows.window_states.insert(
+        window_state_key("libera", "#cordiale"),
+        ChannelWindowState::Failed,
+    );
+    assert!(runtime.block_on(channel_link_join(&mut state, &ui, "libera", "#cordiale")));
+    assert_eq!(join_request_paths(&seen).len(), 2);
+}
+
+#[test]
+fn a_channel_link_on_an_unknown_network_or_without_a_session_sends_nothing() {
+    let ui = slint::Weak::<AppWindow>::default();
+    let (url, seen) = recording_server_with(|_| (202, "{}"));
+    let mut state = channel_link_state(&url);
+    let runtime = network_test_runtime();
+    assert!(!runtime.block_on(channel_link_join(&mut state, &ui, "gone", "#cordiale")));
+    state.conn.token = None;
+    assert!(!runtime.block_on(channel_link_join(&mut state, &ui, "libera", "#cordiale")));
+    assert!(join_request_paths(&seen).is_empty());
+}
+
 #[test]
 fn topic_links_are_clickable_with_normalized_targets() {
     for prefix in ["", "    ", "\t"] {
@@ -13955,6 +14070,20 @@ type RequestLog = Mutex<Vec<(String, String)>>;
 /// request line and the body of each one. The E2E send door answers 202; any
 /// other path answers 404.
 fn recording_server() -> (String, Arc<RequestLog>) {
+    recording_server_with(|line| {
+        if line.starts_with("POST ") && line.contains("/e2e/messages") {
+            (202, r#"{"msgid":"m1"}"#)
+        } else {
+            (404, "{}")
+        }
+    })
+}
+
+/// Like `recording_server`, with `route` choosing the status and the body
+/// from the request line.
+fn recording_server_with(
+    route: impl Fn(&str) -> (u16, &'static str) + Clone + Send + 'static,
+) -> (String, Arc<RequestLog>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let url = format!("http://{}", listener.local_addr().expect("addr"));
@@ -13966,6 +14095,7 @@ fn recording_server() -> (String, Arc<RequestLog>) {
                 return;
             };
             let recorded = Arc::clone(&recorded);
+            let route = route.clone();
             std::thread::spawn(move || {
                 let mut data = Vec::new();
                 let mut chunk = [0u8; 1024];
@@ -13994,12 +14124,7 @@ fn recording_server() -> (String, Arc<RequestLog>) {
                     }
                 };
                 let line = head.lines().next().unwrap_or_default().to_string();
-                let (status, reply) = if line.starts_with("POST ") && line.contains("/e2e/messages")
-                {
-                    (202, r#"{"msgid":"m1"}"#)
-                } else {
-                    (404, "{}")
-                };
+                let (status, reply) = route(&line);
                 recorded.lock().expect("log").push((line, body));
                 let answer = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
