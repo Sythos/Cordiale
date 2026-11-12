@@ -1926,6 +1926,7 @@ export component AppWindow inherits Window {
     // column's minimum width: the widest sidebar row label, and a run of
     // average-width characters as long as the average member label.
     in property <string> sidebar-widest-label: "";
+    in property <string> sidebar-shortest-label: "";
     in property <string> members-average-nick: "";
     // Fixed parts of the sidebar, shared by the rows and the minimum width.
     property <length> sidebar-padding: 8px;
@@ -1938,21 +1939,25 @@ export component AppWindow inherits Window {
     property <length> top-icon-size: 32px;
     property <length> top-icon-spacing: 4px;
     property <int> top-icon-count: is-admin ? 4 : 3;
-    property <length> sidebar-hard-max-width: 360px;
-    // The sidebar never gets narrower than its widest row (the label, the
-    // two cells, their spacing, the row indent, the scrollbar gutter and the
-    // box padding) nor than the top row of icon buttons; it never gets wider
-    // than `sidebar-hard-max-width` unless the icons need more. The member
-    // column is never narrower than the average member label, its Actions
-    // button, or the E2E action of the selected plain query.
+    // Padding of the label button of a row (`SidebarRowButton`).
+    property <length> sidebar-label-padding: 16px;
+    // The sidebar is never narrower than its shortest channel or query row
+    // (the label, the two cells, their spacing, the row indent, the
+    // scrollbar gutter and the box padding) nor than the top row of icon
+    // buttons. It is never wider than its longest row. The member column is
+    // never narrower than the average member label, its Actions button, or
+    // the E2E action of the selected plain query.
     property <length> sidebar-icons-min-width:
         top-icon-size * top-icon-count + top-icon-spacing * (top-icon-count - 1) + 2 * sidebar-padding;
-    property <length> sidebar-rows-min-width:
-        sidebar-label-probe.preferred-width + sidebar-row-indent + 2 * sidebar-cell-width
+    property <length> sidebar-row-fixed-width:
+        sidebar-label-padding + sidebar-row-indent + 2 * sidebar-cell-width
         + 2 * sidebar-row-spacing + sidebar-scroll-gutter + 2 * sidebar-padding;
-    property <length> sidebar-min-width: max(
-        max(120px, sidebar-icons-min-width),
-        min(sidebar-rows-min-width, sidebar-hard-max-width));
+    property <length> sidebar-shortest-row-width:
+        sidebar-shortest-label == "" ? 0px : sidebar-shortest-probe.preferred-width + sidebar-row-fixed-width;
+    property <length> sidebar-min-width: max(sidebar-icons-min-width, sidebar-shortest-row-width);
+    property <length> sidebar-longest-width: max(
+        sidebar-min-width,
+        sidebar-widest-label == "" ? 0px : sidebar-label-probe.preferred-width + sidebar-row-fixed-width);
     property <length> members-e2e-action-min-width:
         current-query && !current-query-e2e
             && (current-query-e2e-request-state == ""
@@ -1977,7 +1982,7 @@ export component AppWindow inherits Window {
         min(320px, root.width - layout-fixed-width - max(sidebar-width, sidebar-min-width) - chat-min-width));
     property <length> sidebar-max-width: max(
         sidebar-min-width,
-        min(sidebar-hard-max-width, root.width - layout-fixed-width - max(members-width, members-min-width) - chat-min-width));
+        min(sidebar-longest-width, root.width - layout-fixed-width - max(members-width, members-min-width) - chat-min-width));
 
     // Fits both side columns into the window. It reads the window width, so
     // only event handlers call it, never a width binding (that would loop
@@ -1988,13 +1993,14 @@ export component AppWindow inherits Window {
             let fitted = fit-column-widths(
                 root.width, sidebar-width, members-width,
                 sidebar-min-width, members-min-width,
-                chat-min-width + layout-fixed-width, sidebar-hard-max-width);
+                chat-min-width + layout-fixed-width, sidebar-longest-width);
             sidebar-width = fitted.sidebar;
             members-width = fitted.members;
         }
     }
     changed width => { fit-columns(); }
     changed sidebar-min-width => { fit-columns(); }
+    changed sidebar-longest-width => { fit-columns(); }
     changed members-min-width => { fit-columns(); }
 
     in-out property <string> theme: "light";
@@ -3613,10 +3619,13 @@ export component AppWindow inherits Window {
     }
 
     // Invisible measuring probes for the side columns' minimum widths.
-    sidebar-label-probe := Button {
+    sidebar-label-probe := Text {
         text: sidebar-widest-label;
         visible: false;
-        enabled: false;
+    }
+    sidebar-shortest-probe := Text {
+        text: sidebar-shortest-label;
+        visible: false;
     }
     members-nick-probe := Text {
         text: members-average-nick;

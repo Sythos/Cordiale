@@ -4855,8 +4855,27 @@ fn theme_choices_need_a_complete_palette() {
     assert!(server_theme_choice(&theme).is_none());
 }
 
+fn group_with_channels(network: &str, labels: &[&str]) -> NetworkGroup {
+    let channels = labels
+        .iter()
+        .map(|label| ChannelEntry {
+            label: (*label).into(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    NetworkGroup {
+        network: network.into(),
+        channels: Rc::new(slint::VecModel::from(channels)).into(),
+        ..Default::default()
+    }
+}
+
+fn labels(groups: &[NetworkGroup]) -> (String, String) {
+    sidebar_row_labels(groups)
+}
+
 #[test]
-fn widest_sidebar_label_picks_the_longest_row() {
+fn sidebar_row_labels_pick_the_shortest_and_the_longest_row() {
     let channels = vec![
         ChannelEntry {
             label: "#rust".into(),
@@ -4865,6 +4884,10 @@ fn widest_sidebar_label_picks_the_longest_row() {
         ChannelEntry {
             label: "#a-much-longer-channel".into(),
             mention_badge: " (2)".into(),
+            ..Default::default()
+        },
+        ChannelEntry {
+            label: "#mid-size".into(),
             ..Default::default()
         },
     ];
@@ -4881,53 +4904,84 @@ fn widest_sidebar_label_picks_the_longest_row() {
         },
     ];
     assert_eq!(
-        widest_sidebar_label(&groups),
-        "● #a-much-longer-channel (2)"
+        labels(&groups),
+        (
+            "● #rust".to_string(),
+            "● #a-much-longer-channel (2)".to_string()
+        )
     );
-    assert_eq!(widest_sidebar_label(&[]), "");
 }
 
 #[test]
-fn widest_sidebar_label_counts_wide_characters_twice() {
-    let channels = vec![
-        ChannelEntry {
-            label: "#abcd".into(),
-            ..Default::default()
-        },
-        ChannelEntry {
-            label: "#ab🎉🎉".into(),
-            ..Default::default()
-        },
-    ];
-    // The network row ("▾ 🔌 n", 6 columns) is narrower than both channels.
-    let groups = vec![NetworkGroup {
-        network: "n".into(),
-        channels: Rc::new(slint::VecModel::from(channels)).into(),
+fn sidebar_row_labels_include_queries_and_skip_network_rows() {
+    let queries = vec![QueryEntry {
+        label: "a-very-long-nickname-for-a-query".into(),
         ..Default::default()
     }];
-    assert_eq!(widest_sidebar_label(&groups), "● #ab🎉🎉");
+    let mut group = group_with_channels("a-very-long-network-name-that-elides", &["#abc"]);
+    group.queries = Rc::new(slint::VecModel::from(queries)).into();
+    assert_eq!(
+        labels(&[group]),
+        (
+            "● #abc".to_string(),
+            "● ↳ a-very-long-nickname-for-a-query".to_string()
+        )
+    );
 }
 
 #[test]
-fn widest_sidebar_label_ignores_joiners_and_combining_marks() {
+fn sidebar_row_labels_are_empty_without_rows() {
+    assert_eq!(labels(&[]), (String::new(), String::new()));
+    let parked = NetworkGroup {
+        network: "azzurra".into(),
+        parked: true,
+        ..Default::default()
+    };
+    assert_eq!(labels(&[parked]), (String::new(), String::new()));
+}
+
+#[test]
+fn sidebar_row_labels_use_one_row_for_both_when_alone() {
+    let groups = vec![group_with_channels("n", &["#only"])];
+    assert_eq!(
+        labels(&groups),
+        ("● #only".to_string(), "● #only".to_string())
+    );
+}
+
+#[test]
+fn sidebar_row_labels_keep_the_first_row_on_a_tie() {
+    let groups = vec![group_with_channels("n", &["#aaa", "#bbb"])];
+    assert_eq!(
+        labels(&groups),
+        ("● #aaa".to_string(), "● #aaa".to_string())
+    );
+}
+
+#[test]
+fn sidebar_row_labels_count_wide_characters_twice() {
+    // "#ab🎉🎉" is 7 columns wide, "#abcde" is 6.
+    let groups = vec![group_with_channels("n", &["#abcde", "#ab🎉🎉"])];
+    assert_eq!(
+        labels(&groups),
+        ("● #abcde".to_string(), "● #ab🎉🎉".to_string())
+    );
+}
+
+#[test]
+fn sidebar_row_labels_ignore_joiners_and_combining_marks() {
     // Zero-width joiners and combining marks add no columns: the second
     // label has more characters and bytes, but is 6 columns wide against 7.
-    let channels = vec![
-        ChannelEntry {
-            label: "#abcdef".into(),
-            ..Default::default()
-        },
-        ChannelEntry {
-            label: "#a\u{200d}\u{200d}\u{200d}e\u{301}e\u{301}e\u{301}e\u{301}".into(),
-            ..Default::default()
-        },
-    ];
-    let groups = vec![NetworkGroup {
-        network: "n".into(),
-        channels: Rc::new(slint::VecModel::from(channels)).into(),
-        ..Default::default()
-    }];
-    assert_eq!(widest_sidebar_label(&groups), "● #abcdef");
+    let groups = vec![group_with_channels(
+        "n",
+        &[
+            "#abcdef",
+            "#a\u{200d}\u{200d}\u{200d}e\u{301}e\u{301}e\u{301}e\u{301}",
+        ],
+    )];
+    let (shortest, longest) = labels(&groups);
+    assert_eq!(longest, "● #abcdef");
+    assert!(shortest.starts_with("● #a\u{200d}"));
 }
 
 #[test]
@@ -5637,7 +5691,7 @@ fn sidebar_selection_keeps_scrolled_channel_in_place() {
             },
         ]
     };
-    ui.set_sidebar_widest_label(widest_sidebar_label(&groups("")).into());
+    set_sidebar_probes(&ui, &groups(""));
     show_network_groups(&ui, groups(""));
     let selected = Rc::new(RefCell::new(String::new()));
     let record = selected.clone();
