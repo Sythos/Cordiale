@@ -5530,6 +5530,9 @@ export component AppWindow inherits Window {
                                     property <length> pointer-x: row-touch.mouse-x;
                                     property <length> pointer-y: row-touch.mouse-y;
                                     function arm-link(cursor: int, anchor: int) {
+                                        // Any new cursor or selection is not the one the
+                                        // opened link left, so the pointer must not reset it.
+                                        opened = false;
                                         pending-link = (!row.key-moved && !row.ranging && cursor == anchor)
                                             ? chat-link-at(line.overlay-body, cursor) : "";
                                         if pending-link != "" {
