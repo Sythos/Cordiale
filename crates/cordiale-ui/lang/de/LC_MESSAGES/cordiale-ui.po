@@ -2417,6 +2417,10 @@ msgid "Could not load the server messages. Live messages may still arrive."
 msgstr "Die Servernachrichten konnten nicht geladen werden. Live-Nachrichten können weiterhin eintreffen."
 
 msgctxt "AppWindow"
+msgid "Could not load the history."
+msgstr "Der Verlauf konnte nicht geladen werden."
+
+msgctxt "AppWindow"
 msgid "Nick suffix while auto-away (e.g. |away)"
 msgstr "Nick-Suffix bei automatischer Abwesenheit (z. B. |away)"
 
