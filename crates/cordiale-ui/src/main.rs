@@ -10467,14 +10467,14 @@ fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isu
         .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459)
 }
 
-/// The shortest and the longest channel or query row label, as displayed.
-/// The Slint probes measure them to set the sidebar's minimum and maximum
-/// width. Network rows do not count: they elide a long text. Rows are
-/// compared by display width (wide characters count twice, joiners and
-/// combining marks add nothing); the probe then measures the real text.
-/// Each row includes the bullet of the open row, the widest form it can
-/// take. On equal widths the first row stays. Without rows both are empty.
-fn sidebar_row_labels(groups: &[NetworkGroup]) -> (String, String) {
+/// The shortest channel or query row label, as displayed. The Slint probe
+/// measures it to set the sidebar's minimum width. Network rows do not
+/// count: they elide a long text. Rows are compared by display width (wide
+/// characters count twice, joiners and combining marks add nothing); the
+/// probe then measures the real text. Each row includes the bullet of the
+/// open row, the widest form it can take. On equal widths the first row
+/// stays. Without rows the label is empty.
+fn sidebar_shortest_label(groups: &[NetworkGroup]) -> String {
     use slint::Model as _;
 
     use unicode_width::UnicodeWidthStr as _;
@@ -10490,29 +10490,17 @@ fn sidebar_row_labels(groups: &[NetworkGroup]) -> (String, String) {
         }
     }
     let mut shortest = String::new();
-    let mut longest = String::new();
     for (index, row) in rows.into_iter().enumerate() {
-        if index == 0 {
-            shortest = row.clone();
-            longest = row;
-            continue;
-        }
-        let width = row.width();
-        if width < shortest.width() {
-            shortest = row.clone();
-        }
-        if width > longest.width() {
-            longest = row;
+        if index == 0 || row.width() < shortest.width() {
+            shortest = row;
         }
     }
-    (shortest, longest)
+    shortest
 }
 
-/// Sets the two sidebar probe texts from the row labels.
+/// Sets the sidebar probe text from the row labels.
 fn set_sidebar_probes(ui: &AppWindow, groups: &[NetworkGroup]) {
-    let (shortest, longest) = sidebar_row_labels(groups);
-    ui.set_sidebar_shortest_label(shortest.into());
-    ui.set_sidebar_widest_label(longest.into());
+    ui.set_sidebar_shortest_label(sidebar_shortest_label(groups).into());
 }
 
 /// Column widths of the connected screen, in logical pixels.
