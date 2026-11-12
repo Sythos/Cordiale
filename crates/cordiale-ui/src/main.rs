@@ -9515,6 +9515,19 @@ fn chat_line_from_message(
         .into_iter()
         .map(|(text, color, bold)| (text, color, bold || bold_mention))
         .collect();
+    // One text input has one weight. A row that can be selected in place
+    // and mixes bold and plain runs shows all runs in plain weight, so the
+    // selection stays under the glyphs. Colors stay.
+    let mut runs = runs;
+    if !incoming
+        && rename_target.is_empty()
+        && !has_uniform_weight(&runs)
+        && (message.nick.is_some() || nth_link(&visible_body_text(&runs), 0).is_empty())
+    {
+        for run in &mut runs {
+            run.2 = false;
+        }
+    }
     let body = slint::StyledText::from_markdown(&message_markdown(&runs, message.italic))
         .unwrap_or_else(|_| {
             let plain: String = runs.iter().map(|run| run.0.as_str()).collect();
@@ -9524,7 +9537,7 @@ fn chat_line_from_message(
     let selectable_body = selectable_body_text(&runs, display_text);
     // A row with links or several colors keeps its styled text and gets a
     // transparent text input over it, so the same text can be selected. The
-    // input has one weight, so a row with mixed weights gets none. The input
+    // input has one weight, so a mixed-weight row was made plain above. The input
     // takes the clicks, so a row with links needs a sender: its menu opens
     // the links.
     let visible_body = visible_body_text(&runs);

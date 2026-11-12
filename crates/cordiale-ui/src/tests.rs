@@ -14600,10 +14600,28 @@ fn rows_with_links_or_styles_get_a_selection_overlay() {
     let colored = chat_row("\x034red\x03 caff\u{e8}");
     assert!(!colored.selectable);
     assert_eq!(colored.overlay_body.as_str(), "red caff\u{e8}");
-    // Mixed weights have different glyph widths in one text input: no overlay.
+    // Mixed weights have different glyph widths in one text input: the row
+    // shows plain weight and is selectable in place, without bold markup.
     let mixed = chat_row("\x02bold\x02 normal");
-    assert!(!mixed.selectable);
-    assert_eq!(mixed.overlay_body.as_str(), "");
+    assert!(mixed.selectable);
+    assert_eq!(mixed.selectable_body.as_str(), "bold normal");
+    assert!(!mixed.body_bold);
+    let mixed_link = chat_row("\x02bold\x02 see https://example.org/a");
+    assert_eq!(
+        mixed_link.overlay_body.as_str(),
+        "bold see https://example.org/a"
+    );
+    assert!(!mixed_link.body_bold);
+    // A link row without a sender has no row menu: it keeps its bold runs.
+    let mixed_notice = chat_line_from_message(
+        &render_message(
+            &serde_json::json!({"kind": "server_event", "body": "\x02bold\x02 https://example.org/a", "id": 3}),
+            None,
+        ),
+        true,
+        "",
+    );
+    assert_eq!(mixed_notice.overlay_body.as_str(), "");
     // One weight for the whole row keeps the overlay, with that weight.
     let bold_link = chat_row("\x02see https://example.org/a\x02");
     assert_eq!(bold_link.overlay_body.as_str(), "see https://example.org/a");
