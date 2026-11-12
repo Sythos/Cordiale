@@ -399,16 +399,17 @@ pub(crate) fn register_passkey_callbacks(
     });
     ui.on_format_chat_copy(|lines| chat_copy_text(&lines).into());
     ui.on_format_chat_row(|line| chat_row_text(&line).into());
-    ui.on_chat_links(|text, channels| {
-        let links: Vec<slint::SharedString> =
-            all_row_links(&text, channel_context_if(channels).as_ref())
-                .into_iter()
-                .map(Into::into)
-                .collect();
+    ui.on_chat_links(|text, network, types, len| {
+        let context = row_channel_context(&network, &types, len);
+        let links: Vec<slint::SharedString> = all_row_links(&text, context.as_ref())
+            .into_iter()
+            .map(Into::into)
+            .collect();
         slint::ModelRc::new(slint::VecModel::from(links))
     });
-    ui.on_chat_link_at(|text, offset, channels| {
-        link_at_offset_in(&text, offset, channel_context_if(channels).as_ref()).into()
+    ui.on_chat_link_at(|text, offset, network, types, len| {
+        let context = row_channel_context(&network, &types, len);
+        link_at_offset_in(&text, offset, context.as_ref()).into()
     });
     ui.on_format_chat_range(|lines, first, last| chat_range_text(&lines, first, last).into());
     let weak_for_codes = ui.as_weak();

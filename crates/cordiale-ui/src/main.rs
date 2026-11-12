@@ -9595,6 +9595,21 @@ fn channel_context_if(enabled: bool) -> Option<ChannelLinkContext> {
     }
 }
 
+/// The context a chat row carries for its own channel links: the network it
+/// was built for, its channel prefixes and its length limit (0 for none). An
+/// empty network means the row has no channel links. A click reads these
+/// fields, never the shared context, which can already point at another window.
+fn row_channel_context(network: &str, types: &str, len: i32) -> Option<ChannelLinkContext> {
+    if network.is_empty() {
+        return None;
+    }
+    Some(ChannelLinkContext {
+        network: network.to_string(),
+        chantypes: types.chars().map(|ch| ch.to_string()).collect(),
+        channellen: u64::try_from(len).ok().filter(|len| *len > 0),
+    })
+}
+
 fn mention_context() -> MentionContext {
     MENTION_CONTEXT
         .read()
@@ -9735,7 +9750,17 @@ fn chat_line_from_message(
     ChatLine {
         selectable: selectable_body.is_some() && !incoming && rename_target.is_empty(),
         selectable_body: selectable_body.unwrap_or_default().into(),
-        channel_links: channels.is_some(),
+        channel_network: channels
+            .map(|context| context.network.clone())
+            .unwrap_or_default()
+            .into(),
+        channel_types: channels
+            .map(|context| context.chantypes.concat())
+            .unwrap_or_default()
+            .into(),
+        channel_len: channels
+            .and_then(|context| context.channellen)
+            .map_or(0, |len| i32::try_from(len).unwrap_or(i32::MAX)),
         overlay_body: overlay_body.into(),
         body_color: runs.first().map_or(
             slint::Color::from_rgb_u8(default_color.0, default_color.1, default_color.2),

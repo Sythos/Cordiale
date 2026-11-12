@@ -5610,7 +5610,10 @@ fn a_channel_name_is_found_under_the_cursor_and_in_the_markup() {
     assert_eq!(link_at_offset_in(text, 5, Some(&context)), href);
     assert_eq!(link_at_offset_in(text, 3, Some(&context)), "");
     assert_eq!(link_at_offset_in(text, 5, None), "");
-    assert_eq!(all_row_links(text, Some(&context)), [href.clone()]);
+    assert_eq!(
+        all_row_links(text, Some(&context)),
+        std::slice::from_ref(&href)
+    );
     let runs = vec![(text.to_string(), (0, 0, 0), false)];
     let markdown = message_markdown_with(&runs, false, Some(&context));
     assert!(markdown.contains(&href));
@@ -5621,6 +5624,21 @@ fn a_channel_name_is_found_under_the_cursor_and_in_the_markup() {
         selectable_body_text_with(&runs, None).as_deref(),
         Some(text)
     );
+}
+
+#[test]
+fn a_row_looks_up_channel_links_with_its_own_network() {
+    // The lookup reads the fields of the row, never the shared context.
+    let context = row_channel_context("libera", "#&", 0);
+    let href = link_at_offset_in("go #cordiale now", 5, context.as_ref());
+    assert_eq!(
+        parse_channel_link(&href),
+        Some(("libera".to_string(), "#cordiale".to_string()))
+    );
+    let context = row_channel_context("libera", "#&", 5).unwrap();
+    assert_eq!(context.chantypes, ["#", "&"]);
+    assert_eq!(context.channellen, Some(5));
+    assert!(row_channel_context("", "#", 0).is_none());
 }
 
 #[test]
@@ -6180,8 +6198,9 @@ fn record_chat_links(ui: &AppWindow) -> Rc<RefCell<Vec<String>>> {
     let opened = Rc::new(RefCell::new(Vec::<String>::new()));
     let record = opened.clone();
     ui.on_chat_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
-    ui.on_chat_link_at(|text, offset, channels| {
-        link_at_offset_in(&text, offset, channel_context_if(channels).as_ref()).into()
+    ui.on_chat_link_at(|text, offset, network, types, len| {
+        let context = row_channel_context(&network, &types, len);
+        link_at_offset_in(&text, offset, context.as_ref()).into()
     });
     opened
 }
