@@ -5985,7 +5985,10 @@ fn chat_row_right_click_on_a_link_opens_the_row_menu() {
     // the link opens from the cursor a click leaves in it (see the click
     // tests below) and from the row menu.
     assert!(!lines[0].selectable, "a row with a link is not plain text");
-    assert_eq!(lines[0].overlay_body.as_str(), "see https://example.org/x");
+    assert_eq!(
+        lines[0].overlay_body.as_str(),
+        "see 🌐 https://example.org/x"
+    );
     assert_eq!(
         nth_link(lines[0].overlay_body.as_str(), 0),
         "https://example.org/x"
@@ -6095,7 +6098,7 @@ fn scan_chat_links(
     opened: &RefCell<Vec<String>>,
     nick: slint::LogicalPosition,
 ) -> Vec<(f32, Vec<String>)> {
-    (nick.x as i32 + 40..nick.x as i32 + 460)
+    (nick.x as i32 + 40..nick.x as i32 + 560)
         .step_by(6)
         .map(|x| (x as f32, click_chat_link(ui, opened, x as f32, nick.y)))
         .collect()
@@ -15312,25 +15315,28 @@ fn selectable_body_text_keeps_only_plain_single_style_rows() {
     let red = (255, 0, 0);
     let plain = vec![("Caff\u{e8} \u{1f642}".to_string(), white, false)];
     assert_eq!(
-        selectable_body_text(&plain, "Caff\u{e8} \u{1f642}").as_deref(),
+        selectable_body_text(&plain).as_deref(),
         Some("Caff\u{e8} \u{1f642}")
     );
     let two_colors = vec![
         ("a".to_string(), white, false),
         ("b".to_string(), red, false),
     ];
-    assert_eq!(selectable_body_text(&two_colors, "ab"), None);
+    assert_eq!(selectable_body_text(&two_colors), None);
     let mixed_bold = vec![
         ("a".to_string(), white, true),
         ("b".to_string(), white, false),
     ];
-    assert_eq!(selectable_body_text(&mixed_bold, "ab"), None);
+    assert_eq!(selectable_body_text(&mixed_bold), None);
     let link = vec![("see https://example.org/a".to_string(), white, false)];
-    assert_eq!(
-        selectable_body_text(&link, "see https://example.org/a"),
-        None
-    );
-    assert_eq!(selectable_body_text(&[], ""), None);
+    assert_eq!(selectable_body_text(&link), None);
+    // A link split by a format code is still a link in the visible text.
+    let split = vec![
+        ("https://exa".to_string(), white, false),
+        ("mple.org/a".to_string(), white, false),
+    ];
+    assert_eq!(selectable_body_text(&split), None);
+    assert_eq!(selectable_body_text(&[]), None);
 }
 
 #[test]
@@ -15338,7 +15344,7 @@ fn selectable_body_shows_a_line_break_as_a_space_so_the_row_stays_one_height() {
     let white = (255, 255, 255);
     let wrapped = vec![("one\r\ntwo\nthree".to_string(), white, false)];
     assert_eq!(
-        selectable_body_text(&wrapped, "one\r\ntwo\nthree").as_deref(),
+        selectable_body_text(&wrapped).as_deref(),
         Some("one  two three")
     );
     let line = chat_line_from_message(
@@ -15372,7 +15378,10 @@ fn rows_with_links_or_styles_get_a_selection_overlay() {
     // A link keeps its styled text and gets the visible text as overlay.
     let link = chat_row("see https://example.org/a now");
     assert!(!link.selectable);
-    assert_eq!(link.overlay_body.as_str(), "see https://example.org/a now");
+    assert_eq!(
+        link.overlay_body.as_str(),
+        "see 🌐 https://example.org/a now"
+    );
     // Colors never enter the overlay text.
     let colored = chat_row("\x034red\x03 caff\u{e8}");
     assert!(!colored.selectable);
@@ -15386,7 +15395,7 @@ fn rows_with_links_or_styles_get_a_selection_overlay() {
     let mixed_link = chat_row("\x02bold\x02 see https://example.org/a");
     assert_eq!(
         mixed_link.overlay_body.as_str(),
-        "bold see https://example.org/a"
+        "bold see 🌐 https://example.org/a"
     );
     assert!(!mixed_link.body_bold);
     // A link row without a sender has no row menu: it keeps its bold runs.
@@ -15401,13 +15410,16 @@ fn rows_with_links_or_styles_get_a_selection_overlay() {
     assert_eq!(mixed_notice.overlay_body.as_str(), "");
     // One weight for the whole row keeps the overlay, with that weight.
     let bold_link = chat_row("\x02see https://example.org/a\x02");
-    assert_eq!(bold_link.overlay_body.as_str(), "see https://example.org/a");
+    assert_eq!(
+        bold_link.overlay_body.as_str(),
+        "see 🌐 https://example.org/a"
+    );
     assert!(bold_link.body_bold);
     // The styled text shows a line break as a space: the overlay does the same.
     let broken = chat_row("see https://example.org/a\nnext");
     assert_eq!(
         broken.overlay_body.as_str(),
-        "see https://example.org/a next"
+        "see 🌐 https://example.org/a next"
     );
     // A link row without a sender has no menu to open the link: no overlay.
     let notice = chat_line_from_message(
@@ -15420,6 +15432,97 @@ fn rows_with_links_or_styles_get_a_selection_overlay() {
     );
     assert_eq!(notice.nick.as_str(), "");
     assert_eq!(notice.overlay_body.as_str(), "");
+}
+
+#[test]
+fn chat_row_icons_stay_outside_links_and_match_the_overlay() {
+    let chat_row = |text: &str| {
+        chat_line_from_message(
+            &render_message(
+                &serde_json::json!({"kind": "privmsg", "sender": "alice", "body": text, "id": 1}),
+                None,
+            ),
+            true,
+            "",
+        )
+    };
+    let line =
+        chat_row("a https://e.org/p.PNG?x=1#f, (https://e.org/v.mp4) 📸 https://e.org/u.png");
+    let overlay = line.overlay_body.to_string();
+    assert_eq!(
+        overlay,
+        "a 📸 https://e.org/p.PNG?x=1#f, 🎬 (https://e.org/v.mp4) 📸 https://e.org/u.png"
+    );
+    // The reply text keeps the original message.
+    assert!(line
+        .reply_body
+        .as_str()
+        .starts_with("a https://e.org/p.PNG"));
+    // The same links in the same order, and the cursor finds each of them
+    // only inside the URL, not on the icon.
+    assert_eq!(
+        all_links(&overlay),
+        [
+            "https://e.org/p.PNG?x=1#f",
+            "https://e.org/v.mp4",
+            "https://e.org/u.png"
+        ]
+    );
+    let icon = overlay.find('📸').unwrap();
+    assert_eq!(
+        link_at_offset(&overlay, i32::try_from(icon + 1).unwrap()),
+        ""
+    );
+    let url = overlay.find("https://e.org/p.PNG").unwrap();
+    assert_eq!(
+        link_at_offset(&overlay, i32::try_from(url + 5).unwrap()),
+        "https://e.org/p.PNG?x=1#f"
+    );
+    // The markup shows the same icons as plain text, outside the link.
+    let mut runs = vec![("see https://e.org/a.mp3".to_string(), (0, 0, 0), false)];
+    add_link_icons(&mut runs);
+    assert_eq!(visible_body_text(&runs), "see 🎵 https://e.org/a.mp3");
+    let markdown = message_markdown(&runs, false);
+    let icon_at = markdown.find('🎵').unwrap();
+    assert!(icon_at < markdown.find("[https").unwrap(), "{markdown}");
+}
+
+#[test]
+fn chat_row_icons_ignore_format_codes_inside_links() {
+    let overlay = |text: &str| {
+        chat_line_from_message(
+            &render_message(
+                &serde_json::json!({"kind": "privmsg", "sender": "alice", "body": text, "id": 1}),
+                None,
+            ),
+            true,
+            "",
+        )
+        .overlay_body
+        .to_string()
+    };
+    // A format code inside the URL does not split it.
+    let split = overlay("\x02https://exa\x02mple.org/a\x02");
+    assert_eq!(split, "🌐 https://example.org/a");
+    assert_eq!(nth_link(&split, 0), "https://example.org/a");
+    let split = overlay("https://exa\x0304mple.org/a\x03 x");
+    assert_eq!(split, "🌐 https://example.org/a x");
+    assert_eq!(all_links(&split), ["https://example.org/a"]);
+    // A marker in another color run still counts.
+    assert_eq!(
+        overlay("\x0304📸\x03 https://e.org/a.png"),
+        "📸 https://e.org/a.png"
+    );
+    // Wrapping punctuation in its own run stays before the URL.
+    assert_eq!(
+        overlay("see \x0304(\x03https://e.org/a.mp3)"),
+        "see 🎵 (https://e.org/a.mp3)"
+    );
+    // The icon takes the run of the word: a colored URL after plain text.
+    assert_eq!(
+        overlay("see \x0304https://e.org/a.png\x03"),
+        "see 📸 https://e.org/a.png"
+    );
 }
 
 #[test]

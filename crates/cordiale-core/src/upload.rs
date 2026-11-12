@@ -67,6 +67,21 @@ impl UploadCategory {
     }
 }
 
+/// Whether `text` ends with an upload marker and one space, so a link that
+/// follows already has its icon.
+pub fn ends_with_marker(text: &str) -> bool {
+    text.strip_suffix(' ').is_some_and(|head| {
+        [
+            UploadCategory::Image,
+            UploadCategory::Video,
+            UploadCategory::Document,
+            UploadCategory::Audio,
+        ]
+        .iter()
+        .any(|category| head.ends_with(category.emoji()))
+    })
+}
+
 /// The MIME type Grappa's allowlist expects for a file name, by extension,
 /// with its cap category. `None` means the server would refuse the file
 /// (415), so it is not sent.
