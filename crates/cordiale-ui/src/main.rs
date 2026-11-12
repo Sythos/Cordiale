@@ -9566,7 +9566,13 @@ fn chat_line_from_message(
         && rename_target.is_empty()
         && has_uniform_weight(&runs)
         && (message.nick.is_some() || nth_link(&visible_body, 0).is_empty());
-    let overlay_body = if overlay { visible_body } else { String::new() };
+    // The styled text shows a line break as a space, so the input does too:
+    // a different break would move the glyphs under the selection.
+    let overlay_body = if overlay {
+        visible_body.replace(['\r', '\n'], " ")
+    } else {
+        String::new()
+    };
 
     ChatLine {
         selectable: selectable_body.is_some() && !incoming && rename_target.is_empty(),
