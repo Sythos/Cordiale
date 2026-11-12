@@ -6074,12 +6074,8 @@ fn chat_row_keyboard_and_mouse_selection_copy_only_the_selected_text() {
             ui.window()
                 .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
         }
-        // Command on macOS, Control on Windows and Linux.
-        let shortcut = if cfg!(target_os = "macos") {
-            Key::Meta
-        } else {
-            Key::Control
-        };
+        // Slint reports the Command key on macOS as Control.
+        let shortcut = Key::Control;
         let clipboard = Rc::new(RefCell::new(String::new()));
         slint::platform::set_platform(Box::new(Headless(clipboard.clone()))).unwrap();
         // A message in a channel, and the same message in an E2E query.
@@ -6095,13 +6091,16 @@ fn chat_row_keyboard_and_mouse_selection_copy_only_the_selected_text() {
             ui.on_chat_link_clicked(move |_| record.set(record.get() + 1));
             let xs = nick.x as i32 + 40..nick.x as i32 + 200;
 
-            // Keyboard: click in the text, go to its start, then Shift and
-            // the right arrow pick the first three characters.
+            // Keyboard: click in the text, go to its start with the left
+            // arrow, then Shift and the right arrow pick the first three
+            // characters.
             for x in xs.clone().step_by(4) {
                 clipboard.borrow_mut().clear();
                 let position = slint::LogicalPosition::new(x as f32, nick.y);
                 chat_row_click(&ui, position, PointerEventButton::Left);
-                tap(&ui, Key::Home);
+                for _ in 0..8 {
+                    tap(&ui, Key::LeftArrow);
+                }
                 for _ in 0..3 {
                     chord(&ui, Key::Shift, Key::RightArrow);
                 }
