@@ -5904,32 +5904,55 @@ fn chat_row_right_click_opens_menu_from_every_part_of_the_row() {
 }
 
 #[test]
-fn chat_row_left_click_still_follows_links_and_keeps_text_unmoved() {
+fn chat_row_link_opens_from_menu_and_left_click_opens_nothing() {
+    use slint::platform::{PointerEventButton, WindowEvent};
     set_headless_software_platform();
     let link_row = RenderedMessage {
         text: "see https://example.org/x".to_string(),
         ..e2e_row(1, Some("Alice"), false, false)
     };
     let lines = chat_lines_model(std::slice::from_ref(&link_row), true);
+    // A row with a link and a sender keeps its styled text and gets a
+    // transparent text input over it. The input takes the left clicks, so
+    // the link opens from the row menu.
     assert!(!lines[0].selectable, "a row with a link is not plain text");
+    assert_eq!(lines[0].overlay_body.as_str(), "see https://example.org/x");
+    assert_eq!(
+        nth_link(lines[0].overlay_body.as_str(), 0),
+        "https://example.org/x"
+    );
     let nick = chat_row_nick_point(std::slice::from_ref(&link_row));
 
-    // A left click on the link opens the link and nothing else.
     let ui = chat_row_window(std::slice::from_ref(&link_row));
     let links = Rc::new(RefCell::new(Vec::<String>::new()));
     let record = links.clone();
     ui.on_chat_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
-    for x in (180..1180).step_by(4) {
+    let queries = Rc::new(std::cell::Cell::new(0));
+    let record = queries.clone();
+    ui.on_member_nickname_clicked(move |_, _, _| record.set(record.get() + 1));
+    // Left clicks along the text of the row, after the nick.
+    for x in (nick.x as i32 + 60..1180).step_by(4) {
         let position = slint::LogicalPosition::new(x as f32, nick.y);
-        chat_row_click(&ui, position, slint::platform::PointerEventButton::Left);
+        chat_row_click(&ui, position, PointerEventButton::Left);
     }
     assert!(
-        links
-            .borrow()
-            .iter()
-            .any(|href| href.contains("example.org")),
-        "link click lost: {:?}",
+        links.borrow().is_empty(),
+        "a left click opened a link: {:?}",
         links.borrow()
+    );
+    assert_eq!(queries.get(), 0, "a left click on the text opened a query");
+
+    // A right click on the text of the row opens its menu.
+    let ui = chat_row_window(std::slice::from_ref(&link_row));
+    let position = slint::LogicalPosition::new(nick.x + 70., nick.y);
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    let before = ui.window().take_snapshot().unwrap();
+    chat_row_click(&ui, position, PointerEventButton::Right);
+    let after = ui.window().take_snapshot().unwrap();
+    assert!(
+        before.as_bytes() != after.as_bytes(),
+        "right click on the link row did not show the menu"
     );
 
     // A left click on the time or the unused space opens no query.
@@ -5975,43 +5998,19 @@ fn chat_row_text_can_still_be_selected_and_copied() {
         let rows = vec![e2e_row(1, Some("Alice"), false, false)];
         let nick = chat_row_nick_point(&rows);
         let ui = chat_row_window(&rows);
-        // Press in the unused space of the text field, drag left past the
-        // start of the text: the whole message is selected.
-        let press = slint::LogicalPosition::new(nick.x + 400., nick.y);
-        let release = slint::LogicalPosition::new(nick.x - 30., nick.y);
-        let button = PointerEventButton::Left;
-        ui.window().dispatch_event(WindowEvent::PointerPressed {
-            position: press,
-            button,
-        });
-        // The chat list is a Flickable: it holds a press back for a short
-        // time to tell a scroll from a click on a row. Wait longer than that
-        // hold, so the text field gets the press before the drag starts.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        slint::platform::update_timers_and_animations();
-        let steps = 8;
-        for step in 1..=steps {
-            let fraction = step as f32 / steps as f32;
-            let position =
-                slint::LogicalPosition::new(press.x + (release.x - press.x) * fraction, press.y);
-            ui.window()
-                .dispatch_event(WindowEvent::PointerMoved { position });
-            slint::platform::update_timers_and_animations();
-        }
-        ui.window().take_snapshot().unwrap();
-        ui.window().dispatch_event(WindowEvent::PointerReleased {
-            position: release,
-            button,
-        });
+        // A click in the unused space of the text field gives it the focus.
+        // Select all and copy: the message of the row is on the clipboard.
+        let position = slint::LogicalPosition::new(nick.x + 400., nick.y);
+        chat_row_click(&ui, position, PointerEventButton::Left);
         let control = slint::platform::Key::Control;
         ui.window().dispatch_event(WindowEvent::KeyPressed {
             text: control.into(),
         });
-        for event in [
-            WindowEvent::KeyPressed { text: "c".into() },
-            WindowEvent::KeyReleased { text: "c".into() },
-        ] {
-            ui.window().dispatch_event(event);
+        for key in ["a", "c"] {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
         }
         ui.window().dispatch_event(WindowEvent::KeyReleased {
             text: control.into(),
