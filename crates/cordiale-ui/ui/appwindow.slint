@@ -5446,6 +5446,8 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                     min-width: 0px;
                                     vertical-stretch: 0;
+                                    // The width the bare input had: the text's own.
+                                    preferred-width: selectable-sizer.preferred-width;
                                     preferred-height: selectable-sizer.preferred-height;
                                     min-height: selectable-sizer.preferred-height;
 
@@ -5508,6 +5510,7 @@ export component AppWindow inherits Window {
                                     // The row takes the height of the styled text at
                                     // its own width, never a stretched share.
                                     vertical-stretch: 0;
+                                    preferred-width: styled-body.preferred-width;
                                     preferred-height: styled-body.preferred-height;
                                     min-height: styled-body.preferred-height;
 
