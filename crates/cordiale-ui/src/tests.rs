@@ -15315,25 +15315,28 @@ fn selectable_body_text_keeps_only_plain_single_style_rows() {
     let red = (255, 0, 0);
     let plain = vec![("Caff\u{e8} \u{1f642}".to_string(), white, false)];
     assert_eq!(
-        selectable_body_text(&plain, "Caff\u{e8} \u{1f642}").as_deref(),
+        selectable_body_text(&plain).as_deref(),
         Some("Caff\u{e8} \u{1f642}")
     );
     let two_colors = vec![
         ("a".to_string(), white, false),
         ("b".to_string(), red, false),
     ];
-    assert_eq!(selectable_body_text(&two_colors, "ab"), None);
+    assert_eq!(selectable_body_text(&two_colors), None);
     let mixed_bold = vec![
         ("a".to_string(), white, true),
         ("b".to_string(), white, false),
     ];
-    assert_eq!(selectable_body_text(&mixed_bold, "ab"), None);
+    assert_eq!(selectable_body_text(&mixed_bold), None);
     let link = vec![("see https://example.org/a".to_string(), white, false)];
-    assert_eq!(
-        selectable_body_text(&link, "see https://example.org/a"),
-        None
-    );
-    assert_eq!(selectable_body_text(&[], ""), None);
+    assert_eq!(selectable_body_text(&link), None);
+    // A link split by a format code is still a link in the visible text.
+    let split = vec![
+        ("https://exa".to_string(), white, false),
+        ("mple.org/a".to_string(), white, false),
+    ];
+    assert_eq!(selectable_body_text(&split), None);
+    assert_eq!(selectable_body_text(&[]), None);
 }
 
 #[test]
@@ -15341,7 +15344,7 @@ fn selectable_body_shows_a_line_break_as_a_space_so_the_row_stays_one_height() {
     let white = (255, 255, 255);
     let wrapped = vec![("one\r\ntwo\nthree".to_string(), white, false)];
     assert_eq!(
-        selectable_body_text(&wrapped, "one\r\ntwo\nthree").as_deref(),
+        selectable_body_text(&wrapped).as_deref(),
         Some("one  two three")
     );
     let line = chat_line_from_message(

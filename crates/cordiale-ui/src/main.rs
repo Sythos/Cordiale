@@ -9572,7 +9572,7 @@ fn chat_line_from_message(
             slint::StyledText::from_plain_text(&plain)
         });
 
-    let selectable_body = selectable_body_text(&runs, display_text);
+    let selectable_body = selectable_body_text(&runs);
     // A row with links or several colors keeps its styled text and gets a
     // transparent text input over it, so the same text can be selected. The
     // input has one weight, so a mixed-weight row was made plain above. The input
@@ -9651,21 +9651,20 @@ fn add_link_icons(runs: &mut [(String, (u8, u8, u8), bool)]) {
 
 /// The visible text of a row that a plain text input can show without
 /// losing anything: no link and one color and weight for every run. Other
-/// rows keep the styled text. Hidden markup never enters the text.
-fn selectable_body_text(
-    runs: &[(String, (u8, u8, u8), bool)],
-    display_text: &str,
-) -> Option<String> {
+/// rows keep the styled text. Hidden markup never enters the text, and the
+/// links are found in the visible text, not in the text with format codes.
+fn selectable_body_text(runs: &[(String, (u8, u8, u8), bool)]) -> Option<String> {
     let first = runs.first()?;
     if runs.iter().any(|run| run.1 != first.1 || run.2 != first.2) {
         return None;
     }
-    if !cordiale_core::media::find_links(display_text).is_empty() {
+    let visible = visible_body_text(runs);
+    if !cordiale_core::media::find_links(&visible).is_empty() {
         return None;
     }
     // A line break is shown as a space, like the styled text does: a break
     // in the input would add a line and a blank band to the row.
-    Some(visible_body_text(runs).replace(['\r', '\n'], " "))
+    Some(visible.replace(['\r', '\n'], " "))
 }
 
 /// The text of all runs of a row as the user sees it. Hidden markup never
