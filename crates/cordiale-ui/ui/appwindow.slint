@@ -226,6 +226,8 @@ struct ChatLine {
     // in a read-only text input, so the user can select and copy part of it.
     selectable: bool,
     selectable-body: string,
+    // Channel names in the text are links (a sender's chat message).
+    channel-links: bool,
     // The visible text of a row that has links or several styles. A
     // transparent text input over the styled text selects it. Empty when
     // the row has no such overlay.
@@ -1451,9 +1453,9 @@ export component AppWindow inherits Window {
     // The displayed text of the rows from the first index to the last one.
     pure callback format-chat-range([ChatLine], int, int) -> string;
     // The link of a row text at a position in the order of its links, or "".
-    pure callback chat-links(string) -> [string];
+    pure callback chat-links(string, bool) -> [string];
     // The link of a row text under a text cursor at a byte offset, or "".
-    pure callback chat-link-at(string, int) -> string;
+    pure callback chat-link-at(string, int, bool) -> string;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -5401,7 +5403,7 @@ export component AppWindow inherits Window {
                                     is-chat-message: true;
                                     reply-body: line.reply-body;
                                     reply-id: line.reply-id;
-                                    links: chat-links(line.overlay-body);
+                                    links: chat-links(line.overlay-body, line.channel-links);
                                     can-moderate: can-moderate-members;
                                     is-ignored: nick-ignored(line.nick, window-ignore-masks);
                                     prefix-text: line.nick != "" ? "<" + line.nick-prefix : "";
@@ -5534,7 +5536,7 @@ export component AppWindow inherits Window {
                                         // opened link left, so the pointer must not reset it.
                                         opened = false;
                                         pending-link = (!row.key-moved && !row.ranging && cursor == anchor)
-                                            ? chat-link-at(line.overlay-body, cursor) : "";
+                                            ? chat-link-at(line.overlay-body, cursor, line.channel-links) : "";
                                         if pending-link != "" {
                                             press-x = pointer-x;
                                             press-y = pointer-y;

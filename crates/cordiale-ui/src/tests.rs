@@ -5538,6 +5538,111 @@ fn link_at_offset_finds_the_link_under_the_cursor() {
     assert_eq!(link_at_offset(text, 500), "");
 }
 
+fn channel_context(network: &str) -> ChannelLinkContext {
+    ChannelLinkContext {
+        network: network.to_string(),
+        chantypes: vec!["#".to_string()],
+        channellen: None,
+    }
+}
+
+#[test]
+fn row_links_make_a_channel_name_a_link_on_the_row_network() {
+    let text = "This is a chat line about #cordiale on IRC.";
+    let context = channel_context("libera");
+    let links = row_links(text, Some(&context));
+    assert_eq!(links.len(), 1);
+    assert_eq!(&text[links[0].range.clone()], "#cordiale");
+    assert_eq!(
+        parse_channel_link(&links[0].href),
+        Some(("libera".to_string(), "#cordiale".to_string()))
+    );
+    // Another network gives another target for the same text.
+    let other = row_links(text, Some(&channel_context("oftc")));
+    assert_eq!(
+        parse_channel_link(&other[0].href),
+        Some(("oftc".to_string(), "#cordiale".to_string()))
+    );
+    // No context: the name stays plain text.
+    assert!(row_links(text, None).is_empty());
+}
+
+#[test]
+fn row_links_keep_boundaries_punctuation_and_urls_apart() {
+    let context = channel_context("libera");
+    let names = |text: &str| -> Vec<String> {
+        row_links(text, Some(&context))
+            .iter()
+            .filter_map(|link| parse_channel_link(&link.href))
+            .map(|(_, channel)| channel)
+            .collect()
+    };
+    assert_eq!(
+        names("Join #cordiale, #two. and (#three)"),
+        ["#cordiale", "#two", "#three"]
+    );
+    assert!(names("word#cordiale").is_empty());
+    assert!(names("see https://host.example/page#section").is_empty());
+    let mixed = row_links("https://host.example/page#section #real", Some(&context));
+    assert_eq!(mixed.len(), 2);
+    assert_eq!(mixed[0].href, "https://host.example/page#section");
+    assert!(parse_channel_link(&mixed[1].href).is_some());
+}
+
+#[test]
+fn channel_links_round_trip_and_never_read_as_urls() {
+    let href = channel_link_href("net work", "#a/b%c");
+    assert_eq!(
+        parse_channel_link(&href),
+        Some(("net work".to_string(), "#a/b%c".to_string()))
+    );
+    assert_eq!(parse_channel_link("https://example.org/#x"), None);
+    assert_eq!(parse_channel_link("cordiale-channel:"), None);
+    assert_eq!(parse_channel_link("cordiale-channel:net/"), None);
+    assert!(cordiale_core::media::validated_url(&href).is_err());
+}
+
+#[test]
+fn a_channel_name_is_found_under_the_cursor_and_in_the_markup() {
+    let context = channel_context("libera");
+    let text = "go #cordiale now";
+    let href = channel_link_href("libera", "#cordiale");
+    assert_eq!(link_at_offset_in(text, 5, Some(&context)), href);
+    assert_eq!(link_at_offset_in(text, 3, Some(&context)), "");
+    assert_eq!(link_at_offset_in(text, 5, None), "");
+    assert_eq!(all_row_links(text, Some(&context)), [href.clone()]);
+    let runs = vec![(text.to_string(), (0, 0, 0), false)];
+    let markdown = message_markdown_with(&runs, false, Some(&context));
+    assert!(markdown.contains(&href));
+    assert!(!message_markdown_with(&runs, false, None).contains("cordiale-channel"));
+    // A row with a channel link keeps its styled text, so it stays an overlay row.
+    assert_eq!(selectable_body_text_with(&runs, Some(&context)), None);
+    assert_eq!(
+        selectable_body_text_with(&runs, None).as_deref(),
+        Some(text)
+    );
+}
+
+#[test]
+fn a_channel_click_joins_only_a_channel_that_is_not_joined_or_pending() {
+    assert_eq!(
+        channel_link_plan(Some(&ChannelWindowState::Joined)),
+        ChannelLinkPlan::Open
+    );
+    assert_eq!(
+        channel_link_plan(Some(&ChannelWindowState::Pending)),
+        ChannelLinkPlan::Wait
+    );
+    for state in [
+        None,
+        Some(&ChannelWindowState::Failed),
+        Some(&ChannelWindowState::Kicked),
+        Some(&ChannelWindowState::Invited),
+    ] {
+        assert_eq!(channel_link_plan(state), ChannelLinkPlan::Join);
+    }
+}
+
 #[test]
 fn topic_links_are_clickable_with_normalized_targets() {
     for prefix in ["", "    ", "\t"] {
@@ -6075,7 +6180,9 @@ fn record_chat_links(ui: &AppWindow) -> Rc<RefCell<Vec<String>>> {
     let opened = Rc::new(RefCell::new(Vec::<String>::new()));
     let record = opened.clone();
     ui.on_chat_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
-    ui.on_chat_link_at(|text, offset| link_at_offset(&text, offset).into());
+    ui.on_chat_link_at(|text, offset, channels| {
+        link_at_offset_in(&text, offset, channel_context_if(channels).as_ref()).into()
+    });
     opened
 }
 

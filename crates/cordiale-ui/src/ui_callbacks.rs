@@ -399,12 +399,17 @@ pub(crate) fn register_passkey_callbacks(
     });
     ui.on_format_chat_copy(|lines| chat_copy_text(&lines).into());
     ui.on_format_chat_row(|line| chat_row_text(&line).into());
-    ui.on_chat_links(|text| {
+    ui.on_chat_links(|text, channels| {
         let links: Vec<slint::SharedString> =
-            all_links(&text).into_iter().map(Into::into).collect();
+            all_row_links(&text, channel_context_if(channels).as_ref())
+                .into_iter()
+                .map(Into::into)
+                .collect();
         slint::ModelRc::new(slint::VecModel::from(links))
     });
-    ui.on_chat_link_at(|text, offset| link_at_offset(&text, offset).into());
+    ui.on_chat_link_at(|text, offset, channels| {
+        link_at_offset_in(&text, offset, channel_context_if(channels).as_ref()).into()
+    });
     ui.on_format_chat_range(|lines, first, last| chat_range_text(&lines, first, last).into());
     let weak_for_codes = ui.as_weak();
     ui.on_security_copy_recovery_codes(move || {
@@ -905,7 +910,12 @@ pub(crate) fn register_link_callbacks(
 
     let tx_for_link = worker_tx.clone();
     ui.on_chat_link_clicked(move |href| {
-        let _ = tx_for_link.send(WorkerCommand::OpenLink(href.to_string()));
+        // A channel name never reaches the URL handler.
+        let command = match parse_channel_link(href.as_str()) {
+            Some((network, channel)) => WorkerCommand::OpenChannelLink { network, channel },
+            None => WorkerCommand::OpenLink(href.to_string()),
+        };
+        let _ = tx_for_link.send(command);
     });
 
     let weak_for_media_browser = ui.as_weak();

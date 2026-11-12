@@ -277,6 +277,12 @@ enum WorkerCommand {
     ArchiveDelete(String),
     /// A link clicked in the chat: the viewer or the browser opens it.
     OpenLink(String),
+    /// A channel name clicked in a chat row: joined on the row's network when
+    /// needed, then opened.
+    OpenChannelLink {
+        network: String,
+        channel: String,
+    },
     /// Tunes a station: `builtin:<id>` or `custom:<index>`.
     RadioTune(String),
     RadioStop,
@@ -2027,6 +2033,9 @@ async fn run_worker(
                                 Err(refusal) => link_refused(&ui, refusal),
                             }
                         }
+                    }
+                    Some(WorkerCommand::OpenChannelLink { network, channel }) => {
+                        channel_link_activate(&mut state, &ui, network, channel).await;
                     }
                     Some(WorkerCommand::RadioTune(key)) => {
                         tune_radio(&mut radio_state, &radio, &worker_self, &ui, &key);
@@ -9460,6 +9469,130 @@ fn refresh_mention_context(state: &WorkerState) {
             patterns: state.prefs.watch_patterns.clone(),
         });
     }
+    let channel_context =
+        state
+            .windows
+            .current_channel
+            .as_ref()
+            .map(|(network, _)| ChannelLinkContext {
+                network: network.clone(),
+                chantypes: state
+                    .networks
+                    .isupport_by_network
+                    .get(network)
+                    .map(|isupport| isupport.chantypes.clone())
+                    .unwrap_or_default(),
+                channellen: state
+                    .networks
+                    .isupport_by_network
+                    .get(network)
+                    .and_then(|isupport| isupport.channellen),
+            });
+    if let Ok(mut context) = CHANNEL_LINK_CONTEXT.write() {
+        *context = channel_context;
+    }
+}
+
+/// What the chat rows need to turn a channel name into a link: the network
+/// of the open window and its channel prefixes and length limit. Read by the
+/// line builder and the link lookups, like the mention context.
+#[derive(Clone, Default)]
+struct ChannelLinkContext {
+    network: String,
+    chantypes: Vec<String>,
+    channellen: Option<u64>,
+}
+
+static CHANNEL_LINK_CONTEXT: std::sync::RwLock<Option<ChannelLinkContext>> =
+    std::sync::RwLock::new(None);
+
+fn channel_link_context() -> Option<ChannelLinkContext> {
+    CHANNEL_LINK_CONTEXT
+        .read()
+        .ok()
+        .and_then(|context| context.clone())
+}
+
+/// The start of the internal link of a channel name. It never goes to the
+/// URL handler: the click handler reads it first.
+const CHANNEL_LINK_PREFIX: &str = "cordiale-channel:";
+
+fn percent_encode(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let pair = text.get(index + 1..index + 3)?;
+            out.push(u8::from_str_radix(pair, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The internal link of a channel name on a network.
+fn channel_link_href(network: &str, channel: &str) -> String {
+    format!(
+        "{CHANNEL_LINK_PREFIX}{}/{}",
+        percent_encode(network),
+        percent_encode(channel)
+    )
+}
+
+/// The network and the channel of an internal channel link, or `None` for
+/// any other link.
+fn parse_channel_link(href: &str) -> Option<(String, String)> {
+    let rest = href.strip_prefix(CHANNEL_LINK_PREFIX)?;
+    let (network, channel) = rest.split_once('/')?;
+    let (network, channel) = (percent_decode(network)?, percent_decode(channel)?);
+    (!network.is_empty() && !channel.is_empty()).then_some((network, channel))
+}
+
+/// The links of a row text in order: the URLs, and with `channels` also the
+/// channel names of the context's network. Both lists never overlap.
+fn row_links(text: &str, channels: Option<&ChannelLinkContext>) -> Vec<cordiale_core::media::Link> {
+    let mut links = cordiale_core::media::find_links(text);
+    if let Some(context) = channels {
+        links.extend(
+            cordiale_core::channel_mentions::find_channels(
+                text,
+                &context.chantypes,
+                context.channellen,
+            )
+            .into_iter()
+            .map(|mention| cordiale_core::media::Link {
+                href: channel_link_href(&context.network, &mention.name),
+                range: mention.range,
+            }),
+        );
+        links.sort_by_key(|link| link.range.start);
+    }
+    links
+}
+
+/// The context for a row that shows channel names as links, or `None`.
+fn channel_context_if(enabled: bool) -> Option<ChannelLinkContext> {
+    if enabled {
+        channel_link_context()
+    } else {
+        None
+    }
 }
 
 fn mention_context() -> MentionContext {
@@ -9536,6 +9669,12 @@ fn chat_line_from_message(
     } else {
         rename_row_parts(message)
     };
+    // Channel names are links in the text of a sender's chat message, not in
+    // event lines.
+    let channels = channel_context_if(
+        !incoming && rename_target.is_empty() && !message.italic && message.nick.is_some(),
+    );
+    let channels = channels.as_ref();
     let runs: Vec<(String, (u8, u8, u8), bool)> =
         cordiale_core::formatting::parse_mirc_text(display_text)
             .into_iter()
@@ -9560,19 +9699,20 @@ fn chat_line_from_message(
     if !incoming
         && rename_target.is_empty()
         && !has_uniform_weight(&runs)
-        && (message.nick.is_some() || nth_link(&visible_body_text(&runs), 0).is_empty())
+        && (message.nick.is_some() || row_links(&visible_body_text(&runs), channels).is_empty())
     {
         for run in &mut runs {
             run.2 = false;
         }
     }
-    let body = slint::StyledText::from_markdown(&message_markdown(&runs, message.italic))
-        .unwrap_or_else(|_| {
-            let plain: String = runs.iter().map(|run| run.0.as_str()).collect();
-            slint::StyledText::from_plain_text(&plain)
-        });
+    let body =
+        slint::StyledText::from_markdown(&message_markdown_with(&runs, message.italic, channels))
+            .unwrap_or_else(|_| {
+                let plain: String = runs.iter().map(|run| run.0.as_str()).collect();
+                slint::StyledText::from_plain_text(&plain)
+            });
 
-    let selectable_body = selectable_body_text(&runs);
+    let selectable_body = selectable_body_text_with(&runs, channels);
     // A row with links or several colors keeps its styled text and gets a
     // transparent text input over it, so the same text can be selected. The
     // input has one weight, so a mixed-weight row was made plain above. The input
@@ -9583,7 +9723,7 @@ fn chat_line_from_message(
         && !incoming
         && rename_target.is_empty()
         && has_uniform_weight(&runs)
-        && (message.nick.is_some() || nth_link(&visible_body, 0).is_empty());
+        && (message.nick.is_some() || row_links(&visible_body, channels).is_empty());
     // The styled text shows a line break as a space, so the input does too:
     // a different break would move the glyphs under the selection.
     let overlay_body = if overlay {
@@ -9595,6 +9735,7 @@ fn chat_line_from_message(
     ChatLine {
         selectable: selectable_body.is_some() && !incoming && rename_target.is_empty(),
         selectable_body: selectable_body.unwrap_or_default().into(),
+        channel_links: channels.is_some(),
         overlay_body: overlay_body.into(),
         body_color: runs.first().map_or(
             slint::Color::from_rgb_u8(default_color.0, default_color.1, default_color.2),
@@ -9653,13 +9794,22 @@ fn add_link_icons(runs: &mut [(String, (u8, u8, u8), bool)]) {
 /// losing anything: no link and one color and weight for every run. Other
 /// rows keep the styled text. Hidden markup never enters the text, and the
 /// links are found in the visible text, not in the text with format codes.
+#[cfg(test)]
 fn selectable_body_text(runs: &[(String, (u8, u8, u8), bool)]) -> Option<String> {
+    selectable_body_text_with(runs, None)
+}
+
+/// As `selectable_body_text`; with `channels` a channel name is a link too.
+fn selectable_body_text_with(
+    runs: &[(String, (u8, u8, u8), bool)],
+    channels: Option<&ChannelLinkContext>,
+) -> Option<String> {
     let first = runs.first()?;
     if runs.iter().any(|run| run.1 != first.1 || run.2 != first.2) {
         return None;
     }
     let visible = visible_body_text(runs);
-    if !cordiale_core::media::find_links(&visible).is_empty() {
+    if !row_links(&visible, channels).is_empty() {
         return None;
     }
     // A line break is shown as a space, like the styled text does: a break
@@ -9685,6 +9835,7 @@ fn has_uniform_weight(runs: &[(String, (u8, u8, u8), bool)]) -> bool {
 
 /// The link of a row text at a position in the order of the links, or an
 /// empty string when the text has no such link. The row menu opens it.
+#[cfg(test)]
 fn nth_link(text: &str, index: i32) -> String {
     usize::try_from(index)
         .ok()
@@ -9701,11 +9852,17 @@ fn nth_link(text: &str, index: i32) -> String {
 /// string. A click puts the cursor on the nearest glyph edge, so only an
 /// offset inside the link counts: the two edges also belong to the text
 /// around the link.
+#[cfg(test)]
 fn link_at_offset(text: &str, offset: i32) -> String {
+    link_at_offset_in(text, offset, None)
+}
+
+/// As `link_at_offset`; with `channels` a channel name is a link too.
+fn link_at_offset_in(text: &str, offset: i32, channels: Option<&ChannelLinkContext>) -> String {
     let Ok(offset) = usize::try_from(offset) else {
         return String::new();
     };
-    cordiale_core::media::find_links(text)
+    row_links(text, channels)
         .into_iter()
         .find(|link| link.range.start < offset && offset < link.range.end)
         .map(|link| link.href)
@@ -9714,8 +9871,14 @@ fn link_at_offset(text: &str, offset: i32) -> String {
 
 /// All links of a row text, in order. The link picker of the row menu lists
 /// them.
+#[cfg(test)]
 fn all_links(text: &str) -> Vec<String> {
-    cordiale_core::media::find_links(text)
+    all_row_links(text, None)
+}
+
+/// As `all_links`; with `channels` the channel names are listed too.
+fn all_row_links(text: &str, channels: Option<&ChannelLinkContext>) -> Vec<String> {
+    row_links(text, channels)
         .into_iter()
         .map(|link| link.href)
         .collect()
@@ -9757,7 +9920,17 @@ fn rename_row_parts(message: &RenderedMessage) -> (&str, &str) {
 /// next to a tag bracket, where CommonMark reliably opens and closes them.
 /// A link sits outside the tag, so the run color never hides the link color.
 /// Text is backslash-escaped, so nothing a user typed becomes markup.
+#[cfg(test)]
 fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> String {
+    message_markdown_with(runs, italic, None)
+}
+
+/// As `message_markdown`; with `channels` a channel name is a link too.
+fn message_markdown_with(
+    runs: &[(String, (u8, u8, u8), bool)],
+    italic: bool,
+    channels: Option<&ChannelLinkContext>,
+) -> String {
     let mut markdown = String::new();
     for (text, (r, g, b), bold) in runs {
         let text: String = text
@@ -9778,7 +9951,7 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
         let links = if core.is_empty() {
             Vec::new()
         } else {
-            cordiale_core::media::find_links(core)
+            row_links(core, channels)
         };
         // The text before, between and after the links keeps the run color.
         let mut last = 0;
@@ -9788,7 +9961,15 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
             push_colored_text(&mut markdown, &font_open, &before, marker);
             before.clear();
             markdown.push_str(marker);
-            markdown.push_str(&linked_markdown(&core[link.range.clone()]));
+            if link.href.starts_with(CHANNEL_LINK_PREFIX) {
+                markdown.push('[');
+                markdown.push_str(&escape_markdown(&core[link.range.clone()]));
+                markdown.push_str("](<");
+                markdown.push_str(&escape_markdown_destination(&link.href));
+                markdown.push_str(">)");
+            } else {
+                markdown.push_str(&linked_markdown(&core[link.range.clone()]));
+            }
             markdown.push_str(marker);
             last = link.range.end;
         }
@@ -12433,6 +12614,72 @@ async fn directory_activate(state: &mut WorkerState, ui: &slint::Weak<AppWindow>
     }
     // Focus the sidebar's own spelling of the window when it has one.
     let key = window_state_key(&network, &channel);
+    let channel = state
+        .windows
+        .channel_entries
+        .iter()
+        .find(|(known_network, known_channel, _)| {
+            window_state_key(known_network, known_channel) == key
+        })
+        .map(|(_, known_channel, _)| known_channel.clone())
+        .unwrap_or(channel);
+    write_back_read_cursor(state);
+    handle_select_channel(state, ui, network, channel).await;
+}
+
+/// What a click on a channel name in a chat row does, from the state of
+/// the channel window on the row's network.
+#[derive(Debug, PartialEq, Eq)]
+enum ChannelLinkPlan {
+    /// The window exists and is joined: open it, send nothing.
+    Open,
+    /// No joined window: send the join request, then open the window.
+    Join,
+    /// A join is pending: do nothing, so no second request goes out.
+    Wait,
+}
+
+fn channel_link_plan(window: Option<&ChannelWindowState>) -> ChannelLinkPlan {
+    match window {
+        Some(ChannelWindowState::Joined) => ChannelLinkPlan::Open,
+        Some(ChannelWindowState::Pending) => ChannelLinkPlan::Wait,
+        _ => ChannelLinkPlan::Join,
+    }
+}
+
+/// A channel name clicked in a chat row: joined on the row's network when
+/// it is not joined, then focused. A failed join keeps the open window and
+/// shows the error in the status bar.
+async fn channel_link_activate(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    network: String,
+    channel: String,
+) {
+    if !state.networks.network_ids.contains_key(&network) {
+        return;
+    }
+    let key = window_state_key(&network, &channel);
+    match channel_link_plan(state.windows.window_states.get(&key)) {
+        ChannelLinkPlan::Wait => return,
+        ChannelLinkPlan::Open => {}
+        ChannelLinkPlan::Join => {
+            let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone())
+            else {
+                return;
+            };
+            if let Err(err) = client.join_channel(&token, &network, &channel, None).await {
+                persistence::log_line(&format!("channel link join failed: {err:?}"));
+                if is_invalid_channel(&err) {
+                    set_command_status(ui, "invalid-channel", channel);
+                } else {
+                    set_command_status(ui, "command-failed", format!("Join {channel}"));
+                }
+                return;
+            }
+        }
+    }
+    // Focus the sidebar's own spelling of the window when it has one.
     let channel = state
         .windows
         .channel_entries
