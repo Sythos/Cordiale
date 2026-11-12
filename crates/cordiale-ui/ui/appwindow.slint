@@ -1666,7 +1666,7 @@ export component AppWindow inherits Window {
     // Set by Rust with `history-loading` back to false: whether that page
     // request failed. A failed page is retried only once the reader comes
     // back to the top (or presses PgUp), never in a loop.
-    in property <bool> history-failed: false;
+    in-out property <bool> history-failed: false;
     callback older-history-requested();
     // A message row of the mentions summary was clicked (its row index).
     callback mention-open-requested(int);
@@ -5075,6 +5075,27 @@ export component AppWindow inherits Window {
                 }
             }
 
+            if has-selected-channel && history-failed && !history-loading : HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: @tr("Could not load the history.");
+                    color: theme == "dark" ? #e57373 : #c0392b;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    accessible-role: AccessibleRole.text;
+                    accessible-live-region: AccessibleLiveness.polite;
+                }
+                Button {
+                    text: @tr("Try again");
+                    clicked => {
+                        history-failed = false;
+                        history-loading = true;
+                        older-history-requested();
+                    }
+                }
+            }
+
             if has-selected-channel : chat-list := ListView {
                 vertical-stretch: 1;
 
@@ -5104,7 +5125,7 @@ export component AppWindow inherits Window {
                 property <bool> near-top: self.content-y >= -self.visible-height / 3;
 
                 function load-older() {
-                    if older-armed && !history-loading && !history-start-reached && chat-lines.length > 0 {
+                    if older-armed && !history-loading && !history-start-reached {
                         older-armed = false;
                         history-loading = true;
                         // Older rows shift every row index.
@@ -5457,6 +5478,10 @@ export component AppWindow inherits Window {
                                 if !line.incoming && !line.selectable && line.overlay-body != "" : Rectangle {
                                     horizontal-stretch: 1;
                                     min-width: 0px;
+                                    // The row takes the height of the styled text at
+                                    // its own width, never a stretched share.
+                                    vertical-stretch: 0;
+                                    preferred-height: styled-body.preferred-height;
                                     min-height: styled-body.preferred-height;
 
                                     styled-body := StyledText {
