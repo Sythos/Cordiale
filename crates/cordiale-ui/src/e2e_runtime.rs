@@ -78,6 +78,15 @@ pub(crate) struct E2eRuntime {
     requests: HashMap<(String, u64), E2eRequest>,
     /// Accepted request IDs already used to start an E2E lane this session.
     activated_requests: HashSet<(String, u64)>,
+    /// Incoming request IDs that already got an alert in this session. A
+    /// reconnect sync lists the same request again and must not alert twice.
+    alerted_requests: HashSet<(String, u64)>,
+    /// Incoming requests seen for the first time and not yet judged against
+    /// the notification settings.
+    fresh_requests: Vec<(String, u64)>,
+    /// Incoming requests whose plain query shows an attention mark until the
+    /// user opens the query.
+    attention_requests: HashSet<(String, u64)>,
     /// The one open X1 pairing of this session, if any.
     pairing: Option<ActivePairing>,
     /// Rendezvous that an earlier run left open. They are closed when the
@@ -440,8 +449,52 @@ impl E2eRuntime {
     }
 
     fn put_request(&mut self, network: &str, request: E2eRequest) {
-        self.requests
-            .insert((network.to_string(), request.id), request);
+        let key = (network.to_string(), request.id);
+        if request.state == E2eRequestState::Incoming {
+            if self.alerted_requests.insert(key.clone()) {
+                self.fresh_requests.push(key.clone());
+            }
+        } else {
+            // An outgoing request, or one that is no longer open, never marks.
+            self.attention_requests.remove(&key);
+        }
+        self.requests.insert(key, request);
+    }
+
+    /// Takes the incoming requests that arrived since the last call.
+    fn take_fresh_requests(&mut self) -> Vec<(String, u64)> {
+        std::mem::take(&mut self.fresh_requests)
+    }
+
+    /// The attention count of each plain query, keyed like the unread counts.
+    pub(crate) fn request_attention_counts(&self) -> HashMap<(String, String), u64> {
+        let mut counts = HashMap::new();
+        for key in &self.attention_requests {
+            if let Some(request) = self.requests.get(key) {
+                *counts
+                    .entry(window_counts_key(&key.0, &request.peer))
+                    .or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
+    /// Clears the attention marks of the plain query of `peer`.
+    pub(crate) fn clear_request_attention(
+        &mut self,
+        network: &str,
+        peer: &str,
+        casemapping: cordiale_core::isupport::CaseMapping,
+    ) -> bool {
+        let before = self.attention_requests.len();
+        let requests = &self.requests;
+        self.attention_requests.retain(|key| {
+            !(key.0 == network
+                && requests
+                    .get(key)
+                    .is_some_and(|request| casemapping.nick_eq(&request.peer, peer)))
+        });
+        self.attention_requests.len() != before
     }
 
     /// Notes an `e2e_incoming` event for the device `own_did`. Returns the
@@ -514,12 +567,15 @@ impl E2eRuntime {
     fn remove_request(&mut self, network: &str, id: u64) {
         self.requests.remove(&(network.to_string(), id));
         self.activated_requests.remove(&(network.to_string(), id));
+        self.attention_requests.remove(&(network.to_string(), id));
     }
 
     fn replace_requests(&mut self, network: &str, requests: Vec<E2eRequest>) {
         self.requests
             .retain(|(known_network, _), _| known_network != network);
         self.activated_requests
+            .retain(|(known_network, _)| known_network != network);
+        self.attention_requests
             .retain(|(known_network, _)| known_network != network);
         for request in requests {
             self.put_request(network, request);
@@ -1265,6 +1321,7 @@ async fn sync_e2e_requests(state: &mut WorkerState, ui: &slint::Weak<AppWindow>,
         }
     }
     push_open_query_consent(state, ui);
+    raise_request_attention(state, ui);
 }
 
 fn ensure_plain_query_for_request(state: &WorkerState, network: &str, peer: &str) {
@@ -1753,6 +1810,34 @@ pub(crate) async fn handle_e2e_request_push(
     } else {
         ensure_plain_query_for_request(state, network, &request.peer);
         push_open_query_consent(state, ui);
+    }
+    raise_request_attention(state, ui);
+}
+
+/// Marks the plain query of each new incoming request when the notification
+/// settings allow it and the query is not the visible window. A request that
+/// was alerted before, by push or by an earlier sync, is not new here.
+pub(crate) fn raise_request_attention(state: &mut WorkerState, ui: &slint::Weak<AppWindow>) {
+    let fresh = state.e2e.take_fresh_requests();
+    let mut changed = false;
+    for key in fresh {
+        let Some(peer) = state
+            .e2e
+            .requests
+            .get(&key)
+            .map(|request| request.peer.clone())
+        else {
+            continue;
+        };
+        if !crate::request_alert_allowed(state, &key.0, &peer) {
+            continue;
+        }
+        changed |= state.e2e.attention_requests.insert(key);
+    }
+    if changed {
+        // A visible query clears the mark again at once.
+        crate::mark_active_window_read(state, ui);
+        crate::refresh_network_groups(state, ui);
     }
 }
 
@@ -4276,6 +4361,90 @@ mod tests {
             at: "2026-11-06T10:00:00Z".to_string(),
             expires_at: None,
         }
+    }
+
+    #[test]
+    fn an_incoming_request_is_fresh_once_and_an_outgoing_one_never() {
+        let mut state = WorkerState::new();
+        state.e2e.replace_requests(
+            "net",
+            vec![
+                consent_request(1, "bob", E2eRequestState::Incoming),
+                consent_request(2, "carol", E2eRequestState::Outgoing),
+            ],
+        );
+        assert_eq!(
+            state.e2e.take_fresh_requests(),
+            vec![("net".to_string(), 1)]
+        );
+        // A reconnect sync lists the same request again.
+        state.e2e.replace_requests(
+            "net",
+            vec![
+                consent_request(1, "bob", E2eRequestState::Incoming),
+                consent_request(2, "carol", E2eRequestState::Outgoing),
+            ],
+        );
+        assert!(state.e2e.take_fresh_requests().is_empty());
+        // A push of the same request is not new either.
+        state
+            .e2e
+            .put_request("net", consent_request(1, "bob", E2eRequestState::Incoming));
+        assert!(state.e2e.take_fresh_requests().is_empty());
+        // A new request ID is new.
+        state
+            .e2e
+            .put_request("net", consent_request(3, "bob", E2eRequestState::Incoming));
+        assert_eq!(
+            state.e2e.take_fresh_requests(),
+            vec![("net".to_string(), 3)]
+        );
+    }
+
+    #[test]
+    fn the_attention_mark_counts_per_query_and_opening_it_clears_it() {
+        let mut state = WorkerState::new();
+        state.e2e.replace_requests(
+            "net",
+            vec![consent_request(1, "Bob", E2eRequestState::Incoming)],
+        );
+        state.e2e.attention_requests.insert(("net".to_string(), 1));
+        let counts = state.e2e.request_attention_counts();
+        assert_eq!(counts.get(&window_counts_key("net", "bob")), Some(&1));
+        let casemapping = cordiale_core::isupport::CaseMapping::Ascii;
+        assert!(!state
+            .e2e
+            .clear_request_attention("net", "carol", casemapping));
+        assert!(state.e2e.clear_request_attention("net", "bob", casemapping));
+        assert!(state.e2e.request_attention_counts().is_empty());
+        // The sync that follows does not bring the mark back.
+        state.e2e.replace_requests(
+            "net",
+            vec![consent_request(1, "Bob", E2eRequestState::Incoming)],
+        );
+        assert!(state.e2e.take_fresh_requests().is_empty());
+        assert!(state.e2e.request_attention_counts().is_empty());
+    }
+
+    #[test]
+    fn a_request_alert_follows_the_notification_settings() {
+        let mut state = WorkerState::new();
+        assert!(request_alert_allowed(&state, "net", "bob"));
+        let mut prefs = serde_json::Map::new();
+        prefs.insert(
+            "private_messages_all".into(),
+            serde_json::Value::Bool(false),
+        );
+        state.prefs.notification_prefs = Some(prefs);
+        assert!(!request_alert_allowed(&state, "net", "bob"));
+        let mut prefs = serde_json::Map::new();
+        prefs.insert(
+            "muted_targets".into(),
+            serde_json::json!({ "net bob": { "until": null } }),
+        );
+        state.prefs.notification_prefs = Some(prefs);
+        assert!(!request_alert_allowed(&state, "net", "Bob"));
+        assert!(request_alert_allowed(&state, "net", "carol"));
     }
 
     #[test]
