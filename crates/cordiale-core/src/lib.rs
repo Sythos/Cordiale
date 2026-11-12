@@ -53,6 +53,7 @@ pub mod admin;
 pub mod backoff;
 pub mod ban;
 pub mod bootstrap;
+pub mod channel_mentions;
 pub mod cleartext;
 pub mod client;
 pub mod credentials;
