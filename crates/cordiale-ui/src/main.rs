@@ -9153,10 +9153,13 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     apply_connecting_labels(&mut data, &state.networks.connecting_networks);
     let window_states = state.windows.window_states.clone();
     let window_mentions = merge_followed_query_counts(state, &state.windows.window_mentions);
-    let mut window_messages = merge_followed_query_counts(state, &state.windows.window_messages);
+    // Add the request attention before the fold, so a request under a new
+    // nick reaches the visible anchor row.
+    let mut message_counts = state.windows.window_messages.clone();
     for (key, count) in state.e2e.request_attention_counts() {
-        *window_messages.entry(key).or_insert(0) += count;
+        *message_counts.entry(key).or_insert(0) += count;
     }
+    let mut window_messages = merge_followed_query_counts(state, &message_counts);
     window_messages.extend(e2e_runtime::locked_unread_counts(state));
     let selected = selected_window(state);
     let cipher_views = e2e_runtime::ciphertext_view_windows(state);
