@@ -264,6 +264,54 @@ fn clean_file_name(name: &str) -> Option<String> {
     }
 }
 
+/// The icon that tells what a link points to, from the extension of the URL
+/// path alone (no request is made). Query and fragment are ignored and the
+/// case does not matter. The icon does not depend on how the link opens.
+pub fn link_icon(href: &str) -> &'static str {
+    let extension = reqwest::Url::parse(href)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(|mut segments| segments.next_back())
+                .and_then(|name| name.rsplit_once('.'))
+                .map(|(_, extension)| extension.to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    match target_for_extension(&extension) {
+        LinkTarget::Image => "📸",
+        LinkTarget::Video => "🎬",
+        LinkTarget::Audio(_) => "🎵",
+        LinkTarget::Text | LinkTarget::Browser => "🌐",
+    }
+}
+
+/// `text` as it is shown: each link gets its icon and one space before it.
+/// The icon goes before the whole word of the link, so the punctuation
+/// around the URL keeps its place and `find_links` finds the same URLs. A
+/// link that an upload marker (and one space) already precedes gets no icon.
+pub fn with_link_icons(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    let mut last = 0;
+    for link in find_links(text) {
+        let word_start = text[..link.range.start]
+            .rfind(char::is_whitespace)
+            .map_or(0, |index| {
+                index + text[index..].chars().next().map_or(1, char::len_utf8)
+            });
+        if word_start < last {
+            continue;
+        }
+        shown.push_str(&text[last..word_start]);
+        if !crate::upload::ends_with_marker(&text[..word_start]) {
+            shown.push_str(link_icon(&link.href));
+            shown.push(' ');
+        }
+        last = word_start;
+    }
+    shown.push_str(&text[last..]);
+    shown
+}
+
 /// Where a file with this extension opens.
 pub fn target_for_extension(extension: &str) -> LinkTarget {
     if IMAGE_EXTENSIONS.contains(&extension) {
@@ -816,6 +864,85 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_icon_follows_the_path_extension() {
+        for ext in [
+            "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg", "apng", "avif",
+        ] {
+            assert_eq!(
+                link_icon(&format!("http://a.example/x.{ext}")),
+                "📸",
+                "{ext}"
+            );
+        }
+        for ext in ["mp4", "webm", "mov", "m4v"] {
+            assert_eq!(
+                link_icon(&format!("https://a.example/x.{ext}")),
+                "🎬",
+                "{ext}"
+            );
+        }
+        for ext in ["mp3", "ogg", "oga", "opus", "flac", "wav", "m4a", "aac"] {
+            assert_eq!(
+                link_icon(&format!("https://a.example/x.{ext}")),
+                "🎵",
+                "{ext}"
+            );
+        }
+        assert_eq!(link_icon("https://a.example/PHOTO.PNG?x=1#top"), "📸");
+        assert_eq!(link_icon("https://a.example/page?file=a.png"), "🌐");
+        assert_eq!(link_icon("https://a.example/page.html"), "🌐");
+        assert_eq!(link_icon("https://a.example/notes.txt"), "🌐");
+        assert_eq!(link_icon("https://a.example"), "🌐");
+    }
+
+    #[test]
+    fn links_get_an_icon_outside_the_link() {
+        let shown = with_link_icons("see https://a.example/p.png and www.b.example/v.MP4.");
+        assert_eq!(
+            shown,
+            "see 📸 https://a.example/p.png and 🎬 www.b.example/v.MP4."
+        );
+        let hrefs: Vec<String> = find_links(&shown).into_iter().map(|l| l.href).collect();
+        assert_eq!(
+            hrefs,
+            ["https://a.example/p.png", "https://www.b.example/v.MP4"]
+        );
+        for link in find_links(&shown) {
+            assert!(!shown[link.range].contains(['📸', '🎬']));
+        }
+    }
+
+    #[test]
+    fn icons_keep_the_punctuation_and_the_urls() {
+        let text = "(https://a.example/s.mp3), <https://a.example/q?a=1#f> „https://a.example/x“";
+        let shown = with_link_icons(text);
+        assert_eq!(
+            shown,
+            "🎵 (https://a.example/s.mp3), 🌐 <https://a.example/q?a=1#f> 🌐 „https://a.example/x“"
+        );
+        let before: Vec<String> = find_links(text).into_iter().map(|l| l.href).collect();
+        let after: Vec<String> = find_links(&shown).into_iter().map(|l| l.href).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn upload_markers_are_not_doubled() {
+        for text in [
+            "📸 https://a.example/uploads/a.png",
+            "🎬 https://a.example/uploads/a.mp4",
+            "🎵 https://a.example/uploads/a.mp3",
+            "📄 https://a.example/uploads/a.pdf",
+        ] {
+            assert_eq!(with_link_icons(text), text);
+        }
+        assert_eq!(
+            with_link_icons("📸 https://a.example/a.png https://a.example/b"),
+            "📸 https://a.example/a.png 🌐 https://a.example/b"
+        );
+        assert_eq!(with_link_icons("no link here"), "no link here");
+    }
 
     fn hrefs(text: &str) -> Vec<(String, String)> {
         find_links(text)
