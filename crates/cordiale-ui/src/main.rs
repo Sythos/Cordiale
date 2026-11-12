@@ -9672,6 +9672,21 @@ fn nth_link(text: &str, index: i32) -> String {
         .unwrap_or_default()
 }
 
+/// The link under a text cursor at a byte offset of a row text, or an empty
+/// string. A click puts the cursor on the nearest glyph edge, so only an
+/// offset inside the link counts: the two edges also belong to the text
+/// around the link.
+fn link_at_offset(text: &str, offset: i32) -> String {
+    let Ok(offset) = usize::try_from(offset) else {
+        return String::new();
+    };
+    cordiale_core::media::find_links(text)
+        .into_iter()
+        .find(|link| link.range.start < offset && offset < link.range.end)
+        .map(|link| link.href)
+        .unwrap_or_default()
+}
+
 /// All links of a row text, in order. The link picker of the row menu lists
 /// them.
 fn all_links(text: &str) -> Vec<String> {
@@ -9715,6 +9730,7 @@ fn rename_row_parts(message: &RenderedMessage) -> (&str, &str) {
 /// several colors wraps as one paragraph. Every run gets an explicit
 /// `<font color>` (the default color too): emphasis markers then always sit
 /// next to a tag bracket, where CommonMark reliably opens and closes them.
+/// A link sits outside the tag, so the run color never hides the link color.
 /// Text is backslash-escaped, so nothing a user typed becomes markup.
 fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> String {
     let mut markdown = String::new();
@@ -9726,26 +9742,58 @@ fn message_markdown(runs: &[(String, (u8, u8, u8), bool)], italic: bool) -> Stri
         if text.is_empty() {
             continue;
         }
-        let core = text.trim();
-        let leading = &text[..text.len() - text.trim_start().len()];
-        let trailing = &text[text.trim_end().len()..];
         let marker = match (*bold, italic) {
             (true, true) => "***",
             (true, false) => "**",
             (false, true) => "*",
             (false, false) => "",
         };
-        markdown.push_str(&format!("<font color=\"#{r:02x}{g:02x}{b:02x}\">"));
-        markdown.push_str(&escape_markdown(leading));
-        if !core.is_empty() {
+        let font_open = format!("<font color=\"#{r:02x}{g:02x}{b:02x}\">");
+        let core = text.trim();
+        let leading = &text[..text.len() - text.trim_start().len()];
+        let trailing = &text[text.trim_end().len()..];
+        let links = if core.is_empty() {
+            Vec::new()
+        } else {
+            cordiale_core::media::find_links(core)
+        };
+        // The text before, between and after the links keeps the run color.
+        let mut last = 0;
+        let mut before = leading.to_string();
+        for link in links {
+            before.push_str(&core[last..link.range.start]);
+            push_colored_text(&mut markdown, &font_open, &before, marker);
+            before.clear();
             markdown.push_str(marker);
-            markdown.push_str(&linked_markdown(core));
+            markdown.push_str(&linked_markdown(&core[link.range.clone()]));
             markdown.push_str(marker);
+            last = link.range.end;
         }
-        markdown.push_str(&escape_markdown(trailing));
-        markdown.push_str("</font>");
+        before.push_str(&core[last..]);
+        before.push_str(trailing);
+        push_colored_text(&mut markdown, &font_open, &before, marker);
     }
     markdown
+}
+
+/// Escaped text with no link, in a `<font>` tag. The emphasis marker stays
+/// off the spaces at both ends, where CommonMark would not open it.
+fn push_colored_text(markdown: &mut String, font_open: &str, text: &str, marker: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let core = text.trim();
+    let leading = &text[..text.len() - text.trim_start().len()];
+    let trailing = &text[text.trim_end().len()..];
+    markdown.push_str(font_open);
+    markdown.push_str(&escape_markdown(leading));
+    if !core.is_empty() {
+        markdown.push_str(marker);
+        markdown.push_str(&escape_markdown(core));
+        markdown.push_str(marker);
+    }
+    markdown.push_str(&escape_markdown(trailing));
+    markdown.push_str("</font>");
 }
 
 /// Escape a whole topic as one paragraph and link only validated web URLs.

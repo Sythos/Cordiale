@@ -5471,6 +5471,41 @@ fn chat_links_become_markdown_links() {
 }
 
 #[test]
+fn chat_links_sit_outside_the_run_color_tag() {
+    let runs = vec![("see https://x.io/a_b. now".to_string(), (1, 2, 3), false)];
+    let markdown = message_markdown(&runs, false);
+    assert!(markdown.starts_with("<font color=\"#010203\">see </font>["));
+    assert!(markdown.contains("](<https://x.io/a_b>)<font color=\"#010203\">"));
+    assert!(markdown.ends_with(" now</font>"));
+    assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+    let two = vec![(
+        "https://a.io/x and https://b.io/y".to_string(),
+        (1, 2, 3),
+        true,
+    )];
+    let markdown = message_markdown(&two, false);
+    assert_eq!(markdown.matches("](<https://").count(), 2);
+    assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+}
+
+#[test]
+fn link_at_offset_finds_the_link_under_the_cursor() {
+    let text = "see https://a.io/x_y. and www.b.io/z!";
+    // Inside the first link.
+    assert_eq!(link_at_offset(text, 10), "https://a.io/x_y");
+    // The edges belong to the text around the link.
+    assert_eq!(link_at_offset(text, 4), "");
+    assert_eq!(link_at_offset(text, 20), "");
+    // Trailing punctuation and plain text are no link.
+    assert_eq!(link_at_offset(text, 21), "");
+    assert_eq!(link_at_offset(text, 0), "");
+    // The second link is the one clicked.
+    assert_eq!(link_at_offset(text, 30), "https://www.b.io/z");
+    assert_eq!(link_at_offset(text, -1), "");
+    assert_eq!(link_at_offset(text, 500), "");
+}
+
+#[test]
 fn topic_links_are_clickable_with_normalized_targets() {
     for prefix in ["", "    ", "\t"] {
         let topic = format!("{prefix}https://example.org/a_b. Caffè 🙂 www.rust-lang.org!");

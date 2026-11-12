@@ -1452,6 +1452,8 @@ export component AppWindow inherits Window {
     pure callback format-chat-range([ChatLine], int, int) -> string;
     // The link of a row text at a position in the order of its links, or "".
     pure callback chat-links(string) -> [string];
+    // The link of a row text under a text cursor at a byte offset, or "".
+    pure callback chat-link-at(string, int) -> string;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -5264,6 +5266,9 @@ export component AppWindow inherits Window {
                     // True while a drag that started in this row is outside
                     // the row, or came back into it.
                     property <bool> ranging: false;
+                    // True while a key is down in this row: a cursor move
+                    // made by a key never opens a link.
+                    property <bool> key-moved: false;
                     // Only a drag that holds the mouse sees the pointer
                     // leave the row, so the height under the pointer is
                     // taken from it. The row under that height ends the range.
@@ -5290,7 +5295,12 @@ export component AppWindow inherits Window {
                     // rows, and Escape drops them.
                     FocusScope {
                         focus-on-click: false;
+                        capture-key-released(event) => {
+                            row.key-moved = false;
+                            return EventResult.reject;
+                        }
                         capture-key-pressed(event) => {
+                            row.key-moved = true;
                             if (event.modifiers.control || event.modifiers.meta) && !event.modifiers.shift
                                 && (event.text == "c" || event.text == "C")
                                 && chat-sel-anchor >= 0 && chat-sel-focus >= 0 && chat-sel-anchor != chat-sel-focus {
@@ -5502,9 +5512,35 @@ export component AppWindow inherits Window {
                                 // Several colors or links: the styled text stays
                                 // visible and a transparent text input of the same
                                 // text lies over it, so the mouse and the keys
-                                // select it. The input takes the clicks, so the
-                                // links of such a row open from its row menu.
+                                // select it. The input takes the clicks, so a click
+                                // on a link is read from the cursor it leaves: the
+                                // cursor sits in a link, with no selection, and no
+                                // drag, key or second click follows at once. Then
+                                // the link opens. The row menu opens the links too.
                                 if !line.incoming && !line.selectable && line.overlay-body != "" : overlay-box := Rectangle {
+                                    // The link a click left the cursor in.
+                                    property <string> pending-link: "";
+                                    function arm-link(cursor: int, anchor: int) {
+                                        pending-link = (!row.key-moved && !row.ranging && cursor == anchor)
+                                            ? chat-link-at(line.overlay-body, cursor) : "";
+                                    }
+
+                                    // A drag or a double click moves the cursor or the
+                                    // anchor again at once and drops the pending link.
+                                    Timer {
+                                        interval: 220ms;
+                                        running: pending-link != "";
+                                        triggered => {
+                                            if pending-link != "" {
+                                                chat-link-clicked(pending-link);
+                                                pending-link = "";
+                                                // A second click at the same place
+                                                // must move the cursor again.
+                                                overlay-input.set-selection-offsets(0, 0);
+                                            }
+                                        }
+                                    }
+
                                     horizontal-stretch: 1;
                                     min-width: 0px;
                                     // The row takes the height of the styled text at
@@ -5559,20 +5595,25 @@ export component AppWindow inherits Window {
                                         font-weight: line.body-bold ? 700 : 400;
                                         changed has-focus => {
                                             if self.has-focus {
+                                                row.key-moved = false;
                                                 chat-sel-anchor = -1;
                                                 chat-sel-focus = -1;
+                                            } else {
+                                                overlay-box.pending-link = "";
                                             }
                                         }
                                         // A new selection in an input that keeps its
                                         // focus drops the old rows. The cursor moves of
                                         // a drag that picks rows do not.
                                         changed cursor-position-byte-offset => {
+                                            overlay-box.arm-link(self.cursor-position-byte-offset, self.anchor-position-byte-offset);
                                             if !row.ranging {
                                                 chat-sel-anchor = -1;
                                                 chat-sel-focus = -1;
                                             }
                                         }
                                         changed anchor-position-byte-offset => {
+                                            overlay-box.arm-link(self.cursor-position-byte-offset, self.anchor-position-byte-offset);
                                             if !row.ranging {
                                                 chat-sel-anchor = -1;
                                                 chat-sel-focus = -1;
