@@ -9670,6 +9670,15 @@ fn nth_link(text: &str, index: i32) -> String {
         .unwrap_or_default()
 }
 
+/// All links of a row text, in order. The link picker of the row menu lists
+/// them.
+fn all_links(text: &str) -> Vec<String> {
+    cordiale_core::media::find_links(text)
+        .into_iter()
+        .map(|link| link.href)
+        .collect()
+}
+
 /// The marker text of the progress row of a multi-frame E2E message on its
 /// way. A NUL byte cannot come over IRC, and a decrypted row is always
 /// `encrypted`, so no peer text is read as this row.

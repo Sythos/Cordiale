@@ -569,11 +569,10 @@ component MemberContextMenu {
     // Whether the nick has a plain ignore rule: the menu then offers
     // Unignore instead of Ignore.
     in property <bool> is-ignored: false;
-    // The first links of a chat row whose text input takes the clicks, so
-    // the menu opens them. Empty for no link.
-    in property <string> link-1: "";
-    in property <string> link-2: "";
-    in property <string> link-3: "";
+    // The links of a chat row whose text input takes the clicks, so the
+    // menu opens them. The menu lists the first three and a picker lists
+    // all of them. Empty for no link.
+    in property <[string]> links: [];
     in property <string> display-text;
     in property <string> suffix-text: "";
     in property <color> text-color;
@@ -605,6 +604,40 @@ component MemberContextMenu {
         nick-menu.show(position);
     }
 
+    // Lists every link of the row, for rows with more than three.
+    link-picker := PopupWindow {
+        x: 0px;
+        y: 0px;
+        width: 360px;
+        height: min(240px, links.length * 28px + 8px);
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            ListView {
+                for link in links : Rectangle {
+                    height: 28px;
+                    background: link-touch.has-hover ? Palette.alternate-background : transparent;
+                    Text {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        text: "🔗  " + link;
+                        color: Palette.foreground;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    link-touch := TouchArea {
+                        clicked => {
+                            link-picker.close();
+                            open-link(link);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     nick-menu := ContextMenuArea {
         Menu {
             if is-chat-message : MenuItem {
@@ -616,17 +649,21 @@ component MemberContextMenu {
                 title: "📋  " + @tr("Copy");
                 activated => { copy-row(); }
             }
-            if link-1 != "" : MenuItem {
-                title: "🔗  " + link-1;
-                activated => { open-link(link-1); }
+            if links.length > 0 : MenuItem {
+                title: "🔗  " + links[0];
+                activated => { open-link(links[0]); }
             }
-            if link-2 != "" : MenuItem {
-                title: "🔗  " + link-2;
-                activated => { open-link(link-2); }
+            if links.length > 1 : MenuItem {
+                title: "🔗  " + links[1];
+                activated => { open-link(links[1]); }
             }
-            if link-3 != "" : MenuItem {
-                title: "🔗  " + link-3;
-                activated => { open-link(link-3); }
+            if links.length > 2 : MenuItem {
+                title: "🔗  " + links[2];
+                activated => { open-link(links[2]); }
+            }
+            if links.length > 3 : MenuItem {
+                title: "🔗  " + @tr("All links...");
+                activated => { link-picker.show(); }
             }
             MenuItem {
                 title: "⬆  " + @tr("Op");
@@ -1414,7 +1451,7 @@ export component AppWindow inherits Window {
     // The displayed text of the rows from the first index to the last one.
     pure callback format-chat-range([ChatLine], int, int) -> string;
     // The link of a row text at a position in the order of its links, or "".
-    pure callback chat-link(string, int) -> string;
+    pure callback chat-links(string) -> [string];
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -5333,9 +5370,7 @@ export component AppWindow inherits Window {
                                     is-chat-message: true;
                                     reply-body: line.reply-body;
                                     reply-id: line.reply-id;
-                                    link-1: chat-link(line.overlay-body, 0);
-                                    link-2: chat-link(line.overlay-body, 1);
-                                    link-3: chat-link(line.overlay-body, 2);
+                                    links: chat-links(line.overlay-body);
                                     can-moderate: can-moderate-members;
                                     is-ignored: nick-ignored(line.nick, window-ignore-masks);
                                     prefix-text: line.nick != "" ? "<" + line.nick-prefix : "";
