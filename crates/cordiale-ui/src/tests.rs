@@ -5998,24 +5998,36 @@ fn chat_row_text_can_still_be_selected_and_copied() {
         let rows = vec![e2e_row(1, Some("Alice"), false, false)];
         let nick = chat_row_nick_point(&rows);
         let ui = chat_row_window(&rows);
-        // A click in the unused space of the text field gives it the focus.
-        // Select all and copy: the message of the row is on the clipboard.
-        let position = slint::LogicalPosition::new(nick.x + 400., nick.y);
-        chat_row_click(&ui, position, PointerEventButton::Left);
+        // A click on the message text gives the text input the focus. The
+        // text input is as wide as its text, so look for the click that
+        // reaches it: a click on the time copies the time, and a click on
+        // the nick copies nothing. Then select all and copy.
         let control = slint::platform::Key::Control;
-        ui.window().dispatch_event(WindowEvent::KeyPressed {
-            text: control.into(),
-        });
-        for key in ["a", "c"] {
-            ui.window()
-                .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
-            ui.window()
-                .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        for x in (nick.x as i32 + 40..nick.x as i32 + 200).step_by(4) {
+            clipboard.borrow_mut().clear();
+            let position = slint::LogicalPosition::new(x as f32, nick.y);
+            chat_row_click(&ui, position, PointerEventButton::Left);
+            ui.window().dispatch_event(WindowEvent::KeyPressed {
+                text: control.into(),
+            });
+            for key in ["a", "c"] {
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+            }
+            ui.window().dispatch_event(WindowEvent::KeyReleased {
+                text: control.into(),
+            });
+            if clipboard.borrow().as_str() == "row 1" {
+                break;
+            }
         }
-        ui.window().dispatch_event(WindowEvent::KeyReleased {
-            text: control.into(),
-        });
-        assert_eq!(clipboard.borrow().as_str(), "row 1");
+        assert_eq!(
+            clipboard.borrow().as_str(),
+            "row 1",
+            "no click on the text of the row copied its message"
+        );
     })
     .join()
     .unwrap();
