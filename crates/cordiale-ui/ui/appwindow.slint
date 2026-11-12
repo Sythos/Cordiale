@@ -5437,35 +5437,64 @@ export component AppWindow inherits Window {
                                     min-width: 0px;
                                 }
 
-                                if !line.incoming && line.selectable : TextInput {
-                                    text: line.selectable-body;
-                                    read-only: true;
-                                    single-line: false;
-                                    wrap: word-wrap;
-                                    color: line.body-color;
-                                    font-italic: line.italic;
-                                    font-weight: line.body-bold ? 700 : 400;
+                                // The row height comes from a hidden `Text` at the
+                                // row's own width, never from the text input: the
+                                // input only draws the glyphs and takes the clicks.
+                                // A wrapped row then has the same height as before
+                                // the inputs, with no blank band below it.
+                                if !line.incoming && line.selectable : Rectangle {
                                     horizontal-stretch: 1;
                                     min-width: 0px;
-                                    changed has-focus => {
-                                        if self.has-focus {
-                                            chat-sel-anchor = -1;
-                                            chat-sel-focus = -1;
-                                        }
+                                    vertical-stretch: 0;
+                                    // The width the bare input had: the text's own.
+                                    preferred-width: selectable-sizer.preferred-width;
+                                    preferred-height: selectable-sizer.preferred-height;
+                                    min-height: selectable-sizer.preferred-height;
+
+                                    selectable-sizer := Text {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: parent.width;
+                                        text: line.selectable-body;
+                                        wrap: word-wrap;
+                                        color: transparent;
+                                        font-italic: line.italic;
+                                        font-weight: line.body-bold ? 700 : 400;
+                                        accessible-role: AccessibleRole.none;
                                     }
-                                    // A new selection in an input that keeps its
-                                    // focus drops the old rows. The cursor moves of
-                                    // a drag that picks rows do not.
-                                    changed cursor-position-byte-offset => {
-                                        if !row.ranging {
-                                            chat-sel-anchor = -1;
-                                            chat-sel-focus = -1;
+
+                                    TextInput {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        text: line.selectable-body;
+                                        read-only: true;
+                                        single-line: false;
+                                        wrap: word-wrap;
+                                        color: line.body-color;
+                                        font-italic: line.italic;
+                                        font-weight: line.body-bold ? 700 : 400;
+                                        changed has-focus => {
+                                            if self.has-focus {
+                                                chat-sel-anchor = -1;
+                                                chat-sel-focus = -1;
+                                            }
                                         }
-                                    }
-                                    changed anchor-position-byte-offset => {
-                                        if !row.ranging {
-                                            chat-sel-anchor = -1;
-                                            chat-sel-focus = -1;
+                                        // A new selection in an input that keeps its
+                                        // focus drops the old rows. The cursor moves of
+                                        // a drag that picks rows do not.
+                                        changed cursor-position-byte-offset => {
+                                            if !row.ranging {
+                                                chat-sel-anchor = -1;
+                                                chat-sel-focus = -1;
+                                            }
+                                        }
+                                        changed anchor-position-byte-offset => {
+                                            if !row.ranging {
+                                                chat-sel-anchor = -1;
+                                                chat-sel-focus = -1;
+                                            }
                                         }
                                     }
                                 }
@@ -5475,12 +5504,13 @@ export component AppWindow inherits Window {
                                 // text lies over it, so the mouse and the keys
                                 // select it. The input takes the clicks, so the
                                 // links of such a row open from its row menu.
-                                if !line.incoming && !line.selectable && line.overlay-body != "" : Rectangle {
+                                if !line.incoming && !line.selectable && line.overlay-body != "" : overlay-box := Rectangle {
                                     horizontal-stretch: 1;
                                     min-width: 0px;
                                     // The row takes the height of the styled text at
                                     // its own width, never a stretched share.
                                     vertical-stretch: 0;
+                                    preferred-width: styled-body.preferred-width;
                                     preferred-height: styled-body.preferred-height;
                                     min-height: styled-body.preferred-height;
 
@@ -5491,6 +5521,26 @@ export component AppWindow inherits Window {
                                         text: line.body;
                                         default-color: theme == "dark" ? white : black;
                                         link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
+                                    }
+
+                                    // The text input ignores a right press and the
+                                    // styled text takes every press, so this sends the
+                                    // right click on the text to the row menu, like the
+                                    // row does anywhere else. A left press never gets
+                                    // here: the input above takes it.
+                                    TouchArea {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        pointer-event(event) => {
+                                            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && line.nick != "" {
+                                                row-menu.show-menu({
+                                                    x: overlay-box.x + self.mouse-x - row-menu.x,
+                                                    y: overlay-box.y + self.mouse-y - row-menu.y,
+                                                });
+                                            }
+                                        }
                                     }
 
                                     overlay-input := TextInput {

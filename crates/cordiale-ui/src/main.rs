@@ -9637,7 +9637,9 @@ fn selectable_body_text(
     if !cordiale_core::media::find_links(display_text).is_empty() {
         return None;
     }
-    Some(visible_body_text(runs))
+    // A line break is shown as a space, like the styled text does: a break
+    // in the input would add a line and a blank band to the row.
+    Some(visible_body_text(runs).replace(['\r', '\n'], " "))
 }
 
 /// The text of all runs of a row as the user sees it. Hidden markup never
