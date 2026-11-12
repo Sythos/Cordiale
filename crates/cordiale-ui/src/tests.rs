@@ -6265,7 +6265,9 @@ fn chat_row_links_use_the_link_color_of_the_theme() {
                 .take_snapshot()
                 .unwrap()
                 .as_bytes()
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|pixel| {
                     pixel[0].abs_diff(r) <= 12
                         && pixel[1].abs_diff(g) <= 12
