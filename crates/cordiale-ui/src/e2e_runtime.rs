@@ -1335,6 +1335,26 @@ fn ensure_plain_query_for_request(state: &WorkerState, network: &str, peer: &str
     }
 }
 
+/// Why an accepted request cannot open its locked query yet. A store error and
+/// a pairing case have their own block, so neither looks like a missing
+/// identity. It reads the state only.
+fn activation_block(
+    runtime: &E2eRuntime,
+    network: &str,
+    engine_open: bool,
+) -> Option<ConsentBlock> {
+    if runtime.store_failed.contains(network) {
+        return Some(ConsentBlock::Store);
+    }
+    if runtime.needs_pairing.contains(network) || runtime.recovery.contains_key(network) {
+        return Some(ConsentBlock::Pairing);
+    }
+    if !engine_open {
+        return Some(ConsentBlock::NoIdentity);
+    }
+    None
+}
+
 async fn activate_accepted_request(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
@@ -1348,8 +1368,10 @@ async fn activate_accepted_request(
     {
         return;
     }
-    if !ensure_engine(state, network) {
-        set_e2e_status(ui, "e2e-request-no-identity");
+    let engine_open = ensure_engine(state, network);
+    if let Some(block) = activation_block(&state.e2e, network, engine_open) {
+        // The request stays in the list, so a later try can work.
+        show_consent_block(state, ui, network, block).await;
         return;
     }
     if state.e2e.request_was_activated(network, request.id) {
@@ -4326,6 +4348,31 @@ mod tests {
     const OWN_DID: &str = "AAAAAAAAAAA";
     const PEER_DID: &str = "If4x36FUomE";
     const SIBLING_DID: &str = "BBBBBBBBBBB";
+
+    #[test]
+    fn activation_block_keeps_pairing_store_and_identity_apart() {
+        let mut runtime = E2eRuntime::default();
+        assert_eq!(activation_block(&runtime, "net", true), None);
+        assert_eq!(
+            activation_block(&runtime, "net", false),
+            Some(ConsentBlock::NoIdentity)
+        );
+        runtime.needs_pairing.insert("net".to_string());
+        assert_eq!(
+            activation_block(&runtime, "net", true),
+            Some(ConsentBlock::Pairing)
+        );
+        assert_eq!(
+            activation_block(&runtime, "net", false),
+            Some(ConsentBlock::Pairing)
+        );
+        runtime.store_failed.insert("net".to_string());
+        assert_eq!(
+            activation_block(&runtime, "net", false),
+            Some(ConsentBlock::Store)
+        );
+        assert_eq!(activation_block(&runtime, "other", true), None);
+    }
 
     fn incoming_event(
         network: &str,

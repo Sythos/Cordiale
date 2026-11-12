@@ -48,12 +48,22 @@ pub fn find_links(text: &str) -> Vec<Link> {
         // Wrapping punctuation before the link, like "(see" or "<http".
         let lead = token.len()
             - token
-                .trim_start_matches(['(', '[', '{', '<', '"', '\''])
+                .trim_start_matches(['(', '[', '{', '<', '"', '\'', '„', '‚', '‹'])
                 .len();
         let candidate = &token[lead..];
+        // A low-high opening mark right before the URL has its own closing mark.
+        let closer = match token[..lead].chars().last() {
+            Some('„') => Some('“'),
+            Some('‚') => Some('‘'),
+            Some('‹') => Some('›'),
+            _ => None,
+        };
         // `<`, `>` and `"` never belong to a URL here.
         let candidate = candidate.split(['<', '>', '"']).next().unwrap_or_default();
-        let candidate = trim_trailing(candidate);
+        let mut candidate = trim_trailing(candidate);
+        if let Some(stripped) = closer.and_then(|mark| candidate.strip_suffix(mark)) {
+            candidate = trim_trailing(stripped);
+        }
         let lower = candidate.to_ascii_lowercase();
         let with_scheme = ["http://", "https://", "ftp://"]
             .iter()
@@ -845,6 +855,39 @@ mod tests {
         );
         assert!(find_links("ftp:// and http:// alone").is_empty());
         assert!(find_links("user@host.org/x mail").is_empty());
+    }
+
+    #[test]
+    fn low_high_quote_pairs_wrap_links() {
+        for (open, close) in [('„', '“'), ('‚', '‘'), ('‹', '›')] {
+            let text = format!("Zitat {open}https://example.com/path{close}, ok");
+            let links = find_links(&text);
+            assert_eq!(links.len(), 1);
+            assert_eq!(links[0].href, "https://example.com/path");
+            assert_eq!(&text[links[0].range.clone()], "https://example.com/path");
+        }
+        assert_eq!(
+            hrefs("„http://w.org/wiki/A_(b)“."),
+            vec![(
+                "http://w.org/wiki/A_(b)".to_string(),
+                "http://w.org/wiki/A_(b)".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn unquoted_links_keep_low_high_closing_marks() {
+        for mark in ['“', '‘'] {
+            let text = format!("https://example.com/a{mark}");
+            assert_eq!(hrefs(&text), vec![(text.clone(), text.clone())]);
+        }
+        assert_eq!(
+            hrefs("https://example.com/a›"),
+            vec![(
+                "https://example.com/a".to_string(),
+                "https://example.com/a".to_string()
+            )]
+        );
     }
 
     #[test]
