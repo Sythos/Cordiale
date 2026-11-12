@@ -41,6 +41,17 @@ pub(crate) fn needs_recent_history(
     !start_reached && !open_locked && loaded_rows < OLDER_HISTORY_PAGE
 }
 
+/// True when a full newest page starts after every loaded row: merging it
+/// would leave a hole that paging back cannot fill, so the window is rebuilt.
+pub(crate) fn recent_page_is_disjoint(
+    loaded_newest: Option<i64>,
+    page_oldest: Option<i64>,
+    page_rows: usize,
+) -> bool {
+    page_rows >= CATCH_UP_PAGE
+        && matches!((loaded_newest, page_oldest), (Some(loaded), Some(page)) if page > loaded)
+}
+
 /// Reads the newest page of `key` and merges it into the transcript by id.
 /// Returns whether the page proves the start of history (a short page), or
 /// `None` when the request failed and the rows are untouched.
@@ -64,6 +75,20 @@ pub(crate) async fn load_recent_history(
             return None;
         }
     };
+    let page_oldest = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_i64))
+        .min();
+    let messages = state.transcript.messages.entry(key.clone()).or_default();
+    let loaded_newest = messages.iter().filter_map(|line| line.message_id).max();
+    if recent_page_is_disjoint(loaded_newest, page_oldest, rows.len()) {
+        messages.clear();
+        state.transcript.history_start_reached.remove(key);
+        state
+            .transcript
+            .history_cursors_fetched
+            .retain(|(cursor_key, _)| cursor_key != key);
+    }
     let messages = state.transcript.messages.entry(key.clone()).or_default();
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
     let start_reached = rows.len() < CATCH_UP_PAGE;
