@@ -6104,6 +6104,26 @@ async fn handle_toggle_denoise(state: &mut WorkerState, ui: &slint::Weak<AppWind
     }
 }
 
+/// Whether a new incoming E2E request may mark its query. It follows the
+/// private message switch and the mute of the query in the stored prefs.
+/// Without stored prefs, Grappa's defaults apply: alert and no mute.
+fn request_alert_allowed(state: &WorkerState, network: &str, peer: &str) -> bool {
+    let Some(prefs) = state.prefs.notification_prefs.as_ref() else {
+        return true;
+    };
+    if !NotificationToggles::from_prefs(prefs).private_messages_all {
+        return false;
+    }
+    let now = chrono::Utc::now().timestamp();
+    current_mute(
+        prefs,
+        &muted_key(network, peer),
+        &state.prefs.mute_since,
+        now,
+    )
+    .is_none()
+}
+
 /// Grappa's key for a muted conversation or a channel's Denoise choice: the
 /// network slug and the channel or peer nick, ASCII-lowercased like
 /// Cicchetto's channel key.
@@ -7923,6 +7943,16 @@ pub(crate) fn mark_active_window_read(
     let Some((network, target)) = state.windows.current_channel.clone() else {
         return false;
     };
+    // The open query shows its request card: that clears the attention mark.
+    if state.windows.current_query {
+        let casemapping = network_casemapping(state, &network);
+        if state
+            .e2e
+            .clear_request_attention(&network, &target, casemapping)
+        {
+            refresh_network_groups(state, ui);
+        }
+    }
     if query_high_water_id(state, &(network.clone(), target.clone())).is_none() {
         return false;
     }
@@ -9124,6 +9154,9 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
     let window_states = state.windows.window_states.clone();
     let window_mentions = merge_followed_query_counts(state, &state.windows.window_mentions);
     let mut window_messages = merge_followed_query_counts(state, &state.windows.window_messages);
+    for (key, count) in state.e2e.request_attention_counts() {
+        *window_messages.entry(key).or_insert(0) += count;
+    }
     window_messages.extend(e2e_runtime::locked_unread_counts(state));
     let selected = selected_window(state);
     let cipher_views = e2e_runtime::ciphertext_view_windows(state);
