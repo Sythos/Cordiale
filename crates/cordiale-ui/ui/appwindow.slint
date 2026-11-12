@@ -1927,9 +1927,9 @@ export component AppWindow inherits Window {
     property <length> sidebar-width: sidebar-icons-min-width;
     property <length> members-width: 160px;
     // Texts measured by the invisible probes below to derive each side
-    // column's minimum width: the widest sidebar row label, and a run of
+    // column's minimum width: the shortest sidebar row label, and a run of
     // average-width characters as long as the average member label.
-    in property <string> sidebar-widest-label: "";
+    in property <string> sidebar-shortest-label: "";
     in property <string> members-average-nick: "";
     // Fixed parts of the sidebar, shared by the rows and the minimum width.
     property <length> sidebar-padding: 8px;
@@ -1942,21 +1942,29 @@ export component AppWindow inherits Window {
     property <length> top-icon-size: 32px;
     property <length> top-icon-spacing: 4px;
     property <int> top-icon-count: is-admin ? 4 : 3;
+    // Padding of the label button of a row (`SidebarRowButton`).
+    property <length> sidebar-label-padding: 16px;
     property <length> sidebar-hard-max-width: 360px;
-    // The sidebar never gets narrower than its widest row (the label, the
-    // two cells, their spacing, the row indent, the scrollbar gutter and the
-    // box padding) nor than the top row of icon buttons; it never gets wider
-    // than `sidebar-hard-max-width` unless the icons need more. The member
+    // Ceiling of the minimum that comes from the rows, below the drag
+    // ceiling: a long label elides and never forces a wide window.
+    property <length> sidebar-rows-min-cap: 240px;
+    // The sidebar is never narrower than its shortest channel or query row
+    // (the label, the two cells, their spacing, the row indent, the
+    // scrollbar gutter and the box padding, up to `sidebar-rows-min-cap`)
+    // nor than the top row of icon buttons. It is never wider than
+    // `sidebar-hard-max-width` unless the icons need more. The member
     // column is never narrower than the average member label, its Actions
     // button, or the E2E action of the selected plain query.
     property <length> sidebar-icons-min-width:
         top-icon-size * top-icon-count + top-icon-spacing * (top-icon-count - 1) + 2 * sidebar-padding;
-    property <length> sidebar-rows-min-width:
-        sidebar-label-probe.preferred-width + sidebar-row-indent + 2 * sidebar-cell-width
+    property <length> sidebar-row-fixed-width:
+        sidebar-label-padding + sidebar-row-indent + 2 * sidebar-cell-width
         + 2 * sidebar-row-spacing + sidebar-scroll-gutter + 2 * sidebar-padding;
+    property <length> sidebar-shortest-row-width:
+        sidebar-shortest-label == "" ? 0px : sidebar-shortest-probe.preferred-width + sidebar-row-fixed-width;
     property <length> sidebar-min-width: max(
-        max(120px, sidebar-icons-min-width),
-        min(sidebar-rows-min-width, sidebar-hard-max-width));
+        sidebar-icons-min-width,
+        min(sidebar-shortest-row-width, sidebar-rows-min-cap));
     property <length> members-e2e-action-min-width:
         current-query && !current-query-e2e
             && (current-query-e2e-request-state == ""
@@ -1998,8 +2006,7 @@ export component AppWindow inherits Window {
         }
     }
     changed width => { fit-columns(); }
-    changed sidebar-min-width => { fit-columns(); }
-    changed members-min-width => { fit-columns(); }
+    changed sidebar-min-width => { fit-columns(); }    changed members-min-width => { fit-columns(); }
 
     in-out property <string> theme: "light";
     // Color theme in use (Grappa's gallery or a built-in copy); false is
@@ -3617,10 +3624,9 @@ export component AppWindow inherits Window {
     }
 
     // Invisible measuring probes for the side columns' minimum widths.
-    sidebar-label-probe := Button {
-        text: sidebar-widest-label;
+    sidebar-shortest-probe := Text {
+        text: sidebar-shortest-label;
         visible: false;
-        enabled: false;
     }
     members-nick-probe := Text {
         text: members-average-nick;

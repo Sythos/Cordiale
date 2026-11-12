@@ -3347,7 +3347,7 @@ async fn finish_connect(
                     None,
                     HashSet::new(),
                 );
-                ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
+                set_sidebar_probes(&ui, &groups);
                 ui.set_network_groups(Rc::new(slint::VecModel::from(groups)).into());
             });
 
@@ -9182,7 +9182,7 @@ fn refresh_network_groups(state: &WorkerState, ui: &slint::Weak<AppWindow>) {
             selected,
             cipher_views,
         );
-        ui.set_sidebar_widest_label(widest_sidebar_label(&groups).into());
+        set_sidebar_probes(&ui, &groups);
         show_network_groups(&ui, groups);
     });
     push_home(state, &ui);
@@ -10673,47 +10673,40 @@ fn network_casemapping(state: &WorkerState, network: &str) -> cordiale_core::isu
         .unwrap_or(cordiale_core::isupport::CaseMapping::Rfc1459)
 }
 
-/// The longest sidebar row label, as displayed, measured by the Slint probe
-/// that sets the sidebar's minimum width. Rows are compared by display width
-/// (wide characters count twice, joiners and combining marks add nothing);
-/// the probe then measures the real text. Channel and query rows include the bullet of the open row, the
-/// widest form that row can take.
-fn widest_sidebar_label(groups: &[NetworkGroup]) -> String {
+/// The shortest channel or query row label, as displayed. The Slint probe
+/// measures it to set the sidebar's minimum width. Network rows do not
+/// count: they elide a long text. Rows are compared by display width (wide
+/// characters count twice, joiners and combining marks add nothing); the
+/// probe then measures the real text. Each row includes the bullet of the
+/// open row, the widest form it can take. On equal widths the first row
+/// stays. Without rows the label is empty.
+fn sidebar_shortest_label(groups: &[NetworkGroup]) -> String {
     use slint::Model as _;
 
     use unicode_width::UnicodeWidthStr as _;
 
-    fn keep_longer(widest: &mut String, candidate: String) {
-        if candidate.width() > widest.width() {
-            *widest = candidate;
-        }
-    }
-
-    let mut widest = String::new();
+    let mut rows: Vec<String> = Vec::new();
     for group in groups {
-        let network_row = if group.parked {
-            format!("▸ {} [PARKED]", group.network)
-        } else if group.connection_label.is_empty() {
-            format!("▾ 🔌 {}", group.network)
-        } else {
-            format!("▾ 🔌 {} · {}", group.network, group.connection_label)
-        };
-        keep_longer(&mut widest, network_row);
         for entry in group.channels.iter() {
             let invited = if entry.invited { "🔔 " } else { "" };
-            keep_longer(
-                &mut widest,
-                format!("● {invited}{}{}", entry.label, entry.mention_badge),
-            );
+            rows.push(format!("● {invited}{}{}", entry.label, entry.mention_badge));
         }
         for query in group.queries.iter() {
-            keep_longer(
-                &mut widest,
-                format!("● ↳ {}{}", query.label, query.mention_badge),
-            );
+            rows.push(format!("● ↳ {}{}", query.label, query.mention_badge));
         }
     }
-    widest
+    let mut shortest = String::new();
+    for (index, row) in rows.into_iter().enumerate() {
+        if index == 0 || row.width() < shortest.width() {
+            shortest = row;
+        }
+    }
+    shortest
+}
+
+/// Sets the sidebar probe text from the row labels.
+fn set_sidebar_probes(ui: &AppWindow, groups: &[NetworkGroup]) {
+    ui.set_sidebar_shortest_label(sidebar_shortest_label(groups).into());
 }
 
 /// Column widths of the connected screen, in logical pixels.

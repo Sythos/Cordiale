@@ -4855,79 +4855,88 @@ fn theme_choices_need_a_complete_palette() {
     assert!(server_theme_choice(&theme).is_none());
 }
 
+fn group_with_channels(network: &str, labels: &[&str]) -> NetworkGroup {
+    let channels = labels
+        .iter()
+        .map(|label| ChannelEntry {
+            label: (*label).into(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    NetworkGroup {
+        network: network.into(),
+        channels: Rc::new(slint::VecModel::from(channels)).into(),
+        ..Default::default()
+    }
+}
+
 #[test]
-fn widest_sidebar_label_picks_the_longest_row() {
-    let channels = vec![
-        ChannelEntry {
-            label: "#rust".into(),
-            ..Default::default()
-        },
-        ChannelEntry {
-            label: "#a-much-longer-channel".into(),
-            mention_badge: " (2)".into(),
-            ..Default::default()
-        },
-    ];
+fn sidebar_shortest_label_picks_the_shortest_row() {
     let groups = vec![
-        NetworkGroup {
-            network: "libera".into(),
-            channels: Rc::new(slint::VecModel::from(channels)).into(),
-            ..Default::default()
-        },
+        group_with_channels("libera", &["#a-much-longer-channel", "#rust", "#mid-size"]),
         NetworkGroup {
             network: "azzurra".into(),
             parked: true,
             ..Default::default()
         },
     ];
-    assert_eq!(
-        widest_sidebar_label(&groups),
-        "● #a-much-longer-channel (2)"
-    );
-    assert_eq!(widest_sidebar_label(&[]), "");
+    assert_eq!(sidebar_shortest_label(&groups), "● #rust");
 }
 
 #[test]
-fn widest_sidebar_label_counts_wide_characters_twice() {
-    let channels = vec![
-        ChannelEntry {
-            label: "#abcd".into(),
-            ..Default::default()
-        },
-        ChannelEntry {
-            label: "#ab🎉🎉".into(),
-            ..Default::default()
-        },
-    ];
-    // The network row ("▾ 🔌 n", 6 columns) is narrower than both channels.
-    let groups = vec![NetworkGroup {
-        network: "n".into(),
-        channels: Rc::new(slint::VecModel::from(channels)).into(),
+fn sidebar_shortest_label_includes_queries_and_skips_network_rows() {
+    let queries = vec![QueryEntry {
+        label: "ab".into(),
         ..Default::default()
     }];
-    assert_eq!(widest_sidebar_label(&groups), "● #ab🎉🎉");
+    let mut group = group_with_channels("n", &["#abc"]);
+    group.queries = Rc::new(slint::VecModel::from(queries)).into();
+    assert_eq!(sidebar_shortest_label(&[group]), "● #abc");
+    let queries = vec![QueryEntry {
+        label: "a".into(),
+        ..Default::default()
+    }];
+    let mut group = group_with_channels("a-very-long-network-name", &["#abc"]);
+    group.queries = Rc::new(slint::VecModel::from(queries)).into();
+    assert_eq!(sidebar_shortest_label(&[group]), "● ↳ a");
 }
 
 #[test]
-fn widest_sidebar_label_ignores_joiners_and_combining_marks() {
-    // Zero-width joiners and combining marks add no columns: the second
+fn sidebar_shortest_label_is_empty_without_rows() {
+    assert_eq!(sidebar_shortest_label(&[]), "");
+    let parked = NetworkGroup {
+        network: "azzurra".into(),
+        parked: true,
+        ..Default::default()
+    };
+    assert_eq!(sidebar_shortest_label(&[parked]), "");
+}
+
+#[test]
+fn sidebar_shortest_label_keeps_the_first_row_on_a_tie() {
+    let groups = vec![group_with_channels("n", &["#aaa", "#bbb"])];
+    assert_eq!(sidebar_shortest_label(&groups), "● #aaa");
+}
+
+#[test]
+fn sidebar_shortest_label_counts_wide_characters_twice() {
+    // "#ab🎉🎉" is 7 columns wide, "#abcde" is 6.
+    let groups = vec![group_with_channels("n", &["#ab🎉🎉", "#abcde"])];
+    assert_eq!(sidebar_shortest_label(&groups), "● #abcde");
+}
+
+#[test]
+fn sidebar_shortest_label_ignores_joiners_and_combining_marks() {
+    // Zero-width joiners and combining marks add no columns: the first
     // label has more characters and bytes, but is 6 columns wide against 7.
-    let channels = vec![
-        ChannelEntry {
-            label: "#abcdef".into(),
-            ..Default::default()
-        },
-        ChannelEntry {
-            label: "#a\u{200d}\u{200d}\u{200d}e\u{301}e\u{301}e\u{301}e\u{301}".into(),
-            ..Default::default()
-        },
-    ];
-    let groups = vec![NetworkGroup {
-        network: "n".into(),
-        channels: Rc::new(slint::VecModel::from(channels)).into(),
-        ..Default::default()
-    }];
-    assert_eq!(widest_sidebar_label(&groups), "● #abcdef");
+    let groups = vec![group_with_channels(
+        "n",
+        &[
+            "#abcdef",
+            "#a\u{200d}\u{200d}\u{200d}e\u{301}e\u{301}e\u{301}e\u{301}",
+        ],
+    )];
+    assert!(sidebar_shortest_label(&groups).starts_with("● #a\u{200d}"));
 }
 
 #[test]
@@ -5760,7 +5769,7 @@ fn sidebar_selection_keeps_scrolled_channel_in_place() {
             },
         ]
     };
-    ui.set_sidebar_widest_label(widest_sidebar_label(&groups("")).into());
+    set_sidebar_probes(&ui, &groups(""));
     show_network_groups(&ui, groups(""));
     let selected = Rc::new(RefCell::new(String::new()));
     let record = selected.clone();
@@ -6723,6 +6732,75 @@ fn query_layout_fills_window_and_separator_can_be_dragged() {
             "action row expanded the notice: {state}"
         );
     }
+}
+
+#[test]
+fn sidebar_separator_moves_with_a_long_channel_label() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.on_fit_column_widths(
+        |window, sidebar, members, sidebar_min, members_min, reserved, sidebar_max| {
+            let fitted = fit_columns(
+                window,
+                sidebar,
+                members,
+                sidebar_min,
+                members_min,
+                reserved,
+                sidebar_max,
+            );
+            ColumnWidths {
+                sidebar: fitted.sidebar,
+                members: fitted.members,
+            }
+        },
+    );
+    ui.set_theme("dark".into());
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_query(true);
+    ui.set_current_query_ready(true);
+    ui.set_current_query_e2e_state("e2e-chat-clear".into());
+    let long_label = format!("#{}", "w".repeat(60));
+    set_sidebar_probes(&ui, &[group_with_channels("test", &[long_label.as_str()])]);
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(900., 1000.));
+    let banner_left = || {
+        let snapshot = ui.window().take_snapshot().unwrap();
+        snapshot
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .position(|pixel| pixel[..3] == [0x1f, 0x2f, 0x3a])
+            .map(|i| i as u32 % snapshot.width())
+            .expect("query banner must be visible")
+    };
+    let before = banner_left();
+    let snapshot = ui.window().take_snapshot().unwrap();
+    let pixels = snapshot.as_bytes();
+    let separator = (0..before)
+        .rev()
+        .find(|x| {
+            let offset = (700 * snapshot.width() + x) as usize * 4;
+            pixels[offset..offset + 3] == [128, 128, 128]
+        })
+        .expect("rendered separator") as f32;
+    let button = PointerEventButton::Left;
+    let position = slint::LogicalPosition::new(separator, 700.);
+    ui.window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    let position = slint::LogicalPosition::new(separator + 60., 700.);
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    ui.window().take_snapshot().unwrap();
+    ui.window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+    assert!(
+        banner_left() > before + 40,
+        "sidebar separator did not move"
+    );
 }
 
 #[test]
