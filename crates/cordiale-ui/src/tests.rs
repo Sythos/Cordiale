@@ -5824,6 +5824,215 @@ fn nick_right_click_opens_menu_without_opening_query() {
     }
 }
 
+/// A connected window that shows `rows` in the chat pane, 1200x800.
+fn chat_row_window(rows: &[RenderedMessage]) -> AppWindow {
+    let ui = AppWindow::new().unwrap();
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_window_is_joined(true);
+    show_chat_lines(&ui, chat_lines_model(rows, true));
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(1200., 800.));
+    ui.window().take_snapshot().unwrap();
+    ui
+}
+
+fn chat_row_click(
+    ui: &AppWindow,
+    position: slint::LogicalPosition,
+    button: slint::platform::PointerEventButton,
+) {
+    use slint::platform::WindowEvent;
+    ui.window()
+        .dispatch_event(WindowEvent::PointerPressed { position, button });
+    ui.window()
+        .dispatch_event(WindowEvent::PointerReleased { position, button });
+}
+
+/// Finds a point on the nick of the first row: the only part of it that
+/// opens a query on a left click.
+fn chat_row_nick_point(rows: &[RenderedMessage]) -> slint::LogicalPosition {
+    let ui = chat_row_window(rows);
+    let queries = Rc::new(std::cell::Cell::new(0));
+    let record = queries.clone();
+    ui.on_member_nickname_clicked(move |_, _, _| record.set(record.get() + 1));
+    for y in (16..760).step_by(8) {
+        for x in (180..1180).step_by(8) {
+            let position = slint::LogicalPosition::new(x as f32, y as f32);
+            chat_row_click(&ui, position, slint::platform::PointerEventButton::Left);
+            if queries.get() > 0 {
+                return position;
+            }
+        }
+    }
+    panic!("nickname must accept a left click");
+}
+
+#[test]
+fn chat_row_right_click_opens_menu_from_every_part_of_the_row() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    set_headless_software_platform();
+    let sender = vec![e2e_row(1, Some("Alice"), false, false)];
+    let system = vec![e2e_row(2, None, true, false)];
+    let nick = chat_row_nick_point(&sender);
+    // The time, the message text and the unused space of the same row.
+    let parts = [
+        ("time", nick.x - 40.),
+        ("text", nick.x + 70.),
+        ("unused space", nick.x + 400.),
+    ];
+    for (rows, opens) in [(&sender, true), (&system, false)] {
+        for (part, x) in parts {
+            let ui = chat_row_window(rows);
+            let queries = Rc::new(std::cell::Cell::new(0));
+            let record = queries.clone();
+            ui.on_member_nickname_clicked(move |_, _, _| record.set(record.get() + 1));
+            let position = slint::LogicalPosition::new(x, nick.y);
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            let before = ui.window().take_snapshot().unwrap();
+            chat_row_click(&ui, position, PointerEventButton::Right);
+            let after = ui.window().take_snapshot().unwrap();
+            assert_eq!(queries.get(), 0, "right click on the {part} opened a query");
+            assert_eq!(
+                before.as_bytes() != after.as_bytes(),
+                opens,
+                "menu from the {part}: sender row={opens}"
+            );
+        }
+    }
+}
+
+#[test]
+fn chat_row_link_opens_from_menu_and_left_click_opens_nothing() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    set_headless_software_platform();
+    let link_row = RenderedMessage {
+        text: "see https://example.org/x".to_string(),
+        ..e2e_row(1, Some("Alice"), false, false)
+    };
+    let lines = chat_lines_model(std::slice::from_ref(&link_row), true);
+    // A row with a link and a sender keeps its styled text and gets a
+    // transparent text input over it. The input takes the left clicks, so
+    // the link opens from the row menu.
+    assert!(!lines[0].selectable, "a row with a link is not plain text");
+    assert_eq!(lines[0].overlay_body.as_str(), "see https://example.org/x");
+    assert_eq!(
+        nth_link(lines[0].overlay_body.as_str(), 0),
+        "https://example.org/x"
+    );
+    let nick = chat_row_nick_point(std::slice::from_ref(&link_row));
+
+    let ui = chat_row_window(std::slice::from_ref(&link_row));
+    let links = Rc::new(RefCell::new(Vec::<String>::new()));
+    let record = links.clone();
+    ui.on_chat_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
+    let queries = Rc::new(std::cell::Cell::new(0));
+    let record = queries.clone();
+    ui.on_member_nickname_clicked(move |_, _, _| record.set(record.get() + 1));
+    // Left clicks along the text of the row, after the nick.
+    for x in (nick.x as i32 + 60..1180).step_by(4) {
+        let position = slint::LogicalPosition::new(x as f32, nick.y);
+        chat_row_click(&ui, position, PointerEventButton::Left);
+    }
+    assert!(
+        links.borrow().is_empty(),
+        "a left click opened a link: {:?}",
+        links.borrow()
+    );
+    assert_eq!(queries.get(), 0, "a left click on the text opened a query");
+
+    // A right click on the text of the row opens its menu.
+    let ui = chat_row_window(std::slice::from_ref(&link_row));
+    let position = slint::LogicalPosition::new(nick.x + 70., nick.y);
+    ui.window()
+        .dispatch_event(WindowEvent::PointerMoved { position });
+    let before = ui.window().take_snapshot().unwrap();
+    chat_row_click(&ui, position, PointerEventButton::Right);
+    let after = ui.window().take_snapshot().unwrap();
+    assert!(
+        before.as_bytes() != after.as_bytes(),
+        "right click on the link row did not show the menu"
+    );
+
+    // A left click on the time or the unused space opens no query.
+    let plain = e2e_row(2, Some("Alice"), false, false);
+    let ui = chat_row_window(std::slice::from_ref(&plain));
+    let queries = Rc::new(std::cell::Cell::new(0));
+    let record = queries.clone();
+    ui.on_member_nickname_clicked(move |_, _, _| record.set(record.get() + 1));
+    for x in [nick.x - 40., nick.x + 400.] {
+        let position = slint::LogicalPosition::new(x, nick.y);
+        chat_row_click(&ui, position, slint::platform::PointerEventButton::Left);
+    }
+    assert_eq!(
+        queries.get(),
+        0,
+        "left click outside the nick opened a query"
+    );
+}
+
+#[test]
+fn chat_row_text_can_still_be_selected_and_copied() {
+    std::thread::spawn(|| {
+        use slint::platform::{
+            software_renderer::*, Clipboard, Platform, PointerEventButton, WindowAdapter,
+            WindowEvent,
+        };
+        struct Headless(Rc<RefCell<String>>);
+        impl Platform for Headless {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+            }
+            fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
+                if clipboard == Clipboard::DefaultClipboard {
+                    *self.0.borrow_mut() = text.to_owned();
+                }
+            }
+            fn clipboard_text(&self, _: Clipboard) -> Option<String> {
+                Some(self.0.borrow().clone())
+            }
+        }
+        let clipboard = Rc::new(RefCell::new(String::new()));
+        slint::platform::set_platform(Box::new(Headless(clipboard.clone()))).unwrap();
+        let rows = vec![e2e_row(1, Some("Alice"), false, false)];
+        let nick = chat_row_nick_point(&rows);
+        let ui = chat_row_window(&rows);
+        // A click on the message text gives the text input the focus. The
+        // text input is as wide as its text, so look for the click that
+        // reaches it: a click on the time copies the time, and a click on
+        // the nick copies nothing. Then select all and copy.
+        let control = slint::platform::Key::Control;
+        for x in (nick.x as i32 + 40..nick.x as i32 + 200).step_by(4) {
+            clipboard.borrow_mut().clear();
+            let position = slint::LogicalPosition::new(x as f32, nick.y);
+            chat_row_click(&ui, position, PointerEventButton::Left);
+            ui.window().dispatch_event(WindowEvent::KeyPressed {
+                text: control.into(),
+            });
+            for key in ["a", "c"] {
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+            }
+            ui.window().dispatch_event(WindowEvent::KeyReleased {
+                text: control.into(),
+            });
+            if clipboard.borrow().as_str() == "row 1" {
+                break;
+            }
+        }
+        assert_eq!(
+            clipboard.borrow().as_str(),
+            "row 1",
+            "no click on the text of the row copied its message"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
 #[test]
 fn query_layout_fills_window_and_separator_can_be_dragged() {
     use slint::platform::{PointerEventButton, WindowEvent};
