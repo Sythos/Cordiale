@@ -14805,6 +14805,12 @@ fn rows_with_links_or_styles_get_a_selection_overlay() {
     let bold_link = chat_row("\x02see https://example.org/a\x02");
     assert_eq!(bold_link.overlay_body.as_str(), "see https://example.org/a");
     assert!(bold_link.body_bold);
+    // The styled text shows a line break as a space: the overlay does the same.
+    let broken = chat_row("see https://example.org/a\nnext");
+    assert_eq!(
+        broken.overlay_body.as_str(),
+        "see https://example.org/a next"
+    );
     // A link row without a sender has no menu to open the link: no overlay.
     let notice = chat_line_from_message(
         &render_message(
