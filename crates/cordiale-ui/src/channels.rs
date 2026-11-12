@@ -42,17 +42,15 @@ pub(crate) async fn handle_select_channel(
     state.windows.current_query_ready = false;
     open_window(state, &key);
     // `/boot` may bring no rows for the channel, or only a few: read the
-    // newest page now instead of waiting for a live message.
-    let mut history_failed = false;
-    if !server_window
+    // newest page instead of waiting for a live message. The request runs
+    // only after the pane shows this window, so the composer never sends to
+    // a window other than the one on screen.
+    let fetch_recent = !server_window
         && needs_recent_history(
             state.transcript.messages.get(&key).map_or(0, Vec::len),
             state.transcript.history_start_reached.contains(&key),
             open_locked_window(state).is_some(),
-        )
-    {
-        history_failed = load_recent_history(state, &key).await.is_none();
-    }
+        );
     refresh_network_groups(state, ui);
     push_mute_bar(state, ui);
 
@@ -120,8 +118,9 @@ pub(crate) async fn handle_select_channel(
         ui.set_reply_target_left(reply_left);
         ui.set_can_moderate_members(can_moderate);
         ui.set_history_start_reached(history_start);
-        ui.set_history_loading(false);
-        ui.set_history_failed(history_failed);
+        // A pending recent page holds back the under-filled-pane request.
+        ui.set_history_loading(fetch_recent);
+        ui.set_history_failed(false);
         ui.set_current_denoise(denoise);
         let model =
             chat_lines_model_with_roster(&lines, dark_theme, &members, casemapping, denoise);
@@ -131,6 +130,9 @@ pub(crate) async fn handle_select_channel(
         ui.set_channel_members(Rc::new(slint::VecModel::from(member_rows)).into());
     });
     mark_active_window_read(state, ui);
+    if fetch_recent {
+        load_and_show_recent_history(state, ui, &key).await;
+    }
     sync_window_ignores(state, ui).await;
 }
 

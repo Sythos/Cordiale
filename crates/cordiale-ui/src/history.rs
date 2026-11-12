@@ -74,6 +74,30 @@ pub(crate) async fn load_recent_history(
     Some(start_reached)
 }
 
+/// Reads the newest page of `key` and shows it if `key` is still the open
+/// window. A failed request keeps the rows and reports the failure, so the
+/// pane offers a retry.
+pub(crate) async fn load_and_show_recent_history(
+    state: &mut WorkerState,
+    ui: &slint::Weak<AppWindow>,
+    key: &(String, String),
+) {
+    let old_rows = state.transcript.messages.get(key).map_or(0, Vec::len);
+    let loaded = load_recent_history(state, key).await;
+    if state.windows.current_channel.as_ref() != Some(key) {
+        return;
+    }
+    match loaded {
+        Some(start_reached) => show_older_history(state, ui, key, old_rows, 0, start_reached),
+        None => {
+            let _ = ui.upgrade_in_event_loop(|ui| {
+                ui.set_history_failed(true);
+                ui.set_history_loading(false);
+            });
+        }
+    }
+}
+
 /// Grappa leaves presence rows out of the history pages it serves while a
 /// channel hides them, so a window loaded in that state has none to show
 /// when Denoise goes off. Reads the newest page again and merges it in.
@@ -191,17 +215,7 @@ pub(crate) async fn handle_load_older_history(
     }
     // A channel with no row yet has no cursor: read its newest page.
     if oldest.is_none() && !state.windows.current_query && key.1 != SERVER_WINDOW_NAME {
-        let old_rows = state.transcript.messages.get(&key).map_or(0, Vec::len);
-        let Some(start_reached) = load_recent_history(state, &key).await else {
-            if state.windows.current_channel.as_ref() == Some(&key) {
-                finish(true, false);
-            }
-            return;
-        };
-        if state.windows.current_channel.as_ref() != Some(&key) {
-            return;
-        }
-        show_older_history(state, ui, &key, old_rows, 0, start_reached);
+        load_and_show_recent_history(state, ui, &key).await;
         return;
     }
     // No line with a Grappa id (a server window), or a cursor already
