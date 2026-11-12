@@ -12490,6 +12490,31 @@ fn row_ids(messages: &[RenderedMessage]) -> Vec<Option<i64>> {
 }
 
 #[test]
+fn recent_history_is_read_for_empty_and_partial_windows_only() {
+    assert!(needs_recent_history(0, false, false));
+    assert!(needs_recent_history(OLDER_HISTORY_PAGE - 1, false, false));
+    assert!(!needs_recent_history(OLDER_HISTORY_PAGE, false, false));
+    assert!(!needs_recent_history(0, true, false));
+    assert!(!needs_recent_history(0, false, true));
+}
+
+#[test]
+fn recent_page_merges_with_live_rows_without_duplicates() {
+    let mut messages = vec![history_row(Some(5), Some(5)), history_row(Some(6), Some(6))];
+    merge_rendered_messages(
+        &mut messages,
+        (3..=6).map(|id| history_row(Some(id), Some(id))),
+    );
+    assert_eq!(row_ids(&messages), vec![Some(3), Some(4), Some(5), Some(6)]);
+    let mut empty = Vec::new();
+    merge_rendered_messages(
+        &mut empty,
+        (1..=3).map(|id| history_row(Some(id), Some(id))),
+    );
+    assert_eq!(row_ids(&empty), vec![Some(1), Some(2), Some(3)]);
+}
+
+#[test]
 fn nothing_is_trimmed_until_the_window_is_past_the_slack() {
     assert_eq!(history_excess(0, 10, 3), 0);
     assert_eq!(history_excess(10, 10, 3), 0);

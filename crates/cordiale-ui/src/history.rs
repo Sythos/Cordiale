@@ -31,6 +31,49 @@ pub(crate) async fn fetch_server_window_history(state: &mut WorkerState, network
     }
 }
 
+/// True when a channel window may lack the newest server rows: it is not
+/// known to start at the first message and holds less than one page.
+pub(crate) fn needs_recent_history(
+    loaded_rows: usize,
+    start_reached: bool,
+    open_locked: bool,
+) -> bool {
+    !start_reached && !open_locked && loaded_rows < OLDER_HISTORY_PAGE
+}
+
+/// Reads the newest page of `key` and merges it into the transcript by id.
+/// Returns whether the page proves the start of history (a short page), or
+/// `None` when the request failed and the rows are untouched.
+pub(crate) async fn load_recent_history(
+    state: &mut WorkerState,
+    key: &(String, String),
+) -> Option<bool> {
+    let (Some(client), Some(token)) = (state.conn.client.clone(), state.conn.token.clone()) else {
+        return None;
+    };
+    let rows = match client
+        .fetch_messages(&token, &key.0, &key.1, None, Some(CATCH_UP_PAGE))
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            persistence::log_line(&format!(
+                "recent history fetch failed for {}/{}: {error:?}",
+                key.0, key.1
+            ));
+            return None;
+        }
+    };
+    let messages = state.transcript.messages.entry(key.clone()).or_default();
+    merge_rendered_messages(messages, rows.iter().map(render_history_entry));
+    let start_reached = rows.len() < CATCH_UP_PAGE;
+    if start_reached {
+        state.transcript.history_start_reached.insert(key.clone());
+    }
+    publish_held_rows(state);
+    Some(start_reached)
+}
+
 /// Grappa leaves presence rows out of the history pages it serves while a
 /// channel hides them, so a window loaded in that state has none to show
 /// when Denoise goes off. Reads the newest page again and merges it in.
@@ -144,6 +187,21 @@ pub(crate) async fn handle_load_older_history(
             return;
         }
         show_older_history(state, ui, &key, old_rows, prepended, start_reached);
+        return;
+    }
+    // A channel with no row yet has no cursor: read its newest page.
+    if oldest.is_none() && !state.windows.current_query && key.1 != SERVER_WINDOW_NAME {
+        let old_rows = state.transcript.messages.get(&key).map_or(0, Vec::len);
+        let Some(start_reached) = load_recent_history(state, &key).await else {
+            if state.windows.current_channel.as_ref() == Some(&key) {
+                finish(true, false);
+            }
+            return;
+        };
+        if state.windows.current_channel.as_ref() != Some(&key) {
+            return;
+        }
+        show_older_history(state, ui, &key, old_rows, 0, start_reached);
         return;
     }
     // No line with a Grappa id (a server window), or a cursor already
