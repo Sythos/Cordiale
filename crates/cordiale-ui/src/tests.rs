@@ -6034,6 +6034,125 @@ fn chat_row_text_can_still_be_selected_and_copied() {
 }
 
 #[test]
+fn chat_row_keyboard_and_mouse_selection_copy_only_the_selected_text() {
+    std::thread::spawn(|| {
+        use slint::platform::{
+            software_renderer::*, Clipboard, Key, Platform, PointerEventButton, WindowAdapter,
+            WindowEvent,
+        };
+        struct Headless(Rc<RefCell<String>>);
+        impl Platform for Headless {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+            }
+            fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
+                if clipboard == Clipboard::DefaultClipboard {
+                    *self.0.borrow_mut() = text.to_owned();
+                }
+            }
+            fn clipboard_text(&self, _: Clipboard) -> Option<String> {
+                Some(self.0.borrow().clone())
+            }
+        }
+        // Holds the modifier, taps the key, then lets both go.
+        fn chord(ui: &AppWindow, modifier: Key, key: impl Into<slint::SharedString>) {
+            let key = key.into();
+            ui.window().dispatch_event(WindowEvent::KeyPressed {
+                text: modifier.into(),
+            });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: key.clone() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: key });
+            ui.window().dispatch_event(WindowEvent::KeyReleased {
+                text: modifier.into(),
+            });
+        }
+        fn tap(ui: &AppWindow, key: Key) {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        }
+        // Command on macOS, Control on Windows and Linux.
+        let shortcut = if cfg!(target_os = "macos") {
+            Key::Meta
+        } else {
+            Key::Control
+        };
+        let clipboard = Rc::new(RefCell::new(String::new()));
+        slint::platform::set_platform(Box::new(Headless(clipboard.clone()))).unwrap();
+        // A message in a channel, and the same message in an E2E query.
+        for encrypted in [false, true] {
+            let rows = vec![e2e_row(1, Some("Alice"), false, encrypted)];
+            let nick = chat_row_nick_point(&rows);
+            let ui = chat_row_window(&rows);
+            let queries = Rc::new(std::cell::Cell::new(0));
+            let record = queries.clone();
+            ui.on_member_nickname_clicked(move |_, _, _| record.set(record.get() + 1));
+            let links = Rc::new(std::cell::Cell::new(0));
+            let record = links.clone();
+            ui.on_chat_link_clicked(move |_| record.set(record.get() + 1));
+            let xs = nick.x as i32 + 40..nick.x as i32 + 200;
+
+            // Keyboard: click in the text, go to its start, then Shift and
+            // the right arrow pick the first three characters.
+            for x in xs.clone().step_by(4) {
+                clipboard.borrow_mut().clear();
+                let position = slint::LogicalPosition::new(x as f32, nick.y);
+                chat_row_click(&ui, position, PointerEventButton::Left);
+                tap(&ui, Key::Home);
+                for _ in 0..3 {
+                    chord(&ui, Key::Shift, Key::RightArrow);
+                }
+                chord(&ui, shortcut, "c");
+                if clipboard.borrow().as_str() == "row" {
+                    break;
+                }
+            }
+            assert_eq!(
+                clipboard.borrow().as_str(),
+                "row",
+                "Shift and the arrow keys must select part of the text: encrypted={encrypted}"
+            );
+
+            // Mouse: a drag from a point of the text to past its end picks
+            // the end of the text, without the time or the nick.
+            let mut dragged = String::new();
+            for x in xs.step_by(4) {
+                clipboard.borrow_mut().clear();
+                let start = slint::LogicalPosition::new(x as f32, nick.y);
+                let end = slint::LogicalPosition::new(x as f32 + 300., nick.y);
+                ui.window().dispatch_event(WindowEvent::PointerPressed {
+                    position: start,
+                    button: PointerEventButton::Left,
+                });
+                ui.window()
+                    .dispatch_event(WindowEvent::PointerMoved { position: end });
+                ui.window().dispatch_event(WindowEvent::PointerReleased {
+                    position: end,
+                    button: PointerEventButton::Left,
+                });
+                chord(&ui, shortcut, "c");
+                let copied = clipboard.borrow().clone();
+                if !copied.is_empty() && "row 1".ends_with(copied.as_str()) && copied != "row 1" {
+                    dragged = copied;
+                    break;
+                }
+            }
+            assert!(
+                !dragged.is_empty(),
+                "a drag over part of the text must copy only that part: encrypted={encrypted}"
+            );
+            assert_eq!(queries.get(), 0, "a selection opened a nick action");
+            assert_eq!(links.get(), 0, "a selection opened a link");
+        }
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn query_layout_fills_window_and_separator_can_be_dragged() {
     use slint::platform::{PointerEventButton, WindowEvent};
     set_headless_software_platform();
