@@ -12615,6 +12615,70 @@ fn trimming_a_window_resets_its_paging_state_only() {
 }
 
 #[test]
+fn an_older_page_lands_in_a_full_window_and_a_trim_lets_paging_resume() {
+    let key = ("libera".to_string(), "#busy".to_string());
+    let mut state = WorkerState::new();
+    let first = 10_000_i64;
+    let last = first + CHAT_HISTORY_CAP as i64 - 1;
+    state.transcript.messages.insert(
+        key.clone(),
+        (first..=last)
+            .map(|id| history_row(Some(id), Some(id)))
+            .collect(),
+    );
+    // A page of older rows goes in above a window that is already full:
+    // nothing is dropped by the merge itself.
+    let page = OLDER_HISTORY_PAGE as i64;
+    let older = ((first - page)..first).map(|id| history_row(Some(id), Some(id)));
+    merge_rendered_messages(state.transcript.messages.get_mut(&key).unwrap(), older);
+    let rows = &state.transcript.messages[&key];
+    assert_eq!(rows.len(), CHAT_HISTORY_CAP + OLDER_HISTORY_PAGE);
+    assert_eq!(rows.first().and_then(|m| m.message_id), Some(first - page));
+    assert_eq!(rows.last().and_then(|m| m.message_id), Some(last));
+    // Still inside the slack: no trim yet, and the cursor of that page is
+    // known as fetched.
+    state
+        .transcript
+        .history_cursors_fetched
+        .insert((key.clone(), first));
+    assert!(!trim_window_history(&mut state, &key));
+
+    // Keep paging back until the window is past the slack, then trim: the
+    // window is bounded again and its oldest id is a fresh cursor.
+    let oldest = first - page;
+    let slack = CHAT_HISTORY_TRIM_SLACK as i64;
+    let more = ((oldest - slack)..oldest).map(|id| history_row(Some(id), Some(id)));
+    merge_rendered_messages(state.transcript.messages.get_mut(&key).unwrap(), more);
+    state.transcript.history_start_reached.insert(key.clone());
+    assert!(trim_window_history(&mut state, &key));
+    assert_eq!(state.transcript.messages[&key].len(), CHAT_HISTORY_CAP);
+    assert!(!state.transcript.history_start_reached.contains(&key));
+    let cursor = state.transcript.messages[&key]
+        .iter()
+        .filter_map(|m| m.message_id)
+        .min()
+        .unwrap();
+    assert!(!state
+        .transcript
+        .history_cursors_fetched
+        .contains(&(key.clone(), cursor)));
+}
+
+#[test]
+fn a_page_of_known_ids_adds_nothing_so_paging_cannot_loop() {
+    let mut messages: Vec<_> = (10..=20)
+        .map(|id| history_row(Some(id), Some(id)))
+        .collect();
+    let before = messages.len();
+    merge_rendered_messages(
+        &mut messages,
+        (10..=20).map(|id| history_row(Some(id), Some(id))),
+    );
+    assert_eq!(messages.len(), before);
+    assert_eq!(messages.first().and_then(|m| m.message_id), Some(10));
+}
+
+#[test]
 fn held_rows_count_every_window_and_the_largest() {
     let mut messages: MessagesByChannel = HashMap::new();
     assert_eq!(held_rows(&messages), (0, 0));
@@ -14926,6 +14990,26 @@ fn selectable_body_text_keeps_only_plain_single_style_rows() {
         None
     );
     assert_eq!(selectable_body_text(&[], ""), None);
+}
+
+#[test]
+fn selectable_body_shows_a_line_break_as_a_space_so_the_row_stays_one_height() {
+    let white = (255, 255, 255);
+    let wrapped = vec![("one\r\ntwo\nthree".to_string(), white, false)];
+    assert_eq!(
+        selectable_body_text(&wrapped, "one\r\ntwo\nthree").as_deref(),
+        Some("one  two three")
+    );
+    let line = chat_line_from_message(
+        &render_message(
+            &serde_json::json!({"kind": "privmsg", "sender": "alice", "body": "one\ntwo", "id": 1}),
+            None,
+        ),
+        true,
+        "",
+    );
+    assert!(line.selectable);
+    assert_eq!(line.selectable_body.as_str(), "one two");
 }
 
 #[test]
