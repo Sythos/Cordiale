@@ -5520,13 +5520,44 @@ export component AppWindow inherits Window {
                                 if !line.incoming && !line.selectable && line.overlay-body != "" : overlay-box := Rectangle {
                                     // The link a click left the cursor in.
                                     property <string> pending-link: "";
+                                    // Where the pointer was when the link was armed.
+                                    property <length> press-x: 0px;
+                                    property <length> press-y: 0px;
+                                    // The last link opened still holds the cursor.
+                                    property <bool> opened: false;
+                                    // The row follows the pointer, also while the
+                                    // text input holds the mouse.
+                                    property <length> pointer-x: row-touch.mouse-x;
+                                    property <length> pointer-y: row-touch.mouse-y;
                                     function arm-link(cursor: int, anchor: int) {
                                         pending-link = (!row.key-moved && !row.ranging && cursor == anchor)
                                             ? chat-link-at(line.overlay-body, cursor) : "";
+                                        if pending-link != "" {
+                                            press-x = pointer-x;
+                                            press-y = pointer-y;
+                                        }
                                     }
+                                    // A pointer that moves after the press is a drag,
+                                    // not a click: the link does not open. The first
+                                    // move after an opened link frees the cursor, so
+                                    // a second click at the same place moves it again.
+                                    function pointer-moved() {
+                                        if abs(pointer-x - press-x) > 3px || abs(pointer-y - press-y) > 3px {
+                                            pending-link = "";
+                                            if opened {
+                                                opened = false;
+                                                overlay-input.set-selection-offsets(0, 0);
+                                            }
+                                        }
+                                    }
+                                    changed pointer-x => { pointer-moved(); }
+                                    changed pointer-y => { pointer-moved(); }
 
                                     // A drag or a double click moves the cursor or the
                                     // anchor again at once and drops the pending link.
+                                    // The input gives no release event, so a click is a
+                                    // press with no move, no key and no new selection
+                                    // for the length of the timer.
                                     Timer {
                                         interval: 220ms;
                                         running: pending-link != "";
@@ -5534,9 +5565,7 @@ export component AppWindow inherits Window {
                                             if pending-link != "" {
                                                 chat-link-clicked(pending-link);
                                                 pending-link = "";
-                                                // A second click at the same place
-                                                // must move the cursor again.
-                                                overlay-input.set-selection-offsets(0, 0);
+                                                opened = true;
                                             }
                                         }
                                     }
