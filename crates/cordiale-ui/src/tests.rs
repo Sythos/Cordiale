@@ -12490,6 +12490,22 @@ fn row_ids(messages: &[RenderedMessage]) -> Vec<Option<i64>> {
 }
 
 #[test]
+fn recent_page_after_the_loaded_rows_resets_the_window() {
+    assert!(recent_page_is_disjoint(Some(150), Some(900), CATCH_UP_PAGE));
+    assert!(!recent_page_is_disjoint(
+        Some(150),
+        Some(100),
+        CATCH_UP_PAGE
+    ));
+    assert!(!recent_page_is_disjoint(
+        Some(150),
+        Some(900),
+        CATCH_UP_PAGE - 1
+    ));
+    assert!(!recent_page_is_disjoint(None, Some(900), CATCH_UP_PAGE));
+}
+
+#[test]
 fn recent_history_is_read_for_empty_and_partial_windows_only() {
     assert!(needs_recent_history(0, false, false));
     assert!(needs_recent_history(OLDER_HISTORY_PAGE - 1, false, false));
