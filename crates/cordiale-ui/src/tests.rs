@@ -5489,6 +5489,39 @@ fn chat_links_sit_outside_the_run_color_tag() {
 }
 
 #[test]
+fn chat_markdown_keeps_the_spaces_of_the_text_once() {
+    let strip = |markdown: &str| -> String {
+        let mut text = String::new();
+        let mut in_tag = false;
+        for ch in markdown.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' if in_tag => in_tag = false,
+                _ if in_tag => {}
+                _ => text.push(ch),
+            }
+        }
+        text
+    };
+    let spaces = |markdown: &str| markdown.matches(' ').count();
+    for (input, bold) in [
+        ("https://a.io/x https://b.io/y", false),
+        ("https://a.io/x https://b.io/y", true),
+        ("  see https://a.io/x  now  ", false),
+        ("   ", false),
+    ] {
+        let runs = vec![(input.to_string(), (1, 2, 3), bold)];
+        let markdown = message_markdown(&runs, false);
+        // Link destinations hold no space, so every space is text.
+        assert_eq!(spaces(&strip(&markdown)), spaces(input), "{input:?}");
+        assert!(slint::StyledText::from_markdown(&markdown).is_ok());
+    }
+    assert_eq!(split_padding("  a b "), ("  ", "a b", " "));
+    assert_eq!(split_padding("   "), ("   ", "", ""));
+    assert_eq!(split_padding(""), ("", "", ""));
+}
+
+#[test]
 fn link_at_offset_finds_the_link_under_the_cursor() {
     let text = "see https://a.io/x_y. and www.b.io/z!";
     // Inside the first link.
