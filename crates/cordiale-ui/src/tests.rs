@@ -5972,7 +5972,7 @@ fn chat_row_right_click_opens_menu_from_every_part_of_the_row() {
 }
 
 #[test]
-fn chat_row_link_opens_from_menu_and_left_click_opens_nothing() {
+fn chat_row_right_click_on_a_link_opens_the_row_menu() {
     use slint::platform::{PointerEventButton, WindowEvent};
     set_headless_software_platform();
     let link_row = RenderedMessage {
@@ -5982,7 +5982,8 @@ fn chat_row_link_opens_from_menu_and_left_click_opens_nothing() {
     let lines = chat_lines_model(std::slice::from_ref(&link_row), true);
     // A row with a link and a sender keeps its styled text and gets a
     // transparent text input over it. The input takes the left clicks, so
-    // the link opens from the row menu.
+    // the link opens from the cursor a click leaves in it (see the click
+    // tests below) and from the row menu.
     assert!(!lines[0].selectable, "a row with a link is not plain text");
     assert_eq!(lines[0].overlay_body.as_str(), "see https://example.org/x");
     assert_eq!(
@@ -5990,25 +5991,6 @@ fn chat_row_link_opens_from_menu_and_left_click_opens_nothing() {
         "https://example.org/x"
     );
     let nick = chat_row_nick_point(std::slice::from_ref(&link_row));
-
-    let ui = chat_row_window(std::slice::from_ref(&link_row));
-    let links = Rc::new(RefCell::new(Vec::<String>::new()));
-    let record = links.clone();
-    ui.on_chat_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
-    let queries = Rc::new(std::cell::Cell::new(0));
-    let record = queries.clone();
-    ui.on_member_nickname_clicked(move |_, _, _| record.set(record.get() + 1));
-    // Left clicks along the text of the row, after the nick.
-    for x in (nick.x as i32 + 60..1180).step_by(4) {
-        let position = slint::LogicalPosition::new(x as f32, nick.y);
-        chat_row_click(&ui, position, PointerEventButton::Left);
-    }
-    assert!(
-        links.borrow().is_empty(),
-        "a left click opened a link: {:?}",
-        links.borrow()
-    );
-    assert_eq!(queries.get(), 0, "a left click on the text opened a query");
 
     // A right click on the text of the row opens its menu.
     let ui = chat_row_window(std::slice::from_ref(&link_row));
@@ -6038,6 +6020,279 @@ fn chat_row_link_opens_from_menu_and_left_click_opens_nothing() {
         0,
         "left click outside the nick opened a query"
     );
+}
+
+std::thread_local! {
+    static MANUAL_CLOCK: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
+/// Installs a headless platform with a clipboard and a clock that moves only
+/// when the test says so, and returns the clipboard text. Call it in a thread
+/// of its own: a thread takes one platform.
+fn set_manual_clock_platform() -> Rc<RefCell<String>> {
+    use slint::platform::{software_renderer::*, Clipboard, Platform, WindowAdapter};
+    struct Manual(Rc<RefCell<String>>);
+    impl Platform for Manual {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+            Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+        }
+        fn duration_since_start(&self) -> std::time::Duration {
+            MANUAL_CLOCK.with(|clock| clock.get())
+        }
+        fn set_clipboard_text(&self, text: &str, clipboard: Clipboard) {
+            if clipboard == Clipboard::DefaultClipboard {
+                *self.0.borrow_mut() = text.to_owned();
+            }
+        }
+        fn clipboard_text(&self, _: Clipboard) -> Option<String> {
+            Some(self.0.borrow().clone())
+        }
+    }
+    let clipboard = Rc::new(RefCell::new(String::new()));
+    slint::platform::set_platform(Box::new(Manual(clipboard.clone()))).unwrap();
+    clipboard
+}
+
+/// Lets the timers of the window run for a while on the manual clock: the
+/// chat row opens a link when its timer ends after a click.
+fn settle_chat_row(ui: &AppWindow) {
+    slint::platform::update_timers_and_animations();
+    // A frame makes every timer of the window read its state.
+    ui.window().take_snapshot().unwrap();
+    for _ in 0..8 {
+        MANUAL_CLOCK.with(|clock| clock.set(clock.get() + std::time::Duration::from_millis(50)));
+        slint::platform::update_timers_and_animations();
+    }
+}
+
+/// Registers the callbacks that a chat row needs to open a link, and returns
+/// the list of the links it opens.
+fn record_chat_links(ui: &AppWindow) -> Rc<RefCell<Vec<String>>> {
+    let opened = Rc::new(RefCell::new(Vec::<String>::new()));
+    let record = opened.clone();
+    ui.on_chat_link_clicked(move |href| record.borrow_mut().push(href.to_string()));
+    ui.on_chat_link_at(|text, offset| link_at_offset(&text, offset).into());
+    opened
+}
+
+/// One left click at a point of the first chat row, with the pointer moved
+/// there first like a mouse does. Returns the links that the click opened.
+fn click_chat_link(ui: &AppWindow, opened: &RefCell<Vec<String>>, x: f32, y: f32) -> Vec<String> {
+    opened.borrow_mut().clear();
+    let position = slint::LogicalPosition::new(x, y);
+    ui.window()
+        .dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+    chat_row_click(ui, position, slint::platform::PointerEventButton::Left);
+    settle_chat_row(ui);
+    opened.borrow().clone()
+}
+
+/// A click at each step along the text of the first row. The result pairs
+/// every x with the links its click opened.
+fn scan_chat_links(
+    ui: &AppWindow,
+    opened: &RefCell<Vec<String>>,
+    nick: slint::LogicalPosition,
+) -> Vec<(f32, Vec<String>)> {
+    (nick.x as i32 + 40..nick.x as i32 + 460)
+        .step_by(6)
+        .map(|x| (x as f32, click_chat_link(ui, opened, x as f32, nick.y)))
+        .collect()
+}
+
+#[test]
+fn chat_row_links_open_on_one_left_click_and_only_the_clicked_link_opens() {
+    std::thread::spawn(|| {
+        set_manual_clock_platform();
+        let text = "see https://example.org/a_b, and https://example.net/c now";
+        let expected = ["https://example.org/a_b", "https://example.net/c"];
+        // A message in a channel, and the same message in an E2E query.
+        for encrypted in [false, true] {
+            let rows = vec![RenderedMessage {
+                text: text.to_string(),
+                ..e2e_row(1, Some("Alice"), false, encrypted)
+            }];
+            let nick = chat_row_nick_point(&rows);
+            let ui = chat_row_window(&rows);
+            let opened = record_chat_links(&ui);
+            let hits = scan_chat_links(&ui, &opened, nick);
+            assert!(
+                hits.iter().all(|(_, links)| links.len() <= 1),
+                "a click opened more than one link: encrypted={encrypted}"
+            );
+            // The underscore stays in the first link, the comma and the
+            // plain words stay out of both, and each link opens alone.
+            let mut order: Vec<&str> = hits
+                .iter()
+                .filter_map(|(_, links)| links.first().map(String::as_str))
+                .collect();
+            order.dedup();
+            assert_eq!(order, expected, "encrypted={encrypted}: {hits:?}");
+            let last_first = hits
+                .iter()
+                .rposition(|(_, links)| links.first().map(String::as_str) == Some(expected[0]))
+                .unwrap();
+            let first_second = hits
+                .iter()
+                .position(|(_, links)| links.first().map(String::as_str) == Some(expected[1]))
+                .unwrap();
+            assert!(
+                first_second > last_first + 1
+                    && hits[last_first + 1..first_second]
+                        .iter()
+                        .all(|(_, links)| links.is_empty()),
+                "a click on the text between the links opened one: encrypted={encrypted}"
+            );
+            // Past the end of the text nothing opens.
+            assert!(
+                click_chat_link(&ui, &opened, nick.x + 700., nick.y).is_empty(),
+                "a click past the text opened a link: encrypted={encrypted}"
+            );
+        }
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn chat_row_drag_over_links_and_text_selects_without_opening_a_link() {
+    std::thread::spawn(|| {
+        use slint::platform::{Key, PointerEventButton, WindowEvent};
+        let clipboard = set_manual_clock_platform();
+        let text = "see https://example.org/a_b, and https://example.net/c now";
+        let rows = vec![RenderedMessage {
+            text: text.to_string(),
+            ..e2e_row(1, Some("Alice"), false, false)
+        }];
+        let nick = chat_row_nick_point(&rows);
+        let ui = chat_row_window(&rows);
+        let opened = record_chat_links(&ui);
+        let hits = scan_chat_links(&ui, &opened, nick);
+        let link_x = hits
+            .iter()
+            .find(|(_, links)| !links.is_empty())
+            .expect("a click must open the first link")
+            .0;
+        let last_link = hits
+            .iter()
+            .rposition(|(_, links)| !links.is_empty())
+            .unwrap();
+        // The drag starts on the first link, then on the text after the last.
+        let after_x = hits[last_link].0 + 6.;
+        for (label, start) in [("link", link_x), ("text after the links", after_x)] {
+            let ui = chat_row_window(&rows);
+            let opened = record_chat_links(&ui);
+            clipboard.borrow_mut().clear();
+            let from = slint::LogicalPosition::new(start, nick.y);
+            let to = slint::LogicalPosition::new(start + 90., nick.y);
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position: from });
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position: from,
+                button: PointerEventButton::Left,
+            });
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position: to });
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position: to,
+                button: PointerEventButton::Left,
+            });
+            settle_chat_row(&ui);
+            assert!(
+                opened.borrow().is_empty(),
+                "a drag from the {label} opened a link: {:?}",
+                opened.borrow()
+            );
+            // Control and C copy what the drag selected.
+            let shortcut = Key::Control;
+            ui.window().dispatch_event(WindowEvent::KeyPressed {
+                text: shortcut.into(),
+            });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: "c".into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: "c".into() });
+            ui.window().dispatch_event(WindowEvent::KeyReleased {
+                text: shortcut.into(),
+            });
+            let copied = clipboard.borrow().clone();
+            assert!(
+                !copied.is_empty() && text.contains(copied.as_str()),
+                "a drag from the {label} did not select text: {copied:?}"
+            );
+        }
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn chat_row_links_with_other_schemes_do_not_open() {
+    std::thread::spawn(|| {
+        set_manual_clock_platform();
+        // The valid link keeps the overlay alive, so its click opens it.
+        let text =
+            "javascript:alert(1) https://example.org/ok file:///etc/passwd mailto:me@example.org";
+        let rows = vec![RenderedMessage {
+            text: text.to_string(),
+            ..e2e_row(1, Some("Alice"), false, false)
+        }];
+        let nick = chat_row_nick_point(&rows);
+        let ui = chat_row_window(&rows);
+        let opened = record_chat_links(&ui);
+        let hits = scan_chat_links(&ui, &opened, nick);
+        let links: Vec<&str> = hits
+            .iter()
+            .flat_map(|(_, links)| links.iter().map(String::as_str))
+            .collect();
+        assert!(!links.is_empty(), "the valid link did not open");
+        assert!(
+            links.iter().all(|href| *href == "https://example.org/ok"),
+            "a link with another scheme opened: {links:?}"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn chat_row_links_use_the_link_color_of_the_theme() {
+    std::thread::spawn(|| {
+        set_manual_clock_platform();
+        let count = |ui: &AppWindow, [r, g, b]: [u8; 3]| {
+            ui.window()
+                .take_snapshot()
+                .unwrap()
+                .as_bytes()
+                .chunks_exact(4)
+                .filter(|pixel| {
+                    pixel[0].abs_diff(r) <= 12
+                        && pixel[1].abs_diff(g) <= 12
+                        && pixel[2].abs_diff(b) <= 12
+                })
+                .count()
+        };
+        for (theme, color) in [("dark", [0x8a, 0xb4, 0xf8]), ("light", [0x1a, 0x5f, 0xb4])] {
+            let mut counts = Vec::new();
+            for text in ["see https://example.org/a_b now", "see example now"] {
+                let rows = vec![RenderedMessage {
+                    text: text.to_string(),
+                    ..e2e_row(1, Some("Alice"), false, false)
+                }];
+                let ui = chat_row_window(&rows);
+                ui.set_theme(theme.into());
+                show_chat_lines(&ui, chat_lines_model(&rows, theme == "dark"));
+                counts.push(count(&ui, color));
+            }
+            assert!(
+                counts[0] >= counts[1] + 20,
+                "the link of a chat row has no link color in the {theme} theme: {counts:?}"
+            );
+        }
+    })
+    .join()
+    .unwrap();
 }
 
 #[test]
