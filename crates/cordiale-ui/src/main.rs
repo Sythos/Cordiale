@@ -9522,10 +9522,23 @@ fn chat_line_from_message(
         });
 
     let selectable_body = selectable_body_text(&runs, display_text);
+    // A row with links or several colors keeps its styled text and gets a
+    // transparent text input over it, so the same text can be selected. The
+    // input has one weight, so a row with mixed weights gets none. The input
+    // takes the clicks, so a row with links needs a sender: its menu opens
+    // the links.
+    let visible_body = visible_body_text(&runs);
+    let overlay = selectable_body.is_none()
+        && !incoming
+        && rename_target.is_empty()
+        && has_uniform_weight(&runs)
+        && (message.nick.is_some() || nth_link(&visible_body, 0).is_empty());
+    let overlay_body = if overlay { visible_body } else { String::new() };
 
     ChatLine {
         selectable: selectable_body.is_some() && !incoming && rename_target.is_empty(),
         selectable_body: selectable_body.unwrap_or_default().into(),
+        overlay_body: overlay_body.into(),
         body_color: runs.first().map_or(
             slint::Color::from_rgb_u8(default_color.0, default_color.1, default_color.2),
             |run| slint::Color::from_rgb_u8(run.1 .0, run.1 .1, run.1 .2),
@@ -9569,12 +9582,37 @@ fn selectable_body_text(
     if !cordiale_core::media::find_links(display_text).is_empty() {
         return None;
     }
-    let text: String = runs
-        .iter()
+    Some(visible_body_text(runs))
+}
+
+/// The text of all runs of a row as the user sees it. Hidden markup never
+/// enters the text.
+fn visible_body_text(runs: &[(String, (u8, u8, u8), bool)]) -> String {
+    runs.iter()
         .flat_map(|run| run.0.chars())
         .filter(|ch| *ch != slint_markdown_placeholder())
-        .collect();
-    Some(text)
+        .collect()
+}
+
+/// Whether every run of a non-empty row has the same weight, so one text
+/// input has the same glyph widths as the styled text.
+fn has_uniform_weight(runs: &[(String, (u8, u8, u8), bool)]) -> bool {
+    runs.first()
+        .is_some_and(|first| runs.iter().all(|run| run.2 == first.2))
+}
+
+/// The link of a row text at a position in the order of the links, or an
+/// empty string when the text has no such link. The row menu opens it.
+fn nth_link(text: &str, index: i32) -> String {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| {
+            cordiale_core::media::find_links(text)
+                .into_iter()
+                .nth(index)
+        })
+        .map(|link| link.href)
+        .unwrap_or_default()
 }
 
 /// The marker text of the progress row of a multi-frame E2E message on its
