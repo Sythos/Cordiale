@@ -564,10 +564,12 @@ impl E2eRuntime {
             .collect()
     }
 
-    fn remove_request(&mut self, network: &str, id: u64) {
+    /// Removes a request. Returns `true` when it also removed an attention
+    /// mark, so the caller can refresh the sidebar.
+    fn remove_request(&mut self, network: &str, id: u64) -> bool {
         self.requests.remove(&(network.to_string(), id));
         self.activated_requests.remove(&(network.to_string(), id));
-        self.attention_requests.remove(&(network.to_string(), id));
+        self.attention_requests.remove(&(network.to_string(), id))
     }
 
     fn replace_requests(&mut self, network: &str, requests: Vec<E2eRequest>) {
@@ -575,11 +577,14 @@ impl E2eRuntime {
             .retain(|(known_network, _), _| known_network != network);
         self.activated_requests
             .retain(|(known_network, _)| known_network != network);
-        self.attention_requests
-            .retain(|(known_network, _)| known_network != network);
         for request in requests {
             self.put_request(network, request);
         }
+        // A request that is still incoming keeps its mark. A request that is
+        // gone from the snapshot loses it.
+        let requests = &self.requests;
+        self.attention_requests
+            .retain(|key| key.0 != network || requests.contains_key(key));
     }
 
     fn request_for_peer(
@@ -1424,7 +1429,9 @@ async fn activate_accepted_request(
         .dismiss_e2e_request(&token, network, request.id, protocol, None)
         .await
     {
-        Ok(()) => state.e2e.remove_request(network, request.id),
+        Ok(()) => {
+            state.e2e.remove_request(network, request.id);
+        }
         Err(error) => persistence::log_line(&format!(
             "accepted e2e request {} was not dismissed: {error:?}",
             request.id
@@ -1825,6 +1832,12 @@ pub(crate) async fn handle_e2e_request_push(
     else {
         return;
     };
+    // A request that leaves the incoming state loses its mark.
+    let lost_mark = request.state != E2eRequestState::Incoming
+        && state
+            .e2e
+            .attention_requests
+            .contains(&(network.to_string(), request.id));
     state.e2e.put_request(network, request.clone());
     if request.state == E2eRequestState::Accepted {
         activate_accepted_request(state, ui, network, request).await;
@@ -1834,6 +1847,9 @@ pub(crate) async fn handle_e2e_request_push(
         push_open_query_consent(state, ui);
     }
     raise_request_attention(state, ui);
+    if lost_mark {
+        crate::refresh_network_groups(state, ui);
+    }
 }
 
 /// Marks the plain query of each new incoming request when the notification
@@ -1874,8 +1890,11 @@ pub(crate) fn handle_e2e_request_gone_push(
     let Some(id) = payload.get("id").and_then(Value::as_u64) else {
         return;
     };
-    state.e2e.remove_request(network, id);
+    let had_mark = state.e2e.remove_request(network, id);
     push_open_query_consent(state, ui);
+    if had_mark {
+        crate::refresh_network_groups(state, ui);
+    }
 }
 
 /// Handles the protocol 54 401 event without touching messages Grappa already
@@ -4455,6 +4474,10 @@ mod tests {
             "net",
             vec![consent_request(1, "Bob", E2eRequestState::Incoming)],
         );
+        assert_eq!(
+            state.e2e.take_fresh_requests(),
+            vec![("net".to_string(), 1)]
+        );
         state.e2e.attention_requests.insert(("net".to_string(), 1));
         let counts = state.e2e.request_attention_counts();
         assert_eq!(counts.get(&window_counts_key("net", "bob")), Some(&1));
@@ -4471,6 +4494,50 @@ mod tests {
         );
         assert!(state.e2e.take_fresh_requests().is_empty());
         assert!(state.e2e.request_attention_counts().is_empty());
+    }
+
+    #[test]
+    fn a_sync_keeps_the_mark_of_a_request_that_stays_incoming() {
+        let mut state = WorkerState::new();
+        let incoming = || vec![consent_request(1, "bob", E2eRequestState::Incoming)];
+        state.e2e.replace_requests("net", incoming());
+        state.e2e.take_fresh_requests();
+        state.e2e.attention_requests.insert(("net".to_string(), 1));
+        state.e2e.replace_requests("net", incoming());
+        assert_eq!(
+            state
+                .e2e
+                .request_attention_counts()
+                .get(&window_counts_key("net", "bob")),
+            Some(&1)
+        );
+        for kind in [E2eRequestState::Outgoing, E2eRequestState::Accepted] {
+            state.e2e.attention_requests.insert(("net".to_string(), 1));
+            state
+                .e2e
+                .replace_requests("net", vec![consent_request(1, "bob", kind)]);
+            assert!(state.e2e.request_attention_counts().is_empty());
+        }
+        state.e2e.replace_requests("net", incoming());
+        state.e2e.attention_requests.insert(("net".to_string(), 1));
+        state.e2e.replace_requests("net", Vec::new());
+        assert!(state.e2e.request_attention_counts().is_empty());
+    }
+
+    #[test]
+    fn removing_a_request_tells_whether_a_mark_went_with_it() {
+        let mut state = WorkerState::new();
+        state.e2e.replace_requests(
+            "net",
+            vec![consent_request(1, "bob", E2eRequestState::Incoming)],
+        );
+        assert!(!state.e2e.remove_request("net", 1));
+        state.e2e.replace_requests(
+            "net",
+            vec![consent_request(2, "bob", E2eRequestState::Incoming)],
+        );
+        state.e2e.attention_requests.insert(("net".to_string(), 2));
+        assert!(state.e2e.remove_request("net", 2));
     }
 
     #[test]
