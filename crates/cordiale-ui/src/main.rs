@@ -9543,9 +9543,11 @@ fn chat_line_from_message(
                 let color = segment
                     .color
                     .map_or(default_color, |rgb| ensure_legible(rgb, dark_theme));
-                (link_icons_for_runs(&segment.text), color, segment.bold)
+                (segment.text, color, segment.bold)
             })
             .collect();
+    let mut runs = runs;
+    add_link_icons(&mut runs);
     let bold_mention = mention && BOLD_MENTIONS.load(std::sync::atomic::Ordering::Relaxed);
     let runs: Vec<(String, (u8, u8, u8), bool)> = runs
         .into_iter()
@@ -9623,16 +9625,28 @@ fn chat_line_from_message(
     }
 }
 
-/// The text of one run with the icon of each link in front of it. The
-/// styled text, the selection overlay and the link lookups all read the
-/// runs, so they all show and measure the same text. Hidden markup is
-/// dropped first, as every reader of the runs does.
-fn link_icons_for_runs(text: &str) -> String {
-    let visible: String = text
-        .chars()
-        .filter(|ch| *ch != slint_markdown_placeholder())
-        .collect();
-    cordiale_core::media::with_link_icons(&visible)
+/// Puts the icon of each link in front of it in the runs. The links are
+/// found in the text of all runs together, so a format code inside a URL
+/// does not split it. Each icon goes into the run that holds the start of
+/// its word. The styled text, the selection overlay and the link lookups
+/// all read the runs, so they all show and measure the same text. Hidden
+/// markup is dropped first, as every reader of the runs does.
+fn add_link_icons(runs: &mut [(String, (u8, u8, u8), bool)]) {
+    for run in runs.iter_mut() {
+        run.0.retain(|ch| ch != slint_markdown_placeholder());
+    }
+    let joined = visible_body_text(runs);
+    let insertions = cordiale_core::media::link_icon_insertions(&joined);
+    for (offset, icon) in insertions.into_iter().rev() {
+        let mut start = 0;
+        for run in runs.iter_mut() {
+            if offset < start + run.0.len() {
+                run.0.insert_str(offset - start, &format!("{icon} "));
+                break;
+            }
+            start += run.0.len();
+        }
+    }
 }
 
 /// The visible text of a row that a plain text input can show without

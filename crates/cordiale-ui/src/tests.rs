@@ -15476,15 +15476,50 @@ fn chat_row_icons_stay_outside_links_and_match_the_overlay() {
         "https://e.org/p.PNG?x=1#f"
     );
     // The markup shows the same icons as plain text, outside the link.
-    let runs = vec![(
-        link_icons_for_runs("see https://e.org/a.mp3"),
-        (0, 0, 0),
-        false,
-    )];
+    let mut runs = vec![("see https://e.org/a.mp3".to_string(), (0, 0, 0), false)];
+    add_link_icons(&mut runs);
     assert_eq!(visible_body_text(&runs), "see 🎵 https://e.org/a.mp3");
     let markdown = message_markdown(&runs, false);
     let icon_at = markdown.find('🎵').unwrap();
     assert!(icon_at < markdown.find("[https").unwrap(), "{markdown}");
+}
+
+#[test]
+fn chat_row_icons_ignore_format_codes_inside_links() {
+    let overlay = |text: &str| {
+        chat_line_from_message(
+            &render_message(
+                &serde_json::json!({"kind": "privmsg", "sender": "alice", "body": text, "id": 1}),
+                None,
+            ),
+            true,
+            "",
+        )
+        .overlay_body
+        .to_string()
+    };
+    // A format code inside the URL does not split it.
+    let split = overlay("\x02https://exa\x02mple.org/a\x02");
+    assert_eq!(split, "🌐 https://example.org/a");
+    assert_eq!(nth_link(&split, 0), "https://example.org/a");
+    let split = overlay("https://exa\x0304mple.org/a\x03 x");
+    assert_eq!(split, "🌐 https://example.org/a x");
+    assert_eq!(all_links(&split), ["https://example.org/a"]);
+    // A marker in another color run still counts.
+    assert_eq!(
+        overlay("\x0304📸\x03 https://e.org/a.png"),
+        "📸 https://e.org/a.png"
+    );
+    // Wrapping punctuation in its own run stays before the URL.
+    assert_eq!(
+        overlay("see \x0304(\x03https://e.org/a.mp3)"),
+        "see 🎵 (https://e.org/a.mp3)"
+    );
+    // The icon takes the run of the word: a colored URL after plain text.
+    assert_eq!(
+        overlay("see \x0304https://e.org/a.png\x03"),
+        "see 📸 https://e.org/a.png"
+    );
 }
 
 #[test]

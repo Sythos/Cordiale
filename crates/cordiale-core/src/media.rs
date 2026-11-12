@@ -285,12 +285,13 @@ pub fn link_icon(href: &str) -> &'static str {
     }
 }
 
-/// `text` as it is shown: each link gets its icon and one space before it.
-/// The icon goes before the whole word of the link, so the punctuation
-/// around the URL keeps its place and `find_links` finds the same URLs. A
-/// link that an upload marker (and one space) already precedes gets no icon.
-pub fn with_link_icons(text: &str) -> String {
-    let mut shown = String::with_capacity(text.len());
+/// Where the icons of the links of `text` go: the byte offset of the word
+/// of each link, with its icon. The icon goes before the whole word, so the
+/// punctuation around the URL keeps its place and `find_links` finds the
+/// same URLs. A link that an upload marker (and one space) already precedes
+/// gets no icon.
+pub fn link_icon_insertions(text: &str) -> Vec<(usize, &'static str)> {
+    let mut insertions = Vec::new();
     let mut last = 0;
     for link in find_links(text) {
         let word_start = text[..link.range.start]
@@ -301,12 +302,23 @@ pub fn with_link_icons(text: &str) -> String {
         if word_start < last {
             continue;
         }
-        shown.push_str(&text[last..word_start]);
-        if !crate::upload::ends_with_marker(&text[..word_start]) {
-            shown.push_str(link_icon(&link.href));
-            shown.push(' ');
-        }
         last = word_start;
+        if !crate::upload::ends_with_marker(&text[..word_start]) {
+            insertions.push((word_start, link_icon(&link.href)));
+        }
+    }
+    insertions
+}
+
+/// `text` as it is shown: each link gets its icon and one space before it.
+pub fn with_link_icons(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    let mut last = 0;
+    for (offset, icon) in link_icon_insertions(text) {
+        shown.push_str(&text[last..offset]);
+        shown.push_str(icon);
+        shown.push(' ');
+        last = offset;
     }
     shown.push_str(&text[last..]);
     shown
