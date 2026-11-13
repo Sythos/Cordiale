@@ -99,12 +99,22 @@ pub fn own_flag_allowed(server_protocol: Option<u32>) -> bool {
     server_protocol.is_some_and(|version| version >= OWN_FLAG_MIN_PROTOCOL)
 }
 
-/// First server protocol whose `e2e_message` rows carry `channel` and whose
-/// door takes a channel target.
-pub const CHANNEL_MIN_PROTOCOL: u32 = 62;
+/// First server protocol whose send door takes a channel target. Below it
+/// the door answers 400 on a channel target.
+pub const CHANNEL_DOOR_MIN_PROTOCOL: u32 = 62;
 
-/// True when the server may send a `channel` field on an inbox row and take
-/// a channel target on the send door.
+/// First server protocol whose `e2e_message` rows carry `channel`. A channel
+/// message that arrives without it would read as a direct message, so this
+/// is also the gate of the whole channel feature in the client.
+pub const CHANNEL_MIN_PROTOCOL: u32 = 63;
+
+/// True when the send door takes a channel target.
+pub fn channel_door_allowed(server_protocol: Option<u32>) -> bool {
+    server_protocol.is_some_and(|version| version >= CHANNEL_DOOR_MIN_PROTOCOL)
+}
+
+/// True when the server may send a `channel` field on an inbox row. The
+/// client offers channel E2E only from such a server.
 pub fn channel_allowed(server_protocol: Option<u32>) -> bool {
     server_protocol.is_some_and(|version| version >= CHANNEL_MIN_PROTOCOL)
 }

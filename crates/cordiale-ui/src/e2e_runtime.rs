@@ -5763,7 +5763,7 @@ mod tests {
     /// A state with an engine for `net` and an E2E channel `#room`.
     fn channel_state(dir: &tempfile::TempDir) -> WorkerState {
         let (mut state, _peer) = sas_state(dir);
-        state.conn.server_protocol_version = Some(62);
+        state.conn.server_protocol_version = Some(63);
         state
             .e2e
             .channels
@@ -5841,8 +5841,8 @@ mod tests {
         let runtime = test_runtime();
         runtime.block_on(enable_e2e_channel(&mut state, &ui, "net".to_string(), None));
         assert!(state.e2e.channels.is_empty());
-        // A server before protocol 62 has no channel messages.
-        state.conn.server_protocol_version = Some(61);
+        // A server before protocol 63 has no channel messages.
+        state.conn.server_protocol_version = Some(62);
         runtime.block_on(enable_e2e_channel(
             &mut state,
             &ui,
@@ -5850,7 +5850,7 @@ mod tests {
             Some("#room".to_string()),
         ));
         assert!(state.e2e.channels.is_empty());
-        state.conn.server_protocol_version = Some(62);
+        state.conn.server_protocol_version = Some(63);
         runtime.block_on(enable_e2e_channel(
             &mut state,
             &ui,

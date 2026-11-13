@@ -270,7 +270,7 @@ pub struct InboxRow {
     pub msgid: String,
     pub payload: String,
     pub own: bool,
-    /// The folded channel name of a channel message (protocol 62 and
+    /// The folded channel name of a channel message (protocol 63 and
     /// higher), or `None` on a query row.
     pub channel: Option<String>,
 }
@@ -564,29 +564,29 @@ mod tests {
     }
 
     #[test]
-    fn inbox_row_reads_the_channel_from_protocol_62() {
+    fn inbox_row_reads_the_channel_from_protocol_63() {
         let mut value = row();
         assert_eq!(
-            InboxRow::from_value(&value, Some(62)).unwrap().channel,
+            InboxRow::from_value(&value, Some(63)).unwrap().channel,
             None
         );
         value["channel"] = json!("#room");
         assert_eq!(
-            InboxRow::from_value(&value, Some(62)).unwrap().channel,
+            InboxRow::from_value(&value, Some(63)).unwrap().channel,
             Some("#room".to_string())
         );
         assert_eq!(
-            InboxRow::from_value(&value, Some(61)),
+            InboxRow::from_value(&value, Some(62)),
             Err(WireError::UnknownField)
         );
         value["channel"] = json!(7);
         assert_eq!(
-            InboxRow::from_value(&value, Some(62)),
+            InboxRow::from_value(&value, Some(63)),
             Err(WireError::BadFieldType)
         );
         value["channel"] = json!(null);
         assert_eq!(
-            InboxRow::from_value(&value, Some(61)).unwrap().channel,
+            InboxRow::from_value(&value, Some(62)).unwrap().channel,
             None
         );
     }
