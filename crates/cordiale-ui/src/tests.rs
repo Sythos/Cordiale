@@ -127,6 +127,16 @@ fn services_history_keeps_eight_commands_and_walks_both_ways() {
 }
 
 #[test]
+fn services_history_keeps_the_draft_when_a_pending_send_is_recorded() {
+    let mut history = ServiceCommandHistory::default();
+    history.record("info one");
+    assert_eq!(history.older("my draft").as_deref(), Some("info one"));
+    history.record("info two");
+    assert_eq!(history.newer("info one").as_deref(), Some("info two"));
+    assert_eq!(history.newer("info two").as_deref(), Some("my draft"));
+}
+
+#[test]
 fn services_history_returns_the_draft_after_the_newest_command() {
     let mut history = ServiceCommandHistory::default();
     history.record("info one");
