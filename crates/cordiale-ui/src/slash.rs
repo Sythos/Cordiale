@@ -588,6 +588,7 @@ async fn open_service_console(
         since_id,
         seen_ids: std::collections::HashSet::new(),
         lines: Vec::new(),
+        history: Default::default(),
     });
     let service_for_ui = service.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -623,6 +624,7 @@ pub(crate) async fn send_service_console_command(
         return;
     };
     let _ = ui.upgrade_in_event_loop(|ui| ui.set_service_console_send_failed(false));
+    let command_for_history = command.clone();
     match post_message(
         &client,
         &token,
@@ -633,6 +635,15 @@ pub(crate) async fn send_service_console_command(
     .await
     {
         Ok(()) => {
+            // Only a command the user sent and the server accepted enters the
+            // history, and only while the same console is still open.
+            if clear_after_success {
+                if let Some(console) = state.service_console.as_mut() {
+                    if console.network == network && console.service == service {
+                        console.history.record(&command_for_history);
+                    }
+                }
+            }
             let _ = ui.upgrade_in_event_loop(move |ui| {
                 let current_draft = ui.get_service_console_command().to_string();
                 if crate::should_clear_service_console_draft(

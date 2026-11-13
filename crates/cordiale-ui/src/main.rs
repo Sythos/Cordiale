@@ -309,6 +309,12 @@ enum WorkerCommand {
     },
     /// Sends a command from the centered Services console.
     ServiceConsoleSend(String),
+    /// Selects an older (`true`) or newer command in the Services console
+    /// input. It never sends the command. The text is the current draft.
+    ServiceConsoleHistory {
+        older: bool,
+        draft: String,
+    },
     /// Stops mirroring notices into the Services console.
     ServiceConsoleClose,
     /// A picked file and what was chosen for it.
@@ -1573,6 +1579,97 @@ struct ServiceConsoleState {
     since_id: Option<i64>,
     seen_ids: std::collections::HashSet<i64>,
     lines: Vec<String>,
+    history: ServiceCommandHistory,
+}
+
+/// Number of commands the Services console remembers.
+const SERVICE_HISTORY_LIMIT: usize = 8;
+
+/// Words that mark a service command as one that carries a secret.
+const SERVICE_SECRET_WORDS: &[&str] = &[
+    "identify",
+    "id",
+    "login",
+    "logon",
+    "auth",
+    "authenticate",
+    "password",
+    "pass",
+    "passwd",
+    "register",
+    "recover",
+    "resetpass",
+    "sendpass",
+    "confirm",
+    "verify",
+    "ghost",
+    "regain",
+    "release",
+    "oper",
+];
+
+/// Short in-memory command history of one open Services console. It lives
+/// only in `ServiceConsoleState`: nothing writes it to disk or to a log.
+#[derive(Default)]
+struct ServiceCommandHistory {
+    entries: Vec<String>,
+    cursor: Option<usize>,
+    draft: String,
+}
+
+/// True when the command can carry a password or another secret.
+fn service_command_has_secret(command: &str) -> bool {
+    command.split_whitespace().any(|word| {
+        let word = word.trim_start_matches('/').to_ascii_lowercase();
+        SERVICE_SECRET_WORDS.contains(&word.as_str())
+    })
+}
+
+impl ServiceCommandHistory {
+    /// Stores one accepted command. A command with a secret is dropped.
+    fn record(&mut self, command: &str) {
+        self.cursor = None;
+        self.draft.clear();
+        let command = command.trim();
+        if command.is_empty() || service_command_has_secret(command) {
+            return;
+        }
+        if self.entries.last().map(String::as_str) == Some(command) {
+            return;
+        }
+        self.entries.push(command.to_string());
+        if self.entries.len() > SERVICE_HISTORY_LIMIT {
+            self.entries.remove(0);
+        }
+    }
+
+    /// Moves to the next older command. `current` is the draft in the input.
+    fn older(&mut self, current: &str) -> Option<String> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let index = match self.cursor {
+            None => {
+                self.draft = current.to_string();
+                self.entries.len() - 1
+            }
+            Some(index) => index.saturating_sub(1),
+        };
+        self.cursor = Some(index);
+        Some(self.entries[index].clone())
+    }
+
+    /// Moves to the next newer command, then back to the saved draft.
+    fn newer(&mut self) -> Option<String> {
+        let index = self.cursor?;
+        if index + 1 < self.entries.len() {
+            self.cursor = Some(index + 1);
+            Some(self.entries[index + 1].clone())
+        } else {
+            self.cursor = None;
+            Some(std::mem::take(&mut self.draft))
+        }
+    }
 }
 
 impl WorkerState {
@@ -2125,6 +2222,20 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ServiceConsoleSend(command)) => {
                         send_service_console_command(&mut state, &ui, command, true).await;
+                    }
+                    Some(WorkerCommand::ServiceConsoleHistory { older, draft }) => {
+                        if let Some(console) = state.service_console.as_mut() {
+                            let text = if older {
+                                console.history.older(&draft)
+                            } else {
+                                console.history.newer()
+                            };
+                            if let Some(text) = text {
+                                let _ = ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_service_console_command(text.into());
+                                });
+                            }
+                        }
                     }
                     Some(WorkerCommand::ServiceConsoleClose) => {
                         state.service_console = None;

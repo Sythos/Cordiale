@@ -10,6 +10,7 @@ fn services_console_captures_only_fresh_notices_from_its_service() {
         since_id: Some(40),
         seen_ids: std::collections::HashSet::new(),
         lines: Vec::new(),
+        history: Default::default(),
     };
     let casemapping = cordiale_core::isupport::CaseMapping::Rfc1459;
     let reply = serde_json::json!({
@@ -81,6 +82,7 @@ fn services_console_does_not_append_the_same_message_twice() {
         since_id: None,
         seen_ids: std::collections::HashSet::new(),
         lines: Vec::new(),
+        history: Default::default(),
     };
     assert_eq!(
         record_service_console_line(&mut console, 71, "First line".into()),
@@ -104,6 +106,62 @@ fn services_console_clears_only_the_command_that_was_submitted() {
         "identify",
         true
     ));
+}
+
+#[test]
+fn services_history_keeps_eight_commands_and_walks_both_ways() {
+    let mut history = ServiceCommandHistory::default();
+    for index in 0..10 {
+        history.record(&format!("info {index}"));
+    }
+    assert_eq!(history.entries.len(), SERVICE_HISTORY_LIMIT);
+    assert_eq!(history.entries[0], "info 2");
+    assert_eq!(history.older("draft").as_deref(), Some("info 9"));
+    assert_eq!(history.older("ignored").as_deref(), Some("info 8"));
+    for _ in 0..10 {
+        history.older("ignored");
+    }
+    assert_eq!(history.older("ignored").as_deref(), Some("info 2"));
+    assert_eq!(history.newer().as_deref(), Some("info 3"));
+}
+
+#[test]
+fn services_history_returns_the_draft_after_the_newest_command() {
+    let mut history = ServiceCommandHistory::default();
+    history.record("info one");
+    history.record("info two");
+    assert_eq!(history.newer(), None);
+    assert_eq!(history.older("half typed").as_deref(), Some("info two"));
+    assert_eq!(history.older("x").as_deref(), Some("info one"));
+    assert_eq!(history.newer().as_deref(), Some("info two"));
+    assert_eq!(history.newer().as_deref(), Some("half typed"));
+    assert_eq!(history.newer(), None);
+}
+
+#[test]
+fn services_history_is_empty_without_commands() {
+    let mut history = ServiceCommandHistory::default();
+    assert_eq!(history.older("draft"), None);
+    assert_eq!(history.newer(), None);
+}
+
+#[test]
+fn services_history_drops_commands_with_secrets() {
+    let mut history = ServiceCommandHistory::default();
+    for command in [
+        "identify secret",
+        "IDENTIFY mynick secret",
+        "set password secret",
+        "register secret me@example.org",
+        "/msg NickServ ghost nick secret",
+        "login secret",
+    ] {
+        history.record(command);
+    }
+    assert!(history.entries.is_empty());
+    history.record("info #rust");
+    history.record("info #rust");
+    assert_eq!(history.entries, vec!["info #rust".to_string()]);
 }
 
 #[test]

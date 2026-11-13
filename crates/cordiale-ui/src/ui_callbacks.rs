@@ -1216,6 +1216,14 @@ pub(crate) fn register_composer_callbacks(
         let _ = tx_for_service_console.send(WorkerCommand::ServiceConsoleSend(command.to_string()));
     });
 
+    let tx_for_service_history = worker_tx.clone();
+    ui.on_service_console_history_requested(move |older, draft| {
+        let _ = tx_for_service_history.send(WorkerCommand::ServiceConsoleHistory {
+            older,
+            draft: draft.to_string(),
+        });
+    });
+
     let tx_for_service_console_close = worker_tx.clone();
     ui.on_service_console_close_requested(move || {
         let _ = tx_for_service_console_close.send(WorkerCommand::ServiceConsoleClose);
