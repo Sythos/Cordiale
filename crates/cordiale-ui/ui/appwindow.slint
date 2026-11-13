@@ -2586,6 +2586,8 @@ export component AppWindow inherits Window {
     callback home-featured-open(string, string); // network, channel
     callback send-chat-message(string);
     callback compose-text-changed(string);
+    // True when the compose text has more than one line.
+    pure callback compose-has-newline(string) -> bool;
     // Up (true) or Down (false) in the compose box: the recalled entry, or
     // the unchanged text when there is nothing to recall.
     callback input-history-requested(bool) -> string;
@@ -5982,7 +5984,8 @@ export component AppWindow inherits Window {
             // to attach a file (left, like Cicchetto), text field, send
             // icon (right).
             if has-selected-channel : HorizontalBox {
-                height: 40px;
+                // Grows for a multi-line text in an encrypted query.
+                height: current-query && current-query-e2e && compose-has-newline(compose-text) ? 96px : 40px;
                 spacing: 6px;
 
                 Button {
@@ -6000,7 +6003,7 @@ export component AppWindow inherits Window {
                             return paste-requested() ? EventResult.accept : EventResult.reject;
                         }
                         // PgUp/PgDown page the chat pane, as in terminal IRC
-                        // clients; the single-line field has no use for them.
+                        // clients; the compose field has no use for them.
                         if event.text == Key.PageUp || event.text == Key.PageDown {
                             chat-page-direction = event.text == Key.PageUp ? -1 : 1;
                             chat-page-seq += 1;
@@ -6028,9 +6031,19 @@ export component AppWindow inherits Window {
                                 return EventResult.accept;
                             }
                         }
-                        // Up/Down recall the channel's submitted entries; the
-                        // single-line field has no other use for them.
-                        if event.text == Key.UpArrow || event.text == Key.DownArrow {
+                        // Enter sends. Shift+Enter adds a line in an encrypted
+                        // query and does nothing elsewhere, so a channel or a
+                        // clear query never gets a multi-line text.
+                        if event.text == Key.Return {
+                            if event.modifiers.shift {
+                                return (current-query && current-query-e2e) ? EventResult.reject : EventResult.accept;
+                            }
+                            send-chat-message(compose-text);
+                            return EventResult.accept;
+                        }
+                        // Up/Down recall the channel's submitted entries. A
+                        // multi-line text keeps them for the caret.
+                        if (event.text == Key.UpArrow || event.text == Key.DownArrow) && !compose-has-newline(compose-text) {
                             let recalled = input-history-requested(event.text == Key.UpArrow);
                             if recalled != compose-text {
                                 compose-text = recalled;
@@ -6081,7 +6094,8 @@ export component AppWindow inherits Window {
                             // A layout, so the border takes the field's size.
                             HorizontalLayout {
                                 padding: 2px;
-                                compose-line-edit := LineEdit {
+                                compose-line-edit := TextEdit {
+                                    wrap: word-wrap;
                                     property <int> focus-request: compose-focus-request;
                                     changed focus-request => {
                                         if focus-request > 0 {
@@ -6094,7 +6108,6 @@ export component AppWindow inherits Window {
                                     accessible-description: reply-target-left ? @tr("Left the channel") : "";
                                     text <=> compose-text;
                                     enabled: !current-query || current-query-ready;
-                                    accepted => { send-chat-message(compose-text); }
                                     edited(new-text) => { compose-text-changed(new-text); }
                                 }
                             }

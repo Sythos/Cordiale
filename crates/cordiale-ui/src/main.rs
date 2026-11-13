@@ -9825,6 +9825,15 @@ fn chat_line_from_message(
             })
             .collect();
     let mut runs = runs;
+    // A decrypted chat message keeps the line breaks the sender typed. Every
+    // other row is one IRC line, so a stray break stays a space.
+    let keep_breaks =
+        !incoming && message_lock_visible(message) && message.text.contains(['\n', '\r']);
+    if keep_breaks {
+        for run in &mut runs {
+            run.0 = run.0.replace("\r\n", "\n").replace('\r', "\n");
+        }
+    }
     add_link_icons(&mut runs);
     let bold_mention = mention && BOLD_MENTIONS.load(std::sync::atomic::Ordering::Relaxed);
     let runs: Vec<(String, (u8, u8, u8), bool)> = runs
@@ -9844,21 +9853,27 @@ fn chat_line_from_message(
             run.2 = false;
         }
     }
-    let body =
-        slint::StyledText::from_markdown(&message_markdown_with(&runs, message.italic, channels))
-            .unwrap_or_else(|_| {
-                let plain: String = runs.iter().map(|run| run.0.as_str()).collect();
-                slint::StyledText::from_plain_text(&plain)
-            });
+    let markdown = if keep_breaks {
+        message_markdown_keeping_breaks(&runs, message.italic, channels)
+    } else {
+        message_markdown_with(&runs, message.italic, channels)
+    };
+    let body = slint::StyledText::from_markdown(&markdown).unwrap_or_else(|_| {
+        let plain: String = runs.iter().map(|run| run.0.as_str()).collect();
+        slint::StyledText::from_plain_text(&plain)
+    });
 
-    let selectable_body = selectable_body_text_with(&runs, channels);
+    let selectable_body = selectable_body_text_mode(&runs, channels, keep_breaks);
     // A row with links or several colors keeps its styled text and gets a
     // transparent text input over it, so the same text can be selected. The
     // input has one weight, so a mixed-weight row was made plain above. The input
     // takes the clicks: the row reads a click on a link from the cursor, and
     // its menu opens the links too, so a row with links needs a sender.
     let visible_body = visible_body_text(&runs);
+    // The input over the styled text maps a click to one wrapped paragraph,
+    // so a row with line breaks has no input and keeps its links as links.
     let overlay = selectable_body.is_none()
+        && !keep_breaks
         && !incoming
         && rename_target.is_empty()
         && has_uniform_weight(&runs)
@@ -9949,9 +9964,20 @@ fn selectable_body_text(runs: &[(String, (u8, u8, u8), bool)]) -> Option<String>
 }
 
 /// As `selectable_body_text`; with `channels` a channel name is a link too.
+#[cfg(test)]
 fn selectable_body_text_with(
     runs: &[(String, (u8, u8, u8), bool)],
     channels: Option<&ChannelLinkContext>,
+) -> Option<String> {
+    selectable_body_text_mode(runs, channels, false)
+}
+
+/// As `selectable_body_text_with`; with `keep_breaks` a line break stays a
+/// line break instead of a space.
+fn selectable_body_text_mode(
+    runs: &[(String, (u8, u8, u8), bool)],
+    channels: Option<&ChannelLinkContext>,
+    keep_breaks: bool,
 ) -> Option<String> {
     let first = runs.first()?;
     if runs.iter().any(|run| run.1 != first.1 || run.2 != first.2) {
@@ -9961,8 +9987,11 @@ fn selectable_body_text_with(
     if !row_links(&visible, channels).is_empty() {
         return None;
     }
-    // A line break is shown as a space, like the styled text does: a break
-    // in the input would add a line and a blank band to the row.
+    if keep_breaks {
+        return Some(visible);
+    }
+    // Otherwise a line break is shown as a space, like the styled text does:
+    // a break in the input would add a line and a blank band to the row.
     Some(visible.replace(['\r', '\n'], " "))
 }
 
@@ -10127,6 +10156,32 @@ fn message_markdown_with(
         push_colored_text(&mut markdown, &font_open, &before, marker);
     }
     markdown
+}
+
+/// As `message_markdown_with`, but a line break (LF) in the runs becomes a
+/// hard break of the paragraph. Each line has its own tags, so a color never
+/// spans a break.
+fn message_markdown_keeping_breaks(
+    runs: &[(String, (u8, u8, u8), bool)],
+    italic: bool,
+    channels: Option<&ChannelLinkContext>,
+) -> String {
+    let mut lines = vec![Vec::new()];
+    for (text, color, bold) in runs {
+        for (index, piece) in text.split('\n').enumerate() {
+            if index > 0 {
+                lines.push(Vec::new());
+            }
+            if let Some(line) = lines.last_mut() {
+                line.push((piece.to_string(), *color, *bold));
+            }
+        }
+    }
+    lines
+        .iter()
+        .map(|line| message_markdown_with(line, italic, channels))
+        .collect::<Vec<_>>()
+        .join("\\\n")
 }
 
 /// A text as its spaces before, its core and its spaces after. The three
