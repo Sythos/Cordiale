@@ -1790,6 +1790,9 @@ export component AppWindow inherits Window {
     in property <bool> current-query-e2e-can-start: false;
     in property <bool> current-query-e2e-can-accept: false;
     in property <bool> current-query-e2e-has-locked: false;
+    // The open query is an encrypted (locked) one, and it shows the ciphertext.
+    in property <bool> current-query-locked: false;
+    in property <bool> current-query-cipher-view: false;
     in-out property <bool> current-query-e2e-start-confirm-open: false;
     // The SAS code of the open locked query while a check is open; empty
     // when no check is open. A verified contact can show it again.
@@ -4780,6 +4783,12 @@ export component AppWindow inherits Window {
                         }
                         // A fixed-width or empty action row must not cap the whole chat.
                         Rectangle { horizontal-stretch: 1; }
+                        if current-query-locked : CompactButton {
+                            text: current-query-cipher-view ? @tr("Show plaintext") : @tr("Show ciphertext");
+                            clicked => {
+                                query-ciphertext-toggle-requested(window-source-network, window-source-target);
+                            }
+                        }
                     }
                     if !current-query-e2e && current-query-e2e-request-state == "" && current-query-e2e-start-confirm-open : VerticalBox {
                         spacing: 6px;

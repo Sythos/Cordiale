@@ -3715,9 +3715,12 @@ fn show_locked_window(state: &WorkerState, ui: &slint::Weak<AppWindow>, network:
     let source_target = key.1.clone();
     let window_status = window_status_for(state);
     let peer_nick = nick.to_string();
+    let cipher_view = state.e2e.shows_ciphertext(network, nick);
     crate::queries::push_shared_channels(state, ui, network, nick);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_current_query_locked(true);
+        ui.set_current_query_cipher_view(cipher_view);
         ui.set_current_channel_label(label.into());
         ui.set_window_source_network(source_network.into());
         ui.set_window_source_target(source_target.into());
@@ -3817,6 +3820,12 @@ pub(crate) fn toggle_ciphertext_view(
         return false;
     }
     let now_ciphertext = state.e2e.toggle_ciphertext(network, &nick);
+    let is_open = open_locked_window(state)
+        .is_some_and(|(open_network, open_nick)| open_network == network && open_nick == nick);
+    if is_open {
+        let _ =
+            ui.upgrade_in_event_loop(move |ui| ui.set_current_query_cipher_view(now_ciphertext));
+    }
     // An entry that is not open loads its rows when the user opens it.
     refresh_locked_view_keeping_place(state, ui, network, &nick, Some(!now_ciphertext));
     refresh_network_groups(state, ui);
