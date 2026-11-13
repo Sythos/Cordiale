@@ -3029,8 +3029,36 @@ msgid "SASL user"
 msgstr "Usuario SASL"
 
 msgctxt "AppWindow"
-msgid "New password (leave empty to keep it)"
-msgstr "Nueva contraseña (déjalo vacío para conservarla)"
+msgid "Auth method"
+msgstr "Método de autenticación"
+
+msgctxt "AppWindow"
+msgid "Server password (PASS)"
+msgstr "Contraseña del servidor (PASS)"
+
+msgctxt "AppWindow"
+msgid "SASL password"
+msgstr "Contraseña SASL"
+
+msgctxt "AppWindow"
+msgid "NickServ password"
+msgstr "Contraseña de NickServ"
+
+msgctxt "AppWindow"
+msgid "No password for this method"
+msgstr "Ninguna contraseña para este método"
+
+msgctxt "AppWindow"
+msgid "{} (leave empty to keep it)"
+msgstr "{} (déjalo vacío para conservarla)"
+
+msgctxt "AppWindow"
+msgid "{} (required for the new method)"
+msgstr "{} (obligatoria para el nuevo método)"
+
+msgctxt "AppWindow"
+msgid "A new auth method needs a password. Type the password for the new method."
+msgstr "Un nuevo método de autenticación necesita una contraseña. Escribe la contraseña del nuevo método."
 
 msgctxt "AppWindow"
 msgid "A new password ends the account's live session on this network; it has to reconnect."

@@ -516,31 +516,105 @@ pub fn admin_credential_fields(entry: &Value) -> (String, String, String, String
     )
 }
 
+/// The auth method a bound credential holds, or `""` when the server does
+/// not report one.
+pub fn admin_credential_auth_method(entry: &Value) -> String {
+    entry
+        .get("auth_method")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Auth methods the credential editor offers, like Cicchetto's admin user
+/// page. Grappa keeps every secret in the one `password` key: the method
+/// tells it what the secret is for.
+pub const CREDENTIAL_EDIT_AUTH_METHODS: [&str; 3] = ["sasl", "server_pass", "none"];
+
+/// The methods the editor lists for a credential that holds `current`, and
+/// the index of `current` in them (`-1` when the server reports none). A
+/// method outside [`CREDENTIAL_EDIT_AUTH_METHODS`] stays in the list, so
+/// opening the editor never changes it.
+pub fn credential_edit_auth_methods(current: &str) -> (Vec<String>, i32) {
+    let current = current.trim();
+    let mut methods: Vec<String> = CREDENTIAL_AUTH_METHODS
+        .into_iter()
+        .filter(|method| CREDENTIAL_EDIT_AUTH_METHODS.contains(method) || *method == current)
+        .map(str::to_string)
+        .collect();
+    if !current.is_empty() && !methods.iter().any(|method| method == current) {
+        methods.push(current.to_string());
+    }
+    let index = methods
+        .iter()
+        .position(|method| method == current)
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or(-1);
+    (methods, index)
+}
+
+/// Why the credential editor cannot send its changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialEditError {
+    /// The nick is empty.
+    MissingNick,
+    /// A new auth method other than `none` has no password: Grappa answers
+    /// 422 for it.
+    MissingPassword,
+}
+
+/// What the credential editor holds.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CredentialEdit<'a> {
+    pub nick: &'a str,
+    pub ident: &'a str,
+    pub realname: &'a str,
+    pub sasl_user: &'a str,
+    /// The method the credential holds now (`""` when unknown).
+    pub current_auth_method: &'a str,
+    /// The method selected in the editor (`""` when none is selected).
+    pub auth_method: &'a str,
+    /// The secret for the selected method: SASL password, server PASS or
+    /// NickServ password. Grappa takes all of them as `password`.
+    pub password: &'a str,
+}
+
 /// The body of `PATCH /admin/credentials/:user_id/:network_id` for what the
-/// editor holds, or `None` for an empty nick. A password is sent only when
-/// one was typed: it ends a live session, so an empty field must never
-/// rotate anything.
-pub fn admin_credential_changes(
-    nick: &str,
-    ident: &str,
-    realname: &str,
-    sasl_user: &str,
-    password: &str,
-) -> Option<Value> {
-    let nick = nick.trim();
+/// editor holds. `auth_method` is sent only when it changes. A password is
+/// sent only when one was typed: it ends a live session, so an empty field
+/// must never rotate or clear anything. The method `none` takes no secret,
+/// so no password is sent with it.
+pub fn admin_credential_changes(edit: &CredentialEdit<'_>) -> Result<Value, CredentialEditError> {
+    let nick = edit.nick.trim();
     if nick.is_empty() {
-        return None;
+        return Err(CredentialEditError::MissingNick);
+    }
+    let current = edit.current_auth_method.trim();
+    let selected = edit.auth_method.trim();
+    let method = if selected.is_empty() {
+        current
+    } else {
+        selected
+    };
+    let changes_method = !selected.is_empty() && selected != current;
+    let sends_password = method != "none" && !edit.password.is_empty();
+    if changes_method && method != "none" && !sends_password {
+        return Err(CredentialEditError::MissingPassword);
     }
     let mut body = serde_json::json!({
         "nick": nick,
-        "ident": ident.trim(),
-        "realname": realname.trim(),
-        "sasl_user": sasl_user.trim(),
+        "ident": edit.ident.trim(),
+        "realname": edit.realname.trim(),
+        "sasl_user": edit.sasl_user.trim(),
     });
-    if !password.is_empty() {
-        body["password"] = Value::from(password);
+    if changes_method {
+        body["auth_method"] = Value::from(selected);
     }
-    Some(body)
+    if sends_password {
+        body["password"] = Value::from(edit.password);
+    }
+    Ok(body)
 }
 
 /// The byte sizes of Grappa's server settings, as MiB text for the
@@ -906,11 +980,25 @@ mod tests {
             admin_credential_fields(&entry),
             ("ada".into(), "".into(), "Ada L".into(), "ada".into())
         );
+        assert_eq!(admin_credential_auth_method(&entry), "");
+        assert_eq!(
+            admin_credential_auth_method(&serde_json::json!({"auth_method": "server_pass"})),
+            "server_pass"
+        );
         // Built at run time: the value is only passed through.
         let typed = format!("pw-{}", std::process::id());
+        let edit = CredentialEdit {
+            nick: " ada ",
+            realname: "Ada",
+            sasl_user: "ada",
+            current_auth_method: "sasl",
+            auth_method: "sasl",
+            password: &typed,
+            ..CredentialEdit::default()
+        };
         assert_eq!(
-            admin_credential_changes(" ada ", "", "Ada", "ada", &typed),
-            Some(serde_json::json!({
+            admin_credential_changes(&edit),
+            Ok(serde_json::json!({
                 "nick": "ada", "ident": "", "realname": "Ada", "sasl_user": "ada",
                 "password": typed
             }))
@@ -918,12 +1006,139 @@ mod tests {
         // No password typed: none is sent, since it would end a live session.
         // Built without a literal: nothing is typed, so nothing is sent.
         let no_password = String::new();
-        let body = admin_credential_changes("ada", "", "Ada", "", &no_password).expect("body");
+        let body = admin_credential_changes(&CredentialEdit {
+            password: &no_password,
+            ..edit
+        })
+        .expect("body");
         assert!(body.get("password").is_none());
+        assert!(body.get("auth_method").is_none());
         assert_eq!(
-            admin_credential_changes("  ", "", "", "", &no_password),
-            None
+            admin_credential_changes(&CredentialEdit {
+                nick: "  ",
+                password: &no_password,
+                ..edit
+            }),
+            Err(CredentialEditError::MissingNick)
         );
+    }
+
+    #[test]
+    fn credential_editor_lists_cicchetto_methods_and_keeps_the_held_one() {
+        let names = |methods: Vec<String>| methods.join(",");
+        let (methods, index) = credential_edit_auth_methods("sasl");
+        assert_eq!(names(methods), "sasl,server_pass,none");
+        assert_eq!(index, 0);
+        let (methods, index) = credential_edit_auth_methods("server_pass");
+        assert_eq!(names(methods), "sasl,server_pass,none");
+        assert_eq!(index, 1);
+        let (methods, index) = credential_edit_auth_methods("none");
+        assert_eq!(names(methods), "sasl,server_pass,none");
+        assert_eq!(index, 2);
+        // Methods the editor does not offer stay selectable when held.
+        let (methods, index) = credential_edit_auth_methods("auto");
+        assert_eq!(names(methods), "auto,sasl,server_pass,none");
+        assert_eq!(index, 0);
+        let (methods, index) = credential_edit_auth_methods("nickserv_identify");
+        assert_eq!(names(methods), "sasl,server_pass,nickserv_identify,none");
+        assert_eq!(index, 2);
+        let (methods, index) = credential_edit_auth_methods("future_method");
+        assert_eq!(names(methods), "sasl,server_pass,none,future_method");
+        assert_eq!(index, 3);
+        // No method reported: nothing is selected, so nothing changes.
+        let (methods, index) = credential_edit_auth_methods("");
+        assert_eq!(names(methods), "sasl,server_pass,none");
+        assert_eq!(index, -1);
+    }
+
+    #[test]
+    fn credential_edit_sends_every_secret_as_password_with_its_method() {
+        // Built at run time: the value is only passed through.
+        let typed = format!("secret-{}", std::process::id());
+        for method in CREDENTIAL_AUTH_METHODS {
+            if method == "none" {
+                continue;
+            }
+            // The same method: the secret is rotated, the method is not sent.
+            let kept = CredentialEdit {
+                nick: "ada",
+                current_auth_method: method,
+                auth_method: method,
+                password: &typed,
+                ..CredentialEdit::default()
+            };
+            let body = admin_credential_changes(&kept).expect("body");
+            assert_eq!(body["password"], Value::from(typed.as_str()), "{method}");
+            assert!(body.get("auth_method").is_none(), "{method}");
+            // Grappa rejects any other key for a secret.
+            for key in ["server_pass", "sasl_password", "nickserv_password"] {
+                assert!(body.get(key).is_none(), "{method} {key}");
+            }
+            // A new method: it goes with the secret typed for it.
+            let current = if method == "sasl" { "none" } else { "sasl" };
+            let changed = CredentialEdit {
+                current_auth_method: current,
+                ..kept
+            };
+            let body = admin_credential_changes(&changed).expect("body");
+            assert_eq!(body["auth_method"], Value::from(method), "{method}");
+            assert_eq!(body["password"], Value::from(typed.as_str()), "{method}");
+            assert!(body.get("server_pass").is_none(), "{method}");
+        }
+    }
+
+    #[test]
+    fn credential_edit_with_an_empty_password_never_clears_a_secret() {
+        let no_password = String::new();
+        for method in CREDENTIAL_AUTH_METHODS {
+            // The method stays: nothing about the secret is sent.
+            let kept = CredentialEdit {
+                nick: "ada",
+                current_auth_method: method,
+                auth_method: method,
+                password: &no_password,
+                ..CredentialEdit::default()
+            };
+            let body = admin_credential_changes(&kept).expect("body");
+            assert!(body.get("password").is_none(), "{method}");
+            assert!(body.get("auth_method").is_none(), "{method}");
+        }
+        // A new method other than `none` needs a password: Grappa answers 422.
+        for method in ["sasl", "server_pass", "auto", "nickserv_identify"] {
+            let changed = CredentialEdit {
+                nick: "ada",
+                current_auth_method: "none",
+                auth_method: method,
+                password: &no_password,
+                ..CredentialEdit::default()
+            };
+            assert_eq!(
+                admin_credential_changes(&changed),
+                Err(CredentialEditError::MissingPassword),
+                "{method}"
+            );
+        }
+        // Moving to `none` takes no secret, and a typed one is not sent.
+        let typed = format!("left-{}", std::process::id());
+        let body = admin_credential_changes(&CredentialEdit {
+            nick: "ada",
+            current_auth_method: "server_pass",
+            auth_method: "none",
+            password: &typed,
+            ..CredentialEdit::default()
+        })
+        .expect("body");
+        assert_eq!(body["auth_method"], Value::from("none"));
+        assert!(body.get("password").is_none());
+        // No method known or selected: the password alone is sent.
+        let body = admin_credential_changes(&CredentialEdit {
+            nick: "ada",
+            password: &typed,
+            ..CredentialEdit::default()
+        })
+        .expect("body");
+        assert!(body.get("auth_method").is_none());
+        assert_eq!(body["password"], Value::from(typed.as_str()));
     }
 
     #[test]

@@ -299,6 +299,11 @@ struct AdminCredentialRow {
     ident: string,
     realname: string,
     sasl-user: string,
+    // The auth method the credential holds ("" when unknown), the methods
+    // the editor offers for it and the index of the held one (-1: none).
+    auth-method: string,
+    auth-methods: [string],
+    auth-index: int,
 }
 
 // One vhost (source address) in Admin, with its two flags.
@@ -2705,6 +2710,12 @@ export component AppWindow inherits Window {
     in-out property <string> admin-edit-cred-realname: "";
     in-out property <string> admin-edit-cred-sasl-user: "";
     in-out property <string> admin-edit-cred-password: "";
+    // The method the credential holds, the methods the editor offers and
+    // the selected one. One password field carries the secret of the
+    // selected method; Grappa takes it as `password` for every method.
+    in-out property <string> admin-edit-cred-auth-current: "";
+    in-out property <[string]> admin-edit-cred-auth-methods: [];
+    in-out property <int> admin-edit-cred-auth-index: -1;
     callback admin-credential-save();
     callback admin-vhost-add();
     callback admin-vhost-set(string, string, bool);
@@ -2790,6 +2801,22 @@ export component AppWindow inherits Window {
             return @tr("failed");
         } else {
             return state;
+        }
+    }
+
+    // What the credential editor's one password field holds for an auth
+    // method: the server PASS, the SASL or the NickServ password.
+    function admin-cred-password-label(method: string) -> string {
+        if method == "server_pass" {
+            return @tr("Server password (PASS)");
+        } else if method == "sasl" {
+            return @tr("SASL password");
+        } else if method == "nickserv_identify" {
+            return @tr("NickServ password");
+        } else if method == "none" {
+            return @tr("No password for this method");
+        } else {
+            return @tr("Password");
         }
     }
 
@@ -3566,6 +3593,8 @@ export component AppWindow inherits Window {
             return @tr("Saved. The server did not report what happened to the session.");
         } else if status-kind == "admin-credential-invalid" {
             return @tr("A credential needs an account, a network and a nickname.");
+        } else if status-kind == "admin-credential-password-needed" {
+            return @tr("A new auth method needs a password. Type the password for the new method.");
         } else if status-kind == "admin-server-invalid" {
             return @tr("A server needs a host and a port between 1 and 65535.");
         } else if status-kind == "admin-setting-invalid" {
@@ -8920,6 +8949,9 @@ export component AppWindow inherits Window {
                                 admin-edit-cred-ident = row.ident;
                                 admin-edit-cred-realname = row.realname;
                                 admin-edit-cred-sasl-user = row.sasl-user;
+                                admin-edit-cred-auth-current = row.auth-method;
+                                admin-edit-cred-auth-methods = row.auth-methods;
+                                admin-edit-cred-auth-index = row.auth-index;
                                 admin-edit-cred-password = "";
                             }
                         }
@@ -8973,10 +9005,29 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 6px;
 
+                        // The selected method; with none selected, the held one.
+                        property <string> cred-method: admin-edit-cred-auth-index >= 0
+                            ? admin-edit-cred-auth-methods[admin-edit-cred-auth-index]
+                            : admin-edit-cred-auth-current;
+                        // A new method other than `none` needs its secret:
+                        // Grappa answers 422 without one.
+                        property <bool> cred-needs-password: cred-method != admin-edit-cred-auth-current
+                            && cred-method != "none";
+                        property <string> cred-password-label: admin-cred-password-label(cred-method);
+
+                        ComboBox {
+                            model: admin-edit-cred-auth-methods;
+                            current-index <=> admin-edit-cred-auth-index;
+                            accessible-label: @tr("Auth method");
+                            min-width: 120px;
+                        }
                         LineEdit {
-                            placeholder-text: @tr("New password (leave empty to keep it)");
-                            accessible-label: @tr("New password (leave empty to keep it)");
+                            placeholder-text: cred-method == "none" ? cred-password-label
+                                : (cred-needs-password ? @tr("{} (required for the new method)", cred-password-label)
+                                    : @tr("{} (leave empty to keep it)", cred-password-label));
+                            accessible-label: cred-password-label;
                             input-type: InputType.password;
+                            enabled: cred-method != "none";
                             text <=> admin-edit-cred-password;
                             horizontal-stretch: 1;
                             min-width: 120px;
@@ -8984,7 +9035,8 @@ export component AppWindow inherits Window {
                         CompactButton {
                             text: "💾  " + @tr("Save");
                             a11y-label: @tr("Save");
-                            enabled: admin-edit-cred-nick != "";
+                            enabled: admin-edit-cred-nick != ""
+                                && (!cred-needs-password || admin-edit-cred-password != "");
                             clicked => { admin-credential-save(); }
                         }
                         CompactButton {
