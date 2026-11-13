@@ -66,9 +66,13 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// `e2e_pairing_offered` event and `GET /e2e/pairings/offer`. Protocols 56 to
 /// 58 add only fields and an upload route that this client does not need.
 /// Protocol 59 adds the `e2e_incoming` and `e2e_incoming_lost` events. The
-/// server sends them only to a client that declares 59. This client uses the
-/// highest Grappa protocol version it implements.
-pub const CLIENT_PROTOCOL_VERSION: u32 = 59;
+/// server sends them only to a client that declares 59. Protocol 60 adds
+/// nothing this client reads. Protocol 61 adds the command-count route that
+/// this client does not use. Protocol 62 adds the channel send door and the
+/// address fields of `whois_bundle`, which this client ignores. Protocol 63
+/// adds `channel` on `e2e_message` rows. This client uses the highest Grappa
+/// protocol version it implements and tests.
+pub const CLIENT_PROTOCOL_VERSION: u32 = 63;
 
 /// The first Grappa `protocol_version` that reads the `before_time`,
 /// `after_time` and `around_time` history cursors. An older server ignores
@@ -138,9 +142,19 @@ mod tests {
     }
 
     #[test]
-    fn client_declares_protocol_59_with_the_incoming_events() {
-        use crate::e2e_protocol::{PairingOperation, PAIRING_OFFER_MIN_PROTOCOL};
-        assert_eq!(CLIENT_PROTOCOL_VERSION, 59);
+    fn client_declares_protocol_63_with_the_channel_rows() {
+        use crate::e2e_protocol::{
+            channel_allowed, channel_door_allowed, PairingOperation, CHANNEL_DOOR_MIN_PROTOCOL,
+            CHANNEL_MIN_PROTOCOL, PAIRING_OFFER_MIN_PROTOCOL,
+        };
+        assert_eq!(CLIENT_PROTOCOL_VERSION, 63);
+        assert_eq!(CHANNEL_DOOR_MIN_PROTOCOL, 62);
+        assert_eq!(CHANNEL_MIN_PROTOCOL, 63);
+        assert!(channel_allowed(Some(CLIENT_PROTOCOL_VERSION)));
+        assert!(channel_door_allowed(Some(CHANNEL_DOOR_MIN_PROTOCOL)));
+        assert!(!channel_door_allowed(Some(CHANNEL_DOOR_MIN_PROTOCOL - 1)));
+        assert!(!channel_allowed(Some(CHANNEL_MIN_PROTOCOL - 1)));
+        assert!(!channel_allowed(None));
         assert_eq!(MIN_SUPPORTED_PROTOCOL_VERSION, 1);
         assert_eq!(PAIRING_OFFER_MIN_PROTOCOL, 55);
         assert!(PairingOperation::Offer.available(Some(CLIENT_PROTOCOL_VERSION)));
