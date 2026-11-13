@@ -14678,6 +14678,44 @@ fn a_locked_row_keeps_the_encrypted_mark_and_the_real_nick() {
 }
 
 #[test]
+fn an_encrypted_row_keeps_its_line_breaks_and_a_clear_row_does_not() {
+    use cordiale_core::e2e_store::E2eMessage;
+    let row = |text: &str| {
+        let message = E2eMessage {
+            id: "libera:in:1".to_string(),
+            conversation_id: "libera\u{0}bob".to_string(),
+            sender_device: "AAAAAAAAAAA".to_string(),
+            sent_at: 1_700_000_000,
+            text: text.to_string(),
+            encrypted: true,
+            captures: Vec::new(),
+        };
+        chat_line_from_message(&locked_row_with_drop(&message, "me", "bob", None), true, "")
+    };
+    let plain = row("first\r\nsecond\nthird");
+    assert!(plain.selectable);
+    assert_eq!(plain.selectable_body.as_str(), "first\nsecond\nthird");
+    // A row with a link has no input over it, and its markdown has a break.
+    let linked = row("see https://example.org/a\nnext");
+    assert_eq!(linked.overlay_body.as_str(), "");
+    assert!(linked.selectable_body.is_empty());
+    let runs = vec![("a\nb".to_string(), (1, 2, 3), false)];
+    let markdown = message_markdown_keeping_breaks(&runs, false, None);
+    assert_eq!(markdown.matches("\\\n").count(), 1);
+    assert_eq!(markdown.matches("<font").count(), 2);
+    // A clear row still shows a break as a space.
+    let clear = chat_line_from_message(
+        &render_message(
+            &serde_json::json!({"kind": "privmsg", "sender": "alice", "body": "a\nb", "id": 1}),
+            None,
+        ),
+        true,
+        "",
+    );
+    assert_eq!(clear.selectable_body.as_str(), "a b");
+}
+
+#[test]
 fn a_dropped_send_is_marked_in_the_locked_row_only() {
     use cordiale_core::e2e_pacing::DropReason;
     use cordiale_core::e2e_store::E2eMessage;
