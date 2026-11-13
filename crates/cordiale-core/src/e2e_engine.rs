@@ -4718,6 +4718,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_multi_line_text_keeps_every_line_break_through_the_round_trip() {
+        // Blank lines, indent, a trailing break and a CRLF pair must all stay.
+        let text = "first\n\n  indented third\r\nlast\n";
+        let mut p = pair();
+        let server = MockServer::start().await;
+        mount_send(&server, "msgid1").await;
+        let (_, body) = alice_sends(&mut p.alice, &server, text).await;
+        // One request carries the whole text, and the request has no clear text.
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert!(!body.to_string().contains("first"));
+        assert!(!body.to_string().contains("indented"));
+
+        let payload = body["payload"].as_str().expect("payload");
+        let value = row(
+            5,
+            "alice",
+            &p.alice_did,
+            &p.bob_did,
+            "pkmsg",
+            "msgid1",
+            payload,
+        );
+        let inbox = InboxRow::from_value(&value, PROTOCOL).expect("row");
+        assert_eq!(p.bob.handle_row(&inbox, 200), RowOutcome::Stored);
+
+        let received = p.bob.history().messages(&conversation_id(NET, "alice"));
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].text, text);
+        let sent = p.alice.history().messages(&conversation_id(NET, "bob"));
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].text, text);
+    }
+
+    #[tokio::test]
     async fn a_repeated_event_or_inbox_item_gives_one_row() {
         let mut p = pair();
         let server = MockServer::start().await;
