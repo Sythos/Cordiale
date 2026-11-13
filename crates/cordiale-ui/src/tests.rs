@@ -14863,9 +14863,10 @@ fn a_locked_row_keeps_the_encrypted_mark_and_the_real_nick() {
 }
 
 /// Counts the text lines `rows` add to the chat pane. A line is a run of
-/// pixel rows that differ from the same pane with no rows. Only the left
-/// part of the window is read: the lines of the test are short.
-fn chat_row_text_lines(rows: &[RenderedMessage]) -> usize {
+/// pixel rows that differ from the same pane with no rows. Only the columns
+/// before `limit` are read. Returns the lines and the last column that
+/// differs, so a test can keep a link icon out of the count.
+fn chat_row_text_lines(rows: &[RenderedMessage], limit: usize) -> (usize, usize) {
     let empty = chat_row_window(&[]).window().take_snapshot().unwrap();
     let shown = chat_row_window(rows).window().take_snapshot().unwrap();
     let width = shown.width() as usize;
@@ -14873,17 +14874,22 @@ fn chat_row_text_lines(rows: &[RenderedMessage]) -> usize {
     let (empty, shown) = (empty.as_slice(), shown.as_slice());
     let mut lines = 0;
     let mut inside = false;
+    let mut last_column = 0;
     for y in 0..height {
-        let differs = (0..width.min(800)).any(|x| {
+        let mut differs = false;
+        for x in 0..width.min(limit) {
             let (a, b) = (&empty[y * width + x], &shown[y * width + x]);
-            (a.r, a.g, a.b) != (b.r, b.g, b.b)
-        });
+            if (a.r, a.g, a.b) != (b.r, b.g, b.b) {
+                differs = true;
+                last_column = last_column.max(x);
+            }
+        }
         if differs && !inside {
             lines += 1;
         }
         inside = differs;
     }
-    lines
+    (lines, last_column)
 }
 
 #[test]
@@ -14895,20 +14901,26 @@ fn a_received_multi_line_row_is_drawn_on_as_many_lines_as_it_has() {
     };
     // Every line is short and has letters that reach the full height of the
     // line, so a gap between two drawn lines is a gap between two text lines.
-    let plain = "line one\nline two\nline six";
-    let linked = "line one https://x.org/a\nline two\nline six";
+    // All lines have the same text, so they have the same width.
+    let plain = "line one\nline one\nline one";
+    // The link is at the end of the last line. A system emoji font draws the
+    // link icon taller than the letters, so the count reads only the columns
+    // of the plain text and never the icon or the link.
+    let linked = "line one\nline one\nline one https://x.org/a";
 
-    assert_eq!(chat_row_text_lines(&[row("line one", true)]), 1);
+    assert_eq!(chat_row_text_lines(&[row("line one", true)], 800).0, 1);
     // A decrypted row without a link: the text input draws every line.
     let lines = chat_lines_model(&[row(plain, true)], true);
     assert_eq!(lines[0].selectable_body.as_str(), plain);
-    assert_eq!(chat_row_text_lines(&[row(plain, true)]), 3);
+    let (drawn, last_column) = chat_row_text_lines(&[row(plain, true)], 800);
+    assert_eq!(drawn, 3);
     // A decrypted row with a link: the styled text draws every line.
     let lines = chat_lines_model(&[row(linked, true)], true);
     assert!(lines[0].selectable_body.is_empty());
-    assert_eq!(chat_row_text_lines(&[row(linked, true)]), 3);
+    let (drawn, _) = chat_row_text_lines(&[row(linked, true)], last_column + 2);
+    assert_eq!(drawn, 3);
     // A row that is not encrypted is one IRC line: the breaks are spaces.
-    assert_eq!(chat_row_text_lines(&[row(plain, false)]), 1);
+    assert_eq!(chat_row_text_lines(&[row(plain, false)], 800).0, 1);
 }
 
 #[test]
