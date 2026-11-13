@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "cordiale-core"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -1186,7 +1186,7 @@ dependencies = [
 
 [[package]]
 name = "cordiale-ui"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "arboard",
  "avif-parse",
