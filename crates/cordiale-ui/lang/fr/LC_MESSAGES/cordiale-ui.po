@@ -493,6 +493,10 @@ msgid "Command"
 msgstr "Commande"
 
 msgctxt "AppWindow"
+msgid "Commands"
+msgstr "Commandes"
+
+msgctxt "AppWindow"
 msgid "Expansion"
 msgstr "Extension"
 
