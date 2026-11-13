@@ -1740,6 +1740,13 @@ export component AppWindow inherits Window {
     // Another window brings its own draft: the list would be stale.
     changed window-source-target => { command-picker-open = false; }
     changed window-source-network => { command-picker-open = false; }
+    // A write from code (for example a Reply quote) does not reach the Rust
+    // filter: a draft that no longer starts with a slash closes the list.
+    changed compose-text => {
+        if !compose-text.starts-with("/") {
+            command-picker-open = false;
+        }
+    }
     function accept-command-suggestion(index: int) {
         if index >= 0 && index < command-suggestions.length {
             compose-text = "/" + command-suggestions[index].name + " ";
