@@ -714,7 +714,21 @@ pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<A
     let session_log = session_log.unwrap_or_default();
     let refresh_error = admin_refresh_error_text(&failed);
     let (vhost_rows, grant_rows) = admin_vhost_rows(&vhost_view.unwrap_or_default());
-    let credential_rows: Vec<AdminCredentialRow> = credentials
+    // Plain data: a Slint model is not `Send`, so the rows are built from
+    // it inside the event-loop closure.
+    struct CredentialRowData {
+        label: slint::SharedString,
+        user_id: slint::SharedString,
+        network_id: slint::SharedString,
+        nick: slint::SharedString,
+        ident: slint::SharedString,
+        realname: slint::SharedString,
+        sasl_user: slint::SharedString,
+        auth_method: slint::SharedString,
+        auth_methods: Vec<slint::SharedString>,
+        auth_index: i32,
+    }
+    let credential_rows: Vec<CredentialRowData> = credentials
         .iter()
         .map(|entry| {
             let id = |key: &str| {
@@ -733,7 +747,7 @@ pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<A
                 cordiale_core::admin::credential_edit_auth_methods(&auth_method);
             let auth_methods: Vec<slint::SharedString> =
                 auth_methods.into_iter().map(Into::into).collect();
-            AdminCredentialRow {
+            CredentialRowData {
                 label: cordiale_core::admin::admin_credential_label(entry).into(),
                 user_id: id("user_id").into(),
                 network_id: id("network_id").into(),
@@ -742,7 +756,7 @@ pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<A
                 realname: realname.into(),
                 sasl_user: sasl_user.into(),
                 auth_method: auth_method.into(),
-                auth_methods: slint::ModelRc::new(slint::VecModel::from(auth_methods)),
+                auth_methods,
                 auth_index,
             }
         })
@@ -843,6 +857,21 @@ pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<A
             ui.set_admin_networks(Rc::new(slint::VecModel::from(network_rows)).into());
         }
         if credentials_ok {
+            let credential_rows: Vec<AdminCredentialRow> = credential_rows
+                .into_iter()
+                .map(|row| AdminCredentialRow {
+                    label: row.label,
+                    user_id: row.user_id,
+                    network_id: row.network_id,
+                    nick: row.nick,
+                    ident: row.ident,
+                    realname: row.realname,
+                    sasl_user: row.sasl_user,
+                    auth_method: row.auth_method,
+                    auth_methods: Rc::new(slint::VecModel::from(row.auth_methods)).into(),
+                    auth_index: row.auth_index,
+                })
+                .collect();
             ui.set_admin_credentials(Rc::new(slint::VecModel::from(credential_rows)).into());
         }
         if vhosts_ok {
