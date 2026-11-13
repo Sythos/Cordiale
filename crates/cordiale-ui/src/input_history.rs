@@ -1,4 +1,6 @@
-// Copyright (c) 2026 Sythos ([https://www.sythos.net/](https://www.sythos.net/)). MIT License.
+// MIT License
+//
+// Copyright (c) 2026 Sythos (https://www.sythos.net/)
 
 //! Per-channel input history for the compose box: Up and Down recall the
 //! last submitted entries. The history lives in client memory only and is

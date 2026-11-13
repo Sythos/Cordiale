@@ -1,4 +1,6 @@
-// Copyright (c) 2026 Sythos ([https://www.sythos.net/](https://www.sythos.net/)). MIT License.
+// MIT License
+//
+// Copyright (c) 2026 Sythos (https://www.sythos.net/)
 
 //! Reply keeps the quoted author's channel presence next to the draft, never
 //! inside it. The log below only knows what this client observed since it

@@ -1,4 +1,6 @@
-// Copyright (c) 2026 Sythos ([https://www.sythos.net/](https://www.sythos.net/)). MIT License.
+// MIT License
+//
+// Copyright (c) 2026 Sythos (https://www.sythos.net/)
 
 //! A chat-row Reply inserts a Cicchetto-shaped quote into the draft.
 //! The source is the message body, never the rendered timestamp or role glyph.
