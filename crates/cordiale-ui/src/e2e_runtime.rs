@@ -3715,9 +3715,12 @@ fn show_locked_window(state: &WorkerState, ui: &slint::Weak<AppWindow>, network:
     let source_target = key.1.clone();
     let window_status = window_status_for(state);
     let peer_nick = nick.to_string();
+    let cipher_view = state.e2e.shows_ciphertext(network, nick);
     crate::queries::push_shared_channels(state, ui, network, nick);
     let ui = ui.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        ui.set_current_query_locked(true);
+        ui.set_current_query_cipher_view(cipher_view);
         ui.set_current_channel_label(label.into());
         ui.set_window_source_network(source_network.into());
         ui.set_window_source_target(source_target.into());
@@ -3817,6 +3820,12 @@ pub(crate) fn toggle_ciphertext_view(
         return false;
     }
     let now_ciphertext = state.e2e.toggle_ciphertext(network, &nick);
+    let is_open = open_locked_window(state)
+        .is_some_and(|(open_network, open_nick)| open_network == network && open_nick == nick);
+    if is_open {
+        let _ =
+            ui.upgrade_in_event_loop(move |ui| ui.set_current_query_cipher_view(now_ciphertext));
+    }
     // An entry that is not open loads its rows when the user opens it.
     refresh_locked_view_keeping_place(state, ui, network, &nick, Some(!now_ciphertext));
     refresh_network_groups(state, ui);
@@ -5763,7 +5772,7 @@ mod tests {
     /// A state with an engine for `net` and an E2E channel `#room`.
     fn channel_state(dir: &tempfile::TempDir) -> WorkerState {
         let (mut state, _peer) = sas_state(dir);
-        state.conn.server_protocol_version = Some(62);
+        state.conn.server_protocol_version = Some(63);
         state
             .e2e
             .channels
@@ -5841,8 +5850,8 @@ mod tests {
         let runtime = test_runtime();
         runtime.block_on(enable_e2e_channel(&mut state, &ui, "net".to_string(), None));
         assert!(state.e2e.channels.is_empty());
-        // A server before protocol 62 has no channel messages.
-        state.conn.server_protocol_version = Some(61);
+        // A server before protocol 63 has no channel messages.
+        state.conn.server_protocol_version = Some(62);
         runtime.block_on(enable_e2e_channel(
             &mut state,
             &ui,
@@ -5850,7 +5859,7 @@ mod tests {
             Some("#room".to_string()),
         ));
         assert!(state.e2e.channels.is_empty());
-        state.conn.server_protocol_version = Some(62);
+        state.conn.server_protocol_version = Some(63);
         runtime.block_on(enable_e2e_channel(
             &mut state,
             &ui,

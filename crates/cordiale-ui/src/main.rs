@@ -31,6 +31,7 @@ mod ceremony;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
 mod ceremony_ctap;
 mod channels;
+mod command_usage;
 mod dates;
 mod debug_info;
 mod e2e_files;
@@ -724,7 +725,8 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     let input_history = Rc::new(RefCell::new(input_history::InputHistory::default()));
-    register_navigation_callbacks(&ui, &worker_tx, &input_history);
+    let command_usage = Rc::new(RefCell::new(command_usage::CommandUsage::default()));
+    register_navigation_callbacks(&ui, &worker_tx, &input_history, &command_usage);
     register_member_callbacks(&ui, &worker_tx);
     register_channel_callbacks(&ui, &worker_tx);
     register_directory_callbacks(&ui, &worker_tx);
@@ -767,7 +769,7 @@ fn main() -> Result<(), slint::PlatformError> {
         );
     }
 
-    register_composer_callbacks(&ui, &worker_tx, &input_history);
+    register_composer_callbacks(&ui, &worker_tx, &input_history, &command_usage);
     register_theme_callbacks(&ui, &worker_tx);
     register_notification_callbacks(&ui, &worker_tx);
     register_admin_user_callbacks(&ui, &worker_tx);
@@ -1198,6 +1200,11 @@ struct WhoisBundle {
     /// Authenticated Grappa path to the cached peer avatar, not a third-party
     /// URL; may arrive later through `whois_avatar_ready`.
     avatar_url: Option<String>,
+    /// `grappa_client_ips` (v62): live socket addresses, only valid IP texts.
+    /// Absent, `null` or malformed means `None`.
+    client_ips: Option<Vec<std::net::IpAddr>>,
+    /// `grappa_client_last_known_ip` (v62): newest login address, if valid.
+    client_last_known_ip: Option<std::net::IpAddr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

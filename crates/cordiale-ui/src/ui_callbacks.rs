@@ -500,6 +500,7 @@ pub(crate) fn register_navigation_callbacks(
     ui: &AppWindow,
     worker_tx: &mpsc::UnboundedSender<WorkerCommand>,
     input_history: &Rc<RefCell<input_history::InputHistory>>,
+    command_usage: &Rc<RefCell<command_usage::CommandUsage>>,
 ) {
     let tx_for_chat_read_state = worker_tx.clone();
     ui.on_chat_read_state_changed(move |visible, follow_bottom| {
@@ -512,10 +513,12 @@ pub(crate) fn register_navigation_callbacks(
     let tx_for_disconnect = worker_tx.clone();
     let weak_for_disconnect = ui.as_weak();
     let history_for_disconnect = input_history.clone();
+    let usage_for_disconnect = command_usage.clone();
     ui.on_disconnect_requested(move || {
         let _ = tx_for_disconnect.send(WorkerCommand::Disconnect);
-        // The history belongs to the signed-in account.
+        // The history and the command usage belong to the signed-in account.
         history_for_disconnect.borrow_mut().clear();
+        usage_for_disconnect.borrow_mut().clear();
         if let Some(ui) = weak_for_disconnect.upgrade() {
             clear_share_link(&ui);
             reset_identity_view(&ui, "");
@@ -1141,6 +1144,7 @@ pub(crate) fn register_composer_callbacks(
     ui: &AppWindow,
     worker_tx: &mpsc::UnboundedSender<WorkerCommand>,
     input_history: &Rc<RefCell<input_history::InputHistory>>,
+    command_usage: &Rc<RefCell<command_usage::CommandUsage>>,
 ) {
     // Ctrl+V (Cmd+V) in the compose box: an image on the clipboard is
     // uploaded like a picked file, and a multi-line text can go up as a .txt
@@ -1177,6 +1181,7 @@ pub(crate) fn register_composer_callbacks(
     let weak_for_send = ui.as_weak();
     let history_for_send = input_history.clone();
     ui.on_compose_has_newline(|text| text.contains('\n'));
+    let usage_for_send = command_usage.clone();
     ui.on_send_chat_message(move |body| {
         let mut body = body.to_string();
         // Only an encrypted query keeps the line breaks. Any other window
@@ -1189,7 +1194,12 @@ pub(crate) fn register_composer_callbacks(
         if body.trim().is_empty() {
             return;
         }
+        // Only the command name is counted, never what follows it.
+        if let Some(name) = cordiale_core::slash::accepted_command_name(&body) {
+            usage_for_send.borrow_mut().record(name);
+        }
         if let Some(ui) = weak_for_send.upgrade() {
+            ui.set_command_picker_open(false);
             if let Some(key) = input_history_key(&ui) {
                 history_for_send.borrow_mut().record(&key, &body);
             }
@@ -1243,8 +1253,13 @@ pub(crate) fn register_composer_callbacks(
     });
 
     let tx_for_draft = worker_tx.clone();
+    let weak_for_picker = ui.as_weak();
+    let usage_for_picker = command_usage.clone();
     ui.on_compose_text_changed(move |text| {
         let _ = tx_for_draft.send(WorkerCommand::ComposeTextChanged(text.to_string()));
+        if let Some(ui) = weak_for_picker.upgrade() {
+            update_command_picker(&ui, &usage_for_picker.borrow(), text.as_str());
+        }
     });
 
     let tx_for_reply = worker_tx.clone();
@@ -1289,6 +1304,23 @@ pub(crate) fn register_composer_callbacks(
             }
         }
     });
+}
+
+/// Opens, filters or closes the slash-command picker for the text the user
+/// just typed in the compose box.
+fn update_command_picker(ui: &AppWindow, usage: &command_usage::CommandUsage, text: &str) {
+    let suggestions: Vec<CommandSuggestion> = command_usage::picker_prefix(text)
+        .map(|prefix| usage.suggestions(prefix))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|info| CommandSuggestion {
+            name: info.name.into(),
+            syntax: info.syntax.into(),
+        })
+        .collect();
+    ui.set_command_picker_open(!suggestions.is_empty());
+    ui.set_command_picker_index(0);
+    ui.set_command_suggestions(slint::ModelRc::new(slint::VecModel::from(suggestions)));
 }
 
 /// Theme toggle, the taskbar badge, color themes and the theme editor.

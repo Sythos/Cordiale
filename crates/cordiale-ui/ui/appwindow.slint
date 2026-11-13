@@ -125,6 +125,13 @@ struct NotifyRow {
     presence: string,
 }
 
+// One entry of the slash-command picker above the compose box: the command
+// name without the slash and its short syntax.
+struct CommandSuggestion {
+    name: string,
+    syntax: string,
+}
+
 // Per-file upload limits advertised by the server (sizes already
 // formatted; `video-seconds` empty when not advertised).
 struct UploadLimitsRow {
@@ -1718,6 +1725,25 @@ export component AppWindow inherits Window {
     in-out property <int> chat-page-direction: 0;
     in-out property <int> chat-page-seq: 0;
     in-out property <string> compose-text: "";
+    // The slash-command picker: the matching commands (set from Rust as the
+    // user types), whether the list is open and the highlighted entry.
+    in-out property <[CommandSuggestion]> command-suggestions: [];
+    in-out property <bool> command-picker-open: false;
+    in-out property <int> command-picker-index: 0;
+    // The Rust side owns the filter and the usage order; the user's choice
+    // fills the compose box but never sends it.
+    // Another window brings its own draft: the list would be stale.
+    changed window-source-target => { command-picker-open = false; }
+    changed window-source-network => { command-picker-open = false; }
+    function accept-command-suggestion(index: int) {
+        if index >= 0 && index < command-suggestions.length {
+            compose-text = "/" + command-suggestions[index].name + " ";
+            compose-text-changed(compose-text);
+        }
+        command-picker-open = false;
+        // Puts the focus and the caret back in the compose field.
+        compose-focus-request += 1;
+    }
     // The pending Reply quotes someone who left the channel: red border
     // plus a text hint, never part of the sent text.
     in-out property <bool> reply-target-left: false;
@@ -1790,6 +1816,9 @@ export component AppWindow inherits Window {
     in property <bool> current-query-e2e-can-start: false;
     in property <bool> current-query-e2e-can-accept: false;
     in property <bool> current-query-e2e-has-locked: false;
+    // The open query is an encrypted (locked) one, and it shows the ciphertext.
+    in property <bool> current-query-locked: false;
+    in property <bool> current-query-cipher-view: false;
     in-out property <bool> current-query-e2e-start-confirm-open: false;
     // The SAS code of the open locked query while a check is open; empty
     // when no check is open. A verified contact can show it again.
@@ -2859,6 +2888,12 @@ export component AppWindow inherits Window {
             return @tr("Certificate fingerprint");
         } else if key == "whois-actually" {
             return @tr("Actual host");
+        } else if key == "whois-client-ipv4" {
+            return @tr("Client IPv4");
+        } else if key == "whois-client-ipv6" {
+            return @tr("Client IPv6");
+        } else if key == "whois-client-last-ip" {
+            return @tr("Last known client IP");
         } else if key == "whois-registered" {
             return @tr("Registered nick");
         } else if key == "whois-admin" {
@@ -4782,6 +4817,12 @@ export component AppWindow inherits Window {
                         }
                         // A fixed-width or empty action row must not cap the whole chat.
                         Rectangle { horizontal-stretch: 1; }
+                        if current-query-locked : CompactButton {
+                            text: current-query-cipher-view ? @tr("Show plaintext") : @tr("Show ciphertext");
+                            clicked => {
+                                query-ciphertext-toggle-requested(window-source-network, window-source-target);
+                            }
+                        }
                     }
                     if !current-query-e2e && current-query-e2e-request-state == "" && current-query-e2e-start-confirm-open : VerticalBox {
                         spacing: 6px;
@@ -5868,6 +5909,69 @@ export component AppWindow inherits Window {
                 }
             }
 
+            // The slash-command picker, docked above the compose bar. It
+            // lists only the commands Cordiale runs, most used first.
+            if has-selected-channel && command-picker-open && command-suggestions.length > 0 : Rectangle {
+                height: min(command-suggestions.length * 26px, 156px) + 4px;
+                border-width: 1px;
+                border-color: #8080807f;
+                border-radius: 5px;
+                accessible-role: list;
+                accessible-label: @tr("Commands");
+
+                ListView {
+                    // Keeps the highlighted row in view when Up or Down moves
+                    // it past the six rows shown, and after a new filter.
+                    property <int> selected-row: command-picker-index;
+                    property <int> row-count: command-suggestions.length;
+                    function reveal-selected() {
+                        if self.visible-height > 0px {
+                            let top = selected-row * 26px;
+                            if top < -self.content-y {
+                                self.content-y = -top;
+                            }
+                            if top + 26px > -self.content-y + self.visible-height {
+                                self.content-y = self.visible-height - top - 26px;
+                            }
+                        }
+                    }
+                    changed selected-row => { reveal-selected(); }
+                    changed row-count => { reveal-selected(); }
+
+                    for suggestion[index] in command-suggestions : Rectangle {
+                        height: 26px;
+                        background: index == command-picker-index ? #80808033 : transparent;
+                        accessible-role: list-item;
+                        accessible-label: "/" + suggestion.name + ", " + suggestion.syntax;
+                        accessible-action-default => { accept-command-suggestion(index); }
+
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 12px;
+                            Text {
+                                text: "/" + suggestion.name;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                min-width: 90px;
+                            }
+                            Text {
+                                text: suggestion.syntax;
+                                color: palette-muted;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { accept-command-suggestion(index); }
+                        }
+                    }
+                }
+            }
+
             // Small compose bar, never more than one line tall: paperclip
             // to attach a file (left, like Cicchetto), text field, send
             // icon (right).
@@ -5890,6 +5994,35 @@ export component AppWindow inherits Window {
                         if (event.modifiers.control || event.modifiers.meta) && (event.text == "v" || event.text == "V") && !event.modifiers.shift {
                             return paste-requested() ? EventResult.accept : EventResult.reject;
                         }
+                        // PgUp/PgDown page the chat pane, as in terminal IRC
+                        // clients; the compose field has no use for them.
+                        if event.text == Key.PageUp || event.text == Key.PageDown {
+                            chat-page-direction = event.text == Key.PageUp ? -1 : 1;
+                            chat-page-seq += 1;
+                            return EventResult.accept;
+                        }
+                        // While the command picker is open it owns Up/Down,
+                        // Enter and Tab (select, never send) and Escape
+                        // (close, text kept).
+                        if command-picker-open && command-suggestions.length > 0 {
+                            if event.text == Key.UpArrow {
+                                command-picker-index = max(command-picker-index - 1, 0);
+                                return EventResult.accept;
+                            }
+                            if event.text == Key.DownArrow {
+                                command-picker-index = min(command-picker-index + 1, command-suggestions.length - 1);
+                                return EventResult.accept;
+                            }
+                            if event.text == Key.Return || event.text == Key.Tab {
+                                accept-command-suggestion(command-picker-index);
+                                compose-line-edit.set-selection-offsets(2147483647, 2147483647);
+                                return EventResult.accept;
+                            }
+                            if event.text == Key.Escape {
+                                command-picker-open = false;
+                                return EventResult.accept;
+                            }
+                        }
                         // Enter sends. Shift+Enter adds a line in an encrypted
                         // query and does nothing elsewhere, so a channel or a
                         // clear query never gets a multi-line text.
@@ -5898,13 +6031,6 @@ export component AppWindow inherits Window {
                                 return (current-query && current-query-e2e) ? EventResult.reject : EventResult.accept;
                             }
                             send-chat-message(compose-text);
-                            return EventResult.accept;
-                        }
-                        // PgUp/PgDown page the chat pane, as in terminal IRC
-                        // clients; the compose field has no use for them.
-                        if event.text == Key.PageUp || event.text == Key.PageDown {
-                            chat-page-direction = event.text == Key.PageUp ? -1 : 1;
-                            chat-page-seq += 1;
                             return EventResult.accept;
                         }
                         // Up/Down recall the channel's submitted entries. A

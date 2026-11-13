@@ -4347,7 +4347,7 @@ mod tests {
         .await;
         let outcomes = p
             .bob
-            .drain(&GrappaClient::new(first.uri()), TOKEN, Some(62), 200)
+            .drain(&GrappaClient::new(first.uri()), TOKEN, Some(63), 200)
             .await
             .expect("drain");
         assert_eq!(outcomes, vec![(5, RowOutcome::Ignored)]);
@@ -4373,7 +4373,7 @@ mod tests {
         mount_inbox(&second, &p.bob_did, vec![channel_row.clone()]).await;
         let outcomes = p
             .bob
-            .drain(&GrappaClient::new(second.uri()), TOKEN, Some(62), 300)
+            .drain(&GrappaClient::new(second.uri()), TOKEN, Some(63), 300)
             .await
             .expect("drain");
         assert_eq!(outcomes, vec![(6, RowOutcome::Stored)]);
@@ -4392,7 +4392,7 @@ mod tests {
         mount_inbox(&third, &p.bob_did, vec![channel_row, forged]).await;
         let outcomes = p
             .bob
-            .drain(&GrappaClient::new(third.uri()), TOKEN, Some(62), 400)
+            .drain(&GrappaClient::new(third.uri()), TOKEN, Some(63), 400)
             .await
             .expect("drain");
         assert_eq!(
@@ -4628,7 +4628,7 @@ mod tests {
                 "k1",
                 requests[0]["payload"].as_str().expect("payload"),
             ),
-            Some(62),
+            Some(63),
         )
         .expect("row");
         let members: BTreeSet<String> = [p.alice_did.clone(), p.bob_did.clone()].into();
@@ -8927,7 +8927,7 @@ mod tests {
             wire["payload"].as_str().expect("payload"),
         );
         channel_row["channel"] = json!(CHANNEL);
-        let item = InboxRow::from_value(&channel_row, Some(62)).expect("row");
+        let item = InboxRow::from_value(&channel_row, Some(63)).expect("row");
         assert_eq!(t.second.handle_row(&item, 170), RowOutcome::Stored);
         let rows = t.second.history().messages(&conversation_id(NET, CHANNEL));
         assert_eq!(rows.len(), 1);

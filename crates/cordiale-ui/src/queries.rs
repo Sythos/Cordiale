@@ -276,6 +276,8 @@ pub(crate) fn show_query_window(
         ui.set_current_query(true);
         ui.set_current_query_ready(query_ready);
         ui.set_current_query_e2e(query_e2e);
+        ui.set_current_query_locked(false);
+        ui.set_current_query_cipher_view(false);
         ui.set_current_query_e2e_state(chat_state.into());
         ui.set_current_query_e2e_start_confirm_open(false);
         ui.set_current_query_peer_nick(peer_nick.into());
