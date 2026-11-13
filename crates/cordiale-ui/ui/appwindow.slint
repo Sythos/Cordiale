@@ -5903,6 +5903,24 @@ export component AppWindow inherits Window {
                 accessible-label: @tr("Commands");
 
                 ListView {
+                    // Keeps the highlighted row in view when Up or Down moves
+                    // it past the six rows shown, and after a new filter.
+                    property <int> selected-row: command-picker-index;
+                    property <int> row-count: command-suggestions.length;
+                    function reveal-selected() {
+                        if self.visible-height > 0px {
+                            let top = selected-row * 26px;
+                            if top < -self.content-y {
+                                self.content-y = -top;
+                            }
+                            if top + 26px > -self.content-y + self.visible-height {
+                                self.content-y = self.visible-height - top - 26px;
+                            }
+                        }
+                    }
+                    changed selected-row => { reveal-selected(); }
+                    changed row-count => { reveal-selected(); }
+
                     for suggestion[index] in command-suggestions : Rectangle {
                         height: 26px;
                         background: index == command-picker-index ? #80808033 : transparent;
