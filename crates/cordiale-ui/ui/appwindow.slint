@@ -1458,6 +1458,9 @@ export component AppWindow inherits Window {
     pure callback chat-links(string, string, string, int) -> [string];
     // The link of a row text under a text cursor at a byte offset, or "".
     pure callback chat-link-at(string, int, string, string, int) -> string;
+    // The link of a row text under the pointer (x, y in the text area, the
+    // wrap width, the line height, the width of the longest line), or "".
+    pure callback chat-link-hover(string, length, length, length, length, length, string, string, int) -> string;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -5539,6 +5542,20 @@ export component AppWindow inherits Window {
                                     // text input holds the mouse.
                                     property <length> pointer-x: row-touch.mouse-x;
                                     property <length> pointer-y: row-touch.mouse-y;
+                                    // The link under the pointer, estimated from the
+                                    // measured width of the text. Only the link area
+                                    // below uses it, so the link cursor shows over
+                                    // the link and nowhere else.
+                                    property <string> hover-link: chat-link-hover(
+                                        line.overlay-body,
+                                        pointer-x - overlay-box.x,
+                                        pointer-y - overlay-box.y,
+                                        overlay-box.width,
+                                        hover-line-probe.preferred-height,
+                                        hover-text-probe.preferred-width,
+                                        line.channel-network,
+                                        line.channel-types,
+                                        line.channel-len);
                                     function arm-link(cursor: int, anchor: int) {
                                         // Any new cursor or selection is not the one the
                                         // opened link left, so the pointer must not reset it.
@@ -5591,6 +5608,31 @@ export component AppWindow inherits Window {
                                     preferred-width: styled-body.preferred-width;
                                     preferred-height: styled-body.preferred-height;
                                     min-height: styled-body.preferred-height;
+
+                                    // Hidden probes: the width of the text on one line
+                                    // and the height of one line, in the font of the
+                                    // text input.
+                                    hover-text-probe := Text {
+                                        x: 0px;
+                                        y: 0px;
+                                        text: line.overlay-body;
+                                        wrap: no-wrap;
+                                        color: transparent;
+                                        font-italic: line.italic;
+                                        font-weight: line.body-bold ? 700 : 400;
+                                        accessible-role: AccessibleRole.none;
+                                    }
+
+                                    hover-line-probe := Text {
+                                        x: 0px;
+                                        y: 0px;
+                                        text: "M";
+                                        wrap: no-wrap;
+                                        color: transparent;
+                                        font-italic: line.italic;
+                                        font-weight: line.body-bold ? 700 : 400;
+                                        accessible-role: AccessibleRole.none;
+                                    }
 
                                     styled-body := StyledText {
                                         x: 0px;
@@ -5659,6 +5701,31 @@ export component AppWindow inherits Window {
                                             if !row.ranging {
                                                 chat-sel-anchor = -1;
                                                 chat-sel-focus = -1;
+                                            }
+                                        }
+                                    }
+
+                                    // In front of the text input, and live only while
+                                    // the pointer is over a link: it shows the link
+                                    // cursor and opens the link on a click. Anywhere
+                                    // else it is off, so the text input keeps the
+                                    // text cursor, the clicks and the selection.
+                                    link-hover-area := TouchArea {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: parent.width;
+                                        height: parent.height;
+                                        enabled: overlay-box.hover-link != "";
+                                        mouse-cursor: MouseCursor.pointer;
+                                        clicked => {
+                                            chat-link-clicked(overlay-box.hover-link);
+                                        }
+                                        pointer-event(event) => {
+                                            if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && line.nick != "" {
+                                                row-menu.show-menu({
+                                                    x: overlay-box.x + self.mouse-x - row-menu.x,
+                                                    y: overlay-box.y + self.mouse-y - row-menu.y,
+                                                });
                                             }
                                         }
                                     }

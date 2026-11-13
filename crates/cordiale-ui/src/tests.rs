@@ -5547,6 +5547,65 @@ fn link_at_offset_finds_the_link_under_the_cursor() {
     assert_eq!(link_at_offset(text, 500), "");
 }
 
+/// The weight of a text, as the hover hit-test measures it.
+fn hover_weight(text: &str) -> f32 {
+    text.chars().map(link_hover::glyph_weight).sum()
+}
+
+#[test]
+fn link_hover_shows_the_link_only_over_its_characters() {
+    // The measured width of the row equals its weight: one unit per unit.
+    let text = "see https://a.io/x and more";
+    let total = hover_weight(text);
+    let before = hover_weight("see ");
+    let link = hover_weight("https://a.io/x");
+    let at =
+        |x: f32, y: f32| link_hover::link_at_point(text, x, y, total + 50.0, 10.0, total, None);
+    // Plain text before the link keeps the text cursor.
+    assert_eq!(at(before - 0.5, 5.0), "");
+    assert_eq!(at(1.0, 5.0), "");
+    // The cursor changes at the two edges of the link.
+    assert_eq!(at(before + 0.1, 5.0), "https://a.io/x");
+    assert_eq!(at(before + link / 2.0, 5.0), "https://a.io/x");
+    assert_eq!(at(before + link - 0.1, 5.0), "https://a.io/x");
+    assert_eq!(at(before + link + 0.1, 5.0), "");
+    // Empty space after the text and below it has no link cursor.
+    assert_eq!(at(total + 20.0, 5.0), "");
+    assert_eq!(at(before + 1.0, 25.0), "");
+    assert_eq!(at(-1.0, 5.0), "");
+    assert_eq!(at(before + 1.0, -1.0), "");
+}
+
+#[test]
+fn link_hover_follows_a_wrapped_link_and_ignores_bad_sizes() {
+    let text = "aaaa bbbb https://a.io/x";
+    let total = hover_weight(text);
+    let link = hover_weight("https://a.io/x");
+    // A row that is too narrow for the words and the link together: the link
+    // starts the second line.
+    let width = link + 1.0;
+    let at = |x: f32, y: f32| link_hover::link_at_point(text, x, y, width, 10.0, total, None);
+    assert_eq!(at(1.0, 5.0), "");
+    assert_eq!(at(1.0, 15.0), "https://a.io/x");
+    assert_eq!(at(link - 0.5, 15.0), "https://a.io/x");
+    assert_eq!(at(link + 0.5, 15.0), "");
+    // The first line has no link where the link used to be.
+    assert_eq!(at(hover_weight("aaaa bbbb ") + 1.0, 5.0), "");
+    // A row with no link, or a size that is not usable, gives no link.
+    assert_eq!(
+        link_hover::link_at_point("plain text", 1.0, 5.0, 100.0, 10.0, 20.0, None),
+        ""
+    );
+    assert_eq!(
+        link_hover::link_at_point(text, 1.0, 15.0, 0.0, 10.0, total, None),
+        ""
+    );
+    assert_eq!(
+        link_hover::link_at_point(text, f32::NAN, 5.0, width, 10.0, total, None),
+        ""
+    );
+}
+
 fn channel_context(network: &str) -> ChannelLinkContext {
     ChannelLinkContext {
         network: network.to_string(),

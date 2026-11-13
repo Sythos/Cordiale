@@ -411,6 +411,21 @@ pub(crate) fn register_passkey_callbacks(
         let context = row_channel_context(&network, &types, len);
         link_at_offset_in(&text, offset, context.as_ref()).into()
     });
+    ui.on_chat_link_hover(
+        |text, x, y, width, line_height, text_width, network, types, len| {
+            let context = row_channel_context(&network, &types, len);
+            link_hover::link_at_point(
+                &text,
+                x,
+                y,
+                width,
+                line_height,
+                text_width,
+                context.as_ref(),
+            )
+            .into()
+        },
+    );
     ui.on_format_chat_range(|lines, first, last| chat_range_text(&lines, first, last).into());
     let weak_for_codes = ui.as_weak();
     ui.on_security_copy_recovery_codes(move || {

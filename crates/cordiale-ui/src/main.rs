@@ -42,6 +42,7 @@ mod home;
 mod input_history;
 #[cfg(all(feature = "ctap-hid", any(target_os = "linux", target_os = "macos")))]
 mod key_prompt;
+mod link_hover;
 mod media_demux;
 mod media_player;
 mod media_save;
