@@ -1198,6 +1198,11 @@ struct WhoisBundle {
     /// Authenticated Grappa path to the cached peer avatar, not a third-party
     /// URL; may arrive later through `whois_avatar_ready`.
     avatar_url: Option<String>,
+    /// `grappa_client_ips` (v62): live socket addresses, only valid IP texts.
+    /// Absent, `null` or malformed means `None`.
+    client_ips: Option<Vec<std::net::IpAddr>>,
+    /// `grappa_client_last_known_ip` (v62): newest login address, if valid.
+    client_last_known_ip: Option<std::net::IpAddr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

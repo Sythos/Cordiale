@@ -10235,6 +10235,63 @@ fn parse_whois_bundle_is_strict_per_field() {
 }
 
 #[test]
+fn whois_bundle_shows_client_ips_only_when_the_server_sends_them() {
+    let topic = "grappa:user:vjt";
+    let rows_of = |payload: &Value| {
+        let bundle = parse_whois_bundle(payload, topic, "vjt").expect("valid bundle");
+        whois_bundle_view(&bundle).rows
+    };
+    let has = |rows: &[(String, String)], key: &str| rows.iter().any(|(label, _)| label == key);
+
+    // Older server: both keys absent, no address rows.
+    let rows = rows_of(&whois_bundle_json());
+    assert!(!has(&rows, "whois-client-ipv4"));
+    assert!(!has(&rows, "whois-client-ipv6"));
+    assert!(!has(&rows, "whois-client-last-ip"));
+
+    // Not entitled: both keys null.
+    let mut payload = whois_bundle_json();
+    payload["grappa_client_ips"] = Value::Null;
+    payload["grappa_client_last_known_ip"] = Value::Null;
+    let rows = rows_of(&payload);
+    assert!(!has(&rows, "whois-client-ipv4"));
+    assert!(!has(&rows, "whois-client-last-ip"));
+
+    // IPv4 and IPv6 each get their own row.
+    payload["grappa_client_ips"] = serde_json::json!(["2001:db8::7", "203.0.113.9"]);
+    let rows = rows_of(&payload);
+    assert!(rows.contains(&("whois-client-ipv4".to_string(), "203.0.113.9".to_string())));
+    assert!(rows.contains(&("whois-client-ipv6".to_string(), "2001:db8::7".to_string())));
+    assert!(!has(&rows, "whois-client-last-ip"));
+
+    // Only IPv4: no IPv6 row.
+    payload["grappa_client_ips"] = serde_json::json!(["203.0.113.9"]);
+    assert!(!has(&rows_of(&payload), "whois-client-ipv6"));
+
+    // No open socket: the last known login address shows.
+    payload["grappa_client_ips"] = serde_json::json!([]);
+    payload["grappa_client_last_known_ip"] = serde_json::json!("198.51.100.4");
+    let rows = rows_of(&payload);
+    assert!(rows.contains(&(
+        "whois-client-last-ip".to_string(),
+        "198.51.100.4".to_string()
+    )));
+    assert!(!has(&rows, "whois-client-ipv4"));
+
+    // Malformed optional values never reject the bundle and never show.
+    payload["grappa_client_ips"] = serde_json::json!(["not-an-ip", 7, "203.0.113.9"]);
+    payload["grappa_client_last_known_ip"] = serde_json::json!("not-an-ip");
+    let rows = rows_of(&payload);
+    assert!(rows.contains(&("whois-client-ipv4".to_string(), "203.0.113.9".to_string())));
+    assert!(!has(&rows, "whois-client-last-ip"));
+    payload["grappa_client_ips"] = serde_json::json!("203.0.113.9");
+    payload["grappa_client_last_known_ip"] = serde_json::json!(5);
+    let rows = rows_of(&payload);
+    assert!(!has(&rows, "whois-client-ipv4"));
+    assert!(!has(&rows, "whois-client-last-ip"));
+}
+
+#[test]
 fn whois_avatar_ready_patches_only_the_matching_open_card() {
     use cordiale_core::isupport::CaseMapping;
     let topic = "grappa:user:vjt";
