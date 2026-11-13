@@ -1634,9 +1634,9 @@ fn service_command_has_secret(command: &str) -> bool {
 
 impl ServiceCommandHistory {
     /// Stores one accepted command. A command with a secret is dropped.
+    /// An active history walk and its saved draft stay as they are: the
+    /// walk ends by itself when the input stops showing the selected command.
     fn record(&mut self, command: &str) {
-        self.cursor = None;
-        self.draft.clear();
         let command = command.trim();
         if command.is_empty() || service_command_has_secret(command) {
             return;
@@ -1647,6 +1647,8 @@ impl ServiceCommandHistory {
         self.entries.push(command.to_string());
         if self.entries.len() > SERVICE_HISTORY_LIMIT {
             self.entries.remove(0);
+            // The entries moved one place: keep the cursor on the same entry.
+            self.cursor = self.cursor.and_then(|cursor| cursor.checked_sub(1));
         }
     }
 
