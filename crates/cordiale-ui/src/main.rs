@@ -1582,6 +1582,120 @@ struct ServiceConsoleState {
     lines: Vec<String>,
 }
 
+/// Number of commands the Services console remembers.
+const SERVICE_HISTORY_LIMIT: usize = 8;
+
+/// Words that mark a service command as one that carries a secret.
+const SERVICE_SECRET_WORDS: &[&str] = &[
+    "identify",
+    "id",
+    "login",
+    "logon",
+    "auth",
+    "authenticate",
+    "password",
+    "pass",
+    "passwd",
+    "register",
+    "recover",
+    "resetpass",
+    "sendpass",
+    "confirm",
+    "verify",
+    "group",
+    "ghost",
+    "regain",
+    "release",
+    "oper",
+];
+
+thread_local! {
+    /// The command history of the open Services console (UI thread only).
+    /// Nothing writes it to disk or to a log.
+    static SERVICE_HISTORY: RefCell<ServiceCommandHistory> =
+        RefCell::new(ServiceCommandHistory::default());
+}
+
+/// Short in-memory command history of one open Services console.
+#[derive(Default)]
+struct ServiceCommandHistory {
+    entries: Vec<String>,
+    cursor: Option<usize>,
+    draft: String,
+}
+
+/// True when the command can carry a password or another secret.
+fn service_command_has_secret(command: &str) -> bool {
+    command.split_whitespace().any(|word| {
+        let word = word.trim_start_matches('/').to_ascii_lowercase();
+        SERVICE_SECRET_WORDS.contains(&word.as_str())
+    })
+}
+
+impl ServiceCommandHistory {
+    /// Stores one accepted command. A command with a secret is dropped.
+    fn record(&mut self, command: &str) {
+        self.cursor = None;
+        self.draft.clear();
+        let command = command.trim();
+        if command.is_empty() || service_command_has_secret(command) {
+            return;
+        }
+        if self.entries.last().map(String::as_str) == Some(command) {
+            return;
+        }
+        self.entries.push(command.to_string());
+        if self.entries.len() > SERVICE_HISTORY_LIMIT {
+            self.entries.remove(0);
+        }
+    }
+
+    /// Forgets the stored commands and the draft.
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Ends the walk when the input no longer shows the selected command:
+    /// the user edited it, so the text in the input is the new draft.
+    fn sync_with_input(&mut self, current: &str) {
+        if let Some(cursor) = self.cursor {
+            if self.entries.get(cursor).map(String::as_str) != Some(current) {
+                self.cursor = None;
+            }
+        }
+    }
+
+    /// Moves to the next older command. `current` is the text in the input.
+    fn older(&mut self, current: &str) -> Option<String> {
+        self.sync_with_input(current);
+        if self.entries.is_empty() {
+            return None;
+        }
+        let index = match self.cursor {
+            None => {
+                self.draft = current.to_string();
+                self.entries.len() - 1
+            }
+            Some(index) => index.saturating_sub(1),
+        };
+        self.cursor = Some(index);
+        Some(self.entries[index].clone())
+    }
+
+    /// Moves to the next newer command, then back to the saved draft.
+    fn newer(&mut self, current: &str) -> Option<String> {
+        self.sync_with_input(current);
+        let index = self.cursor?;
+        if index + 1 < self.entries.len() {
+            self.cursor = Some(index + 1);
+            Some(self.entries[index + 1].clone())
+        } else {
+            self.cursor = None;
+            Some(std::mem::take(&mut self.draft))
+        }
+    }
+}
+
 impl WorkerState {
     fn new() -> Self {
         let settings = persistence::load_settings().unwrap_or_default();

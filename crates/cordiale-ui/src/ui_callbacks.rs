@@ -1247,8 +1247,25 @@ pub(crate) fn register_composer_callbacks(
         let _ = tx_for_service_console.send(WorkerCommand::ServiceConsoleSend(command.to_string()));
     });
 
+    // Up/Down in the console input. This runs on the UI thread and returns
+    // the text for the input, so a pending send cannot overwrite later edits.
+    // It never sends the command.
+    ui.on_service_console_history_requested(move |older, current| {
+        let current = current.to_string();
+        let text = SERVICE_HISTORY.with(|history| {
+            let mut history = history.borrow_mut();
+            if older {
+                history.older(&current)
+            } else {
+                history.newer(&current)
+            }
+        });
+        text.unwrap_or(current).into()
+    });
+
     let tx_for_service_console_close = worker_tx.clone();
     ui.on_service_console_close_requested(move || {
+        SERVICE_HISTORY.with(|history| history.borrow_mut().clear());
         let _ = tx_for_service_console_close.send(WorkerCommand::ServiceConsoleClose);
     });
 
