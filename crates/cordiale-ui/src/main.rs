@@ -309,12 +309,6 @@ enum WorkerCommand {
     },
     /// Sends a command from the centered Services console.
     ServiceConsoleSend(String),
-    /// Selects an older (`true`) or newer command in the Services console
-    /// input. It never sends the command. The text is the current draft.
-    ServiceConsoleHistory {
-        older: bool,
-        draft: String,
-    },
     /// Stops mirroring notices into the Services console.
     ServiceConsoleClose,
     /// A picked file and what was chosen for it.
@@ -1579,7 +1573,6 @@ struct ServiceConsoleState {
     since_id: Option<i64>,
     seen_ids: std::collections::HashSet<i64>,
     lines: Vec<String>,
-    history: ServiceCommandHistory,
 }
 
 /// Number of commands the Services console remembers.
@@ -1602,14 +1595,21 @@ const SERVICE_SECRET_WORDS: &[&str] = &[
     "sendpass",
     "confirm",
     "verify",
+    "group",
     "ghost",
     "regain",
     "release",
     "oper",
 ];
 
-/// Short in-memory command history of one open Services console. It lives
-/// only in `ServiceConsoleState`: nothing writes it to disk or to a log.
+thread_local! {
+    /// The command history of the open Services console (UI thread only).
+    /// Nothing writes it to disk or to a log.
+    static SERVICE_HISTORY: RefCell<ServiceCommandHistory> =
+        RefCell::new(ServiceCommandHistory::default());
+}
+
+/// Short in-memory command history of one open Services console.
 #[derive(Default)]
 struct ServiceCommandHistory {
     entries: Vec<String>,
@@ -1643,8 +1643,24 @@ impl ServiceCommandHistory {
         }
     }
 
-    /// Moves to the next older command. `current` is the draft in the input.
+    /// Forgets the stored commands and the draft.
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Ends the walk when the input no longer shows the selected command:
+    /// the user edited it, so the text in the input is the new draft.
+    fn sync_with_input(&mut self, current: &str) {
+        if let Some(cursor) = self.cursor {
+            if self.entries.get(cursor).map(String::as_str) != Some(current) {
+                self.cursor = None;
+            }
+        }
+    }
+
+    /// Moves to the next older command. `current` is the text in the input.
     fn older(&mut self, current: &str) -> Option<String> {
+        self.sync_with_input(current);
         if self.entries.is_empty() {
             return None;
         }
@@ -1660,7 +1676,8 @@ impl ServiceCommandHistory {
     }
 
     /// Moves to the next newer command, then back to the saved draft.
-    fn newer(&mut self) -> Option<String> {
+    fn newer(&mut self, current: &str) -> Option<String> {
+        self.sync_with_input(current);
         let index = self.cursor?;
         if index + 1 < self.entries.len() {
             self.cursor = Some(index + 1);
@@ -2222,20 +2239,6 @@ async fn run_worker(
                     }
                     Some(WorkerCommand::ServiceConsoleSend(command)) => {
                         send_service_console_command(&mut state, &ui, command, true).await;
-                    }
-                    Some(WorkerCommand::ServiceConsoleHistory { older, draft }) => {
-                        if let Some(console) = state.service_console.as_mut() {
-                            let text = if older {
-                                console.history.older(&draft)
-                            } else {
-                                console.history.newer()
-                            };
-                            if let Some(text) = text {
-                                let _ = ui.upgrade_in_event_loop(move |ui| {
-                                    ui.set_service_console_command(text.into());
-                                });
-                            }
-                        }
                     }
                     Some(WorkerCommand::ServiceConsoleClose) => {
                         state.service_console = None;

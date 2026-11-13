@@ -588,10 +588,10 @@ async fn open_service_console(
         since_id,
         seen_ids: std::collections::HashSet::new(),
         lines: Vec::new(),
-        history: Default::default(),
     });
     let service_for_ui = service.clone();
     let _ = ui.upgrade_in_event_loop(move |ui| {
+        crate::SERVICE_HISTORY.with(|history| history.borrow_mut().clear());
         ui.set_service_console_service(service_for_ui.into());
         ui.set_service_console_output("".into());
         ui.set_service_console_command("".into());
@@ -637,14 +637,16 @@ pub(crate) async fn send_service_console_command(
         Ok(()) => {
             // Only a command the user sent and the server accepted enters the
             // history, and only while the same console is still open.
-            if clear_after_success {
-                if let Some(console) = state.service_console.as_mut() {
-                    if console.network == network && console.service == service {
-                        console.history.record(&command_for_history);
-                    }
-                }
-            }
+            let same_console = state
+                .service_console
+                .as_ref()
+                .is_some_and(|console| console.network == network && console.service == service);
+            let record = clear_after_success && same_console;
             let _ = ui.upgrade_in_event_loop(move |ui| {
+                if record && ui.get_service_console_open() {
+                    crate::SERVICE_HISTORY
+                        .with(|history| history.borrow_mut().record(&command_for_history));
+                }
                 let current_draft = ui.get_service_console_command().to_string();
                 if crate::should_clear_service_console_draft(
                     &current_draft,

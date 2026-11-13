@@ -10,7 +10,6 @@ fn services_console_captures_only_fresh_notices_from_its_service() {
         since_id: Some(40),
         seen_ids: std::collections::HashSet::new(),
         lines: Vec::new(),
-        history: Default::default(),
     };
     let casemapping = cordiale_core::isupport::CaseMapping::Rfc1459;
     let reply = serde_json::json!({
@@ -82,7 +81,6 @@ fn services_console_does_not_append_the_same_message_twice() {
         since_id: None,
         seen_ids: std::collections::HashSet::new(),
         lines: Vec::new(),
-        history: Default::default(),
     };
     assert_eq!(
         record_service_console_line(&mut console, 71, "First line".into()),
@@ -117,12 +115,15 @@ fn services_history_keeps_eight_commands_and_walks_both_ways() {
     assert_eq!(history.entries.len(), SERVICE_HISTORY_LIMIT);
     assert_eq!(history.entries[0], "info 2");
     assert_eq!(history.older("draft").as_deref(), Some("info 9"));
-    assert_eq!(history.older("ignored").as_deref(), Some("info 8"));
+    assert_eq!(history.older("info 9").as_deref(), Some("info 8"));
+    let mut shown = "info 8".to_string();
     for _ in 0..10 {
-        history.older("ignored");
+        if let Some(text) = history.older(&shown) {
+            shown = text;
+        }
     }
-    assert_eq!(history.older("ignored").as_deref(), Some("info 2"));
-    assert_eq!(history.newer().as_deref(), Some("info 3"));
+    assert_eq!(shown, "info 2");
+    assert_eq!(history.newer(&shown).as_deref(), Some("info 3"));
 }
 
 #[test]
@@ -130,19 +131,29 @@ fn services_history_returns_the_draft_after_the_newest_command() {
     let mut history = ServiceCommandHistory::default();
     history.record("info one");
     history.record("info two");
-    assert_eq!(history.newer(), None);
+    assert_eq!(history.newer("half typed"), None);
     assert_eq!(history.older("half typed").as_deref(), Some("info two"));
-    assert_eq!(history.older("x").as_deref(), Some("info one"));
-    assert_eq!(history.newer().as_deref(), Some("info two"));
-    assert_eq!(history.newer().as_deref(), Some("half typed"));
-    assert_eq!(history.newer(), None);
+    assert_eq!(history.older("info two").as_deref(), Some("info one"));
+    assert_eq!(history.newer("info one").as_deref(), Some("info two"));
+    assert_eq!(history.newer("info two").as_deref(), Some("half typed"));
+    assert_eq!(history.newer("half typed"), None);
+}
+
+#[test]
+fn services_history_treats_an_edited_input_as_the_new_draft() {
+    let mut history = ServiceCommandHistory::default();
+    history.record("info one");
+    history.record("info two");
+    assert_eq!(history.older("a").as_deref(), Some("info two"));
+    assert_eq!(history.older("edited").as_deref(), Some("info two"));
+    assert_eq!(history.newer("info two").as_deref(), Some("edited"));
 }
 
 #[test]
 fn services_history_is_empty_without_commands() {
     let mut history = ServiceCommandHistory::default();
     assert_eq!(history.older("draft"), None);
-    assert_eq!(history.newer(), None);
+    assert_eq!(history.newer("draft"), None);
 }
 
 #[test]
@@ -155,6 +166,7 @@ fn services_history_drops_commands_with_secrets() {
         "register secret me@example.org",
         "/msg NickServ ghost nick secret",
         "login secret",
+        "group Alice s3cr3t",
     ] {
         history.record(command);
     }

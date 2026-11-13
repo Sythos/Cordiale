@@ -2085,7 +2085,7 @@ export component AppWindow inherits Window {
     in-out property <string> service-console-command: "";
     in-out property <bool> service-console-send-failed: false;
     callback service-console-send-requested(string);
-    callback service-console-history-requested(bool, string);
+    callback service-console-history-requested(bool, string) -> string;
     callback service-console-close-requested();
     // Offered when pasting text of several lines into the one-line compose
     // box.
@@ -10167,7 +10167,10 @@ export component AppWindow inherits Window {
                             // they never send the command.
                             capture-key-pressed(event) => {
                                 if event.text == Key.UpArrow || event.text == Key.DownArrow {
-                                    service-console-history-requested(event.text == Key.UpArrow, service-console-command);
+                                    let recalled = service-console-history-requested(event.text == Key.UpArrow, service-console-command);
+                                    if recalled != service-console-command {
+                                        service-console-command = recalled;
+                                    }
                                     return EventResult.accept;
                                 }
                                 return EventResult.reject;
