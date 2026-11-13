@@ -5744,6 +5744,12 @@ export component AppWindow inherits Window {
                                                 overlay-input.set-selection-offsets(overlay-box.press-offset, overlay-box.offset-at-pointer());
                                             }
                                         }
+                                        // A double click is not a link click: this
+                                        // area takes both presses, so the pending
+                                        // link is dropped here.
+                                        double-clicked => {
+                                            overlay-box.pending-link = "";
+                                        }
                                         pointer-event(event) => {
                                             if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
                                                 overlay-box.press-offset = overlay-box.offset-at-pointer();
