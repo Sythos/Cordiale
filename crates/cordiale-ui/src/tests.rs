@@ -107,6 +107,76 @@ fn services_console_clears_only_the_command_that_was_submitted() {
 }
 
 #[test]
+fn services_history_keeps_eight_commands_and_walks_both_ways() {
+    let mut history = ServiceCommandHistory::default();
+    for index in 0..10 {
+        history.record(&format!("info {index}"));
+    }
+    assert_eq!(history.entries.len(), SERVICE_HISTORY_LIMIT);
+    assert_eq!(history.entries[0], "info 2");
+    assert_eq!(history.older("draft").as_deref(), Some("info 9"));
+    assert_eq!(history.older("info 9").as_deref(), Some("info 8"));
+    let mut shown = "info 8".to_string();
+    for _ in 0..10 {
+        if let Some(text) = history.older(&shown) {
+            shown = text;
+        }
+    }
+    assert_eq!(shown, "info 2");
+    assert_eq!(history.newer(&shown).as_deref(), Some("info 3"));
+}
+
+#[test]
+fn services_history_returns_the_draft_after_the_newest_command() {
+    let mut history = ServiceCommandHistory::default();
+    history.record("info one");
+    history.record("info two");
+    assert_eq!(history.newer("half typed"), None);
+    assert_eq!(history.older("half typed").as_deref(), Some("info two"));
+    assert_eq!(history.older("info two").as_deref(), Some("info one"));
+    assert_eq!(history.newer("info one").as_deref(), Some("info two"));
+    assert_eq!(history.newer("info two").as_deref(), Some("half typed"));
+    assert_eq!(history.newer("half typed"), None);
+}
+
+#[test]
+fn services_history_treats_an_edited_input_as_the_new_draft() {
+    let mut history = ServiceCommandHistory::default();
+    history.record("info one");
+    history.record("info two");
+    assert_eq!(history.older("a").as_deref(), Some("info two"));
+    assert_eq!(history.older("edited").as_deref(), Some("info two"));
+    assert_eq!(history.newer("info two").as_deref(), Some("edited"));
+}
+
+#[test]
+fn services_history_is_empty_without_commands() {
+    let mut history = ServiceCommandHistory::default();
+    assert_eq!(history.older("draft"), None);
+    assert_eq!(history.newer("draft"), None);
+}
+
+#[test]
+fn services_history_drops_commands_with_secrets() {
+    let mut history = ServiceCommandHistory::default();
+    for command in [
+        "identify secret",
+        "IDENTIFY mynick secret",
+        "set password secret",
+        "register secret me@example.org",
+        "/msg NickServ ghost nick secret",
+        "login secret",
+        "group Alice s3cr3t",
+    ] {
+        history.record(command);
+    }
+    assert!(history.entries.is_empty());
+    history.record("info #rust");
+    history.record("info #rust");
+    assert_eq!(history.entries, vec!["info #rust".to_string()]);
+}
+
+#[test]
 fn statusmsg_targets_peel_the_longest_prefix_run() {
     let prefixes = cordiale_core::isupport::prefix_symbol_order(None);
     assert_eq!(
