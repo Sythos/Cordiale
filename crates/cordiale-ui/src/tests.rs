@@ -14738,6 +14738,21 @@ fn a_locked_window_without_an_engine_sends_nothing() {
 }
 
 #[test]
+fn a_multi_line_text_in_a_locked_window_keeps_every_line_break() {
+    let text = "first\n\nthird line\n  indented";
+    match classify_locked_input(text) {
+        LockedInput::Text(sent) => assert_eq!(sent, text),
+        _ => panic!("a plain text must stay a text"),
+    }
+}
+
+#[test]
+fn compose_lines_flatten_for_windows_that_are_not_encrypted() {
+    assert_eq!(flatten_compose_lines("one line"), "one line");
+    assert_eq!(flatten_compose_lines("a\nb\r\n\nc  \n"), "a b c");
+}
+
+#[test]
 fn query_without_a_nick_closes_the_locked_window() {
     for command in ["/query", "/q"] {
         let mut state = peer_link_state(&[("libera", "bob")]);
