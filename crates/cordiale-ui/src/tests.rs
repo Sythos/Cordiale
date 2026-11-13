@@ -127,6 +127,16 @@ fn services_history_keeps_eight_commands_and_walks_both_ways() {
 }
 
 #[test]
+fn services_history_keeps_the_draft_when_a_pending_send_is_recorded() {
+    let mut history = ServiceCommandHistory::default();
+    history.record("info one");
+    assert_eq!(history.older("my draft").as_deref(), Some("info one"));
+    history.record("info two");
+    assert_eq!(history.newer("info one").as_deref(), Some("info two"));
+    assert_eq!(history.newer("info two").as_deref(), Some("my draft"));
+}
+
+#[test]
 fn services_history_returns_the_draft_after_the_newest_command() {
     let mut history = ServiceCommandHistory::default();
     history.record("info one");
@@ -10359,6 +10369,54 @@ fn whois_bundle_shows_client_ips_only_when_the_server_sends_them() {
     let rows = rows_of(&payload);
     assert!(!has(&rows, "whois-client-ipv4"));
     assert!(!has(&rows, "whois-client-last-ip"));
+}
+
+#[test]
+fn whois_client_ips_leave_the_other_rows_and_fields_unchanged() {
+    let topic = "grappa:user:vjt";
+    let plain = parse_whois_bundle(&whois_bundle_json(), topic, "vjt").expect("valid bundle");
+    let plain_rows = whois_bundle_view(&plain).rows;
+
+    let mut payload = whois_bundle_json();
+    payload["grappa_client_ips"] = serde_json::json!(["2001:db8::7", "203.0.113.9"]);
+    let with_ips = parse_whois_bundle(&payload, topic, "vjt").expect("valid bundle");
+    let view = whois_bundle_view(&with_ips);
+
+    // The model keeps the target, the account and the avatar as before.
+    assert_eq!(with_ips.target, plain.target);
+    assert_eq!(with_ips.account, plain.account);
+    assert_eq!(with_ips.avatar_url, plain.avatar_url);
+    assert_eq!(view.subject, "alice");
+
+    // Every earlier row stays in place; only the address rows are new.
+    let kept: Vec<_> = view
+        .rows
+        .iter()
+        .filter(|(label, _)| !label.starts_with("whois-client-"))
+        .cloned()
+        .collect();
+    assert_eq!(kept, plain_rows);
+    assert_eq!(view.rows.len(), plain_rows.len() + 2);
+
+    // The address rows only repeat the server values: the legacy actual
+    // address row is separate and no row holds an address from elsewhere.
+    payload["actually_ip"] = serde_json::json!("198.51.100.77");
+    let bundle = parse_whois_bundle(&payload, topic, "vjt").expect("valid bundle");
+    let rows = whois_bundle_view(&bundle).rows;
+    let value_of = |key: &str| {
+        rows.iter()
+            .find(|(label, _)| label == key)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(value_of("whois-actually").as_deref(), Some("198.51.100.77"));
+    assert_eq!(
+        value_of("whois-client-ipv4").as_deref(),
+        Some("203.0.113.9")
+    );
+    assert_eq!(
+        value_of("whois-client-ipv6").as_deref(),
+        Some("2001:db8::7")
+    );
 }
 
 #[test]
