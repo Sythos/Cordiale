@@ -877,7 +877,17 @@ per chiavi sconosciute); `PUT /admin/networks/:id/servers/:id` e
 `autojoin_channels`, `password`; cambiare password o `auth_method` ferma la
 sessione viva; dal protocollo 51 la riavvia (vedi §8, «Protocollo 51»); un server
 più vecchio la ferma soltanto e risponde `session_action: "stopped"`).
-Il cambio di `auth_method` non è esposto in UI.
+Il cambio di `auth_method` è esposto nell'editor delle credenziali (issue
+#744), come nella pagina admin utente di Cicchetto: un solo campo password e
+un selettore con `sasl`, `server_pass` e `none`, più il metodo che la
+credenziale ha già (`auto`, `nickserv_identify`) per non cambiarlo
+all'apertura. L'etichetta del campo segue il metodo (password SASL, PASS del
+server, password NickServ). Grappa rifiuta di proposito una chiave
+`server_pass` separata: ogni segreto viaggia come `password`. Il client invia
+`auth_method` solo se cambia e `password` solo se il campo non è vuoto, così
+un campo vuoto non cancella mai un segreto; con `none` non invia la password.
+Un nuovo metodo diverso da `none` senza password non parte, perché Grappa
+risponde `422`.
 
 Ogni entry (`AdminSession`/`AdminUser`/`AdminNetwork`) è tenuta come
 JSON opaco: i nomi dei campi sono confermati dal sorgente, non ogni
