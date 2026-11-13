@@ -635,6 +635,162 @@ pub fn parse(input: &str) -> Option<SlashCommand> {
     Some(command)
 }
 
+/// One command the compose line understands, for the command picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandInfo {
+    /// The main name, without the slash.
+    pub name: &'static str,
+    /// Other names that run the same command, without the slash.
+    pub aliases: &'static [&'static str],
+    /// The short syntax shown in the picker.
+    pub syntax: &'static str,
+    /// `true` when the UI answers the command before [`parse`] (views and
+    /// reply screens), so [`parse`] reports it as unknown.
+    pub local: bool,
+}
+
+const fn cmd(
+    name: &'static str,
+    aliases: &'static [&'static str],
+    syntax: &'static str,
+) -> CommandInfo {
+    CommandInfo {
+        name,
+        aliases,
+        syntax,
+        local: false,
+    }
+}
+
+const fn local_cmd(name: &'static str, syntax: &'static str) -> CommandInfo {
+    CommandInfo {
+        name,
+        aliases: &[],
+        syntax,
+        local: true,
+    }
+}
+
+/// Every command Cordiale runs: the ones [`parse`] knows and the ones the UI
+/// answers itself. Keep it in step with [`parse`]; a test checks it.
+pub const COMMANDS: &[CommandInfo] = &[
+    cmd("me", &[], "/me <text>"),
+    cmd("msg", &[], "/msg <nick> <text>"),
+    cmd("notice", &[], "/notice <target> <text>"),
+    cmd("query", &["q"], "/query [nick]"),
+    cmd("join", &["j"], "/join <#channel>[,<#channel>] [key]"),
+    cmd("part", &[], "/part [#channel] [reason]"),
+    cmd("cycle", &[], "/cycle [#channel] [reason]"),
+    cmd("topic", &[], "/topic [#channel] [text | -delete]"),
+    cmd("nick", &[], "/nick <nick>"),
+    cmd("away", &[], "/away [reason]"),
+    cmd("ctcp", &[], "/ctcp <target> <VERB> [args]"),
+    cmd("ping", &[], "/ping <target>"),
+    cmd("op", &[], "/op <nick> [nick...]"),
+    cmd("deop", &[], "/deop <nick> [nick...]"),
+    cmd("voice", &[], "/voice <nick> [nick...]"),
+    cmd("devoice", &[], "/devoice <nick> [nick...]"),
+    cmd("kick", &[], "/kick <nick> [reason]"),
+    cmd("kb", &["kickban"], "/kb <nick> [reason]"),
+    cmd("ban", &[], "/ban <nick-or-mask>"),
+    cmd("unban", &[], "/unban <mask>"),
+    cmd("mode", &[], "/mode [target] <modes> [params]"),
+    cmd("umode", &[], "/umode [modes]"),
+    cmd("names", &["n"], "/names [#channel]"),
+    cmd("quote", &["raw"], "/quote <raw IRC line>"),
+    cmd("oper", &[], "/oper <name> <password>"),
+    cmd("kill", &[], "/kill <nick> [reason]"),
+    cmd("stats", &[], "/stats [query]"),
+    cmd("rehash", &[], "/rehash"),
+    cmd("connect", &[], "/connect <network>"),
+    cmd("disconnect", &[], "/disconnect [network] [reason]"),
+    cmd("reconnect", &[], "/reconnect [network] [reason]"),
+    cmd("quit", &[], "/quit [reason]"),
+    cmd("e2e", &[], "/e2e pair | join <link> | accept | decline | code <nn> | cancel | devices | revoke <id> | channel | reset | forget"),
+    cmd("hilight", &["highlight"], "/hilight <pattern>"),
+    cmd("dehilight", &[], "/dehilight <pattern>"),
+    cmd("ignore", &[], "/ignore <nick!user@host> [text pattern]"),
+    cmd("unignore", &[], "/unignore <nick!user@host> [text pattern]"),
+    cmd("np", &[], "/np"),
+    cmd("beep", &[], "/beep [sound]"),
+    cmd("notify", &["watch"], "/notify <nick> [nick...]"),
+    cmd("alias", &[], "/alias <name> <expansion>"),
+    cmd("unalias", &[], "/unalias <name>"),
+    cmd("ame", &[], "/ame <text>"),
+    cmd("amsg", &[], "/amsg <text>"),
+    cmd("cs", &[], "/cs [text]"),
+    cmd("ns", &[], "/ns [text]"),
+    cmd("ms", &[], "/ms [text]"),
+    cmd("os", &[], "/os [text]"),
+    cmd("hs", &[], "/hs [text]"),
+    cmd("rs", &[], "/rs [text]"),
+    local_cmd("links", "/links"),
+    local_cmd("recover", "/recover"),
+    local_cmd("mentions", "/mentions"),
+    local_cmd("archive", "/archive"),
+    local_cmd("list", "/list [search]"),
+    local_cmd("who", "/who [#channel]"),
+    local_cmd("info", "/info"),
+    local_cmd("version", "/version"),
+    CommandInfo {
+        name: "whois",
+        aliases: &["w"],
+        syntax: "/whois <nick> [server]",
+        local: true,
+    },
+    local_cmd("whowas", "/whowas <nick>"),
+    local_cmd("banlist", "/banlist [#channel] [mode]"),
+    local_cmd("motd", "/motd [server]"),
+    local_cmd("admin", "/admin [server]"),
+    local_cmd("invite", "/invite <nick> [#channel]"),
+    local_cmd("lusers", "/lusers [mask [server]]"),
+];
+
+impl CommandInfo {
+    fn has_name(&self, word: &str) -> bool {
+        self.name == word || self.aliases.contains(&word)
+    }
+}
+
+/// The command a word (without the slash, any case) names, by main name or
+/// alias.
+pub fn command_info(word: &str) -> Option<&'static CommandInfo> {
+    let word = word.to_ascii_lowercase();
+    COMMANDS.iter().find(|info| info.has_name(&word))
+}
+
+/// The commands whose main name or alias starts with `prefix` (without the
+/// slash, any case), in table order.
+pub fn matching_commands(prefix: &str) -> Vec<&'static CommandInfo> {
+    let prefix = prefix.to_ascii_lowercase();
+    COMMANDS
+        .iter()
+        .filter(|info| {
+            info.name.starts_with(&prefix)
+                || info.aliases.iter().any(|alias| alias.starts_with(&prefix))
+        })
+        .collect()
+}
+
+/// The main name of the command a line runs, or `None` when the line is not
+/// a command Cordiale accepts: plain text, `//text`, an unknown command, or a
+/// known one with missing or malformed arguments. Only the name leaves this
+/// function; the arguments never do.
+pub fn accepted_command_name(line: &str) -> Option<&'static str> {
+    let rest = line.trim().strip_prefix('/')?;
+    let (word, args) = split_word(rest);
+    let info = command_info(word)?;
+    if info.local {
+        return Some(info.name);
+    }
+    // Parse under the main name, so the short forms `/n` and `/w` count.
+    let canonical = format!("/{} {args}", info.name);
+    match parse(&canonical) {
+        Some(SlashCommand::Usage(_) | SlashCommand::Unknown(_)) | None => None,
+        Some(_) => Some(info.name),
+    }
+}
+
 /// How many aliases may expand into one another before the chain is
 /// refused, as in Cicchetto.
 pub const MAX_ALIAS_DEPTH: usize = 5;
@@ -1324,5 +1480,66 @@ mod tests {
             Some(Notify(vec!["a".to_string(), "b".to_string()]))
         );
         assert!(matches!(parse("/notify"), Some(Usage(_))));
+    }
+
+    #[test]
+    fn command_table_matches_the_parser() {
+        for info in COMMANDS {
+            assert!(
+                info.syntax.starts_with(&format!("/{}", info.name)),
+                "{}",
+                info.name
+            );
+            if info.local {
+                assert!(matches!(
+                    parse(&format!("/{}", info.name)),
+                    Some(Unknown(_))
+                ));
+                continue;
+            }
+            for word in std::iter::once(&info.name).chain(info.aliases) {
+                let canonical = accepted_command_name(&format!("/{word}"));
+                let parsed = parse(&format!("/{word}"));
+                assert!(
+                    !matches!(parsed, Some(Unknown(_))) || *word == "n",
+                    "{word}"
+                );
+                assert!(canonical.is_none() || canonical == Some(info.name));
+            }
+        }
+    }
+
+    #[test]
+    fn command_names_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for info in COMMANDS {
+            for word in std::iter::once(&info.name).chain(info.aliases) {
+                assert!(seen.insert(*word), "{word}");
+            }
+        }
+    }
+
+    #[test]
+    fn matching_commands_filters_by_prefix() {
+        let names = |prefix: &str| -> Vec<&str> {
+            matching_commands(prefix).iter().map(|c| c.name).collect()
+        };
+        assert_eq!(names("").len(), COMMANDS.len());
+        assert_eq!(names("ki"), vec!["kick", "kb", "kill"]);
+        assert_eq!(names("JOI"), vec!["join"]);
+        assert!(names("frob").is_empty());
+    }
+
+    #[test]
+    fn accepted_command_name_ignores_arguments_and_bad_lines() {
+        assert_eq!(accepted_command_name("/join #rust"), Some("join"));
+        assert_eq!(accepted_command_name("/J #rust"), Some("join"));
+        assert_eq!(accepted_command_name("/n #rust"), Some("names"));
+        assert_eq!(accepted_command_name("/w bob"), Some("whois"));
+        assert_eq!(accepted_command_name("/links"), Some("links"));
+        assert_eq!(accepted_command_name("/join"), None);
+        assert_eq!(accepted_command_name("/frob x"), None);
+        assert_eq!(accepted_command_name("//join #rust"), None);
+        assert_eq!(accepted_command_name("hello"), None);
     }
 }
