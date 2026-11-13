@@ -7,9 +7,10 @@
 //! hit-test for it. The window measures the whole row once (the width of its
 //! longest line); this module spreads that width over the characters by
 //! their relative widths, wraps the words like the row does, and finds the
-//! character under the pointer. The result is an estimate, so the row only
-//! uses it to show the link cursor; the click itself still uses the cursor
-//! offset of the text input.
+//! character under the pointer. The result is an estimate, so the row uses
+//! it to show the link cursor and to give the text input the press that the
+//! link area took. A link opens only from the cursor offset of the text
+//! input, never from the estimated link itself.
 
 use super::*;
 
@@ -118,32 +119,19 @@ pub(crate) fn link_at_point(
     text_width: f32,
     channels: Option<&ChannelLinkContext>,
 ) -> String {
-    let sizes = [x, y, width, line_height, text_width];
-    if sizes.iter().any(|value| !value.is_finite()) || x < 0.0 || y < 0.0 {
-        return String::new();
-    }
-    if width <= 0.0 || line_height <= 0.0 || text_width <= 0.0 {
+    if x < 0.0 || y < 0.0 {
         return String::new();
     }
     let links = row_links(text, channels);
     if links.is_empty() {
         return String::new();
     }
-    let longest = text.split('\n').map(text_weight).fold(0.0f32, f32::max);
-    if longest <= 0.0 {
+    let Some(spot) = Spot::new(text, x, y, width, line_height, text_width) else {
         return String::new();
-    }
-    let scale = text_width / longest;
-    let line = (y / line_height).floor();
-    if line >= usize::MAX as f32 {
-        return String::new();
-    }
-    let line = line as usize;
-    let at = x / scale;
-    let layout_width = width / scale;
-    place_chars(text, layout_width)
+    };
+    spot.placed
         .into_iter()
-        .find(|c| c.line == line && c.start <= at && at < c.end)
+        .find(|c| c.line == spot.line && c.start <= spot.at && spot.at < c.end)
         .and_then(|c| {
             links
                 .into_iter()
@@ -151,4 +139,118 @@ pub(crate) fn link_at_point(
         })
         .map(|link| link.href)
         .unwrap_or_default()
+}
+
+/// The pointer on the placed characters of a row: the characters, the line
+/// under the pointer and the horizontal place on it, in the units of
+/// `glyph_weight`.
+struct Spot {
+    placed: Vec<Placed>,
+    line: usize,
+    at: f32,
+}
+
+impl Spot {
+    /// `None` for a size that is not usable. A pointer left of or above the
+    /// text counts as its start.
+    fn new(
+        text: &str,
+        x: f32,
+        y: f32,
+        width: f32,
+        line_height: f32,
+        text_width: f32,
+    ) -> Option<Self> {
+        let sizes = [x, y, width, line_height, text_width];
+        if sizes.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        if width <= 0.0 || line_height <= 0.0 || text_width <= 0.0 {
+            return None;
+        }
+        let longest = text.split('\n').map(text_weight).fold(0.0f32, f32::max);
+        if longest <= 0.0 {
+            return None;
+        }
+        let scale = text_width / longest;
+        let line = (y.max(0.0) / line_height).floor();
+        if line >= usize::MAX as f32 {
+            return None;
+        }
+        Some(Self {
+            placed: place_chars(text, width / scale),
+            line: line as usize,
+            at: x.max(0.0) / scale,
+        })
+    }
+}
+
+/// The byte offset of the text cursor for a press at a point of a row text:
+/// the nearest character edge, as the text input would put it. On a link the
+/// offset stays inside the link, so a click on any character of it reads the
+/// link, like a click that the text input handles itself. Past the end of a
+/// line it is the end of the line, below the text the end of the text. A size
+/// that is not usable gives 0.
+pub(crate) fn offset_at_point(
+    text: &str,
+    x: f32,
+    y: f32,
+    width: f32,
+    line_height: f32,
+    text_width: f32,
+    channels: Option<&ChannelLinkContext>,
+) -> usize {
+    let Some(spot) = Spot::new(text, x, y, width, line_height, text_width) else {
+        return 0;
+    };
+    let char_len = |byte: usize| text[byte..].chars().next().map_or(0, char::len_utf8);
+    let on_line: Vec<&Placed> = spot.placed.iter().filter(|c| c.line == spot.line).collect();
+    let (Some(first), Some(last)) = (on_line.first(), on_line.last()) else {
+        // A line with no character: the start of the next line with one.
+        return spot
+            .placed
+            .iter()
+            .find(|c| c.line > spot.line)
+            .map_or(text.len(), |c| c.byte);
+    };
+    let nearest = if spot.at < first.start {
+        first.byte
+    } else if spot.at >= last.end {
+        last.byte + char_len(last.byte)
+    } else {
+        let under = on_line
+            .iter()
+            .find(|c| c.start <= spot.at && spot.at < c.end)
+            .unwrap_or(last);
+        if spot.at < (under.start + under.end) / 2.0 {
+            under.byte
+        } else {
+            under.byte + char_len(under.byte)
+        }
+    };
+    // Keep the offset strictly inside the link under the point, if any.
+    let under_byte = on_line
+        .iter()
+        .find(|c| c.start <= spot.at && spot.at < c.end)
+        .map(|c| c.byte);
+    let link = under_byte.and_then(|byte| {
+        row_links(text, channels)
+            .into_iter()
+            .find(|link| link.range.start <= byte && byte < link.range.end)
+    });
+    match link {
+        Some(link) => {
+            let low = link.range.start + char_len(link.range.start);
+            let last_start = text[..link.range.end]
+                .char_indices()
+                .next_back()
+                .map_or(link.range.end, |(byte, _)| byte);
+            if low <= last_start {
+                nearest.clamp(low, last_start)
+            } else {
+                nearest
+            }
+        }
+        None => nearest,
+    }
 }

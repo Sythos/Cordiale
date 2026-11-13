@@ -426,6 +426,21 @@ pub(crate) fn register_passkey_callbacks(
             .into()
         },
     );
+    ui.on_chat_offset_hover(
+        |text, x, y, width, line_height, text_width, network, types, len| {
+            let context = row_channel_context(&network, &types, len);
+            let offset = link_hover::offset_at_point(
+                &text,
+                x,
+                y,
+                width,
+                line_height,
+                text_width,
+                context.as_ref(),
+            );
+            i32::try_from(offset).unwrap_or(i32::MAX)
+        },
+    );
     ui.on_format_chat_range(|lines, first, last| chat_range_text(&lines, first, last).into());
     let weak_for_codes = ui.as_weak();
     ui.on_security_copy_recovery_codes(move || {

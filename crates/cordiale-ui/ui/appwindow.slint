@@ -1461,6 +1461,8 @@ export component AppWindow inherits Window {
     // The link of a row text under the pointer (x, y in the text area, the
     // wrap width, the line height, the width of the longest line), or "".
     pure callback chat-link-hover(string, length, length, length, length, length, string, string, int) -> string;
+    // The text cursor offset the same estimate gives for a press on a link.
+    pure callback chat-offset-hover(string, length, length, length, length, length, string, string, int) -> int;
     callback chat-read-state-changed(bool, bool);
     // Leaving the chat for a screen it is expected to come back from
     // destroys the chat pane (see `chat-resume`); the other screens (sign-in,
@@ -5556,6 +5558,22 @@ export component AppWindow inherits Window {
                                         line.channel-network,
                                         line.channel-types,
                                         line.channel-len);
+                                    // The text cursor offset a press on a link began at.
+                                    property <int> press-offset: 0;
+                                    // The text cursor offset of the estimate under the
+                                    // pointer.
+                                    function offset-at-pointer() -> int {
+                                        return chat-offset-hover(
+                                            line.overlay-body,
+                                            link-hover-area.mouse-x,
+                                            link-hover-area.mouse-y,
+                                            overlay-box.width,
+                                            hover-line-probe.preferred-height,
+                                            hover-text-probe.preferred-width,
+                                            line.channel-network,
+                                            line.channel-types,
+                                            line.channel-len);
+                                    }
                                     function arm-link(cursor: int, anchor: int) {
                                         // Any new cursor or selection is not the one the
                                         // opened link left, so the pointer must not reset it.
@@ -5706,21 +5724,35 @@ export component AppWindow inherits Window {
                                     }
 
                                     // In front of the text input, and live only while
-                                    // the pointer is over a link: it shows the link
-                                    // cursor and opens the link on a click. Anywhere
-                                    // else it is off, so the text input keeps the
-                                    // text cursor, the clicks and the selection.
+                                    // the pointer is over a link or a press that began
+                                    // on it goes on. It shows the link cursor and
+                                    // gives the press to the text input, with the
+                                    // cursor offset of the estimate, so the click,
+                                    // the drag and the selection work as before. The
+                                    // link opens only from that cursor offset, never
+                                    // from the estimate. Anywhere else the area is
+                                    // off, so the text input keeps the text cursor.
                                     link-hover-area := TouchArea {
                                         x: 0px;
                                         y: 0px;
                                         width: parent.width;
                                         height: parent.height;
-                                        enabled: overlay-box.hover-link != "";
+                                        enabled: overlay-box.hover-link != "" || self.pressed;
                                         mouse-cursor: MouseCursor.pointer;
-                                        clicked => {
-                                            chat-link-clicked(overlay-box.hover-link);
+                                        moved => {
+                                            if self.pressed {
+                                                overlay-input.set-selection-offsets(overlay-box.press-offset, overlay-box.offset-at-pointer());
+                                            }
                                         }
                                         pointer-event(event) => {
+                                            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                                overlay-box.press-offset = overlay-box.offset-at-pointer();
+                                                overlay-input.focus();
+                                                overlay-input.set-selection-offsets(overlay-box.press-offset, overlay-box.press-offset);
+                                                // The cursor may not change, so the
+                                                // link is armed here as well.
+                                                overlay-box.arm-link(overlay-box.press-offset, overlay-box.press-offset);
+                                            }
                                             if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && line.nick != "" {
                                                 row-menu.show-menu({
                                                     x: overlay-box.x + self.mouse-x - row-menu.x,

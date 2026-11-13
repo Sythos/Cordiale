@@ -5606,6 +5606,34 @@ fn link_hover_follows_a_wrapped_link_and_ignores_bad_sizes() {
     );
 }
 
+#[test]
+fn link_hover_offset_is_the_nearest_edge_and_stays_inside_a_link() {
+    let text = "see https://a.io/x and more";
+    let total = hover_weight(text);
+    let before = hover_weight("see ");
+    let link = hover_weight("https://a.io/x");
+    let at =
+        |x: f32, y: f32| link_hover::offset_at_point(text, x, y, total + 50.0, 10.0, total, None);
+    // Plain text: the nearest edge of the character.
+    assert_eq!(at(-5.0, 5.0), 0);
+    assert_eq!(at(before - 0.2, 5.0), 4);
+    // On the first and last character of the link the offset stays inside it,
+    // so a click there reads the link.
+    assert_eq!(at(before + 0.1, 5.0), 5);
+    assert_eq!(at(before + link - 0.1, 5.0), 17);
+    assert_eq!(at(before + hover_weight("https://") + 0.1, 5.0), 12);
+    // The text right after the link is no link: its edge is the link's end.
+    assert_eq!(at(before + link + 0.1, 5.0), 18);
+    // Past the end of the line and below the text: the end of the text.
+    assert_eq!(at(total + 10.0, 5.0), text.len());
+    assert_eq!(at(before, 25.0), text.len());
+    // A size that is not usable gives the start.
+    assert_eq!(
+        link_hover::offset_at_point(text, 1.0, 5.0, 0.0, 10.0, total, None),
+        0
+    );
+}
+
 fn channel_context(network: &str) -> ChannelLinkContext {
     ChannelLinkContext {
         network: network.to_string(),
