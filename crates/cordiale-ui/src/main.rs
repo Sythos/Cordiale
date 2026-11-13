@@ -468,6 +468,10 @@ enum WorkerCommand {
         ident: String,
         realname: String,
         sasl_user: String,
+        /// The method the credential holds, and the one selected in the
+        /// editor: `auth_method` is sent only when they differ.
+        current_auth_method: String,
+        auth_method: String,
         password: String,
     },
     AdminSettingsLoad,
@@ -2553,11 +2557,21 @@ async fn run_worker(
                         ident,
                         realname,
                         sasl_user,
+                        current_auth_method,
+                        auth_method,
                         password,
                     }) => match cordiale_core::admin::admin_credential_changes(
-                        &nick, &ident, &realname, &sasl_user, &password,
+                        &cordiale_core::admin::CredentialEdit {
+                            nick: &nick,
+                            ident: &ident,
+                            realname: &realname,
+                            sasl_user: &sasl_user,
+                            current_auth_method: &current_auth_method,
+                            auth_method: &auth_method,
+                            password: &password,
+                        },
                     ) {
-                        Some(changes) => {
+                        Ok(changes) => {
                             handle_admin_write(
                                 &state,
                                 &ui,
@@ -2569,9 +2583,17 @@ async fn run_worker(
                             )
                             .await;
                         }
-                        None => {
-                            let _ = ui.upgrade_in_event_loop(|ui| {
-                                ui.set_status_kind("admin-credential-invalid".into());
+                        Err(error) => {
+                            let kind = match error {
+                                cordiale_core::admin::CredentialEditError::MissingNick => {
+                                    "admin-credential-invalid"
+                                }
+                                cordiale_core::admin::CredentialEditError::MissingPassword => {
+                                    "admin-credential-password-needed"
+                                }
+                            };
+                            let _ = ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_status_kind(kind.into());
                             });
                         }
                     },

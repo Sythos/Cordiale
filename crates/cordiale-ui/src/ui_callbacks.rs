@@ -1776,7 +1776,14 @@ pub(crate) fn register_admin_access_callbacks(
     let tx_for_credential_save = worker_tx.clone();
     let weak_for_credential_save = ui.as_weak();
     ui.on_admin_credential_save(move || {
+        use slint::Model as _;
         if let Some(ui) = weak_for_credential_save.upgrade() {
+            // `-1` (no method reported) selects nothing, so nothing changes.
+            let auth_method = usize::try_from(ui.get_admin_edit_cred_auth_index())
+                .ok()
+                .and_then(|index| ui.get_admin_edit_cred_auth_methods().row_data(index))
+                .map(|method| method.to_string())
+                .unwrap_or_default();
             let _ = tx_for_credential_save.send(WorkerCommand::AdminCredentialEdit {
                 user_id: ui.get_admin_edit_cred_user_id().to_string(),
                 network_id: ui.get_admin_edit_cred_network_id().to_string(),
@@ -1784,6 +1791,8 @@ pub(crate) fn register_admin_access_callbacks(
                 ident: ui.get_admin_edit_cred_ident().to_string(),
                 realname: ui.get_admin_edit_cred_realname().to_string(),
                 sasl_user: ui.get_admin_edit_cred_sasl_user().to_string(),
+                current_auth_method: ui.get_admin_edit_cred_auth_current().to_string(),
+                auth_method,
                 password: ui.get_admin_edit_cred_password().to_string(),
             });
         }

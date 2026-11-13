@@ -728,6 +728,11 @@ pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<A
             };
             let (nick, ident, realname, sasl_user) =
                 cordiale_core::admin::admin_credential_fields(entry);
+            let auth_method = cordiale_core::admin::admin_credential_auth_method(entry);
+            let (auth_methods, auth_index) =
+                cordiale_core::admin::credential_edit_auth_methods(&auth_method);
+            let auth_methods: Vec<slint::SharedString> =
+                auth_methods.into_iter().map(Into::into).collect();
             AdminCredentialRow {
                 label: cordiale_core::admin::admin_credential_label(entry).into(),
                 user_id: id("user_id").into(),
@@ -736,6 +741,9 @@ pub(crate) async fn handle_admin_refresh(state: &WorkerState, ui: &slint::Weak<A
                 ident: ident.into(),
                 realname: realname.into(),
                 sasl_user: sasl_user.into(),
+                auth_method: auth_method.into(),
+                auth_methods: slint::ModelRc::new(slint::VecModel::from(auth_methods)),
+                auth_index,
             }
         })
         .collect();
