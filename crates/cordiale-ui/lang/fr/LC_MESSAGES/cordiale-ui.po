@@ -665,6 +665,18 @@ msgid "Certificate fingerprint"
 msgstr "Empreinte du certificat"
 
 msgctxt "AppWindow"
+msgid "Client IPv4"
+msgstr "IPv4 du client"
+
+msgctxt "AppWindow"
+msgid "Client IPv6"
+msgstr "IPv6 du client"
+
+msgctxt "AppWindow"
+msgid "Last known client IP"
+msgstr "Dernière IP connue du client"
+
+msgctxt "AppWindow"
 msgid "Actual host"
 msgstr "Hôte réel"
 

@@ -5324,7 +5324,24 @@ pub(crate) fn parse_whois_bundle(
         certfp: text("certfp")?,
         extra_lines,
         avatar_url,
+        client_ips: parse_whois_client_ips(payload.get("grappa_client_ips")),
+        client_last_known_ip: payload
+            .get("grappa_client_last_known_ip")
+            .and_then(Value::as_str)
+            .and_then(|text| text.parse().ok()),
     })
+}
+
+/// Optional `grappa_client_ips`: an absent, `null` or non-array value gives
+/// `None`; entries that are not IP addresses are dropped, never guessed.
+fn parse_whois_client_ips(value: Option<&Value>) -> Option<Vec<std::net::IpAddr>> {
+    let items = value?.as_array()?;
+    Some(
+        items
+            .iter()
+            .filter_map(|item| item.as_str()?.parse().ok())
+            .collect(),
+    )
 }
 
 /// `h:mm:ss`, without words to translate.
@@ -5382,6 +5399,21 @@ pub(crate) fn whois_bundle_view(bundle: &WhoisBundle) -> ReplyView {
         (host, ip) => host.clone().or_else(|| ip.clone()),
     };
     push("whois-actually", actually);
+    let client_ips = bundle.client_ips.as_deref().unwrap_or_default();
+    let joined = |v6: bool| {
+        let list: Vec<String> = client_ips
+            .iter()
+            .filter(|ip| ip.is_ipv6() == v6)
+            .map(ToString::to_string)
+            .collect();
+        Some(list.join(", "))
+    };
+    push("whois-client-ipv4", joined(false));
+    push("whois-client-ipv6", joined(true));
+    push(
+        "whois-client-last-ip",
+        bundle.client_last_known_ip.map(|ip| ip.to_string()),
+    );
     push("whois-certfp", bundle.certfp.clone());
     if bundle.secure || bundle.using_ssl {
         rows.push((
