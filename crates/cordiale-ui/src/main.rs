@@ -9964,6 +9964,7 @@ fn selectable_body_text(runs: &[(String, (u8, u8, u8), bool)]) -> Option<String>
 }
 
 /// As `selectable_body_text`; with `channels` a channel name is a link too.
+#[cfg(test)]
 fn selectable_body_text_with(
     runs: &[(String, (u8, u8, u8), bool)],
     channels: Option<&ChannelLinkContext>,
@@ -9986,11 +9987,11 @@ fn selectable_body_text_mode(
     if !row_links(&visible, channels).is_empty() {
         return None;
     }
-    // A line break is shown as a space, like the styled text does: a break
-    // in the input would add a line and a blank band to the row.
     if keep_breaks {
         return Some(visible);
     }
+    // Otherwise a line break is shown as a space, like the styled text does:
+    // a break in the input would add a line and a blank band to the row.
     Some(visible.replace(['\r', '\n'], " "))
 }
 
@@ -10165,7 +10166,7 @@ fn message_markdown_keeping_breaks(
     italic: bool,
     channels: Option<&ChannelLinkContext>,
 ) -> String {
-    let mut lines: Vec<Vec<(String, (u8, u8, u8), bool)>> = vec![Vec::new()];
+    let mut lines = vec![Vec::new()];
     for (text, color, bold) in runs {
         for (index, piece) in text.split('\n').enumerate() {
             if index > 0 {
