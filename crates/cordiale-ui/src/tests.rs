@@ -7116,6 +7116,136 @@ fn sidebar_separator_moves_with_a_long_channel_label() {
     );
 }
 
+/// A connected window with a query open, so its banner marks the chat
+/// column. The sidebar probes hold the rows of `labels`.
+fn sidebar_width_window(labels: &[&str], width: f32) -> AppWindow {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.on_fit_column_widths(
+        |window, sidebar, members, sidebar_min, members_min, reserved, sidebar_max| {
+            let fitted = fit_columns(
+                window,
+                sidebar,
+                members,
+                sidebar_min,
+                members_min,
+                reserved,
+                sidebar_max,
+            );
+            ColumnWidths {
+                sidebar: fitted.sidebar,
+                members: fitted.members,
+            }
+        },
+    );
+    ui.set_theme("dark".into());
+    ui.set_screen("connected".into());
+    ui.set_has_selected_channel(true);
+    ui.set_current_query(true);
+    ui.set_current_query_ready(true);
+    ui.set_current_query_e2e_state("e2e-chat-clear".into());
+    if !labels.is_empty() {
+        set_sidebar_probes(&ui, &[group_with_channels("test", labels)]);
+    }
+    ui.show().unwrap();
+    ui.window().set_size(slint::LogicalSize::new(width, 1000.));
+    ui
+}
+
+/// Left and right pixel of the query banner, after the layout settles. The
+/// left edge moves one pixel for each pixel of sidebar width.
+fn chat_edges(ui: &AppWindow) -> (u32, u32) {
+    let mut edges = (0, 0);
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+        let snapshot = ui.window().take_snapshot().unwrap();
+        let mut left = u32::MAX;
+        let mut right = 0;
+        for (i, pixel) in snapshot.as_bytes().as_chunks::<4>().0.iter().enumerate() {
+            if pixel[..3] == [0x1f, 0x2f, 0x3a] {
+                let x = i as u32 % snapshot.width();
+                left = left.min(x);
+                right = right.max(x);
+            }
+        }
+        assert_ne!(left, u32::MAX, "query banner must be visible");
+        edges = (left, right);
+    }
+    edges
+}
+
+#[test]
+fn sidebar_opens_fitted_to_a_row_wider_than_360() {
+    let icons_only = chat_edges(&sidebar_width_window(&[], 1920.)).0;
+    let wide_label = format!("#{}", "w".repeat(40));
+    let fitted = chat_edges(&sidebar_width_window(&[wide_label.as_str()], 1920.)).0;
+    // The icon-only sidebar is 120 wide: the fitted one passes 360 and
+    // stays under the 720 cap.
+    assert!(fitted > icons_only + 240, "row wider than 360 is cut");
+    assert!(fitted < icons_only + 600, "row below the cap hit the cap");
+}
+
+#[test]
+fn sidebar_width_stops_at_720_for_a_longer_row() {
+    let icons_only = chat_edges(&sidebar_width_window(&[], 1920.)).0;
+    let long_label = format!("#{}", "w".repeat(80));
+    let longer_label = format!("#{}", "w".repeat(120));
+    let (capped, _) = chat_edges(&sidebar_width_window(&[long_label.as_str()], 1920.));
+    let (longer, _) = chat_edges(&sidebar_width_window(&[longer_label.as_str()], 1920.));
+    // 720 minus the 120 of the icon-only sidebar.
+    assert_eq!(capped, icons_only + 600);
+    assert_eq!(longer, capped);
+}
+
+#[test]
+fn sidebar_keeps_the_chat_inside_a_narrow_window() {
+    let wide = chat_edges(&sidebar_width_window(&[], 1920.)).0;
+    let long_label = format!("#{}", "w".repeat(80));
+    let ui = sidebar_width_window(&[long_label.as_str()], 800.);
+    let (left, right) = chat_edges(&ui);
+    // The sidebar gave way: it is far from the 720 it needs.
+    assert!(left < wide + 600, "sidebar kept its full width");
+    assert!(right < 800, "chat left the window");
+    assert!(right - left > 100, "chat lost its width");
+    // The member column keeps room right of the chat.
+    assert!(800 - right > 100, "member column left the window");
+}
+
+#[test]
+fn sidebar_width_follows_new_and_refreshed_rows() {
+    let ui = sidebar_width_window(&["#rust"], 1920.);
+    let short = chat_edges(&ui).0;
+    let medium_label = format!("#{}", "w".repeat(30));
+    set_sidebar_probes(
+        &ui,
+        &[group_with_channels("test", &["#rust", &medium_label])],
+    );
+    let medium = chat_edges(&ui).0;
+    assert!(
+        medium > short + 100,
+        "a new wider row did not widen the sidebar"
+    );
+    let wider_label = format!("#{}", "w".repeat(45));
+    set_sidebar_probes(
+        &ui,
+        &[group_with_channels(
+            "test",
+            &["#rust", &medium_label, &wider_label],
+        )],
+    );
+    let wider = chat_edges(&ui).0;
+    assert!(
+        wider > medium + 50,
+        "a refreshed row did not widen the sidebar"
+    );
+    // Even the first short row widens the icon-only sidebar.
+    let empty = chat_edges(&sidebar_width_window(&[], 1920.)).0;
+    assert!(
+        short > empty,
+        "the first row did not widen the icon-only sidebar"
+    );
+}
+
 #[test]
 fn plain_query_e2e_actions_are_available_in_the_right_pane() {
     use slint::platform::{PointerEventButton, WindowEvent};
