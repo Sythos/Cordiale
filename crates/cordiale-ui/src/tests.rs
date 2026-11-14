@@ -5073,25 +5073,18 @@ fn fit_columns_keeps_a_wide_sidebar_inside_a_narrow_window() {
 }
 
 #[test]
-fn sidebar_widest_label_picks_the_widest_row_and_follows_updates() {
+fn sidebar_row_labels_lists_every_row_and_follows_updates() {
+    let groups = vec![group_with_channels("n", &["#rust", "#long-channel"])];
+    assert_eq!(sidebar_row_labels(&groups), ["● #rust", "● #long-channel"]);
     let groups = vec![group_with_channels(
         "n",
-        &["#rust", "#a-much-longer-channel"],
-    )];
-    assert_eq!(sidebar_widest_label(&groups), "● #a-much-longer-channel");
-    let groups = vec![group_with_channels(
-        "n",
-        &[
-            "#rust",
-            "#a-much-longer-channel",
-            "#an-even-longer-channel-name",
-        ],
+        &["#rust", "#long-channel", "#new"],
     )];
     assert_eq!(
-        sidebar_widest_label(&groups),
-        "● #an-even-longer-channel-name"
+        sidebar_row_labels(&groups),
+        ["● #rust", "● #long-channel", "● #new"]
     );
-    assert_eq!(sidebar_widest_label(&[]), "");
+    assert!(sidebar_row_labels(&[]).is_empty());
 }
 
 #[test]
@@ -7110,14 +7103,15 @@ fn sidebar_separator_moves_with_a_long_channel_label() {
     let position = slint::LogicalPosition::new(separator, 700.);
     ui.window()
         .dispatch_event(WindowEvent::PointerPressed { position, button });
-    let position = slint::LogicalPosition::new(separator + 60., 700.);
+    // The sidebar opens fitted to the long label, so it can only shrink.
+    let position = slint::LogicalPosition::new(separator - 60., 700.);
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position });
     ui.window().take_snapshot().unwrap();
     ui.window()
         .dispatch_event(WindowEvent::PointerReleased { position, button });
     assert!(
-        banner_left() > before + 40,
+        banner_left() + 40 < before,
         "sidebar separator did not move"
     );
 }

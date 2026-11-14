@@ -10893,23 +10893,9 @@ fn sidebar_shortest_label(groups: &[NetworkGroup]) -> String {
     shortest
 }
 
-/// The widest channel or query row label, as displayed, chosen like
-/// `sidebar_shortest_label`. The Slint probe measures it to fit the sidebar
-/// width to the rows. On equal widths the first row stays. Without rows the
-/// label is empty.
-fn sidebar_widest_label(groups: &[NetworkGroup]) -> String {
-    use unicode_width::UnicodeWidthStr as _;
-
-    let mut widest = String::new();
-    for (index, row) in sidebar_row_labels(groups).into_iter().enumerate() {
-        if index == 0 || row.width() > widest.width() {
-            widest = row;
-        }
-    }
-    widest
-}
-
-/// The displayed label of every channel and query row, with the bullet.
+/// The displayed label of every channel and query row, with the bullet. The
+/// Slint probe measures all of them with the real font and takes the widest,
+/// to fit the sidebar width to the rows.
 fn sidebar_row_labels(groups: &[NetworkGroup]) -> Vec<String> {
     use slint::Model as _;
 
@@ -10929,7 +10915,11 @@ fn sidebar_row_labels(groups: &[NetworkGroup]) -> Vec<String> {
 /// Sets the sidebar probe texts from the row labels.
 fn set_sidebar_probes(ui: &AppWindow, groups: &[NetworkGroup]) {
     ui.set_sidebar_shortest_label(sidebar_shortest_label(groups).into());
-    ui.set_sidebar_widest_label(sidebar_widest_label(groups).into());
+    let rows: Vec<slint::SharedString> = sidebar_row_labels(groups)
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    ui.set_sidebar_row_labels(Rc::new(slint::VecModel::from(rows)).into());
 }
 
 /// Column widths of the connected screen, in logical pixels.
