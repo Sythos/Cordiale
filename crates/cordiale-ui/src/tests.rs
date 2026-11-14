@@ -5047,14 +5047,51 @@ fn fit_columns_never_goes_below_the_minimums() {
 
 #[test]
 fn fit_columns_caps_the_sidebar_and_ignores_an_unknown_window() {
-    let fitted = fit_columns(2000.0, 500.0, 160.0, 200.0, 125.0, 316.0, 360.0);
-    assert_eq!(fitted.sidebar, 360.0);
-    let fitted = fit_columns(0.0, 250.0, 160.0, 200.0, 125.0, 316.0, 360.0);
+    let fitted = fit_columns(2000.0, 900.0, 160.0, 200.0, 125.0, 316.0, 720.0);
+    assert_eq!(fitted.sidebar, 720.0);
+    let fitted = fit_columns(0.0, 250.0, 160.0, 200.0, 125.0, 316.0, 720.0);
     assert_eq!(fitted.sidebar, 250.0);
     assert_eq!(fitted.members, 160.0);
     // A minimum above the cap wins over the cap.
-    let fitted = fit_columns(2000.0, 500.0, 160.0, 400.0, 125.0, 316.0, 360.0);
-    assert_eq!(fitted.sidebar, 400.0);
+    let fitted = fit_columns(2000.0, 500.0, 160.0, 800.0, 125.0, 316.0, 720.0);
+    assert_eq!(fitted.sidebar, 800.0);
+}
+
+#[test]
+fn fit_columns_allows_a_sidebar_between_360_and_720() {
+    let fitted = fit_columns(2000.0, 500.0, 160.0, 200.0, 125.0, 316.0, 720.0);
+    assert_eq!(fitted.sidebar, 500.0);
+    assert_eq!(fitted.members, 160.0);
+}
+
+#[test]
+fn fit_columns_keeps_a_wide_sidebar_inside_a_narrow_window() {
+    // 900 - 316 leaves 584: members reach 125, the sidebar keeps 459.
+    let fitted = fit_columns(900.0, 700.0, 160.0, 200.0, 125.0, 316.0, 720.0);
+    assert_eq!(fitted.members, 125.0);
+    assert_eq!(fitted.sidebar, 459.0);
+}
+
+#[test]
+fn sidebar_widest_label_picks_the_widest_row_and_follows_updates() {
+    let groups = vec![group_with_channels(
+        "n",
+        &["#rust", "#a-much-longer-channel"],
+    )];
+    assert_eq!(sidebar_widest_label(&groups), "● #a-much-longer-channel");
+    let groups = vec![group_with_channels(
+        "n",
+        &[
+            "#rust",
+            "#a-much-longer-channel",
+            "#an-even-longer-channel-name",
+        ],
+    )];
+    assert_eq!(
+        sidebar_widest_label(&groups),
+        "● #an-even-longer-channel-name"
+    );
+    assert_eq!(sidebar_widest_label(&[]), "");
 }
 
 #[test]
