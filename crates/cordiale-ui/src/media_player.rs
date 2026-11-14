@@ -605,22 +605,37 @@ impl Packets {
         }
     }
 
-    fn seek(&mut self, seconds: f64) {
+    /// Moves to `seconds`. Returns how many seconds before that time the
+    /// next packet starts: the decoded sound of that gap is to be dropped.
+    fn seek(&mut self, seconds: f64) -> f64 {
         match self {
             Packets::Format { reader, track_id } => {
-                if let Some(time) = Time::try_from_secs_f64(seconds) {
-                    let _ = reader.seek(
-                        SeekMode::Coarse,
-                        SeekTo::Time {
-                            time,
-                            track_id: Some(*track_id),
-                        },
-                    );
-                }
+                let Some(time) = Time::try_from_secs_f64(seconds) else {
+                    return 0.0;
+                };
+                let Ok(seeked) = reader.seek(
+                    SeekMode::Coarse,
+                    SeekTo::Time {
+                        time,
+                        track_id: Some(*track_id),
+                    },
+                ) else {
+                    return 0.0;
+                };
+                let time_base = reader
+                    .tracks()
+                    .iter()
+                    .find(|track| track.id == seeked.track_id)
+                    .and_then(|track| track.time_base);
+                let gap = seeked.required_ts.duration_from(seeked.actual_ts);
+                gap.zip(time_base)
+                    .and_then(|(gap, base)| base.calc_duration(gap))
+                    .map_or(0.0, |gap| gap.as_secs_f64().clamp(0.0, seconds))
             }
             Packets::List { list, next, .. } => {
                 let target = (seconds * 1_000_000.0) as i64;
                 *next = list.partition_point(|packet| packet.2 < target);
+                0.0
             }
         }
     }
@@ -740,14 +755,19 @@ impl Source for AudioSource {
     }
 
     fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
-        self.packets.seek(pos.as_secs_f64());
+        let gap = self.packets.seek(pos.as_secs_f64());
+        self.skip = 0;
         match &mut self.decode {
-            Decode::Symphonia(decoder) => decoder.reset(),
+            Decode::Symphonia(decoder) => {
+                decoder.reset();
+                // The reader may stop before the time: drop the early frames.
+                let frames = (gap * f64::from(self.rate)).round() as usize;
+                self.skip = frames * usize::from(self.channels);
+            }
             Decode::Opus { decoder, .. } => decoder.reset(),
         }
         self.pending.clear();
         self.at = 0;
-        self.skip = 0;
         Ok(())
     }
 }
@@ -1742,6 +1762,17 @@ mod tests {
         source.try_seek(Duration::from_millis(500)).expect("a seek");
         let left = source.count();
         assert!(left > 0 && left <= 4_100, "{left} samples left");
+    }
+
+    #[test]
+    fn seeking_a_wav_file_to_the_start_keeps_every_sample() {
+        let bytes = wav_second(8_000);
+        let mut source = symphonia_source(&bytes, "wav").expect("a WAV source");
+        for _ in 0..3_000 {
+            source.next();
+        }
+        source.try_seek(Duration::ZERO).expect("a seek");
+        assert_eq!(source.count(), 8_000);
     }
 
     #[test]
