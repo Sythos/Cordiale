@@ -63,6 +63,7 @@ mod totp;
 mod ui_callbacks;
 #[cfg(windows)]
 mod webauthn_windows;
+mod window_state;
 mod worker_commands;
 
 use std::cell::RefCell;
@@ -782,7 +783,12 @@ fn main() -> Result<(), slint::PlatformError> {
     register_admin_settings_callbacks(&ui, &worker_tx);
     register_settings_callbacks(&ui, &worker_tx);
 
+    // Window size, position, state and column widths come back from the
+    // local settings; the timer saves them again after a change.
+    let window_state_timer = window_state::install(&ui, settings.window);
+
     let result = ui.run();
+    drop(window_state_timer);
 
     // Closing the window quits: tell Grappa the client is leaving, so
     // auto-away doesn't wait for the visibility report to go stale. Bounded,
