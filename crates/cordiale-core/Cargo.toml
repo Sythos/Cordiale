@@ -31,8 +31,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 # `static` feature of this crate to build them).
 ffmpeg-next = { version = "9", optional = true }
 # Ed25519 checks and Olm for the per-device E2E engine (`e2e_device.rs`):
-# pure Rust, Apache-2.0, encrypted pickles. 0.10 is the newest release for
-# the pinned toolchain.
+# pure Rust, Apache-2.0, encrypted pickles.
 vodozemac = "0.11.2"
 chacha20poly1305 = "0.11"
 # AES-256-GCM for the files of an encrypted query (`e2e_file.rs`).
