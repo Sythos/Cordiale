@@ -1775,6 +1775,104 @@ mod tests {
         assert_eq!(source.count(), 8_000);
     }
 
+    fn crc8(data: &[u8]) -> u8 {
+        data.iter().fold(0u8, |mut crc, byte| {
+            crc ^= byte;
+            for _ in 0..8 {
+                crc = if crc & 0x80 != 0 {
+                    (crc << 1) ^ 0x07
+                } else {
+                    crc << 1
+                };
+            }
+            crc
+        })
+    }
+
+    fn crc16(data: &[u8]) -> u16 {
+        data.iter().fold(0u16, |mut crc, byte| {
+            crc ^= u16::from(*byte) << 8;
+            for _ in 0..8 {
+                crc = if crc & 0x8000 != 0 {
+                    (crc << 1) ^ 0x8005
+                } else {
+                    crc << 1
+                };
+            }
+            crc
+        })
+    }
+
+    /// Two frames of 4096 samples: 16-bit mono FLAC at 8 kHz, stored as is.
+    fn flac_two_frames() -> Arc<[u8]> {
+        let block = 4096u16;
+        let frames = 2u64;
+        let mut bytes = b"fLaC".to_vec();
+        bytes.extend_from_slice(&[0x80, 0, 0, 34]);
+        bytes.extend_from_slice(&block.to_be_bytes());
+        bytes.extend_from_slice(&block.to_be_bytes());
+        bytes.extend_from_slice(&[0; 6]);
+        // 20 bits of rate, 3 of channels less 1, 5 of bits less 1, 36 of samples.
+        let packed = (8_000u64 << 44) | (15u64 << 36) | (frames * u64::from(block));
+        bytes.extend_from_slice(&packed.to_be_bytes());
+        bytes.extend_from_slice(&[0; 16]);
+        for number in 0..frames {
+            let mut frame = vec![0xFF, 0xF8, 0xC0, 0x08, number as u8];
+            frame.push(crc8(&frame));
+            frame.push(0x02);
+            for n in 0..block {
+                let sample = ((n % 200) as i16 - 100) * 100;
+                frame.extend_from_slice(&sample.to_be_bytes());
+            }
+            let crc = crc16(&frame);
+            frame.extend_from_slice(&crc.to_be_bytes());
+            bytes.extend_from_slice(&frame);
+        }
+        Arc::from(bytes)
+    }
+
+    /// Silent MPEG-1 Layer III frames: 44.1 kHz, 128 kbit/s, mono.
+    fn mp3_silence(frames: usize) -> Arc<[u8]> {
+        let mut bytes = Vec::new();
+        for _ in 0..frames {
+            let mut frame = vec![0u8; 417];
+            frame[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0xC0]);
+            bytes.extend_from_slice(&frame);
+        }
+        Arc::from(bytes)
+    }
+
+    #[test]
+    fn a_flac_file_is_read_and_decoded() {
+        let bytes = flac_two_frames();
+        let source = symphonia_source(&bytes, "flac").expect("a FLAC source");
+        assert_eq!(source.channels, 1);
+        assert_eq!(source.rate, 8_000);
+        let total = source.total.expect("a length");
+        assert!((total.as_secs_f64() - 1.024).abs() < 0.01);
+        let samples: Vec<Sample> = source.collect();
+        assert_eq!(samples.len(), 8_192);
+        assert!(samples.iter().any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
+    fn seeking_a_flac_file_skips_the_start() {
+        let bytes = flac_two_frames();
+        let mut source = symphonia_source(&bytes, "flac").expect("a FLAC source");
+        source.try_seek(Duration::from_millis(700)).expect("a seek");
+        let left = source.count();
+        assert!(left > 0 && left < 8_192, "{left} samples left");
+    }
+
+    #[test]
+    fn an_mp3_file_is_read_and_decoded() {
+        let bytes = mp3_silence(20);
+        let source = symphonia_source(&bytes, "mp3").expect("an MP3 source");
+        assert_eq!(source.channels, 1);
+        assert_eq!(source.rate, 44_100);
+        assert!(source.count() >= 1_152);
+    }
+
     #[test]
     fn times_read_as_minutes_and_hours() {
         assert_eq!(clock_text(0.0), "0:00");
