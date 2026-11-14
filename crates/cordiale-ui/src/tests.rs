@@ -225,6 +225,35 @@ fn foreground_needs_focus_and_no_minimize() {
 }
 
 #[test]
+fn startup_opens_on_the_splash_and_hands_off_by_language() {
+    set_headless_software_platform();
+    let ui = AppWindow::new().unwrap();
+    assert_eq!(ui.get_screen(), "splash");
+    assert_eq!(startup_next_screen(false), "language");
+    assert_eq!(startup_next_screen(true), "connect");
+    let logo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../resources/branding/cordiale.png");
+    assert!(std::fs::metadata(logo).unwrap().len() > 0);
+}
+
+#[test]
+fn splash_window_is_centered_on_its_monitor() {
+    assert_eq!(
+        centered_position(((0, 0), (1920, 1080)), (900, 600)),
+        (510, 240)
+    );
+    assert_eq!(
+        centered_position(((-1280, 100), (1280, 720)), (900, 600)),
+        (-1090, 160)
+    );
+    // A window larger than the monitor stays at the monitor corner.
+    assert_eq!(
+        centered_position(((10, 20), (800, 600)), (900, 700)),
+        (10, 20)
+    );
+}
+
+#[test]
 fn guest_login_refusals_get_their_own_status() {
     assert_eq!(
         login_refusal_kind("anon_collision"),
