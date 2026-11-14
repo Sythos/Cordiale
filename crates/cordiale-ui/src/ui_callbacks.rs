@@ -1180,17 +1180,10 @@ pub(crate) fn register_composer_callbacks(
     let tx_for_send = worker_tx.clone();
     let weak_for_send = ui.as_weak();
     let history_for_send = input_history.clone();
-    ui.on_compose_has_newline(|text| text.contains('\n'));
     let usage_for_send = command_usage.clone();
     ui.on_send_chat_message(move |body| {
-        let mut body = body.to_string();
-        // Only an encrypted query keeps the line breaks. Any other window
-        // gets one line, as before the compose box took several lines.
-        if let Some(ui) = weak_for_send.upgrade() {
-            if !(ui.get_current_query() && ui.get_current_query_e2e()) {
-                body = flatten_compose_lines(&body);
-            }
-        }
+        // A message has one line, also in an encrypted query.
+        let body = flatten_compose_lines(&body);
         if body.trim().is_empty() {
             return;
         }
