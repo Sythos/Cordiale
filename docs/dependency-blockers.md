@@ -26,16 +26,23 @@ Each parent crate below is at its newest release on crates.io.
 | `reqwest` 0.13.5 | Requires `tower-http` `^0.6` | `tower-http` 0.7.1 |
 | `vodozemac` 0.11.2 | Requires `hpke` 0.14 | `hpke` 0.15.1 |
 | `rodio` 0.23.0 | `cpal` 0.18.2 requires `alsa` 0.11 and `alsa-sys` 0.4 | `alsa` 0.12.1, `alsa-sys` 0.6.1 |
+| `wiremock` 0.6.5 (dev only) | Requires `deadpool` 0.12 | `deadpool` 0.13.1, `deadpool-runtime` 0.3.1 |
+| `rodio` 0.23.0, `rusty_av1d` 1.3.0, `keyring` 4.2.0 | `num-rational` 0.4 (through `rodio` and `av-data`) and `num` 0.4 (through `secret-service`) require `num-bigint` 0.4 | `num-bigint` 0.5.1 |
+| `slint` 1.18.1 | `glutin` 0.32.3 build script requires `gl_generator` 0.14, which requires `xml-rs` 0.8 | `xml-rs` 1.0.0 |
 
 The newest `winit` is 0.31.0-beta.4.
 Cordiale needs the `unstable-winit-030` feature of `slint`, so a beta release does not replace 0.30.
 
 ## Other parent crates at their newest release
 
-These crates have no newer release that allows the remaining targets:
-`wiremock` 0.6.5, `symphonia` 0.6.1, `image` 0.25.10, `rusty_h264-decoder` 0.17.2,
-`keyring` 4.2.0, `dark-light` 3.0.0, `arboard` 3.7.0, `rusty_av1d` 1.3.0, `rodio` 0.23.0,
-`cpal` 0.18.2 and `dirs` 7.0.0.
+Each crate below is locked to its newest stable release on crates.io (checked on 14 November 2026).
+No newer release allows the remaining targets:
+`slint` 1.18.1, `reqwest` 0.13.5, `vodozemac` 0.11.2, `wiremock` 0.6.5, `symphonia` 0.6.1,
+`image` 0.25.10, `rusty_h264-decoder` 0.17.2, `keyring` 4.2.0, `dark-light` 3.0.0,
+`arboard` 3.7.0, `rusty_av1d` 1.3.0, `rodio` 0.23.0, `cpal` 0.18.2 and `dirs` 7.0.0.
+
+Do not raise a version past a break point of the chain.
+A newer child crate stays blocked until its parent crate allows it.
 
 ## How to continue
 
