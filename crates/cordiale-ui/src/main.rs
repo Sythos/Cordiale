@@ -788,6 +788,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let window_state_timer = window_state::install(&ui, settings.window);
 
     let result = ui.run();
+    window_state_timer.flush();
     drop(window_state_timer);
 
     // Closing the window quits: tell Grappa the client is leaving, so

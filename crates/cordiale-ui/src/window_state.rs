@@ -27,6 +27,8 @@
 //! tests need no window: what a host cannot read or set (the position on
 //! Wayland, for example) is a missing value that is skipped silently.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use cordiale_core::persistence::{self, WindowState};
@@ -201,11 +203,15 @@ pub fn plan(
         }
         _ => None,
     };
-    let (sidebar_width, members_width) = clamp_columns(
-        state.sidebar_width,
-        state.members_width,
-        size.map(|(w, _)| w),
-    );
+    // The saved column widths of a maximized or full-screen window fit the
+    // larger window, not the normal width: the layout clamps them later.
+    let layout_width = if state.maximized || state.fullscreen {
+        None
+    } else {
+        size.map(|(w, _)| w)
+    };
+    let (sidebar_width, members_width) =
+        clamp_columns(state.sidebar_width, state.members_width, layout_width);
     RestorePlan {
         size,
         position,
@@ -234,6 +240,21 @@ impl SaveGate {
     /// What the file holds, as far as this gate knows.
     pub fn saved(&self) -> Option<WindowState> {
         self.saved
+    }
+
+    /// The last state seen by `observe`, stable or not.
+    pub fn last_seen(&self) -> Option<WindowState> {
+        self.last_seen
+    }
+
+    /// Returns true when `state` differs from the saved one, without the
+    /// stability check. Used when the window closes.
+    pub fn flush(&mut self, state: WindowState) -> bool {
+        if self.saved == Some(state) {
+            return false;
+        }
+        self.saved = Some(state);
+        true
     }
 
     /// Returns true when `state` must be written now.
@@ -321,7 +342,7 @@ fn restore(ui: &AppWindow, state: &WindowState) {
 
 /// Restores the saved window state once the event loop runs, then saves
 /// changes. Keep the returned timer alive until the window closes.
-pub fn install(ui: &AppWindow, saved: Option<WindowState>) -> slint::Timer {
+pub fn install(ui: &AppWindow, saved: Option<WindowState>) -> WindowStateSaver {
     if let Some(state) = saved {
         let weak = ui.as_weak();
         slint::Timer::single_shot(Duration::ZERO, move || {
@@ -331,8 +352,9 @@ pub fn install(ui: &AppWindow, saved: Option<WindowState>) -> slint::Timer {
         });
     }
     let timer = slint::Timer::default();
+    let gate = Rc::new(RefCell::new(SaveGate::new(saved)));
     let weak = ui.as_weak();
-    let mut gate = SaveGate::new(saved);
+    let timer_gate = Rc::clone(&gate);
     timer.start(slint::TimerMode::Repeated, SAMPLE_INTERVAL, move || {
         let Some(ui) = weak.upgrade() else {
             return;
@@ -340,14 +362,61 @@ pub fn install(ui: &AppWindow, saved: Option<WindowState>) -> slint::Timer {
         let Some(sample) = sample(&ui) else {
             return;
         };
+        let mut gate = timer_gate.borrow_mut();
         let state = record(gate.saved(), &sample);
         if gate.observe(state) {
-            let mut settings = persistence::load_settings().unwrap_or_default();
-            settings.window = Some(state);
-            let _ = persistence::save_settings(&settings);
+            write(state);
         }
     });
-    timer
+    // Closing the window right after a change must not lose it: write the
+    // final state without waiting for the debounce.
+    let weak = ui.as_weak();
+    let close_gate = Rc::clone(&gate);
+    ui.window().on_close_requested(move || {
+        if let Some(ui) = weak.upgrade() {
+            let mut gate = close_gate.borrow_mut();
+            let state = sample(&ui)
+                .map(|sample| record(gate.saved(), &sample))
+                .or(gate.last_seen());
+            if let Some(state) = state {
+                if gate.flush(state) {
+                    write(state);
+                }
+            }
+        }
+        slint::CloseRequestResponse::HideWindow
+    });
+    WindowStateSaver {
+        _timer: timer,
+        gate,
+    }
+}
+
+/// Keeps the saving timer alive. Drop it after the window closes.
+pub struct WindowStateSaver {
+    _timer: slint::Timer,
+    gate: Rc<RefCell<SaveGate>>,
+}
+
+impl WindowStateSaver {
+    /// Writes the last sampled state if the file does not hold it yet. It
+    /// covers exits that send no close request (for example Cmd+Q on macOS).
+    /// The window can be gone by now, so it does not sample.
+    pub fn flush(&self) {
+        let mut gate = self.gate.borrow_mut();
+        if let Some(state) = gate.last_seen() {
+            if gate.flush(state) {
+                write(state);
+            }
+        }
+    }
+}
+
+/// Stores the state next to every other setting, which stay as they are.
+fn write(state: WindowState) {
+    let mut settings = persistence::load_settings().unwrap_or_default();
+    settings.window = Some(state);
+    let _ = persistence::save_settings(&settings);
 }
 
 #[cfg(test)]
@@ -553,6 +622,51 @@ mod tests {
         let (sidebar, members) = clamp_columns(Some(600), Some(300), Some(500));
         assert_eq!(members, Some(COLUMN_MIN_WIDTH));
         assert_eq!(sidebar, Some(COLUMN_MIN_WIDTH));
+    }
+
+    #[test]
+    fn plan_keeps_columns_saved_in_a_maximized_or_fullscreen_window() {
+        for (maximized, fullscreen) in [(true, false), (false, true)] {
+            let state = WindowState {
+                width: Some(900),
+                height: Some(600),
+                maximized,
+                fullscreen,
+                sidebar_width: Some(600),
+                members_width: Some(300),
+                ..WindowState::default()
+            };
+            let plan = plan(&state, &[monitor(0, 0, 1920, 1080)], 1.0, true);
+            assert_eq!(plan.sidebar_width, Some(600));
+            assert_eq!(plan.members_width, Some(300));
+        }
+    }
+
+    #[test]
+    fn plan_clamps_columns_against_the_normal_width() {
+        let state = WindowState {
+            width: Some(900),
+            height: Some(600),
+            sidebar_width: Some(400),
+            members_width: Some(300),
+            ..WindowState::default()
+        };
+        let plan = plan(&state, &[monitor(0, 0, 1920, 1080)], 1.0, true);
+        assert_eq!(plan.sidebar_width, Some(400));
+        assert_eq!(plan.members_width, Some(168));
+    }
+
+    #[test]
+    fn gate_flush_saves_a_value_seen_once() {
+        let first = record(None, &sample(false, false));
+        let mut gate = SaveGate::new(Some(first));
+        let mut moved = sample(false, false);
+        moved.position = Some((90, 90));
+        let changed = record(Some(first), &moved);
+        assert!(gate.flush(changed));
+        assert!(!gate.flush(changed), "a saved value is not written again");
+        assert_eq!(gate.saved(), Some(changed));
+        assert_eq!(gate.last_seen(), None);
     }
 
     #[test]
