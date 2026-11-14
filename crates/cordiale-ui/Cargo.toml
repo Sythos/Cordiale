@@ -57,7 +57,7 @@ rodio = { version = "0.23", default-features = false, features = ["playback", "m
 # containers and audio codecs (MP3, Vorbis, FLAC, WAV, AAC) from symphonia,
 # Opus, H.264, HEVC/H.265, VP8, VP9 and AV1 from their own decoders. SVG is drawn by resvg,
 # which runs no script and gets no external resolver.
-symphonia = { version = "0.5", default-features = false, features = ["isomp4", "ogg", "mp3", "vorbis", "flac", "wav", "pcm", "aac"] }
+symphonia = { version = "0.6", default-features = false, features = ["isomp4", "ogg", "mp3", "vorbis", "flac", "wav", "pcm", "aac"] }
 opus-decoder = "0.1"
 rusty_h265 = "0.7"
 rusty_vp9 = "0.1"
