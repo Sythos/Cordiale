@@ -5047,14 +5047,44 @@ fn fit_columns_never_goes_below_the_minimums() {
 
 #[test]
 fn fit_columns_caps_the_sidebar_and_ignores_an_unknown_window() {
-    let fitted = fit_columns(2000.0, 500.0, 160.0, 200.0, 125.0, 316.0, 360.0);
-    assert_eq!(fitted.sidebar, 360.0);
-    let fitted = fit_columns(0.0, 250.0, 160.0, 200.0, 125.0, 316.0, 360.0);
+    let fitted = fit_columns(2000.0, 900.0, 160.0, 200.0, 125.0, 316.0, 720.0);
+    assert_eq!(fitted.sidebar, 720.0);
+    let fitted = fit_columns(0.0, 250.0, 160.0, 200.0, 125.0, 316.0, 720.0);
     assert_eq!(fitted.sidebar, 250.0);
     assert_eq!(fitted.members, 160.0);
     // A minimum above the cap wins over the cap.
-    let fitted = fit_columns(2000.0, 500.0, 160.0, 400.0, 125.0, 316.0, 360.0);
-    assert_eq!(fitted.sidebar, 400.0);
+    let fitted = fit_columns(2000.0, 500.0, 160.0, 800.0, 125.0, 316.0, 720.0);
+    assert_eq!(fitted.sidebar, 800.0);
+}
+
+#[test]
+fn fit_columns_allows_a_sidebar_between_360_and_720() {
+    let fitted = fit_columns(2000.0, 500.0, 160.0, 200.0, 125.0, 316.0, 720.0);
+    assert_eq!(fitted.sidebar, 500.0);
+    assert_eq!(fitted.members, 160.0);
+}
+
+#[test]
+fn fit_columns_keeps_a_wide_sidebar_inside_a_narrow_window() {
+    // 900 - 316 leaves 584: members reach 125, the sidebar keeps 459.
+    let fitted = fit_columns(900.0, 700.0, 160.0, 200.0, 125.0, 316.0, 720.0);
+    assert_eq!(fitted.members, 125.0);
+    assert_eq!(fitted.sidebar, 459.0);
+}
+
+#[test]
+fn sidebar_row_labels_lists_every_row_and_follows_updates() {
+    let groups = vec![group_with_channels("n", &["#rust", "#long-channel"])];
+    assert_eq!(sidebar_row_labels(&groups), ["● #rust", "● #long-channel"]);
+    let groups = vec![group_with_channels(
+        "n",
+        &["#rust", "#long-channel", "#new"],
+    )];
+    assert_eq!(
+        sidebar_row_labels(&groups),
+        ["● #rust", "● #long-channel", "● #new"]
+    );
+    assert!(sidebar_row_labels(&[]).is_empty());
 }
 
 #[test]
@@ -7073,14 +7103,15 @@ fn sidebar_separator_moves_with_a_long_channel_label() {
     let position = slint::LogicalPosition::new(separator, 700.);
     ui.window()
         .dispatch_event(WindowEvent::PointerPressed { position, button });
-    let position = slint::LogicalPosition::new(separator + 60., 700.);
+    // The sidebar opens fitted to the long label, so it can only shrink.
+    let position = slint::LogicalPosition::new(separator - 60., 700.);
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position });
     ui.window().take_snapshot().unwrap();
     ui.window()
         .dispatch_event(WindowEvent::PointerReleased { position, button });
     assert!(
-        banner_left() > before + 40,
+        banner_left() + 40 < before,
         "sidebar separator did not move"
     );
 }

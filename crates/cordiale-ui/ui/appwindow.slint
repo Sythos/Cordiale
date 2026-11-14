@@ -1485,6 +1485,7 @@ export component AppWindow inherits Window {
         // The side columns are fitted to the window when the connected
         // screen opens.
         fit-columns();
+        fit-sidebar-to-rows();
         if screen == "connected" {
             if !has-selected-channel {
                 chat-resume = false;
@@ -1976,6 +1977,9 @@ export component AppWindow inherits Window {
     // column's minimum width: the shortest sidebar row label, and a run of
     // average-width characters as long as the average member label.
     in property <string> sidebar-shortest-label: "";
+    // Every sidebar row label: the widest one, measured, sets the width the
+    // sidebar opens at.
+    in property <[string]> sidebar-row-labels: [];
     in property <string> members-average-nick: "";
     // Fixed parts of the sidebar, shared by the rows and the minimum width.
     property <length> sidebar-padding: 8px;
@@ -1990,7 +1994,7 @@ export component AppWindow inherits Window {
     property <int> top-icon-count: is-admin ? 4 : 3;
     // Padding of the label button of a row (`SidebarRowButton`).
     property <length> sidebar-label-padding: 16px;
-    property <length> sidebar-hard-max-width: 360px;
+    property <length> sidebar-hard-max-width: 720px;
     // Ceiling of the minimum that comes from the rows, below the drag
     // ceiling: a long label elides and never forces a wide window.
     property <length> sidebar-rows-min-cap: 240px;
@@ -2008,6 +2012,10 @@ export component AppWindow inherits Window {
         + 2 * sidebar-row-spacing + sidebar-scroll-gutter + 2 * sidebar-padding;
     property <length> sidebar-shortest-row-width:
         sidebar-shortest-label == "" ? 0px : sidebar-shortest-probe.preferred-width + sidebar-row-fixed-width;
+    // Width that shows the widest row whole, never above the hard maximum.
+    property <length> sidebar-fit-width: min(
+        sidebar-hard-max-width,
+        sidebar-row-labels.length == 0 ? 0px : sidebar-rows-probe.preferred-width + sidebar-row-fixed-width);
     property <length> sidebar-min-width: max(
         sidebar-icons-min-width,
         min(sidebar-shortest-row-width, sidebar-rows-min-cap));
@@ -2051,6 +2059,15 @@ export component AppWindow inherits Window {
             members-width = fitted.members;
         }
     }
+    // Grows the sidebar to show its widest row whole when rows load or
+    // change; a width the user dragged wider is kept.
+    function fit-sidebar-to-rows() {
+        if (screen == "connected" && sidebar-fit-width > sidebar-width) {
+            sidebar-width = sidebar-fit-width;
+            fit-columns();
+        }
+    }
+    changed sidebar-fit-width => { fit-sidebar-to-rows(); }
     changed width => { fit-columns(); }
     changed sidebar-min-width => { fit-columns(); }    changed members-min-width => { fit-columns(); }
 
@@ -3704,6 +3721,13 @@ export component AppWindow inherits Window {
     sidebar-shortest-probe := Text {
         text: sidebar-shortest-label;
         visible: false;
+    }
+    // Its preferred width is that of the widest row label.
+    sidebar-rows-probe := Rectangle {
+        visible: false;
+        VerticalLayout {
+            for label in sidebar-row-labels : Text { text: label; }
+        }
     }
     members-nick-probe := Text {
         text: members-average-nick;
