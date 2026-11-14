@@ -23,17 +23,19 @@ use std::time::{Duration, Instant};
 
 use opus_decoder::OpusDecoder;
 use rodio::{ChannelCount, Sample, SampleRate, Source};
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{
-    CodecParameters, Decoder as SymphoniaDecoder, DecoderOptions, CODEC_TYPE_NULL, CODEC_TYPE_OPUS,
-    CODEC_TYPE_VORBIS,
+use symphonia::core::codecs::audio::well_known::{CODEC_ID_OPUS, CODEC_ID_VORBIS};
+use symphonia::core::codecs::audio::{
+    AudioCodecParameters, AudioDecoder as SymphoniaDecoder, AudioDecoderOptions,
+    CODEC_ID_NULL_AUDIO,
 };
+use symphonia::core::codecs::CodecParameters;
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::{FormatOptions, FormatReader, Packet, SeekMode, SeekTo};
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
+use symphonia::core::packet::PacketRef;
+use symphonia::core::units::{Duration as MediaDuration, Time, Timestamp};
 
 use crate::media_demux::{self, Sample as VideoSample, VideoCodec, VideoTrack};
 use crate::AppWindow;
@@ -567,20 +569,24 @@ enum Packets {
 
 struct Pcm {
     data: Vec<u8>,
-    ts: u64,
-    dur: u64,
+    ts: Timestamp,
+    dur: MediaDuration,
+    trim_start: MediaDuration,
+    trim_end: MediaDuration,
 }
 
 impl Packets {
     fn next(&mut self) -> Option<Pcm> {
         match self {
             Packets::Format { reader, track_id } => loop {
-                let packet = reader.next_packet().ok()?;
-                if packet.track_id() == *track_id {
+                let packet = reader.next_packet().ok()??;
+                if packet.track_id == *track_id {
                     return Some(Pcm {
-                        data: packet.data.to_vec(),
-                        ts: packet.ts(),
-                        dur: packet.dur(),
+                        data: packet.data.into_vec(),
+                        ts: packet.pts,
+                        dur: packet.dur,
+                        trim_start: packet.trim_start,
+                        trim_end: packet.trim_end,
                     });
                 }
             },
@@ -590,27 +596,46 @@ impl Packets {
                 let data = bytes.get(offset..offset.checked_add(size)?)?.to_vec();
                 Some(Pcm {
                     data,
-                    ts: us.max(0) as u64,
-                    dur: 0,
+                    ts: Timestamp::new(us.max(0)),
+                    dur: MediaDuration::ZERO,
+                    trim_start: MediaDuration::ZERO,
+                    trim_end: MediaDuration::ZERO,
                 })
             }
         }
     }
 
-    fn seek(&mut self, seconds: f64) {
+    /// Moves to `seconds`. Returns how many seconds before that time the
+    /// next packet starts: the decoded sound of that gap is to be dropped.
+    fn seek(&mut self, seconds: f64) -> f64 {
         match self {
             Packets::Format { reader, track_id } => {
-                let _ = reader.seek(
+                let Some(time) = Time::try_from_secs_f64(seconds) else {
+                    return 0.0;
+                };
+                let Ok(seeked) = reader.seek(
                     SeekMode::Coarse,
                     SeekTo::Time {
-                        time: Time::from(seconds),
+                        time,
                         track_id: Some(*track_id),
                     },
-                );
+                ) else {
+                    return 0.0;
+                };
+                let time_base = reader
+                    .tracks()
+                    .iter()
+                    .find(|track| track.id == seeked.track_id)
+                    .and_then(|track| track.time_base);
+                let gap = seeked.required_ts.duration_from(seeked.actual_ts);
+                gap.zip(time_base)
+                    .and_then(|(gap, base)| base.calc_duration(gap))
+                    .map_or(0.0, |gap| gap.as_secs_f64().clamp(0.0, seconds))
             }
             Packets::List { list, next, .. } => {
                 let target = (seconds * 1_000_000.0) as i64;
                 *next = list.partition_point(|packet| packet.2 < target);
+                0.0
             }
         }
     }
@@ -671,17 +696,16 @@ impl AudioSource {
                     }
                 }
                 Decode::Symphonia(decoder) => {
-                    let coded =
-                        Packet::new_from_slice(self.track_id, packet.ts, packet.dur, &packet.data);
-                    match decoder.decode(&coded) {
+                    let mut coded =
+                        PacketRef::new(self.track_id, packet.ts, packet.dur, &packet.data);
+                    coded.trim_start = packet.trim_start;
+                    coded.trim_end = packet.trim_end;
+                    match decoder.decode_ref(&coded) {
                         Ok(decoded) => {
-                            let spec = *decoded.spec();
-                            let mut converted =
-                                SampleBuffer::<f32>::new(decoded.capacity() as u64, spec);
-                            converted.copy_interleaved_ref(decoded);
-                            self.channels = spec.channels.count() as u16;
-                            self.rate = spec.rate;
-                            self.pending.extend_from_slice(converted.samples());
+                            let spec = decoded.spec();
+                            self.channels = spec.channels().count() as u16;
+                            self.rate = spec.rate();
+                            decoded.copy_to_vec_interleaved::<f32>(&mut self.pending);
                         }
                         Err(SymphoniaError::DecodeError(_)) => continue,
                         Err(_) => return false,
@@ -731,14 +755,19 @@ impl Source for AudioSource {
     }
 
     fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
-        self.packets.seek(pos.as_secs_f64());
+        let gap = self.packets.seek(pos.as_secs_f64());
+        self.skip = 0;
         match &mut self.decode {
-            Decode::Symphonia(decoder) => decoder.reset(),
+            Decode::Symphonia(decoder) => {
+                decoder.reset();
+                // The reader may stop before the time: drop the early frames.
+                let frames = (gap * f64::from(self.rate)).round() as usize;
+                self.skip = frames * usize::from(self.channels);
+            }
             Decode::Opus { decoder, .. } => decoder.reset(),
         }
         self.pending.clear();
         self.at = 0;
-        self.skip = 0;
         Ok(())
     }
 }
@@ -760,24 +789,29 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
     if !extension.is_empty() {
         hint.with_extension(extension);
     }
-    let probed = symphonia::default::get_probe()
-        .format(
+    let reader = symphonia::default::get_probe()
+        .probe(
             &hint,
             stream,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|_| "unsupported audio".to_string())?;
-    let reader = probed.format;
-    let track = reader
+    let (track_id, params, delay, num_frames) = reader
         .tracks()
         .iter()
-        .find(|track| track.codec_params.codec != CODEC_TYPE_NULL)
+        .find_map(|track| match &track.codec_params {
+            Some(CodecParameters::Audio(params)) if params.codec != CODEC_ID_NULL_AUDIO => {
+                Some((track.id, params.clone(), track.delay, track.num_frames))
+            }
+            _ => None,
+        })
         .ok_or("no audio track")?;
-    let track_id = track.id;
-    let params: CodecParameters = track.codec_params.clone();
-    let mut source = if params.codec == CODEC_TYPE_OPUS {
-        let channels = params.channels.map_or(2, |channels| channels.count());
+    let mut source = if params.codec == CODEC_ID_OPUS {
+        let channels = params
+            .channels
+            .as_ref()
+            .map_or(2, |channels| channels.count());
         let mut source = AudioSource {
             packets: Packets::Format { reader, track_id },
             track_id,
@@ -786,16 +820,16 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
             rate: OPUS_RATE,
             pending: Vec::new(),
             at: 0,
-            skip: params.delay.unwrap_or(0) as usize * channels.clamp(1, 2),
+            skip: delay.unwrap_or(0) as usize * channels.clamp(1, 2),
             total: None,
         };
-        source.total = ogg_opus_duration(bytes, params.delay.unwrap_or(0));
+        source.total = ogg_opus_duration(bytes, delay.unwrap_or(0));
         source
     } else {
         let decoder = symphonia::default::get_codecs()
-            .make(&params, &DecoderOptions::default())
+            .make_audio_decoder(&params, &AudioDecoderOptions::default())
             .map_err(|_| "unsupported audio".to_string())?;
-        let total = match (params.n_frames, params.sample_rate) {
+        let total = match (num_frames, params.sample_rate) {
             (Some(frames), Some(hz)) if hz > 0 => {
                 Some(Duration::from_secs_f64(frames as f64 / f64::from(hz)))
             }
@@ -807,6 +841,7 @@ fn symphonia_source(bytes: &Arc<[u8]>, extension: &str) -> Result<AudioSource, S
             decode: Decode::Symphonia(decoder),
             channels: params
                 .channels
+                .as_ref()
                 .map_or(2, |channels| channels.count() as u16),
             rate: params.sample_rate.unwrap_or(44_100),
             pending: Vec::new(),
@@ -832,13 +867,13 @@ fn vorbis_source(
     if track.packets.is_empty() {
         return None;
     }
-    let mut params = CodecParameters::new();
+    let mut params = AudioCodecParameters::new();
     params
-        .for_codec(CODEC_TYPE_VORBIS)
+        .for_codec(CODEC_ID_VORBIS)
         .with_sample_rate(track.sample_rate)
         .with_extra_data(track.headers.into_boxed_slice());
     let decoder = symphonia::default::get_codecs()
-        .make(&params, &DecoderOptions::default())
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .ok()?;
     let mut source = AudioSource {
         packets: Packets::List {
@@ -1675,6 +1710,69 @@ mod tests {
         assert!(symphonia_source(&bytes, "opus").is_err());
         assert!(open_video(&bytes, "mp4").is_err());
         assert!(open_video(&bytes, "webm").is_err());
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_opened_gives_the_same_error() {
+        let bytes: Arc<[u8]> = Arc::from(b"not media".to_vec());
+        let error = symphonia_source(&bytes, "wav").err();
+        assert_eq!(error.as_deref(), Some("unsupported audio"));
+    }
+
+    /// One second of a ramp: 16-bit mono PCM in a WAV container.
+    fn wav_second(rate: u32) -> Arc<[u8]> {
+        let samples: Vec<i16> = (0..rate).map(|n| ((n % 200) as i16 - 100) * 100).collect();
+        let data_len = (samples.len() * 2) as u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        Arc::from(bytes)
+    }
+
+    #[test]
+    fn a_wav_file_is_read_and_decoded() {
+        let bytes = wav_second(8_000);
+        let source = symphonia_source(&bytes, "wav").expect("a WAV source");
+        assert_eq!(source.channels, 1);
+        assert_eq!(source.rate, 8_000);
+        let total = source.total.expect("a length");
+        assert!((total.as_secs_f64() - 1.0).abs() < 0.01);
+        let samples: Vec<Sample> = source.collect();
+        assert_eq!(samples.len(), 8_000);
+        assert!(samples.iter().any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
+    fn seeking_a_wav_file_skips_the_start() {
+        let bytes = wav_second(8_000);
+        let mut source = symphonia_source(&bytes, "wav").expect("a WAV source");
+        source.try_seek(Duration::from_millis(500)).expect("a seek");
+        let left = source.count();
+        assert!(left > 0 && left <= 4_100, "{left} samples left");
+    }
+
+    #[test]
+    fn seeking_a_wav_file_to_the_start_keeps_every_sample() {
+        let bytes = wav_second(8_000);
+        let mut source = symphonia_source(&bytes, "wav").expect("a WAV source");
+        for _ in 0..3_000 {
+            source.next();
+        }
+        source.try_seek(Duration::ZERO).expect("a seek");
+        assert_eq!(source.count(), 8_000);
     }
 
     #[test]
