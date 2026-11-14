@@ -15223,9 +15223,14 @@ fn compose_field_takes_mouse_focus_text_paste_and_send_in_every_window() {
                 (0..40)
                     .map(|i| {
                         // Like a production row, the text is in the fields
-                        // that draw the row, so the row takes a click over
-                        // its whole width and moves the focus.
-                        let text = format!("{prefix} {i} https://example.org/a");
+                        // that draw the row. A row input has the width of
+                        // its text, so a short row leaves empty space that
+                        // does not take the focus. This text is longer than
+                        // the chat column on every platform: it wraps, the
+                        // row input fills the row width, and a click at
+                        // x=500 lands on it and moves the focus.
+                        let filler = "word ".repeat(40);
+                        let text = format!("{prefix} {i} {filler}https://example.org/a");
                         // Every other row has a link, so it has the overlay.
                         let link = i % 2 == 0;
                         ChatLine {
