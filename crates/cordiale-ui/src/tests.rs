@@ -15197,6 +15197,195 @@ fn compose_lines_flatten_for_windows_that_are_not_encrypted() {
     assert_eq!(flatten_compose_lines("a\nb\r\n\nc  \n"), "a b c");
 }
 
+/// The compose field takes a mouse click, typed text, pasted plain text and
+/// Enter in a channel, a plain query, an encrypted query and the server window.
+/// Chat rows with link overlays lie above the bar and must not take the click.
+/// A channel change leaves the field usable.
+#[test]
+fn compose_field_takes_mouse_focus_text_paste_and_send_in_every_window() {
+    std::thread::spawn(|| {
+        use slint::platform::{
+            software_renderer::*, Clipboard, Key, Platform, PointerEventButton, WindowAdapter,
+            WindowEvent,
+        };
+        struct Headless;
+        impl Platform for Headless {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer))
+            }
+            fn clipboard_text(&self, _: Clipboard) -> Option<String> {
+                Some("pasted words".to_owned())
+            }
+        }
+        slint::platform::set_platform(Box::new(Headless)).unwrap();
+        let rows = |prefix: &str| -> slint::ModelRc<ChatLine> {
+            Rc::new(slint::VecModel::from(
+                (0..40)
+                    .map(|i| {
+                        // Like a production row, the text is in the fields
+                        // that draw the row. A row input has the width of
+                        // its text, so a short row leaves empty space that
+                        // does not take the focus. This text is longer than
+                        // the chat column on every platform: it wraps, the
+                        // row input fills the row width, and a click at
+                        // x=500 lands on it and moves the focus.
+                        let filler = "word ".repeat(40);
+                        let text = format!("{prefix} {i} {filler}https://example.org/a");
+                        // Every other row has a link, so it has the overlay.
+                        let link = i % 2 == 0;
+                        ChatLine {
+                            timestamp: "12:00".into(),
+                            nick: "Alice".into(),
+                            body: slint::StyledText::from_plain_text(&text),
+                            overlay_body: if link {
+                                text.as_str().into()
+                            } else {
+                                "".into()
+                            },
+                            selectable: !link,
+                            selectable_body: if link {
+                                "".into()
+                            } else {
+                                text.as_str().into()
+                            },
+                            reply_body: text.as_str().into(),
+                            ..Default::default()
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            ))
+            .into()
+        };
+        let ui = AppWindow::new().unwrap();
+        ui.set_screen("connected".into());
+        ui.set_has_selected_channel(true);
+        ui.set_current_channel_label("#rust".into());
+        ui.set_chat_lines(rows("first"));
+        let sent = Rc::new(RefCell::new(Vec::<String>::new()));
+        let record = sent.clone();
+        ui.on_send_chat_message(move |body| record.borrow_mut().push(body.to_string()));
+        ui.show().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(1200., 800.));
+        ui.window().take_snapshot().unwrap();
+
+        let key = |text: slint::SharedString| {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        let click = |x: f32, y: f32| {
+            let position = slint::LogicalPosition::new(x, y);
+            let button = PointerEventButton::Left;
+            ui.window()
+                .dispatch_event(WindowEvent::PointerPressed { position, button });
+            ui.window()
+                .dispatch_event(WindowEvent::PointerReleased { position, button });
+        };
+        // A click on a chat row takes the focus away from the field. The
+        // check types a letter: it must not reach the field.
+        let leave_field = || {
+            click(500., 100.);
+            key("z".into());
+            assert_eq!(
+                ui.get_compose_text(),
+                "",
+                "a click on a chat row left the focus in the field"
+            );
+        };
+        let click_reaches_field = |x: f32, y: f32| {
+            leave_field();
+            ui.set_compose_text("".into());
+            click(x, y);
+            key("z".into());
+            let reached = ui.get_compose_text() == "z";
+            ui.set_compose_text("".into());
+            reached
+        };
+        // The height of the middle of the field, found in the first window.
+        let field_middle = std::cell::Cell::new(0.0_f32);
+        let check_window = |name: &str, has_rows: bool| {
+            ui.window().take_snapshot().unwrap();
+            if has_rows {
+                // A click on a chat row never types into the field.
+                assert!(!click_reaches_field(500., 100.), "{name}: row click");
+                // The rows of the chat stay above the bar: the field answers
+                // over its whole height, and only there.
+                let hits: Vec<u32> = (640..800)
+                    .step_by(2)
+                    .filter(|y| click_reaches_field(500., *y as f32))
+                    .collect();
+                assert!(!hits.is_empty(), "{name}: the field takes no click");
+                let (top, bottom) = (hits[0], hits[hits.len() - 1]);
+                assert!(bottom - top >= 20, "{name}: field too thin {top}..{bottom}");
+                assert!(top >= 700, "{name}: field too high {top}");
+                field_middle.set(((top + bottom) / 2) as f32);
+                let across: Vec<u32> = (250..1000)
+                    .step_by(10)
+                    .filter(|x| click_reaches_field(*x as f32, field_middle.get()))
+                    .collect();
+                assert!(!across.is_empty(), "{name}: no click across the field");
+                assert!(
+                    across[across.len() - 1] - across[0] >= 300,
+                    "{name}: field too narrow {across:?}"
+                );
+                leave_field();
+            }
+            let middle = field_middle.get();
+            assert!(middle > 0., "{name}: the field was not found");
+            // Typing, pasting and Enter, after a click in the field.
+            let before = sent.borrow().len();
+            click(500., middle);
+            for letter in ["h", "i"] {
+                key(letter.into());
+            }
+            assert_eq!(ui.get_compose_text(), "hi", "{name}: typing");
+            let control = Key::Control;
+            ui.window().dispatch_event(WindowEvent::KeyPressed {
+                text: control.into(),
+            });
+            key("v".into());
+            ui.window().dispatch_event(WindowEvent::KeyReleased {
+                text: control.into(),
+            });
+            assert_eq!(ui.get_compose_text(), "hipasted words", "{name}: paste");
+            key(Key::Return.into());
+            assert_eq!(
+                sent.borrow()[before..],
+                ["hipasted words".to_string()],
+                "{name}: send"
+            );
+            ui.set_compose_text("".into());
+        };
+
+        check_window("channel", true);
+
+        // Another channel with new rows: no stale overlay and no blocked field.
+        ui.set_current_channel_label("#other".into());
+        ui.set_chat_lines(rows("second"));
+        slint::platform::update_timers_and_animations();
+        check_window("second channel", true);
+        ui.set_chat_lines(Default::default());
+        check_window("empty channel", false);
+        ui.set_chat_lines(rows("third"));
+
+        // A plain query that is ready, and an encrypted one.
+        ui.set_current_query(true);
+        ui.set_current_query_ready(true);
+        check_window("query", true);
+        ui.set_current_query_e2e(true);
+        check_window("encrypted query", true);
+        ui.set_current_query(false);
+        ui.set_current_query_e2e(false);
+
+        // The server window.
+        ui.set_current_server_window(true);
+        check_window("server window", true);
+    })
+    .join()
+    .unwrap();
+}
+
 #[test]
 fn query_without_a_nick_closes_the_locked_window() {
     for command in ["/query", "/q"] {
