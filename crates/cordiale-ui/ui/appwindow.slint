@@ -1984,7 +1984,11 @@ export component AppWindow inherits Window {
     // Fixed parts of the sidebar, shared by the rows and the minimum width.
     property <length> sidebar-padding: 8px;
     property <length> sidebar-row-spacing: 4px;
-    property <length> sidebar-row-indent: 16px;
+    // Width of the expand arrow of a network row.
+    property <length> sidebar-arrow-width: 28px;
+    // Rows under a network start at the left edge of its name button:
+    // after the arrow and the spacing.
+    property <length> sidebar-row-indent: sidebar-arrow-width + sidebar-row-spacing;
     // The unread-count cell and the [X] cell of a row: reserved in every row.
     property <length> sidebar-cell-width: 28px;
     // Gutter that keeps the overlay scrollbar off the row cells.
@@ -4323,10 +4327,10 @@ export component AppWindow inherits Window {
                     }
 
                     if !group.parked : HorizontalLayout {
-                        spacing: 4px;
+                        spacing: sidebar-row-spacing;
                         Button {
                             text: group.expanded ? "▾" : "▸";
-                            width: 28px;
+                            width: sidebar-arrow-width;
                             accessible-label: @tr("Expand or collapse network {}", group.network);
                             clicked => { network-toggle-requested(group.network); }
                         }
@@ -4339,10 +4343,10 @@ export component AppWindow inherits Window {
                         }
                     }
                     if group.parked : HorizontalLayout {
-                        spacing: 4px;
+                        spacing: sidebar-row-spacing;
                         Button {
                             text: group.expanded ? "▾" : "▸";
-                            width: 28px;
+                            width: sidebar-arrow-width;
                             accessible-label: @tr("Expand or collapse parked network {}", group.network);
                             clicked => { network-toggle-requested(group.network); }
                         }
