@@ -6455,6 +6455,8 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             spacing: 12px;
+            // Keeps a gap between the panels and the vertical scroll bar.
+            padding-right: 8px;
 
             if settings-section == "general" : VerticalLayout {
                 spacing: 12px;
