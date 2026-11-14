@@ -300,7 +300,7 @@ impl Session {
             (Some(source), Some(sink)) => {
                 let player = rodio::Player::connect_new(sink.mixer());
                 player.set_volume(volume);
-                player.append(source);
+                player.append(BufferedAudio::new(source));
                 Some(player)
             }
             (None, _) if video.is_none() => return Err("no audio track".to_string()),
@@ -768,6 +768,195 @@ impl Source for AudioSource {
         }
         self.pending.clear();
         self.at = 0;
+        Ok(())
+    }
+}
+
+/// Decoded chunks that wait between the decode worker and the audio output.
+/// Each chunk is one packet, so the queue holds a fixed, small amount of sound.
+const AUDIO_QUEUE_CHUNKS: usize = 32;
+
+/// How long the worker sleeps when the queue is full.
+const AUDIO_WORKER_IDLE: Duration = Duration::from_millis(5);
+
+enum AudioMessage {
+    Chunk {
+        epoch: u64,
+        channels: u16,
+        rate: u32,
+        samples: Vec<Sample>,
+    },
+    End {
+        epoch: u64,
+    },
+}
+
+struct AudioSeek {
+    epoch: u64,
+    pos: Duration,
+}
+
+/// Runs an [`AudioSource`] on a worker thread, so that packet reads and decoding
+/// never delay the audio output. The output only takes decoded samples from a
+/// bounded queue.
+struct BufferedAudio {
+    messages: Receiver<AudioMessage>,
+    seeks: mpsc::Sender<AudioSeek>,
+    epoch: u64,
+    current: Vec<Sample>,
+    at: usize,
+    ended: bool,
+    channels: u16,
+    rate: u32,
+    total: Option<Duration>,
+}
+
+impl BufferedAudio {
+    fn new(source: AudioSource) -> Self {
+        let channels = source.channels;
+        let rate = source.rate;
+        let total = source.total;
+        let (tx, messages) = mpsc::sync_channel(AUDIO_QUEUE_CHUNKS);
+        let (seeks, seek_rx) = mpsc::channel();
+        thread::spawn(move || audio_worker(source, tx, seek_rx));
+        Self {
+            messages,
+            seeks,
+            epoch: 0,
+            current: Vec::new(),
+            at: 0,
+            ended: false,
+            channels,
+            rate,
+            total,
+        }
+    }
+}
+
+/// Decodes ahead of the audio output until the queue is full.
+fn audio_worker(
+    mut source: AudioSource,
+    out: mpsc::SyncSender<AudioMessage>,
+    seeks: Receiver<AudioSeek>,
+) {
+    let mut epoch = 0;
+    let mut waiting: Option<AudioMessage> = None;
+    let mut finished = false;
+    loop {
+        // Only the last seek counts.
+        let mut seek = None;
+        loop {
+            match seeks.try_recv() {
+                Ok(next) => seek = Some(next),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return,
+            }
+        }
+        if let Some(seek) = seek {
+            let _ = source.try_seek(seek.pos);
+            epoch = seek.epoch;
+            waiting = None;
+            finished = false;
+        }
+        if waiting.is_none() {
+            if finished {
+                match seeks.recv() {
+                    Ok(next) => {
+                        let _ = source.try_seek(next.pos);
+                        epoch = next.epoch;
+                        finished = false;
+                    }
+                    Err(_) => return,
+                }
+                continue;
+            }
+            waiting = Some(if source.refill() {
+                AudioMessage::Chunk {
+                    epoch,
+                    channels: source.channels,
+                    rate: source.rate,
+                    samples: std::mem::take(&mut source.pending),
+                }
+            } else {
+                finished = true;
+                AudioMessage::End { epoch }
+            });
+            source.at = 0;
+        }
+        if let Some(message) = waiting.take() {
+            match out.try_send(message) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(message)) => {
+                    waiting = Some(message);
+                    thread::sleep(AUDIO_WORKER_IDLE);
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
+            }
+        }
+    }
+}
+
+impl Iterator for BufferedAudio {
+    type Item = Sample;
+
+    fn next(&mut self) -> Option<Sample> {
+        loop {
+            if self.at < self.current.len() {
+                let sample = self.current[self.at];
+                self.at += 1;
+                return Some(sample);
+            }
+            if self.ended {
+                return None;
+            }
+            match self.messages.recv() {
+                Ok(AudioMessage::Chunk {
+                    epoch,
+                    channels,
+                    rate,
+                    samples,
+                }) if epoch == self.epoch => {
+                    self.channels = channels;
+                    self.rate = rate;
+                    self.current = samples;
+                    self.at = 0;
+                }
+                Ok(AudioMessage::End { epoch }) if epoch == self.epoch => self.ended = true,
+                // A chunk from before a seek.
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
+    }
+}
+
+impl Source for BufferedAudio {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> ChannelCount {
+        count(self.channels)
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+        rate(self.rate)
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.total
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        self.epoch += 1;
+        self.current.clear();
+        self.at = 0;
+        self.ended = false;
+        // The worker stops when it is gone: the sound then ends.
+        let _ = self.seeks.send(AudioSeek {
+            epoch: self.epoch,
+            pos,
+        });
         Ok(())
     }
 }
@@ -1753,6 +1942,32 @@ mod tests {
         let samples: Vec<Sample> = source.collect();
         assert_eq!(samples.len(), 8_000);
         assert!(samples.iter().any(|sample| sample.abs() > 0.1));
+    }
+
+    #[test]
+    fn buffered_audio_gives_the_same_samples_as_direct_decoding() {
+        let bytes = wav_second(8_000);
+        let direct: Vec<Sample> = symphonia_source(&bytes, "wav").expect("a source").collect();
+        let source = symphonia_source(&bytes, "wav").expect("a source");
+        let buffered = BufferedAudio::new(source);
+        assert!(buffered.total_duration().is_some());
+        let samples: Vec<Sample> = buffered.collect();
+        assert_eq!(samples, direct);
+    }
+
+    #[test]
+    fn buffered_audio_seeks_and_restarts_after_the_end() {
+        let bytes = wav_second(8_000);
+        let source = symphonia_source(&bytes, "wav").expect("a source");
+        let mut buffered = BufferedAudio::new(source);
+        while buffered.next().is_some() {}
+        buffered.try_seek(Duration::ZERO).expect("a seek");
+        assert_eq!(buffered.by_ref().count(), 8_000);
+        buffered
+            .try_seek(Duration::from_millis(500))
+            .expect("a seek");
+        let left = buffered.count();
+        assert!(left > 0 && left <= 4_100, "{left} samples left");
     }
 
     #[test]
