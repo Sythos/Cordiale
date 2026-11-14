@@ -8130,6 +8130,13 @@ export component AppWindow inherits Window {
                             horizontal-alignment: center;
                             wrap: word-wrap;
                         }
+                        StyledText {
+                            text: @markdown("[https://www.sythos.net](https://www.sythos.net)");
+                            horizontal-alignment: center;
+                            default-color: theme == "dark" ? white : black;
+                            link-color: theme == "dark" ? #8ab4f8 : #1a5fb4;
+                            link-clicked(href) => { credits-link-clicked(href); }
+                        }
                         Text {
                             text: app-version;
                             horizontal-alignment: center;
