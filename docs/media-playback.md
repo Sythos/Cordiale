@@ -54,8 +54,8 @@ zero indica un vuoto nel suono.
   VP9 e AV1; VP8 resta in software.
 - È spenta di default, come `video-shrink`: una build che la vuole deve avere
   le librerie di sviluppo di FFmpeg. Il job CI `hw-decode` la compila e la
-  prova su Linux. Tra i pacchetti di rilascio la include solo Windows x64
-  (sezione «Pacchetti di rilascio»).
+  prova su Linux. Tra i pacchetti di rilascio la includono Windows (x64 e
+  ARM64) e macOS; i pacchetti Linux no (sezione «Pacchetti di rilascio»).
 - Senza la feature, senza un decodificatore adatto nel sistema, o con
   `CORDIALE_VIDEO_DECODE=software`, il file si riproduce con i
   decodificatori software, senza errori.
@@ -120,52 +120,56 @@ fondo non contiene misure, e le tarature restano ai valori attuali.
 ## Pacchetti di rilascio
 
 La feature si accende in una piattaforma solo se esiste una scelta di
-collegamento. Un binario con `hw-decode` collega FFmpeg in modo dinamico,
-salvo dove è scritto altrimenti:
+collegamento che non dipende dalle librerie del sistema dell'utente. Dove FFmpeg
+è collegato in modo statico, l'eseguibile non ha bisogno di FFmpeg nel sistema.
 
-- **Windows x64: accesa.** `packages.yml` installa FFmpeg da vcpkg
-  (`x64-windows-static-md`) e compila con `--features hw-decode`. FFmpeg è
-  dentro l'eseguibile: nessuna DLL, quindi parte anche senza FFmpeg nel
-  sistema. Senza un percorso hardware adatto il lettore usa il software.
-- **Windows ARM64, macOS, Linux: spenta**, per i motivi qui sotto.
+| Piattaforma | Hardware | Collegamento |
+|---|---|---|
+| Windows x64 | D3D11VA, DXVA2 | FFmpeg da vcpkg, triplet `x64-windows-static-md`, feature `hw-decode` |
+| Windows ARM64 | D3D11VA, DXVA2 | FFmpeg da vcpkg, triplet `arm64-windows-static-md` (build incrociata sul runner x64), feature `hw-decode` |
+| macOS ARM64 | VideoToolbox | FFmpeg da vcpkg, triplet `arm64-osx`, statico con pkg-config, feature `hw-decode-static` |
+| macOS x64 | VideoToolbox | FFmpeg da vcpkg, triplet `x64-osx` (build incrociata sul runner ARM64), feature `hw-decode-static` |
+| Linux | nessuno | software |
 
-Motivi per cui le altre piattaforme restano spente:
+Regole del workflow `packages.yml`:
 
-- il nome della libreria cambia tra le distribuzioni (per esempio
-  `libavcodec.so.60` su Ubuntu 24.04 e `.so.61` su Debian 13): il binario
-  compilato su `ubuntu-24.04` non partirebbe su Debian 13;
+- Windows ARM64 e macOS hanno un ripiego: se l'installazione di FFmpeg o la
+  build con hardware fallisce, il job compila senza `hw-decode`, scrive un
+  avviso e il pacchetto usa il software. Windows x64 non ha ripiego: un
+  errore ferma il job.
+- Ogni job di Windows controlla che l'eseguibile non importi una DLL di FFmpeg.
+  Ogni job di macOS controlla con `otool -L` che non colleghi `libav*`,
+  `libsw*` né un percorso di Homebrew. Il controllo fa fallire il pacchetto
+  che non partirebbe senza FFmpeg.
+- Le build con vcpkg su Windows ARM64 e su macOS sono scritte ma non ancora
+  provate dalla CI: partono con la prossima release o con l'avvio manuale di
+  `Packages`. Se il ripiego scatta, l'avviso appare nel riepilogo del job.
+
+Perché Linux resta in software, decisione presa: un collegamento statico di
+FFmpeg non ha un percorso hardware senza le librerie condivise di VA-API, e
+queste cambiano tra le distribuzioni. Un collegamento dinamico non parte su
+tutte le distribuzioni:
+
+- il nome della libreria cambia (per esempio `libavcodec.so.60` su Ubuntu 24.04
+  e `.so.61` su Debian 13): il binario compilato su `ubuntu-24.04` non partirebbe
+  su Debian 13;
 - `packaging/check-linux-deps.sh` rifiuta le librerie che la sua tabella non
   conosce, e per AlmaLinux e Arch i pacchetti di FFmpeg hanno altri nomi;
-- su Windows e macOS le librerie di FFmpeg vanno incluse nell'installer, e
-  sul bersaglio `aarch64-unknown-linux-gnu` la build con `cross` non le ha.
+- sul bersaglio `aarch64-unknown-linux-gnu` la build con `cross` non ha le
+  librerie di FFmpeg.
 
-Per accenderla in un'altra piattaforma serve una scelta di collegamento
-(statico, o librerie incluse) e un job di pacchetto provato su di essa:
-
-- **Windows ARM64:** la build statica con vcpkg è provata solo per x64.
-- **macOS:** FFmpeg di Homebrew in modo dinamico. Per un pacchetto servirebbe
-  includere le librerie nel bundle `.app`: da decidere.
-- **Linux:** collegamento dinamico alle librerie della distribuzione; per i
-  pacchetti serve una build statica di FFmpeg o una tabella di dipendenze per
-  ogni distribuzione.
-
-Accenderla senza questa scelta può impedire l'avvio del programma sul
-sistema dell'utente.
+Su Linux la decodifica hardware resta disponibile con la build di prova
+`linux-x64-hw-dev` del workflow `Dev Build`.
 
 ## Cosa resta da fare
 
-Il codice della issue #787 è completo. Restano la scelta di collegamento per
-le piattaforme ancora spente e, con la prossima release, la verifica che il
-pacchetto Windows x64 con `hw-decode` parta su un sistema senza FFmpeg.
-Si accende `hw-decode` per un'altra piattaforma solo quando sono vere tutte
-queste condizioni:
+Il codice della issue #787 è completo. Resta solo l'esito della prossima
+release (o di un avvio manuale di `Packages`):
 
-- le prove di quella piattaforma sono nella tabella, con `decoder` uguale al
-  percorso hardware atteso e `audio_underruns` vicino a zero;
-- la prova in software (`CORDIALE_VIDEO_DECODE=software`) riproduce senza
-  errori;
-- esiste una scelta di collegamento per quella piattaforma e il pacchetto
-  parte su un sistema senza FFmpeg installato.
+- il pacchetto Windows x64 con `hw-decode` parte su un sistema senza FFmpeg
+  (il job lo controlla sull'eseguibile: nessuna DLL di FFmpeg);
+- le build con hardware di Windows ARM64 e macOS riescono, o il ripiego
+  compila il pacchetto in software con un avviso.
 
 ## Registro dei risultati
 
