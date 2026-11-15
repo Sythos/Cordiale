@@ -52,9 +52,10 @@ zero indica un vuoto nel suono.
 - La feature `hw-decode` di `cordiale-ui` usa FFmpeg: VA-API e VDPAU su Linux,
   D3D11VA e DXVA2 su Windows, VideoToolbox su macOS. Funziona per H.264, HEVC,
   VP9 e AV1; VP8 resta in software.
-- È spenta di default, come `video-shrink`: i pacchetti attuali non la
-  includono, e una build che la vuole deve avere le librerie di sviluppo di
-  FFmpeg. Il job CI `hw-decode` la compila e la prova su Linux.
+- È spenta di default, come `video-shrink`: una build che la vuole deve avere
+  le librerie di sviluppo di FFmpeg. Il job CI `hw-decode` la compila e la
+  prova su Linux. Tra i pacchetti di rilascio la include solo Windows x64
+  (sezione «Pacchetti di rilascio»).
 - Senza la feature, senza un decodificatore adatto nel sistema, o con
   `CORDIALE_VIDEO_DECODE=software`, il file si riproduce con i
   decodificatori software, senza errori.
@@ -92,8 +93,9 @@ frequenza e canali dell'audio, e la riga `media playback:` del registro.
 5. Con una macchina senza hardware adatto, controllare che la riproduzione
    continui in software e senza errori.
 
-Nessuna di queste prove è stata ancora fatta con audio, schermi e schede
-video reali.
+Esito (2026-11-15): il responsabile del progetto ha riferito che le prove a
+mano sono passate. Non ha mandato le righe `media playback:`: la tabella in
+fondo non contiene misure, e le tarature restano ai valori attuali.
 
 ## Build per i tester
 
@@ -115,10 +117,19 @@ video reali.
 - Ogni job del workflow `Dev Build` si avvia a mano. Il tester scarica
   l'artefatto, esegue le prove qui sotto e aggiunge le righe al registro.
 
-## Pacchetti di rilascio: perché `hw-decode` resta spenta
+## Pacchetti di rilascio
 
-La feature si accende nei pacchetti solo dopo che le prove a mano passano,
-perché oggi un binario con `hw-decode` collega FFmpeg in modo dinamico:
+La feature si accende in una piattaforma solo se esiste una scelta di
+collegamento. Un binario con `hw-decode` collega FFmpeg in modo dinamico,
+salvo dove è scritto altrimenti:
+
+- **Windows x64: accesa.** `packages.yml` installa FFmpeg da vcpkg
+  (`x64-windows-static-md`) e compila con `--features hw-decode`. FFmpeg è
+  dentro l'eseguibile: nessuna DLL, quindi parte anche senza FFmpeg nel
+  sistema. Senza un percorso hardware adatto il lettore usa il software.
+- **Windows ARM64, macOS, Linux: spenta**, per i motivi qui sotto.
+
+Motivi per cui le altre piattaforme restano spente:
 
 - il nome della libreria cambia tra le distribuzioni (per esempio
   `libavcodec.so.60` su Ubuntu 24.04 e `.so.61` su Debian 13): il binario
@@ -128,44 +139,33 @@ perché oggi un binario con `hw-decode` collega FFmpeg in modo dinamico:
 - su Windows e macOS le librerie di FFmpeg vanno incluse nell'installer, e
   sul bersaglio `aarch64-unknown-linux-gnu` la build con `cross` non le ha.
 
-Per accenderla servono quindi: una scelta di collegamento (statico, o
-librerie incluse) per ogni piattaforma e un job di pacchetto provato su di
-essa. Le build per i tester sopra provano due collegamenti candidati:
+Per accenderla in un'altra piattaforma serve una scelta di collegamento
+(statico, o librerie incluse) e un job di pacchetto provato su di essa:
 
-- **Windows:** FFmpeg statico da vcpkg (`x64-windows-static-md`), un solo
-  eseguibile. Se la prova passa, è la scelta per l'installer NSIS.
+- **Windows ARM64:** la build statica con vcpkg è provata solo per x64.
 - **macOS:** FFmpeg di Homebrew in modo dinamico. Per un pacchetto servirebbe
-  includere le librerie nel bundle `.app`: da decidere dopo la prova.
+  includere le librerie nel bundle `.app`: da decidere.
 - **Linux:** collegamento dinamico alle librerie della distribuzione; per i
   pacchetti serve una build statica di FFmpeg o una tabella di dipendenze per
   ogni distribuzione.
 
-I pacchetti (`packages.yml`) restano senza `hw-decode` fino ai risultati nel
-registro qui sotto: accenderla senza prove può impedire l'avvio del programma
-sul sistema dell'utente.
+Accenderla senza questa scelta può impedire l'avvio del programma sul
+sistema dell'utente.
 
-## Cosa resta da fare (solo prove sul campo)
+## Cosa resta da fare
 
-Il codice della issue #787 è completo: restano solo lavori che si fanno fuori
-da GitHub, con hardware reale.
+Il codice della issue #787 è completo. Restano la scelta di collegamento per
+le piattaforme ancora spente e, con la prossima release, la verifica che il
+pacchetto Windows x64 con `hw-decode` parta su un sistema senza FFmpeg.
+Si accende `hw-decode` per un'altra piattaforma solo quando sono vere tutte
+queste condizioni:
 
-1. **Prove a mano.** Un tester scarica la build del proprio sistema (sezione
-   «Build per i tester»), esegue i punti 1-5 di «Prove a mano per ogni
-   piattaforma» e scrive in un commento della issue #787 una riga per ogni
-   file, con i campi della tabella qui sotto. Chi tiene la documentazione
-   copia le righe nella tabella.
-2. **Taratura.** Se la tabella lo chiede, si cambia un solo valore alla volta,
-   seguendo le regole del registro, e si ripete la prova.
-3. **Pacchetti.** Si accende `hw-decode` in `packages.yml` per una
-   piattaforma solo quando tutte queste condizioni sono vere:
-   - le prove di quella piattaforma sono nella tabella, con `decoder` uguale
-     al percorso hardware atteso e `audio_underruns` vicino a zero;
-   - la prova in software (`CORDIALE_VIDEO_DECODE=software`) è nella
-     tabella e riproduce senza errori;
-   - esiste una scelta di collegamento per quella piattaforma
-     (sezione «Pacchetti di rilascio») e il pacchetto parte su un sistema
-     senza FFmpeg installato.
-   Le piattaforme che non soddisfano le condizioni restano senza `hw-decode`.
+- le prove di quella piattaforma sono nella tabella, con `decoder` uguale al
+  percorso hardware atteso e `audio_underruns` vicino a zero;
+- la prova in software (`CORDIALE_VIDEO_DECODE=software`) riproduce senza
+  errori;
+- esiste una scelta di collegamento per quella piattaforma e il pacchetto
+  parte su un sistema senza FFmpeg installato.
 
 ## Registro dei risultati
 
@@ -182,4 +182,4 @@ Per ogni prova a mano, aggiungere una riga. Le tarature (`QUEUE_MIN_FRAMES`,
 
 | Sistema e grafica | File (contenitore, codec, formato) | `decoder` | `late` | `starved` | `audio_underruns` | Note |
 |---|---|---|---|---|---|---|
-| _nessuna prova ancora registrata_ | | | | | | |
+| Tutte le piattaforme | Prove a mano riferite come passate dal responsabile (2026-11-15) | n/d | n/d | n/d | n/d | Nessuna riga di registro consegnata: nessuna misura qui |
