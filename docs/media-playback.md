@@ -102,11 +102,18 @@ video reali.
   librerie condivise di FFmpeg del sistema: il tester ha bisogno delle
   librerie di FFmpeg della stessa versione di quelle del runner
   (`ubuntu-26.04`), cioè di una distribuzione recente.
-- **Windows e macOS:** non c'è ancora una build pronta con `hw-decode`; serve
-  compilare in locale con le librerie di sviluppo di FFmpeg
-  (`cargo build --release --package cordiale-ui --features hw-decode`).
-- Windows resta il job `windows-x64-dev` (senza `hw-decode`): serve per la
-  prova in software.
+- **Windows x64:** il job `windows-x64-hw-dev` compila con `--features
+  hw-decode` e carica uno zip con il solo `cordiale-ui.exe`. FFmpeg viene da
+  vcpkg con il triplet `x64-windows-static-md` (libreria statica, runtime C
+  dinamico): nessuna DLL di FFmpeg accanto all'eseguibile. Non è un
+  installer.
+- **macOS ARM64 e x64:** il job `macos-hw-dev` (un lavoro per architettura)
+  compila con `--features hw-decode` e FFmpeg di Homebrew, e carica un
+  tarball. Il tester installa lo stesso FFmpeg con `brew install ffmpeg`.
+- Windows resta anche il job `windows-x64-dev` (senza `hw-decode`): serve per
+  la prova in software.
+- Ogni job del workflow `Dev Build` si avvia a mano. Il tester scarica
+  l'artefatto, esegue le prove qui sotto e aggiunge le righe al registro.
 
 ## Pacchetti di rilascio: perché `hw-decode` resta spenta
 
@@ -123,7 +130,19 @@ perché oggi un binario con `hw-decode` collega FFmpeg in modo dinamico:
 
 Per accenderla servono quindi: una scelta di collegamento (statico, o
 librerie incluse) per ogni piattaforma e un job di pacchetto provato su di
-essa. Questo non si decide senza i risultati qui sotto.
+essa. Le build per i tester sopra provano due collegamenti candidati:
+
+- **Windows:** FFmpeg statico da vcpkg (`x64-windows-static-md`), un solo
+  eseguibile. Se la prova passa, è la scelta per l'installer NSIS.
+- **macOS:** FFmpeg di Homebrew in modo dinamico. Per un pacchetto servirebbe
+  includere le librerie nel bundle `.app`: da decidere dopo la prova.
+- **Linux:** collegamento dinamico alle librerie della distribuzione; per i
+  pacchetti serve una build statica di FFmpeg o una tabella di dipendenze per
+  ogni distribuzione.
+
+I pacchetti (`packages.yml`) restano senza `hw-decode` fino ai risultati nel
+registro qui sotto: accenderla senza prove può impedire l'avvio del programma
+sul sistema dell'utente.
 
 ## Registro dei risultati
 
