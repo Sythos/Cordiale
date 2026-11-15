@@ -3600,14 +3600,15 @@ fn show_locked_rows(
 
 /// How many rows each stored message of the locked window has in one view,
 /// then one row for each message on its way (those come after the stored
-/// ones, as in `load_locked_rows`).
+/// ones, as in `load_locked_rows`). The date separator before a message
+/// counts as one more row of that message.
 fn locked_row_counts(
     state: &WorkerState,
     network: &str,
     nick: &str,
     ciphertext: bool,
 ) -> Vec<usize> {
-    let mut counts: Vec<usize> = state
+    let mut rows: Vec<(Option<chrono::NaiveDate>, usize)> = state
         .e2e
         .history_of(network)
         .map(|history| {
@@ -3615,17 +3616,39 @@ fn locked_row_counts(
                 .messages(&conversation_id(network, nick))
                 .into_iter()
                 .map(|message| {
-                    if ciphertext {
+                    let date = message
+                        .sent_at
+                        .checked_mul(1000)
+                        .and_then(dates::local_date_of_millis);
+                    let count = if ciphertext {
                         message.captures.len().max(1)
                     } else {
                         1
-                    }
+                    };
+                    (date, count)
                 })
                 .collect()
         })
         .unwrap_or_default();
-    counts.extend(state.e2e.incoming_rows(network, nick).iter().map(|_| 1));
-    counts
+    // A row on its way has no event time, so it has no separator.
+    rows.extend(
+        state
+            .e2e
+            .incoming_rows(network, nick)
+            .iter()
+            .map(|_| (None, 1)),
+    );
+    counts_with_separators(&rows)
+}
+
+/// The row count of each message with the date separator before it, per the
+/// one rule of the pane (`date_separator_flags`).
+fn counts_with_separators(rows: &[(Option<chrono::NaiveDate>, usize)]) -> Vec<usize> {
+    let flags = date_separator_flags(rows.iter().map(|(date, _)| *date));
+    rows.iter()
+        .zip(flags)
+        .map(|((_, count), separator)| count + usize::from(separator))
+        .collect()
 }
 
 /// The anchor for the new view. The offset is dropped: it was measured in a
@@ -4942,6 +4965,20 @@ mod tests {
         // A stale row maps to the last message; no messages map to row 0.
         assert_eq!(remap_message_row(&clear, &cipher, 99), 4);
         assert_eq!(remap_message_row(&[], &[], 5), 0);
+    }
+
+    #[test]
+    fn locked_row_counts_include_the_date_separators() {
+        let day = |day| chrono::NaiveDate::from_ymd_opt(2026, 11, day);
+        // Two messages on the 13th, then one on the 14th with three
+        // ciphertext rows, then a row on its way with no date.
+        let clear = counts_with_separators(&[(day(13), 1), (day(13), 1), (day(14), 1), (None, 1)]);
+        let cipher = counts_with_separators(&[(day(13), 1), (day(13), 2), (day(14), 3), (None, 1)]);
+        assert_eq!(clear, vec![1, 1, 2, 1]);
+        assert_eq!(cipher, vec![1, 2, 4, 1]);
+        // The first row of the 14th message is its separator in both views.
+        assert_eq!(remap_message_row(&clear, &cipher, 2), 3);
+        assert_eq!(remap_message_row(&cipher, &clear, 5), 2);
     }
 
     #[test]

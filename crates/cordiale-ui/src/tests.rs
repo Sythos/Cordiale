@@ -11772,6 +11772,31 @@ fn mention_jumps_resolve_the_window_and_keep_the_id_optional() {
 }
 
 #[test]
+fn mention_row_counts_the_date_separators_above_the_message() {
+    use cordiale_core::isupport::CaseMapping;
+
+    let mut hidden = dated_row(2, (2026, 11, 14), (8, 0), true);
+    hidden.message_id = Some(2);
+    let rows = vec![
+        dated_row(1, (2026, 11, 13), (22, 0), false),
+        hidden,
+        dated_row(3, (2026, 11, 14), (9, 0), false),
+        dated_row(4, (2026, 11, 15), (9, 0), false),
+    ];
+    for denoise in [false, true] {
+        let lines = chat_lines_model_with_roster(&rows, false, &[], CaseMapping::Rfc1459, denoise);
+        for id in [1, 3, 4] {
+            let row = mention_row(&rows, id, denoise).expect("row");
+            assert_eq!(lines[row].reply_id.to_string(), id.to_string());
+            assert!(lines[row].separator.is_empty());
+        }
+    }
+    // The first row of a new day is the one after its separator.
+    assert_eq!(mention_row(&rows, 3, true), Some(2));
+    assert_eq!(mention_row(&rows, 3, false), Some(3));
+}
+
+#[test]
 fn mention_row_finds_the_message_among_the_shown_rows() {
     let row = |kind: &str, id: i64| {
         render_message(

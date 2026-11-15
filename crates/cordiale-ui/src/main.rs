@@ -10063,22 +10063,29 @@ fn separator_label_before(
 /// How many rows the pane shows for `messages`: the visible messages and
 /// the date separators between them.
 fn chat_display_row_count(messages: &[RenderedMessage], hide_presence: bool) -> usize {
-    let mut count = 0;
-    let mut above = None;
-    for message in messages
+    let dates = messages
         .iter()
         .filter(|message| !(hide_presence && message.presence_noise))
-    {
-        let date = message_local_date(message);
-        if above.zip(date).is_some_and(|(above, date)| above != date) {
-            count += 1;
-        }
-        if date.is_some() {
-            above = date;
-        }
-        count += 1;
-    }
-    count
+        .map(message_local_date);
+    let flags = date_separator_flags(dates);
+    flags.len() + flags.iter().filter(|flag| **flag).count()
+}
+
+/// For each row, in display order, whether a date separator goes before it.
+/// This is the one rule for every caller. A row with an unknown date never
+/// changes the last known date.
+fn date_separator_flags(dates: impl IntoIterator<Item = Option<chrono::NaiveDate>>) -> Vec<bool> {
+    let mut above = None;
+    dates
+        .into_iter()
+        .map(|date| {
+            let flag = above.zip(date).is_some_and(|(above, date)| above != date);
+            if date.is_some() {
+                above = date;
+            }
+            flag
+        })
+        .collect()
 }
 
 /// Puts the icon of each link in front of it in the runs. The links are
@@ -10944,18 +10951,18 @@ fn chat_lines_model_with_roster(
     casemapping: cordiale_core::isupport::CaseMapping,
     hide_presence: bool,
 ) -> Vec<ChatLine> {
-    let mut lines = Vec::with_capacity(messages.len());
-    let mut above = None;
-    for message in messages
+    let visible: Vec<&RenderedMessage> = messages
         .iter()
         .filter(|message| !(hide_presence && message.presence_noise))
-    {
-        let date = message_local_date(message);
-        if let Some(label) = separator_label_between(above, date) {
-            lines.push(separator_chat_line(&label, dark_theme));
-        }
-        if date.is_some() {
-            above = date;
+        .collect();
+    let flags = date_separator_flags(visible.iter().map(|message| message_local_date(message)));
+    let mut lines = Vec::with_capacity(visible.len() + flags.len());
+    for (message, separator) in visible.into_iter().zip(flags) {
+        if let Some(date) = message_local_date(message).filter(|_| separator) {
+            lines.push(separator_chat_line(
+                &dates::separator_label(&date),
+                dark_theme,
+            ));
         }
         let prefix = message
             .nick
