@@ -101,6 +101,9 @@ ctap-hid = ["dep:ctap-hid-fido2"]
 # FFmpeg. Without the feature, or when the host has no suitable decoder, the
 # player decodes in software.
 hw-decode = ["dep:ffmpeg-next"]
+# Same, with FFmpeg linked statically through pkg-config (macOS release
+# packages). The executable then needs no FFmpeg library on the host.
+hw-decode-static = ["hw-decode", "ffmpeg-next/static"]
 # Shrinking videos before an upload: links FFmpeg through the core crate.
 video-shrink = ["cordiale-core/video-shrink"]
 
