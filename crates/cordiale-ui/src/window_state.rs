@@ -247,6 +247,12 @@ impl SaveGate {
         self.last_seen
     }
 
+    /// The newest known state: the last one seen, else the saved one. New
+    /// samples merge into it, so the debounce keeps no observed bounds out.
+    pub fn latest(&self) -> Option<WindowState> {
+        self.last_seen.or(self.saved)
+    }
+
     /// Returns true when `state` differs from the saved one, without the
     /// stability check. Used when the window closes.
     pub fn flush(&mut self, state: WindowState) -> bool {
@@ -363,7 +369,7 @@ pub fn install(ui: &AppWindow, saved: Option<WindowState>) -> WindowStateSaver {
             return;
         };
         let mut gate = timer_gate.borrow_mut();
-        let state = record(gate.saved(), &sample);
+        let state = record(gate.latest(), &sample);
         if gate.observe(state) {
             write(state);
         }
@@ -376,7 +382,7 @@ pub fn install(ui: &AppWindow, saved: Option<WindowState>) -> WindowStateSaver {
         if let Some(ui) = weak.upgrade() {
             let mut gate = close_gate.borrow_mut();
             let state = sample(&ui)
-                .map(|sample| record(gate.saved(), &sample))
+                .map(|sample| record(gate.latest(), &sample))
                 .or(gate.last_seen());
             if let Some(state) = state {
                 if gate.flush(state) {
@@ -441,6 +447,21 @@ mod tests {
             sidebar_width: 220,
             members_width: 180,
         }
+    }
+
+    #[test]
+    fn latest_keeps_bounds_seen_once_before_maximizing() {
+        let old = record(None, &sample(false, false));
+        let mut gate = SaveGate::new(Some(old));
+        let mut resized = sample(false, false);
+        resized.size = (1200, 800);
+        assert!(!gate.observe(record(gate.latest(), &resized)));
+        let mut maximized = sample(true, false);
+        maximized.size = (1920, 1080);
+        let state = record(gate.latest(), &maximized);
+        assert_eq!(state.width, Some(1200));
+        assert_eq!(state.height, Some(800));
+        assert!(state.maximized);
     }
 
     #[test]
