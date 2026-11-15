@@ -6165,7 +6165,13 @@ fn sidebar_hit_spans(
 ) -> std::collections::BTreeMap<String, (f32, f32)> {
     use slint::platform::{PointerEventButton, WindowEvent};
     let mut spans = std::collections::BTreeMap::new();
+    let mut last_hit = None;
     for x in 0..max_x {
+        // Stop after the last control of the row: more than the unread cell
+        // and its two gaps (36) without any hit.
+        if last_hit.is_some_and(|last| x - last > 40) {
+            break;
+        }
         let position = slint::LogicalPosition::new(x as f32, y);
         let button = PointerEventButton::Left;
         log.borrow_mut().clear();
@@ -6174,6 +6180,7 @@ fn sidebar_hit_spans(
         ui.window()
             .dispatch_event(WindowEvent::PointerReleased { position, button });
         for event in log.borrow().iter() {
+            last_hit = Some(x);
             let span = spans.entry(event.clone()).or_insert((x as f32, x as f32));
             span.1 = x as f32;
         }
@@ -6224,6 +6231,24 @@ fn sidebar_rows_share_the_left_and_right_edges_of_the_network_button() {
     ];
     for width in [1200., 700.] {
         let ui = AppWindow::new().unwrap();
+        // The sidebar width comes from the same fitting as in the app.
+        ui.on_fit_column_widths(
+            |window, sidebar, members, sidebar_min, members_min, reserved, sidebar_max| {
+                let fitted = fit_columns(
+                    window,
+                    sidebar,
+                    members,
+                    sidebar_min,
+                    members_min,
+                    reserved,
+                    sidebar_max,
+                );
+                ColumnWidths {
+                    sidebar: fitted.sidebar,
+                    members: fitted.members,
+                }
+            },
+        );
         ui.set_screen("connected".into());
         set_sidebar_probes(&ui, &groups);
         show_network_groups(&ui, groups.clone());
@@ -6250,10 +6275,13 @@ fn sidebar_rows_share_the_left_and_right_edges_of_the_network_button() {
         ui.window().set_size(slint::LogicalSize::new(width, 800.));
         ui.window().take_snapshot().unwrap();
 
-        // Find the top of every row by scanning down the sidebar.
+        // Find the top of every row by scanning down the sidebar. The scan
+        // starts under the icon row (its buttons change the screen) and
+        // clicks at x=64: the rows start at x=56 (sidebar padding 16 + 8,
+        // arrow 28, spacing 4), so the click hits a name or label button.
         let mut tops = std::collections::BTreeMap::new();
-        for y in (0..790).step_by(2) {
-            let position = slint::LogicalPosition::new(100., y as f32);
+        for y in (64..790).step_by(2) {
+            let position = slint::LogicalPosition::new(64., y as f32);
             let button = PointerEventButton::Left;
             log.borrow_mut().clear();
             ui.window()
