@@ -1614,6 +1614,9 @@ struct VideoPlayer {
     /// Most pictures that wait in `decoded`; set by the size of the picture.
     queue_limit: usize,
     shown: Option<i64>,
+    /// After a fall-back to software, the pictures at or before this time
+    /// were shown already: the queue skips them.
+    resume_after: Option<i64>,
     duration: f64,
     /// The average time between two pictures, in microseconds.
     frame_interval_us: i64,
@@ -1762,6 +1765,7 @@ impl VideoPlayer {
             drained: false,
             decoded: VecDeque::new(),
             shown: None,
+            resume_after: None,
             starving: false,
             stats,
         }
@@ -1822,7 +1826,8 @@ impl VideoPlayer {
     }
 
     /// The hardware decoder failed. The software decoder starts again from
-    /// the key sample before the failed one, so the video goes on.
+    /// the key sample of the earliest picture that is not shown yet, so the
+    /// queued pictures come back and the video goes on.
     fn fall_back(&mut self, reason: &str) {
         cordiale_core::persistence::log_line(&format!(
             "video decode: hardware decoder stopped, using software: {reason}"
@@ -1832,9 +1837,16 @@ impl VideoPlayer {
             return;
         };
         self.decoder = decoder;
-        self.next_sample = self.key_at_or_before(self.next_sample.saturating_sub(1));
+        let mut restart = self.next_sample.saturating_sub(1);
+        if let Some((pts, _)) = self.decoded.front() {
+            if let Some(index) = self.track.samples.iter().position(|s| s.pts_us == *pts) {
+                restart = restart.min(index);
+            }
+        }
+        self.next_sample = self.key_at_or_before(restart);
         self.drained = false;
         self.decoded.clear();
+        self.resume_after = self.shown;
         self.stats.decoder = "software";
         self.stats.fell_back = true;
     }
@@ -1959,6 +1971,14 @@ impl VideoPlayer {
         let now = (position * 1_000_000.0) as i64;
         let mut newest = None;
         let mut due = 0u64;
+        if let Some(limit) = self.resume_after {
+            while self.decoded.front().is_some_and(|(pts, _)| *pts <= limit) {
+                self.decoded.pop_front();
+            }
+            if !self.decoded.is_empty() {
+                self.resume_after = None;
+            }
+        }
         while self.decoded.front().is_some_and(|(pts, _)| *pts <= now) {
             newest = self.decoded.pop_front();
             due += 1;
@@ -2016,6 +2036,7 @@ impl VideoPlayer {
         self.drained = false;
         self.decoded.clear();
         self.shown = None;
+        self.resume_after = None;
     }
 }
 
@@ -2723,12 +2744,13 @@ mod tests {
         }
         assert!(matches!(player.decoder, Decoder::Hardware(_)));
         assert_eq!(player.decoded.len(), 7);
-        // The eighth sample fails: software starts at the key sample (5) before it.
+        // The eighth sample fails: software starts at the key sample (0) of the
+        // earliest queued picture, so no queued picture is lost.
         player.decode_next();
         assert!(matches!(player.decoder, Decoder::H264(_)));
         assert!(player.stats.fell_back);
         assert_eq!(player.stats.decoder, "software");
-        assert_eq!(player.next_sample, 5);
+        assert_eq!(player.next_sample, 0);
         assert!(player.decoded.is_empty());
         // The player goes on with the file.
         for _ in 0..40 {
