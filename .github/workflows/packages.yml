@@ -217,14 +217,6 @@ jobs:
           "${RUNNER_TEMP}/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
           "${RUNNER_TEMP}/vcpkg/vcpkg" install "ffmpeg:${VCPKG_TRIPLET}"
 
-      - name: Build release binary (native)
-        if: >-
-          matrix.target != 'aarch64-unknown-linux-gnu' &&
-          steps.win_hw_build.outcome != 'success' &&
-          steps.mac_hw_build.outcome != 'success'
-        shell: bash
-        run: cargo build --release --package cordiale-ui --target "${{ matrix.target }}"
-
       - name: Build release binary (native, hardware decoding, Windows)
         id: win_hw_build
         if: runner.os == 'Windows' && matrix.hw_decode == 'true' && steps.win_ffmpeg.outcome == 'success'
@@ -251,6 +243,15 @@ jobs:
           PKG_CONFIG_LIBDIR: ${{ runner.temp }}/vcpkg/installed/${{ matrix.vcpkg_triplet }}/lib/pkgconfig
           PKG_CONFIG_ALLOW_CROSS: "1"
         run: cargo build --release --package cordiale-ui --target "${{ matrix.target }}" --features hw-decode-static
+
+      # This step must stay after the hardware builds: it reads their outcomes.
+      - name: Build release binary (native)
+        if: >-
+          matrix.target != 'aarch64-unknown-linux-gnu' &&
+          steps.win_hw_build.outcome != 'success' &&
+          steps.mac_hw_build.outcome != 'success'
+        shell: bash
+        run: cargo build --release --package cordiale-ui --target "${{ matrix.target }}"
 
       - name: Report hardware decoding fallback
         if: >-
