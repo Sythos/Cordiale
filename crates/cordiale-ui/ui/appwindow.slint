@@ -2031,6 +2031,9 @@ export component AppWindow inherits Window {
         members-e2e-action-min-width);
     // The chat column keeps at least this width; the side columns give way.
     property <length> chat-min-width: 240px;
+    // Height shared by the compose row and the Actions row, so both sit
+    // on the same line at the bottom of their columns.
+    property <length> bottom-row-height: 36px;
     // Window width taken by the layout padding (2 x 16px), the four 8px
     // gaps and the two 6px resize handles.
     property <length> layout-fixed-width: 2 * 16px + 4 * 8px + 2 * 6px;
@@ -6034,8 +6037,8 @@ export component AppWindow inherits Window {
             // Small compose bar, never more than one line tall: paperclip
             // to attach a file (left, like Cicchetto), text field, send
             // icon (right).
-            if has-selected-channel : HorizontalBox {
-                height: 40px;
+            if has-selected-channel : HorizontalLayout {
+                height: bottom-row-height;
                 spacing: 6px;
 
                 Button {
@@ -6273,6 +6276,7 @@ export component AppWindow inherits Window {
             // also has the radio.
             HorizontalLayout {
                 alignment: start;
+                height: bottom-row-height;
 
                 Button {
                     text: "☰ " + @tr("Actions") + " ▾";
