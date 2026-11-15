@@ -1196,6 +1196,7 @@ dependencies = [
  "cordiale-core",
  "ctap-hid-fido2",
  "dark-light",
+ "ffmpeg-next",
  "iana-time-zone",
  "image",
  "opus-decoder",
