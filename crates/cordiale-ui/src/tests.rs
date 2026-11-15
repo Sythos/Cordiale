@@ -16823,3 +16823,26 @@ fn language_choice_opens_connect_only_from_the_language_screen() {
         assert!(!ui_callbacks::language_choice_opens_connect(screen));
     }
 }
+
+/// The compose row and the Actions row share one height, so their top and
+/// bottom edges line up. There is no Slint layout probe here, so the test
+/// reads the definitions: both rows take the shared height and nothing else
+/// uses it.
+#[test]
+fn compose_row_and_actions_row_share_one_height() {
+    let slint = include_str!("../ui/appwindow.slint");
+    assert!(slint.contains("property <length> bottom-row-height: 36px;"));
+    let compose = slint
+        .split("if has-selected-channel : HorizontalLayout {")
+        .nth(1)
+        .and_then(|rest| rest.lines().nth(1))
+        .expect("compose row");
+    assert_eq!(compose.trim(), "height: bottom-row-height;");
+    let actions = slint.split("alignment: start;").skip(1).any(|rest| {
+        rest.lines()
+            .nth(1)
+            .is_some_and(|line| line.trim() == "height: bottom-row-height;")
+    });
+    assert!(actions, "the Actions row must take the shared height");
+    assert_eq!(slint.matches("height: bottom-row-height;").count(), 2);
+}
