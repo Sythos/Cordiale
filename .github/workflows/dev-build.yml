@@ -1,7 +1,7 @@
 name: Dev Build
 
-# Manually-triggered: a quick installer (Windows x64) and a Linux x64
-# tarball with hardware video decoding, for field testing between real
+# Manually-triggered: a quick installer (Windows x64) and tester builds
+# with hardware video decoding (Linux, Windows, macOS), for field testing between real
 # releases, not a substitute for the tagged
 # `packages.yml` pipeline (which still builds every platform and
 # publishes a GitHub Release on a `v*` tag). Never runs on a push/tag —
@@ -172,4 +172,112 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: cordiale-linux-x64-hw-dev-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: dist/*
+
+  # Field-test build for the media player checks on Windows. FFmpeg comes
+  # from vcpkg with the static triplet that uses the dynamic C runtime, so the
+  # executable has no FFmpeg DLL next to it. Hardware decoding uses D3D11VA
+  # and DXVA2. The zip is NOT a release package: it has no installer.
+  windows-x64-hw-dev:
+    name: windows-x64-hw-dev
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install FFmpeg with vcpkg
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install ffmpeg:x64-windows-static-md
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcpkg install failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Build release binary with hardware decoding
+        shell: pwsh
+        env:
+          # Baked into the Grappa User-Agent by cordiale-core's build.rs.
+          BUILD_ID: ${{ github.run_id }}
+          VCPKGRS_TRIPLET: x64-windows-static-md
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          cargo build --release --package cordiale-ui --features hw-decode
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package zip and checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $name = "cordiale-windows-x64-hw-dev-$($env:GITHUB_RUN_ID)"
+          Compress-Archive -Path target\release\cordiale-ui.exe -DestinationPath "dist\$name.zip"
+          Get-ChildItem dist | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
+            Set-Content -Path "dist\SHA256SUMS-windows-x64-hw-dev" -Encoding ascii
+
+      - name: Upload tester build
+        uses: actions/upload-artifact@v7
+        with:
+          name: cordiale-windows-x64-hw-dev-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: dist/*
+
+  # Field-test build for the media player checks on macOS (ARM64 and x64).
+  # It turns on the `hw-decode` feature, which links the FFmpeg shared
+  # libraries of Homebrew. Hardware decoding uses VideoToolbox. The tarball is
+  # NOT a release package: the tester installs the same FFmpeg with Homebrew.
+  macos-hw-dev:
+    name: macos-hw-dev (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install FFmpeg with Homebrew
+        shell: bash
+        run: brew install ffmpeg pkg-config
+
+      - name: Build release binary with hardware decoding
+        shell: bash
+        env:
+          # Baked into the Grappa User-Agent by cordiale-core's build.rs.
+          BUILD_ID: ${{ github.run_id }}
+        run: cargo build --release --package cordiale-ui --features hw-decode
+
+      - name: Package tarball and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="cordiale-macos-${{ matrix.arch }}-hw-dev-${GITHUB_RUN_ID}"
+          tar -czf "dist/${name}.tar.gz" -C target/release cordiale-ui
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "SHA256SUMS-macos-${{ matrix.arch }}-hw-dev")
+
+      - name: Upload tester build
+        uses: actions/upload-artifact@v7
+        with:
+          name: cordiale-macos-${{ matrix.arch }}-hw-dev-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: dist/*
