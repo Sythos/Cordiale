@@ -243,6 +243,9 @@ fn splash_waits_for_the_startup_and_never_returns() {
         let _clipboard = set_manual_clock_platform();
         let ui = AppWindow::new().unwrap();
         ui.set_next_screen("language".into());
+        let finished = std::rc::Rc::new(std::cell::Cell::new(0));
+        let finished_in_callback = std::rc::Rc::clone(&finished);
+        ui.on_splash_finished(move || finished_in_callback.set(finished_in_callback.get() + 1));
         ui.show().unwrap();
         ui.window().set_size(slint::LogicalSize::new(900., 600.));
         let advance = |ui: &AppWindow, milliseconds: u64| {
@@ -260,14 +263,18 @@ fn splash_waits_for_the_startup_and_never_returns() {
         // The animation is over, but the startup is not ready: the splash stays.
         advance(&ui, 2500);
         assert_eq!(ui.get_screen(), "splash");
+        assert_eq!(finished.get(), 0);
         // The startup is ready: the splash hands off to the next screen.
         ui.set_startup_ready(true);
         advance(&ui, 300);
         assert_eq!(ui.get_screen(), "language");
+        // The sign-in at launch starts once, at the handoff.
+        assert_eq!(finished.get(), 1);
         // The splash does not come back after the user enters the application.
         ui.set_screen("connected".into());
         advance(&ui, 2500);
         assert_eq!(ui.get_screen(), "connected");
+        assert_eq!(finished.get(), 1);
     })
     .join()
     .unwrap();

@@ -1556,6 +1556,9 @@ export component AppWindow inherits Window {
     // Set by Rust once the window is up and placed: the splash does not
     // hand off before.
     in property <bool> startup-ready: false;
+    // Called once when the splash hands off. The sign-in at launch starts
+    // here, so a fast login never replaces the splash.
+    callback splash-finished();
     // Which Settings section is open; mirrors Cicchetto's own Settings
     // drawer categories (see docs/feature-matrix.md) so the navigation
     // feels familiar to anyone coming from that client.
@@ -3839,6 +3842,7 @@ export component AppWindow inherits Window {
         changed splash-done => {
             if splash-done {
                 screen = next-screen;
+                splash-finished();
             }
         }
 
