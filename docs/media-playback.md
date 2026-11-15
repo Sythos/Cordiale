@@ -94,3 +94,50 @@ frequenza e canali dell'audio, e la riga `media playback:` del registro.
 
 Nessuna di queste prove è stata ancora fatta con audio, schermi e schede
 video reali.
+
+## Build per i tester
+
+- **Linux x64:** il workflow manuale `Dev Build` (job `linux-x64-hw-dev`)
+  compila con `--features hw-decode` e carica un tarball. Il binario usa le
+  librerie condivise di FFmpeg del sistema: il tester ha bisogno delle
+  librerie di FFmpeg della stessa versione di quelle del runner
+  (`ubuntu-26.04`), cioè di una distribuzione recente.
+- **Windows e macOS:** non c'è ancora una build pronta con `hw-decode`; serve
+  compilare in locale con le librerie di sviluppo di FFmpeg
+  (`cargo build --release --package cordiale-ui --features hw-decode`).
+- Windows resta il job `windows-x64-dev` (senza `hw-decode`): serve per la
+  prova in software.
+
+## Pacchetti di rilascio: perché `hw-decode` resta spenta
+
+La feature si accende nei pacchetti solo dopo che le prove a mano passano,
+perché oggi un binario con `hw-decode` collega FFmpeg in modo dinamico:
+
+- il nome della libreria cambia tra le distribuzioni (per esempio
+  `libavcodec.so.60` su Ubuntu 24.04 e `.so.61` su Debian 13): il binario
+  compilato su `ubuntu-24.04` non partirebbe su Debian 13;
+- `packaging/check-linux-deps.sh` rifiuta le librerie che la sua tabella non
+  conosce, e per AlmaLinux e Arch i pacchetti di FFmpeg hanno altri nomi;
+- su Windows e macOS le librerie di FFmpeg vanno incluse nell'installer, e
+  sul bersaglio `aarch64-unknown-linux-gnu` la build con `cross` non le ha.
+
+Per accenderla servono quindi: una scelta di collegamento (statico, o
+librerie incluse) per ogni piattaforma e un job di pacchetto provato su di
+essa. Questo non si decide senza i risultati qui sotto.
+
+## Registro dei risultati
+
+Per ogni prova a mano, aggiungere una riga. Le tarature (`QUEUE_MIN_FRAMES`,
+`QUEUE_MAX_FRAMES`, `QUEUE_BYTES`, `DECODE_SLICE`, `DECODE_MAX_SAMPLES`,
+`AUDIO_QUEUE_CHUNKS`) si cambiano solo se i risultati lo chiedono:
+
+- `starved` alto con `decode_max` sotto il tempo di fotogramma: alzare
+  `QUEUE_MIN_FRAMES` o `QUEUE_BYTES`;
+- `starved` alto con `decode_max` sopra il tempo di fotogramma: il
+  decodificatore è lento, non la coda (provare l'hardware);
+- `audio_underruns` maggiore di zero: alzare `AUDIO_QUEUE_CHUNKS`;
+- l'interfaccia lenta durante la decodifica: abbassare `DECODE_SLICE`.
+
+| Sistema e grafica | File (contenitore, codec, formato) | `decoder` | `late` | `starved` | `audio_underruns` | Note |
+|---|---|---|---|---|---|---|
+| _nessuna prova ancora registrata_ | | | | | | |
