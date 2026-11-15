@@ -238,6 +238,7 @@ impl SaveGate {
     }
 
     /// What the file holds, as far as this gate knows.
+    #[cfg(test)]
     pub fn saved(&self) -> Option<WindowState> {
         self.saved
     }
