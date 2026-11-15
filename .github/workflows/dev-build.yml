@@ -1,7 +1,8 @@
 name: Dev Build
 
-# Manually-triggered, Windows x64 only: a quick installer for field
-# testing between real releases, not a substitute for the tagged
+# Manually-triggered: a quick installer (Windows x64) and a Linux x64
+# tarball with hardware video decoding, for field testing between real
+# releases, not a substitute for the tagged
 # `packages.yml` pipeline (which still builds every platform and
 # publishes a GitHub Release on a `v*` tag). Never runs on a push/tag —
 # `workflow_dispatch` only, so it can't be triggered by accident.
@@ -125,4 +126,50 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: cordiale-windows-x64-dev-${{ steps.metadata.outputs.package_version }}-attempt-${{ steps.metadata.outputs.build_attempt }}
+          path: dist/*
+
+  # Field-test build for the media player checks (docs/media-playback.md).
+  # It turns on the `hw-decode` feature, which links the FFmpeg shared
+  # libraries of the runner. The tarball is NOT a release package: the
+  # tester needs the FFmpeg libraries of a matching distribution release.
+  linux-x64-hw-dev:
+    name: linux-x64-hw-dev
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang pkg-config libasound2-dev libfontconfig1-dev libgl1-mesa-dev libudev-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev
+
+      - name: Build release binary with hardware decoding
+        shell: bash
+        env:
+          # Baked into the Grappa User-Agent by cordiale-core's build.rs.
+          BUILD_ID: ${{ github.run_id }}
+        run: cargo build --release --package cordiale-ui --features hw-decode
+
+      - name: Package tarball and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="cordiale-linux-x64-hw-dev-${GITHUB_RUN_ID}"
+          tar -czf "dist/${name}.tar.gz" -C target/release cordiale-ui
+          (cd dist && sha256sum "${name}.tar.gz" > "SHA256SUMS-linux-x64-hw-dev")
+
+      - name: Upload tester build
+        uses: actions/upload-artifact@v7
+        with:
+          name: cordiale-linux-x64-hw-dev-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: dist/*
