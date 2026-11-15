@@ -38,14 +38,26 @@ use symphonia::core::packet::PacketRef;
 use symphonia::core::units::{Duration as MediaDuration, Time, Timestamp};
 
 use crate::media_demux::{self, Sample as VideoSample, VideoCodec, VideoTrack};
+use crate::media_hw::{self, HardwareDecode};
 use crate::AppWindow;
 
 /// Largest picture the player decodes, in pixels (4K).
 const MAX_PIXELS: usize = 3840 * 2160;
-/// Decoded pictures kept ahead of the clock.
-const QUEUE_FRAMES: usize = 4;
-/// Samples handed to the video decoder in one pass of the controller loop.
-const DECODE_BUDGET: usize = 3;
+/// Fewest decoded pictures kept ahead of the clock, whatever their size.
+const QUEUE_MIN_FRAMES: usize = 4;
+/// Most decoded pictures kept ahead of the clock, for small pictures.
+const QUEUE_MAX_FRAMES: usize = 12;
+/// Memory that the queue of decoded pictures may hold, in bytes.
+const QUEUE_BYTES: usize = 96 * 1024 * 1024;
+/// Time that one pass of the controller loop gives to video decoding. A pass
+/// always decodes one sample, so a slow picture cannot stop the video.
+const DECODE_SLICE: Duration = Duration::from_millis(8);
+/// Most samples handed to the video decoder in one pass of the controller loop.
+const DECODE_MAX_SAMPLES: usize = 8;
+/// The longest sleep of the controller loop.
+const POLL_MAX: Duration = Duration::from_millis(15);
+/// The shortest sleep of the controller loop.
+const POLL_MIN: Duration = Duration::from_millis(1);
 /// Opus decodes at this rate.
 const OPUS_RATE: u32 = 48_000;
 
@@ -137,11 +149,9 @@ fn controller(commands: Receiver<Command>, on_event: EventSink) {
     let mut volume = 1.0f32;
     let mut session: Option<Session> = None;
     loop {
-        let wait = if session.is_some() {
-            Duration::from_millis(15)
-        } else {
-            Duration::from_secs(3600)
-        };
+        let wait = session
+            .as_ref()
+            .map_or(Duration::from_secs(3600), Session::poll_interval);
         match commands.recv_timeout(wait) {
             Ok(Command::Open {
                 bytes,
@@ -262,6 +272,8 @@ struct Session {
     bytes: Arc<[u8]>,
     extension: String,
     audio: Option<rodio::Player>,
+    /// Under-runs of the audio output, shared with the sound source.
+    audio_stats: Option<Arc<AudioStats>>,
     /// The sound still plays and is the clock. When it ends before the
     /// video, the wall clock goes on from `audio_at`.
     audio_live: bool,
@@ -296,11 +308,14 @@ impl Session {
         if let Some(video) = &video {
             duration = duration.max(video.duration);
         }
+        let mut audio_stats = None;
         let audio = match (audio_source, device) {
             (Some(source), Some(sink)) => {
                 let player = rodio::Player::connect_new(sink.mixer());
                 player.set_volume(volume);
-                player.append(BufferedAudio::new(source));
+                let buffered = BufferedAudio::new(source);
+                audio_stats = Some(buffered.stats());
+                player.append(buffered);
                 Some(player)
             }
             (None, _) if video.is_none() => return Err("no audio track".to_string()),
@@ -319,12 +334,24 @@ impl Session {
             audio_live: audio.is_some(),
             audio_at: 0.0,
             audio,
+            audio_stats,
             video,
             clock,
             paused: false,
             ended: false,
             duration,
             last_report: Instant::now(),
+        })
+    }
+
+    /// How long the controller may sleep before the next pass: until the next
+    /// picture is due, and not at all while the video queue still has room.
+    fn poll_interval(&self) -> Duration {
+        if self.ended {
+            return POLL_MAX;
+        }
+        self.video.as_ref().map_or(POLL_MAX, |video| {
+            video.next_wait(self.position(), self.paused)
         })
     }
 
@@ -420,6 +447,7 @@ impl Session {
             if let Some(frame) = video.due(position) {
                 on_event(self.generation, frame);
             }
+            video.check_starved(self.paused);
         }
         if self.last_report.elapsed() >= Duration::from_millis(250) {
             self.last_report = Instant::now();
@@ -434,6 +462,88 @@ impl Session {
             self.clock.pause();
             on_event(self.generation, MediaEvent::Position(self.duration));
             on_event(self.generation, MediaEvent::Ended);
+        }
+    }
+}
+
+// ----- measurements -----
+
+/// What the video of one file did while it played. The player writes one
+/// line with these numbers to the log when the file closes, so slow
+/// systems can be told apart from slow decoders.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct VideoStats {
+    /// The decoder in use: `software`, or the name of the hardware path.
+    decoder: &'static str,
+    /// The hardware decoder failed and the software decoder took over.
+    fell_back: bool,
+    /// Pictures sent to the window.
+    shown: u64,
+    /// Pictures shown more than one frame time after their time.
+    late: u64,
+    /// Pictures that were due and skipped, because a newer one was due too.
+    dropped: u64,
+    /// Times when the queue ran empty during play.
+    starved: u64,
+    /// Samples decoded, and the time that their decoding took.
+    decoded: u64,
+    decode_total: Duration,
+    decode_max: Duration,
+    /// The longest colour conversion of a picture.
+    convert_max: Duration,
+}
+
+impl VideoStats {
+    fn record_decode(&mut self, took: Duration) {
+        self.decoded += 1;
+        self.decode_total += took;
+        self.decode_max = self.decode_max.max(took);
+    }
+}
+
+/// Counters of the audio output. The output thread and the controller share them.
+#[derive(Default)]
+struct AudioStats {
+    /// Times when the output found the decoded queue empty and had to wait.
+    underruns: AtomicU64,
+}
+
+/// The line for the log.
+fn playback_summary(video: Option<&VideoStats>, underruns: Option<u64>) -> String {
+    let mut line = "media playback:".to_string();
+    if let Some(video) = video {
+        let average = video
+            .decode_total
+            .checked_div(u32::try_from(video.decoded).unwrap_or(u32::MAX).max(1))
+            .unwrap_or_default();
+        line.push_str(&format!(
+            " decoder={}{} shown={} late={} dropped={} starved={} decode_avg={:.1}ms decode_max={:.1}ms convert_max={:.1}ms",
+            video.decoder,
+            if video.fell_back { " (fallback)" } else { "" },
+            video.shown,
+            video.late,
+            video.dropped,
+            video.starved,
+            average.as_secs_f64() * 1000.0,
+            video.decode_max.as_secs_f64() * 1000.0,
+            video.convert_max.as_secs_f64() * 1000.0,
+        ));
+    }
+    if let Some(underruns) = underruns {
+        line.push_str(&format!(" audio_underruns={underruns}"));
+    }
+    line
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        let underruns = self
+            .audio_stats
+            .as_ref()
+            .map(|stats| stats.underruns.load(Ordering::Relaxed));
+        let video = self.video.as_ref().map(|video| &video.stats);
+        if video.is_some() || underruns.is_some() {
+            cordiale_core::persistence::log_line(&playback_summary(video, underruns));
         }
     }
 }
@@ -806,12 +916,35 @@ struct BufferedAudio {
     current: Vec<Sample>,
     at: usize,
     ended: bool,
+    /// No chunk of the current position has come yet (at the start, and
+    /// after a seek): waiting for it is not an under-run.
+    fresh: bool,
     channels: u16,
     rate: u32,
     total: Option<Duration>,
+    stats: Arc<AudioStats>,
 }
 
 impl BufferedAudio {
+    fn stats(&self) -> Arc<AudioStats> {
+        Arc::clone(&self.stats)
+    }
+
+    /// The next message of the worker. When the queue is empty the output
+    /// has to wait for the decoder: that is an under-run, a gap in the sound.
+    fn next_message(&self) -> Option<AudioMessage> {
+        match self.messages.try_recv() {
+            Ok(message) => Some(message),
+            Err(mpsc::TryRecvError::Disconnected) => None,
+            Err(mpsc::TryRecvError::Empty) => {
+                if !self.fresh {
+                    self.stats.underruns.fetch_add(1, Ordering::Relaxed);
+                }
+                self.messages.recv().ok()
+            }
+        }
+    }
+
     fn new(source: AudioSource) -> Self {
         let channels = source.channels;
         let rate = source.rate;
@@ -826,9 +959,11 @@ impl BufferedAudio {
             current: Vec::new(),
             at: 0,
             ended: false,
+            fresh: true,
             channels,
             rate,
             total,
+            stats: Arc::new(AudioStats::default()),
         }
     }
 }
@@ -920,8 +1055,8 @@ impl Iterator for BufferedAudio {
             if self.ended {
                 return None;
             }
-            match self.messages.recv() {
-                Ok(AudioMessage::Chunk {
+            match self.next_message() {
+                Some(AudioMessage::Chunk {
                     epoch,
                     channels,
                     rate,
@@ -931,11 +1066,12 @@ impl Iterator for BufferedAudio {
                     self.rate = rate;
                     self.current = samples;
                     self.at = 0;
+                    self.fresh = false;
                 }
-                Ok(AudioMessage::End { epoch }) if epoch == self.epoch => self.ended = true,
+                Some(AudioMessage::End { epoch }) if epoch == self.epoch => self.ended = true,
                 // A chunk from before a seek.
-                Ok(_) => {}
-                Err(_) => return None,
+                Some(_) => {}
+                None => return None,
             }
         }
     }
@@ -963,6 +1099,7 @@ impl Source for BufferedAudio {
         self.current.clear();
         self.at = 0;
         self.ended = false;
+        self.fresh = true;
         // The worker stops when it is gone: the sound then ends.
         let _ = self.seeks.send(AudioSeek {
             epoch: self.epoch,
@@ -1319,7 +1456,7 @@ fn vp9_planar(frame: &rusty_vp9::DecodedFrame) -> Option<Planar> {
 
 /// A picture with 8-bit 4:2:0 planes and tight rows (H.264 and VP8 give
 /// this). `None` when a plane is shorter than the size needs.
-fn yuv420_planar(
+pub(crate) fn yuv420_planar(
     width: usize,
     height: usize,
     y: Vec<u8>,
@@ -1462,6 +1599,8 @@ enum Decoder {
     Vp8(Box<vp8_decoder::Decoder>),
     Vp9(Box<rusty_vp9::Vp9Decoder>),
     Av1(Box<rusty_av1d::Decoder>),
+    /// The decoder of the host hardware; any failure goes to software.
+    Hardware(Box<dyn HardwareDecode>),
 }
 
 /// The decoded pictures of one file, and the position in its sample list.
@@ -1472,8 +1611,26 @@ struct VideoPlayer {
     next_sample: usize,
     drained: bool,
     decoded: VecDeque<(i64, Planar)>,
+    /// Most pictures that wait in `decoded`; set by the size of the picture.
+    queue_limit: usize,
     shown: Option<i64>,
     duration: f64,
+    /// The average time between two pictures, in microseconds.
+    frame_interval_us: i64,
+    /// The queue ran empty and has not filled since.
+    starving: bool,
+    stats: VideoStats,
+}
+
+/// How many decoded pictures of this size wait ahead of the clock. Small
+/// pictures get a longer queue, so a slow pass does not show. A large picture
+/// gets a shorter one, so the memory stays within [`QUEUE_BYTES`].
+fn queue_frames(width: u32, height: u32) -> usize {
+    let bytes = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(3)
+        / 2;
+    (QUEUE_BYTES / bytes.max(1)).clamp(QUEUE_MIN_FRAMES, QUEUE_MAX_FRAMES)
 }
 
 /// A track with its decoder set up, or the reason the file can't play.
@@ -1534,7 +1691,7 @@ const ANNEX_B_START: [u8; 4] = [0, 0, 0, 1];
 
 /// A sample with a length in front of each NAL unit (MP4, Matroska) as an
 /// Annex B access unit. The data stops at a length that does not fit.
-fn length_prefixed_to_annex_b(data: &[u8], length_size: usize) -> Vec<u8> {
+pub(crate) fn length_prefixed_to_annex_b(data: &[u8], length_size: usize) -> Vec<u8> {
     let length_size = length_size.clamp(1, 4);
     let mut out = Vec::with_capacity(data.len() + 16);
     let mut at = 0usize;
@@ -1555,17 +1712,49 @@ fn length_prefixed_to_annex_b(data: &[u8], length_size: usize) -> Vec<u8> {
 
 impl VideoPlayer {
     fn new(bytes: Arc<[u8]>, track: VideoTrack) -> Result<Self, String> {
+        Self::with_preference(bytes, track, media_hw::Preference::from_env())
+    }
+
+    /// The hardware decoder is tried first, unless `preference` is software.
+    /// A host with no hardware decoder for the track uses the software one.
+    fn with_preference(
+        bytes: Arc<[u8]>,
+        track: VideoTrack,
+        preference: media_hw::Preference,
+    ) -> Result<Self, String> {
         if track.samples.is_empty() {
             return Err("no video frames".to_string());
         }
         if (track.width as usize).saturating_mul(track.height as usize) > MAX_PIXELS {
             return Err("video too large".to_string());
         }
-        let decoder = new_decoder(&track)?;
+        let decoder = match media_hw::open(&track, preference) {
+            Some(hardware) => Decoder::Hardware(hardware),
+            None => new_decoder(&track)?,
+        };
+        Ok(Self::from_decoder(bytes, track, decoder))
+    }
+
+    fn from_decoder(bytes: Arc<[u8]>, track: VideoTrack, decoder: Decoder) -> Self {
         let last = track.samples.iter().map(|s| s.pts_us).max().unwrap_or(0);
         let step = last / i64::try_from(track.samples.len()).unwrap_or(1).max(1);
-        Ok(Self {
+        let stats = VideoStats {
+            decoder: match &decoder {
+                Decoder::Hardware(hardware) => hardware.name(),
+                _ => "software",
+            },
+            ..VideoStats::default()
+        };
+        if let Decoder::Hardware(hardware) = &decoder {
+            cordiale_core::persistence::log_line(&format!(
+                "video decode: {} hardware decoder",
+                hardware.name()
+            ));
+        }
+        Self {
             duration: (last + step) as f64 / 1_000_000.0,
+            queue_limit: queue_frames(track.width, track.height),
+            frame_interval_us: step.max(1),
             bytes,
             track,
             decoder,
@@ -1573,20 +1762,81 @@ impl VideoPlayer {
             drained: false,
             decoded: VecDeque::new(),
             shown: None,
-        })
+            starving: false,
+            stats,
+        }
     }
 
     fn finished(&self) -> bool {
         self.drained && self.decoded.is_empty()
     }
 
-    /// Decodes a few samples, up to the length of the queue.
+    /// Decodes samples until the queue is full, or until the time slice of
+    /// this pass is spent. It always decodes one, so the video goes on even
+    /// when one picture takes longer than the slice.
     fn fill(&mut self) {
-        let mut budget = DECODE_BUDGET;
-        while self.decoded.len() < QUEUE_FRAMES && budget > 0 && !self.drained {
-            budget -= 1;
+        let started = Instant::now();
+        let mut samples = 0;
+        while self.decoded.len() < self.queue_limit && samples < DECODE_MAX_SAMPLES && !self.drained
+        {
+            if samples > 0 && started.elapsed() >= DECODE_SLICE {
+                break;
+            }
+            samples += 1;
+            let before = Instant::now();
             self.decode_next();
+            self.stats.record_decode(before.elapsed());
         }
+    }
+
+    /// How long the controller may sleep. The queue is not full: decode
+    /// again at once. It is full: wait for the next picture to be due.
+    fn next_wait(&self, position: f64, paused: bool) -> Duration {
+        if !self.drained && self.decoded.len() < self.queue_limit {
+            return POLL_MIN;
+        }
+        let Some((pts, _)) = self.decoded.front().filter(|_| !paused) else {
+            return POLL_MAX;
+        };
+        let due_in = (pts - (position * 1_000_000.0) as i64).max(0) as u64;
+        Duration::from_micros(due_in).clamp(POLL_MIN, POLL_MAX)
+    }
+
+    /// Counts a time when the picture queue ran empty during play, once for
+    /// each time. The decoder is then slower than the video.
+    fn check_starved(&mut self, paused: bool) {
+        let empty = !paused && !self.drained && self.shown.is_some() && self.decoded.is_empty();
+        if empty && !self.starving {
+            self.stats.starved += 1;
+        }
+        self.starving = empty;
+    }
+
+    /// The index of the last key sample at or before `index`.
+    fn key_at_or_before(&self, index: usize) -> usize {
+        let end = (index + 1).min(self.track.samples.len());
+        self.track.samples[..end]
+            .iter()
+            .rposition(|sample| sample.key)
+            .unwrap_or(0)
+    }
+
+    /// The hardware decoder failed. The software decoder starts again from
+    /// the key sample before the failed one, so the video goes on.
+    fn fall_back(&mut self, reason: &str) {
+        cordiale_core::persistence::log_line(&format!(
+            "video decode: hardware decoder stopped, using software: {reason}"
+        ));
+        let Ok(decoder) = new_decoder(&self.track) else {
+            self.drained = true;
+            return;
+        };
+        self.decoder = decoder;
+        self.next_sample = self.key_at_or_before(self.next_sample.saturating_sub(1));
+        self.drained = false;
+        self.decoded.clear();
+        self.stats.decoder = "software";
+        self.stats.fell_back = true;
     }
 
     fn decode_next(&mut self) {
@@ -1595,6 +1845,12 @@ impl VideoPlayer {
             match &mut self.decoder {
                 Decoder::Hevc(decoder) => decoder.flush(),
                 Decoder::Vp9(decoder) => decoder.flush(),
+                // The pictures that are left are not worth a failure.
+                Decoder::Hardware(decoder) => {
+                    for (pts, picture) in decoder.flush().unwrap_or_default() {
+                        queue_sorted(&mut self.decoded, pts, picture);
+                    }
+                }
                 // These give each picture with the sample that holds it.
                 Decoder::H264(_) | Decoder::Vp8(_) | Decoder::Av1(_) => {}
             }
@@ -1609,6 +1865,18 @@ impl VideoPlayer {
         else {
             return;
         };
+        if let Decoder::Hardware(decoder) = &mut self.decoder {
+            let unit = media_hw::access_unit(&self.track, data, sample.key);
+            match decoder.decode(&unit, sample.pts_us) {
+                Ok(pictures) => {
+                    for (pts, picture) in pictures {
+                        queue_sorted(&mut self.decoded, pts, picture);
+                    }
+                }
+                Err(reason) => self.fall_back(&reason),
+            }
+            return;
+        }
         match &mut self.decoder {
             Decoder::H264(decoder) => {
                 let access_unit = length_prefixed_to_annex_b(data, self.track.nal_length_size);
@@ -1655,6 +1923,8 @@ impl VideoPlayer {
             Decoder::Vp9(decoder) => {
                 let _ = decoder.push(data, Some(sample.pts_us));
             }
+            // Handled above.
+            Decoder::Hardware(_) => {}
         }
         self.collect();
     }
@@ -1680,7 +1950,7 @@ impl VideoPlayer {
                 }
             }
             // Queued by `decode_next`, with the time of their sample.
-            Decoder::H264(_) | Decoder::Vp8(_) | Decoder::Av1(_) => {}
+            Decoder::H264(_) | Decoder::Vp8(_) | Decoder::Av1(_) | Decoder::Hardware(_) => {}
         }
     }
 
@@ -1688,15 +1958,28 @@ impl VideoPlayer {
     fn due(&mut self, position: f64) -> Option<MediaEvent> {
         let now = (position * 1_000_000.0) as i64;
         let mut newest = None;
+        let mut due = 0u64;
         while self.decoded.front().is_some_and(|(pts, _)| *pts <= now) {
             newest = self.decoded.pop_front();
+            due += 1;
         }
         let (pts, picture) = newest?;
         if self.shown == Some(pts) {
             return None;
         }
+        // After a seek, the pictures before the target are skipped on
+        // purpose: they are not counted.
+        if self.shown.is_some() {
+            self.stats.dropped += due - 1;
+            if now - pts > self.frame_interval_us {
+                self.stats.late += 1;
+            }
+        }
         self.shown = Some(pts);
+        let started = Instant::now();
         let rgba = to_rgba(&picture)?;
+        self.stats.convert_max = self.stats.convert_max.max(started.elapsed());
+        self.stats.shown += 1;
         Some(MediaEvent::Frame {
             width: picture.width as u32,
             height: picture.height as u32,
@@ -1714,8 +1997,20 @@ impl VideoPlayer {
             .iter()
             .rposition(|sample: &VideoSample| sample.key && sample.pts_us <= target)
             .unwrap_or(0);
-        if let Ok(decoder) = new_decoder(&self.track) {
-            self.decoder = decoder;
+        // A hardware decoder is reset and kept. When it cannot reset, or the
+        // decoder is software, a new software decoder starts.
+        let reset = match &mut self.decoder {
+            Decoder::Hardware(decoder) => decoder.reset().is_ok(),
+            _ => false,
+        };
+        if !reset {
+            if let Ok(decoder) = new_decoder(&self.track) {
+                self.decoder = decoder;
+                if self.stats.decoder != "software" {
+                    self.stats.decoder = "software";
+                    self.stats.fell_back = true;
+                }
+            }
         }
         self.next_sample = key;
         self.drained = false;
@@ -2222,6 +2517,405 @@ mod tests {
             player.seek(0.0);
             assert!(!player.finished());
         }
+    }
+
+    /// A hardware decoder that gives one gray picture for each sample, and
+    /// fails from the sample number `fail_at` (counted from 0).
+    struct FakeHardware {
+        calls: usize,
+        fail_at: Option<usize>,
+        resets: Arc<std::sync::atomic::AtomicUsize>,
+        reset_fails: bool,
+    }
+
+    impl FakeHardware {
+        fn new(fail_at: Option<usize>) -> Self {
+            Self {
+                calls: 0,
+                fail_at,
+                resets: Arc::default(),
+                reset_fails: false,
+            }
+        }
+    }
+
+    impl HardwareDecode for FakeHardware {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+
+        fn decode(&mut self, _data: &[u8], pts_us: i64) -> Result<Vec<(i64, Planar)>, String> {
+            let call = self.calls;
+            self.calls += 1;
+            if self.fail_at.is_some_and(|at| call >= at) {
+                return Err("no hardware".to_string());
+            }
+            Ok(vec![(pts_us, gray(2, 2, 16))])
+        }
+
+        fn flush(&mut self) -> Result<Vec<(i64, Planar)>, String> {
+            Ok(Vec::new())
+        }
+
+        fn reset(&mut self) -> Result<(), String> {
+            self.resets.fetch_add(1, Ordering::Relaxed);
+            if self.reset_fails {
+                Err("no reset".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// A track of `count` samples, 40 ms apart, with a key sample every five.
+    fn long_track(count: usize) -> (Arc<[u8]>, VideoTrack) {
+        let (_, mut track) = garbage_track(VideoCodec::H264);
+        let mut sample = vec![0, 0, 0, 12, 0x65];
+        sample.extend_from_slice(&[0xFF; 11]);
+        let bytes: Arc<[u8]> = Arc::from(sample.repeat(count));
+        track.samples = (0..count)
+            .map(|index| VideoSample {
+                offset: index * 16,
+                size: 16,
+                pts_us: index as i64 * 40_000,
+                key: index % 5 == 0,
+            })
+            .collect();
+        (bytes, track)
+    }
+
+    fn hardware_player(count: usize, hardware: FakeHardware) -> VideoPlayer {
+        let (bytes, track) = long_track(count);
+        VideoPlayer::from_decoder(bytes, track, Decoder::Hardware(Box::new(hardware)))
+    }
+
+    #[test]
+    fn the_picture_queue_stays_within_its_memory_limit() {
+        for (width, height) in [(16, 16), (640, 360), (1920, 1080), (3840, 2160)] {
+            let frames = queue_frames(width, height);
+            assert!((QUEUE_MIN_FRAMES..=QUEUE_MAX_FRAMES).contains(&frames));
+            let bytes = width as usize * height as usize * 3 / 2;
+            if frames > QUEUE_MIN_FRAMES {
+                assert!(frames * bytes <= QUEUE_BYTES, "{width}x{height}");
+            }
+        }
+        // The largest picture that the player decodes still fits, at the
+        // least length of the queue.
+        const { assert!(QUEUE_MIN_FRAMES * MAX_PIXELS * 3 / 2 <= QUEUE_BYTES) };
+        assert_eq!(queue_frames(16, 16), QUEUE_MAX_FRAMES);
+        assert_eq!(queue_frames(3840, 2160), 8);
+    }
+
+    #[test]
+    fn decoding_stops_when_the_queue_is_full() {
+        let mut player = hardware_player(100, FakeHardware::new(None));
+        for _ in 0..100 {
+            player.fill();
+        }
+        assert_eq!(player.decoded.len(), player.queue_limit);
+        assert_eq!(player.next_sample, player.queue_limit);
+        assert!(!player.drained);
+        // A picture that is shown makes room for exactly one more.
+        assert!(player.due(0.0).is_some());
+        player.fill();
+        assert_eq!(player.decoded.len(), player.queue_limit);
+    }
+
+    #[test]
+    fn a_pass_decodes_at_least_one_sample_and_a_bounded_number() {
+        let mut player = hardware_player(100, FakeHardware::new(None));
+        player.fill();
+        assert!(player.next_sample >= 1);
+        assert!(player.next_sample <= DECODE_MAX_SAMPLES);
+        assert_eq!(player.stats.decoded as usize, player.next_sample);
+    }
+
+    #[test]
+    fn the_end_of_the_file_drains_the_queue() {
+        let mut player = hardware_player(3, FakeHardware::new(None));
+        for _ in 0..5 {
+            player.fill();
+        }
+        assert!(player.drained);
+        assert_eq!(player.decoded.len(), 3);
+        assert!(!player.finished());
+        player.due(1.0);
+        assert!(player.finished());
+    }
+
+    #[test]
+    fn late_and_dropped_pictures_are_counted() {
+        let mut player = hardware_player(10, FakeHardware::new(None));
+        // Three pictures are ready, at 0, 40 and 80 ms.
+        for _ in 0..3 {
+            player.decode_next();
+        }
+        // The first picture is on time.
+        assert!(player.due(0.0).is_some());
+        assert_eq!((player.stats.late, player.stats.dropped), (0, 0));
+        // The clock is at 0.2 s: the pictures at 40 and 80 ms were both due,
+        // and the newest of them is more than one frame time late.
+        assert!(player.due(0.2).is_some());
+        assert_eq!(player.stats.dropped, 1);
+        assert_eq!(player.stats.late, 1);
+        assert_eq!(player.stats.shown, 2);
+    }
+
+    #[test]
+    fn a_picture_on_time_is_not_late() {
+        let mut player = hardware_player(10, FakeHardware::new(None));
+        player.fill();
+        assert!(player.due(0.0).is_some());
+        assert!(player.due(0.041).is_some());
+        assert_eq!((player.stats.late, player.stats.dropped), (0, 0));
+    }
+
+    #[test]
+    fn an_empty_queue_during_play_counts_once_for_each_time() {
+        let mut player = hardware_player(100, FakeHardware::new(None));
+        player.check_starved(false);
+        assert_eq!(player.stats.starved, 0);
+        player.fill();
+        assert!(player.due(0.0).is_some());
+        player.decoded.clear();
+        player.check_starved(false);
+        player.check_starved(false);
+        assert_eq!(player.stats.starved, 1);
+        // Paused is not starved.
+        player.check_starved(true);
+        player.check_starved(false);
+        assert_eq!(player.stats.starved, 2);
+        player.fill();
+        player.check_starved(false);
+        player.decoded.clear();
+        player.check_starved(false);
+        assert_eq!(player.stats.starved, 3);
+    }
+
+    #[test]
+    fn the_controller_sleeps_until_the_next_picture() {
+        let mut player = hardware_player(100, FakeHardware::new(None));
+        // The queue has room: decode again at once.
+        assert_eq!(player.next_wait(0.0, false), POLL_MIN);
+        for _ in 0..100 {
+            player.fill();
+        }
+        // Full: the next picture, at 0 s, is due now.
+        assert_eq!(player.next_wait(0.0, false), POLL_MIN);
+        player.decoded.pop_front();
+        player.decoded.push_back((10_000_000, gray(2, 2, 16)));
+        // The first picture is at 40 ms and the clock is at 30 ms.
+        let wait = player.next_wait(0.03, false);
+        assert!(
+            (POLL_MIN..=Duration::from_millis(10)).contains(&wait),
+            "{wait:?}"
+        );
+        // A far picture and a paused player wait the longest time.
+        assert_eq!(player.next_wait(-1.0, false), POLL_MAX);
+        assert_eq!(player.next_wait(0.0, true), POLL_MAX);
+    }
+
+    #[test]
+    fn a_failing_hardware_decoder_gives_way_to_software() {
+        let mut player = hardware_player(30, FakeHardware::new(Some(7)));
+        for _ in 0..7 {
+            player.decode_next();
+        }
+        assert!(matches!(player.decoder, Decoder::Hardware(_)));
+        assert_eq!(player.decoded.len(), 7);
+        // The eighth sample fails: software starts at the key sample (5) before it.
+        player.decode_next();
+        assert!(matches!(player.decoder, Decoder::H264(_)));
+        assert!(player.stats.fell_back);
+        assert_eq!(player.stats.decoder, "software");
+        assert_eq!(player.next_sample, 5);
+        assert!(player.decoded.is_empty());
+        // The player goes on with the file.
+        for _ in 0..40 {
+            player.fill();
+        }
+        assert!(player.drained);
+    }
+
+    #[test]
+    fn a_hardware_decoder_that_fails_at_once_gives_way_to_software() {
+        let mut player = hardware_player(10, FakeHardware::new(Some(0)));
+        player.decode_next();
+        assert!(matches!(player.decoder, Decoder::H264(_)));
+        assert_eq!(player.next_sample, 0);
+        assert!(!player.drained);
+    }
+
+    #[test]
+    fn a_track_with_no_decoder_at_all_ends_instead_of_stopping() {
+        let mut player = hardware_player(10, FakeHardware::new(Some(0)));
+        player.track.codec = VideoCodec::Other;
+        player.decode_next();
+        assert!(player.drained);
+        assert!(player.finished());
+    }
+
+    #[test]
+    fn a_seek_resets_the_hardware_decoder_and_starts_at_a_key_sample() {
+        let hardware = FakeHardware::new(None);
+        let resets = Arc::clone(&hardware.resets);
+        let mut player = hardware_player(30, hardware);
+        player.fill();
+        assert!(player.due(0.0).is_some());
+        player.seek(0.3);
+        assert_eq!(resets.load(Ordering::Relaxed), 1);
+        assert!(matches!(player.decoder, Decoder::Hardware(_)));
+        assert!(player.decoded.is_empty());
+        assert!(player.shown.is_none());
+        // 0.3 s is sample 7; the key sample before it is 5.
+        assert_eq!(player.next_sample, 5);
+        assert!(!player.drained);
+        // The pictures before the target are skipped without being counted.
+        player.fill();
+        let dropped = player.stats.dropped;
+        assert!(player.due(0.3).is_some());
+        assert_eq!(player.stats.dropped, dropped);
+    }
+
+    #[test]
+    fn a_seek_goes_to_software_when_the_hardware_cannot_reset() {
+        let mut hardware = FakeHardware::new(None);
+        hardware.reset_fails = true;
+        let mut player = hardware_player(30, hardware);
+        player.seek(0.3);
+        assert!(matches!(player.decoder, Decoder::H264(_)));
+        assert!(player.stats.fell_back);
+        assert_eq!(player.next_sample, 5);
+    }
+
+    #[test]
+    fn the_software_preference_plays_without_hardware() {
+        let (bytes, track) = garbage_track(VideoCodec::H264);
+        let player = VideoPlayer::with_preference(bytes, track, media_hw::Preference::Software)
+            .expect("player");
+        assert!(matches!(player.decoder, Decoder::H264(_)));
+        assert_eq!(player.stats.decoder, "software");
+        assert!(!player.stats.fell_back);
+    }
+
+    #[test]
+    fn a_host_with_no_hardware_decoder_plays_in_software() {
+        // The test host may have a decoder or not; either way the file opens.
+        let (bytes, track) = garbage_track(VideoCodec::H264);
+        let player =
+            VideoPlayer::with_preference(bytes, track, media_hw::Preference::Auto).expect("player");
+        assert!(matches!(
+            player.decoder,
+            Decoder::H264(_) | Decoder::Hardware(_)
+        ));
+    }
+
+    fn audio_with(queue: usize) -> (BufferedAudio, mpsc::SyncSender<AudioMessage>) {
+        let (tx, messages) = mpsc::sync_channel(queue);
+        let (seeks, _) = mpsc::channel();
+        let audio = BufferedAudio {
+            messages,
+            seeks,
+            epoch: 0,
+            current: Vec::new(),
+            at: 0,
+            ended: false,
+            fresh: false,
+            channels: 1,
+            rate: 8_000,
+            total: None,
+            stats: Arc::new(AudioStats::default()),
+        };
+        (audio, tx)
+    }
+
+    fn chunk(samples: Vec<Sample>) -> AudioMessage {
+        AudioMessage::Chunk {
+            epoch: 0,
+            channels: 1,
+            rate: 8_000,
+            samples,
+        }
+    }
+
+    #[test]
+    fn a_full_queue_is_no_under_run() {
+        let (mut audio, tx) = audio_with(4);
+        tx.send(chunk(vec![0.5, 0.25])).expect("send");
+        tx.send(chunk(vec![0.125])).expect("send");
+        assert_eq!(audio.next(), Some(0.5));
+        assert_eq!(audio.next(), Some(0.25));
+        assert_eq!(audio.next(), Some(0.125));
+        assert_eq!(audio.stats.underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn an_empty_queue_is_an_under_run_and_the_output_waits_for_the_sound() {
+        let (mut audio, tx) = audio_with(4);
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            tx.send(chunk(vec![0.5])).expect("send");
+        });
+        // The output waits, and takes the sound when it comes.
+        assert_eq!(audio.next(), Some(0.5));
+        assert_eq!(audio.stats.underruns.load(Ordering::Relaxed), 1);
+        sender.join().expect("sender");
+    }
+
+    #[test]
+    fn waiting_at_the_start_or_after_a_seek_is_no_under_run() {
+        let (mut audio, tx) = audio_with(4);
+        audio.fresh = true;
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            tx.send(chunk(vec![0.5])).expect("send");
+        });
+        assert_eq!(audio.next(), Some(0.5));
+        sender.join().expect("sender");
+        assert!(!audio.fresh);
+        assert_eq!(audio.stats.underruns.load(Ordering::Relaxed), 0);
+        audio.try_seek(Duration::ZERO).expect("a seek");
+        assert!(audio.fresh);
+    }
+
+    #[test]
+    fn a_stopped_worker_ends_the_sound_without_an_under_run() {
+        let (mut audio, tx) = audio_with(4);
+        drop(tx);
+        assert_eq!(audio.next(), None);
+        assert_eq!(audio.stats.underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn the_summary_line_has_every_number() {
+        let stats = VideoStats {
+            decoder: "VA-API",
+            fell_back: false,
+            shown: 120,
+            late: 3,
+            dropped: 1,
+            starved: 2,
+            decoded: 4,
+            decode_total: Duration::from_millis(8),
+            decode_max: Duration::from_millis(5),
+            convert_max: Duration::from_millis(7),
+        };
+        let line = playback_summary(Some(&stats), Some(6));
+        assert_eq!(
+            line,
+            "media playback: decoder=VA-API shown=120 late=3 dropped=1 starved=2 \
+             decode_avg=2.0ms decode_max=5.0ms convert_max=7.0ms audio_underruns=6"
+        );
+        let fallback = VideoStats {
+            decoder: "software",
+            fell_back: true,
+            ..VideoStats::default()
+        };
+        assert!(playback_summary(Some(&fallback), None).contains("software (fallback)"));
+        assert_eq!(
+            playback_summary(None, Some(0)),
+            "media playback: audio_underruns=0"
+        );
     }
 
     #[test]

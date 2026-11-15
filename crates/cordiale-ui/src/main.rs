@@ -45,6 +45,7 @@ mod input_history;
 mod key_prompt;
 mod link_hover;
 mod media_demux;
+mod media_hw;
 mod media_player;
 mod media_save;
 mod mentions;

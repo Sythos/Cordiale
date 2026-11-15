@@ -172,3 +172,34 @@ jobs:
 
       - name: Run tests (video-shrink)
         run: cargo test --package cordiale-core --features video-shrink
+
+  # The hw-decode feature (hardware video decoding in the media player) links
+  # FFmpeg, so the default build never compiles it. Here it is checked against
+  # the distribution's FFmpeg development packages. The runners have no video
+  # hardware: the tests prove the software fallback.
+  hw-decode:
+    name: hw-decode (ubuntu-26.04)
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Checkout client
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang pkg-config libasound2-dev libfontconfig1-dev libgl1-mesa-dev libudev-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev
+
+      - name: Lint with Clippy (hw-decode)
+        run: cargo clippy --package cordiale-ui --all-targets --features hw-decode -- -D warnings
+
+      - name: Run tests (hw-decode)
+        run: cargo test --package cordiale-ui --features hw-decode media_
