@@ -137,6 +137,53 @@ pub struct Settings {
     /// on; the upload popup starts from it and never writes it back.
     #[serde(default)]
     pub shrink_videos: bool,
+    /// Window geometry and divider widths from the last run. Kept on this
+    /// device only, never sent to Grappa. An unreadable value is dropped
+    /// without touching any other setting.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_window_state"
+    )]
+    pub window: Option<WindowState>,
+}
+
+/// The client window as the user left it. Every value is optional: a host
+/// that cannot read or set one (for example the window position on Wayland)
+/// leaves it out. Sizes and divider widths are logical pixels; the position
+/// is in physical pixels of the desktop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WindowState {
+    /// Normal (not maximized, not full-screen) width.
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// Normal height.
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// Normal position, left edge.
+    #[serde(default)]
+    pub x: Option<i32>,
+    /// Normal position, top edge.
+    #[serde(default)]
+    pub y: Option<i32>,
+    #[serde(default)]
+    pub maximized: bool,
+    #[serde(default)]
+    pub fullscreen: bool,
+    /// Width of the channel list.
+    #[serde(default)]
+    pub sidebar_width: Option<u32>,
+    /// Width of the member list.
+    #[serde(default)]
+    pub members_width: Option<u32>,
+}
+
+fn lenient_window_state<'de, D>(deserializer: D) -> Result<Option<WindowState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 /// A radio station added in Settings > Radio.
@@ -181,6 +228,7 @@ impl Default for Settings {
             presence_unsynced: BTreeSet::new(),
             mute_since: BTreeMap::new(),
             shrink_videos: false,
+            window: None,
         }
     }
 }
@@ -1074,12 +1122,64 @@ mod tests {
             presence_unsynced: BTreeSet::from(["libera #rust".to_string()]),
             mute_since: BTreeMap::from([("libera #rust".to_string(), 1_700_000_000)]),
             shrink_videos: true,
+            window: Some(WindowState {
+                width: Some(1000),
+                height: Some(700),
+                x: Some(-20),
+                y: Some(40),
+                maximized: true,
+                fullscreen: false,
+                sidebar_width: Some(220),
+                members_width: Some(180),
+            }),
         };
 
         let json = serde_json::to_string(&settings).expect("serialize");
         let decoded: Settings = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(settings, decoded);
+    }
+
+    #[test]
+    fn settings_without_window_state_default_to_none() {
+        let decoded: Settings = serde_json::from_str(
+            r#"{"schema_version":1,"language":"it","theme":"dark","font_size_percent":120}"#,
+        )
+        .expect("deserialize");
+        assert_eq!(decoded.window, None);
+        assert_eq!(decoded.language, Some(Language::It));
+        assert_eq!(decoded.theme, Theme::Dark);
+        assert_eq!(decoded.font_size_percent, 120);
+        let json = serde_json::to_value(Settings::default()).expect("serialize");
+        assert!(json.get("window").is_none());
+    }
+
+    #[test]
+    fn unreadable_window_state_keeps_every_other_setting() {
+        let decoded: Settings = serde_json::from_str(
+            r#"{"language":"it","theme":"dark","window":{"width":-5,"x":"left"}}"#,
+        )
+        .expect("deserialize");
+        assert_eq!(decoded.window, None);
+        assert_eq!(decoded.language, Some(Language::It));
+        assert_eq!(decoded.theme, Theme::Dark);
+        let decoded: Settings =
+            serde_json::from_str(r#"{"language":"fr","window":42}"#).expect("deserialize");
+        assert_eq!(decoded.window, None);
+        assert_eq!(decoded.language, Some(Language::Fr));
+    }
+
+    #[test]
+    fn partial_window_state_keeps_the_values_that_exist() {
+        let decoded: Settings =
+            serde_json::from_str(r#"{"window":{"width":800,"height":600,"maximized":true}}"#)
+                .expect("deserialize");
+        let window = decoded.window.expect("window state");
+        assert_eq!(window.width, Some(800));
+        assert_eq!(window.x, None);
+        assert!(window.maximized);
+        assert!(!window.fullscreen);
+        assert_eq!(window.sidebar_width, None);
     }
 
     #[test]

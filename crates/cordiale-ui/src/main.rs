@@ -63,6 +63,7 @@ mod totp;
 mod ui_callbacks;
 #[cfg(windows)]
 mod webauthn_windows;
+mod window_state;
 mod worker_commands;
 
 use std::cell::RefCell;
@@ -792,12 +793,19 @@ fn main() -> Result<(), slint::PlatformError> {
     register_admin_settings_callbacks(&ui, &worker_tx);
     register_settings_callbacks(&ui, &worker_tx);
 
+    // Window size, position, state and column widths come back from the
+    // local settings; the timer saves them again after a change.
+    let window_state_timer = window_state::install(&ui, settings.window);
+
     // Show the window first: the native window must exist to be moved.
-    // A platform that refuses the move keeps its own placement.
+    // A platform that refuses the move keeps its own placement. A saved
+    // position replaces the centered one when the event loop starts.
     ui.show()?;
     center_window_on_monitor(&ui);
     ui.set_startup_ready(true);
     let result = slint::run_event_loop();
+    window_state_timer.flush();
+    drop(window_state_timer);
     drop(auto_connect_timer);
     let _ = ui.hide();
 

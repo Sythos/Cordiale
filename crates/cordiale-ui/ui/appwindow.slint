@@ -1973,9 +1973,10 @@ export component AppWindow inherits Window {
     in property <bool> can-moderate-members: false;
 
     // User-resizable via the drag handles between the three "connected"
-    // screen columns (see `ResizeHandle`) — session-local, not persisted.
-    property <length> sidebar-width: sidebar-icons-min-width;
-    property <length> members-width: 160px;
+    // screen columns (see `ResizeHandle`). Rust saves them on this device
+    // only and sets them at launch; `fit-columns` then clamps them.
+    in-out property <length> sidebar-width: sidebar-icons-min-width;
+    in-out property <length> members-width: 160px;
     // Texts measured by the invisible probes below to derive each side
     // column's minimum width: the shortest sidebar row label, and a run of
     // average-width characters as long as the average member label.
@@ -8155,6 +8156,13 @@ export component AppWindow inherits Window {
                             text: credits-copyright-text;
                             horizontal-alignment: center;
                             wrap: word-wrap;
+                        }
+                        StyledText {
+                            text: @markdown("[https://www.sythos.net](https://www.sythos.net)");
+                            horizontal-alignment: center;
+                            default-color: theme == "dark" ? white : black;
+                            link-color: theme == "dark" ? #8ab4f8 : #1a5fb4;
+                            link-clicked(href) => { credits-link-clicked(href); }
                         }
                         Text {
                             text: app-version;
