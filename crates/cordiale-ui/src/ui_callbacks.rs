@@ -103,6 +103,12 @@ pub(crate) fn register_radio_callbacks(
     });
 }
 
+/// Only the language screen hands off to Connect. A choice made in Settings
+/// keeps the current screen and the session.
+pub(crate) fn language_choice_opens_connect(current_screen: &str) -> bool {
+    current_screen == "language"
+}
+
 /// Language and server pickers, the passkey origin editor, and the connect, TOTP, share-link and recovery sign-in flows.
 pub(crate) fn register_connect_callbacks(
     ui: &AppWindow,
@@ -119,7 +125,9 @@ pub(crate) fn register_connect_callbacks(
         }
         if let Some(ui) = weak_for_language.upgrade() {
             push_date_format_examples(&ui);
-            ui.set_screen("connect".into());
+            if language_choice_opens_connect(&ui.get_screen()) {
+                ui.set_screen("connect".into());
+            }
         }
     });
 
