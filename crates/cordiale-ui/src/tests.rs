@@ -16714,7 +16714,7 @@ fn compose_row_and_actions_row_stay_anchored_to_the_bottom() {
     let spacer = slint
         .split("if !current-window-is-joined || current-query : Rectangle {")
         .nth(1)
-        .and_then(|rest| rest.lines().next())
+        .and_then(|rest| rest.lines().nth(1))
         .expect("spacer");
     assert_eq!(spacer.trim(), "vertical-stretch: 1;");
 }
