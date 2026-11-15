@@ -6155,6 +6155,191 @@ fn sidebar_selection_keeps_scrolled_channel_in_place() {
     );
 }
 
+/// Horizontal hit spans (first and last whole pixel that reacts to a click)
+/// of every control on the sidebar row at `y`, keyed by the event it raises.
+fn sidebar_hit_spans(
+    ui: &AppWindow,
+    log: &Rc<RefCell<Vec<String>>>,
+    y: f32,
+    max_x: u32,
+) -> std::collections::BTreeMap<String, (f32, f32)> {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    let mut spans = std::collections::BTreeMap::new();
+    let mut last_hit = None;
+    for x in 0..max_x {
+        // Stop after the last control of the row: more than the unread cell
+        // and its two gaps (36) without any hit.
+        if last_hit.is_some_and(|last| x - last > 40) {
+            break;
+        }
+        let position = slint::LogicalPosition::new(x as f32, y);
+        let button = PointerEventButton::Left;
+        log.borrow_mut().clear();
+        ui.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        ui.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        for event in log.borrow().iter() {
+            last_hit = Some(x);
+            let span = spans.entry(event.clone()).or_insert((x as f32, x as f32));
+            span.1 = x as f32;
+        }
+    }
+    spans
+}
+
+#[test]
+fn sidebar_rows_share_the_left_and_right_edges_of_the_network_button() {
+    use slint::platform::{PointerEventButton, WindowEvent};
+    set_headless_software_platform();
+    const LONG: &str = "#a-very-long-channel-name-that-has-to-be-elided";
+    let entry = |network: &str, name: &str, unread: &str| ChannelEntry {
+        network: network.into(),
+        channel: name.into(),
+        label: name.into(),
+        joined: true,
+        unread_count: unread.into(),
+        unread_description: if unread.is_empty() {
+            "".into()
+        } else {
+            format!("{unread} unread").into()
+        },
+        ..Default::default()
+    };
+    let group = |network: &str, entries: Vec<ChannelEntry>| NetworkGroup {
+        network: network.into(),
+        expanded: true,
+        channels: Rc::new(slint::VecModel::from(entries)).into(),
+        ..Default::default()
+    };
+    // A network without unread counts, and one with them; long names in both.
+    let plain_names = ["#a", LONG, "#c"];
+    let busy_names = ["#d", "#e", LONG];
+    let groups = vec![
+        group(
+            "plain",
+            plain_names.iter().map(|n| entry("plain", n, "")).collect(),
+        ),
+        group(
+            "busy",
+            vec![
+                entry("busy", busy_names[0], "3"),
+                entry("busy", busy_names[1], ""),
+                entry("busy", busy_names[2], "99+"),
+            ],
+        ),
+    ];
+    for width in [1200., 700.] {
+        let ui = AppWindow::new().unwrap();
+        // The sidebar width comes from the same fitting as in the app.
+        ui.on_fit_column_widths(
+            |window, sidebar, members, sidebar_min, members_min, reserved, sidebar_max| {
+                let fitted = fit_columns(
+                    window,
+                    sidebar,
+                    members,
+                    sidebar_min,
+                    members_min,
+                    reserved,
+                    sidebar_max,
+                );
+                ColumnWidths {
+                    sidebar: fitted.sidebar,
+                    members: fitted.members,
+                }
+            },
+        );
+        ui.set_screen("connected".into());
+        set_sidebar_probes(&ui, &groups);
+        show_network_groups(&ui, groups.clone());
+        let log = Rc::new(RefCell::new(Vec::<String>::new()));
+        let record = |prefix: &'static str| {
+            let log = log.clone();
+            move |network: slint::SharedString| {
+                log.borrow_mut().push(format!("{prefix}:{network}"));
+            }
+        };
+        ui.on_network_selected(record("network"));
+        ui.on_network_toggle_requested(record("toggle"));
+        ui.on_directory_open_requested(record("directory"));
+        let record_channel = |prefix: &'static str| {
+            let log = log.clone();
+            move |network: slint::SharedString, channel: slint::SharedString| {
+                log.borrow_mut()
+                    .push(format!("{prefix}:{network}:{channel}"));
+            }
+        };
+        ui.on_channel_selected(record_channel("channel"));
+        ui.on_channel_part_requested(record_channel("leave"));
+        ui.show().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(width, 800.));
+        ui.window().take_snapshot().unwrap();
+
+        // Find the top of every row by scanning down the sidebar. The scan
+        // starts under the icon row (its buttons change the screen) and
+        // clicks at x=64: the rows start at x=56 (sidebar padding 16 + 8,
+        // arrow 28, spacing 4), so the click hits a name or label button.
+        let mut tops = std::collections::BTreeMap::new();
+        for y in (64..790).step_by(2) {
+            let position = slint::LogicalPosition::new(64., y as f32);
+            let button = PointerEventButton::Left;
+            log.borrow_mut().clear();
+            ui.window()
+                .dispatch_event(WindowEvent::PointerPressed { position, button });
+            ui.window()
+                .dispatch_event(WindowEvent::PointerReleased { position, button });
+            for event in log.borrow().iter() {
+                tops.entry(event.clone()).or_insert(y as f32);
+            }
+        }
+        let spans_of = |event: &str| {
+            let top = *tops
+                .get(event)
+                .unwrap_or_else(|| panic!("row {event} not found at width {width}"));
+            sidebar_hit_spans(&ui, &log, top + 8., 600)
+        };
+        let mut cells: Vec<(f32, f32)> = Vec::new();
+        let mut labels: Vec<(f32, f32)> = Vec::new();
+        for (network, names) in [("plain", plain_names), ("busy", busy_names)] {
+            let header = spans_of(&format!("network:{network}"));
+            let (guide_left, guide_right) = header[&format!("network:{network}")];
+            // The arrow stays a separate control left of the name button.
+            let arrow = header[&format!("toggle:{network}")];
+            assert!(arrow.1 < guide_left, "arrow overlaps the name: {arrow:?}");
+            assert!(arrow.1 - arrow.0 >= 26., "arrow is not whole: {arrow:?}");
+
+            let directory = spans_of(&format!("directory:{network}"));
+            let directory = directory[&format!("directory:{network}")];
+            assert_eq!(directory.0, guide_left, "Channels left edge, {network}");
+            assert_eq!(directory.1, guide_right, "Channels right edge, {network}");
+
+            for name in names {
+                let row = spans_of(&format!("channel:{network}:{name}"));
+                let label = row[&format!("channel:{network}:{name}")];
+                let leave = row[&format!("leave:{network}:{name}")];
+                assert_eq!(label.0, guide_left, "label left edge of {name}");
+                assert!(
+                    (leave.1 - guide_right).abs() <= 1.,
+                    "[X] right edge of {name}: {leave:?} against {guide_right}"
+                );
+                assert!(
+                    leave.1 - leave.0 <= 28.,
+                    "[X] wider than its cell: {leave:?}"
+                );
+                // The unread cell (28) and two gaps (4) sit between label and [X].
+                let gap = leave.0 - label.1;
+                assert!((35. ..=37.).contains(&gap), "gap of {name}: {gap}");
+                cells.push(leave);
+                labels.push(label);
+            }
+        }
+        for (cell, label) in cells.iter().zip(&labels) {
+            assert_eq!(cell, &cells[0], "[X] cells are not in one column");
+            assert_eq!(label, &labels[0], "label buttons differ in width");
+        }
+    }
+}
+
 #[test]
 fn copy_text_view_preserves_text_and_supports_read_only_copy() {
     std::thread::spawn(|| {

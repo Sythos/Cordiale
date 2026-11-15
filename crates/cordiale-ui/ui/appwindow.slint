@@ -954,6 +954,55 @@ component SidebarRowButton inherits Rectangle {
     }
 }
 
+// The [X] button of a channel or query row. It fills the cell it is placed
+// in and has no minimum width of its own, so it never grows past the cell and
+// the right edge of every row stays on one line. Click, Enter or Space
+// activates it.
+component SidebarCellButton inherits Rectangle {
+    in property <string> text: "×";
+    in property <string> a11y-label;
+    callback clicked();
+
+    min-width: 0px;
+    min-height: 32px;
+    border-radius: 4px;
+    border-width: focus.has-focus ? 2px : 1px;
+    border-color: focus.has-focus ? Palette.accent-background : Palette.border;
+    background: touch.has-hover ? Palette.control-background.brighter(0.15) : Palette.control-background;
+    accessible-role: button;
+    accessible-label: a11y-label;
+    accessible-action-default => { clicked(); }
+
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            focus.focus();
+            root.clicked();
+        }
+    }
+
+    Text {
+        text: root.text;
+        width: parent.width;
+        height: parent.height;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: clip;
+        color: Palette.control-foreground;
+    }
+}
+
 // One source address in Settings > Source Address: a single-choice row.
 // Click, Enter or Space activates it; the border shows the keyboard focus.
 component SourceAddressChoice inherits Rectangle {
@@ -4422,16 +4471,14 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 width: sidebar-cell-width;
 
-                                if entry.kicked : Button {
-                                    text: "×";
-                                    accessible-label: @tr("Dismiss kicked channel {}", entry.label);
+                                if entry.kicked : SidebarCellButton {
+                                    a11y-label: @tr("Dismiss kicked channel {}", entry.label);
                                     clicked => {
                                         kicked-channel-dismiss-requested(entry.network, entry.channel);
                                     }
                                 }
-                                if entry.joined : Button {
-                                    text: "×";
-                                    accessible-label: @tr("Leave channel {} on {}", entry.channel, entry.network);
+                                if entry.joined : SidebarCellButton {
+                                    a11y-label: @tr("Leave channel {} on {}", entry.channel, entry.network);
                                     clicked => { channel-part-requested(entry.network, entry.channel); }
                                 }
                             }
@@ -4487,9 +4534,8 @@ export component AppWindow inherits Window {
                             HorizontalLayout {
                                 width: sidebar-cell-width;
 
-                                Button {
-                                    text: "×";
-                                    accessible-label: @tr("Close conversation with {} on {}", query.nick, query.network);
+                                SidebarCellButton {
+                                    a11y-label: @tr("Close conversation with {} on {}", query.nick, query.network);
                                     clicked => { query-close-requested(query.network, query.nick); }
                                 }
                             }
