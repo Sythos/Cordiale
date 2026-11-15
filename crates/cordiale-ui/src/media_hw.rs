@@ -108,11 +108,14 @@ mod ffmpeg_backend {
     use crate::media_demux::{VideoCodec, VideoTrack};
     use crate::media_player::{yuv420_planar, Planar};
     use ffmpeg_next::ffi;
-    use std::os::raw::c_int;
+    use ffmpeg_next::util::error::EAGAIN;
+    use ffmpeg_next::Error as FfmpegError;
+    use std::os::raw::{c_int, c_void};
     use std::ptr;
 
-    /// `AV_PIX_FMT_FLAG_HWACCEL` in the pixel format descriptor.
-    const HWACCEL_FLAG: u64 = 1 << 3;
+    /// `AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX`: the codec takes a device
+    /// context that the caller creates.
+    const METHOD_HW_DEVICE_CTX: c_int = 1;
 
     fn codec_id(codec: VideoCodec) -> Option<ffi::AVCodecID> {
         match codec {
@@ -141,16 +144,37 @@ mod ffmpeg_backend {
         }
     }
 
-    /// Takes the first hardware format that the decoder offers. When it
-    /// offers none, the decoder fails and the player uses the software path.
+    /// The pixel format that the codec uses with the device type `kind`, from
+    /// the hardware configurations of the codec. `None` when the codec has no
+    /// configuration for that device type.
+    unsafe fn device_pixel_format(
+        codec: *const ffi::AVCodec,
+        kind: ffi::AVHWDeviceType,
+    ) -> Option<ffi::AVPixelFormat> {
+        let mut index = 0;
+        loop {
+            let config = ffi::avcodec_get_hw_config(codec, index);
+            if config.is_null() {
+                return None;
+            }
+            if (*config).methods & METHOD_HW_DEVICE_CTX != 0 && (*config).device_type == kind {
+                return Some((*config).pix_fmt);
+            }
+            index += 1;
+        }
+    }
+
+    /// Takes the pixel format of the open device, which `open_device` keeps
+    /// in the `opaque` field of the context. When the decoder does not offer
+    /// it, the decoder fails and the player uses the software path.
     unsafe extern "C" fn pick_hw_format(
-        _context: *mut ffi::AVCodecContext,
+        context: *mut ffi::AVCodecContext,
         formats: *const ffi::AVPixelFormat,
     ) -> ffi::AVPixelFormat {
+        let wanted = (*context).opaque as isize as c_int;
         let mut at = formats;
         while *at != ffi::AVPixelFormat::AV_PIX_FMT_NONE {
-            let descriptor = ffi::av_pix_fmt_desc_get(*at);
-            if !descriptor.is_null() && (*descriptor).flags & HWACCEL_FLAG != 0 {
+            if *at as c_int == wanted {
                 return *at;
             }
             at = at.add(1);
@@ -207,6 +231,7 @@ mod ffmpeg_backend {
         kind: ffi::AVHWDeviceType,
         track: &VideoTrack,
     ) -> Option<Decoder> {
+        let pix_fmt = device_pixel_format(codec, kind)?;
         let mut device = ptr::null_mut();
         if ffi::av_hwdevice_ctx_create(&mut device, kind, ptr::null(), ptr::null_mut(), 0) < 0 {
             return None;
@@ -219,6 +244,7 @@ mod ffmpeg_backend {
         // The context owns the device reference from here.
         let context = Context(raw);
         (*raw).hw_device_ctx = device;
+        (*raw).opaque = pix_fmt as c_int as isize as *mut c_void;
         (*raw).get_format = Some(pick_hw_format);
         (*raw).width = c_int::try_from(track.width).ok()?;
         (*raw).height = c_int::try_from(track.height).ok()?;
@@ -270,7 +296,7 @@ mod ffmpeg_backend {
             let mut u = Vec::with_capacity(chroma_width * chroma_height);
             let mut v = Vec::with_capacity(chroma_width * chroma_height);
             for row in rows(1, chroma_width * 2, chroma_height)? {
-                for pair in row.chunks_exact(2) {
+                for pair in row.as_chunks::<2>().0 {
                     u.push(pair[0]);
                     v.push(pair[1]);
                 }
@@ -294,12 +320,25 @@ mod ffmpeg_backend {
         fn receive(&mut self) -> Result<Vec<(i64, Planar)>, String> {
             let mut out = Vec::new();
             unsafe {
-                // A negative result is "send more data" or "end of file".
-                while ffi::avcodec_receive_frame(self.context.0, self.frame) >= 0 {
+                loop {
+                    let code = ffi::avcodec_receive_frame(self.context.0, self.frame);
+                    if code < 0 {
+                        // "Send more data" and "end of file" end the loop.
+                        // Any other result is a failure of the decoder.
+                        match FfmpegError::from(code) {
+                            FfmpegError::Eof => break,
+                            FfmpegError::Other { errno } if errno == EAGAIN => break,
+                            _ => return Err(format!("hardware decoder failed ({code})")),
+                        }
+                    }
                     let mut source = self.frame;
                     if !(*self.frame).hw_frames_ctx.is_null() {
                         ffi::av_frame_unref(self.transfer);
-                        if ffi::av_hwframe_transfer_data(self.transfer, self.frame, 0) < 0 {
+                        // The copy has the pixels only: the properties, such
+                        // as the colour range, come from the decoded frame.
+                        if ffi::av_hwframe_transfer_data(self.transfer, self.frame, 0) < 0
+                            || ffi::av_frame_copy_props(self.transfer, self.frame) < 0
+                        {
                             ffi::av_frame_unref(self.frame);
                             return Err("hardware picture copy failed".to_string());
                         }

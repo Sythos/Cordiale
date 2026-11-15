@@ -58,7 +58,12 @@ zero indica un vuoto nel suono.
 - Senza la feature, senza un decodificatore adatto nel sistema, o con
   `CORDIALE_VIDEO_DECODE=software`, il file si riproduce con i
   decodificatori software, senza errori.
-- Se l'hardware si ferma durante la riproduzione, il lettore passa al software
+- Il formato dei fotogrammi hardware è quello che il codec dichiara per il
+  tipo di dispositivo aperto (`avcodec_get_hw_config`), non il primo formato
+  hardware offerto. L'intervallo di colore (pieno o limitato) passa dal
+  fotogramma decodificato alla copia in memoria.
+- Se l'hardware si ferma durante la riproduzione, anche per un errore di
+  decodifica (non solo per un campione rifiutato), il lettore passa al software
   dal fotogramma chiave precedente e la riga di registro riporta
   `(fallback)`.
 

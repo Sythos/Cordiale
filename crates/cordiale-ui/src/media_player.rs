@@ -2601,7 +2601,7 @@ mod tests {
         }
         // The largest picture that the player decodes still fits, at the
         // least length of the queue.
-        assert!(QUEUE_MIN_FRAMES * MAX_PIXELS * 3 / 2 <= QUEUE_BYTES);
+        const { assert!(QUEUE_MIN_FRAMES * MAX_PIXELS * 3 / 2 <= QUEUE_BYTES) };
         assert_eq!(queue_frames(16, 16), QUEUE_MAX_FRAMES);
         assert_eq!(queue_frames(3840, 2160), 8);
     }
