@@ -1553,6 +1553,9 @@ export component AppWindow inherits Window {
     // screen hands off to once its animation finishes ("language" on
     // first launch, "connect" otherwise).
     in property <string> next-screen: "connect";
+    // Set by Rust once the window is up and placed: the splash does not
+    // hand off before.
+    in property <bool> startup-ready: false;
     // Which Settings section is open; mirrors Cicchetto's own Settings
     // drawer categories (see docs/feature-matrix.md) so the navigation
     // feels familiar to anyone coming from that client.
@@ -3829,6 +3832,15 @@ export component AppWindow inherits Window {
             duration: 1800ms;
             easing: ease-out;
         }
+        // The splash ends when its animation is over and Rust says the
+        // startup is ready, whichever comes last.
+        property <bool> splash-elapsed: false;
+        property <bool> splash-done: splash-elapsed && startup-ready;
+        changed splash-done => {
+            if splash-done {
+                screen = next-screen;
+            }
+        }
 
         init => {
             splash-progress = 1.0;
@@ -3838,7 +3850,7 @@ export component AppWindow inherits Window {
             interval: 1900ms;
             running: true;
             triggered => {
-                screen = next-screen;
+                splash-elapsed = true;
             }
         }
 
@@ -3848,8 +3860,14 @@ export component AppWindow inherits Window {
             height: 220px;
         }
 
-        ProgressIndicator {
-            progress: splash-progress;
+        HorizontalLayout {
+            alignment: center;
+
+            ProgressIndicator {
+                preferred-width: 320px;
+                min-width: 0px;
+                progress: splash-progress;
+            }
         }
     }
 

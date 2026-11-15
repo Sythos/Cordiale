@@ -802,6 +802,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // position replaces the centered one when the event loop starts.
     ui.show()?;
     center_window_on_monitor(&ui);
+    ui.set_startup_ready(true);
     let result = slint::run_event_loop();
     window_state_timer.flush();
     drop(window_state_timer);

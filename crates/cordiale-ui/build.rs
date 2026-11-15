@@ -32,8 +32,12 @@ fn main() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            let config =
-                slint_build::CompilerConfiguration::new().with_bundled_translations("lang");
+            // Embed the images in the binary. Without this, Slint keeps the
+            // absolute path of the build machine and a packaged application
+            // shows no splash logo.
+            let config = slint_build::CompilerConfiguration::new()
+                .embed_resources(slint_build::EmbedResourcesKind::EmbedFiles)
+                .with_bundled_translations("lang");
             slint_build::compile_with_config("ui/appwindow.slint", config)
                 .expect("failed to compile the Slint UI");
         })
