@@ -311,3 +311,23 @@ dell'ombrello 416: il testo completo del protocollo 50 è stato riletto.
 | 48 | Accoppiamento di due dispositivi (§4g) | Implementato per una rete per volta (`e2e_pairing_flow.rs`) |
 | 49 | Dispositivi, liste firmate, `to_did`/`from_did` | Implementato (`e2e_device_routes.rs`, `e2e_trust.rs`) |
 | 50 | Copie S1 e `own` | Implementato (`e2e_selfcopy.rs`, motore) |
+
+## Prove a mano: riga di composizione e riga Actions (issue 789)
+
+La riga di composizione (graffetta, campo, invio) e la riga Actions della
+colonna destra hanno la stessa altezza (`bottom-row-height` in
+`appwindow.slint`) e restano in fondo alle loro colonne. La CI non ha uno
+schermo e non misura le posizioni: i test in `tests.rs` leggono le
+definizioni Slint. Le prove visive restano da fare su desktop e vanno scritte
+nella PR o nella issue.
+
+Per ogni caso controllare che bordo alto e bordo basso dei quattro controlli
+coincidano, che nulla si sovrapponga e che nulla esca dalla colonna:
+
+- finestra stretta (circa 900 px) e larga (oltre 1600 px);
+- scala di visualizzazione 100%, 150% e 200%;
+- canale selezionato, query semplice e query cifrata;
+- lista dei membri nascosta e poi di nuovo visibile;
+- finestra ridimensionata a trascinamento, con e senza canale unito;
+- scrivere, allegare un file, inviare con il pulsante e con Invio, Tab per il
+  completamento del nick e Su/Giù per la cronologia.
