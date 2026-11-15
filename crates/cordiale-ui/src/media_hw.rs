@@ -62,7 +62,9 @@ pub fn supports(codec: VideoCodec) -> bool {
 
 /// The bytes of one sample for the hardware decoder. H.264 and HEVC samples
 /// become Annex B access units, with the parameter sets in front of each key
-/// sample. VP9 and AV1 samples go as they are.
+/// sample. An AV1 key sample gets the configuration OBUs in front, so the
+/// decoder has the sequence header after a start or a reset. VP9 samples go
+/// as they are.
 pub fn access_unit(track: &VideoTrack, data: &[u8], key: bool) -> Vec<u8> {
     match track.codec {
         VideoCodec::H264 | VideoCodec::Hevc => {
@@ -74,6 +76,11 @@ pub fn access_unit(track: &VideoTrack, data: &[u8], key: bool) -> Vec<u8> {
                 }
             }
             out.extend(length_prefixed_to_annex_b(data, track.nal_length_size));
+            out
+        }
+        VideoCodec::Av1 if key => {
+            let mut out: Vec<u8> = track.parameter_sets.concat();
+            out.extend_from_slice(data);
             out
         }
         _ => data.to_vec(),
@@ -465,9 +472,24 @@ mod tests {
     }
 
     #[test]
-    fn vp9_and_av1_samples_go_unchanged() {
-        for codec in [VideoCodec::Vp9, VideoCodec::Av1] {
-            assert_eq!(access_unit(&track(codec), &[1, 2, 3], true), vec![1, 2, 3]);
-        }
+    fn vp9_samples_and_plain_av1_samples_go_unchanged() {
+        assert_eq!(
+            access_unit(&track(VideoCodec::Vp9), &[1, 2, 3], true),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            access_unit(&track(VideoCodec::Av1), &[1, 2, 3], false),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn an_av1_key_sample_gets_the_configuration_obus_in_front() {
+        let mut av1 = track(VideoCodec::Av1);
+        av1.parameter_sets = vec![vec![0x0a, 1], vec![0x12, 2]];
+        assert_eq!(
+            access_unit(&av1, &[1, 2, 3], true),
+            vec![0x0a, 1, 0x12, 2, 1, 2, 3]
+        );
     }
 }
