@@ -716,26 +716,21 @@ fn main() -> Result<(), slint::PlatformError> {
     // with a manual disconnect.
     // The sign-in waits for the end of the splash: a fast login would
     // otherwise replace the splash with the connected screen.
-    let auto_connect_timer = slint::Timer::default();
     if auto_connect {
         if let Some(identifier) = auto_connect_identifier(&remembered_server_url) {
             let tx_for_connect = worker_tx.clone();
             let weak_for_connect = ui.as_weak();
             let server_url = remembered_server_url.clone();
-            auto_connect_timer.start(
-                slint::TimerMode::SingleShot,
-                SPLASH_DURATION + std::time::Duration::from_millis(100),
-                move || {
-                    if let Some(ui) = weak_for_connect.upgrade() {
-                        ui.set_connecting(true);
-                    }
-                    let _ = tx_for_connect.send(WorkerCommand::Connect {
-                        server_url: server_url.clone(),
-                        identifier: identifier.clone(),
-                        credential: ConnectCredential::SavedProfile,
-                    });
-                },
-            );
+            ui.on_splash_finished(move || {
+                if let Some(ui) = weak_for_connect.upgrade() {
+                    ui.set_connecting(true);
+                }
+                let _ = tx_for_connect.send(WorkerCommand::Connect {
+                    server_url: server_url.clone(),
+                    identifier: identifier.clone(),
+                    credential: ConnectCredential::SavedProfile,
+                });
+            });
         }
     }
 
@@ -806,7 +801,6 @@ fn main() -> Result<(), slint::PlatformError> {
     let result = slint::run_event_loop();
     window_state_timer.flush();
     drop(window_state_timer);
-    drop(auto_connect_timer);
     let _ = ui.hide();
 
     // Closing the window quits: tell Grappa the client is leaving, so
@@ -827,10 +821,6 @@ fn main() -> Result<(), slint::PlatformError> {
 fn window_in_foreground(focused: bool, minimized: Option<bool>) -> bool {
     focused && !minimized.unwrap_or(false)
 }
-
-/// How long the splash stays up: the 1900ms timer of the `splash` view in
-/// `appwindow.slint`.
-const SPLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(1900);
 
 /// The screen that follows the splash: the language choice until a language
 /// is saved, the connect screen after.
