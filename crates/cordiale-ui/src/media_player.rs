@@ -870,7 +870,18 @@ fn audio_worker(
                 }
                 continue;
             }
-            waiting = Some(if source.refill() {
+            // The constructors decode the first packet ahead: send what is
+            // still unread before the next packet.
+            waiting = Some(if source.at < source.pending.len() {
+                let mut samples = std::mem::take(&mut source.pending);
+                samples.drain(..source.at);
+                AudioMessage::Chunk {
+                    epoch,
+                    channels: source.channels,
+                    rate: source.rate,
+                    samples,
+                }
+            } else if source.refill() {
                 AudioMessage::Chunk {
                     epoch,
                     channels: source.channels,
@@ -1952,6 +1963,16 @@ mod tests {
         let buffered = BufferedAudio::new(source);
         assert!(buffered.total_duration().is_some());
         let samples: Vec<Sample> = buffered.collect();
+        assert_eq!(samples, direct);
+    }
+
+    #[test]
+    fn buffered_audio_keeps_a_clip_of_one_packet() {
+        let bytes = wav_second(200);
+        let direct: Vec<Sample> = symphonia_source(&bytes, "wav").expect("a source").collect();
+        assert_eq!(direct.len(), 200);
+        let source = symphonia_source(&bytes, "wav").expect("a source");
+        let samples: Vec<Sample> = BufferedAudio::new(source).collect();
         assert_eq!(samples, direct);
     }
 
