@@ -16656,3 +16656,13 @@ fn media_content_uses_the_file_name_hint_last() {
         MediaContent::Player(_, extension) if extension == "mp3"
     ));
 }
+
+#[test]
+fn language_choice_opens_connect_only_from_the_language_screen() {
+    // First run and the Connect screen button use the language screen.
+    assert!(ui_callbacks::language_choice_opens_connect("language"));
+    // Settings, the connected view and other screens keep their place.
+    for screen in ["settings", "connected", "connect", "splash", "admin"] {
+        assert!(!ui_callbacks::language_choice_opens_connect(screen));
+    }
+}
