@@ -107,13 +107,12 @@ pub(crate) async fn load_and_show_recent_history(
     ui: &slint::Weak<AppWindow>,
     key: &(String, String),
 ) {
-    let old_rows = state.transcript.messages.get(key).map_or(0, Vec::len);
     let loaded = load_recent_history(state, key).await;
     if state.windows.current_channel.as_ref() != Some(key) {
         return;
     }
     match loaded {
-        Some(start_reached) => show_older_history(state, ui, key, old_rows, 0, start_reached),
+        Some(start_reached) => show_older_history(state, ui, key, false, start_reached),
         None => {
             let _ = ui.upgrade_in_event_loop(|ui| {
                 ui.set_history_failed(true);
@@ -200,7 +199,6 @@ pub(crate) async fn handle_load_older_history(
         let position_of = |lines: &[RenderedMessage], id: Option<i64>| {
             id.and_then(|id| lines.iter().position(|line| line.message_id == Some(id)))
         };
-        let old_rows = state.transcript.messages.get(&key).map_or(0, Vec::len);
         let before = position_of(
             state
                 .transcript
@@ -235,7 +233,7 @@ pub(crate) async fn handle_load_older_history(
         if state.windows.current_channel.as_ref() != Some(&key) {
             return;
         }
-        show_older_history(state, ui, &key, old_rows, prepended, start_reached);
+        show_older_history(state, ui, &key, prepended > 0, start_reached);
         return;
     }
     // A channel with no row yet has no cursor: read its newest page.
@@ -278,7 +276,6 @@ pub(crate) async fn handle_load_older_history(
             .iter()
             .position(|line| line.message_id == Some(oldest))
     };
-    let old_rows = messages.len();
     let before = position_of_oldest(messages);
     merge_rendered_messages(messages, rows.iter().map(render_history_entry));
     let prepended = match (before, position_of_oldest(messages)) {
@@ -294,16 +291,17 @@ pub(crate) async fn handle_load_older_history(
     if state.windows.current_channel.as_ref() != Some(&key) {
         return;
     }
-    show_older_history(state, ui, &key, old_rows, prepended, start_reached);
+    show_older_history(state, ui, &key, prepended > 0, start_reached);
 }
 
 /// Puts the rows of an older page above what the open window shows.
+/// `keep_place` is true when the page added messages above the open ones: the
+/// pane then keeps the line the reader had at the top.
 fn show_older_history(
     state: &mut WorkerState,
     ui: &slint::Weak<AppWindow>,
     key: &(String, String),
-    old_rows: usize,
-    prepended: usize,
+    keep_place: bool,
     start_reached: bool,
 ) {
     let key = key.clone();
@@ -340,13 +338,20 @@ fn show_older_history(
         // switch) isn't touched, so the pane doesn't jump to the newest
         // line. A pane following the newest line stays on it; otherwise
         // the line the reader had at the top is put back there.
-        let anchor = (!ui.get_chat_follow_bottom())
+        // Date separators are rows too: the pane's own row count and the
+        // rows the new model adds are counted, so a separator at the page
+        // boundary moves the anchor as well.
+        let pane_rows = {
+            use slint::Model as _;
+            ui.get_chat_lines().row_count()
+        };
+        let anchor = (keep_place && !ui.get_chat_follow_bottom())
             .then(|| {
                 prepend_scroll_anchor(
                     ui.get_chat_scroll_y(),
                     ui.get_chat_content_height(),
-                    old_rows,
-                    prepended,
+                    pane_rows,
+                    model.len().saturating_sub(pane_rows),
                 )
             })
             .flatten();

@@ -161,16 +161,16 @@ pub(crate) async fn handle_open_mention(
     });
 }
 
-/// The pane row of message `id`: its place among the rows the pane shows
-/// (presence noise is left out while Denoise hides it). `None` when the
-/// message isn't in the window's rows.
+/// The pane row of message `id`: its place among the rows the pane shows,
+/// date separators included (presence noise is left out while Denoise hides
+/// it). `None` when the message isn't in the window's rows.
 pub(crate) fn mention_row(
     messages: &[RenderedMessage],
     id: i64,
     hide_presence: bool,
 ) -> Option<usize> {
-    messages
-        .iter()
-        .filter(|message| !(hide_presence && message.presence_noise))
-        .position(|message| message.message_id == Some(id))
+    let index = messages.iter().position(|message| {
+        message.message_id == Some(id) && !(hide_presence && message.presence_noise)
+    })?;
+    Some(chat_display_row_count(&messages[..=index], hide_presence) - 1)
 }

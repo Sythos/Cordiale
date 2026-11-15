@@ -11772,6 +11772,31 @@ fn mention_jumps_resolve_the_window_and_keep_the_id_optional() {
 }
 
 #[test]
+fn mention_row_counts_the_date_separators_above_the_message() {
+    use cordiale_core::isupport::CaseMapping;
+
+    let mut hidden = dated_row(2, (2026, 11, 14), (8, 0), true);
+    hidden.message_id = Some(2);
+    let rows = vec![
+        dated_row(1, (2026, 11, 13), (22, 0), false),
+        hidden,
+        dated_row(3, (2026, 11, 14), (9, 0), false),
+        dated_row(4, (2026, 11, 15), (9, 0), false),
+    ];
+    for denoise in [false, true] {
+        let lines = chat_lines_model_with_roster(&rows, false, &[], CaseMapping::Rfc1459, denoise);
+        for id in [1, 3, 4] {
+            let row = mention_row(&rows, id, denoise).expect("row");
+            assert_eq!(lines[row].reply_id.to_string(), id.to_string());
+            assert!(lines[row].separator.is_empty());
+        }
+    }
+    // The first row of a new day is the one after its separator.
+    assert_eq!(mention_row(&rows, 3, true), Some(2));
+    assert_eq!(mention_row(&rows, 3, false), Some(3));
+}
+
+#[test]
 fn mention_row_finds_the_message_among_the_shown_rows() {
     let row = |kind: &str, id: i64| {
         render_message(
@@ -16303,6 +16328,171 @@ fn query_catch_up_failure_is_incomplete_and_keeps_the_rows_read() {
     assert_eq!(calls.len(), 2);
     // The first page arrived: a retry resumes after its last row.
     assert_eq!(ids, (1..=210).collect::<Vec<_>>());
+}
+
+fn dated_row(
+    id: i64,
+    (year, month, day): (i32, u32, u32),
+    (hour, minute): (u32, u32),
+    presence_noise: bool,
+) -> RenderedMessage {
+    use chrono::TimeZone as _;
+    let moment = chrono::Local
+        .with_ymd_and_hms(year, month, day, hour, minute, 0)
+        .single()
+        .expect("local time");
+    RenderedMessage {
+        nick: Some("alice".to_string()),
+        text: format!("row {id}"),
+        presence_noise,
+        ..history_row(Some(id), Some(moment.timestamp_millis()))
+    }
+}
+
+fn separator_positions(lines: &[ChatLine]) -> Vec<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.separator.is_empty())
+        .map(|(index, _)| index)
+        .collect()
+}
+
+#[test]
+fn rows_of_one_local_date_have_no_separator() {
+    let rows = vec![
+        dated_row(1, (2026, 11, 13), (0, 0), false),
+        dated_row(2, (2026, 11, 13), (12, 30), false),
+        dated_row(3, (2026, 11, 13), (23, 59), false),
+    ];
+    let lines = chat_lines_model(&rows, false);
+    assert_eq!(lines.len(), 3);
+    assert!(separator_positions(&lines).is_empty());
+}
+
+#[test]
+fn a_new_local_date_adds_exactly_one_separator_before_its_first_row() {
+    let rows = vec![
+        dated_row(1, (2026, 11, 13), (22, 0), false),
+        dated_row(2, (2026, 11, 13), (23, 59), false),
+        dated_row(3, (2026, 11, 14), (0, 1), false),
+        dated_row(4, (2026, 11, 14), (9, 0), false),
+        dated_row(5, (2026, 11, 16), (9, 0), false),
+    ];
+    let lines = chat_lines_model(&rows, false);
+    assert_eq!(lines.len(), 7);
+    assert_eq!(separator_positions(&lines), vec![2, 5]);
+    assert_eq!(lines[3].reply_body.to_string(), "row 3");
+    assert_eq!(lines[6].reply_body.to_string(), "row 5");
+    assert_eq!(chat_display_row_count(&rows, false), lines.len());
+}
+
+#[test]
+fn a_separator_is_not_a_message_row() {
+    let rows = vec![
+        dated_row(1, (2026, 11, 13), (22, 0), false),
+        dated_row(2, (2026, 11, 14), (0, 1), false),
+    ];
+    let lines = chat_lines_model(&rows, true);
+    let separator = &lines[1];
+    assert!(!separator.separator.is_empty());
+    assert!(separator.nick.is_empty());
+    assert!(separator.reply_id.is_empty());
+    assert!(separator.reply_body.is_empty());
+    assert!(separator.timestamp.is_empty());
+    assert!(separator.rename_target.is_empty());
+    assert!(!separator.mention && !separator.selectable && !separator.encrypted);
+    assert_eq!(
+        chat_row_text(separator),
+        format!("--- {} ---", separator.separator)
+    );
+}
+
+#[test]
+fn hidden_rows_do_not_make_an_empty_date_section() {
+    use cordiale_core::isupport::CaseMapping;
+
+    let rows = vec![
+        dated_row(1, (2026, 11, 13), (22, 0), false),
+        dated_row(2, (2026, 11, 14), (8, 0), true),
+        dated_row(3, (2026, 11, 14), (9, 0), true),
+        dated_row(4, (2026, 11, 15), (9, 0), false),
+    ];
+    let hidden = chat_lines_model_with_roster(&rows, false, &[], CaseMapping::Rfc1459, true);
+    assert_eq!(hidden.len(), 3);
+    assert_eq!(separator_positions(&hidden), vec![1]);
+    assert_eq!(chat_display_row_count(&rows, true), hidden.len());
+    let shown = chat_lines_model_with_roster(&rows, false, &[], CaseMapping::Rfc1459, false);
+    assert_eq!(separator_positions(&shown), vec![1, 4]);
+}
+
+#[test]
+fn rows_without_an_event_time_do_not_split_a_date() {
+    let rows = vec![
+        dated_row(1, (2026, 11, 13), (22, 0), false),
+        history_row(Some(2), None),
+        dated_row(3, (2026, 11, 13), (23, 0), false),
+        history_row(Some(4), None),
+        dated_row(5, (2026, 11, 14), (1, 0), false),
+    ];
+    let lines = chat_lines_model(&rows, false);
+    assert_eq!(separator_positions(&lines), vec![4]);
+}
+
+#[test]
+fn a_live_row_after_midnight_gets_one_separator_at_the_end() {
+    let mut rows = vec![
+        dated_row(1, (2026, 11, 13), (23, 58), false),
+        dated_row(2, (2026, 11, 13), (23, 59), false),
+    ];
+    let same_day = dated_row(3, (2026, 11, 13), (23, 59), false);
+    assert!(separator_label_before(&rows, &same_day, false).is_none());
+    let next_day = dated_row(4, (2026, 11, 14), (0, 0), false);
+    assert!(separator_label_before(&rows, &next_day, false).is_some());
+    // The same rows built whole give the same single separator.
+    rows.push(next_day);
+    let lines = chat_lines_model(&rows, false);
+    assert_eq!(separator_positions(&lines), vec![2]);
+    assert_eq!(chat_display_row_count(&rows, false), lines.len());
+}
+
+#[test]
+fn a_live_row_looks_past_hidden_rows_for_the_date_above() {
+    let rows = vec![
+        dated_row(1, (2026, 11, 13), (23, 58), false),
+        dated_row(2, (2026, 11, 14), (0, 5), true),
+    ];
+    let next = dated_row(3, (2026, 11, 14), (0, 6), false);
+    // The hidden row does not count: the date above is the 13th.
+    assert!(separator_label_before(&rows, &next, true).is_some());
+    // Shown, the row above is on the 14th already.
+    assert!(separator_label_before(&rows, &next, false).is_none());
+}
+
+#[test]
+fn an_older_page_keeps_one_separator_at_the_page_boundary() {
+    let newer = vec![
+        dated_row(10, (2026, 11, 14), (8, 0), false),
+        dated_row(11, (2026, 11, 14), (9, 0), false),
+    ];
+    let before = chat_lines_model(&newer, false);
+    assert!(separator_positions(&before).is_empty());
+
+    let mut combined = vec![
+        dated_row(8, (2026, 11, 13), (21, 0), false),
+        dated_row(9, (2026, 11, 13), (22, 0), false),
+    ];
+    combined.extend(newer.clone());
+    let after = chat_lines_model(&combined, false);
+    assert_eq!(after.len(), 5);
+    assert_eq!(separator_positions(&after), vec![2]);
+
+    // The pane gained the page and the separator: the reader's top row moves
+    // down by all of them.
+    let added = after.len() - before.len();
+    assert_eq!(added, 3);
+    let anchor = prepend_scroll_anchor(-100.0, 1000.0, before.len(), added).unwrap();
+    assert_eq!(anchor.row, added);
 }
 
 #[test]

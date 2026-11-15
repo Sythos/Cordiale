@@ -32,7 +32,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use chrono::{DateTime, Datelike, Local};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Weekday};
 use cordiale_core::persistence::Language;
 use cordiale_core::rest::DateFormat;
 
@@ -49,6 +49,7 @@ pub(crate) enum AutoStyle {
 
 static FORMAT: AtomicU8 = AtomicU8::new(0);
 static AUTO_STYLE: AtomicU8 = AtomicU8::new(0);
+static LANGUAGE: AtomicU8 = AtomicU8::new(0);
 
 fn format_index(format: DateFormat) -> u8 {
     match format {
@@ -78,8 +79,29 @@ pub(crate) fn current_format() -> DateFormat {
 
 /// Re-resolves `auto` after the interface language changes.
 pub(crate) fn set_language(language: Option<Language>) {
+    LANGUAGE.store(language_index(language), Ordering::Relaxed);
     let style = auto_style(language, &system_locale());
     AUTO_STYLE.store(style_index(style), Ordering::Relaxed);
+}
+
+fn language_index(language: Option<Language>) -> u8 {
+    match language {
+        None | Some(Language::En) => 0,
+        Some(Language::It) => 1,
+        Some(Language::Fr) => 2,
+        Some(Language::De) => 3,
+        Some(Language::Es) => 4,
+    }
+}
+
+fn current_language() -> Option<Language> {
+    match LANGUAGE.load(Ordering::Relaxed) {
+        1 => Some(Language::It),
+        2 => Some(Language::Fr),
+        3 => Some(Language::De),
+        4 => Some(Language::Es),
+        _ => None,
+    }
 }
 
 fn current_auto_style() -> AutoStyle {
@@ -153,6 +175,88 @@ pub(crate) fn render_date_time(moment: &DateTime<Local>, seconds: bool) -> Strin
         moment.format("%H:%M")
     };
     format!("{date} {time}")
+}
+
+/// The local calendar date of an epoch-milliseconds timestamp, in the time
+/// zone that the message times use. `None` for a value out of range.
+pub(crate) fn local_date_of_millis(millis: i64) -> Option<NaiveDate> {
+    DateTime::from_timestamp_millis(millis).map(|moment| moment.with_timezone(&Local).date_naive())
+}
+
+/// The weekday name in an interface language (`None` is English).
+pub(crate) fn weekday_name(weekday: Weekday, language: Option<Language>) -> &'static str {
+    const EN: [&str; 7] = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ];
+    const IT: [&str; 7] = [
+        "Lunedì",
+        "Martedì",
+        "Mercoledì",
+        "Giovedì",
+        "Venerdì",
+        "Sabato",
+        "Domenica",
+    ];
+    const FR: [&str; 7] = [
+        "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche",
+    ];
+    const DE: [&str; 7] = [
+        "Montag",
+        "Dienstag",
+        "Mittwoch",
+        "Donnerstag",
+        "Freitag",
+        "Samstag",
+        "Sonntag",
+    ];
+    const ES: [&str; 7] = [
+        "Lunes",
+        "Martes",
+        "Miércoles",
+        "Jueves",
+        "Viernes",
+        "Sábado",
+        "Domingo",
+    ];
+    let names = match language {
+        Some(Language::It) => &IT,
+        Some(Language::Fr) => &FR,
+        Some(Language::De) => &DE,
+        Some(Language::Es) => &ES,
+        Some(Language::En) | None => &EN,
+    };
+    names[weekday.num_days_from_monday() as usize]
+}
+
+/// The label of a date separator: the weekday of the day that starts and
+/// its date, per `format`, `style` and `language`.
+pub(crate) fn separator_label_with(
+    date: &NaiveDate,
+    format: DateFormat,
+    style: AutoStyle,
+    language: Option<Language>,
+) -> String {
+    format!(
+        "{}, {}",
+        weekday_name(date.weekday(), language),
+        render_date_with(date, format, style)
+    )
+}
+
+/// The label of a date separator per the current preferences.
+pub(crate) fn separator_label(date: &NaiveDate) -> String {
+    separator_label_with(
+        date,
+        current_format(),
+        current_auto_style(),
+        current_language(),
+    )
 }
 
 /// The Settings selector's live examples, one per `DateFormat::ALL` entry,
@@ -243,5 +347,83 @@ mod tests {
         set_format(Some(DateFormat::Ymd));
         assert_eq!(current_format(), DateFormat::Ymd);
         set_format(None);
+    }
+
+    #[test]
+    fn separator_label_has_a_localized_weekday_and_the_configured_date() {
+        let friday = NaiveDate::from_ymd_opt(2026, 11, 13).expect("date");
+        let label =
+            |format, language| separator_label_with(&friday, format, AutoStyle::DaySlash, language);
+        assert_eq!(
+            label(DateFormat::Ymd, Some(Language::En)),
+            "Friday, 2026-11-13"
+        );
+        assert_eq!(label(DateFormat::Ymd, None), "Friday, 2026-11-13");
+        assert_eq!(
+            label(DateFormat::Dmy, Some(Language::It)),
+            "Venerdì, 13/11/2026"
+        );
+        assert_eq!(
+            label(DateFormat::Mdy, Some(Language::Fr)),
+            "Vendredi, 11/13/2026"
+        );
+        assert_eq!(
+            label(DateFormat::Ymd, Some(Language::De)),
+            "Freitag, 2026-11-13"
+        );
+        assert_eq!(
+            label(DateFormat::Dmy, Some(Language::Es)),
+            "Viernes, 13/11/2026"
+        );
+        assert_eq!(
+            separator_label_with(
+                &friday,
+                DateFormat::Auto,
+                AutoStyle::DayDot,
+                Some(Language::De)
+            ),
+            "Freitag, 13.11.2026"
+        );
+    }
+
+    #[test]
+    fn every_weekday_has_a_name_in_every_language() {
+        for language in [
+            None,
+            Some(Language::En),
+            Some(Language::It),
+            Some(Language::Fr),
+            Some(Language::De),
+            Some(Language::Es),
+        ] {
+            let names: std::collections::HashSet<_> = (0..7)
+                .map(|offset| {
+                    let date = NaiveDate::from_ymd_opt(2026, 11, 9 + offset).expect("date");
+                    weekday_name(date.weekday(), language)
+                })
+                .collect();
+            assert_eq!(names.len(), 7);
+        }
+    }
+
+    #[test]
+    fn local_date_follows_the_local_time_zone_near_midnight() {
+        use chrono::TimeZone as _;
+        let late = Local
+            .with_ymd_and_hms(2026, 11, 13, 23, 59, 59)
+            .single()
+            .expect("time");
+        let early = Local
+            .with_ymd_and_hms(2026, 11, 14, 0, 0, 1)
+            .single()
+            .expect("time");
+        assert_eq!(
+            local_date_of_millis(late.timestamp_millis()),
+            NaiveDate::from_ymd_opt(2026, 11, 13)
+        );
+        assert_eq!(
+            local_date_of_millis(early.timestamp_millis()),
+            NaiveDate::from_ymd_opt(2026, 11, 14)
+        );
     }
 }

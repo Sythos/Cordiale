@@ -3621,6 +3621,9 @@ async fn finish_connect(
 
 /// Plain text of one displayed row: time, sender and the full message.
 fn chat_row_text(line: &ChatLine) -> String {
+    if !line.separator.is_empty() {
+        return format!("--- {} ---", line.separator);
+    }
     let body: String = cordiale_core::formatting::parse_mirc_text(&line.reply_body)
         .into_iter()
         .map(|run| run.text)
@@ -10010,7 +10013,79 @@ fn chat_line_from_message(
         rename_target: rename_target.into(),
         encrypted: message_lock_visible(message),
         incoming,
+        separator: Default::default(),
     }
+}
+
+/// The local calendar date of a row, from its original event time. A row
+/// with no event time has no known date.
+fn message_local_date(message: &RenderedMessage) -> Option<chrono::NaiveDate> {
+    message.server_time.and_then(dates::local_date_of_millis)
+}
+
+/// The label of the date separator that goes before a row on `date`, given
+/// the date of the last visible row above it. There is none for the first
+/// row, for a row on the same date, or for a row whose date is unknown.
+fn separator_label_between(
+    previous: Option<chrono::NaiveDate>,
+    date: Option<chrono::NaiveDate>,
+) -> Option<String> {
+    let (previous, date) = (previous?, date?);
+    (previous != date).then(|| dates::separator_label(&date))
+}
+
+/// A visual transcript row for a date separator. It is not a message: it has
+/// no sender, id, body or time.
+fn separator_chat_line(label: &str, dark_theme: bool) -> ChatLine {
+    ChatLine {
+        separator: label.into(),
+        timestamp_color: muted_color(dark_theme),
+        ..Default::default()
+    }
+}
+
+/// The label of the separator that goes before `next`, a row just added
+/// after `previous` (the rows above it, in display order). `previous` rows
+/// that `hide_presence` hides do not count.
+fn separator_label_before(
+    previous: &[RenderedMessage],
+    next: &RenderedMessage,
+    hide_presence: bool,
+) -> Option<String> {
+    let above = previous
+        .iter()
+        .rev()
+        .filter(|message| !(hide_presence && message.presence_noise))
+        .find_map(message_local_date);
+    separator_label_between(above, message_local_date(next))
+}
+
+/// How many rows the pane shows for `messages`: the visible messages and
+/// the date separators between them.
+fn chat_display_row_count(messages: &[RenderedMessage], hide_presence: bool) -> usize {
+    let dates = messages
+        .iter()
+        .filter(|message| !(hide_presence && message.presence_noise))
+        .map(message_local_date);
+    let flags = date_separator_flags(dates);
+    flags.len() + flags.iter().filter(|flag| **flag).count()
+}
+
+/// For each row, in display order, whether a date separator goes before it.
+/// This is the one rule for every caller. A row with an unknown date never
+/// changes the last known date.
+fn date_separator_flags(dates: impl IntoIterator<Item = Option<chrono::NaiveDate>>) -> Vec<bool> {
+    let mut above = None;
+    dates
+        .into_iter()
+        .map(|date| {
+            let flag = above.zip(date).is_some_and(|(above, date)| above != date);
+            if date.is_some() {
+                above = date;
+            }
+            flag
+        })
+        .collect()
 }
 
 /// Puts the icon of each link in front of it in the runs. The links are
@@ -10876,18 +10951,27 @@ fn chat_lines_model_with_roster(
     casemapping: cordiale_core::isupport::CaseMapping,
     hide_presence: bool,
 ) -> Vec<ChatLine> {
-    messages
+    let visible: Vec<&RenderedMessage> = messages
         .iter()
         .filter(|message| !(hide_presence && message.presence_noise))
-        .map(|message| {
-            let prefix = message
-                .nick
-                .as_deref()
-                .map(|nick| member_prefix_for_nick(members, nick, casemapping))
-                .unwrap_or("");
-            chat_line_from_message(message, dark_theme, prefix)
-        })
-        .collect()
+        .collect();
+    let flags = date_separator_flags(visible.iter().map(|message| message_local_date(message)));
+    let mut lines = Vec::with_capacity(visible.len() + flags.len());
+    for (message, separator) in visible.into_iter().zip(flags) {
+        if let Some(date) = message_local_date(message).filter(|_| separator) {
+            lines.push(separator_chat_line(
+                &dates::separator_label(&date),
+                dark_theme,
+            ));
+        }
+        let prefix = message
+            .nick
+            .as_deref()
+            .map(|nick| member_prefix_for_nick(members, nick, casemapping))
+            .unwrap_or("");
+        lines.push(chat_line_from_message(message, dark_theme, prefix));
+    }
+    lines
 }
 
 /// Runs `mutate` against the chat pane's persistent row model, installing

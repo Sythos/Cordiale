@@ -1053,6 +1053,16 @@ pub(crate) async fn handle_frame(
             .cloned()
             .unwrap_or_default();
         let casemapping = network_casemapping(state, &network);
+        // The new row is the last stored one: a new date puts a separator
+        // before it.
+        let separator = state
+            .transcript
+            .messages
+            .get(&key)
+            .and_then(|rows| rows.split_last())
+            .and_then(|(_, above)| {
+                separator_label_before(above, &line, state.denoise_active(&key))
+            });
         let ui = ui.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
             // A plain append (not `show_chat_lines`): channel history is
@@ -1063,6 +1073,9 @@ pub(crate) async fn handle_frame(
                 .as_deref()
                 .map(|nick| member_prefix_for_nick(&members, nick, casemapping))
                 .unwrap_or("");
+            if let Some(label) = separator {
+                append_chat_line(&ui, separator_chat_line(&label, dark_theme));
+            }
             append_chat_line(&ui, chat_line_from_message(&line, dark_theme, prefix));
             if let Some(worker) = rebuild_worker.filter(|_| ui.get_chat_follow_bottom()) {
                 request_chat_rebuild(&worker, &rebuild_key, true);
@@ -2475,15 +2488,19 @@ fn show_live_query_message(
         return;
     }
     let rows = state.transcript.messages.get(key).map_or(0, Vec::len);
-    let Some(line) = state
+    let Some((line, above)) = state
         .transcript
         .messages
         .get(key)
-        .and_then(|rows| rows.last())
-        .cloned()
+        .and_then(|rows| rows.split_last())
     else {
         return;
     };
+    // The pane shows the rows above this one with their date separators; a
+    // new date puts one more separator before the new row.
+    let shown_rows = chat_display_row_count(above, false);
+    let separator = separator_label_before(above, line, false);
+    let line = line.clone();
     let over_cap = history_excess(rows, CHAT_HISTORY_CAP, CHAT_HISTORY_TRIM_SLACK) > 0;
     let worker = state.conn.chat_rebuild_tx.clone();
     let key = key.clone();
@@ -2491,11 +2508,14 @@ fn show_live_query_message(
         use slint::Model as _;
         // The pane holds every stored row but this one; if it doesn't, it
         // has drifted from the stored rows and the worker rebuilds it.
-        if ui.get_chat_lines().row_count() + 1 != rows {
+        if ui.get_chat_lines().row_count() != shown_rows {
             if let Some(worker) = &worker {
                 request_chat_rebuild(worker, &key, false);
             }
             return;
+        }
+        if let Some(label) = separator {
+            append_chat_line(&ui, separator_chat_line(&label, dark_theme));
         }
         append_chat_line(&ui, chat_line_from_message(&line, dark_theme, ""));
         if let Some(worker) = worker.filter(|_| over_cap && ui.get_chat_follow_bottom()) {

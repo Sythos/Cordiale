@@ -259,6 +259,10 @@ struct ChatLine {
     // A multi-frame E2E message is on its way. The row has no content: it
     // shows a translated sentence in place of `body`.
     incoming: bool,
+    // A date separator row, not a message: the label of the day that starts
+    // ("Friday, 2026-11-13"). Empty for every message row. A separator has
+    // no sender, id, body or menu.
+    separator: string,
 }
 
 // One row in the admin Sessions list.
@@ -5548,9 +5552,49 @@ export component AppWindow inherits Window {
                                 alignment: start;
                                 spacing: 0px;
 
+                                // A date separator: a thin line on each side of the
+                                // label of the day that starts. It only draws; the
+                                // row has no sender, so the menu never opens. The
+                                // label is elided, so it never widens the pane.
+                                if line.separator != "" : HorizontalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 8px;
+                                    padding-top: 4px;
+                                    padding-bottom: 4px;
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        min-width: 8px;
+                                        Rectangle {
+                                            y: (parent.height - self.height) / 2;
+                                            height: 1px;
+                                            background: line.timestamp-color;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: line.separator;
+                                        color: line.timestamp-color;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 0;
+                                        min-width: 0px;
+                                        overflow: elide;
+                                    }
+
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                        min-width: 8px;
+                                        Rectangle {
+                                            y: (parent.height - self.height) / 2;
+                                            height: 1px;
+                                            background: line.timestamp-color;
+                                        }
+                                    }
+                                }
+
                                 // Read-only inputs, so the time can be selected and
                                 // copied with the mouse or Shift and the arrow keys.
-                                TextInput {
+                                if line.separator == "" : TextInput {
                                     text: "[" + line.timestamp + "] ";
                                     read-only: true;
                                     wrap: no-wrap;
@@ -5947,7 +5991,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                if !line.incoming && !line.selectable && line.overlay-body == "" : StyledText {
+                                if !line.incoming && !line.selectable && line.overlay-body == "" && line.separator == "" : StyledText {
                                     text: line.body;
                                     default-color: theme == "dark" ? white : black;
                                     link-color: palette-active ? palette-accent : (theme == "dark" ? #8ab4f8 : #1a5fb4);
