@@ -1985,7 +1985,11 @@ export component AppWindow inherits Window {
     // Fixed parts of the sidebar, shared by the rows and the minimum width.
     property <length> sidebar-padding: 8px;
     property <length> sidebar-row-spacing: 4px;
-    property <length> sidebar-row-indent: 16px;
+    // Width of the expand arrow of a network row.
+    property <length> sidebar-arrow-width: 28px;
+    // Rows under a network start at the left edge of its name button:
+    // after the arrow and the spacing.
+    property <length> sidebar-row-indent: sidebar-arrow-width + sidebar-row-spacing;
     // The unread-count cell and the [X] cell of a row: reserved in every row.
     property <length> sidebar-cell-width: 28px;
     // Gutter that keeps the overlay scrollbar off the row cells.
@@ -2032,6 +2036,9 @@ export component AppWindow inherits Window {
         members-e2e-action-min-width);
     // The chat column keeps at least this width; the side columns give way.
     property <length> chat-min-width: 240px;
+    // Height shared by the compose row and the Actions row, so both sit
+    // on the same line at the bottom of their columns.
+    property <length> bottom-row-height: 36px;
     // Window width taken by the layout padding (2 x 16px), the four 8px
     // gaps and the two 6px resize handles.
     property <length> layout-fixed-width: 2 * 16px + 4 * 8px + 2 * 6px;
@@ -4324,10 +4331,10 @@ export component AppWindow inherits Window {
                     }
 
                     if !group.parked : HorizontalLayout {
-                        spacing: 4px;
+                        spacing: sidebar-row-spacing;
                         Button {
                             text: group.expanded ? "▾" : "▸";
-                            width: 28px;
+                            width: sidebar-arrow-width;
                             accessible-label: @tr("Expand or collapse network {}", group.network);
                             clicked => { network-toggle-requested(group.network); }
                         }
@@ -4340,10 +4347,10 @@ export component AppWindow inherits Window {
                         }
                     }
                     if group.parked : HorizontalLayout {
-                        spacing: 4px;
+                        spacing: sidebar-row-spacing;
                         Button {
                             text: group.expanded ? "▾" : "▸";
-                            width: 28px;
+                            width: sidebar-arrow-width;
                             accessible-label: @tr("Expand or collapse parked network {}", group.network);
                             clicked => { network-toggle-requested(group.network); }
                         }
@@ -6035,8 +6042,8 @@ export component AppWindow inherits Window {
             // Small compose bar, never more than one line tall: paperclip
             // to attach a file (left, like Cicchetto), text field, send
             // icon (right).
-            if has-selected-channel : HorizontalBox {
-                height: 40px;
+            if has-selected-channel : HorizontalLayout {
+                height: bottom-row-height;
                 spacing: 6px;
 
                 Button {
@@ -6274,6 +6281,7 @@ export component AppWindow inherits Window {
             // also has the radio.
             HorizontalLayout {
                 alignment: start;
+                height: bottom-row-height;
 
                 Button {
                     text: "☰ " + @tr("Actions") + " ▾";
@@ -6456,6 +6464,8 @@ export component AppWindow inherits Window {
 
         VerticalLayout {
             spacing: 12px;
+            // Keeps a gap between the panels and the vertical scroll bar.
+            padding-right: 8px;
 
             if settings-section == "general" : VerticalLayout {
                 spacing: 12px;
