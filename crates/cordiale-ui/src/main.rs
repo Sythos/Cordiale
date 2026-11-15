@@ -626,11 +626,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let auto_connect = settings.auto_connect
         && settings.language.is_some()
         && !cleartext::is_cleartext_remote(&remembered_server_url);
-    ui.set_next_screen(if settings.language.is_none() {
-        "language".into()
-    } else {
-        "connect".into()
-    });
+    ui.set_next_screen(startup_next_screen(settings.language.is_some()).into());
     if let Some(language) = settings.language {
         let _ = slint::select_bundled_translation(language_code(language));
     }
@@ -717,14 +713,28 @@ fn main() -> Result<(), slint::PlatformError> {
     // Sign in at launch with the remembered profile (its bearer, or the
     // login password kept in the OS keyring), unless the last session ended
     // with a manual disconnect.
+    // The sign-in waits for the end of the splash: a fast login would
+    // otherwise replace the splash with the connected screen.
+    let auto_connect_timer = slint::Timer::default();
     if auto_connect {
         if let Some(identifier) = auto_connect_identifier(&remembered_server_url) {
-            ui.set_connecting(true);
-            let _ = worker_tx.send(WorkerCommand::Connect {
-                server_url: remembered_server_url.clone(),
-                identifier,
-                credential: ConnectCredential::SavedProfile,
-            });
+            let tx_for_connect = worker_tx.clone();
+            let weak_for_connect = ui.as_weak();
+            let server_url = remembered_server_url.clone();
+            auto_connect_timer.start(
+                slint::TimerMode::SingleShot,
+                SPLASH_DURATION + std::time::Duration::from_millis(100),
+                move || {
+                    if let Some(ui) = weak_for_connect.upgrade() {
+                        ui.set_connecting(true);
+                    }
+                    let _ = tx_for_connect.send(WorkerCommand::Connect {
+                        server_url: server_url.clone(),
+                        identifier: identifier.clone(),
+                        credential: ConnectCredential::SavedProfile,
+                    });
+                },
+            );
         }
     }
 
@@ -782,7 +792,13 @@ fn main() -> Result<(), slint::PlatformError> {
     register_admin_settings_callbacks(&ui, &worker_tx);
     register_settings_callbacks(&ui, &worker_tx);
 
-    let result = ui.run();
+    // Show the window first: the native window must exist to be moved.
+    // A platform that refuses the move keeps its own placement.
+    ui.show()?;
+    center_window_on_monitor(&ui);
+    let result = slint::run_event_loop();
+    drop(auto_connect_timer);
+    let _ = ui.hide();
 
     // Closing the window quits: tell Grappa the client is leaving, so
     // auto-away doesn't wait for the visibility report to go stale. Bounded,
@@ -801,6 +817,51 @@ fn main() -> Result<(), slint::PlatformError> {
 /// loses focus when it is minimized anyway.
 fn window_in_foreground(focused: bool, minimized: Option<bool>) -> bool {
     focused && !minimized.unwrap_or(false)
+}
+
+/// How long the splash stays up: the 1900ms timer of the `splash` view in
+/// `appwindow.slint`.
+const SPLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(1900);
+
+/// The screen that follows the splash: the language choice until a language
+/// is saved, the connect screen after.
+fn startup_next_screen(language_saved: bool) -> &'static str {
+    if language_saved {
+        "connect"
+    } else {
+        "language"
+    }
+}
+
+/// Top-left corner (physical pixels) that centers a window of `window` size
+/// on a monitor, never above or left of the monitor corner.
+fn centered_position(monitor: ((i32, i32), (u32, u32)), window: (u32, u32)) -> (i32, i32) {
+    let ((mx, my), (mw, mh)) = monitor;
+    let offset = |monitor_size: u32, window_size: u32| {
+        i32::try_from(monitor_size.saturating_sub(window_size) / 2).unwrap_or(0)
+    };
+    (mx + offset(mw, window.0), my + offset(mh, window.1))
+}
+
+/// Moves the window to the center of its monitor. Best effort: where the
+/// window system gives no monitor or ignores the position (Wayland), the
+/// native placement stays and nothing is reported.
+fn center_window_on_monitor(ui: &AppWindow) {
+    use slint::winit_030::WinitWindowAccessor;
+    let _ = ui.window().with_winit_window(|window| {
+        let monitor = window
+            .current_monitor()
+            .or_else(|| window.primary_monitor())?;
+        let position = monitor.position();
+        let size = monitor.size();
+        let outer = window.outer_size();
+        let (x, y) = centered_position(
+            ((position.x, position.y), (size.width, size.height)),
+            (outer.width, outer.height),
+        );
+        window.set_outer_position(slint::winit_030::winit::dpi::PhysicalPosition::new(x, y));
+        Some(())
+    });
 }
 
 /// State the worker keeps across the whole connected session. Lives only on
