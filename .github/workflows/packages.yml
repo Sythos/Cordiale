@@ -120,6 +120,9 @@ jobs:
             runner: windows-latest
             artifact: windows-x64
             win_arch: x64
+            # Hardware video decoding (docs/media-playback.md). FFmpeg is
+            # linked statically from vcpkg, so the executable needs no DLL.
+            hw_decode: "true"
           - target: aarch64-pc-windows-msvc
             runner: windows-latest
             artifact: windows-arm64
@@ -173,10 +176,32 @@ jobs:
         shell: pwsh
         run: magick resources\branding\cordiale_icona.png -define icon:auto-resize="256,48,32,16" resources\branding\cordiale.ico
 
+      - name: Install FFmpeg with vcpkg
+        if: matrix.hw_decode == 'true'
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install ffmpeg:x64-windows-static-md
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcpkg install failed with exit code $LASTEXITCODE"
+          }
+
       - name: Build release binary (native)
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.hw_decode != 'true'
         shell: bash
         run: cargo build --release --package cordiale-ui --target "${{ matrix.target }}"
+
+      - name: Build release binary (native, hardware decoding)
+        if: matrix.hw_decode == 'true'
+        shell: pwsh
+        env:
+          VCPKGRS_TRIPLET: x64-windows-static-md
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          cargo build --release --package cordiale-ui --target "${{ matrix.target }}" --features hw-decode
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed with exit code $LASTEXITCODE"
+          }
 
       - name: Build release binary (cross, aarch64 Linux)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
