@@ -123,20 +123,34 @@ jobs:
             # Hardware video decoding (docs/media-playback.md). FFmpeg is
             # linked statically from vcpkg, so the executable needs no DLL.
             hw_decode: "true"
+            vcpkg_triplet: x64-windows-static-md
           - target: aarch64-pc-windows-msvc
             runner: windows-latest
             artifact: windows-arm64
             win_arch: arm64
+            # Cross-built on the x64 runner with the same static link as x64.
+            # If the hardware build fails, the job builds without it.
+            hw_decode: "true"
+            hw_fallback: "true"
+            vcpkg_triplet: arm64-windows-static-md
           - target: aarch64-apple-darwin
             runner: macos-latest
             artifact: macos-arm64
             mac_arch: arm64
+            # FFmpeg from vcpkg, linked statically. If the hardware build
+            # fails, the job builds without it.
+            hw_decode: "true"
+            hw_fallback: "true"
+            vcpkg_triplet: arm64-osx
           # Intel Macs: cross-built on the Apple Silicon runner, whose
           # toolchain targets both architectures.
           - target: x86_64-apple-darwin
             runner: macos-latest
             artifact: macos-x64
             mac_arch: x64
+            hw_decode: "true"
+            hw_fallback: "true"
+            vcpkg_triplet: x64-osx
 
     steps:
       - name: Checkout client
@@ -176,25 +190,48 @@ jobs:
         shell: pwsh
         run: magick resources\branding\cordiale_icona.png -define icon:auto-resize="256,48,32,16" resources\branding\cordiale.ico
 
-      - name: Install FFmpeg with vcpkg
-        if: matrix.hw_decode == 'true'
+      - name: Install FFmpeg with vcpkg (Windows)
+        id: win_ffmpeg
+        if: runner.os == 'Windows' && matrix.hw_decode == 'true'
+        continue-on-error: ${{ matrix.hw_fallback == 'true' }}
         shell: pwsh
+        env:
+          VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install ffmpeg:x64-windows-static-md
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install "ffmpeg:$env:VCPKG_TRIPLET"
           if ($LASTEXITCODE -ne 0) {
             throw "vcpkg install failed with exit code $LASTEXITCODE"
           }
 
+      - name: Install FFmpeg with vcpkg (macOS)
+        id: mac_ffmpeg
+        if: runner.os == 'macOS' && matrix.hw_decode == 'true'
+        continue-on-error: ${{ matrix.hw_fallback == 'true' }}
+        shell: bash
+        env:
+          VCPKG_TRIPLET: ${{ matrix.vcpkg_triplet }}
+        run: |
+          set -euo pipefail
+          brew install pkg-config autoconf automake libtool
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "${RUNNER_TEMP}/vcpkg"
+          "${RUNNER_TEMP}/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          "${RUNNER_TEMP}/vcpkg/vcpkg" install "ffmpeg:${VCPKG_TRIPLET}"
+
       - name: Build release binary (native)
-        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.hw_decode != 'true'
+        if: >-
+          matrix.target != 'aarch64-unknown-linux-gnu' &&
+          steps.win_hw_build.outcome != 'success' &&
+          steps.mac_hw_build.outcome != 'success'
         shell: bash
         run: cargo build --release --package cordiale-ui --target "${{ matrix.target }}"
 
-      - name: Build release binary (native, hardware decoding)
-        if: matrix.hw_decode == 'true'
+      - name: Build release binary (native, hardware decoding, Windows)
+        id: win_hw_build
+        if: runner.os == 'Windows' && matrix.hw_decode == 'true' && steps.win_ffmpeg.outcome == 'success'
+        continue-on-error: ${{ matrix.hw_fallback == 'true' }}
         shell: pwsh
         env:
-          VCPKGRS_TRIPLET: x64-windows-static-md
+          VCPKGRS_TRIPLET: ${{ matrix.vcpkg_triplet }}
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: |
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
@@ -202,6 +239,26 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "cargo build failed with exit code $LASTEXITCODE"
           }
+
+      - name: Build release binary (native, hardware decoding, macOS)
+        id: mac_hw_build
+        if: runner.os == 'macOS' && matrix.hw_decode == 'true' && steps.mac_ffmpeg.outcome == 'success'
+        continue-on-error: ${{ matrix.hw_fallback == 'true' }}
+        shell: bash
+        env:
+          # Only the vcpkg FFmpeg is visible to pkg-config. The static
+          # feature links it into the executable.
+          PKG_CONFIG_LIBDIR: ${{ runner.temp }}/vcpkg/installed/${{ matrix.vcpkg_triplet }}/lib/pkgconfig
+          PKG_CONFIG_ALLOW_CROSS: "1"
+        run: cargo build --release --package cordiale-ui --target "${{ matrix.target }}" --features hw-decode-static
+
+      - name: Report hardware decoding fallback
+        if: >-
+          matrix.hw_fallback == 'true' &&
+          (steps.win_ffmpeg.outcome == 'failure' || steps.win_hw_build.outcome == 'failure' ||
+          steps.mac_ffmpeg.outcome == 'failure' || steps.mac_hw_build.outcome == 'failure')
+        shell: bash
+        run: echo "::warning::The hardware decoding build failed. This package uses software decoding."
 
       - name: Build release binary (cross, aarch64 Linux)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -232,6 +289,36 @@ jobs:
           } finally {
             $stream.Dispose()
           }
+
+      # A hardware decoding build must start on a system without FFmpeg.
+      # The executable must not import an FFmpeg DLL.
+      - name: Verify no FFmpeg DLL import (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $exe = "target\$env:TARGET\release\cordiale-ui.exe"
+          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($exe))
+          $found = [regex]::Matches($text, '(?i)(avcodec|avformat|avutil|avdevice|avfilter|swscale|swresample)-[0-9]+\.dll')
+          if ($found.Count -gt 0) {
+            throw "The executable imports an FFmpeg DLL: $($found[0].Value)"
+          }
+
+      # Same check on macOS: no FFmpeg dynamic library and no Homebrew path.
+      - name: Verify no FFmpeg library link (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bad="$(otool -L "target/${TARGET}/release/cordiale-ui" | grep -E 'libav|libsw|/opt/homebrew|/usr/local' || true)"
+          if [[ -n "${bad}" ]]; then
+            echo "The executable links a library of the build host:" >&2
+            echo "${bad}" >&2
+            exit 1
+          fi
 
       # Fails if the binary links a shared library that the package
       # dependency table in the script doesn't know (readelf comes with the
