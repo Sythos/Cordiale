@@ -16874,3 +16874,32 @@ fn compose_row_and_actions_row_share_one_height() {
     assert!(actions, "the Actions row must take the shared height");
     assert_eq!(slint.matches("height: bottom-row-height;").count(), 2);
 }
+
+/// Both rows stay at the bottom of their columns. The compose row is the
+/// last child of the chat column. A stretching spacer keeps the Actions row
+/// at the bottom of the member column when the roster is hidden.
+#[test]
+fn compose_row_and_actions_row_stay_anchored_to_the_bottom() {
+    let slint = include_str!("../ui/appwindow.slint");
+    let after_compose = slint
+        .split("if has-selected-channel : HorizontalLayout {")
+        .nth(1)
+        .expect("compose row");
+    let before_members = after_compose
+        .split("// Always present on the \"connected\" screen")
+        .next()
+        .expect("end of the chat column");
+    // After the send button lock mark only closing braces remain up to the
+    // column end.
+    let tail = before_members
+        .rsplit("y: parent.height - self.height - 3px;")
+        .next()
+        .expect("send button");
+    assert!(tail.chars().all(|c| c == '}' || c.is_whitespace()));
+    let spacer = slint
+        .split("if !current-window-is-joined || current-query : Rectangle {")
+        .nth(1)
+        .and_then(|rest| rest.lines().nth(1))
+        .expect("spacer");
+    assert_eq!(spacer.trim(), "vertical-stretch: 1;");
+}
