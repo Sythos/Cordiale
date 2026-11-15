@@ -3621,6 +3621,9 @@ async fn finish_connect(
 
 /// Plain text of one displayed row: time, sender and the full message.
 fn chat_row_text(line: &ChatLine) -> String {
+    if !line.separator.is_empty() {
+        return format!("--- {} ---", line.separator);
+    }
     let body: String = cordiale_core::formatting::parse_mirc_text(&line.reply_body)
         .into_iter()
         .map(|run| run.text)
@@ -10010,7 +10013,72 @@ fn chat_line_from_message(
         rename_target: rename_target.into(),
         encrypted: message_lock_visible(message),
         incoming,
+        separator: Default::default(),
     }
+}
+
+/// The local calendar date of a row, from its original event time. A row
+/// with no event time has no known date.
+fn message_local_date(message: &RenderedMessage) -> Option<chrono::NaiveDate> {
+    message.server_time.and_then(dates::local_date_of_millis)
+}
+
+/// The label of the date separator that goes before a row on `date`, given
+/// the date of the last visible row above it. There is none for the first
+/// row, for a row on the same date, or for a row whose date is unknown.
+fn separator_label_between(
+    previous: Option<chrono::NaiveDate>,
+    date: Option<chrono::NaiveDate>,
+) -> Option<String> {
+    let (previous, date) = (previous?, date?);
+    (previous != date).then(|| dates::separator_label(&date))
+}
+
+/// A visual transcript row for a date separator. It is not a message: it has
+/// no sender, id, body or time.
+fn separator_chat_line(label: &str, dark_theme: bool) -> ChatLine {
+    ChatLine {
+        separator: label.into(),
+        timestamp_color: muted_color(dark_theme),
+        ..Default::default()
+    }
+}
+
+/// The label of the separator that goes before `next`, a row just added
+/// after `previous` (the rows above it, in display order). `previous` rows
+/// that `hide_presence` hides do not count.
+fn separator_label_before(
+    previous: &[RenderedMessage],
+    next: &RenderedMessage,
+    hide_presence: bool,
+) -> Option<String> {
+    let above = previous
+        .iter()
+        .rev()
+        .filter(|message| !(hide_presence && message.presence_noise))
+        .find_map(message_local_date);
+    separator_label_between(above, message_local_date(next))
+}
+
+/// How many rows the pane shows for `messages`: the visible messages and
+/// the date separators between them.
+fn chat_display_row_count(messages: &[RenderedMessage], hide_presence: bool) -> usize {
+    let mut count = 0;
+    let mut above = None;
+    for message in messages
+        .iter()
+        .filter(|message| !(hide_presence && message.presence_noise))
+    {
+        let date = message_local_date(message);
+        if above.zip(date).is_some_and(|(above, date)| above != date) {
+            count += 1;
+        }
+        if date.is_some() {
+            above = date;
+        }
+        count += 1;
+    }
+    count
 }
 
 /// Puts the icon of each link in front of it in the runs. The links are
@@ -10876,18 +10944,27 @@ fn chat_lines_model_with_roster(
     casemapping: cordiale_core::isupport::CaseMapping,
     hide_presence: bool,
 ) -> Vec<ChatLine> {
-    messages
+    let mut lines = Vec::with_capacity(messages.len());
+    let mut above = None;
+    for message in messages
         .iter()
         .filter(|message| !(hide_presence && message.presence_noise))
-        .map(|message| {
-            let prefix = message
-                .nick
-                .as_deref()
-                .map(|nick| member_prefix_for_nick(members, nick, casemapping))
-                .unwrap_or("");
-            chat_line_from_message(message, dark_theme, prefix)
-        })
-        .collect()
+    {
+        let date = message_local_date(message);
+        if let Some(label) = separator_label_between(above, date) {
+            lines.push(separator_chat_line(&label, dark_theme));
+        }
+        if date.is_some() {
+            above = date;
+        }
+        let prefix = message
+            .nick
+            .as_deref()
+            .map(|nick| member_prefix_for_nick(members, nick, casemapping))
+            .unwrap_or("");
+        lines.push(chat_line_from_message(message, dark_theme, prefix));
+    }
+    lines
 }
 
 /// Runs `mutate` against the chat pane's persistent row model, installing
