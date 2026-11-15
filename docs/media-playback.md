@@ -144,6 +144,29 @@ I pacchetti (`packages.yml`) restano senza `hw-decode` fino ai risultati nel
 registro qui sotto: accenderla senza prove può impedire l'avvio del programma
 sul sistema dell'utente.
 
+## Cosa resta da fare (solo prove sul campo)
+
+Il codice della issue #787 è completo: restano solo lavori che si fanno fuori
+da GitHub, con hardware reale.
+
+1. **Prove a mano.** Un tester scarica la build del proprio sistema (sezione
+   «Build per i tester»), esegue i punti 1-5 di «Prove a mano per ogni
+   piattaforma» e scrive in un commento della issue #787 una riga per ogni
+   file, con i campi della tabella qui sotto. Chi tiene la documentazione
+   copia le righe nella tabella.
+2. **Taratura.** Se la tabella lo chiede, si cambia un solo valore alla volta,
+   seguendo le regole del registro, e si ripete la prova.
+3. **Pacchetti.** Si accende `hw-decode` in `packages.yml` per una
+   piattaforma solo quando tutte queste condizioni sono vere:
+   - le prove di quella piattaforma sono nella tabella, con `decoder` uguale
+     al percorso hardware atteso e `audio_underruns` vicino a zero;
+   - la prova in software (`CORDIALE_VIDEO_DECODE=software`) è nella
+     tabella e riproduce senza errori;
+   - esiste una scelta di collegamento per quella piattaforma
+     (sezione «Pacchetti di rilascio») e il pacchetto parte su un sistema
+     senza FFmpeg installato.
+   Le piattaforme che non soddisfano le condizioni restano senza `hw-decode`.
+
 ## Registro dei risultati
 
 Per ogni prova a mano, aggiungere una riga. Le tarature (`QUEUE_MIN_FRAMES`,
