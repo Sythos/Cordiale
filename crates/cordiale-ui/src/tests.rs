@@ -237,6 +237,35 @@ fn startup_opens_on_the_splash_and_hands_off_by_language() {
 }
 
 #[test]
+fn splash_waits_for_the_startup_and_never_returns() {
+    let _clipboard = set_manual_clock_platform();
+    let ui = AppWindow::new().unwrap();
+    ui.set_next_screen("language".into());
+    ui.show().unwrap();
+    let advance = |ui: &AppWindow, milliseconds: u64| {
+        slint::platform::update_timers_and_animations();
+        // A frame makes every timer of the window read its state.
+        ui.window().take_snapshot().unwrap();
+        for _ in 0..(milliseconds / 100) {
+            MANUAL_CLOCK
+                .with(|clock| clock.set(clock.get() + std::time::Duration::from_millis(100)));
+            slint::platform::update_timers_and_animations();
+        }
+    };
+    // The animation is over, but the startup is not ready: the splash stays.
+    advance(&ui, 2500);
+    assert_eq!(ui.get_screen(), "splash");
+    // The startup is ready: the splash hands off to the next screen.
+    ui.set_startup_ready(true);
+    advance(&ui, 300);
+    assert_eq!(ui.get_screen(), "language");
+    // The splash does not come back after the user enters the application.
+    ui.set_screen("connected".into());
+    advance(&ui, 2500);
+    assert_eq!(ui.get_screen(), "connected");
+}
+
+#[test]
 fn splash_window_is_centered_on_its_monitor() {
     assert_eq!(
         centered_position(((0, 0), (1920, 1080)), (900, 600)),

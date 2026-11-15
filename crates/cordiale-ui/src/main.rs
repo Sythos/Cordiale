@@ -796,6 +796,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // A platform that refuses the move keeps its own placement.
     ui.show()?;
     center_window_on_monitor(&ui);
+    ui.set_startup_ready(true);
     let result = slint::run_event_loop();
     drop(auto_connect_timer);
     let _ = ui.hide();
