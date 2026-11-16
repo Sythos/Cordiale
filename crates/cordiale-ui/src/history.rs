@@ -313,6 +313,7 @@ fn show_older_history(
         .unwrap_or_default();
     let dark_theme = state.prefs.theme == Theme::Dark;
     refresh_mention_context(state);
+    unread_divider::refresh(state, ui);
     let roster = (!state.windows.current_query).then(|| {
         (
             state
