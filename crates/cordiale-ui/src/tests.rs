@@ -17586,7 +17586,10 @@ fn rendered_chat_height(lines: Vec<ChatLine>, theme: &str, select_rows: bool) ->
     settle();
     if select_rows {
         // The first layout clears any selection (the pane asks for older
-        // history when its rows fit), so select after it has settled.
+        // history when its rows fit), so select after it has settled. With
+        // no drag, the pointer must sit outside every row: at the default
+        // height 0 the first row would take the focus.
+        ui.set_chat_sel_pointer_y(-1.);
         ui.set_chat_sel_anchor(0);
         ui.set_chat_sel_focus(last_row);
         settle();
